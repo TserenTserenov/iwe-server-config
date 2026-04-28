@@ -13,7 +13,7 @@
 {
   # Hostname и ZFS hostId
   hostName = "tsekh-1";
-  hostId = "1ce5e40";  # стабильный 8-hex hostId; не менять (ZFS импорт сломается)
+  hostId = "f27da647";  # стабильный 8-hex hostId; не менять (ZFS импорт сломается)
 
   # Сетевой интерфейс (Hetzner Xeon E3 = enp0s31f6, Intel I219-LM)
   interface = "enp0s31f6";
@@ -45,12 +45,16 @@
   # SSH-ключи — добавятся при первом запуске Ф1.
   # Сейчас плейсхолдеры. Перед `nixos-anywhere` подменяем на реальные
   # из ~/.ssh/authorized_keys на сервере + 1Password.
+  # SSH-ключи — публичные, можно держать в git.
+  # Текущий ключ снят с активного root@95.216.75.148 28 апр.
+  # Дополнительные ключи (резервный, ноутбук, Андрей-collaborator)
+  # добавляются по мере появления — обновлять только этот файл.
   sshKeys = {
     root = [
-      # "ssh-ed25519 AAAA... tseren@laptop"  # из 1Password
+      "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIM4q8Z+S8CK16KKRRTyr8X6/OP3WFtew+2pud2tUO9DX tserenov1972@gmail.com"
     ];
     tseren = [
-      # "ssh-ed25519 AAAA... tseren@laptop"
+      "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIM4q8Z+S8CK16KKRRTyr8X6/OP3WFtew+2pud2tUO9DX tserenov1972@gmail.com"
     ];
   };
 }
