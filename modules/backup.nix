@@ -35,7 +35,7 @@ let
       # имя БД — последний сегмент пути до символа '?'
       dbname=$(echo "$url" | sed 's/.*\///' | sed 's/?.*//')
       echo "  Дамп: $dbname"
-      ${pkgs.postgresql}/bin/pg_dump \
+      ${pkgs.postgresql_17}/bin/pg_dump \
         --format=custom \
         --no-password \
         "$url" \
@@ -71,7 +71,8 @@ in
   };
 
   config = lib.mkIf cfg.enable {
-    environment.systemPackages = with pkgs; [ restic postgresql ];
+    # postgresql_17 — Neon сервер v17, pg_dump требует версию >= сервера
+    environment.systemPackages = with pkgs; [ restic postgresql_17 ];
 
     # ===== Neon БД → B2 =====
     services.restic.backups.neon-dbs = {
