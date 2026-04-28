@@ -9,7 +9,9 @@
 #
 # Конкретные значения (IP, gateway, имя интерфейса) — в instances/<name>/values.nix.
 #
-# Связь: системная информация снята со старого Ubuntu 28 апр.
+# Вся конфигурация через systemd-networkd напрямую (один .network файл),
+# без networking.interfaces — иначе NixOS генерирует второй файл 40-<iface>.network,
+# который не совпадает с нашим 10-<iface>.network по приоритету → IP не назначается.
 
 { config, lib, ... }:
 
@@ -60,48 +62,34 @@ in
     networking = {
       useDHCP = false;
       useNetworkd = true;
-
-      interfaces.${cfg.interface} = {
-        ipv4.addresses = [{
-          address = cfg.ipv4.address;
-          prefixLength = cfg.ipv4.prefixLength;
-        }];
-        ipv6.addresses = [{
-          address = cfg.ipv6.address;
-          prefixLength = cfg.ipv6.prefixLength;
-        }];
-      };
-
-      defaultGateway = {
-        address = cfg.ipv4.gateway;
-        interface = cfg.interface;
-      };
-      defaultGateway6 = {
-        address = cfg.ipv6.gateway;
-        interface = cfg.interface;
-      };
-
-      # DNS — Cloudflare + Google как резерв (нейтральные провайдеры)
-      nameservers = [
-        "1.1.1.1"
-        "1.0.0.1"
-        "8.8.8.8"
-        "2606:4700:4700::1111"
-        "2606:4700:4700::1001"
-      ];
+      nameservers = [ "1.1.1.1" "1.0.0.1" "8.8.8.8" ];
     };
 
-    # systemd-networkd: для Hetzner с /32 IPv4 и /64 IPv6 нужен явный onlink маршрут.
+    # Один .network файл — полная конфигурация интерфейса.
+    # Не используем networking.interfaces чтобы NixOS не генерировал конкурирующий файл.
     systemd.network.networks."10-${cfg.interface}" = {
       matchConfig.Name = cfg.interface;
       networkConfig = {
+        DHCP = "no";
         IPv6AcceptRA = false;
       };
+      addresses = [
+        { addressConfig.Address = "${cfg.ipv4.address}/${toString cfg.ipv4.prefixLength}"; }
+        { addressConfig.Address = "${cfg.ipv6.address}/${toString cfg.ipv6.prefixLength}"; }
+      ];
       routes = [
+        # IPv4: Hetzner /32 — gateway вне подсети, нужен onlink маршрут
         {
           routeConfig = {
             Gateway = cfg.ipv4.gateway;
-            GatewayOnLink = true; # Hetzner требует onlink (gateway вне /32)
+            GatewayOnLink = true;
+          };
+        }
+        # IPv6: link-local gateway тоже через onlink
+        {
+          routeConfig = {
+            Gateway = cfg.ipv6.gateway;
+            GatewayOnLink = true;
           };
         }
       ];
