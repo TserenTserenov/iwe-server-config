@@ -145,3 +145,18 @@ nix-env --list-generations --profile /nix/var/nix/profiles/system
    git add . && git commit -m "feat(Ф1): зафиксирован реальный hardware-configuration.nix" && git push
    ```
 2. Перейти к Ф2: добавить `modules/backup.nix`, `modules/monitoring.nix`, `modules/caddy.nix`.
+
+---
+
+## Текущий прогресс Ф1 (28 апр)
+
+- ✅ Снимок текущего Ubuntu сделан на сервере (`/root/pre-nixos-snapshot-2026-04-28.tar.gz`)
+- ✅ Базовые модули написаны и закоммичены (flake, disko, base, networking, users)
+- ✅ SSH-ключ Tseren подставлен в `values.nix`
+- ✅ ZFS hostId сгенерирован: `f27da647`
+- ✅ Runbook этот написан
+- ⏳ **Ждёт окна Tseren (Чт 30 апр или Пт 1 мая после Red Line WP-250):**
+  - Tseren активирует Rescue mode в Hetzner Robot (Шаг 1)
+  - Tseren устанавливает Nix локально (Шаг 3, разово, sudo)
+  - Claude запускает `nixos-anywhere` (Шаги 4-5)
+  - Smoke-test и фиксация `hardware-configuration.nix` (Шаги 6-7)
