@@ -1,0 +1,26 @@
+# Nix build outputs
+result
+result-*
+
+# Editor backups
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Local env (никогда не публикуется)
+.env
+.env.local
+*.local.nix
+
+# Незашифрованные секреты (только sops-nix зашифрованные коммитятся)
+secrets/*.unencrypted.yaml
+secrets/*.plain.yaml
+*.key
+*.pem
+id_rsa
+id_ed25519
+
+# Direnv
+.direnv/
+.envrc.local
