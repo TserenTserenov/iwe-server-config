@@ -53,7 +53,7 @@
   # b2Bucket — имя B2 бакета (без b2:). Найти в 1Password «tseren-knowledge»
   # или посмотреть в настройках старого Ubuntu restic (pre-nixos-snapshot → /etc/hetzner-backstage/env)
   backup = {
-    b2Bucket = "iwe-backups";  # уточнить из 1Password если другое имя
+    b2Bucket = "aisystant-neon-backup";
   };
 
   sshKeys = {
