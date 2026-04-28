@@ -170,7 +170,9 @@ in
 
     # ZFS поддержка
     boot.supportedFilesystems = [ "zfs" ];
-    boot.zfs.forceImportRoot = false;
+    # nixos-anywhere не делает zpool export перед перезагрузкой →
+    # пул хранит hostId установщика, не наш → без force первый boot зависает.
+    boot.zfs.forceImportRoot = true;
     services.zfs.autoScrub.enable = true;
     services.zfs.autoSnapshot = {
       enable = true;
