@@ -16,23 +16,8 @@
   boot.kernelModules = [ "kvm-intel" ];
   boot.extraModulePackages = [ ];
 
-  # Файловые системы — ZFS датасеты (дублирует disko, нужно для nixos-rebuild)
-  fileSystems."/" =
-    { device = "rpool/root"; fsType = "zfs"; };
-  fileSystems."/nix" =
-    { device = "rpool/nix"; fsType = "zfs"; };
-  fileSystems."/var" =
-    { device = "rpool/var"; fsType = "zfs"; };
-  fileSystems."/var/log" =
-    { device = "rpool/var/log"; fsType = "zfs"; };
-  fileSystems."/home" =
-    { device = "rpool/home"; fsType = "zfs"; };
-  fileSystems."/boot" =
-    { device = "/dev/disk/by-uuid/7b401059-7965-4654-a867-b620600045b1";
-      fsType = "ext4"; };
-
-  swapDevices =
-    [ { device = "/dev/disk/by-uuid/3c343c9a-7329-47f8-af87-8dfb2aa5c2e3"; } ];
+  # Файловые системы и swap определяются в modules/disko-zfs-mirror.nix.
+  # Здесь только то, что disko не знает (платформа, CPU).
 
   nixpkgs.hostPlatform = lib.mkDefault "x86_64-linux";
   hardware.cpu.intel.updateMicrocode = lib.mkDefault config.hardware.enableRedistributableFirmware;
