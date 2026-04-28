@@ -1,39 +1,39 @@
 # SPDX-License-Identifier: Apache-2.0
 #
-# hardware-configuration.nix — параметры конкретного железа.
-#
-# При первой установке через nixos-anywhere этот файл будет
-# перезаписан результатом `nixos-generate-config`. Текущая версия —
-# минимально достаточная для запуска (то что не выводится из disko).
-#
-# Связь: системная информация снята с Ubuntu 28 апр.
+# hardware-configuration.nix — реальная конфигурация железа tsekh-1.
+# Сгенерирован nixos-generate-config 28 апр 2026 после Ф1 установки.
+# Не редактировать вручную — при nixos-rebuild перезаписывается.
 
-{ lib, modulesPath, ... }:
+{ config, lib, modulesPath, ... }:
 
 {
   imports = [
     (modulesPath + "/installer/scan/not-detected.nix")
   ];
 
-  # Initrd модули для NVMe и ZFS
-  boot.initrd.availableKernelModules = [
-    "nvme"
-    "xhci_pci"
-    "ahci"
-    "usb_storage"
-    "sd_mod"
-    "sr_mod"
-  ];
-
-  # ZFS требует initrd kernel modules
+  boot.initrd.availableKernelModules = [ "xhci_pci" "ahci" "nvme" ];
   boot.initrd.kernelModules = [ ];
   boot.kernelModules = [ "kvm-intel" ];
   boot.extraModulePackages = [ ];
 
-  # Платформа
-  nixpkgs.hostPlatform = "x86_64-linux";
+  # Файловые системы — ZFS датасеты (дублирует disko, нужно для nixos-rebuild)
+  fileSystems."/" =
+    { device = "rpool/root"; fsType = "zfs"; };
+  fileSystems."/nix" =
+    { device = "rpool/nix"; fsType = "zfs"; };
+  fileSystems."/var" =
+    { device = "rpool/var"; fsType = "zfs"; };
+  fileSystems."/var/log" =
+    { device = "rpool/var/log"; fsType = "zfs"; };
+  fileSystems."/home" =
+    { device = "rpool/home"; fsType = "zfs"; };
+  fileSystems."/boot" =
+    { device = "/dev/disk/by-uuid/7b401059-7965-4654-a867-b620600045b1";
+      fsType = "ext4"; };
 
-  # Управление CPU частотой — power-saver на idle
-  hardware.cpu.intel.updateMicrocode = lib.mkDefault true;
-  powerManagement.cpuFreqGovernor = lib.mkDefault "schedutil";
+  swapDevices =
+    [ { device = "/dev/disk/by-uuid/3c343c9a-7329-47f8-af87-8dfb2aa5c2e3"; } ];
+
+  nixpkgs.hostPlatform = lib.mkDefault "x86_64-linux";
+  hardware.cpu.intel.updateMicrocode = lib.mkDefault config.hardware.enableRedistributableFirmware;
 }
