@@ -160,10 +160,12 @@ in
 
     # ZFS требует hostId — задаётся в instances/<name>/values.nix.
     # Boot loader — GRUB BIOS legacy, ставится на оба диска.
+    # lib.mkForce: disko тоже генерирует grub.devices из EF02-разделов;
+    # без Force два определения конкатенируются → дубли → assertion fail.
     boot.loader.grub = {
       enable = lib.mkDefault true;
-      devices = [ cfg.diskA cfg.diskB ];
-      efiSupport = false; # Hetzner E3-1275v6 — BIOS legacy
+      devices = lib.mkForce [ cfg.diskA cfg.diskB ];
+      efiSupport = lib.mkForce false;
     };
 
     # ZFS поддержка
