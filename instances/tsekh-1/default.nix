@@ -17,8 +17,8 @@ in
     ../../modules/nixos-base.nix
     ../../modules/networking-hetzner.nix
     ../../modules/users.nix
-    # ../../modules/backup.nix         # Ф2
-    # ../../modules/monitoring.nix     # Ф2
+    ../../modules/backup.nix
+    ../../modules/monitoring.nix
     # ../../modules/caddy.nix          # Ф3
     # ../../modules/postgres-preprod.nix  # Ф3
     # ../../modules/systemd-timers.nix    # Ф3
@@ -48,5 +48,14 @@ in
   tsekh.users = {
     rootSshKeys = values.sshKeys.root;
     tserenSshKeys = values.sshKeys.tseren;
+  };
+
+  tsekh.backup = {
+    enable = true;
+    b2Bucket = values.backup.b2Bucket;
+  };
+
+  tsekh.monitoring = {
+    enable = true;
   };
 }

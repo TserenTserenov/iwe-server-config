@@ -49,6 +49,13 @@
   # Текущий ключ снят с активного root@95.216.75.148 28 апр.
   # Дополнительные ключи (резервный, ноутбук, Андрей-collaborator)
   # добавляются по мере появления — обновлять только этот файл.
+  # Резервное копирование (Ф2)
+  # b2Bucket — имя B2 бакета (без b2:). Найти в 1Password «tseren-knowledge»
+  # или посмотреть в настройках старого Ubuntu restic (pre-nixos-snapshot → /etc/hetzner-backstage/env)
+  backup = {
+    b2Bucket = "iwe-backups";  # уточнить из 1Password если другое имя
+  };
+
   sshKeys = {
     root = [
       "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIM4q8Z+S8CK16KKRRTyr8X6/OP3WFtew+2pud2tUO9DX tserenov1972@gmail.com"
