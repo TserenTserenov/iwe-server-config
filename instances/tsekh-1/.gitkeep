@@ -1,9 +1,0 @@
-# Конкретный инстанс «Цех» — заполнится в Ф1.
-#
-# Здесь живут:
-# - values.nix       — мои константы (IP, hostname, пути, расписания)
-# - secrets.yaml     — sops-nix зашифрованные секреты (B2 ключи, токен бота, restic password)
-# - default.nix      — импорт modules/* + values.nix
-# - hardware-configuration.nix — auto-generated при первой установке через nixos-anywhere
-#
-# При извлечении шаблона в Q3-Q4 — этот каталог остаётся в личном репо TserenTserenov, не копируется.
