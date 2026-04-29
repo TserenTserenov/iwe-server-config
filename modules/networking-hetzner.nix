@@ -74,24 +74,14 @@ in
         IPv6AcceptRA = false;
       };
       addresses = [
-        { addressConfig.Address = "${cfg.ipv4.address}/${toString cfg.ipv4.prefixLength}"; }
-        { addressConfig.Address = "${cfg.ipv6.address}/${toString cfg.ipv6.prefixLength}"; }
+        { Address = "${cfg.ipv4.address}/${toString cfg.ipv4.prefixLength}"; }
+        { Address = "${cfg.ipv6.address}/${toString cfg.ipv6.prefixLength}"; }
       ];
       routes = [
         # IPv4: Hetzner /32 — gateway вне подсети, нужен onlink маршрут
-        {
-          routeConfig = {
-            Gateway = cfg.ipv4.gateway;
-            GatewayOnLink = true;
-          };
-        }
+        { Gateway = cfg.ipv4.gateway; GatewayOnLink = true; }
         # IPv6: link-local gateway тоже через onlink
-        {
-          routeConfig = {
-            Gateway = cfg.ipv6.gateway;
-            GatewayOnLink = true;
-          };
-        }
+        { Gateway = cfg.ipv6.gateway; GatewayOnLink = true; }
       ];
     };
   };
