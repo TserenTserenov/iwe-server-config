@@ -57,10 +57,12 @@ let
     StandardError   = "journal";
   };
 
-  # OnFailure → iwe-failure-alert@<unit-name>.service
-  # %N = unit name без суффикса .service (iwe-scheduler, iwe-sync-fleeting-notes, …)
+  # OnFailure → iwe-failure-alert@<full-unit-name>.service
+  # %n = полное имя юнита включая суффикс (iwe-scheduler.service).
+  # Внутри template %i = "iwe-scheduler.service" — валидно для journalctl -u.
+  # НЕ %N: для не-шаблонных юнитов %N тоже включает .service → двойной суффикс.
   commonUnitConfig = {
-    OnFailure = "iwe-failure-alert@%N.service";
+    OnFailure = "iwe-failure-alert@%n.service";
   };
 
   # Скрипт TG-алерта. TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID — из EnvironmentFile /etc/iwe/env.
@@ -322,8 +324,9 @@ in
     systemd.services."iwe-failure-alert@" = {
       description = "IWE — TG-алерт при сбое %i";
       serviceConfig = {
+        User           = "tseren";   # как все остальные IWE-сервисы
         Type           = "oneshot";
-        EnvironmentFile = "/etc/iwe/env";
+        EnvironmentFile = "/etc/iwe/env";  # читается systemd (root) до смены User
         ExecStart      = "${alertScript} %i";
         StandardOutput = "journal";
         StandardError  = "journal";
