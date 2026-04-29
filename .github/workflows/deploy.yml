@@ -54,18 +54,16 @@ jobs:
       - name: Save previous generation (for rollback)
         id: snapshot
         run: |
-          set -x
-          ssh -v -i ~/.ssh/id_ed25519 -o ConnectTimeout=10 $SERVER \
-            "readlink /nix/var/nix/profiles/system" > /tmp/prev_link 2>/tmp/ssh_err || {
-              echo "::error::SSH failed (stderr below):"
-              cat /tmp/ssh_err
-              exit 1
-            }
-          PREV_LINK=$(cat /tmp/prev_link)
-          PREV_GEN=$(echo "$PREV_LINK" | grep -oE '[0-9]+$')
-          echo "PREV_LINK=$PREV_LINK"
+          # readlink даёт "system-20-link" — извлекаем цифры между system- и -link
+          PREV_LINK=$(ssh -i ~/.ssh/id_ed25519 -o ConnectTimeout=10 $SERVER \
+            "readlink /nix/var/nix/profiles/system")
+          PREV_GEN=$(echo "$PREV_LINK" | sed -nE 's/^system-([0-9]+)-link$/\1/p')
+          if [ -z "$PREV_GEN" ]; then
+            echo "::error::Could not extract generation from: $PREV_LINK"
+            exit 1
+          fi
           echo "PREV_GEN=$PREV_GEN" >> "$GITHUB_ENV"
-          echo "Previous generation: $PREV_GEN"
+          echo "Previous generation: $PREV_GEN (link: $PREV_LINK)"
 
       - name: Deploy — git pull + nixos-rebuild switch
         run: |
