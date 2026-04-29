@@ -54,9 +54,17 @@ jobs:
       - name: Save previous generation (for rollback)
         id: snapshot
         run: |
-          PREV_GEN=$(ssh -i ~/.ssh/id_ed25519 $SERVER \
-            "readlink /nix/var/nix/profiles/system | grep -oE '[0-9]+$'")
-          echo "PREV_GEN=$PREV_GEN" >> $GITHUB_ENV
+          set -x
+          ssh -v -i ~/.ssh/id_ed25519 -o ConnectTimeout=10 $SERVER \
+            "readlink /nix/var/nix/profiles/system" > /tmp/prev_link 2>/tmp/ssh_err || {
+              echo "::error::SSH failed (stderr below):"
+              cat /tmp/ssh_err
+              exit 1
+            }
+          PREV_LINK=$(cat /tmp/prev_link)
+          PREV_GEN=$(echo "$PREV_LINK" | grep -oE '[0-9]+$')
+          echo "PREV_LINK=$PREV_LINK"
+          echo "PREV_GEN=$PREV_GEN" >> "$GITHUB_ENV"
           echo "Previous generation: $PREV_GEN"
 
       - name: Deploy — git pull + nixos-rebuild switch
