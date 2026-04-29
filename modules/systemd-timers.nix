@@ -37,10 +37,16 @@ let
     done
   '';
 
+  # Пакеты, доступные в PATH всех IWE-сервисов.
+  # Используем опцию `path` (не environment.PATH) — NixOS-паттерн для systemd сервисов,
+  # не конфликтует с auto-generated PATH от systemd module.
+  commonPath = with pkgs; [ git openssh bash curl jq ];
+
+  # Python с зависимостями для rule-classifier.py (требует pyyaml).
+  pythonForClassifier = pkgs.python3.withPackages (ps: with ps; [ pyyaml ]);
+
   commonEnv = {
     HOME = "/home/tseren";
-    # PATH не выставляем — NixOS systemd module инжектирует его автоматически
-    # из system packages. Явный PATH конфликтует с auto-generated значением.
   };
 
   commonServiceConfig = {
@@ -95,6 +101,7 @@ in
         ExecStart  = "${pkgs.bash}/bin/bash ${iwe}/DS-IT-systems/DS-ai-systems/synchronizer/scripts/scheduler.sh dispatch";
         TimeoutSec = 1800;  # 30 мин — агентские задачи могут быть долгими
       };
+      path = commonPath;
       environment = commonEnv;
     };
 
@@ -139,6 +146,7 @@ in
       serviceConfig = commonServiceConfig // {
         ExecStart = "${pkgs.bash}/bin/bash ${iwe}/DS-IT-systems/DS-ai-systems/synchronizer/scripts/sync-files.sh ${iwe}/DS-my-strategy inbox/fleeting-notes.md";
       };
+      path = commonPath;
       environment = commonEnv;
     };
 
@@ -163,6 +171,7 @@ in
         ExecStart  = "${pkgs.bash}/bin/bash ${iwe}/DS-IT-systems/activity-hub/scripts/sync-lms.sh";
         TimeoutSec = 600;
       };
+      path = commonPath;
       environment = commonEnv;
     };
 
@@ -186,6 +195,7 @@ in
         ExecStart  = "${pkgs.bash}/bin/bash ${iwe}/DS-IT-systems/activity-hub/scripts/sync-iwe.sh";
         TimeoutSec = 600;
       };
+      path = commonPath;
       environment = commonEnv;
     };
 
@@ -211,6 +221,7 @@ in
         ExecStart  = "${pkgs.bash}/bin/bash ${iwe}/DS-autonomous-agents/scripts/overnight-scout.sh";
         TimeoutSec = 1800;
       };
+      path = commonPath;
       environment = commonEnv;
     };
 
@@ -231,9 +242,10 @@ in
     systemd.services."iwe-rule-classifier" = {
       description = "IWE — классификатор правил агента (daily, 23:55)";
       serviceConfig = commonServiceConfig // {
-        ExecStart  = "${pkgs.python3}/bin/python3 ${iwe}/.claude/scripts/rule-classifier.py";
+        ExecStart  = "${pythonForClassifier}/bin/python3 ${iwe}/.claude/scripts/rule-classifier.py";
         TimeoutSec = 300;
       };
+      path = commonPath;
       environment = commonEnv;
     };
 
@@ -255,9 +267,10 @@ in
     systemd.services."iwe-rule-classifier-hourly" = {
       description = "IWE — классификатор правил агента (hourly)";
       serviceConfig = commonServiceConfig // {
-        ExecStart  = "${pkgs.python3}/bin/python3 ${iwe}/.claude/scripts/rule-classifier.py";
+        ExecStart  = "${pythonForClassifier}/bin/python3 ${iwe}/.claude/scripts/rule-classifier.py";
         TimeoutSec = 300;
       };
+      path = commonPath;
       environment = commonEnv;
     };
 
