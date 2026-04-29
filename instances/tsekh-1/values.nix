@@ -68,6 +68,9 @@
   sshKeys = {
     root = [
       "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIM4q8Z+S8CK16KKRRTyr8X6/OP3WFtew+2pud2tUO9DX tserenov1972@gmail.com"
+      # Deploy key для GitHub Actions CD (приватный ключ — в SSH_PRIVATE_KEY secret).
+      # Используется для git pull + nixos-rebuild + post-deploy health checks + rollback.
+      "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIJwvKzFjBaGxrg9lv8favoWVUlH6KMirdf7K8RePVGlL iwe-server-config-deploy@github-actions"
     ];
     tseren = [
       "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIM4q8Z+S8CK16KKRRTyr8X6/OP3WFtew+2pud2tUO9DX tserenov1972@gmail.com"
