@@ -39,7 +39,8 @@ let
 
   commonEnv = {
     HOME = "/home/tseren";
-    PATH  = "/run/current-system/sw/bin:/home/tseren/.nix-profile/bin";
+    # PATH не выставляем — NixOS systemd module инжектирует его автоматически
+    # из system packages. Явный PATH конфликтует с auto-generated значением.
   };
 
   commonServiceConfig = {
