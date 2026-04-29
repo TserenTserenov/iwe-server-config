@@ -43,7 +43,7 @@ jobs:
           SSH_KNOWN_HOSTS: "${{ secrets.SSH_KNOWN_HOSTS }}"
         run: |
           mkdir -p ~/.ssh
-          # env-vars вместо ${{ }} — корректно сохраняют переносы строк в multi-line secrets
+          # env-vars вместо подстановки в shell — корректно сохраняют переносы строк в multi-line secrets
           printf '%s\n' "$SSH_PRIVATE_KEY" > ~/.ssh/id_ed25519
           chmod 600 ~/.ssh/id_ed25519
           printf '%s\n' "$SSH_KNOWN_HOSTS" > ~/.ssh/known_hosts
