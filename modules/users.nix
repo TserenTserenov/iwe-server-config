@@ -16,12 +16,21 @@ in
     rootSshKeys = lib.mkOption {
       type = lib.types.listOf lib.types.str;
       default = [];
-      description = "SSH-ключи для root (текущий ключ Tseren + резервные)";
+      description = "SSH-ключи владельца для root (Tseren + резервные)";
     };
     tserenSshKeys = lib.mkOption {
       type = lib.types.listOf lib.types.str;
       default = [];
       description = "SSH-ключи для пользователя tseren";
+    };
+    teamRootKeys = lib.mkOption {
+      type = lib.types.listOf lib.types.str;
+      default = [];
+      description = ''
+        SSH-ключи членов команды с root-доступом (bus factor).
+        Добавлять только тем, кто умеет работать с NixOS и понимает recovery.md.
+        Текущий список: instances/tsekh-1/values.nix → teamSshKeys.root
+      '';
     };
   };
 
@@ -30,7 +39,7 @@ in
     users.mutableUsers = false;
 
     users.users.root = {
-      openssh.authorizedKeys.keys = cfg.rootSshKeys;
+      openssh.authorizedKeys.keys = cfg.rootSshKeys ++ cfg.teamRootKeys;
     };
 
     users.users.tseren = {

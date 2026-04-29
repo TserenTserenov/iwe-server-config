@@ -42,6 +42,29 @@ in
       default = 32;
       description = "Размер swap zvol в гигабайтах";
     };
+    encrypt = lib.mkOption {
+      type = lib.types.bool;
+      default = false;
+      description = ''
+        ZFS native encryption (aes-256-gcm) на пуле rpool.
+
+        ТРЕБУЕТ ПЕРЕУСТАНОВКИ: encryption задаётся при создании пула (zpool create).
+        Применить к существующему пулу без переустановки через nixos-anywhere невозможно.
+
+        Когда encrypt = true:
+          - rootFsOptions получают encryption=aes-256-gcm, keyformat=hex.
+          - Ключ хранится в /boot/zfs.key (на нешифрованном /boot-разделе).
+          - Защита: ZFS-данные нечитаемы без ключа (защита от кражи дисков).
+          - /boot и GRUB не шифруются — ключ физически доступен на /boot,
+            поэтому шифрование защищает только от извлечения дисков без /boot.
+
+        Перед переустановкой:
+          1. Сгенерировать ключ: dd if=/dev/urandom of=/tmp/zfs.key bs=32 count=1
+          2. Сохранить ключ в 1Password (сейф tseren-knowledge, запись «ZFS key tsekh-1»)
+          3. При nixos-anywhere файл /tmp/zfs.key передаётся в /boot/zfs.key
+             через extra-files или postInstallCommands.
+      '';
+    };
   };
 
   config = {
@@ -113,6 +136,10 @@ in
           xattr = "sa";
           atime = "off";
           mountpoint = "none"; # отдельные dataset'ы монтируются явно
+        } // lib.optionalAttrs cfg.encrypt {
+          encryption   = "aes-256-gcm";
+          keyformat    = "hex";
+          keylocation  = "file:///boot/zfs.key";
         };
         options.ashift = "12"; # 4K сектор для NVMe
 

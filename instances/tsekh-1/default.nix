@@ -28,9 +28,10 @@ in
 
   # Передача параметров в модули
   tsekh.disko = {
-    diskA = values.disks.a;
-    diskB = values.disks.b;
+    diskA      = values.disks.a;
+    diskB      = values.disks.b;
     swapSizeGB = values.swapSizeGB;
+    encrypt    = values.encrypt;
   };
 
   tsekh.base = {
@@ -46,8 +47,9 @@ in
   };
 
   tsekh.users = {
-    rootSshKeys = values.sshKeys.root;
+    rootSshKeys   = values.sshKeys.root;
     tserenSshKeys = values.sshKeys.tseren;
+    teamRootKeys  = values.teamSshKeys.root;
   };
 
   tsekh.backup = {

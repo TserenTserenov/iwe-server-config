@@ -42,6 +42,12 @@
   # Swap размер (zvol) — 32GB как сейчас на mdadm
   swapSizeGB = 32;
 
+  # ZFS native encryption — включить при следующей переустановке через nixos-anywhere.
+  # false = текущий живой пул rpool создан без шифрования (28 апр 2026).
+  # Для включения: сгенерировать ключ, сохранить в 1Password, переустановить через nixos-anywhere.
+  # Инструкция: modules/disko-zfs-mirror.nix → options.tsekh.disko.encrypt (описание).
+  encrypt = false;
+
   # SSH-ключи — добавятся при первом запуске Ф1.
   # Сейчас плейсхолдеры. Перед `nixos-anywhere` подменяем на реальные
   # из ~/.ssh/authorized_keys на сервере + 1Password.
@@ -65,6 +71,15 @@
     ];
     tseren = [
       "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIM4q8Z+S8CK16KKRRTyr8X6/OP3WFtew+2pud2tUO9DX tserenov1972@gmail.com"
+    ];
+  };
+
+  # SSH-ключи команды — bus factor ≥2 к 1 июня 2026.
+  # Добавить публичный ключ Андрея когда пришлёт (запросить через TG).
+  # Формат: "ssh-ed25519 AAAA... andrey@example.com"
+  teamSshKeys = {
+    root = [
+      # "ssh-ed25519 AAAA...  andrey-smirnov"  # добавить ключ Андрея
     ];
   };
 }

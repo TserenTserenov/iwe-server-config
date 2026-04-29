@@ -10,7 +10,8 @@
 # Секреты (создать вручную на сервере, не в git):
 #   /etc/iwe/env — ANTHROPIC_API_KEY=...
 #                  TELEGRAM_BOT_TOKEN=...
-#                  TELEGRAM_CHAT_ID=...
+#                  TELEGRAM_CHAT_ID=...       (личный чат Tseren)
+#                  TELEGRAM_TEAM_CHAT_ID=...  (командный канал, опционально)
 #
 # IWE-репозитории должны быть склонированы под iweHome до первого запуска.
 # Список репозиториев: docs/repos-to-clone.md (создать в Ф3).
@@ -68,7 +69,9 @@ let
     OnFailure = "iwe-failure-alert@%n.service";
   };
 
-  # Скрипт TG-алерта. TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID — из EnvironmentFile /etc/iwe/env.
+  # Скрипт TG-алерта.
+  # TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID — из EnvironmentFile /etc/iwe/env (личный чат).
+  # TELEGRAM_TEAM_CHAT_ID — опционально; если задан, алерт дублируется в командный канал.
   # Вызывается как: iwe-alert <unit-name>  (без суффикса .service)
   alertScript = pkgs.writeShellScript "iwe-alert" ''
     set -euo pipefail
@@ -78,11 +81,18 @@ let
     msg=$(${pkgs.coreutils}/bin/printf \
       "Сбой IWE на %s\nСервис: %s\nВремя: %s\nЛог: journalctl -u %s --since -1h" \
       "$host" "$unit" "$ts" "$unit")
-    ${pkgs.curl}/bin/curl -s --max-time 10 -X POST \
-      "https://api.telegram.org/bot''${TELEGRAM_BOT_TOKEN}/sendMessage" \
-      -d "chat_id=''${TELEGRAM_CHAT_ID}" \
-      --data-urlencode "text=$msg" \
-      > /dev/null
+    send_tg() {
+      ${pkgs.curl}/bin/curl -s --max-time 10 -X POST \
+        "https://api.telegram.org/bot''${TELEGRAM_BOT_TOKEN}/sendMessage" \
+        -d "chat_id=$1" \
+        --data-urlencode "text=$msg" \
+        > /dev/null
+    }
+    send_tg "''${TELEGRAM_CHAT_ID}"
+    # Командный канал — дублируем если задан
+    if [ -n "''${TELEGRAM_TEAM_CHAT_ID:-}" ]; then
+      send_tg "''${TELEGRAM_TEAM_CHAT_ID}"
+    fi
   '';
 in
 {
