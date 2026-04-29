@@ -59,6 +59,24 @@ nix flake check --no-build 2>&1 | head -30
 
 Если flake собирается — продолжаем. Если ошибки синтаксиса — правим, коммитим, проверяем снова.
 
+## Шаг 4.5 — Tseren: подготовить ZFS-ключ (только если `encrypt = true`)
+
+Пропустить если в `values.nix` стоит `encrypt = false` (default).
+
+```bash
+# 1) Генерация 256-битного hex-ключа
+dd if=/dev/urandom of=/tmp/zfs.key bs=32 count=1
+HEX_KEY=$(xxd -p /tmp/zfs.key | tr -d '\n')
+echo "$HEX_KEY"  # сохранить в 1Password сейф `tseren-knowledge`, запись «ZFS key tsekh-1»
+
+# 2) Подготовить файл для передачи в /boot через --extra-files
+mkdir -p /tmp/extra-files/boot
+echo -n "$HEX_KEY" > /tmp/extra-files/boot/zfs.key
+chmod 400 /tmp/extra-files/boot/zfs.key
+```
+
+Без этого шага nixos-anywhere упадёт на этапе создания пула с `keylocation=file:///boot/zfs.key not found`.
+
 ## Шаг 5 — Claude: запустить `nixos-anywhere`
 
 ```bash
@@ -73,9 +91,14 @@ nix run github:nix-community/nixos-anywhere -- \
 Если VM-тест прошёл (NixOS грузится в QEMU и пингуется) — запускаем реальную установку:
 
 ```bash
+# Если encrypt = true, передать ключ через --extra-files
+EXTRA_FILES_ARG=""
+[ -d /tmp/extra-files ] && EXTRA_FILES_ARG="--extra-files /tmp/extra-files"
+
 nix run github:nix-community/nixos-anywhere -- \
     --flake .#tsekh-1 \
     --target-host root@95.216.75.148 \
+    $EXTRA_FILES_ARG \
     --debug
 ```
 
