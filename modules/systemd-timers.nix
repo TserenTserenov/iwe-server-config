@@ -49,8 +49,9 @@ let
   # и явно через ${pythonForIWE}/bin/python3 для rule-classifier.
   pythonForIWE = pkgs.python3.withPackages (ps: with ps; [ pyyaml psycopg2 ]);
 
-  # postgresql — нужен `psql` для unsatisfied-report.sh и других синхронизаторов.
-  commonPath = with pkgs; [ git openssh bash curl jq gawk caffeinate-stub postgresql pythonForIWE ]
+  # postgresql — psql для unsatisfied-report.sh и других синхронизаторов.
+  # nodejs — npx для knowledge-mcp/scripts/reindex.sh (mcp reindex task).
+  commonPath = with pkgs; [ git openssh bash curl jq gawk caffeinate-stub postgresql pythonForIWE nodejs ]
     ++ [ "/home/tseren/.npm-global" ];
 
   commonEnv = {
