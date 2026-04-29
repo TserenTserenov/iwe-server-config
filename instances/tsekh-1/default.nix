@@ -53,6 +53,7 @@ in
   tsekh.backup = {
     enable = true;
     b2Bucket = values.backup.b2Bucket;
+    backupHeartbeatUrlFile = "/etc/monitoring/backup-heartbeat-url";
   };
 
   tsekh.monitoring = {

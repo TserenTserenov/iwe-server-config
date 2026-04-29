@@ -68,6 +68,17 @@ in
       default = "03:30";
       description = "Время запуска локального бэкапа";
     };
+
+    backupHeartbeatUrlFile = lib.mkOption {
+      type    = lib.types.nullOr lib.types.str;
+      default = null;
+      description = ''
+        Путь к файлу с URL backup-heartbeat для Better Stack (одна строка).
+        null = не пинговать. Пинг отправляется только после успешного бэкапа БД.
+        Файл создать вручную: echo "https://uptime.betterstack.com/api/v1/heartbeat/XXX" > /etc/monitoring/backup-heartbeat-url
+      '';
+      example = "/etc/monitoring/backup-heartbeat-url";
+    };
   };
 
   config = lib.mkIf cfg.enable {
@@ -125,6 +136,30 @@ in
         OnCalendar = cfg.onCalendarLocal;
         Persistent = true;
       };
+    };
+
+    # Backup heartbeat — пинг после успешного бэкапа Neon БД.
+    # ExecStartPost выполняется только если основной ExecStart (restic backup) завершился успешно.
+    # Решает проблему: uptime-монитор (каждые 5 мин) ≠ backup-монитор (раз в сутки).
+    systemd.services."restic-backups-neon-dbs" = lib.mkIf (cfg.backupHeartbeatUrlFile != null) {
+      serviceConfig.ExecStartPost = pkgs.writeShellScript "backup-heartbeat-ping" ''
+        url_file="${cfg.backupHeartbeatUrlFile}"
+        if [ ! -f "$url_file" ]; then
+          echo "Backup heartbeat: файл $url_file не найден, пропускаю" >&2
+          exit 0
+        fi
+        url=$(tr -d '[:space:]' < "$url_file")
+        if [ -z "$url" ]; then
+          echo "Backup heartbeat: пустой URL, пропускаю" >&2
+          exit 0
+        fi
+        ${pkgs.curl}/bin/curl \
+          --silent --show-error \
+          --max-time 10 --retry 3 --retry-delay 5 \
+          "$url" > /dev/null \
+          && echo "Backup heartbeat OK" \
+          || echo "Backup heartbeat FAIL (не критично)" >&2
+      '';
     };
 
     # Директория для секретов (права только root)
