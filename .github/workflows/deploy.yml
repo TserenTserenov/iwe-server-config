@@ -2,24 +2,36 @@
 #
 # .github/workflows/deploy.yml — автоматический деплой на tsekh-1 при push в main.
 #
+# Защита: post-deploy health checks + auto-rollback при провале.
+#   1. Сохраняется previous generation номер ДО rebuild
+#   2. nixos-rebuild switch
+#   3. SSH reachability check (защита от lockout — Андрей 29 апр)
+#   4. Critical systemd services check
+#   5. /health endpoint smoke test
+#   6. При любом провале (3-5) — nixos-rebuild --rollback switch
+#
+# Не покрывает: случай когда SSH сломан полностью (тогда нужен физический доступ
+# или deploy-rs «magic rollback» через scheduled timer на сервере).
+#
 # Требует GitHub Secrets:
 #   SSH_PRIVATE_KEY  — приватный SSH-ключ с доступом root@95.216.75.148
 #   SSH_KNOWN_HOSTS  — вывод: ssh-keyscan 95.216.75.148
-#
-# Добавить секреты: Settings → Secrets → Actions → New repository secret.
 
 name: Deploy to tsekh-1
 
 on:
   push:
     branches: [main]
-  workflow_dispatch:  # ручной запуск из GitHub UI
+  workflow_dispatch:
+
+env:
+  SERVER: root@95.216.75.148
 
 jobs:
   deploy:
-    name: nixos-rebuild switch
+    name: nixos-rebuild switch + health check + rollback
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 20
 
     steps:
       - name: Checkout
@@ -32,17 +44,60 @@ jobs:
           chmod 600 ~/.ssh/id_ed25519
           echo "${{ secrets.SSH_KNOWN_HOSTS }}" > ~/.ssh/known_hosts
 
+      - name: Save previous generation (for rollback)
+        id: snapshot
+        run: |
+          PREV_GEN=$(ssh -i ~/.ssh/id_ed25519 $SERVER \
+            "readlink /nix/var/nix/profiles/system | grep -oE '[0-9]+$'")
+          echo "PREV_GEN=$PREV_GEN" >> $GITHUB_ENV
+          echo "Previous generation: $PREV_GEN"
+
       - name: Deploy — git pull + nixos-rebuild switch
         run: |
-          ssh -i ~/.ssh/id_ed25519 root@95.216.75.148 \
+          ssh -i ~/.ssh/id_ed25519 $SERVER \
             "cd /root/iwe-server-config && git pull && nixos-rebuild switch --flake .#tsekh-1 2>&1"
+
+      - name: Wait for services to settle
+        run: sleep 15
+
+      - name: Verify SSH still works (lockout check)
+        run: |
+          ssh -o ConnectTimeout=10 -o BatchMode=yes -i ~/.ssh/id_ed25519 $SERVER \
+            "echo SSH_OK" || {
+              echo "::error::SSH unreachable after deploy — rolling back"
+              exit 1
+            }
+
+      - name: Verify critical services active
+        run: |
+          ssh -i ~/.ssh/id_ed25519 $SERVER bash <<'EOF'
+            set -e
+            for unit in iwe-scheduler.timer caddy.service sshd.service; do
+              if ! systemctl is-active --quiet "$unit"; then
+                echo "::error::$unit is not active"
+                systemctl status "$unit" --no-pager | head -10
+                exit 1
+              fi
+            done
+            echo "All critical services OK"
+          EOF
 
       - name: Smoke test — /health endpoint
         run: |
-          sleep 5
-          STATUS=$(curl -s -o /dev/null -w "%{http_code}" http://95.216.75.148:8080/health)
+          STATUS=$(curl -s -o /dev/null -w "%{http_code}" --max-time 10 http://95.216.75.148:8080/health)
           if [ "$STATUS" != "200" ]; then
-            echo "Health check failed: HTTP $STATUS"
+            echo "::error::Health check failed: HTTP $STATUS"
             exit 1
           fi
           echo "Health check OK: HTTP $STATUS"
+
+      - name: Auto-rollback on failure
+        if: failure() && env.PREV_GEN != ''
+        run: |
+          echo "::warning::Deploy validation failed — rolling back to generation $PREV_GEN"
+          ssh -o ConnectTimeout=15 -i ~/.ssh/id_ed25519 $SERVER \
+            "nixos-rebuild switch --rollback 2>&1" || {
+              echo "::error::Rollback via SSH failed — manual intervention needed (Hetzner Rescue mode)"
+              exit 1
+            }
+          echo "Rolled back to previous generation"
