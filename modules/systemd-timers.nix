@@ -40,7 +40,10 @@ let
   # Пакеты, доступные в PATH всех IWE-сервисов.
   # Используем опцию `path` (не environment.PATH) — NixOS-паттерн для systemd сервисов,
   # не конфликтует с auto-generated PATH от systemd module.
-  commonPath = with pkgs; [ git openssh bash curl jq gawk caffeinate-stub ];
+  # "/home/tseren/.npm-global/bin" — путь к claude CLI (устанавливается iwe-install-claude).
+  # Строка принимается как-есть (не как store-путь) и добавляется в PATH без /bin суффикса.
+  commonPath = with pkgs; [ git openssh bash curl jq gawk caffeinate-stub ]
+    ++ [ "/home/tseren/.npm-global/bin" ];
 
   # Python с зависимостями для rule-classifier.py (требует pyyaml).
   pythonForClassifier = pkgs.python3.withPackages (ps: with ps; [ pyyaml ]);

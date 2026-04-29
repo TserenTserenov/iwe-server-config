@@ -22,7 +22,7 @@ in
     ../../modules/caddy.nix
     # ../../modules/postgres-preprod.nix  # Ф3
     ../../modules/systemd-timers.nix
-    # ../../modules/claude-agents.nix     # Ф4
+    ../../modules/claude-agents.nix
     ./hardware-configuration.nix # генерируется при первой установке
   ];
 
@@ -71,5 +71,9 @@ in
     enable = true;
     port   = 8080;
     # domain = null;  # добавить домен когда будет A-запись
+  };
+
+  tsekh.claudeAgents = {
+    enable = true;
   };
 }
