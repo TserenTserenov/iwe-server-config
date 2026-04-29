@@ -1,0 +1,48 @@
+# SPDX-License-Identifier: Apache-2.0
+#
+# .github/workflows/deploy.yml — автоматический деплой на tsekh-1 при push в main.
+#
+# Требует GitHub Secrets:
+#   SSH_PRIVATE_KEY  — приватный SSH-ключ с доступом root@95.216.75.148
+#   SSH_KNOWN_HOSTS  — вывод: ssh-keyscan 95.216.75.148
+#
+# Добавить секреты: Settings → Secrets → Actions → New repository secret.
+
+name: Deploy to tsekh-1
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:  # ручной запуск из GitHub UI
+
+jobs:
+  deploy:
+    name: nixos-rebuild switch
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup SSH
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.SSH_PRIVATE_KEY }}" > ~/.ssh/id_ed25519
+          chmod 600 ~/.ssh/id_ed25519
+          echo "${{ secrets.SSH_KNOWN_HOSTS }}" > ~/.ssh/known_hosts
+
+      - name: Deploy — git pull + nixos-rebuild switch
+        run: |
+          ssh -i ~/.ssh/id_ed25519 root@95.216.75.148 \
+            "cd /root/iwe-server-config && git pull && nixos-rebuild switch --flake .#tsekh-1 2>&1"
+
+      - name: Smoke test — /health endpoint
+        run: |
+          sleep 5
+          STATUS=$(curl -s -o /dev/null -w "%{http_code}" http://95.216.75.148:8080/health)
+          if [ "$STATUS" != "200" ]; then
+            echo "Health check failed: HTTP $STATUS"
+            exit 1
+          fi
+          echo "Health check OK: HTTP $STATUS"
