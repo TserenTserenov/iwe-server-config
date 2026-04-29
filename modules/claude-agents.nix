@@ -45,6 +45,9 @@ in
       wantedBy    = [ "multi-user.target" ];
       after       = [ "network-online.target" ];
       wants       = [ "network-online.target" ];
+      # pkgs.bash нужен: npm postinstall вызывает `sh` по имени, в Nix-PATH нет /bin/sh.
+      # pkgs.bash предоставляет и bash, и sh в ${pkgs.bash}/bin/.
+      path = [ cfg.nodePackage pkgs.bash pkgs.coreutils ];
       serviceConfig = {
         Type             = "oneshot";
         RemainAfterExit  = true;
@@ -60,7 +63,7 @@ in
             exit 0
           fi
           echo "Устанавливаю @anthropic-ai/claude-code..."
-          ${cfg.nodePackage}/bin/npm install -g @anthropic-ai/claude-code 2>&1
+          npm install -g @anthropic-ai/claude-code 2>&1
           echo "Готово: $(${claudeBin} --version 2>&1 | head -1)"
         '';
       };
