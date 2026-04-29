@@ -208,7 +208,7 @@ in
     systemd.services."iwe-overnight-scout" = {
       description = "IWE — ночной разведчик (overnight-scout)";
       serviceConfig = commonServiceConfig // {
-        ExecStart  = "${pkgs.bash}/bin/bash ${iwe}/DS-IT-systems/DS-autonomous-agents/scripts/overnight-scout.sh";
+        ExecStart  = "${pkgs.bash}/bin/bash ${iwe}/DS-autonomous-agents/scripts/overnight-scout.sh";
         TimeoutSec = 1800;
       };
       environment = commonEnv;
