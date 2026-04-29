@@ -153,6 +153,16 @@ in
       options = "--delete-older-than 30d";
     };
 
+    # /bin/bash совместимость — NixOS не создаёт /bin/bash по умолчанию,
+    # но все IWE-скрипты используют #!/bin/bash shebang.
+    system.activationScripts.binbash = {
+      deps = [];
+      text = ''
+        mkdir -p /bin
+        ln -sfn ${pkgs.bashInteractive}/bin/bash /bin/bash
+      '';
+    };
+
     # NixOS state version — фиксируется при первой установке
     system.stateVersion = "24.11";
   };
