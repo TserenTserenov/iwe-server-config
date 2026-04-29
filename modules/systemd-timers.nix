@@ -40,7 +40,7 @@ let
   # Пакеты, доступные в PATH всех IWE-сервисов.
   # Используем опцию `path` (не environment.PATH) — NixOS-паттерн для systemd сервисов,
   # не конфликтует с auto-generated PATH от systemd module.
-  commonPath = with pkgs; [ git openssh bash curl jq ];
+  commonPath = with pkgs; [ git openssh bash curl jq gawk caffeinate-stub ];
 
   # Python с зависимостями для rule-classifier.py (требует pyyaml).
   pythonForClassifier = pkgs.python3.withPackages (ps: with ps; [ pyyaml ]);
