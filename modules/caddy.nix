@@ -100,10 +100,10 @@ in
 
     services.caddy = {
       enable = true;
-      virtualHosts = if cfg.domain != null then {
-        # HTTPS через ACME — автоматически если domain задан
-        "${cfg.domain}" = {
-          extraConfig = ''
+      virtualHosts =
+        let
+          # Общий Caddyfile: /health → JSON из healthDir, /ping → liverness
+          caddyConfig = ''
             handle /health {
               header Content-Type application/json
               root * ${healthDir}
@@ -112,21 +112,10 @@ in
             }
             respond /ping "pong" 200
           '';
-        };
-      } else {
-        # HTTP без домена — только по IP/localhost
-        ":${toString cfg.port}" = {
-          extraConfig = ''
-            handle /health {
-              header Content-Type application/json
-              root * ${healthDir}
-              rewrite * /status.json
-              file_server
-            }
-            respond /ping "pong" 200
-          '';
-        };
-      };
+        in
+        if cfg.domain != null
+        then { "${cfg.domain}"         = { extraConfig = caddyConfig; }; }
+        else { ":${toString cfg.port}" = { extraConfig = caddyConfig; }; };
     };
 
     # systemd-таймер: обновление health JSON каждые 2 мин
@@ -150,9 +139,10 @@ in
       };
     };
 
-    # Директория для health JSON
+    # Директория для health JSON.
+    # Владелец root (скрипт пишет как root), права 0755 (caddy читает как other).
     systemd.tmpfiles.rules = [
-      "d ${healthDir} 0755 caddy caddy -"
+      "d ${healthDir} 0755 root root -"
     ];
 
     # Firewall: открыть нужные порты

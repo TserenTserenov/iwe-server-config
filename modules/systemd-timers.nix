@@ -258,14 +258,13 @@ in
     };
 
     # =========================================================
-    # 7. RULE CLASSIFIER (hourly) — com.iwe.rule-classifier
+    # 7. RULE CLASSIFIER (hourly) — ОТКЛЮЧЁН (дубль daily 23:55)
     # =========================================================
-    # Часовой запуск того же rule-classifier.py.
-    # Возможно дубль daily-версии выше — проверить после Ф3:
-    # если daily достаточно, этот таймер отключить (enable = false).
+    # daily (23:55) достаточно — hourly не несёт пользы при текущем объёме журналов.
+    # Оставлен как unit для будущего включения через timerConfig.enable если нужно.
 
     systemd.services."iwe-rule-classifier-hourly" = {
-      description = "IWE — классификатор правил агента (hourly)";
+      description = "IWE — классификатор правил агента (hourly, резерв)";
       serviceConfig = commonServiceConfig // {
         ExecStart  = "${pythonForClassifier}/bin/python3 ${iwe}/.claude/scripts/rule-classifier.py";
         TimeoutSec = 300;
@@ -275,9 +274,10 @@ in
     };
 
     systemd.timers."iwe-rule-classifier-hourly" = {
-      wantedBy    = [ "timers.target" ];
+      # wantedBy НЕ задан → таймер не запускается автоматически.
+      # Для включения добавить: wantedBy = [ "timers.target" ];
       timerConfig = {
-        OnBootSec       = "15min";  # первый запуск через 15 мин после boot
+        OnBootSec       = "15min";
         OnUnitActiveSec = "1h";
       };
     };
