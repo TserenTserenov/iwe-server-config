@@ -30,6 +30,11 @@ in
 
   config = lib.mkIf cfg.enable {
 
+    # nix-ld: совместимость с dynamically linked binaries из npm/pip/etc.
+    # Предоставляет /lib64/ld-linux-x86-64.so.2 и стандартные библиотеки.
+    # Без него claude (скачанный через npm) падает с "Could not start dynamically linked executable".
+    programs.nix-ld.enable = true;
+
     environment.systemPackages = [ cfg.nodePackage ];
 
     systemd.tmpfiles.rules = [
