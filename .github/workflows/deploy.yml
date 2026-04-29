@@ -39,8 +39,8 @@ jobs:
 
       - name: Setup SSH
         env:
-          SSH_PRIVATE_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
-          SSH_KNOWN_HOSTS: ${{ secrets.SSH_KNOWN_HOSTS }}
+          SSH_PRIVATE_KEY: "${{ secrets.SSH_PRIVATE_KEY }}"
+          SSH_KNOWN_HOSTS: "${{ secrets.SSH_KNOWN_HOSTS }}"
         run: |
           mkdir -p ~/.ssh
           # env-vars вместо ${{ }} — корректно сохраняют переносы строк в multi-line secrets
