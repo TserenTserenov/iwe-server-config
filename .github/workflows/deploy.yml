@@ -38,11 +38,18 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Setup SSH
+        env:
+          SSH_PRIVATE_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
+          SSH_KNOWN_HOSTS: ${{ secrets.SSH_KNOWN_HOSTS }}
         run: |
           mkdir -p ~/.ssh
-          echo "${{ secrets.SSH_PRIVATE_KEY }}" > ~/.ssh/id_ed25519
+          # env-vars вместо ${{ }} — корректно сохраняют переносы строк в multi-line secrets
+          printf '%s\n' "$SSH_PRIVATE_KEY" > ~/.ssh/id_ed25519
           chmod 600 ~/.ssh/id_ed25519
-          echo "${{ secrets.SSH_KNOWN_HOSTS }}" > ~/.ssh/known_hosts
+          printf '%s\n' "$SSH_KNOWN_HOSTS" > ~/.ssh/known_hosts
+          # Sanity check (без раскрытия секретов): размеры должны быть >0
+          [ -s ~/.ssh/id_ed25519 ] || { echo "::error::SSH_PRIVATE_KEY secret пуст"; exit 1; }
+          [ -s ~/.ssh/known_hosts ] || { echo "::error::SSH_KNOWN_HOSTS secret пуст"; exit 1; }
 
       - name: Save previous generation (for rollback)
         id: snapshot
