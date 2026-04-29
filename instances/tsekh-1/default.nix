@@ -19,7 +19,7 @@ in
     ../../modules/users.nix
     ../../modules/backup.nix
     ../../modules/monitoring.nix
-    # ../../modules/caddy.nix          # Ф3
+    ../../modules/caddy.nix
     # ../../modules/postgres-preprod.nix  # Ф3
     ../../modules/systemd-timers.nix
     # ../../modules/claude-agents.nix     # Ф4
@@ -63,5 +63,13 @@ in
   tsekh.timers = {
     enable  = true;
     iweHome = values.iweHome;
+  };
+
+  # Health endpoint: GET http://95.216.75.148:8080/health → JSON статус таймеров
+  # Для HTTPS добавить: tsekh.caddy.domain = "tsekh.example.com" (нужна A-запись)
+  tsekh.caddy = {
+    enable = true;
+    port   = 8080;
+    # domain = null;  # добавить домен когда будет A-запись
   };
 }
