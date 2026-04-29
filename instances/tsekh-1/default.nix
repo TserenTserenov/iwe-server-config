@@ -23,6 +23,7 @@ in
     # ../../modules/postgres-preprod.nix  # Ф3
     ../../modules/systemd-timers.nix
     ../../modules/claude-agents.nix
+    ../../modules/iwe-extensions-sync.nix
     ./hardware-configuration.nix # генерируется при первой установке
   ];
 
