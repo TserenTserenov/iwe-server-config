@@ -56,6 +56,9 @@
     b2Bucket = "aisystant-neon-backup";
   };
 
+  # Корневая директория IWE-репозиториев на сервере
+  iweHome = "/home/tseren/IWE";
+
   sshKeys = {
     root = [
       "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIM4q8Z+S8CK16KKRRTyr8X6/OP3WFtew+2pud2tUO9DX tserenov1972@gmail.com"

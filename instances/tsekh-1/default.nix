@@ -21,7 +21,7 @@ in
     ../../modules/monitoring.nix
     # ../../modules/caddy.nix          # Ф3
     # ../../modules/postgres-preprod.nix  # Ф3
-    # ../../modules/systemd-timers.nix    # Ф3
+    ../../modules/systemd-timers.nix
     # ../../modules/claude-agents.nix     # Ф4
     ./hardware-configuration.nix # генерируется при первой установке
   ];
@@ -57,5 +57,10 @@ in
 
   tsekh.monitoring = {
     enable = true;
+  };
+
+  tsekh.timers = {
+    enable  = true;
+    iweHome = values.iweHome;
   };
 }
