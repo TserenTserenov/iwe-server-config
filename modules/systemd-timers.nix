@@ -44,11 +44,14 @@ let
   # NixOS добавляет /bin и /sbin к КАЖДОМУ элементу path (и к пакетам, и к строкам).
   # Поэтому строку указываем как PREFIX ("/home/tseren/.npm-global"), не как готовый путь.
   # Результат: .npm-global/bin (claude CLI) и .npm-global/sbin (безвредно, не существует).
-  commonPath = with pkgs; [ git openssh bash curl jq gawk caffeinate-stub ]
-    ++ [ "/home/tseren/.npm-global" ];
+  # Python с зависимостями: pyyaml (rule-classifier), psycopg2 (dt-collect-neon).
+  # Используется и в commonPath (чтобы python3 был доступен скриптам strategist/dt-collect),
+  # и явно через ${pythonForIWE}/bin/python3 для rule-classifier.
+  pythonForIWE = pkgs.python3.withPackages (ps: with ps; [ pyyaml psycopg2 ]);
 
-  # Python с зависимостями для rule-classifier.py (требует pyyaml).
-  pythonForClassifier = pkgs.python3.withPackages (ps: with ps; [ pyyaml ]);
+  # postgresql — нужен `psql` для unsatisfied-report.sh и других синхронизаторов.
+  commonPath = with pkgs; [ git openssh bash curl jq gawk caffeinate-stub postgresql pythonForIWE ]
+    ++ [ "/home/tseren/.npm-global" ];
 
   commonEnv = {
     HOME = "/home/tseren";
@@ -287,7 +290,7 @@ in
       description = "IWE — классификатор правил агента (daily, 23:55)";
       unitConfig   = commonUnitConfig;
       serviceConfig = commonServiceConfig // {
-        ExecStart  = "${pythonForClassifier}/bin/python3 ${iwe}/.claude/scripts/rule-classifier.py";
+        ExecStart  = "${pythonForIWE}/bin/python3 ${iwe}/.claude/scripts/rule-classifier.py";
         TimeoutSec = 300;
       };
       path = commonPath;
@@ -312,7 +315,7 @@ in
       description = "IWE — классификатор правил агента (hourly, резерв)";
       unitConfig   = commonUnitConfig;
       serviceConfig = commonServiceConfig // {
-        ExecStart  = "${pythonForClassifier}/bin/python3 ${iwe}/.claude/scripts/rule-classifier.py";
+        ExecStart  = "${pythonForIWE}/bin/python3 ${iwe}/.claude/scripts/rule-classifier.py";
         TimeoutSec = 300;
       };
       path = commonPath;
