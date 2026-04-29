@@ -56,6 +56,29 @@ let
     StandardOutput  = "journal";
     StandardError   = "journal";
   };
+
+  # OnFailure → iwe-failure-alert@<unit-name>.service
+  # %N = unit name без суффикса .service (iwe-scheduler, iwe-sync-fleeting-notes, …)
+  commonUnitConfig = {
+    OnFailure = "iwe-failure-alert@%N.service";
+  };
+
+  # Скрипт TG-алерта. TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID — из EnvironmentFile /etc/iwe/env.
+  # Вызывается как: iwe-alert <unit-name>  (без суффикса .service)
+  alertScript = pkgs.writeShellScript "iwe-alert" ''
+    set -euo pipefail
+    unit="$1"
+    host="tsekh-1"
+    ts=$(${pkgs.coreutils}/bin/date -Iseconds)
+    msg=$(${pkgs.coreutils}/bin/printf \
+      "Сбой IWE на %s\nСервис: %s\nВремя: %s\nЛог: journalctl -u %s --since -1h" \
+      "$host" "$unit" "$ts" "$unit")
+    ${pkgs.curl}/bin/curl -s --max-time 10 -X POST \
+      "https://api.telegram.org/bot''${TELEGRAM_BOT_TOKEN}/sendMessage" \
+      -d "chat_id=''${TELEGRAM_CHAT_ID}" \
+      --data-urlencode "text=$msg" \
+      > /dev/null
+  '';
 in
 {
   options.tsekh.timers = {
@@ -97,6 +120,7 @@ in
 
     systemd.services."iwe-scheduler" = {
       description = "IWE Scheduler — центральный диспетчер агентов";
+      unitConfig   = commonUnitConfig;
       serviceConfig = commonServiceConfig // {
         ExecStart  = "${pkgs.bash}/bin/bash ${iwe}/DS-IT-systems/DS-ai-systems/synchronizer/scripts/scheduler.sh dispatch";
         TimeoutSec = 1800;  # 30 мин — агентские задачи могут быть долгими
@@ -143,6 +167,7 @@ in
 
     systemd.services."iwe-sync-fleeting-notes" = {
       description = "IWE — git-синхронизация fleeting-notes.md (каждые 2 мин)";
+      unitConfig   = commonUnitConfig;
       serviceConfig = commonServiceConfig // {
         ExecStart = "${pkgs.bash}/bin/bash ${iwe}/DS-IT-systems/DS-ai-systems/synchronizer/scripts/sync-files.sh ${iwe}/DS-my-strategy inbox/fleeting-notes.md";
       };
@@ -167,6 +192,7 @@ in
 
     systemd.services."iwe-activity-hub-sync" = {
       description = "IWE — синхронизация LMS → activity-hub";
+      unitConfig   = commonUnitConfig;
       serviceConfig = commonServiceConfig // {
         ExecStart  = "${pkgs.bash}/bin/bash ${iwe}/DS-IT-systems/activity-hub/scripts/sync-lms.sh";
         TimeoutSec = 600;
@@ -191,6 +217,7 @@ in
 
     systemd.services."iwe-activity-hub-sync-iwe" = {
       description = "IWE — синхронизация IWE-событий → activity-hub";
+      unitConfig   = commonUnitConfig;
       serviceConfig = commonServiceConfig // {
         ExecStart  = "${pkgs.bash}/bin/bash ${iwe}/DS-IT-systems/activity-hub/scripts/sync-iwe.sh";
         TimeoutSec = 600;
@@ -217,6 +244,7 @@ in
 
     systemd.services."iwe-overnight-scout" = {
       description = "IWE — ночной разведчик (overnight-scout)";
+      unitConfig   = commonUnitConfig;
       serviceConfig = commonServiceConfig // {
         ExecStart  = "${pkgs.bash}/bin/bash ${iwe}/DS-autonomous-agents/scripts/overnight-scout.sh";
         TimeoutSec = 1800;
@@ -241,6 +269,7 @@ in
 
     systemd.services."iwe-rule-classifier" = {
       description = "IWE — классификатор правил агента (daily, 23:55)";
+      unitConfig   = commonUnitConfig;
       serviceConfig = commonServiceConfig // {
         ExecStart  = "${pythonForClassifier}/bin/python3 ${iwe}/.claude/scripts/rule-classifier.py";
         TimeoutSec = 300;
@@ -265,6 +294,7 @@ in
 
     systemd.services."iwe-rule-classifier-hourly" = {
       description = "IWE — классификатор правил агента (hourly, резерв)";
+      unitConfig   = commonUnitConfig;
       serviceConfig = commonServiceConfig // {
         ExecStart  = "${pythonForClassifier}/bin/python3 ${iwe}/.claude/scripts/rule-classifier.py";
         TimeoutSec = 300;
@@ -280,6 +310,25 @@ in
         OnBootSec       = "15min";
         OnUnitActiveSec = "1h";
       };
+    };
+
+    # =========================================================
+    # FAILURE ALERT — template service (iwe-failure-alert@.service)
+    # =========================================================
+    # Вызывается через OnFailure=iwe-failure-alert@%N.service от каждого IWE-сервиса.
+    # %N = имя упавшего юнита без суффикса (iwe-scheduler, iwe-sync-fleeting-notes, …).
+    # Отправляет TG-сообщение через TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID из /etc/iwe/env.
+
+    systemd.services."iwe-failure-alert@" = {
+      description = "IWE — TG-алерт при сбое %i";
+      serviceConfig = {
+        Type           = "oneshot";
+        EnvironmentFile = "/etc/iwe/env";
+        ExecStart      = "${alertScript} %i";
+        StandardOutput = "journal";
+        StandardError  = "journal";
+      };
+      path = [ pkgs.curl pkgs.coreutils ];
     };
 
     # =========================================================
