@@ -51,7 +51,8 @@ let
 
   # postgresql — psql для unsatisfied-report.sh и других синхронизаторов.
   # nodejs — npx для knowledge-mcp/scripts/reindex.sh (mcp reindex task).
-  commonPath = with pkgs; [ git openssh bash curl jq gawk caffeinate-stub postgresql pythonForIWE nodejs ]
+  # perl — используется в template-sync.sh (line 113, YAML парсинг).
+  commonPath = with pkgs; [ git openssh bash curl jq gawk caffeinate-stub postgresql pythonForIWE nodejs perl ]
     ++ [ "/home/tseren/.npm-global" ];
 
   commonEnv = {
