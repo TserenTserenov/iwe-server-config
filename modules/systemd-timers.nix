@@ -206,54 +206,13 @@ in
     };
 
     # =========================================================
-    # 3. ACTIVITY HUB SYNC LMS — com.iwe.activity-hub-sync
+    # 3. ACTIVITY HUB SYNC — ДЕАКТИВИРОВАН (WP-268 Ф-migration, 2 мая 2026)
     # =========================================================
-    # Синхронизация данных LMS → activity-hub БД.
-    # 04:00 МСК (01:00 UTC; Helsinki UTC+3 летом → 04:00 local).
-
-    systemd.services."iwe-activity-hub-sync" = {
-      description = "IWE — синхронизация LMS → activity-hub";
-      unitConfig   = commonUnitConfig;
-      serviceConfig = commonServiceConfig // {
-        ExecStart  = "${pkgs.bash}/bin/bash ${iwe}/DS-IT-systems/activity-hub/scripts/sync-lms.sh";
-        TimeoutSec = 600;
-      };
-      path = commonPath;
-      environment = commonEnv;
-    };
-
-    systemd.timers."iwe-activity-hub-sync" = {
-      wantedBy    = [ "timers.target" ];
-      timerConfig = {
-        OnCalendar = "*-*-* 04:00:00";
-        Persistent = true;
-      };
-    };
-
-    # =========================================================
-    # 4. ACTIVITY HUB SYNC IWE — com.iwe.activity-hub-sync-iwe
-    # =========================================================
-    # Синхронизация IWE-данных (активность, события) → activity-hub.
-    # 23:00 МСК (20:00 UTC; Helsinki UTC+3 летом → 23:00 local).
-
-    systemd.services."iwe-activity-hub-sync-iwe" = {
-      description = "IWE — синхронизация IWE-событий → activity-hub";
-      unitConfig   = commonUnitConfig;
-      serviceConfig = commonServiceConfig // {
-        ExecStart  = "${pkgs.bash}/bin/bash ${iwe}/DS-IT-systems/activity-hub/scripts/sync-iwe.sh";
-        TimeoutSec = 600;
-      };
-      path = commonPath;
-      environment = commonEnv;
-    };
-
-    systemd.timers."iwe-activity-hub-sync-iwe" = {
-      wantedBy    = [ "timers.target" ];
-      timerConfig = {
-        OnCalendar = "*-*-* 23:00:00";
-        Persistent = true;
-      };
-    };
+    # sync-lms и sync-iwe заменены новой архитектурой:
+    #   - LMS уроки → bridge-2-lms-poller → learning.domain_event (102K+ событий)
+    #   - IWE коммиты/события → event-gateway (iwe source) → learning.domain_event
+    # Запускать дублирующие sync-скрипты против несуществующей БД platform нет смысла.
+    # Код в DS-IT-systems/activity-hub/ сохранён для истории/109-Ф9 рефакторинга.
 
     # =========================================================
     # 5. OVERNIGHT SCOUT — com.iwe.overnight-scout
