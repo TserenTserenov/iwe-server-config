@@ -20,6 +20,23 @@ IWE="${IWE_ROOT:-$HOME/IWE}"
 CONFIG="${2:-$IWE/DS-my-strategy/exocortex/day-rhythm-config.yaml}"
 SECRETS_FILE="${HOME}/.secrets/google-calendar"
 
+# --- Выбираем python3 с PyYAML (NixOS: scheduler env имеет yaml, base не имеет) ---
+_find_python3() {
+  if python3 -c "import yaml" 2>/dev/null; then echo "python3"; return; fi
+  local p
+  for p in \
+    /nix/store/aj1smkrsnv16lbz9g8qancb04b3kv0va-python3-3.12.8-env/bin/python3 \
+    /usr/bin/python3 /usr/local/bin/python3; do
+    [[ -x "$p" ]] && "$p" -c "import yaml" 2>/dev/null && { echo "$p"; return; }
+  done
+  # Fallback: glob по nix store
+  find /nix/store -maxdepth 3 -name "python3" -path "*env*/bin/*" 2>/dev/null | while read -r p; do
+    "$p" -c "import yaml" 2>/dev/null && { echo "$p"; return; }
+  done
+  echo "python3"
+}
+PYTHON3=$(_find_python3)
+
 # --- Загружаем credentials ---
 if [[ -f "$SECRETS_FILE" ]]; then
   # shellcheck source=/dev/null
@@ -46,23 +63,24 @@ TOKEN_RESPONSE=$(curl -s -X POST "https://oauth2.googleapis.com/token" \
   -d "grant_type=refresh_token" \
   2>/dev/null)
 
-ACCESS_TOKEN=$(echo "$TOKEN_RESPONSE" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('access_token',''))" 2>/dev/null)
+ACCESS_TOKEN=$(echo "$TOKEN_RESPONSE" | $PYTHON3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('access_token',''))" 2>/dev/null)
 
 if [[ -z "$ACCESS_TOKEN" ]]; then
-  ERROR=$(echo "$TOKEN_RESPONSE" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('error_description', d.get('error','unknown')))" 2>/dev/null || echo "unknown")
+  ERROR=$(echo "$TOKEN_RESPONSE" | $PYTHON3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('error_description', d.get('error','unknown')))" 2>/dev/null || echo "unknown")
   echo "📅 **Календарь ($DATE):** ⚠️ PENDING — OAuth error: $ERROR"
   echo ""
   echo "⏱ Свободных блоков ≥1h: **не определено**"
   exit 0
 fi
 
-# --- Читаем calendar_ids из конфига ---
-CALENDAR_IDS=$(python3 -c "
+# --- Читаем calendar_ids из конфига (вложен под day_open) ---
+CALENDAR_IDS=$($PYTHON3 -c "
 import yaml, sys
 try:
     with open('$CONFIG') as f: d = yaml.safe_load(f)
-    ids = d.get('calendar_ids', [])
-    for cid in ids:
+    # calendar_ids может быть на корне или под day_open
+    ids = d.get('calendar_ids') or d.get('day_open', {}).get('calendar_ids', [])
+    for cid in (ids or []):
         print(cid)
 except Exception as e:
     pass
@@ -80,16 +98,8 @@ fi
 TIME_MIN="${DATE}T00:00:00Z"
 TIME_MAX="${DATE}T23:59:59Z"
 
-# --- Собираем события со всех календарей ---
-ALL_EVENTS=$(python3 - <<PYEOF
-import json, sys
-
-events_all = []
-PYEOF
-)
-
-# Запрашиваем каждый календарь
-EVENTS_JSON=$(python3 << PYEOF
+# --- Запрашиваем каждый календарь ---
+EVENTS_JSON=$($PYTHON3 << PYEOF
 import json, subprocess, urllib.parse, sys
 
 calendar_ids = """${CALENDAR_IDS}""".strip().split('\n')
@@ -180,7 +190,7 @@ PYEOF
 )
 
 # --- Формируем markdown секцию ---
-python3 << PYEOF
+$PYTHON3 << PYEOF
 import json, sys
 
 try:
