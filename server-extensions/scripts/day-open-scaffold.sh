@@ -274,6 +274,22 @@ generated_by: day-open-scaffold.sh (WP-264 Ф2)
 </details>
 
 <details>
+<summary><b>Саморазвитие (шаг 3)</b></summary>
+
+<!-- PENDING: self_dev — прочитать drafts/draft-list.md и выбрать активный D-NNN. Обязательно:
+  1. Номер черновика и тема: [D-NNN](drafts/D-NNN-тема.md)
+  2. Где остановился: параграф / раздел / последний написанный тезис
+  3. Сколько времени сегодня и на что именно
+  4. TTL истекает? (из «Требует внимания» предыдущего DayPlan)
+  Минимум: одна строка в таблице плана + эта секция с D-NNN. -->
+
+**Активный черновик:** <!-- PENDING: [D-NNN](drafts/D-NNN-тема.md) -->
+**Где остановился:** <!-- PENDING: раздел/параграф/последний тезис -->
+**Сегодня:** <!-- PENDING: X мин/h — на что именно (ревью / дописать / структурировать) -->
+
+</details>
+
+<details>
 <summary><b>Календарь ($DAY_NUM $MONTH_RU)</b></summary>
 
 <!-- PENDING: calendar — mcp__ext-google-calendar__list-events для calendar_ids из day-rhythm-config.yaml. Фильтр 09:00-19:00, private пропустить. -->
