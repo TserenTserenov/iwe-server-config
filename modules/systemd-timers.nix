@@ -47,7 +47,7 @@ let
   # Python с зависимостями: pyyaml (rule-classifier), psycopg2 (dt-collect-neon).
   # Используется и в commonPath (чтобы python3 был доступен скриптам strategist/dt-collect),
   # и явно через ${pythonForIWE}/bin/python3 для rule-classifier.
-  pythonForIWE = pkgs.python3.withPackages (ps: with ps; [ pyyaml psycopg2 ]);
+  pythonForIWE = pkgs.python3.withPackages (ps: with ps; [ pyyaml psycopg2 cryptography ]);
 
   # postgresql — psql для unsatisfied-report.sh и других синхронизаторов.
   # nodejs — npx для knowledge-mcp/scripts/reindex.sh (mcp reindex task).
@@ -127,6 +127,7 @@ in
       "d /home/tseren/logs/rule-engine         0755 tseren tseren -"
       "d /home/tseren/.local/state/exocortex   0755 tseren tseren -"
       "d /home/tseren/.config/aist             0700 tseren tseren -"
+      "d /home/tseren/logs/render-pilot-guides 0755 tseren tseren -"
     ];
 
     # =========================================================
@@ -289,6 +290,65 @@ in
       timerConfig = {
         OnBootSec       = "15min";
         OnUnitActiveSec = "1h";
+      };
+    };
+
+    # =========================================================
+    # 8. RENDER PILOT GUIDES — weekly (WP-149 Ф12, WP-245 Ф28.7)
+    # =========================================================
+    # Полный рендер всех 6 файлов персонального руководства каждому пилоту.
+    # Понедельник 05:00 МСК — перед рабочей неделей.
+
+    systemd.services."iwe-render-pilot-guides-weekly" = {
+      description = "IWE — рендер руководств пилотов (weekly, Пн 05:00)";
+      unitConfig   = commonUnitConfig;
+      serviceConfig = commonServiceConfig // {
+        ExecStart  = "${pythonForIWE}/bin/python3 ${iwe}/DS-autonomous-agents/scripts/render-pilot-guides.py";
+        TimeoutSec = 1800;
+      };
+      path = commonPath;
+      environment = commonEnv;
+    };
+
+    systemd.timers."iwe-render-pilot-guides-weekly" = {
+      wantedBy    = [ "timers.target" ];
+      description = "IWE рендер руководств — Пн 05:00 МСК";
+      timerConfig = {
+        OnCalendar = "Mon *-*-* 05:00:00";
+        Persistent = true;
+      };
+    };
+
+    # =========================================================
+    # 9. RENDER PILOT GUIDES — daily (WP-149 Ф12, WP-245 Ф28.7)
+    # =========================================================
+    # Только новый daily/YYYY-MM-DD.md — вт–вс 06:00 МСК.
+    # В понедельник не нужен: weekly (#8) уже делает полный рендер.
+
+    systemd.services."iwe-render-pilot-guides-daily" = {
+      description = "IWE — рендер руководств пилотов (daily, вт–вс 06:00)";
+      unitConfig   = commonUnitConfig;
+      serviceConfig = commonServiceConfig // {
+        ExecStart  = "${pythonForIWE}/bin/python3 ${iwe}/DS-autonomous-agents/scripts/render-pilot-guides.py --daily";
+        TimeoutSec = 600;
+      };
+      path = commonPath;
+      environment = commonEnv;
+    };
+
+    systemd.timers."iwe-render-pilot-guides-daily" = {
+      wantedBy    = [ "timers.target" ];
+      description = "IWE рендер руководств (daily) — вт–вс 06:00 МСК";
+      timerConfig = {
+        OnCalendar = [
+          "Tue *-*-* 06:00:00"
+          "Wed *-*-* 06:00:00"
+          "Thu *-*-* 06:00:00"
+          "Fri *-*-* 06:00:00"
+          "Sat *-*-* 06:00:00"
+          "Sun *-*-* 06:00:00"
+        ];
+        Persistent = true;
       };
     };
 
