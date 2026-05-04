@@ -4,6 +4,12 @@ description: Уроки Day Open / Day Close / Session Close — дата, ка�
 type: feedback
 valid_from: 2026-03-29
 originSessionId: 9a0e726a-951e-4408-9e02-94d7eeffbf74
+
+horizon: warm
+domains: [behaviour]
+status: active
+owner: user
+schema_version: 1
 ---
 **Day Open: дата и календарь.** (1) `currentDate` от Anthropic может врать — ПЕРВОЕ действие = `date`. (2) Календарь: ВСЕ calendarId из `gcal_list_calendars`, не только `primary`. 10 календарей, основные — «Служба ПМП» и «Aisystant Консультации». (3) SchedulerReport: за СЕГОДНЯ (`~/logs/strategist/YYYY-MM-DD.log`), не из `current/SchedulerReport*.md`.
 

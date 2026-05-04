@@ -4,6 +4,12 @@ description: Шаблоны DayPlan и WeekPlan — единый источни�
 type: reference
 valid_from: 2026-04-13
 originSessionId: ae6f0122-1618-49c4-a209-0040178b6810
+
+horizon: warm
+domains: [reference]
+status: active
+owner: user
+schema_version: 1
 ---
 # Шаблоны DayPlan и WeekPlan
 
@@ -13,13 +19,11 @@ originSessionId: ae6f0122-1618-49c4-a209-0040178b6810
 ## Шаблон DayPlan
 
 ```markdown
----
 type: daily-plan
 date: YYYY-MM-DD
 week: W{N}
 status: active
 agent: Стратег
----
 
 # Day Plan: DD месяца YYYY (День недели)
 
@@ -139,14 +143,12 @@ agent: Стратег
 > Бюджет: формат `~Zh РП всего / ~Yh физ / Плановый мультипликатор ~N.Nx`. Активные — **жирным**. Done — зачёркнуть.
 
 ```markdown
----
 type: week-plan
 week: W{N}
 date_start: YYYY-MM-DD
 date_end: YYYY-MM-DD
 status: draft
 agent: Стратег
----
 
 # WeekPlan W{N}: DD мес — DD мес YYYY
 
@@ -229,7 +231,6 @@ agent: Стратег
 > Дописывается в `DayPlan YYYY-MM-DD.md` секцией в конце.
 
 ```markdown
----
 
 ## Итоги дня
 

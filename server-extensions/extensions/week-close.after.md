@@ -1,5 +1,35 @@
 ## Авторские проверки Week Close
 
+### Guard: канонический множитель (Ф8.3, WP-139)
+
+> **Цель:** Week Close НЕ завершается при 0x/пустом множителе — силент-фейл парсера невидим.
+
+**Выполнить ДО написания поста:**
+
+```bash
+# Запустить dry-run и проверить weekly_multiplier
+MULT_JSON=$(bash ~/IWE/DS-IT-systems/DS-ai-systems/synchronizer/scripts/dt-collect.sh --dry-run 2>/dev/null | python3 -c "
+import sys, json
+data = json.load(sys.stdin)
+mult = data.get('weekly_multiplier', 0)
+budget = data.get('weekly_budget_closed', 0)
+print(f'weekly_multiplier={mult}, weekly_budget_closed={budget}')
+")
+echo "$MULT_JSON"
+```
+
+**Критерий блокировки:** `weekly_multiplier == 0` И `weekly_budget_closed == 0`
+- Если оба 0 → **СТОП Week Close.** Парсер мультипликатора не нашёл данные.
+  Диагностика: `bash ~/IWE/DS-IT-systems/DS-ai-systems/synchronizer/scripts/dt-collect.sh --dry-run`
+  Проверить: DayPlan-ы за неделю существуют? Формат «Бюджет закрыт» совпадает?
+  Зафиксировать вручную множитель в WeekPlan и только потом закрыть.
+- Если `weekly_multiplier > 0` → продолжать.
+- Если только `weekly_budget_closed > 0` но `weekly_multiplier == 0` → WakaTime недоступен, не блокер (записать ∞/N/A).
+
+- [ ] **Guard выполнен** — `weekly_multiplier` не 0 (или задокументировано исключение)
+
+---
+
 ### Написание недельного поста из черновика (S-19, тестируется)
 
 > **Источник:** `DS-Knowledge-Index-Tseren/docs/{YYYY}/{NN}-{месяц}/week-draft-w{NN}.md`

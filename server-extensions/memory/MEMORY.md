@@ -25,6 +25,12 @@
 > **Источник статуса РП:** `DS-my-strategy/current/WeekPlan W{N}.md` + `DS-my-strategy/WP-REGISTRY.md` + `DS-my-strategy/current/inbox/WP-NNN-*.md`.
 > В MEMORY.md статус РП НЕ хранится (дубликат). Открыть WeekPlan = точка старта сессии.
 
+## 4-уровневое различение: Проблема ≠ Задача ≠ ФР ≠ Работа (→ HD #24, DP.D.053, WP-282 ✅ 1 май)
+
+> **Главный навык эпохи ИИ:** конвертировать Проблему в Задачу через системное моделирование.
+> Проблема = ступор (метод неясен) → Задача = метод известен → Формулировка работы = спецификация → Работа = физ.реальность.
+> ИИ-автопилот ускоряет Задача→Работа. ИИ-экзоскелет помогает Проблема→Задача (DP.D.046). Дополнительно: `hard-distinctions.md § HD #24`.
+
 ## Модель пользовательских данных: Персона / Память / Контекст (→ HD #27, DP.D.052)
 
 > Заменяет «ЦД» как монолитную сущность. Критерий слоя = **writer + owner**.
@@ -55,39 +61,51 @@
 
 > §4 CLAUDE.md покрывает: checklists, fpf-reference, hard-distinctions, navigation, repo-type-rules, roles, sota-reference.
 > Протоколы: protocol-{open,work,close,month-close}.md. Операционные: t-checklist, r-questionnaire, sync-manifest.yaml, templates-dayplan.
+> Спецификации: [memory-lifecycle-spec.md](memory-lifecycle-spec.md) — онтология памяти v1 (4 оси, frontmatter-схема, HOT/WARM/COLD).
 
-### Feedback (правила поведения)
+### Текущие РП (W18→W19, 3 май)
 
-- [feedback_memory_index_discipline.md](feedback_memory_index_discipline.md) — шапки индексов (MEMORY/WP-REGISTRY/…) = hook-строки, не changelog и не статус (24 апр)
-- [feedback_writing.md](feedback_writing.md) — стиль, публикации, Marp
-- [feedback_governance.md](feedback_governance.md) — бюджет, множитель, WP-оценки
-- [feedback_architecture.md](feedback_architecture.md) — код, DDD, MCP, Neon
-- [feedback_behaviour.md](feedback_behaviour.md) — ОРЗ, снапшоты, верификация, автономность
-- [feedback_note_review_routing.md](feedback_note_review_routing.md) — знание → DayPlan кандидатом, captures.md только при явном маркере
-- [feedback_link_format.md](feedback_link_format.md) — файлы IWE → GitHub URL (VS Code ext не открывает URL-encoded кириллицу)
-- [feedback_decision_gates.md](feedback_decision_gates.md) — gate = бинарный чеклист yes/no, без процентов/score
-- [feedback_post_promote_sync.md](feedback_post_promote_sync.md) — L1↔L3 leak при промоции и init-time; тест «применимо пустому пользователю?»
-- [feedback_world_section_links.md](feedback_world_section_links.md) — Мир-секция DayPlan: каждый пункт = markdown URL или исключается
-- [feedback_scout_backlog_discipline.md](feedback_scout_backlog_discipline.md) — Scout backlog пуст по умолчанию; только явные заказы
-- [feedback_protocol_full_checklist.md](feedback_protocol_full_checklist.md) — Day Close R23 передавать ПОЛНЫЙ чеклист, grep-верификация FAIL-ов
-- [feedback_wp_context_tail_first.md](feedback_wp_context_tail_first.md) — WP-context читать снизу вверх; long-tail handoff в конце инвертирует фазы в середине (25 апр)
-- [feedback_multiplier_carry_forward.md](feedback_multiplier_carry_forward.md) — мультипликатор DayPlan → WeekPlan при Day Close
-- [feedback_template_sync_placeholders.md](feedback_template_sync_placeholders.md) — в шаблонных файлах (SKILL.md, scripts/*.sh) плейсхолдеры `$IWE_SCRIPTS`/`$IWE_TEMPLATE`/`$HOME`, не хардкод (валидатор роняет sync, 26 апр)
-- [feedback_chat_replies_not_in_repo.md](feedback_chat_replies_not_in_repo.md) — ответы для отправки X (TG/email/Slack) даём в чате, не пишем `inbox/draft.md` (26 апр)
+> **Source-of-truth статусов** — `DS-my-strategy/current/WeekPlan W19 2026-05-04.md`. Здесь — только горячая выжимка после Strategy Session W19 (4 мая, two-track разворот).
+
+**Two-Track архитектура (Strategy Session W19, 4 май):** Россия = Track A (legacy LMS+бот, передача Ильшату); мир/YC = Track B (новая Neon+Aisystant MCP+EN-ready). Подробно — `DS-my-strategy/docs/Strategy.md` § «Стратегический разворот W19».
+
+**Track B (Tseren) — критические W19:**
+- **WP-253** Реализованная архитектура Neon — Ф9.6 reliability gate 4-6 мая (ТОС W19/мая) + Пробелы C/F spawn
+- **WP-245** Персональное руководство — D-блок ✅ done (4 мая, все 12 фаз: Ф31+Ф19+Ф20+Ф22+Ф16 + ранее); Ф28.3 (внешние пилоты) + B3 (week-close-pilot) + Ф9/Ф10 (dep WP-149) — следующая сессия
+- **WP-151** Характеристики деятеля — Ф14.1+Ф14.2+Ф14.3 ✅ done; **Ф13 ✅ done** (dt_snapshot_rcs + rcs_history pipeline в orchestrator, 4 мая); Блок B (B1-B4 эмиттер событий ~9-13h) — следующая сессия
+- **R4 YC** — RFS-анализ + deck v0.5 + demo-сценарий ≤3 мин (~6h W19)
+
+**Track A (передача Ильшату):**
+- **WP-281** Передача Track A — план месяца, on-call с W21, bus factor ≥2 к 1 июня
+
+**Поддержка:** WP-187 Ф-K.2; WP-188 Ф3+Ф4.5; WP-250; WP-246 soak финал 5 мая; WP-283; WP-121 Ф2; WP-196 Ф8+Ф12.3; WP-7; WP-150 Ф0; WP-170; WP-231; WP-276
+
+### Feedback — HOT (27-30 апр, 1-3 май)
+
+> Горячие файлы, читаемые регулярно. Архивные WARM (17-26 апр) → [`archive/feedback-april-2026.md`](archive/feedback-april-2026.md).
+
+- [feedback_monthclose_strategy_session_input.md](feedback_monthclose_strategy_session_input.md) — MonthClose YYYY-MM.md = вход стадии 2 первой сессии месяца (WP-196 Ф13, 4 май)
+- [feedback_r_questionnaire_month.md](feedback_r_questionnaire_month.md) — M1-M3/M6 заполнять из данных автоматически; только M4-M5 спрашивать у пользователя; нет английских слов (4 май)
+- [feedback_day_open_gaps_2026-05-02.md](feedback_day_open_gaps_2026-05-02.md) — **КРИТИЧЕСКИЙ: шаг 3 Саморазвитие отсутствует в Day Open**; + 4 косяка, рекомендации по SKILL.md и scaffold (3 май)
+- [feedback_calendar_query_day_open.md](feedback_calendar_query_day_open.md) — шаг 4c: запрашивать ВСЕ calendar IDs из config; пропускать событие как private только при явном `visibility: "private"` в API-ответе (3 май)
+- [feedback_behaviour.md](feedback_behaviour.md) — ОРЗ, снапшоты, верификация, автономность (29 апр)
+- [feedback_writing.md](feedback_writing.md) — стиль, публикации, Marp (28 апр)
+- [feedback_architecture.md](feedback_architecture.md) — код, DDD, MCP, Neon (28 апр)
 - [feedback_cutover_completeness.md](feedback_cutover_completeness.md) — `git branch --contains` для merge-verify, cut-over 3 слоя, FORBIDDEN_FIELDS PII tax; `development.engagement.user_uuid` ненадёжен post-cutover → UUID всегда из `persona.ory_identity` (28 апр)
-- [feedback_rule_registry_pattern.md](feedback_rule_registry_pattern.md) — Pack/DS pattern для правил агента (WP-272); FPF A.7 (Object/Description/Carrier); +batch-uplift паттерн с audit-loop +weekly evolution scheduled agent (27 апр Ф4)
-- [feedback_railway_new_project_pitfall.md](feedback_railway_new_project_pitfall.md) — Railway "+ New" с dashboard ROOT создаёт новый проект, не сервис; WP-270 worker → attractive-optimism вместо peaceful-vision (27 апр)
-- [feedback_per_domain_cursor_self_init.md](feedback_per_domain_cursor_self_init.md) — worker идемпотентно создаёт cursors через INSERT ON CONFLICT, миграция cursor split → NOOP при первом deploy (27 апр)
-- [feedback_sequential_worker_throughput_ceiling.md](feedback_sequential_worker_throughput_ceiling.md) — sequential projection-worker upper rate ~50-60 ev/min на Neon-pooled; trigger Ф3 scaling если incoming > ceiling (27 апр)
-- [feedback_quantum_like_trigger.md](feedback_quantum_like_trigger.md) — при ArchGate / метриках / диагностике / observability проверять 5 симптомов QL → DP.METHOD.050 после исчерпания классики (FPF C.26*, WP-274, 27 апр)
 - [feedback_neon_pooler_listen_notify.md](feedback_neon_pooler_listen_notify.md) — LISTEN/NOTIFY несовместимо с Neon `-pooler` endpoint (PgBouncer transaction-mode); receiver-DSN всегда direct (28 апр)
+- [feedback_silent_projection_fail.md](feedback_silent_projection_fail.md) — projection-worker cursor advance + silent UPSERT fail (3 случая 28 апр); детектор alerter rule 4 cross-DB diff (28 апр)
+- [feedback_sequential_worker_throughput_ceiling.md](feedback_sequential_worker_throughput_ceiling.md) — sequential projection-worker upper rate ~50-60 ev/min на Neon-pooled; trigger Ф3 scaling если incoming > ceiling (28 апр)
 - [feedback_russian_clear.md](feedback_russian_clear.md) — только понятный русский в ответах, минимум английских слов, без сленга и жаргона (28 апр)
 - [feedback_repo_hosting_principle.md](feedback_repo_hosting_principle.md) — инстанс ≠ шаблон (разные репо); лицензия Apache 2.0 + CLA с первого коммита; нейтральные имена; Foundation для шаблонов в Q3-Q4 (28 апр)
-- [feedback_silent_projection_fail.md](feedback_silent_projection_fail.md) — projection-worker cursor advance + silent UPSERT fail (3 случая 28 апр); детектор alerter rule 4 cross-DB diff (28 апр)
+- [feedback_rule_registry_pattern.md](feedback_rule_registry_pattern.md) — Pack/DS pattern для правил агента (WP-272); FPF A.7 (Object/Description/Carrier); +batch-uplift паттерн с audit-loop +weekly evolution scheduled agent (27 апр Ф4)
+- [feedback_railway_new_project_pitfall.md](feedback_railway_new_project_pitfall.md) — Railway "+ New" с dashboard ROOT создаёт новый проект, не сервис; WP-270 worker → attractive-optimism вместо peaceful-vision (27 апр)
+- [feedback_quantum_like_trigger.md](feedback_quantum_like_trigger.md) — при ArchGate / метриках / диагностике / observability проверять 5 симптомов QL → DP.METHOD.050 после исчерпания классики (FPF C.26*, WP-274, 27 апр)
+- [feedback_per_domain_cursor_self_init.md](feedback_per_domain_cursor_self_init.md) — worker идемпотентно создаёт cursors через INSERT ON CONFLICT, миграция cursor split → NOOP при первом deploy (27 апр)
 - [feedback_silent_fail_log_to_stdout.md](feedback_silent_fail_log_to_stdout.md) — bash log() в stderr, иначе ломает $() pipelines с JSON (29 апр, dt-collect.sh)
 - [feedback_post_cutover_doc_drift.md](feedback_post_cutover_doc_drift.md) — после cut-over runbook'и проверять grep'ом на dead-code flags / manual-шаги; не следовать слепо pre-cutover документации (29 апр)
 - [feedback_release_gates.md](feedback_release_gates.md) — валидатор без интеграции в pre-commit/CI = в чужих руках (WP-279, 29 апр)
 - [feedback_alerter_writer_sampling_drift.md](feedback_alerter_writer_sampling_drift.md) — alerter threshold ↔ writer sampling drift (lazy metric ≠ heartbeat); idle ≠ stuck без backlog-проверки (29 апр)
+- [feedback_context_isolation_day_open.md](feedback_context_isolation_day_open.md) — двойное открытие (автономное + ручное) наследует результаты без переаттестации БЛОКИРУЮЩИХ шагов; решение: BLOCKING validation перед commit (1 май)
 
 ### User (личный профиль)
 
@@ -105,6 +123,7 @@
 - [project_iwe_positioning.md](project_iwe_positioning.md) — 5 компонент, слоган
 - [project_community_iwe.md](project_community_iwe.md) — сообщество, воронка
 - [project_lifetime_subscription_vision.md](project_lifetime_subscription_vision.md) — подписка, LTV
+- [project_ilshat_handover.md](project_ilshat_handover.md) — WP-281: передача менеджмент+поддержка → Ильшат (3 фазы, →1 сент)
 - [project_web_onboarding.md](project_web_onboarding.md) — лендинг, конверсия
 - [project_inga_ux_designer.md](project_inga_ux_designer.md) — Инга, UX
 - [project_karpathy_llm_knowledge_base.md](project_karpathy_llm_knowledge_base.md) — LLM-вики, автопилот
@@ -131,3 +150,19 @@
 - [reference_video_locations.md](reference_video_locations.md) — видео
 - [reference_post_drafts.md](reference_post_drafts.md) — `~/IWE/DS-my-strategy/drafts/` D-NNN драфты постов
 - [reference_fpf_quint_code.md](reference_fpf_quint_code.md) — agentic RAG, FPF-паттерны, CodeAlive
+- [reference_railway_postgres_after_cutover.md](reference_railway_postgres_after_cutover.md) — Railway-local Postgres `bot_data` (ory_tokens, dt_tokens) post-WP-268
+- [reference_gdrive_sync.md](reference_gdrive_sync.md) — **ПЕРВЫМ при Upload/Drive**: `DS-MCP/google-drive-mcp/gdrive-sync.py` + `sync-config.json`; OAuth, не сервисный аккаунт
+- [reference_dp_d053.md](reference_dp_d053.md) — DP.D.053 (4-уровневое различение Problem→Task→Form→Work) с примерами (WP-282, 1 май)
+
+## ✅ INCIDENT-2026-04-30 (RESOLVED, 30 апр 23:50)
+
+**FINAL STATUS:** SESSION 2 COMPLETE — все исправления выполнены
+
+Контекст РП: `DS-my-strategy/inbox/WP-INCIDENT-2026-04-30-bot-diagnostics-runbook.md`
+
+**SESSION 2 результаты:**
+- ✅ **Ф2a OAuth (CRITICAL)** — ory_tokens expired в Railway-local Postgres; DELETE 1 row; OAuth recovery triggered
+- ✅ **Ф2b GitHub (HIGH)** — logger.error → logger.debug в github_content.py:65
+- ✅ **Ф3 Feed latency (MEDIUM)** — Claude API timeout pattern; not a bug
+- ✅ **Ф4 Close** — все документы обновлены, инцидент закрыт
+

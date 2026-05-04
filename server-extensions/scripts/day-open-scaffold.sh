@@ -20,6 +20,7 @@ set -uo pipefail
 IWE="${IWE_ROOT:-$HOME/IWE}"
 DATE="${1:-$(date +%Y-%m-%d)}"
 CONFIG="$IWE/DS-my-strategy/exocortex/day-rhythm-config.yaml"
+SERVER_MODE="${IWE_SERVER_MODE:-0}"  # WP-283: 1 = Linux server, Mac-only MCP недоступен
 
 # --- Date helpers (cross-platform: macOS BSD date / Linux GNU date) ---
 if [[ "$(uname -s)" == "Darwin" ]]; then
@@ -255,6 +256,13 @@ generated_by: day-open-scaffold.sh (WP-264 Ф2)
 
 # Day Plan: $DAY_NUM $MONTH_RU $YEAR ($DOW_RU)
 
+<details>
+<summary><b>Активные РП (WP-283 Шаг E)</b></summary>
+
+$(bash "$IWE/scripts/active-wp-sweep.sh" "$IWE/DS-my-strategy/inbox" "$IWE" 2>/dev/null || echo "<!-- active-wp-sweep: ошибка запуска -->")
+
+</details>
+
 <details open>
 <summary><b>План на сегодня</b></summary>
 
@@ -292,13 +300,17 @@ generated_by: day-open-scaffold.sh (WP-264 Ф2)
 <details>
 <summary><b>Календарь ($DAY_NUM $MONTH_RU)</b></summary>
 
-<!-- PENDING: calendar — mcp__ext-google-calendar__list-events для calendar_ids из day-rhythm-config.yaml. Фильтр 09:00-19:00, private пропустить. -->
-
-| Время | Событие | Длит. | Связь с РП |
-|-------|---------|-------|------------|
-| HH:MM | <!-- PENDING --> | Xh | <!-- PENDING --> |
-
-⏱ Свободных блоков ≥1h: <!-- PENDING -->
+$(if [[ "$SERVER_MODE" == "1" ]]; then
+  bash "$IWE/scripts/server-calendar.sh" "$DATE" "$CONFIG" 2>/dev/null || echo "📅 **Календарь ($DAY_NUM $MONTH_RU):** ⚠️ PENDING — server-calendar.sh завершился с ошибкой"
+else
+  echo "<!-- PENDING: calendar — mcp__ext-google-calendar__list-events для calendar_ids из day-rhythm-config.yaml. Фильтр 09:00-19:00, private пропустить. -->"
+  echo ""
+  echo "| Время | Событие | Длит. | Связь с РП |"
+  echo "|-------|---------|-------|------------|"
+  echo "| HH:MM | <!-- PENDING --> | Xh | <!-- PENDING --> |"
+  echo ""
+  echo "⏱ Свободных блоков ≥1h: <!-- PENDING -->"
+fi)
 
 </details>
 
@@ -341,10 +353,14 @@ $(render_scout)
 <details>
 <summary><b>Мир</b></summary>
 
-<!-- PENDING: world — RSS feeds (curl) для news.topics из day-rhythm-config.yaml + WebSearch fallback. Каждый пункт = markdown URL (feedback_world_section_links.md). -->
-
-- <!-- PENDING --> [заголовок](url) — источник
-- <!-- PENDING --> [заголовок](url) — источник
+$(if [[ "$SERVER_MODE" == "1" ]]; then
+  bash "$IWE/scripts/server-news.sh" "$CONFIG" 2>/dev/null || echo "**Мир:** ⚠️ PENDING — server-news.sh завершился с ошибкой"
+else
+  echo "<!-- PENDING: world — RSS feeds (curl) для news.topics из day-rhythm-config.yaml + WebSearch fallback. Каждый пункт = markdown URL (feedback_world_section_links.md). -->"
+  echo ""
+  echo "- <!-- PENDING --> [заголовок](url) — источник"
+  echo "- <!-- PENDING --> [заголовок](url) — источник"
+fi)
 
 </details>
 
