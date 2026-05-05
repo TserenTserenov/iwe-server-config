@@ -47,7 +47,8 @@ let
   # Python с зависимостями: pyyaml (rule-classifier), psycopg2 (dt-collect-neon).
   # Используется и в commonPath (чтобы python3 был доступен скриптам strategist/dt-collect),
   # и явно через ${pythonForIWE}/bin/python3 для rule-classifier.
-  pythonForIWE = pkgs.python3.withPackages (ps: with ps; [ pyyaml psycopg2 cryptography ]);
+  # asyncpg + aiohttp — для activity-hub sync-iwe (runner.py читает persona, пишет в learning).
+  pythonForIWE = pkgs.python3.withPackages (ps: with ps; [ pyyaml psycopg2 cryptography asyncpg aiohttp ]);
 
   # postgresql — psql для unsatisfied-report.sh и других синхронизаторов.
   # nodejs — npx для knowledge-mcp/scripts/reindex.sh (mcp reindex task).
@@ -379,6 +380,35 @@ in
       timerConfig = {
         OnCalendar = "*-*-* 04:30:00";
         Persistent = true;  # catch-up если сервер был недоступен
+      };
+    };
+
+    # =========================================================
+    # 11. ACTIVITY HUB — sync IWE engagement (GitHub + WakaTime → Neon learning)
+    # =========================================================
+    # Заменяет Mac launchd com.iwe.activity-hub-sync-iwe (23:00 МСК).
+    # runner.py sync-iwe тянет коммиты GitHub и активность WakaTime пилотов,
+    # пишет в learning.public.domain_event. Читает OAuth-токены из persona DB.
+    # Env vars: LEARNING_URL, PERSONA_URL, GITHUB_TOKEN_ENCRYPTION_KEY (в /etc/iwe/env).
+
+    systemd.services."iwe-activity-hub-sync" = {
+      description = "IWE Activity Hub — sync IWE→Neon (GitHub + WakaTime, 23:00 МСК)";
+      unitConfig  = commonUnitConfig;
+      serviceConfig = commonServiceConfig // {
+        ExecStart  = "${pythonForIWE}/bin/python3 ${iwe}/DS-IT-systems/activity-hub/runner.py sync-iwe";
+        WorkingDirectory = "${iwe}/DS-IT-systems/activity-hub";
+        TimeoutSec = 1800;  # 30 min — GitHub/WakaTime API могут быть медленными
+      };
+      path = commonPath;
+      environment = commonEnv;
+    };
+
+    systemd.timers."iwe-activity-hub-sync" = {
+      wantedBy    = [ "timers.target" ];
+      description = "Activity Hub sync — ежедн 23:00 МСК";
+      timerConfig = {
+        OnCalendar = "*-*-* 23:00:00";
+        Persistent = true;
       };
     };
 
