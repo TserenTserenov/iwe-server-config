@@ -353,6 +353,36 @@ in
     };
 
     # =========================================================
+    # 10. PROFILER (daily) — recalculate_derived.py
+    # =========================================================
+    # Запускает R28 Профилировщик (AISYS.018) ежедневно в 04:30 МСК.
+    # Читает 2_collected из digital_twins → пишет 3_derived в:
+    #   - indicators.calculated_profile (F2 dual-write, всегда)
+    #   - event-gateway → projection-worker (F1.A, если EVENT_GATEWAY_URL задан)
+    # Зависимости: ~/.secrets/neon (INDICATORS_DIRECT, LEARNING_DIRECT, EVENT_GATEWAY_URL)
+    # Связь: WP-253 Ф9.6, system.yaml AISYS.018
+
+    systemd.services."iwe-profiler" = {
+      description = "IWE — Профилировщик (recalculate_derived, 04:30 МСК)";
+      unitConfig   = commonUnitConfig;
+      serviceConfig = commonServiceConfig // {
+        ExecStart  = "${pkgs.bash}/bin/bash ${iwe}/DS-IT-systems/DS-ai-systems/synchronizer/scripts/recalculate.sh";
+        TimeoutSec = 600;  # 10 мин — 7 пользователей × ~1 мин каждый
+      };
+      path = commonPath;
+      environment = commonEnv;
+    };
+
+    systemd.timers."iwe-profiler" = {
+      wantedBy    = [ "timers.target" ];
+      description = "IWE Профилировщик — ежедн 04:30 МСК";
+      timerConfig = {
+        OnCalendar = "*-*-* 04:30:00";
+        Persistent = true;  # catch-up если сервер был недоступен
+      };
+    };
+
+    # =========================================================
     # FAILURE ALERT — template service (iwe-failure-alert@.service)
     # =========================================================
     # Вызывается через OnFailure=iwe-failure-alert@%N.service от каждого IWE-сервиса.
