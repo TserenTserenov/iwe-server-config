@@ -407,7 +407,9 @@ in
       wantedBy    = [ "timers.target" ];
       description = "Activity Hub sync — ежедн 23:00 МСК";
       timerConfig = {
-        OnCalendar = "*-*-* 23:00:00";
+        # Явный TZ → детерминированно МСК круглый год.
+        # Без него systemd использует Europe/Helsinki: летом EEST=MSK, зимой EET=MSK-1h.
+        OnCalendar = "*-*-* 23:00:00 Europe/Moscow";
         Persistent = true;
       };
     };

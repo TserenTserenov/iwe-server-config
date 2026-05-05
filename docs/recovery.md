@@ -95,7 +95,18 @@ nixos-rebuild --rollback --target-host root@95.216.75.148
 6. Восстановить секреты:
    ssh root@<IP> "mkdir -p /etc/iwe && cat > /etc/iwe/env"
    # ввести содержимое из 1Password → tseren-knowledge → «Цех /etc/iwe/env»
-7. Восстановить из B2 содержательные данные (если применимо):
+   # Обязательные ключи (для всех IWE timers):
+   #   ANTHROPIC_API_KEY, TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID
+   # Для iwe-activity-hub-sync (sync-iwe):
+   #   LEARNING_URL, PERSONA_URL, GITHUB_TOKEN_ENCRYPTION_KEY
+   # Для iwe-profiler (recalculate_derived):
+   #   NEON_URL, NEON_LEARNING_URL, NEON_INDICATORS_URL, INDICATORS_URL, DT_USER_ID
+7. Клонировать IWE-репозитории под /home/tseren/IWE/ (как пользователь tseren):
+   sudo -u tseren bash -c "mkdir -p /home/tseren/IWE/DS-IT-systems && cd /home/tseren/IWE/DS-IT-systems && \
+     git clone git@github.com:aisystant/activity-hub.git && \
+     git clone git@github.com:TserenTserenov/DS-ai-systems.git"
+   # Полный список зависимостей таймеров — см. iwe-server-config/CLAUDE.md
+8. Восстановить из B2 содержательные данные (если применимо):
    restic -r b2:aisystant-neon-backup restore latest --target /restored
 ```
 
