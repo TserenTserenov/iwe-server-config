@@ -58,3 +58,47 @@ echo "$MULT_JSON"
 - [ ] **Метрики недели посчитаны** и встроены в текст
 - [ ] **Интегральный показатель** (прогресс месяца) записан
 - [ ] **Exit Protocol поста** выполнен (обложка, README, commit, push)
+
+---
+
+### Emit weekly_hypothesis_set / weekly_hypothesis_closed (WP-151 Блок B)
+
+> Выполнить **после** написания недельного поста, перед финальным commit.
+> Заполнить поля из контекста стратегической сессии / WeekPlan W{N}.
+>
+> `target_lever`: W | M1 | M2 | M3 | M4 | resources
+> `target_characteristic`: clarity | agency | composure | regularity | production_capacity | productivity | resourcefulness | stress_resilience
+> `actual_idx_delta`: фактический прирост по шкале 0-2 (0=без изменений, 1=+1 пункт, 2=+2 пункта)
+
+```bash
+ENV_FILE="$HOME/.config/aist/env"
+ACCOUNT_ID=$(grep '^export DT_USER_ID=' "$ENV_FILE" 2>/dev/null | cut -d'=' -f2- | tr -d '"' || echo "")
+EVENT_GW="${EVENT_GATEWAY_URL:-https://event-gateway.aisystant.workers.dev}"
+WEEK_START=$(date -d "last Monday" +%Y-%m-%d 2>/dev/null || date -v-Mon +%Y-%m-%d 2>/dev/null || date +%Y-%m-%d)
+WEEK_ISO=$(date +%V | sed 's/^0//')
+EXT_SET="weekly-hyp-set-W${WEEK_ISO}-${ACCOUNT_ID:0:8}"
+EXT_CLOSED="weekly-hyp-closed-W${WEEK_ISO}-${ACCOUNT_ID:0:8}"
+
+# Заполнить из контекста стратегической сессии / WeekPlan W{N}:
+LEVER=<рычаг_недели: W|M1|M2|M3|M4|resources>
+CHARACTERISTIC=<характеристика: composure|regularity|...>
+HYPOTHESIS="<текст гипотезы>"
+EXPECTED_DELTA=<0-2 или null>
+ACTUAL_DELTA=<фактический прирост 0-2>
+
+if [ -z "$ACCOUNT_ID" ]; then
+  echo "⚠️ DT_USER_ID не задан — пропуск emit weekly_hypothesis"
+else
+  # 1. weekly_hypothesis_set (план)
+  RESP=$(curl -sf -X POST "$EVENT_GW/events" \
+    -H "Content-Type: application/json" \
+    -d "{\"source\":\"iwe\",\"event_type\":\"weekly_hypothesis_set\",\"schema_version\":\"v1\",\"external_id\":\"$EXT_SET\",\"account_id\":\"$ACCOUNT_ID\",\"payload\":{\"week_start\":\"$WEEK_START\",\"week_iso\":$WEEK_ISO,\"target_lever\":\"$LEVER\",\"target_characteristic\":\"$CHARACTERISTIC\",\"hypothesis_text\":\"$HYPOTHESIS\",\"expected_idx_delta\":$EXPECTED_DELTA}}" 2>&1)
+  echo "$RESP" | grep -q '"inserted"\|"idempotent"' && echo "✅ weekly_hypothesis_set emitted" || echo "⚠️ set emit: $RESP"
+
+  # 2. weekly_hypothesis_closed (факт)
+  RESP=$(curl -sf -X POST "$EVENT_GW/events" \
+    -H "Content-Type: application/json" \
+    -d "{\"source\":\"iwe\",\"event_type\":\"weekly_hypothesis_closed\",\"schema_version\":\"v1\",\"external_id\":\"$EXT_CLOSED\",\"account_id\":\"$ACCOUNT_ID\",\"payload\":{\"week_start\":\"$WEEK_START\",\"actual_idx_delta\":$ACTUAL_DELTA}}" 2>&1)
+  echo "$RESP" | grep -q '"inserted"\|"idempotent"' && echo "✅ weekly_hypothesis_closed emitted" || echo "⚠️ closed emit: $RESP"
+fi
+```

@@ -6,7 +6,7 @@
 ### strategy_day gate (Day Close)
 При записи «Завтра начать с:» в DayPlan — проверить: завтра = strategy_day?
 ```bash
-grep 'strategy_day:' ~/.claude/projects/-Users-tserentserenov-IWE/memory/day-rhythm-config.yaml
+grep 'strategy_day:' ~/IWE/DS-my-strategy/exocortex/day-rhythm-config.yaml
 ```
 Если завтра strategy_day → **DayPlan НЕ создавать**. Carry-over записать в WeekPlan (секция «План на {день недели}»).
 
@@ -14,7 +14,7 @@ grep 'strategy_day:' ~/.claude/projects/-Users-tserentserenov-IWE/memory/day-rhy
 
 При запуске sub-agent Haiku R23 — передавать файлы как **абсолютные пути** (не `git diff --name-only`):
 ```bash
-git -C ~/IWE/DS-my-strategy diff --name-only HEAD~1 | sed 's|^|/Users/tserentserenov/IWE/DS-my-strategy/|'
+git -C ~/IWE/DS-my-strategy diff --name-only HEAD~1 | sed "s|^|$HOME/IWE/DS-my-strategy/|"
 ```
 Иначе: субагент не найдёт файлы с пробелами в именах (`WeekPlan W14 *.md`, `DayPlan *.md`) → ложные ❌.
 

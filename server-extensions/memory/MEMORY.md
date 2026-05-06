@@ -70,15 +70,22 @@
 **Two-Track архитектура (Strategy Session W19, 4 май):** Россия = Track A (legacy LMS+бот, передача Ильшату); мир/YC = Track B (новая Neon+Aisystant MCP+EN-ready). Подробно — `DS-my-strategy/docs/Strategy.md` § «Стратегический разворот W19».
 
 **Track B (Tseren) — критические W19:**
-- **WP-253** Реализованная архитектура Neon — Ф9.6 reliability gate 4-6 мая (ТОС W19/мая) + Пробелы C/F spawn
+- **WP-150** Мультиагентность IWE — архитектура Ф0–Ф8 (28h). **Уточнено W18 (4 май):** Claude (Planner) + Kimikode (Executor) + Ollama (fallback). Ф6 CRITICAL = unified MCP Gateway в VS Code (все агенты через один слой). Offline = Ф5 local MCP server + workspace cache. Phases overview в `phases-wp150-overview.md`. **Ф0 ✅ complete** (decision doc: peer-agent model, offline graceful degradation, context isolation) — **Ф1** (context isolation spec, 2.5h) — следующая сессия.
+- **WP-253** Реализованная архитектура Neon — Ф9.6 ✅ (5 мая): cron tsekh-1 04:30 МСК работает, F1.A активен (event-gateway 201); soak F2 до 2026-05-12 → убрать digital_twins fallback из twin.py
 - **WP-245** Персональное руководство — D-блок ✅ done (4 мая, все 12 фаз: Ф31+Ф19+Ф20+Ф22+Ф16 + ранее); Ф28.3 (внешние пилоты) + B3 (week-close-pilot) + Ф9/Ф10 (dep WP-149) — следующая сессия
-- **WP-151** Характеристики деятеля — Ф14.1+Ф14.2+Ф14.3 ✅ done; **Ф13 ✅ done** (dt_snapshot_rcs + rcs_history pipeline в orchestrator, 4 мая); Блок B (B1-B4 эмиттер событий ~9-13h) — следующая сессия
+- **WP-151** Характеристики деятеля — Ф14.1+Ф14.2+Ф14.3 ✅ done; **Ф13 ✅ done** (dt_snapshot_rcs + rcs_history pipeline в orchestrator, 4 мая); **Блок B ✅ done 5 мая** (эмиттеры IWE → event-gateway → projection-worker → learning.daily_plan/weekly_hypothesis end-to-end). Уроки: feedback_asyncpg_type_coercion.md, feedback_upsert_vs_update_for_closed_events.md
 - **R4 YC** — RFS-анализ + deck v0.5 + demo-сценарий ≤3 мин (~6h W19)
 
 **Track A (передача Ильшату):**
 - **WP-281** Передача Track A — план месяца, on-call с W21, bus factor ≥2 к 1 июня
 
-**Поддержка:** WP-187 Ф-K.2; WP-188 Ф3+Ф4.5; WP-250; WP-246 soak финал 5 мая; WP-283; WP-121 Ф2; WP-196 Ф8+Ф12.3; WP-7; WP-150 Ф0; WP-170; WP-231; WP-276
+**Поддержка:** WP-188 Ф3+Ф4.5; WP-250; WP-246 soak продлён → 12 мая (digital_twins fallback тоже до 12 мая, Ф9.x spec); WP-283; WP-121 Ф2; WP-196 Ф8+Ф12.3; WP-7; WP-170; WP-231; WP-276; **WP-284** Интервью-пайплайн Ф0-Ф5 ✅ done 5 мая; **WP-214** Ф7 ✅ done 5 мая (iwe-actions-catalog + emitter + orz-tracker + git-template) → Ф8 dep WP-121; **WP-285** Ф1-Ф2 ✅ done 5 мая (Neon-аудит + сценарии)
+
+**WP-293 ✅ done 6 мая:** Контракт параметризации путей IWE — FMT 0.29.29 (commit `4f0277f`): фикс `dt-collect.sh:234`, `update.sh:609` `.claude/scripts/*`, smoke HOME isolation + 3 safeguards.
+
+**WP-287** Руководство по использованию IWE — **Ф0 ✅ done 6 мая** (трёхканальная стратегия: холодный/тёплый/внутренний; Ф1 dep WP-188 Ф4.5; Ф2 blocked dep WP-222); context: `DS-my-strategy/inbox/WP-287-iwe-usage-guide.md`
+
+**Новые pending (W20+):** WP-286 IWE в корп. среде; WP-288 Рекомендации наставникам резидентур; WP-289 Интеграция IWE с PKM/Notion/Obsidian; **WP-290 «Следователь»** — каузальная аналитика развития (C.28, Pearl Hierarchy; dep WP-151+WP-253; enables WP-149+WP-117; ~26h); **WP-292 Бренд IWE** (spawn 6 мая) — имя продукта (Ipsembra кандидат, ищем альтернативы) + Brand Compendium 8 секций + приёмка работ дизайнера; артефакт в `DS-ecosystem-development/C.IT-Platform/C2.IT-Platform/C2.1.Meaning/2.1.1. Brand/` (бренд продукта IWE — SoI ядра C, не B; различение «IWE-продукт ≠ Aisystant-экосистема»); ⚪ ~30h за W19-W22, поддерживает Track B / R4 YC
 
 ### Feedback — HOT (27-30 апр, 1-3 май)
 
@@ -98,14 +105,16 @@
 - [feedback_russian_clear.md](feedback_russian_clear.md) — только понятный русский в ответах, минимум английских слов, без сленга и жаргона (28 апр)
 - [feedback_repo_hosting_principle.md](feedback_repo_hosting_principle.md) — инстанс ≠ шаблон (разные репо); лицензия Apache 2.0 + CLA с первого коммита; нейтральные имена; Foundation для шаблонов в Q3-Q4 (28 апр)
 - [feedback_rule_registry_pattern.md](feedback_rule_registry_pattern.md) — Pack/DS pattern для правил агента (WP-272); FPF A.7 (Object/Description/Carrier); +batch-uplift паттерн с audit-loop +weekly evolution scheduled agent (27 апр Ф4)
-- [feedback_railway_new_project_pitfall.md](feedback_railway_new_project_pitfall.md) — Railway "+ New" с dashboard ROOT создаёт новый проект, не сервис; WP-270 worker → attractive-optimism вместо peaceful-vision (27 апр)
-- [feedback_quantum_like_trigger.md](feedback_quantum_like_trigger.md) — при ArchGate / метриках / диагностике / observability проверять 5 симптомов QL → DP.METHOD.050 после исчерпания классики (FPF C.26*, WP-274, 27 апр)
-- [feedback_per_domain_cursor_self_init.md](feedback_per_domain_cursor_self_init.md) — worker идемпотентно создаёт cursors через INSERT ON CONFLICT, миграция cursor split → NOOP при первом deploy (27 апр)
+- **[archive ↓]** feedback_railway_new_project_pitfall / feedback_quantum_like_trigger / feedback_per_domain_cursor_self_init — [feedback-april-2026.md](archive/feedback-april-2026.md) (WP-270, WP-274 done)
 - [feedback_silent_fail_log_to_stdout.md](feedback_silent_fail_log_to_stdout.md) — bash log() в stderr, иначе ломает $() pipelines с JSON (29 апр, dt-collect.sh)
 - [feedback_post_cutover_doc_drift.md](feedback_post_cutover_doc_drift.md) — после cut-over runbook'и проверять grep'ом на dead-code flags / manual-шаги; не следовать слепо pre-cutover документации (29 апр)
 - [feedback_release_gates.md](feedback_release_gates.md) — валидатор без интеграции в pre-commit/CI = в чужих руках (WP-279, 29 апр)
 - [feedback_alerter_writer_sampling_drift.md](feedback_alerter_writer_sampling_drift.md) — alerter threshold ↔ writer sampling drift (lazy metric ≠ heartbeat); idle ≠ stuck без backlog-проверки (29 апр)
 - [feedback_context_isolation_day_open.md](feedback_context_isolation_day_open.md) — двойное открытие (автономное + ручное) наследует результаты без переаттестации БЛОКИРУЮЩИХ шагов; решение: BLOCKING validation перед commit (1 май)
+- [feedback_asyncpg_type_coercion.md](feedback_asyncpg_type_coercion.md) — asyncpg валидирует Python-тип ДО отправки в PG; SQL `::cast` не помогает для параметров — нужен Python-coerce (str→date, str→datetime). WP-151 Блок B 5 май
+- [feedback_upsert_vs_update_for_closed_events.md](feedback_upsert_vs_update_for_closed_events.md) — closed-события с бедным payload должны быть `op: UPDATE`, не UPSERT; PG проверяет NOT NULL на INSERT clause ДО conflict resolution. WP-151 Блок B 5 май
+- [lessons_architecture_audit_before_implementation.md](lessons_architecture_audit_before_implementation.md) — WP-121 Ф2 fail 5 мая: реализовал на Railway вместо Neon из-за пропуска архитектурного аудита. Правило: до кода — DP.ARCH + WP-context + grep на existing implementations
+- [project_wp121_phase2_state.md](project_wp121_phase2_state.md) — WP-121 Ф2 после сноса: точная карта Neon БД (learning/reference/rewards), gap в существующем rewards-projection-worker, план v2 (6-8h)
 
 ### User (личный профиль)
 
@@ -133,7 +142,7 @@
 ### Lessons (уроки, детали → тематические файлы)
 
 - [lessons_day_rituals.md](lessons_day_rituals.md) — Day Open/Close, календарь
-- [lessons_infra.md](lessons_infra.md) — launchd, Neon tz, asyncpg, alerter DB-backed cooldown, feature flag без gate check, NEON_PROD_BASE в ~/.secrets/neon
+- [lessons_infra.md](lessons_infra.md) — launchd, Neon tz, asyncpg, alerter DB-backed cooldown, feature flag без gate check, NEON_PROD_BASE в ~/.secrets/neon, INSERT RETURNING atomic dedup, uuid4 external_id
 - [lessons_tools.md](lessons_tools.md) — MCP, Linear
 
 ### Reference (внешние системы)

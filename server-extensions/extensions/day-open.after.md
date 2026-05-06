@@ -73,4 +73,27 @@ if [ -d ".venv" ]; then .venv/bin/python -m pytest tests/smoke/ -q --tb=line 2>&
 > Загрузить и выполнить `extensions/day-open.checks.md` ПОСЛЕ записи файла DayPlan, ДО `git commit`.
 > Порядок шага 7: записать файл → пройти checks → `git commit` → `git push` → compact dashboard.
 
+### 8. Emit day_plan_opened (WP-151 Блок B)
+
+> После commit DayPlan (шаг 7, финал) → отправить событие в event-gateway.
+> Идемпотентно: повторный запуск → 200 `{idempotent: true}`, не дублирует.
+
+```bash
+DATE=$(date +%Y-%m-%d)
+ENV_FILE="$HOME/.config/aist/env"
+ACCOUNT_ID=$(grep '^export DT_USER_ID=' "$ENV_FILE" 2>/dev/null | cut -d'=' -f2- | tr -d '"' || echo "")
+EVENT_GW="${EVENT_GATEWAY_URL:-https://event-gateway.aisystant.workers.dev}"
+IS_STRATEGY=$([ "$(date +%u)" = "1" ] && echo "true" || echo "false")
+EXT_ID="day-plan-opened-${DATE}-${ACCOUNT_ID:0:8}"
+
+if [ -z "$ACCOUNT_ID" ]; then
+  echo "⚠️ DT_USER_ID не задан в $ENV_FILE — пропуск emit day_plan_opened"
+else
+  RESP=$(curl -sf -X POST "$EVENT_GW/events" \
+    -H "Content-Type: application/json" \
+    -d "{\"source\":\"iwe\",\"event_type\":\"day_plan_opened\",\"schema_version\":\"v1\",\"external_id\":\"$EXT_ID\",\"account_id\":\"$ACCOUNT_ID\",\"payload\":{\"plan_date\":\"$DATE\",\"is_strategy_day\":$IS_STRATEGY}}" 2>&1)
+  echo "$RESP" | grep -q '"inserted"' && echo "✅ day_plan_opened → learning.domain_event" || echo "⚠️ emit: $RESP (non-blocking)"
+fi
+```
+
 <!-- /AUTHOR-ONLY -->

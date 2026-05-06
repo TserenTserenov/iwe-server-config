@@ -3,6 +3,22 @@
 > Выполняется в шаге 0 SKILL.md перед шагом 1.
 > Автор: Tseren (author_mode). Слой 3 (extensions).
 
+## 0a-pre. Pull-on-Touch для индексных репо (WP-283 follow-up, 6 мая)
+
+Перед scaffold — `git pull --rebase` для двух репо, чьи отчёты используются в светофоре. Иначе ложно-🟡 (локальная копия отстаёт, серверный отчёт уже в origin):
+
+```bash
+for repo in DS-agent-workspace; do
+  dir="$IWE_WORKSPACE/$repo"
+  if [ -d "$dir/.git" ]; then
+    (cd "$dir" && git diff --quiet && git pull --rebase --quiet 2>/dev/null) || \
+      echo "  ⚠ $repo: dirty или pull failed — данные potentially stale"
+  fi
+done
+```
+
+DS-my-strategy уже покрыт §2 п.4 платформенным правилом. DS-agent-workspace — отдельно потому что scaffold читает scheduler/feedback-triage отчёты ДО первого касания репо в сессии.
+
 ## 0a. Scaffold (детерминированный каркас, БЛОКИРУЮЩЕЕ — WP-264 Ф2)
 
 Сгенерировать болванку DayPlan со всеми 11 обязательными секциями + PENDING-маркерами:
