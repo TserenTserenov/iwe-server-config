@@ -60,21 +60,31 @@ if [[ "$CURRENT_BLOCK" == *"${SWEEP_OUT}"* ]]; then
   exit 0
 fi
 
-# --- Заменить блок с помощью Python (безопасная многострочная замена) ---
-python3 - <<PYEOF
-import re, sys
+# --- Заменить блок через Python (безопасная многострочная замена) ---
+# Передаём данные через env-vars с quoted heredoc <<'PYEOF' — bash НЕ раскрывает
+# спецсимволы (`backticks`, $(...), \n, """) внутри NEW_BLOCK. Защита от
+# heredoc-инъекции при странных WP-title (Opus review WP-283 #1).
+export MEMORY_PATH="$MEMORY_FILE"
+export START_MARKER_ENV="$START_MARKER"
+export END_MARKER_ENV="$END_MARKER"
+export NEW_BLOCK_ENV="$NEW_BLOCK"
 
-memory_path = '$MEMORY_FILE'
-start = '$START_MARKER'
-end = '$END_MARKER'
-new_block = """$NEW_BLOCK"""
+python3 - <<'PYEOF'
+import os, re, sys
+
+memory_path = os.environ['MEMORY_PATH']
+start = os.environ['START_MARKER_ENV']
+end = os.environ['END_MARKER_ENV']
+new_block = os.environ['NEW_BLOCK_ENV']
 
 try:
     with open(memory_path, 'r', encoding='utf-8') as f:
         content = f.read()
 
     pattern = re.escape(start) + r'.*?' + re.escape(end)
-    new_content = re.sub(pattern, new_block, content, flags=re.DOTALL)
+    # Backslashes в new_block мог бы ломать re.sub (трактуются как backreferences).
+    # Используем callable replacement для буквальной подстановки.
+    new_content = re.sub(pattern, lambda m: new_block, content, flags=re.DOTALL)
 
     if new_content == content:
         print("INFO: нет изменений", file=sys.stderr)
@@ -83,7 +93,7 @@ try:
     with open(memory_path, 'w', encoding='utf-8') as f:
         f.write(new_content)
 
-    print(f"OK: MEMORY.md обновлён", file=sys.stderr)
+    print("OK: MEMORY.md обновлён", file=sys.stderr)
 
 except Exception as e:
     print(f"ERROR: {e}", file=sys.stderr)

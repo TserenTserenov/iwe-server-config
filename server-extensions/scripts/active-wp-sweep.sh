@@ -41,19 +41,20 @@ if [[ ! -d "$INBOX" ]]; then
 fi
 
 # --- Python-хелпер: извлекает wp + title из frontmatter ---
+# Передаём WP_FILE через env-var (защита от спецсимволов в путях).
+# Python-код через quoted heredoc <<'PYEOF' — bash не раскрывает.
 _extract_wp_meta() {
-  local WP_FILE="$1"
-  $PYTHON -c "
-import sys, re
-path = '$WP_FILE'
-wp_num = ''
-title = ''
+  WP_FILE_ENV="$1" $PYTHON <<'PYEOF' 2>/dev/null
+import sys, re, os
+path = os.environ["WP_FILE_ENV"]
+wp_num = ""
+title = ""
 try:
-    with open(path, 'r', encoding='utf-8') as f:
+    with open(path, "r", encoding="utf-8") as f:
         in_fm = False
         for line in f:
             line = line.rstrip()
-            if line == '---':
+            if line == "---":
                 if not in_fm:
                     in_fm = True
                     continue
@@ -61,16 +62,24 @@ try:
                     break
             if not in_fm:
                 continue
-            m = re.match(r'^wp:\s*(\S+)', line)
+            # wp: 283 | wp: WP-283 | id: WP-283 — все варианты
+            m = re.match(r"^(?:wp|id):\s*(\S+)", line)
+            if m and not wp_num:
+                raw = m.group(1).strip("\"' ")
+                wp_num = re.sub(r"^WP-", "", raw)
+            m = re.match(r'^title:\s*["\']?(.+?)["\']?\s*$', line)
             if m:
-                wp_num = m.group(1)
-            m = re.match(r'^title:\s*[\"\']?(.+?)[\"\']?\s*$', line)
-            if m:
-                title = m.group(1).strip('\"\'')[:60]
+                title = m.group(1).strip("\"' ")[:60]
+    # Fallback: если в frontmatter ничего не нашли — извлечь из filename
+    if not wp_num:
+        fname = os.path.basename(path)
+        m = re.match(r"^WP-(\d+)", fname)
+        if m:
+            wp_num = m.group(1)
 except Exception:
     pass
-print(wp_num + '|' + title)
-" 2>/dev/null
+print(wp_num + "|" + title)
+PYEOF
 }
 
 # --- Собрать WP-файлы с in_progress или active ---
