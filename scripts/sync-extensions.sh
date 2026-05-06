@@ -46,7 +46,8 @@ rsync -a --delete "$HOME/IWE/.claude/hooks/"              "$DST/claude-hooks/"
 rsync -a --delete "$HOME/IWE/.claude/scripts/"            "$DST/claude-scripts/"
 
 # Memory: только эти файлы (остальное — личные feedback/project, не нужны на сервере)
-for f in templates-dayplan protocol-open protocol-close protocol-work MEMORY lessons_day_rituals checklists; do
+# t-checklist и r-questionnaire добавлены 2026-05-06: нужны Day/Week/Month Close на сервере
+for f in templates-dayplan protocol-open protocol-close protocol-work MEMORY lessons_day_rituals checklists t-checklist r-questionnaire; do
     if [ -f "$MAC_MEMORY/$f.md" ]; then
         cp "$MAC_MEMORY/$f.md" "$DST/memory/"
     fi
