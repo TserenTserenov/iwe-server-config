@@ -38,6 +38,7 @@ in
     systemd.tmpfiles.rules = [
       "d /home/${cfg.user}/IWE/.claude 0755 ${cfg.user} users -"
       "d /home/${cfg.user}/IWE/.claude/skills 0755 ${cfg.user} users -"
+      "d /home/${cfg.user}/IWE/.claude/hooks 0755 ${cfg.user} users -"
       "d /home/${cfg.user}/IWE/.claude/scripts 0755 ${cfg.user} users -"
       "d /home/${cfg.user}/IWE/extensions 0755 ${cfg.user} users -"
       "d /home/${cfg.user}/IWE/scripts 0755 ${cfg.user} users -"
@@ -51,6 +52,11 @@ in
       text = ''
         echo "[iwe-ext-sync] копирую IWE extensions из nix store..."
 
+        # Root-level CLAUDE.md (slim-ядро инструкций для агента)
+        if [ -f ${src}/CLAUDE.md ]; then
+          ${pkgs.coreutils}/bin/cp ${src}/CLAUDE.md /home/${cfg.user}/IWE/CLAUDE.md
+        fi
+
         ${pkgs.rsync}/bin/rsync -a --delete \
           ${src}/scripts/ \
           /home/${cfg.user}/IWE/scripts/
@@ -59,9 +65,14 @@ in
           ${src}/extensions/ \
           /home/${cfg.user}/IWE/extensions/
 
+        # Все скиллы целиком (был только day-open — audit-installation и др. отсутствовали)
         ${pkgs.rsync}/bin/rsync -a --delete \
-          ${src}/claude-skills/day-open/ \
-          /home/${cfg.user}/IWE/.claude/skills/day-open/
+          ${src}/claude-skills/ \
+          /home/${cfg.user}/IWE/.claude/skills/
+
+        ${pkgs.rsync}/bin/rsync -a --delete \
+          ${src}/claude-hooks/ \
+          /home/${cfg.user}/IWE/.claude/hooks/
 
         ${pkgs.rsync}/bin/rsync -a --delete \
           ${src}/claude-scripts/ \
@@ -72,6 +83,7 @@ in
           /home/${cfg.user}/.claude/projects/-Users-${cfg.user}-IWE/memory/
 
         # Восстановить права (rsync из nix store даёт root, нужно tseren)
+        chown ${cfg.user}:users /home/${cfg.user}/IWE/CLAUDE.md 2>/dev/null || true
         chown -R ${cfg.user}:users \
           /home/${cfg.user}/IWE/scripts \
           /home/${cfg.user}/IWE/extensions \
@@ -79,7 +91,7 @@ in
           /home/${cfg.user}/.claude/projects/-Users-${cfg.user}-IWE/memory
 
         # Скрипты должны быть executable
-        find /home/${cfg.user}/IWE/scripts /home/${cfg.user}/IWE/.claude/scripts \
+        find /home/${cfg.user}/IWE/scripts /home/${cfg.user}/IWE/.claude/scripts /home/${cfg.user}/IWE/.claude/hooks \
           -name "*.sh" -exec chmod +x {} \;
 
         echo "[iwe-ext-sync] sync done"

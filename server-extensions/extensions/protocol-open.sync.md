@@ -13,7 +13,7 @@
 
 ```bash
 WP_NUM="<номер РП, упомянутый пользователем>"
-bash "$IWE_WORKSPACE/scripts/wp-sync-bundle.sh" "$WP_NUM" > /tmp/wp-sync-bundle-$$.md
+bash "$IWE_WORKSPACE/.claude/scripts/wp-sync-bundle.sh" "$WP_NUM" > /tmp/wp-sync-bundle-$$.md
 BUNDLE_EXIT=$?
 ```
 

@@ -6,9 +6,11 @@
 #   git add server-extensions/ && git commit -m "sync: extensions" && git push
 #
 # Что делает:
+#   ~/IWE/CLAUDE.md                                           → server-extensions/CLAUDE.md
 #   ~/IWE/scripts/                                            → server-extensions/scripts/
 #   ~/IWE/extensions/                                         → server-extensions/extensions/
-#   ~/IWE/.claude/skills/day-open/                            → server-extensions/claude-skills/day-open/
+#   ~/IWE/.claude/skills/                                     → server-extensions/claude-skills/        (все скиллы)
+#   ~/IWE/.claude/hooks/                                      → server-extensions/claude-hooks/
 #   ~/IWE/.claude/scripts/                                    → server-extensions/claude-scripts/
 #   ~/.claude/projects/-Users-$USER-IWE/memory/{7 файлов}     → server-extensions/memory/
 #
@@ -28,11 +30,19 @@ fi
 
 echo "Синхронизация в $DST/..."
 
-mkdir -p "$DST"/{scripts,extensions,claude-skills/day-open,claude-scripts,memory}
+mkdir -p "$DST"/{scripts,extensions,claude-skills,claude-scripts,claude-hooks,memory}
+
+# Root-level CLAUDE.md (slim-ядро инструкций, нужен агенту на сервере)
+if [ -f "$HOME/IWE/CLAUDE.md" ]; then
+    cp "$HOME/IWE/CLAUDE.md" "$DST/CLAUDE.md"
+fi
 
 rsync -a --delete "$HOME/IWE/scripts/"                    "$DST/scripts/"
 rsync -a --delete "$HOME/IWE/extensions/"                 "$DST/extensions/"
-rsync -a --delete "$HOME/IWE/.claude/skills/day-open/"    "$DST/claude-skills/day-open/"
+# Все скиллы целиком — раньше копировался только day-open, из-за этого audit-installation
+# и др. отсутствовали на сервере (SchedulerReport 6 мая «Source not found»).
+rsync -a --delete "$HOME/IWE/.claude/skills/"             "$DST/claude-skills/"
+rsync -a --delete "$HOME/IWE/.claude/hooks/"              "$DST/claude-hooks/"
 rsync -a --delete "$HOME/IWE/.claude/scripts/"            "$DST/claude-scripts/"
 
 # Memory: только эти файлы (остальное — личные feedback/project, не нужны на сервере)
