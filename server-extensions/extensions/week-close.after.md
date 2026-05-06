@@ -102,3 +102,52 @@ else
   echo "$RESP" | grep -q '"inserted"\|"idempotent"' && echo "✅ weekly_hypothesis_closed emitted" || echo "⚠️ closed emit: $RESP"
 fi
 ```
+
+---
+
+### Audit Installation (WP-265 Ф10)
+
+> **Цель:** еженедельный аудит инсталляции IWE — раннее обнаружение L1 drift, missing files, MCP failures. Соответствует SC.005 сценарий 3 («Week Close авторской инсталляции — Tseren еженедельно»).
+>
+> **Не блокирует Close.** Verdict ⚠️/❌ → информативный warning в Week Close report. Если хотите блокирующее поведение — перенесите блок в `extensions/week-close.checks.md`.
+
+**Выполнить:**
+
+```bash
+AUDIT_SCRIPT="${IWE_ROOT:-$HOME/IWE}/scripts/iwe-audit.sh"
+if [ ! -f "$AUDIT_SCRIPT" ]; then
+    AUDIT_SCRIPT="${IWE_ROOT:-$HOME/IWE}/FMT-exocortex-template/scripts/iwe-audit.sh"
+fi
+
+if [ ! -f "$AUDIT_SCRIPT" ]; then
+    echo "ℹ️ iwe-audit.sh не найден — аудит пропущен"
+else
+    AUDIT_OUT=$(bash "$AUDIT_SCRIPT" 2>&1)
+    AUDIT_RC=$?
+    case $AUDIT_RC in
+        0) echo "✅ Аудит инсталляции: всё в порядке (exit 0)" ;;
+        1) echo "⚠️ Аудит инсталляции: warnings (exit 1) — не блокирует Close, но рекомендуется проверить" ;;
+        2) echo "❌ Аудит инсталляции: критичные gaps (exit 2) — рекомендуется починить" ;;
+        *) echo "⚠️ Аудит инсталляции: неожиданный exit $AUDIT_RC" ;;
+    esac
+    # Показать первые 30 строк отчёта (Inventory + L1 drift summary)
+    echo ""
+    echo "$AUDIT_OUT" | head -30
+fi
+```
+
+**Логика verdict:**
+- exit 0 → ✅ всё в порядке
+- exit 1 → ⚠️ warnings (отсутствует ≤2 опциональных файла)
+- exit 2 → ❌ критичные gaps (≥1 обязательного файла нет)
+
+**Что делать с verdict ❌:**
+- L1 drift из-за устаревшей `update.sh` → запустить `cd FMT-exocortex-template && bash update.sh`
+- Отсутствуют скрипты/protocols → перепроверить целостность шаблона, восстановить из FMT
+- MCP unavailable → проверить настройки коннекторов claude.ai
+
+**Чеклист:**
+
+- [ ] **Аудит запущен** (или пропущен с причиной)
+- [ ] **Verdict записан** в Week Close report
+- [ ] **Если ❌** — план починки сформулирован (реализация на следующей сессии или сразу)
