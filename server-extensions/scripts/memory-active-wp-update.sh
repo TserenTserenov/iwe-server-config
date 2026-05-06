@@ -1,0 +1,91 @@
+#!/usr/bin/env bash
+# memory-active-wp-update.sh — обновление секции «Текущие РП» в MEMORY.md
+# из результатов active-wp-sweep.sh.
+# see WP-283 Ф8 (DS-my-strategy/inbox/WP-283-server-day-open-crossplatform.md)
+#
+# Использование:
+#   bash memory-active-wp-update.sh [IWE_ROOT]
+#
+# Ищет маркеры <!-- ACTIVE-WP-START --> и <!-- ACTIVE-WP-END --> в MEMORY.md,
+# заменяет содержимое между ними на свежий sweep-output.
+# Идемпотентно: повторный запуск не меняет файл, если состояние не изменилось.
+#
+# Совместимость: bash 3.2+ (macOS), bash 4+ (Linux/NixOS)
+
+set -uo pipefail
+
+IWE="${1:-${IWE_ROOT:-$HOME/IWE}}"
+MEMORY_FILE="$IWE/memory/MEMORY.md"
+SWEEP_SCRIPT="$IWE/scripts/active-wp-sweep.sh"
+INBOX_DIR="$IWE/DS-my-strategy/inbox"
+
+START_MARKER="<!-- ACTIVE-WP-START -->"
+END_MARKER="<!-- ACTIVE-WP-END -->"
+
+# --- Проверки ---
+if [[ ! -f "$MEMORY_FILE" ]]; then
+  echo "ERROR: MEMORY.md не найден: $MEMORY_FILE" >&2
+  exit 1
+fi
+
+if [[ ! -f "$SWEEP_SCRIPT" ]]; then
+  echo "ERROR: active-wp-sweep.sh не найден: $SWEEP_SCRIPT" >&2
+  exit 1
+fi
+
+if ! grep -qF "$START_MARKER" "$MEMORY_FILE"; then
+  echo "INFO: маркер $START_MARKER не найден в MEMORY.md — пропускаю (добавь маркеры вручную)" >&2
+  exit 0
+fi
+
+# --- Запустить sweep ---
+SWEEP_OUT=$(bash "$SWEEP_SCRIPT" "$INBOX_DIR" "$IWE" 2>/dev/null) || true
+
+if [[ -z "$SWEEP_OUT" ]]; then
+  SWEEP_OUT="<!-- active-wp-sweep: нет активных РП или python3+yaml не найден -->"
+fi
+
+# --- Сформировать новый блок ---
+TIMESTAMP=$(date +"%Y-%m-%d %H:%M" 2>/dev/null || echo "?")
+NEW_BLOCK="${START_MARKER}
+${SWEEP_OUT}
+> _Обновлено: ${TIMESTAMP} (memory-active-wp-update.sh)_
+${END_MARKER}"
+
+# --- Проверка идемпотентности: сравнить текущий блок с новым ---
+CURRENT_BLOCK=$(awk "/$START_MARKER/{found=1} found{print} /$END_MARKER/{found=0}" "$MEMORY_FILE" 2>/dev/null)
+
+if [[ "$CURRENT_BLOCK" == *"${SWEEP_OUT}"* ]]; then
+  echo "INFO: MEMORY.md уже актуален — изменений нет" >&2
+  exit 0
+fi
+
+# --- Заменить блок с помощью Python (безопасная многострочная замена) ---
+python3 - <<PYEOF
+import re, sys
+
+memory_path = '$MEMORY_FILE'
+start = '$START_MARKER'
+end = '$END_MARKER'
+new_block = """$NEW_BLOCK"""
+
+try:
+    with open(memory_path, 'r', encoding='utf-8') as f:
+        content = f.read()
+
+    pattern = re.escape(start) + r'.*?' + re.escape(end)
+    new_content = re.sub(pattern, new_block, content, flags=re.DOTALL)
+
+    if new_content == content:
+        print("INFO: нет изменений", file=sys.stderr)
+        sys.exit(0)
+
+    with open(memory_path, 'w', encoding='utf-8') as f:
+        f.write(new_content)
+
+    print(f"OK: MEMORY.md обновлён", file=sys.stderr)
+
+except Exception as e:
+    print(f"ERROR: {e}", file=sys.stderr)
+    sys.exit(1)
+PYEOF
