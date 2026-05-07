@@ -283,6 +283,32 @@ in
     };
 
     # =========================================================
+    # 2b. SYNC STRATEGY FILES — WP-WP-files + current/* + MEMORY.md
+    # =========================================================
+    # WP-7 S-C (7 мая 2026). Точечный pull WP-карточек и плана недели для DS-my-strategy.
+    # Не делает full git pull (DS-my-strategy почти всегда dirty из-за iwe-sync-fleeting-notes).
+    # Запускается реже чем fleeting-notes (каждые 10 мин).
+
+    systemd.services."iwe-sync-strategy-files" = {
+      description = "IWE — sync inbox/WP-*.md + current/*.md в DS-my-strategy (каждые 10 мин)";
+      unitConfig   = commonUnitConfig;
+      serviceConfig = commonServiceConfig // {
+        ExecStart = "${pkgs.bash}/bin/bash ${iwe}/scripts/sync-strategy-files.sh ${iwe}/DS-my-strategy";
+      };
+      path = commonPath;
+      environment = commonEnv;
+    };
+
+    systemd.timers."iwe-sync-strategy-files" = {
+      wantedBy    = [ "timers.target" ];
+      description = "IWE strategy-files sync — каждые 10 мин";
+      timerConfig = {
+        OnBootSec       = "5min";
+        OnUnitActiveSec = "10min";
+      };
+    };
+
+    # =========================================================
     # 3. ACTIVITY HUB SYNC — ДЕАКТИВИРОВАН (WP-268 Ф-migration, 2 мая 2026)
     # =========================================================
     # sync-lms и sync-iwe заменены новой архитектурой:

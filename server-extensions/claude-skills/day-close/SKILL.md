@@ -54,10 +54,12 @@ done
 
 ### 3. Архивация
 
+- **DayPlan сегодняшнего дня** → `git mv current/DayPlan $(date +%Y-%m-%d).md archive/day-plans/`. Если есть DayPlan'ы прошлых дней в `current/` (накопленный мусор) — заархивировать их тоже одной командой.
 - Done WP context files → `mv inbox/WP-{N}-*.md → archive/wp-contexts/`
 - Done РП → удалить строку из MEMORY.md (они уже в WP-REGISTRY и WeekPlan)
 
 > MEMORY.md хранит ТОЛЬКО активные РП (in_progress + pending). Done = удалить.
+> Архивация DayPlan ОБЯЗАТЕЛЬНА: следующий Day Open читает carry-over из `archive/day-plans/DayPlan {вчера}.md` и предполагает, что `current/` чистый.
 
 ### 4б. Memory Drift Scan
 
@@ -194,6 +196,7 @@ python3 $HOME/IWE/.claude/scripts/rule-classifier.py
 - [ ] Синхронизация downstream: `update.sh` выполнен
 - [ ] Linear sync: статусы соответствуют git. Пост-sync чек: кол-во active РП в REGISTRY = кол-во active issues в Linear
 - [ ] Repo CLAUDE.md: feat-коммиты → новые правила?
+- [ ] DayPlan сегодня → `archive/day-plans/` (старые DayPlan'ы в `current/` тоже)
 - [ ] WP context: done → `mv inbox/ → archive/wp-contexts/`
 - [ ] Lesson Hygiene: уроки MEMORY.md ≤8
 - [ ] Draft-list: Pack обогащён → черновик предложен?

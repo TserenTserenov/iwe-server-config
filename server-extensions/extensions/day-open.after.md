@@ -68,6 +68,43 @@ if [ -d ".venv" ]; then .venv/bin/python -m pytest tests/smoke/ -q --tb=line 2>&
 
 Если хотя бы одно «да» → добавить WP-170 в план дня (~30-60 мин).
 
+### 5e. KE-кандидаты (Knowledge Extraction)
+
+> Проверить: есть ли extraction-reports, ожидающих разбора R15 Валидатором.
+> Молча пропустить если N = 0. Показать секцию если N > 0 — пользователь решит сам.
+
+```bash
+REPORTS_DIR="$HOME/IWE/DS-my-strategy/inbox/extraction-reports"
+PENDING=$(grep -l "status: pending-review" "$REPORTS_DIR"/*.md 2>/dev/null | wc -l | tr -d ' ')
+echo "KE_PENDING=$PENDING"
+```
+
+**Если KE_PENDING > 0** → добавить в DayPlan отдельную секцию перед «Требует внимания»:
+
+```markdown
+### 📚 KE-кандидаты (Knowledge Extraction)
+
+> N extraction-report(ов) ожидают разбора R15 Валидатором.
+> Запустить `/apply-captures` в отдельной сессии (~15 мин).
+
+| Отчёт | Дата | Статус |
+|-------|------|--------|
+| [список файлов из grep выше] | [дата из frontmatter] | pending-review |
+
+**SLA:** разобрать ≤24ч (DP.SC.004). Команда: `/apply-captures`
+```
+
+**Если KE_PENDING = 0** → ничего не выводить, пропустить молча.
+
+**Как заполнить таблицу (bash):**
+```bash
+for f in "$REPORTS_DIR"/*.md; do
+  st=$(grep "^status:" "$f" 2>/dev/null | awk '{print $2}')
+  dt=$(grep "^date:" "$f" 2>/dev/null | awk '{print $2}')
+  [ "$st" = "pending-review" ] && echo "$(basename $f) | $dt | pending-review"
+done
+```
+
 ### 7b. Верификация DayPlan (БЛОКИРУЮЩЕЕ перед коммитом)
 
 > Загрузить и выполнить `extensions/day-open.checks.md` ПОСЛЕ записи файла DayPlan, ДО `git commit`.

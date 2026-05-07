@@ -16,7 +16,9 @@
 set -uo pipefail
 export PATH="/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin:${PATH:-}"
 
-IWE_ROOT="${IWE_ROOT:-$HOME/IWE}"
+IWE_ROOT="${IWE_ROOT:-${IWE_WORKSPACE:-$HOME/IWE}}"
+GOV_REPO="${IWE_GOVERNANCE_REPO:-DS-my-strategy}"
+GOV_PATH="$IWE_ROOT/$GOV_REPO"
 GATE_LOG="$IWE_ROOT/.claude/logs/gate_log.jsonl"
 mkdir -p "$(dirname "$GATE_LOG")" 2>/dev/null || true
 
@@ -72,7 +74,7 @@ fi
 # Check if we're in DS-my-strategy (protocol governance repo)
 if ! echo "$TOOL_INPUT" | grep -q 'DayPlan\|day-open\|day-close\|WeekPlan'; then
   # Also check pwd context — look for staged DayPlan files
-  STAGED=$(cd ~/IWE/DS-my-strategy 2>/dev/null && git diff --cached --name-only 2>/dev/null || echo "")
+  STAGED=$(cd "$GOV_PATH" 2>/dev/null && git diff --cached --name-only 2>/dev/null || echo "")
   if ! echo "$STAGED" | grep -qE 'DayPlan|WeekPlan'; then
     log_decision "allow" "no DayPlan/WeekPlan in staged or command" "" ""
     echo '{}'
@@ -80,14 +82,12 @@ if ! echo "$TOOL_INPUT" | grep -q 'DayPlan\|day-open\|day-close\|WeekPlan'; then
   fi
 fi
 
-# --- DayPlan Validation ---
-DAYPLAN=$(ls ~/IWE/DS-my-strategy/current/DayPlan\ *.md 2>/dev/null | head -1)
+# --- DayPlan Validation (выполняется только если DayPlan-файл существует) ---
+DAYPLAN=$(ls "$GOV_PATH"/current/DayPlan\ *.md 2>/dev/null | head -1)
+MISSING=()
+ERRORS=()
 
-if [ -z "$DAYPLAN" ]; then
-  log_decision "allow" "no DayPlan file found" "" ""
-  echo '{}'
-  exit 0
-fi
+if [ -n "$DAYPLAN" ]; then
 
 # Required sections (parameterized — update this list when format changes)
 SECTIONS=(
@@ -104,7 +104,6 @@ SECTIONS=(
   "Требует внимания"
 )
 
-MISSING=()
 for section in "${SECTIONS[@]}"; do
   if ! grep -q "$section" "$DAYPLAN"; then
     MISSING+=("$section")
@@ -112,7 +111,6 @@ for section in "${SECTIONS[@]}"; do
 done
 
 # Check mandatory format elements
-ERRORS=()
 
 # --- Ф3 Check 1: collapsible <details> блоки ---
 DETAILS_COUNT=$(grep -c '<details' "$DAYPLAN" 2>/dev/null || echo 0)
@@ -152,7 +150,7 @@ if ! grep -qE "~[0-9]+\.?[0-9]*h РП" "$DAYPLAN"; then
 fi
 
 # --- Ф3 Check 5: Carry-over цитата (если есть предыдущий DayPlan) ---
-PREV_DAYPLAN=$(ls ~/IWE/DS-my-strategy/current/DayPlan\ *.md 2>/dev/null | sort | tail -2 | head -1)
+PREV_DAYPLAN=$(ls "$GOV_PATH"/current/DayPlan\ *.md 2>/dev/null | sort | tail -2 | head -1)
 if [ -n "$PREV_DAYPLAN" ] && [ "$PREV_DAYPLAN" != "$DAYPLAN" ]; then
   # Предыдущий DayPlan существует — текущий должен содержать Carry-over
   if ! grep -qiE 'carry.over|carry_over' "$DAYPLAN"; then
@@ -165,6 +163,61 @@ PENDING_COUNT=$(grep -c '<!-- PENDING:' "$DAYPLAN" 2>/dev/null || echo 0)
 if [ "$PENDING_COUNT" -gt 0 ]; then
   PENDING_LIST=$(grep -o '<!-- PENDING:[^>]*>' "$DAYPLAN" 2>/dev/null | head -5 | tr '\n' ' ' || true)
   ERRORS+=("Незаполненные PENDING-маркеры ($PENDING_COUNT шт): $PENDING_LIST — заполни перед коммитом")
+fi
+
+fi  # endif [ -n "$DAYPLAN" ]
+
+# --- WeekPlan Validation (Ф6.1 WP-265) ---
+WEEKPLAN=$(ls "$GOV_PATH"/current/WeekPlan\ *.md 2>/dev/null | sort | tail -1)
+if [ -n "$WEEKPLAN" ]; then
+  WP_LINES=$(wc -l < "$WEEKPLAN" | tr -d ' ')
+  WP_ERRORS=()
+  WP_MISSING_LIST=()
+
+  # Детектор (а): >80 строк без достаточного числа <details>
+  WP_DETAILS_COUNT=$(grep -c '<details' "$WEEKPLAN" 2>/dev/null || true); WP_DETAILS_COUNT=${WP_DETAILS_COUNT:-0}
+  if [ "$WP_LINES" -gt 80 ] && [ "$WP_DETAILS_COUNT" -lt 3 ]; then
+    WP_ERRORS+=("WeekPlan >80 строк ($WP_LINES) но collapsible секций < 3 ($WP_DETAILS_COUNT). Используй <details>/<summary> (formatting.md)")
+  fi
+
+  # Детектор (б): баланс <details> / </details>
+  DETAILS_OPEN=$(grep -c '<details' "$WEEKPLAN" 2>/dev/null || true); DETAILS_OPEN=${DETAILS_OPEN:-0}
+  DETAILS_CLOSE=$(grep -c '</details>' "$WEEKPLAN" 2>/dev/null || true); DETAILS_CLOSE=${DETAILS_CLOSE:-0}
+  if [ "$DETAILS_OPEN" != "$DETAILS_CLOSE" ]; then
+    WP_ERRORS+=("WeekPlan: несбалансированные <details> (открытий=$DETAILS_OPEN, закрытий=$DETAILS_CLOSE)")
+  fi
+
+  # Детектор (в): обязательные секции WeekPlan (5 минимальных по templates-dayplan.md Ф7)
+  WP_REQUIRED=(
+    "Итоги"
+    "Повестка"
+    "Inbox Triage"
+    "План на неделю"
+    "Контент-план"
+  )
+  for wp_section in "${WP_REQUIRED[@]}"; do
+    if ! grep -q "$wp_section" "$WEEKPLAN"; then
+      WP_MISSING_LIST+=("$wp_section")
+    fi
+  done
+
+  if [ ${#WP_MISSING_LIST[@]} -gt 0 ] || [ ${#WP_ERRORS[@]} -gt 0 ]; then
+    WP_MISSING_STR=$(IFS=', '; echo "${WP_MISSING_LIST[*]:-}")
+    WP_ERRORS_STR=$(IFS=', '; echo "${WP_ERRORS[*]:-}")
+    WP_MISSING_PIPE=$(IFS='|'; echo "${WP_MISSING_LIST[*]:-}")
+    WP_ERRORS_PIPE=$(IFS='|'; echo "${WP_ERRORS[*]:-}")
+
+    WP_MSG="⛔ WEEKPLAN VALIDATION FAILED."
+    [ ${#WP_MISSING_LIST[@]} -gt 0 ] && WP_MSG="$WP_MSG Пропущены секции (${#WP_MISSING_LIST[@]}): $WP_MISSING_STR."
+    [ ${#WP_ERRORS[@]} -gt 0 ] && WP_MSG="$WP_MSG Ошибки структуры: $WP_ERRORS_STR."
+    WP_MSG="$WP_MSG Исправь WeekPlan перед коммитом."
+
+    log_decision "block" "$WP_MSG" "$WP_MISSING_PIPE" "$WP_ERRORS_PIPE"
+    jq -n --arg reason "$WP_MSG" '{"decision": "block", "reason": $reason}'
+    exit 0
+  fi
+
+  log_decision "allow" "WeekPlan validation passed" "" ""
 fi
 
 # Report results

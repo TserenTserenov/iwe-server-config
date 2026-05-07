@@ -1,14 +1,25 @@
 ---
-type: operational-checklist
+type: protocol
 wp: 217
-promoted: 2026-04-25
+promoted: 2026-04-10
 valid_from: 2026-04-10
+originSessionId: 9a0e726a-951e-4408-9e02-94d7eeffbf74
+
+horizon: warm
+domains: [reference]
+status: active
+owner: user
+schema_version: 1
+
+name: "t-checklist"
+description: "Операционный файл памяти IWE"
 ---
 # T-чеклист (single source для skill /close)
 
+> **Source:** промотировано из `<governance-repo>/inbox/WP-217-t-checklist.md` 10 апр 2026.
 > Линейный, не требующий суждения. Каждый пункт: owner, trigger, symptom-if-skipped.
 > **Класс T (True maintenance):** идемпотентно, календарно, автопилот.
-> Различение T ≠ S ≠ R: см. `.claude/rules/distinctions.md`.
+> Различение T ≠ S ≠ R: см. `.claude/rules/distinctions.md` (зона AUTHOR-ONLY).
 
 ## Session Close (Quick Close ≤15 мин, или по триггеру «закрывай»)
 
@@ -30,9 +41,9 @@ valid_from: 2026-04-10
 |---|----------|-------|---------|--------------------|
 | T6 | Все T1-T5 выполнены для текущей сессии | агент | конец дня | см. выше |
 | T7 | Архивация done WP contexts → archive/wp-contexts/ | агент | день | inbox/ забит, путаница активных/закрытых |
-| T8 | Backup memory/ + CLAUDE.md → `<strategy-repo>/exocortex/` (governance-репо пользователя) | агент | день | экзокортекс отстаёт, recovery ломается |
+| T8 | Backup memory/ + CLAUDE.md → `<governance-repo>/exocortex/` | агент | день | экзокортекс отстаёт, recovery ломается |
 | T9 | Архивация старых DayPlan'ов → archive/day-plans/ | агент | день (auto-chore) | current/ забит устаревшими DayPlan |
-| T10 | Downstream sync (update.sh — reindex + pack-project + template) | агент | день при изменениях Pack | MCP-сервер отдаёт устаревший Pack, template-sync ломается |
+| T10 | Downstream sync (update.sh — reindex + pack-project + template) | агент | день при изменениях Pack | knowledge-mcp отдаёт устаревший Pack, template-sync ломается |
 | T11 | Linear sync (статусы linear ↔ git) | агент | день | Linear отражает не то, что в git |
 | T12 | Governance batch: WeekPlan/DayPlan/WP-REGISTRY/open-sessions.log обновлены | агент | день | план-факт расходится |
 | T13 | Drift top-3 critical в Day Report (`iwe-drift.sh --top 3 --critical`) | агент (S-вставка) | день | drift копится невидимо |
@@ -52,13 +63,14 @@ valid_from: 2026-04-10
 | T20 | `/iwe-rules-review` запущен — какие правила обходились | агент | Week Close | мёртвые правила живут вечно |
 | T21 | R-вопросник прогнан (см. `r-questionnaire.md`) → ответы в Week Report | человек + агент модератор | Week Close | формальное закрытие недели |
 | T22 | Next-week план создан | агент + человек | Week Close | понедельник стартует с нуля |
-| T22a | Проверить логи запланированных задач (launchd/cron) на `FAIL`/`ERROR` за неделю — путь зависит от настройки пользователя, см. `extensions/week-close.checks.md` | агент (T+S) | Week Close | скрипт валится неделями, симптом живёт незамеченным |
+| T22a | Проверить фейлы ночных launchd-скриптов за неделю: `grep -lE 'FAIL\|ERROR' ~/logs/setup-agent/*.log ~/logs/synchronizer/*.log` | агент (T+S) | Week Close | скрипт валится неделями, симптом живёт незамеченным (WP-7 H1, 3 ночи 17-19 апр) |
+| T22b | Memory Validate: `bash ${IWE_SCRIPTS:-$HOME/IWE/scripts}/memory-bleed.sh` → проверить HOT-лимит, orphans, superseded_by. Нарушения — исправить ДО коммита. Кандидаты на понижение — информативно | агент (WP-217 Ф10.2) | Week Close | HOT-лимит незаметно пробивается, orphans накапливаются |
 
 **Верификация:** Haiku R23 проверяет чеклист. Для T21 проверяется только наличие ответов, не их качество.
 
 ## Month Close (первый Пн месяца)
 
-> **Триггер:** скилл `/month-close` (см. `.claude/skills/month-close/SKILL.md`). T23-T25 выполняются как шаги 6-7 алгоритма Month Close.
+> **Триггер:** скилл `/month-close` (см. `.claude/skills/month-close/SKILL.md`, протокол `memory/protocol-month-close.md`). T23-T25 выполняются как шаги 6-7 алгоритма Month Close.
 
 | # | Действие | Owner | Trigger | Symptom-if-skipped |
 |---|----------|-------|---------|--------------------|

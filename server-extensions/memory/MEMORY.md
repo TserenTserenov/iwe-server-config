@@ -1,5 +1,3 @@
-<!-- index-health: skip -->
-<!-- Обоснование: серверный контекст-файл для автономного Day Open агента; dense prose-формат, не индекс-таблица. Длинные строки = намеренная упаковка контекста для LLM. -->
 # Оперативная память
 
 > **Инструкции:** `~/IWE/CLAUDE.md` | **Навигация:** `memory/navigation.md` | **Source-of-truth:** `DP.EXOCORTEX.001`
@@ -65,29 +63,67 @@
 > Протоколы: protocol-{open,work,close,month-close}.md. Операционные: t-checklist, r-questionnaire, sync-manifest.yaml, templates-dayplan.
 > Спецификации: [memory-lifecycle-spec.md](memory-lifecycle-spec.md) — онтология памяти v1 (4 оси, frontmatter-схема, HOT/WARM/COLD).
 
-### Текущие РП (W18→W19, 3 май)
+<!-- ACTIVE-WP-START -->
 
-> **Source-of-truth статусов** — `DS-my-strategy/current/WeekPlan W19 2026-05-04.md`. Здесь — только горячая выжимка после Strategy Session W19 (4 мая, two-track разворот).
+### 🔄 Активные РП (sweep по inbox/WP-*.md)
 
-**Two-Track архитектура (Strategy Session W19, 4 май):** Россия = Track A (legacy LMS+бот, передача Ильшату); мир/YC = Track B (новая Neon+Aisystant MCP+EN-ready). Подробно — `DS-my-strategy/docs/Strategy.md` § «Стратегический разворот W19».
-
-**Track B (Tseren) — критические W19:**
-- **WP-150** Мультиагентность IWE — архитектура Ф0–Ф8 (28h). **Уточнено W18 (4 май):** Claude (Planner) + Kimikode (Executor) + Ollama (fallback). Ф6 CRITICAL = unified MCP Gateway в VS Code (все агенты через один слой). Offline = Ф5 local MCP server + workspace cache. Phases overview в `phases-wp150-overview.md`. **Ф0 ✅ complete** (decision doc: peer-agent model, offline graceful degradation, context isolation) — **Ф1** (context isolation spec, 2.5h) — следующая сессия.
-- **WP-253** Реализованная архитектура Neon — Ф9.6 ✅ (5 мая): cron tsekh-1 04:30 МСК работает, F1.A активен (event-gateway 201); soak F2 до 2026-05-12 → убрать digital_twins fallback из twin.py
-- **WP-245** Персональное руководство — D-блок ✅ done (4 мая, все 12 фаз: Ф31+Ф19+Ф20+Ф22+Ф16 + ранее); Ф28.3 (внешние пилоты) + B3 (week-close-pilot) + Ф9/Ф10 (dep WP-149) — следующая сессия
-- **WP-151** Характеристики деятеля — Ф14.1+Ф14.2+Ф14.3 ✅ done; **Ф13 ✅ done** (dt_snapshot_rcs + rcs_history pipeline в orchestrator, 4 мая); **Блок B ✅ done 5 мая** (эмиттеры IWE → event-gateway → projection-worker → learning.daily_plan/weekly_hypothesis end-to-end). Уроки: feedback_asyncpg_type_coercion.md, feedback_upsert_vs_update_for_closed_events.md
-- **R4 YC** — RFS-анализ + deck v0.5 + demo-сценарий ≤3 мин (~6h W19)
-
-**Track A (передача Ильшату):**
-- **WP-281** Передача Track A — план месяца, on-call с W21, bus factor ≥2 к 1 июня
-
-**Поддержка:** WP-188 Ф3+Ф4.5; WP-250; WP-246 soak продлён → 12 мая (digital_twins fallback тоже до 12 мая, Ф9.x spec); WP-283; WP-121 Ф2; WP-196 Ф8+Ф12.3; WP-7; WP-170; WP-231; WP-276; **WP-284** Интервью-пайплайн Ф0-Ф5 ✅ done 5 мая; **WP-214** Ф7 ✅ done 5 мая (iwe-actions-catalog + emitter + orz-tracker + git-template) → Ф8 dep WP-121; **WP-285** Ф1-Ф2 ✅ done 5 мая (Neon-аудит + сценарии)
-
-**WP-293 ✅ done 6 мая:** Контракт параметризации путей IWE — FMT 0.29.29 (commit `4f0277f`): фикс `dt-collect.sh:234`, `update.sh:609` `.claude/scripts/*`, smoke HOME isolation + 3 safeguards.
-
-**WP-287** Руководство по использованию IWE — **Ф0 ✅ done 6 мая** (трёхканальная стратегия: холодный/тёплый/внутренний; Ф1 dep WP-188 Ф4.5; Ф2 blocked dep WP-222); context: `DS-my-strategy/inbox/WP-287-iwe-usage-guide.md`
-
-**Новые pending (W20+):** WP-286 IWE в корп. среде; WP-288 Рекомендации наставникам резидентур; WP-289 Интеграция IWE с PKM/Notion/Obsidian; **WP-290 «Следователь»** — каузальная аналитика развития (C.28, Pearl Hierarchy; dep WP-151+WP-253; enables WP-149+WP-117; ~26h); **WP-292 Бренд IWE** (spawn 6 мая) — имя продукта (Ipsembra кандидат, ищем альтернативы) + Brand Compendium 8 секций + приёмка работ дизайнера; артефакт в `DS-ecosystem-development/C.IT-Platform/C2.IT-Platform/C2.1.Meaning/2.1.1. Brand/` (бренд продукта IWE — SoI ядра C, не B; различение «IWE-продукт ≠ Aisystant-экосистема»); ⚪ ~30h за W19-W22, поддерживает Track B / R4 YC
+| РП | Последний коммит (7д) |
+|----|---------------------------------|
+| **WP-114** Claude Partner — исследование партнёрской программы Anthropi | нет (7д) |
+| **WP-117** Развитие nudge-системы — расширение правил, все тиры, ЦД-пер | dcb445c2 feat: WP-290 Следователь — система каузальной  |
+| **WP-121** Правила начисления баллов за активность — правила + реализац | b437c6c6 day-plan: 6 мая 2026 — расширенный план + WP-2 |
+| **WP-132** WP-132-autonomous-night-agents | нет (7д) |
+| **WP-140** Windows-совместимость IWE | нет (7д) |
+| **WP-144** Управление заданиями агентов (research-tasks) | нет (7д) |
+| **WP-149** Система генерации персональных руководств | dcb445c2 feat: WP-290 Следователь — система каузальной  |
+| **WP-151** Характеристики и состояния деятеля — от модели к измерению | dcb445c2 feat: WP-290 Следователь — система каузальной  |
+| **WP-155** Конвейер публикаций ContentPipeline | 04412926 docs: WP-155 Editorial Ф + S-37 Редактор конте |
+| **WP-164** Персональное руководство по ZP для семьи (Денис) | нет (7д) |
+| **WP-167** Публикации — зонтичный РП контент-конвейера | 1e911e06 close(WP-167): Quick Close — сессия 4 мая, пос |
+| **WP-171** WP-171-hw-checker-v2-async | 36686a9b docs(WP-171): обновить Осталось — handoff посл |
+| **WP-183** CRM как система | нет (7д) |
+| **WP-185** Google Drive MCP + DocSend — экспорт документов и аналитика  | нет (7д) |
+| **WP-188** Первая когорта + IWE лендинг (Ф15a system-school.ru/iwe — завтра) | d4ef79ac docs(WP-188): Ф15a структура лендинга из исследования |
+| **WP-190** Анализ прецессионных центрифуг — SOTA, стартап, коммерциализ | нет (7д) |
+| **WP-199** UX бота и пользовательских интерфейсов платформы | 1947dda fix: маршрутизация задач T001-T049 — исправлени |
+| **WP-202** Зрелость IWE-шаблона для внешнего мира | нет (7д) |
+| **WP-203** Оркестратор SC.020 -- управление циклом развития | 9cf5740d docs: связки между незакрытыми РП (10 пар) |
+| **WP-206** Исследование многозадачности | нет (7д) |
+| **WP-207** Гарантированный handoff между сессиями | 9cf5740d docs: связки между незакрытыми РП (10 пар) |
+| **WP-211** Стилистический эталон письма автора | нет (7д) |
+| **WP-212** Программа безопасности продуктов | 0e37b77a WP-212: Quick Close handoff — «Осталось» 29 ап |
+| **WP-214** Концепция учёта персональных данных в IWE | 0fc1e2e6 docs(WP-214): Ф10 сессия 2 — MULT_JSON fix    |
+| **WP-215** Концепция разделения инфраструктуры Россия и мир | 934552b2 feat: WP-285 Международная инфраструктура Trac |
+| **WP-231** Реестр подписок | 9cf5740d docs: связки между незакрытыми РП (10 пар) |
+| **WP-232** Консолидация баз Neon → platform | нет (7д) |
+| **WP-237** Audit trail для финансовых таблиц (compliance 7 лет) | нет (7д) |
+| **WP-292** Бренд IWE: имя продукта и Brand Compendium | a8afcfc WP-292 Ф1: 01-foundations.md — Brand Foundations |
+| **WP-244** Наблюдаемость платформы (Platform Observability) | 209854c2 docs(WP-73): актуализация контекст-файла — 30  |
+| **WP-245** Анализ падения ступени: механика M1/M4, раннее предупреждени | 097922ac WP-196 Ф14: трекер lifework-рекомендаций + WP- |
+| **WP-245** Программа личного развития | 097922ac WP-196 Ф14: трекер lifework-рекомендаций + WP- |
+| **WP-246** Архитектура прямых платежей (все каналы → Neon) | нет (7д) |
+| **WP-250** План развития до конца 2026 | b437c6c6 day-plan: 6 мая 2026 — расширенный план + WP-2 |
+| **WP-253** WP-253 Legacy `platform` БД audit — что осталось, чтобы DROP | dcb445c2 feat: WP-290 Следователь — система каузальной  |
+| **WP-253** Master Roadmap — DROP `platform` БД (от 28 апр до Q3) | dcb445c2 feat: WP-290 Следователь — система каузальной  |
+| **WP-253** Реализованная новая архитектура Neon | dcb445c2 feat: WP-290 Следователь — система каузальной  |
+| **WP-265** Аудит инсталляции IWE — SC + скрипт + скилл | d61cd212 WP-265 Quick Close: Ф6.1+Ф9 done + Opus review |
+| **WP-276** Двухуровневая карта внешних провайдеров (Pack: принципы + DS | нет (7д) |
+| **WP-281** Трекер передачи: менеджмент + поддержка → Ильшат | 1e08d377 strategy-session W19: two-track architecture + |
+| **WP-283** Автономный Day Open на сервере — кросс-платформенные скрипты | 964ead6c docs(WP-283): Ф7+Ф8 done — session-prep sweep  |
+| **WP-284** Регулярные интервью с пользователями → обратная связь → РП ( | 9868b996 upd(WP-284): контекст Ф0-Ф5 done — журнал, сек |
+| **WP-284** WP-284-participants | 9868b996 upd(WP-284): контекст Ф0-Ф5 done — журнал, сек |
+| **WP-285** Международная инфраструктура Track B | abcb05a WP-285: командный план + Ф2 выбор GKE Standard 7 мая |
+| **WP-287** Руководство по использованию IWE | bc733374 docs: зарегистрировать сессию WP-287 в open-sessions.log |
+| **WP-294** WP-294-wp-mention-sync-actualization | 2841ecee WP-294 ✅ Ф1-Ф5 done — «Осталось» + MEMORY.md о |
+| **WP-295** Журнал решений, повтор и параллельные пути для ИИ-агентов IWE | spawn 2026-05-06 |
+| **WP-45** Бот: observability + auto-fix | нет (7д) |
+| **WP-5** Платформа: развитие (зонтичный) | a99d5595 chore: add WP-5 1h to итоги, мультипликатор 1. |
+| **WP-55** DS-principles-curriculum: разработка ячеек и программ | 9cf5740d docs: связки между незакрытыми РП (10 пар) |
+| **WP-7** Платформа: техдолг (зонтичный) | b437c6c6 day-plan: 6 мая 2026 — расширенный план + WP-2 |
+| **WP-73** Новая архитектура и план развития ИТ-платформы Aisystant | ce56769f docs(WP-73): актуализация встреча 14, GKE Standard 7 мая |
+| **WP-??** WP-INCIDENT-2026-04-30-bot-diagnostics-runbook | нет (7д) |
+> _Обновлено: 2026-05-07 (quick-close WP-285/WP-73)_
+<!-- ACTIVE-WP-END -->
 
 ### Feedback — HOT (27-30 апр, 1-3 май)
 
@@ -115,6 +151,7 @@
 - [feedback_context_isolation_day_open.md](feedback_context_isolation_day_open.md) — двойное открытие (автономное + ручное) наследует результаты без переаттестации БЛОКИРУЮЩИХ шагов; решение: BLOCKING validation перед commit (1 май)
 - [feedback_asyncpg_type_coercion.md](feedback_asyncpg_type_coercion.md) — asyncpg валидирует Python-тип ДО отправки в PG; SQL `::cast` не помогает для параметров — нужен Python-coerce (str→date, str→datetime). WP-151 Блок B 5 май
 - [feedback_upsert_vs_update_for_closed_events.md](feedback_upsert_vs_update_for_closed_events.md) — closed-события с бедным payload должны быть `op: UPDATE`, не UPSERT; PG проверяет NOT NULL на INSERT clause ДО conflict resolution. WP-151 Блок B 5 май
+- [feedback_server_sync_patterns.md](feedback_server_sync_patterns.md) — pre-tick git pull через ExecStartPre+`-`-префикс, deployment ≠ artifact-generation location, DIRTY как сигнал, FORCE_PROD-projection правило, master↔main divergence (WP-7 S-A/S-B 7 мая)
 - [lessons_architecture_audit_before_implementation.md](lessons_architecture_audit_before_implementation.md) — WP-121 Ф2 fail 5 мая: реализовал на Railway вместо Neon из-за пропуска архитектурного аудита. Правило: до кода — DP.ARCH + WP-context + grep на existing implementations
 - [project_wp121_phase2_state.md](project_wp121_phase2_state.md) — WP-121 Ф2 после сноса: точная карта Neon БД (learning/reference/rewards), gap в существующем rewards-projection-worker, план v2 (6-8h)
 
@@ -144,8 +181,9 @@
 ### Lessons (уроки, детали → тематические файлы)
 
 - [lessons_day_rituals.md](lessons_day_rituals.md) — Day Open/Close, календарь
-- [lessons_infra.md](lessons_infra.md) — launchd, Neon tz, asyncpg, alerter DB-backed cooldown, feature flag без gate check, NEON_PROD_BASE в ~/.secrets/neon, INSERT RETURNING atomic dedup, uuid4 external_id
+- [lessons_infra.md](lessons_infra.md) — launchd, Neon tz, asyncpg, alerter DB-backed cooldown, feature flag без gate check, NEON_PROD_BASE в ~/.secrets/neon, INSERT RETURNING atomic dedup, uuid4 external_id, knowledge-mcp≠iwe-knowledge
 - [lessons_tools.md](lessons_tools.md) — MCP, Linear
+- [lessons_hook_json_safety.md](lessons_hook_json_safety.md) — Claude Code hooks: JSON только через `jq -n --arg`, не `cat <<EOF` (silent failure при кавычках в reason). WP-265 Ф6.1 + Opus review (6 мая)
 
 ### Reference (внешние системы)
 

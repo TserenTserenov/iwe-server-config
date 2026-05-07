@@ -76,7 +76,7 @@ Mandatory РП отсутствуют в WeekPlan → «Требует вним�
 Из `day-rhythm-config.yaml → calendar_ids` (если указаны) или все доступные календари → list-events → свободные блоки ≥1h (09:00–19:00). Private — пропустить.
 
 ### 5. IWE за ночь (светофор)
-Scheduler report, update.sh, template-sync, MCP reindex, Scout. 🟢/🟡/🔴.
+update.sh, template-sync, MCP reindex, Scout. 🟢/🟡/🔴.
 
 **Проверка обновлений:** `cd "$IWE_TEMPLATE" && bash update.sh --check 2>&1`. Если доступно обновление → добавить в «Требует внимания»: «Доступно обновление IWE → `/iwe-update`».
 
