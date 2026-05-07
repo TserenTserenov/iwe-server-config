@@ -92,7 +92,7 @@ let
   #   - DS-my-strategy: dirty почти всегда из-за iwe-sync-fleeting-notes (точечный sync inbox/fleeting-notes.md)
   #     → отдельная задача расширить sync-files.sh для inbox/WP-*.md и current/
   #   - FMT-exocortex-template: на сервере не git-репо (runtime-копия)
-  #   - PACK-* кроме PACK-personal: не клонированы (S-B клонирует digital-platform отдельно)
+  # Все 8 PACK склонированы 7 мая в S-E (PACK-digital-platform склонирован в S-B).
   pullScript = pkgs.writeShellScript "iwe-pull-repos" ''
     set -uo pipefail
     export GIT_TERMINAL_PROMPT=0
@@ -105,7 +105,14 @@ let
       "DS-agent-workspace"
       "DS-autonomous-agents"
       "DS-Knowledge-Index-Tseren"
+      "PACK-MIM"
+      "PACK-agent-rules"
+      "PACK-autonomous-agents"
+      "PACK-digital-platform"
+      "PACK-ecosystem"
+      "PACK-education"
       "PACK-personal"
+      "PACK-verification"
     )
 
     failed=()
@@ -214,7 +221,7 @@ in
         # WP-7 S-A: pre-tick git pull для 7 IWE-репо. Префикс `-` → fail не блокирует ExecStart.
         ExecStartPre = "-${pullScript}";
         ExecStart    = "${pkgs.bash}/bin/bash ${iwe}/DS-IT-systems/DS-ai-systems/synchronizer/scripts/scheduler.sh dispatch";
-        TimeoutSec   = 1800;  # 30 мин — включая pre-tick pull (worst-case 7×60s=7 мин)
+        TimeoutSec   = 1800;  # 30 мин — включая pre-tick pull (worst-case 14×60s=14 мин)
       };
       path = commonPath;
       environment = commonEnv;
