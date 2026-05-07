@@ -32,22 +32,23 @@ if ! git fetch "$REMOTE" "$BRANCH" --quiet 2>/dev/null; then
   exit 0
 fi
 
-# Glob список файлов для синхронизации (read-only в сторону сервера)
+# Glob список файлов для синхронизации (read-only в сторону сервера).
+# git ls-tree не поддерживает glob magic — используем grep-фильтр.
 FILES_TO_SYNC=()
+ALL_FILES=$(git ls-tree -r --name-only "${REMOTE}/${BRANCH}" 2>/dev/null)
 
 # inbox/WP-*.md — карточки рабочих продуктов
 while IFS= read -r line; do
-  # git ls-tree выдаёт filename в последней колонке после tab
   FILES_TO_SYNC+=("$line")
-done < <(git ls-tree -r --name-only "${REMOTE}/${BRANCH}" -- 'inbox/WP-*.md' 2>/dev/null)
+done < <(echo "$ALL_FILES" | grep -E '^inbox/WP-.*\.md$' || true)
 
 # current/*.md — план недели + DayPlan (если есть)
 while IFS= read -r line; do
   FILES_TO_SYNC+=("$line")
-done < <(git ls-tree -r --name-only "${REMOTE}/${BRANCH}" -- 'current/*.md' 2>/dev/null)
+done < <(echo "$ALL_FILES" | grep -E '^current/[^/]+\.md$' || true)
 
 # MEMORY.md — индекс активных РП (обновляется memory-active-wp-update.sh ежедневно)
-if git cat-file -e "${REMOTE}/${BRANCH}:MEMORY.md" 2>/dev/null; then
+if echo "$ALL_FILES" | grep -qx "MEMORY.md"; then
   FILES_TO_SYNC+=("MEMORY.md")
 fi
 
