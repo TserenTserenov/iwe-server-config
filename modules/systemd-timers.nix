@@ -76,6 +76,72 @@ let
     OnFailure = "iwe-failure-alert@%n.service";
   };
 
+  # Pre-tick auto-pull репозиториев — закрывает дыру «GitHub ≠ сервер».
+  # Запускается как ExecStartPre перед iwe-scheduler.service. Префикс `-` в ExecStartPre
+  # → fail в pull НЕ блокирует ExecStart (scheduler стартует с тем кодом что есть).
+  # WP-7 фаза S-A (7 мая 2026, см. inbox/WP-7-platform-tech-debt.md «Server (sync infra)»).
+  #
+  # Стратегия:
+  #   - --ff-only (без rebase, divergent → fail-fast → TG-алерт)
+  #   - timeout 60s per repo (защита от network hang)
+  #   - GIT_TERMINAL_PROMPT=0 + BatchMode=yes (детерминированный fail без password prompt)
+  #   - skip dirty репо (защита локальных правок)
+  #   - exit 0 always (не блокирует scheduler tick)
+  #
+  # Исключения:
+  #   - DS-my-strategy: dirty почти всегда из-за iwe-sync-fleeting-notes (точечный sync inbox/fleeting-notes.md)
+  #     → отдельная задача расширить sync-files.sh для inbox/WP-*.md и current/
+  #   - FMT-exocortex-template: на сервере не git-репо (runtime-копия)
+  #   - PACK-* кроме PACK-personal: не клонированы (S-B клонирует digital-platform отдельно)
+  pullScript = pkgs.writeShellScript "iwe-pull-repos" ''
+    set -uo pipefail
+    export GIT_TERMINAL_PROMPT=0
+    export GIT_SSH_COMMAND="ssh -o BatchMode=yes -o StrictHostKeyChecking=accept-new"
+
+    repos=(
+      "DS-IT-systems/DS-ai-systems"
+      "DS-IT-systems/activity-hub"
+      "DS-MCP/knowledge-mcp"
+      "DS-agent-workspace"
+      "DS-autonomous-agents"
+      "DS-Knowledge-Index-Tseren"
+      "PACK-personal"
+    )
+
+    failed=()
+    for repo in "''${repos[@]}"; do
+      dir="${iwe}/$repo"
+      if [ ! -d "$dir/.git" ]; then
+        echo "SKIP: $repo (не клонирован)"
+        continue
+      fi
+      cd "$dir" || { failed+=("$repo (cd failed)"); continue; }
+      if [ -n "$(${pkgs.git}/bin/git status --porcelain 2>/dev/null)" ]; then
+        echo "DIRTY: $repo (uncommitted changes — пропускаю pull)"
+        failed+=("$repo (dirty)")
+        continue
+      fi
+      if ${pkgs.coreutils}/bin/timeout 60s ${pkgs.git}/bin/git pull --ff-only 2>&1; then
+        echo "OK: $repo"
+      else
+        echo "FAIL: $repo"
+        failed+=("$repo (pull failed)")
+      fi
+    done
+
+    # TG-алерт при ошибках. exit 0 always — не блокируем scheduler tick.
+    if [ "''${#failed[@]}" -gt 0 ]; then
+      msg="⚠️ IWE pull-repos warnings (tsekh-1, $(${pkgs.coreutils}/bin/date '+%Y-%m-%d %H:%M')): ''${failed[*]}"
+      ${pkgs.curl}/bin/curl -s --max-time 10 -X POST \
+        "https://api.telegram.org/bot''${TELEGRAM_BOT_TOKEN}/sendMessage" \
+        -d "chat_id=''${TELEGRAM_CHAT_ID}" \
+        --data-urlencode "text=$msg" \
+        > /dev/null || true
+    fi
+
+    exit 0
+  '';
+
   # Скрипт TG-алерта.
   # TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID — из EnvironmentFile /etc/iwe/env (личный чат).
   # TELEGRAM_TEAM_CHAT_ID — опционально; если задан, алерт дублируется в командный канал.
@@ -145,8 +211,10 @@ in
       description = "IWE Scheduler — центральный диспетчер агентов";
       unitConfig   = commonUnitConfig;
       serviceConfig = commonServiceConfig // {
-        ExecStart  = "${pkgs.bash}/bin/bash ${iwe}/DS-IT-systems/DS-ai-systems/synchronizer/scripts/scheduler.sh dispatch";
-        TimeoutSec = 1800;  # 30 мин — агентские задачи могут быть долгими
+        # WP-7 S-A: pre-tick git pull для 7 IWE-репо. Префикс `-` → fail не блокирует ExecStart.
+        ExecStartPre = "-${pullScript}";
+        ExecStart    = "${pkgs.bash}/bin/bash ${iwe}/DS-IT-systems/DS-ai-systems/synchronizer/scripts/scheduler.sh dispatch";
+        TimeoutSec   = 1800;  # 30 мин — включая pre-tick pull (worst-case 7×60s=7 мин)
       };
       path = commonPath;
       environment = commonEnv;
