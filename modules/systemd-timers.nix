@@ -85,7 +85,9 @@ let
   #   - --ff-only (без rebase, divergent → fail-fast → TG-алерт)
   #   - timeout 60s per repo (защита от network hang)
   #   - GIT_TERMINAL_PROMPT=0 + BatchMode=yes (детерминированный fail без password prompt)
-  #   - skip dirty репо (защита локальных правок)
+  #   - skip dirty репо (защита локальных правок) + grace-период 30s + retry,
+  #     чтобы не алертить на транзиентный dirty от фоновых синхронизаторов
+  #     (synchronizer пишет sync-hashes/pulse state, knowledge-mcp reindex и т.п.)
   #   - exit 0 always (не блокирует scheduler tick)
   #
   # Исключения:
@@ -124,9 +126,18 @@ let
       fi
       cd "$dir" || { failed+=("$repo (cd failed)"); continue; }
       if [ -n "$(${pkgs.git}/bin/git status --porcelain 2>/dev/null)" ]; then
-        echo "DIRTY: $repo (uncommitted changes — пропускаю pull)"
-        failed+=("$repo (dirty)")
-        continue
+        # Grace-период: фоновые синхронизаторы (DS-ai-systems synchronizer auto-commits,
+        # knowledge-mcp reindex и т.п.) могут оставлять untracked/modified файлы на
+        # секунды до собственного коммита. Ждём 30s и проверяем повторно — если всё
+        # ещё dirty, считаем настоящим локальным изменением и алертим.
+        echo "DIRTY: $repo (transient? grace 30s)"
+        ${pkgs.coreutils}/bin/sleep 30
+        if [ -n "$(${pkgs.git}/bin/git status --porcelain 2>/dev/null)" ]; then
+          echo "DIRTY: $repo (uncommitted changes — пропускаю pull)"
+          failed+=("$repo (dirty)")
+          continue
+        fi
+        echo "RECOVERED: $repo (был транзиентный dirty, продолжаю pull)"
       fi
       if ${pkgs.coreutils}/bin/timeout 60s ${pkgs.git}/bin/git pull --ff-only 2>&1; then
         echo "OK: $repo"
