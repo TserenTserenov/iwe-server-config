@@ -137,6 +137,10 @@ in
       zfs
       # Git
       git
+      # GitHub API (для VR.R.002 Аудитор + general DevOps)
+      gh
+      # Crypto (JWT для GitHub App, прочие OAuth/JWT задачи)
+      openssl
       # Tar/restic — для бэкапов и восстановления
       gnutar
       restic
