@@ -106,6 +106,7 @@ let
       "DS-MCP/knowledge-mcp"
       "DS-agent-workspace"
       "DS-autonomous-agents"
+      "DS-ecosystem-development"
       "DS-Knowledge-Index-Tseren"
       "PACK-MIM"
       "PACK-agent-rules"
