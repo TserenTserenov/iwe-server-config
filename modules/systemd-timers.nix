@@ -381,6 +381,34 @@ in
     };
 
     # =========================================================
+    # 6b. OVERNIGHT AUDITOR — R24 Аудитор безопасности (WP-212)
+    # =========================================================
+    # Ежедневный security-аудит по чеклисту B7.4 (разделы A-D).
+    # 04:30 МСК — после scout (04:00), до strategist morning.
+    # Бюджет $1.5/run, ~10-15 мин. Отчёт в DS-agent-workspace/auditor/YYYY-MM-DD/.
+    # Эталоны: B7.4 + security-posture.md + WP-212 backlog.
+    # Trust Stack: read-only, не коммитит, не пушит. Решения принимает R1 при Day Open.
+
+    systemd.services."iwe-overnight-auditor" = {
+      description = "IWE — R24 Аудитор безопасности (daily B7.4 audit)";
+      unitConfig   = commonUnitConfig;
+      serviceConfig = commonServiceConfig // {
+        ExecStart  = "${pkgs.bash}/bin/bash ${iwe}/DS-autonomous-agents/scripts/overnight-auditor.sh";
+        TimeoutSec = 1200;
+      };
+      path = commonPath;
+      environment = commonEnv;
+    };
+
+    systemd.timers."iwe-overnight-auditor" = {
+      wantedBy    = [ "timers.target" ];
+      timerConfig = {
+        OnCalendar = "*-*-* 04:30:00";
+        Persistent = true;
+      };
+    };
+
+    # =========================================================
     # 7. RULE CLASSIFIER (hourly) — ОТКЛЮЧЁН (дубль daily 23:55)
     # =========================================================
     # daily (23:55) достаточно — hourly не несёт пользы при текущем объёме журналов.
