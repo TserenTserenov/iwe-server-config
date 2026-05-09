@@ -158,10 +158,23 @@ python3 {{HOME_DIR}}/IWE/DS-my-strategy/scripts/check-index-health.py
 
 **Валидация «Завтра начать с» (ADR-207):** поле не пустое + каждый pending РП упомянут + каждый содержит конкретный next action (не «продолжить работу»).
 
-**9b.** Дописать сводку итогов в WeekPlan:
+**9b.** Дописать сводку итогов в WeekReport (split, ОПТ-5 WP-297):
+- Файл: `DS-my-strategy/current/WeekReport W{N} YYYY-MM-DD.md` (дата = первый день недели)
+- Если файла нет (старый цикл) — fallback в WeekPlan, пометить «требует split в session-prep следующей недели»
 - Формат: `<details><summary><b>Итоги {день} {дата}</b></summary>...</details>`
 - Порядок: свежие итоги СВЕРХУ (обратная хронология)
 - Содержание: таблица коммитов по репо, закрытые РП, продвинутые РП, мультипликатор
+
+**Postcondition 9b (машинная проверка — НЕ пропускать):**
+```bash
+TODAY=$(date +%Y-%m-%d)
+DAY_NUM=$(date +%-d)
+# Сначала проверь WeekReport (split ОПТ-5), fallback на WeekPlan
+( grep -rl "Итоги.*${DAY_NUM}" ~/IWE/DS-my-strategy/current/WeekReport\ W*.md 2>/dev/null \
+  || grep -rl "Итоги.*${DAY_NUM}" ~/IWE/DS-my-strategy/current/WeekPlan\ W*.md 2>/dev/null ) \
+  | grep -q . && echo "9b OK" || echo "9b FAIL: итоги не найдены ни в WeekReport, ни в WeekPlan"
+```
+Результат `9b FAIL` → шаг НЕ помечать completed, вернуться к записи.
 
 ### 10. Закоммитить DS-my-strategy
 
@@ -208,7 +221,7 @@ python3 $HOME/IWE/.claude/scripts/rule-classifier.py
 - [ ] WakaTime + Мультипликатор: часы, бюджет, остаток недели
 - [ ] Итоги дня записаны в DayPlan
 - [ ] Handoff-валидация: «Завтра начать с» содержит ВСЕ pending РП с конкретным next action
-- [ ] Сводка итогов записана в WeekPlan (`<details>`, обратная хронология)
+- [ ] Сводка итогов записана в WeekReport (`<details>`, обратная хронология) **(postcondition 9b: grep подтверждён)**
 - [ ] Новое репо → MAPSTRATEGIC.md + Strategy.md
 
 Все ✅ → «День закрыт.» Иначе — указать что осталось.
