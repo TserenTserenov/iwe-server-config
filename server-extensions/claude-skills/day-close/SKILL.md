@@ -126,7 +126,11 @@ python3 {{HOME_DIR}}/IWE/DS-my-strategy/scripts/check-index-health.py
 
 **Алгоритм:**
 
-1. **WakaTime** — физическое время за день (`wakatime --today`)
+1. **WakaTime** — физическое время за день:
+   - Сначала CLI: `wakatime --today`
+   - Если CLI недоступен → **fallback Neon**: `SELECT payload->>'human_readable', payload->>'total_seconds' FROM public.domain_event WHERE event_type='coding_time' AND account_id='{DT_USER_ID}' AND external_id='wakatime:{DT_USER_ID}:{YYYY-MM-DD}'` (БД `learning`)
+   - Если Neon тоже пуст (данные синхронизируются ночью) → пометить «pending Neon» и пересчитать при следующей сессии
+   - Поле: `payload->>'human_readable'` (напр. «9 hrs»); `total_seconds` для мультипликатора
 2. **Бюджет закрыт** — сумма бюджетов по ВСЕМ РП за день:
    - done → полный бюджет (или пропорционально фазам для зонтичных)
    - partial → % выполнения × бюджет
