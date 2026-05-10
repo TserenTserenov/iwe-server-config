@@ -50,6 +50,14 @@ done
 
 **2e.** Governance-синхронизация: новые репо/сервисы за день? → REPOSITORY-REGISTRY, navigation.md, MAP.002.
 
+**2f. WeekReport — ФАКТЫ ДНЯ (ОПТ-5):** Если есть WeekReport W{N} YYYY-MM-DD.md:
+  - Открыть `DS-my-strategy/current/WeekReport W{N} YYYY-MM-DD.md`
+  - Добавить новый раздел `<details><summary><b>Итоги {День} {Дата}</b></summary>` **перед** существующими `Итоги ...` (в обратном порядке дат: сегодня → старше). Проверять: вставлять сразу ниже `</details>` W18-summary, а не в конец файла.
+  - Содержимое: коммиты по репо, РП-статусы за день, мультипликатор
+  - **Правило ОПТ-5:** WeekPlan содержит ТОЛЬКО намерения, WeekReport содержит ТОЛЬКО факты
+  - **strategy_day (Пн без DayPlan):** Итоги пишутся как обычный день — только факты. Плановые строки (`strategy_day → план живёт в WeekPlan`) в WeekReport НЕ копировать. Позиция: Пн всегда в конец (самый старый день недели).
+  - Если файла нет (старый цикл) — fallback в WeekPlan, пометить «требует split при следующей strategy-session»
+
 **EXTENSION POINT (day-close checks):** `bash .claude/scripts/load-extensions.sh day-close checks` — exit 0 → `Read` каждый файл из вывода (alphabetic) → выполнить. Exit 1 → пропустить. Поддерживает `extensions/day-close.checks.md` И `extensions/day-close.checks.<suffix>.md`.
 
 ### 3. Архивация
@@ -162,7 +170,7 @@ python3 {{HOME_DIR}}/IWE/DS-my-strategy/scripts/check-index-health.py
 - Файл: `DS-my-strategy/current/WeekReport W{N} YYYY-MM-DD.md` (дата = первый день недели)
 - Если файла нет (старый цикл) — fallback в WeekPlan, пометить «требует split в session-prep следующей недели»
 - Формат: `<details><summary><b>Итоги {день} {дата}</b></summary>...</details>`
-- Порядок: свежие итоги СВЕРХУ (обратная хронология)
+- Порядок: свежие итоги СВЕРХУ (обратная хронология). Проверять: вставлять сразу ниже `</details>` W18-summary, а не в конец файла.
 - Содержание: таблица коммитов по репо, закрытые РП, продвинутые РП, мультипликатор
 
 **Postcondition 9b (машинная проверка — НЕ пропускать):**
