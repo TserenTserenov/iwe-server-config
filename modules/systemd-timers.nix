@@ -525,6 +525,36 @@ in
     };
 
     # =========================================================
+    # 10b. STAGE EVALUATOR — SR.001-SR.004 transitions (WP-253 Блок 2 Ф2.4)
+    # =========================================================
+    # Запускается после profiler в 04:35 МСК. Читает learning.domain_event +
+    # learning.w_reflections для opt-in пилотов, INSERT'ит learning.stage_transitions
+    # при изменении ступени мастерства (FORM.089 §5).
+    # Env vars (требуются в /etc/iwe/env): LEARNING_URL (или DATABASE_URL_STAGE_EVALUATOR).
+    # see DP.SC.020, B7.3.6 privacy spec, миграции 109/110/111.
+
+    systemd.services."iwe-stage-evaluator" = {
+      description = "IWE — Stage Evaluator (FORM.089 §5, 04:35 МСК)";
+      unitConfig  = commonUnitConfig;
+      serviceConfig = commonServiceConfig // {
+        ExecStart  = "${pythonForIWE}/bin/python3 ${iwe}/DS-IT-systems/activity-hub/runner.py stage-evaluator";
+        WorkingDirectory = "${iwe}/DS-IT-systems/activity-hub";
+        TimeoutSec = 300;  # 5 мин — небольшой объём opt-in пилотов
+      };
+      path = commonPath;
+      environment = commonEnv;
+    };
+
+    systemd.timers."iwe-stage-evaluator" = {
+      wantedBy    = [ "timers.target" ];
+      description = "Stage Evaluator — ежедн 04:35 МСК (после profiler)";
+      timerConfig = {
+        OnCalendar = "*-*-* 04:35:00 Europe/Moscow";
+        Persistent = true;
+      };
+    };
+
+    # =========================================================
     # 11. ACTIVITY HUB — sync IWE engagement (GitHub + WakaTime → Neon learning)
     # =========================================================
     # Заменяет Mac launchd com.iwe.activity-hub-sync-iwe (23:00 МСК).
