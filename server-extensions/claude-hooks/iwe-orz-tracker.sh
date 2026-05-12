@@ -138,6 +138,23 @@ print(json.dumps({'wp_number': int('${WP_NUM_C}'), 'session_id': '${SESSION_ID}'
   "$EMIT" "wp_closed" "wp-${WP_NUM_C}" "$PAYLOAD"
 done
 
+# ── ДЕТЕКТОР: day_close ───────────────────────────────────────────────────
+# Паттерн: «День закрыт» / «day close завершён» в тексте агента.
+# external_id = day-close-YYYY-MM-DD → идемпотентно (один per day).
+# payload: wakatime_h + multiplier из текста агента.
+if echo "$AGENT_TEXT" | grep -qE '(день закрыт|day close завершён|day close.*✅|день закрыт.*✅)'; then
+  WAKATIME_H=$(echo "$AGENT_TEXT" | grep -oE '[0-9]+ ч [0-9]+ мин' | head -1 | \
+    awk '{h=$1; m=$3; printf "%.2f", h + m/60}' 2>/dev/null || echo "0")
+  MULTIPLIER=$(echo "$AGENT_TEXT" | grep -oE '~[0-9]+\.[0-9]+x' | head -1 | \
+    grep -oE '[0-9]+\.[0-9]+' || echo "0")
+  TODAY=$(date +%Y-%m-%d)
+  PAYLOAD=$(python3 -c "
+import json
+print(json.dumps({'wakatime_h': float('${WAKATIME_H}' or 0), 'multiplier': float('${MULTIPLIER}' or 0), 'date': '${TODAY}', 'session_id': '${SESSION_ID}', 'source': 'day-close-skill'}))
+" 2>/dev/null || echo '{}')
+  "$EMIT" "day_close" "day-close-${TODAY}" "$PAYLOAD"
+fi
+
 # ── ДЕТЕКТОР: iwe_session (всегда — базовое событие сессии) ───────────────
 # Каждый Stop = одна Claude Code сессия. Считаем time via transcript timestamps.
 FIRST_TS=$(jq -r '.timestamp // empty' "$TRANSCRIPT_PATH" 2>/dev/null | head -1)
