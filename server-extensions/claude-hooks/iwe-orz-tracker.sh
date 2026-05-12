@@ -150,7 +150,8 @@ if echo "$AGENT_TEXT" | grep -qE '(день закрыт|day close заверш�
   TODAY=$(date +%Y-%m-%d)
   PAYLOAD=$(python3 -c "
 import json
-print(json.dumps({'wakatime_h': float('${WAKATIME_H}' or 0), 'multiplier': float('${MULTIPLIER}' or 0), 'date': '${TODAY}', 'session_id': '${SESSION_ID}', 'source': 'day-close-skill'}))
+wh = float('${WAKATIME_H}') if '${WAKATIME_H}' else 0.0; mx = float('${MULTIPLIER}') if '${MULTIPLIER}' else 0.0
+print(json.dumps({'wakatime_h': wh, 'multiplier': mx, 'date': '${TODAY}', 'session_id': '${SESSION_ID}', 'source': 'day-close-skill'}))
 " 2>/dev/null || echo '{}')
   "$EMIT" "day_close" "day-close-${TODAY}" "$PAYLOAD"
 fi
