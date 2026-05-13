@@ -48,13 +48,19 @@ description: "Протокол ОРЗ — пошаговые инструкци�
 
    **Race-guard:** если state-файл `.claude/state/wp-sync-<N>.done` существует И его mtime моложе 8 часов — пропустить (sync уже выполнен в этой сессии). Если файл есть, но mtime старше 8h — считать stale: `rm -f` и продолжить заново. Проверка: `find .claude/state/wp-sync-<N>.done -mmin -480 2>/dev/null` (пустой вывод = нет файла или stale → запускать; непустой = свежий → пропускать).
 
-   **Шаг 3a — Bundle.** Запустить детерминированный сборщик контекста:
+   **Шаг 3a — Pre-flight (диагностика).** Перед основным запуском проверить, что bundler видит реальное окружение, а не тестовое:
+   ```bash
+   bash .claude/scripts/wp-sync-bundle.sh --self-test
+   ```
+   Exit 0 → окружение валидно, переходим к 3b. Exit 1 → окружение сломано (частая причина: env-переменные `IWE_WORKSPACE` / `IWE_GOVERNANCE_REPO` указывают на несуществующий путь) → **graceful degradation**: сбросить env (`unset IWE_WORKSPACE IWE_GOVERNANCE_REPO`) и повторить `--self-test`. Если снова fail → перейти к Ритуалу с пометкой «Sync-фаза требует ремонта (см. WP-294)».
+
+   **Шаг 3b — Bundle.** Запустить детерминированный сборщик контекста:
    ```bash
    bash .claude/scripts/wp-sync-bundle.sh WP-N > /tmp/wp-sync-bundle-$$.md
    ```
    Exit 0 → читать вывод. Exit 1 → РП не найден → перейти к Ритуалу с пометкой «контекст не найден». Exit 2 → ошибка парсинга → перейти к Ритуалу, поднять stderr в «Требует внимания».
 
-   **Шаг 3b — Override (опционально).** `bash .claude/scripts/load-extensions.sh protocol-open sync` — exit 0 → `Read` файлы (alphabetic), они переопределяют дефолтное поведение шага 3c. Exit 1 → дефолт.
+   **Шаг 3c — Override (опционально).** `bash .claude/scripts/load-extensions.sh protocol-open sync` — exit 0 → `Read` файлы (alphabetic), они переопределяют дефолтное поведение шага 3d. Exit 1 → дефолт.
 
    **Шаг 3c — Дефолтное поведение по веткам (если 3b не override'нул):**
    - **Ветка A — тривиальный случай** (≤1 связанных РП И drift-сигналов нет): главный агент сам читает контекст текущего РП и патчит маркеры (`[ ]` → `[x]` для подзадач, ссылающихся на закрытые связанные РП).

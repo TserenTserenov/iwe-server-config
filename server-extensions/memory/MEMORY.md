@@ -114,7 +114,7 @@
 | **WP-284** WP-284-participants | 9868b996 upd(WP-284): контекст Ф0-Ф5 done — журнал, сек |
 | **WP-285** Международная инфраструктура Track B | abcb05a WP-285: командный план + Ф2 выбор GKE Standard 7 мая |
 | **WP-287** Руководство по использованию IWE | bc733374 docs: зарегистрировать сессию WP-287 в open-sessions.log |
-| **WP-294** WP-294-wp-mention-sync-actualization | 2841ecee WP-294 ✅ Ф1-Ф5 done — «Осталось» + MEMORY.md о |
+| **WP-294** WP-294-wp-mention-sync-actualization | 2841ecee WP-294 ✅ Ф1-Ф5 done — Ф6 blocked (env-bug) → Ф7 resilience + Ф8 observability applied 13 мая — 🧪 passive testing до Week Close |
 | **WP-295** Журнал решений, повтор и параллельные пути для ИИ-агентов IWE | spawn 2026-05-06 |
 | **WP-45** Бот: observability + auto-fix | нет (7д) |
 | **WP-5** Платформа: развитие (зонтичный) | a99d5595 chore: add WP-5 1h to итоги, мультипликатор 1. |
