@@ -495,6 +495,34 @@ in
     };
 
     # =========================================================
+    # 9.5 RENDER PILOT GUIDES — queue processor (WP-309 Ф7)
+    # =========================================================
+    # Обрабатывает pending-строки в learning.guide_render_queue каждые 10 мин.
+    # Триггеры: repo_created (gateway), stage_transition (listener), manual.
+    # Зависимости: NEON_KNOWLEDGE_URL, PERSONA_URL, ANTHROPIC_API_KEY, GITHUB_TOKEN.
+
+    systemd.services."iwe-render-pilot-guides-queue" = {
+      description = "IWE — рендер очереди персональных руководств (queue, каждые 10 мин)";
+      unitConfig   = commonUnitConfig;
+      serviceConfig = commonServiceConfig // {
+        ExecStart  = "${pythonForIWE}/bin/python3 ${iwe}/DS-autonomous-agents/scripts/render-pilot-guides.py --queue-only";
+        TimeoutSec = 300;
+      };
+      path = commonPath;
+      environment = commonEnv;
+    };
+
+    systemd.timers."iwe-render-pilot-guides-queue" = {
+      wantedBy    = [ "timers.target" ];
+      description = "IWE рендер очереди руководств — каждые 10 мин";
+      timerConfig = {
+        OnBootSec       = "2min";
+        OnUnitActiveSec = "10min";
+        Persistent      = false;
+      };
+    };
+
+    # =========================================================
     # 10. PROFILER (daily) — recalculate_derived.py
     # =========================================================
     # Запускает R28 Профилировщик (AISYS.018) ежедневно в 04:30 МСК.
