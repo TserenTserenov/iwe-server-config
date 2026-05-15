@@ -24,9 +24,11 @@ let
 
   # Скрипт дампа всех БД из файла с URL
   pgDumpScript = pkgs.writeShellScript "restic-neon-dump" ''
-    set -euo pipefail
+    set -uo pipefail
     mkdir -p /tmp/restic-neon
     echo "Начало дампа Neon БД $(date -Is)"
+    fail_count=0
+    ok_count=0
 
     while IFS= read -r url; do
       # пропускаем пустые строки и комментарии
@@ -35,16 +37,24 @@ let
       # имя БД — последний сегмент пути до символа '?'
       dbname=$(echo "$url" | sed 's/.*\///' | sed 's/?.*//')
       echo "  Дамп: $dbname"
-      ${pkgs.postgresql_17}/bin/pg_dump \
-        --format=custom \
-        --no-password \
-        "$url" \
-        > /tmp/restic-neon/"$dbname".dump \
-        && echo "  OK: $dbname" \
-        || echo "  ОШИБКА: $dbname (продолжаем)" >&2
+      if ${pkgs.postgresql_17}/bin/pg_dump \
+          --format=custom \
+          --no-password \
+          "$url" \
+          > /tmp/restic-neon/"$dbname".dump 2>/tmp/restic-neon/"$dbname".err; then
+        echo "  OK: $dbname"
+        ok_count=$((ok_count+1))
+      else
+        echo "  ОШИБКА: $dbname — $(cat /tmp/restic-neon/$dbname.err 2>/dev/null | tail -1)" >&2
+        fail_count=$((fail_count+1))
+      fi
     done < /etc/restic/neon-connections
 
-    echo "Дамп завершён $(date -Is)"
+    echo "Дамп завершён $(date -Is): OK=$ok_count ОШИБКА=$fail_count"
+    # Записываем статус для heartbeat-скрипта
+    echo "$fail_count" > /tmp/restic-neon-fail-count
+    # Всегда exit 0 — restic должен сохранить то, что успело задампиться
+    exit 0
   '';
 in
 {
@@ -143,6 +153,19 @@ in
     # Решает проблему: uptime-монитор (каждые 5 мин) ≠ backup-монитор (раз в сутки).
     systemd.services."restic-backups-neon-dbs" = lib.mkIf (cfg.backupHeartbeatUrlFile != null) {
       serviceConfig.ExecStartPost = pkgs.writeShellScript "backup-heartbeat-ping" ''
+        # Проверяем статус pg_dump: пинговать только если ВСЕ БД задампились успешно
+        fail_count_file="/tmp/restic-neon-fail-count"
+        if [ -f "$fail_count_file" ]; then
+          fail_count=$(cat "$fail_count_file" | tr -d '[:space:]')
+          if [ "$fail_count" != "0" ]; then
+            echo "Backup heartbeat: пропускаю — $fail_count БД с ошибками" >&2
+            exit 0
+          fi
+        else
+          echo "Backup heartbeat: файл статуса не найден, пропускаю" >&2
+          exit 0
+        fi
+
         url_file="${cfg.backupHeartbeatUrlFile}"
         if [ ! -f "$url_file" ]; then
           echo "Backup heartbeat: файл $url_file не найден, пропускаю" >&2
@@ -157,7 +180,7 @@ in
           --silent --show-error \
           --max-time 10 --retry 3 --retry-delay 5 \
           "$url" > /dev/null \
-          && echo "Backup heartbeat OK" \
+          && echo "Backup heartbeat OK (все БД в норме)" \
           || echo "Backup heartbeat FAIL (не критично)" >&2
       '';
     };
