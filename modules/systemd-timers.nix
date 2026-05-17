@@ -583,6 +583,36 @@ in
     };
 
     # =========================================================
+    # 10c. IWE STAGE CONTROLLER — двумерная карта мастерства IWE (WP-326 Ф3)
+    # =========================================================
+    # Service Clause: DP.SC.139, Role: DP.ROLE.046, Pack: PD.FORM.089 §6.3
+    # Запускается после profiler+stage_evaluator (04:30/04:35) — в 05:30 МСК — чтобы видеть
+    # свежие stage_transitions и не пересечься с render-pilot-guides (05:00 Пн / 06:00 daily).
+    # render-pilot-guides-queue (каждые 10 мин) подхватит enqueued render-задачи.
+    # Env vars (требуются в /etc/iwe/env): IWE_STAGE_CONTROLLER_URL — DSN роли iwe_stage_controller
+    # на learning DB (создана миграциями 219/220).
+
+    systemd.services."iwe-stage-controller" = {
+      description = "IWE — Stage Controller (cp.iwe × cp.cre, ежедн 05:30 МСК)";
+      unitConfig  = commonUnitConfig;
+      serviceConfig = commonServiceConfig // {
+        ExecStart  = "${pythonForIWE}/bin/python3 ${iwe}/DS-autonomous-agents/scripts/iwe-stage-controller.py";
+        TimeoutSec = 300;  # 5 мин — небольшой объём opt-in (9 пилотов на 17 мая, рост ожидается)
+      };
+      path = commonPath;
+      environment = commonEnv;
+    };
+
+    systemd.timers."iwe-stage-controller" = {
+      wantedBy    = [ "timers.target" ];
+      description = "IWE Stage Controller — ежедн 05:30 МСК (между stage_evaluator и render)";
+      timerConfig = {
+        OnCalendar = "*-*-* 05:30:00 Europe/Moscow";
+        Persistent = true;
+      };
+    };
+
+    # =========================================================
     # 11. ACTIVITY HUB — sync IWE engagement (GitHub + WakaTime → Neon learning)
     # =========================================================
     # Заменяет Mac launchd com.iwe.activity-hub-sync-iwe (23:00 МСК).
