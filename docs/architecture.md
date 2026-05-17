@@ -35,7 +35,7 @@
 |--------|----------------|
 | Bridge-2 (legacy LMS bridge) | Снимется после полной миграции LMS, перенос = работа в стол |
 | multi-domain projection-worker (WP-270) | Sequential ceiling 50-60 событий/мин хватает на пилот ≤50; триггер переноса — когорта 50+ |
-| rewards-projection-worker | Аналогично |
+| ~~rewards-projection-worker~~ ⛔ decommission'd 2026-05-17 (WP-311 Ф-Close) | Функционал поглощён `multi-domain-projection-worker` (строка выше) |
 | Embedding daemon (BGE-M3 / E5 на CPU) | Заменён GitHub Actions runner pattern по предложению Андрея 28 апр (событийная обработка по коммиту, не daemon) |
 | Self-hosted LLM (Llama, Qwen) | Нет GPU; CPU 1-3 токенов/сек не подходит для production |
 | Aisystant MCP, Knowledge MCP | Cloudflare Workers глобальны (edge), Hetzner один регион — деградация задержек для пользователей |
