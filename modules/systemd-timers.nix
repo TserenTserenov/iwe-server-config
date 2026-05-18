@@ -479,7 +479,7 @@ in
       unitConfig   = commonUnitConfig;
       serviceConfig = commonServiceConfig // {
         ExecStart  = "${pythonForIWE}/bin/python3 ${iwe}/DS-autonomous-agents/scripts/render-pilot-guides.py --queue-only";
-        TimeoutSec = 600;  # 2 пути x 1 попытка x 120с = 240с + запас
+        TimeoutSec = 900;  # LIMIT=3 x 2 пути x 1x120с = 720с (weekly); LIMIT=3 x 225с = 675с (daily)
       };
       path = commonPath;
       environment = commonEnv;
