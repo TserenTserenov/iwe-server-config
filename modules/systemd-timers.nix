@@ -53,7 +53,7 @@ let
   # postgresql — psql для unsatisfied-report.sh и других синхронизаторов.
   # nodejs — npx для knowledge-mcp/scripts/reindex.sh (mcp reindex task).
   # perl — используется в template-sync.sh (line 113, YAML парсинг).
-  commonPath = with pkgs; [ git openssh bash curl jq gawk caffeinate-stub postgresql pythonForIWE nodejs perl ]
+  commonPath = with pkgs; [ git openssh bash curl jq gawk caffeinate-stub postgresql pythonForIWE nodejs perl gh ]
     ++ [ "/home/tseren/.npm-global" ];
 
   commonEnv = {
@@ -506,7 +506,7 @@ in
       unitConfig   = commonUnitConfig;
       serviceConfig = commonServiceConfig // {
         ExecStart  = "${pythonForIWE}/bin/python3 ${iwe}/DS-autonomous-agents/scripts/render-pilot-guides.py --queue-only";
-        TimeoutSec = 300;
+        TimeoutSec = 420;
       };
       path = commonPath;
       environment = commonEnv;
@@ -639,6 +639,33 @@ in
         # Явный TZ → детерминированно МСК круглый год.
         # Без него systemd использует Europe/Helsinki: летом EEST=MSK, зимой EET=MSK-1h.
         OnCalendar = "*-*-* 23:00:00 Europe/Moscow";
+        Persistent = true;
+      };
+    };
+
+    # =========================================================
+    # 4. OVERNIGHT AUDITOR — R24 Аудитор безопасности (daily B7.4)
+    # =========================================================
+    # Запускает VR.R.002 Аудитор в headless-режиме.
+    # 04:45 МСК — после strategist morning (04:00) и profiler (04:30).
+    # Таймер: ежедневно, Persistent=true.
+
+    systemd.services."iwe-overnight-auditor" = {
+      description = "IWE — R24 Аудитор безопасности (daily B7.4 audit)";
+      unitConfig   = commonUnitConfig;
+      serviceConfig = commonServiceConfig // {
+        ExecStart  = "${pkgs.bash}/bin/bash ${iwe}/DS-autonomous-agents/scripts/overnight-auditor.sh";
+        TimeoutSec = 1200;
+      };
+      path = commonPath;
+      environment = commonEnv;
+    };
+
+    systemd.timers."iwe-overnight-auditor" = {
+      wantedBy    = [ "timers.target" ];
+      description = "IWE Аудитор — ежедн 04:45 МСК";
+      timerConfig = {
+        OnCalendar = "*-*-* 04:45:00";
         Persistent = true;
       };
     };
