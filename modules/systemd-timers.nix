@@ -382,33 +382,6 @@ in
     };
 
     # =========================================================
-    # 6b. OVERNIGHT AUDITOR — VR.R.002 Аудитор безопасности (WP-212)
-    # =========================================================
-    # Ежедневный security-аудит по чеклисту B7.4 (разделы A-D).
-    # 04:45 МСК — после scout (04:00), после profiler (04:30), до strategist morning.
-    # Бюджет $1.5/run, ~10-15 мин. Отчёт в DS-agent-workspace/auditor/YYYY-MM-DD/.
-    # Эталоны: B7.4 + security-posture.md + WP-212 backlog.
-    # Trust Stack: read-only, не коммитит, не пушит. Решения принимает R1 при Day Open.
-
-    systemd.services."iwe-overnight-auditor" = {
-      description = "IWE — R24 Аудитор безопасности (daily B7.4 audit)";
-      unitConfig   = commonUnitConfig;
-      serviceConfig = commonServiceConfig // {
-        ExecStart  = "${pkgs.bash}/bin/bash ${iwe}/DS-autonomous-agents/scripts/overnight-auditor.sh";
-        TimeoutSec = 1200;
-      };
-      path = commonPath;
-      environment = commonEnv;
-    };
-
-    systemd.timers."iwe-overnight-auditor" = {
-      wantedBy    = [ "timers.target" ];
-      timerConfig = {
-        OnCalendar = "*-*-* 04:45:00";
-        Persistent = true;
-      };
-    };
-
     # =========================================================
     # 7. RULE CLASSIFIER (hourly) — ОТКЛЮЧЁН (дубль daily 23:55)
     # =========================================================
@@ -506,7 +479,7 @@ in
       unitConfig   = commonUnitConfig;
       serviceConfig = commonServiceConfig // {
         ExecStart  = "${pythonForIWE}/bin/python3 ${iwe}/DS-autonomous-agents/scripts/render-pilot-guides.py --queue-only";
-        TimeoutSec = 420;
+        TimeoutSec = 600;  # 2 пути x 1 попытка x 120с = 240с + запас
       };
       path = commonPath;
       environment = commonEnv;
