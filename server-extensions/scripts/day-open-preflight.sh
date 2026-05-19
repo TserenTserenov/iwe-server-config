@@ -5,6 +5,14 @@
 
 set -uo pipefail
 
+# Загрузка Telegram credentials (если доступны)
+AIST_ENV="$HOME/.config/aist/env"
+if [ -f "$AIST_ENV" ]; then
+  set -a
+  source "$AIST_ENV"
+  set +a
+fi
+
 DATE="${1:-$(date +%Y-%m-%d)}"
 CONFIG="${2:-$HOME/IWE/DS-my-strategy/exocortex/day-rhythm-config.yaml}"
 IWE="${IWE_ROOT:-$HOME/IWE}"
@@ -33,18 +41,18 @@ if [ -n "$SCOUT_LOG" ]; then
     SCOUT_STATUS="ok"
   else
     SCOUT_STATUS="fail"
-    if [ -n "${TG_WEBHOOK:-}" ]; then
-      curl -s -X POST "$TG_WEBHOOK" \
+    if [ -n "${TELEGRAM_BOT_TOKEN:-}" ] && [ -n "${TELEGRAM_CHAT_ID:-}" ]; then
+      curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
         -H "Content-Type: application/json" \
-        -d "{\"text\":\"🚨 Scout silent failure: last log $LOG_DATE (expected $DATE)\"}" > /dev/null
+        -d "{\"chat_id\":\"${TELEGRAM_CHAT_ID}\",\"text\":\"🚨 Scout silent failure: last log $LOG_DATE (expected $DATE)\"}" > /dev/null
     fi
   fi
 else
   SCOUT_STATUS="fail"
-  if [ -n "${TG_WEBHOOK:-}" ]; then
-    curl -s -X POST "$TG_WEBHOOK" \
+  if [ -n "${TELEGRAM_BOT_TOKEN:-}" ] && [ -n "${TELEGRAM_CHAT_ID:-}" ]; then
+    curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
       -H "Content-Type: application/json" \
-      -d "{\"text\":\"🚨 Scout silent failure: no logs found at all\"}" > /dev/null
+      -d "{\"chat_id\":\"${TELEGRAM_CHAT_ID}\",\"text\":\"🚨 Scout silent failure: no logs found at all\"}" > /dev/null
   fi
 fi
 
@@ -62,10 +70,10 @@ else
     YESTERDAY=$(date -d yesterday +%Y-%m-%d)
   fi
   YESTERDAY_FILE="$IWE/DS-agent-workspace/scheduler/feedback-triage/$YESTERDAY.md"
-  if [ ! -f "$YESTERDAY_FILE" ] && [ -n "${TG_WEBHOOK:-}" ]; then
-    curl -s -X POST "$TG_WEBHOOK" \
+  if [ ! -f "$YESTERDAY_FILE" ] && [ -n "${TELEGRAM_BOT_TOKEN:-}" ] && [ -n "${TELEGRAM_CHAT_ID:-}" ]; then
+    curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
       -H "Content-Type: application/json" \
-      -d "{\"text\":\"🚨 Feedback-triage silent failure: no reports since before $YESTERDAY\"}" > /dev/null
+      -d "{\"chat_id\":\"${TELEGRAM_CHAT_ID}\",\"text\":\"🚨 Feedback-triage silent failure: no reports since before $YESTERDAY\"}" > /dev/null
   fi
 fi
 
