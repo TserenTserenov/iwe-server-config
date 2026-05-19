@@ -22,6 +22,12 @@ DATE="${1:-$(date +%Y-%m-%d)}"
 CONFIG="$IWE/DS-my-strategy/exocortex/day-rhythm-config.yaml"
 SERVER_MODE="${IWE_SERVER_MODE:-0}"  # WP-283: 1 = Linux server, Mac-only MCP недоступен
 
+# --- Pre-flight healthcheck (WP-7 ФDay-Open-Hardening) ---
+PREFLIGHT_JSON=$(bash "$IWE/scripts/day-open-preflight.sh" "$DATE" "$CONFIG" 2>/dev/null || echo '{"calendar":"unknown","scout":"unknown","triage":"unknown"}')
+CALENDAR_PF=$(echo "$PREFLIGHT_JSON" | jq -r '.calendar // "unknown"')
+SCOUT_PF=$(echo "$PREFLIGHT_JSON" | jq -r '.scout // "unknown"')
+TRIAGE_PF=$(echo "$PREFLIGHT_JSON" | jq -r '.triage // "unknown"')
+
 # --- Date helpers (cross-platform: macOS BSD date / Linux GNU date) ---
 if [[ "$(uname -s)" == "Darwin" ]]; then
   WEEK_NUM=$(date -j -f "%Y-%m-%d" "$DATE" "+%V" 2>/dev/null)
@@ -131,7 +137,11 @@ render_bot_qa() {
     echo
     echo "*Полный отчёт: \`$file\`*"
   else
-    echo "**Дельта:** нет данных (отчёт за $DATE отсутствует)"
+    if [ "${TRIAGE_PF:-unknown}" = "fail" ]; then
+      echo "**Дельта:** ⚠️ Отчёт feedback-triage за $DATE отсутствует. Scheduler, вероятно, не запущен (простой ≥1 дня)."
+    else
+      echo "**Дельта:** нет данных (отчёт за $DATE отсутствует)"
+    fi
     echo
     echo "| Метрика | Значение |"
     echo "|---------|----------|"
@@ -147,13 +157,24 @@ render_iwe_status() {
   echo "| Подсистема | Статус | Детали |"
   echo "|------------|--------|--------|"
 
-  # Scheduler report
-  local sched_file
-  sched_file="$IWE/DS-agent-workspace/scheduler/reports/SchedulerReport $DATE.md"
-  if [ -f "$sched_file" ]; then
-    echo "| Scheduler | 🟢 | отчёт за $DATE |"
+  # Per-role launchd agents (старый com.exocortex.scheduler отключён с марта 2026)
+  # Проверяем exit-status ключевых per-role агентов через launchctl list
+  if command -v launchctl &>/dev/null; then
+    local agents_bad=""
+    for agent in com.strategist.morning com.strategist.notereview com.pulse.daily com.aisystant.profiler.recalculate; do
+      local line status
+      line=$(launchctl list 2>/dev/null | awk -v a="$agent" '$3==a{print}')
+      [ -z "$line" ] && { agents_bad="$agents_bad $agent(missing)"; continue; }
+      status=$(echo "$line" | awk '{print $2}')
+      [ "$status" != "0" ] && [ "$status" != "-" ] && agents_bad="$agents_bad $agent(exit=$status)"
+    done
+    if [ -z "$agents_bad" ]; then
+      echo "| LaunchAgents | 🟢 | per-role агенты OK |"
+    else
+      echo "| LaunchAgents | 🟡 |${agents_bad} |"
+    fi
   else
-    echo "| Scheduler | 🟡 | нет отчёта на $DATE |"
+    echo "| LaunchAgents | ⚪ | launchctl недоступен |"
   fi
 
   # template-sync (FMT last commit)
@@ -166,14 +187,28 @@ render_iwe_status() {
   fi
 
   # Scout findings
-  local scout_dir="$IWE/DS-agent-workspace/scout/results/$YEAR/$MM/$DD"
-  if [ -d "$scout_dir" ]; then
-    local findings=0 captures=0
-    [ -f "$scout_dir/report.md" ] && findings=$(grep -c '^### ' "$scout_dir/report.md" 2>/dev/null || echo 0)
-    [ -f "$scout_dir/capture-candidates.md" ] && captures=$(grep -c '^### ' "$scout_dir/capture-candidates.md" 2>/dev/null || echo 0)
-    echo "| Scout | 🟢 | $findings находок, $captures capture-кандидатов |"
+  if [ "${SCOUT_PF:-unknown}" = "ok" ]; then
+    local scout_dir="$IWE/DS-agent-workspace/scout/results/$YEAR/$MM/$DD"
+    if [ -d "$scout_dir" ]; then
+      local findings=0 captures=0
+      [ -f "$scout_dir/report.md" ] && findings=$(grep -c '^### ' "$scout_dir/report.md" 2>/dev/null || echo 0)
+      [ -f "$scout_dir/capture-candidates.md" ] && captures=$(grep -c '^### ' "$scout_dir/capture-candidates.md" 2>/dev/null || echo 0)
+      echo "| Scout | 🟢 | $findings находок, $captures capture-кандидатов |"
+    else
+      echo "| Scout | 🟡 | нет отчёта на $DATE |"
+    fi
+  elif [ "${SCOUT_PF:-unknown}" = "fail" ]; then
+    local last_log
+    last_log=$(ls -t "$IWE/DS-autonomous-agents/logs/scout-"*.log 2>/dev/null | head -1 || echo "")
+    if [ -n "$last_log" ]; then
+      local last_date
+      last_date=$(basename "$last_log" | grep -oE '[0-9]{4}-[0-9]{2}-[0-9]{2}')
+      echo "| Scout | 🔴 | нет отчёта на $DATE. Последний лог: $last_date (>20 дней простоя) — диагностика службы |"
+    else
+      echo "| Scout | 🔴 | нет отчёта на $DATE. Логи не найдены — служба не настроена |"
+    fi
   else
-    echo "| Scout | 🟡 | нет отчёта на $DATE |"
+    echo "| Scout | 🟡 | статус Scout не определён (preflight unavailable) |"
   fi
 
   # gate_log активность (Ф1 проверка)
