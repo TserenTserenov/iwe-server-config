@@ -77,9 +77,26 @@ else
   fi
 fi
 
+# --- active-wp.md stale check ---
+MEMORY_STATUS="ok"
+ACTIVE_WP="$IWE/DS-my-strategy/current/active-wp.md"
+if [ -f "$ACTIVE_WP" ]; then
+  if stat -f%m "$ACTIVE_WP" > /dev/null 2>&1; then
+    AGE_DAYS=$(( ( $(date +%s) - $(stat -f%m "$ACTIVE_WP") ) / 86400 ))
+  else
+    AGE_DAYS=$(( ( $(date +%s) - $(stat -c%Y "$ACTIVE_WP") ) / 86400 ))
+  fi
+  if [ "$AGE_DAYS" -gt 7 ]; then
+    MEMORY_STATUS="stale"
+  fi
+else
+  MEMORY_STATUS="missing"
+fi
+
 # Output unified JSON
 jq -n \
   --arg calendar "$CALENDAR_STATUS" \
   --arg scout "$SCOUT_STATUS" \
   --arg triage "$TRIAGE_STATUS" \
-  '{calendar: $calendar, scout: $scout, triage: $triage}'
+  --arg memory "$MEMORY_STATUS" \
+  '{calendar: $calendar, scout: $scout, triage: $triage, memory: $memory}'

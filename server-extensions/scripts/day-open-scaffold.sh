@@ -27,6 +27,7 @@ PREFLIGHT_JSON=$(bash "$IWE/scripts/day-open-preflight.sh" "$DATE" "$CONFIG" 2>/
 CALENDAR_PF=$(echo "$PREFLIGHT_JSON" | jq -r '.calendar // "unknown"')
 SCOUT_PF=$(echo "$PREFLIGHT_JSON" | jq -r '.scout // "unknown"')
 TRIAGE_PF=$(echo "$PREFLIGHT_JSON" | jq -r '.triage // "unknown"')
+MEMORY_PF=$(echo "$PREFLIGHT_JSON" | jq -r '.memory // "unknown"')
 
 # --- Date helpers (cross-platform: macOS BSD date / Linux GNU date) ---
 if [[ "$(uname -s)" == "Darwin" ]]; then
@@ -219,6 +220,15 @@ render_iwe_status() {
     echo "| gate_log | 🟢 | $recent записей за $DATE (Ф1 WP-264) |"
   else
     echo "| gate_log | 🟡 | $gate_log не найден |"
+  fi
+
+  # active-wp freshness
+  if [ "${MEMORY_PF:-unknown}" = "ok" ]; then
+    echo "| active-wp | 🟢 | актуален (<7 дней) |"
+  elif [ "${MEMORY_PF:-unknown}" = "stale" ]; then
+    echo "| active-wp | 🟡 | устарел (>7 дней) — обновить через build-active-wp.py |"
+  else
+    echo "| active-wp | ⚪ | статус не определён |"
   fi
 
   # update.sh check (FMT)
