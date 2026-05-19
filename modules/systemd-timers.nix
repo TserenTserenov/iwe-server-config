@@ -263,6 +263,7 @@ in
           "*-*-* 18:00:00"
           "*-*-* 21:00:00"
           "*-*-* 23:00:00"
+          "Sun *-*-* 23:50:00 Europe/Moscow"  # autonomous week-close (если не было ручного)
         ];
         Persistent = true;  # catch-up если сервер был недоступен
       };
