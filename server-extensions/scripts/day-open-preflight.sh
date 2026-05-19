@@ -32,27 +32,40 @@ else
   CALENDAR_STATUS="fail"
 fi
 
-# --- Scout: check latest log ---
+# --- Scout: check backlog + latest log ---
 SCOUT_STATUS="unknown"
+BACKLOG_FILE="$IWE/DS-agent-workspace/scout/backlog.yaml"
+HAS_PENDING=false
+if [ -f "$BACKLOG_FILE" ] && grep -q "status: pending" "$BACKLOG_FILE" 2>/dev/null; then
+  HAS_PENDING=true
+fi
+
 SCOUT_LOG=$(ls -t "$IWE/DS-autonomous-agents/logs/scout-"*.log 2>/dev/null | head -1 || echo "")
 if [ -n "$SCOUT_LOG" ]; then
   LOG_DATE=$(basename "$SCOUT_LOG" | grep -oE '[0-9]{4}-[0-9]{2}-[0-9]{2}' || echo "")
   if [ "$LOG_DATE" = "$DATE" ]; then
+    SCOUT_STATUS="ok"
+  elif [ "$HAS_PENDING" = "false" ]; then
+    # Нет заданий в backlog — отсутствие лога = норма (Scout вышел с NO_TASKS)
     SCOUT_STATUS="ok"
   else
     SCOUT_STATUS="fail"
     if [ -n "${TELEGRAM_BOT_TOKEN:-}" ] && [ -n "${TELEGRAM_CHAT_ID:-}" ]; then
       curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
         -H "Content-Type: application/json" \
-        -d "{\"chat_id\":\"${TELEGRAM_CHAT_ID}\",\"text\":\"🚨 Scout silent failure: last log $LOG_DATE (expected $DATE)\"}" > /dev/null
+        -d "{\"chat_id\":\"${TELEGRAM_CHAT_ID}\",\"text\":\"🚨 Scout silent failure: last log $LOG_DATE (expected $DATE), backlog has pending tasks\"}" > /dev/null
     fi
   fi
 else
-  SCOUT_STATUS="fail"
-  if [ -n "${TELEGRAM_BOT_TOKEN:-}" ] && [ -n "${TELEGRAM_CHAT_ID:-}" ]; then
-    curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
-      -H "Content-Type: application/json" \
-      -d "{\"chat_id\":\"${TELEGRAM_CHAT_ID}\",\"text\":\"🚨 Scout silent failure: no logs found at all\"}" > /dev/null
+  if [ "$HAS_PENDING" = "false" ]; then
+    SCOUT_STATUS="ok"
+  else
+    SCOUT_STATUS="fail"
+    if [ -n "${TELEGRAM_BOT_TOKEN:-}" ] && [ -n "${TELEGRAM_CHAT_ID:-}" ]; then
+      curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+        -H "Content-Type: application/json" \
+        -d "{\"chat_id\":\"${TELEGRAM_CHAT_ID}\",\"text\":\"🚨 Scout silent failure: no logs found at all, backlog has pending tasks\"}" > /dev/null
+    fi
   fi
 fi
 
