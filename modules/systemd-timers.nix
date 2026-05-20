@@ -665,6 +665,37 @@ in
     };
 
     # =========================================================
+    # 10d. ONBOARDING CONTROLLER (WP-346)
+    # =========================================================
+    # SC: DP.SC.151, Role: DP.ROLE.046 profil Onboarding, WP-343.
+    # 3x/den: 05:30, 12:00, 18:00 MSK.
+    # Env: ONBOARDING_CONTROLLER_URL, BOT_NOTIFY_URL, INTERNAL_NOTIFY_SECRET (v /etc/iwe/env).
+
+    systemd.services."iwe-onboarding-controller" = {
+      description = "IWE Onboarding Controller (R2, 3x/day)";
+      unitConfig  = commonUnitConfig;
+      serviceConfig = commonServiceConfig // {
+        ExecStart   = "${pythonForIWE}/bin/python3 ${iwe}/DS-IT-systems/iwe-server/scripts/onboarding_controller.py";
+        WorkingDirectory = "${iwe}/DS-IT-systems/iwe-server/scripts";
+        TimeoutSec  = 300;
+      };
+      path = commonPath;
+      environment = commonEnv;
+    };
+
+    systemd.timers."iwe-onboarding-controller" = {
+      wantedBy    = [ "timers.target" ];
+      description = "IWE Onboarding Controller 05:30/12:00/18:00 MSK";
+      timerConfig = {
+        OnCalendar = [
+          "*-*-* 05:30:00 Europe/Moscow"
+          "*-*-* 12:00:00 Europe/Moscow"
+          "*-*-* 18:00:00 Europe/Moscow"
+        ];
+        Persistent = true;
+      };
+    };
+
     # НЕ МИГРИРОВАНО: com.exocortex.pomodoro-alert
     # =========================================================
     # pomodoro-alert.py использует macOS Notification Center / osascript.
