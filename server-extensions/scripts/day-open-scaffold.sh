@@ -380,7 +380,11 @@ $(render_scout)
 <details>
 <summary><b>Контент-план</b></summary>
 
-<!-- PENDING: content — 1-3 темы из стратегии маркетинга + draft-list. Источник: DS-my-strategy/drafts/ или Strategy.md. -->
+**Стратегия:** <!-- PENDING: 1 строка из Strategy.md (пример: club → Telegram → Дзен/Habr, N постов/нед) -->
+**TTL просрочены:** <!-- PENDING: D-NNN (истёк YYYY-MM-DD), ... или «нет просроченных» -->
+**TTL скоро:** <!-- PENDING: D-NNN (истекает YYYY-MM-DD, через N дн), ... или «нет» -->
+
+<!-- PENDING: content — таблица 1-3 тем из плана публикаций W{N}. Источник: WeekPlan или Strategy.md. -->
 
 </details>
 
