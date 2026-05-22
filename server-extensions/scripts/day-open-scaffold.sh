@@ -378,6 +378,13 @@ $(render_scout)
 </details>
 
 <details>
+<summary><b>📚 KE-кандидаты (Knowledge Extraction)</b></summary>
+
+<!-- PENDING: ke_candidates — bash: grep -rl "status: pending-review" DS-my-strategy/inbox/extraction-reports/ | wc -l. Если 0 → удалить секцию. Если >0 → таблица файлов + SLA DP.SC.004 ≤24ч → запустить /apply-captures -->
+
+</details>
+
+<details>
 <summary><b>Контент-план</b></summary>
 
 **Стратегия:** <!-- PENDING: 1 строка из Strategy.md (пример: club → Telegram → Дзен/Habr, N постов/нед) -->
