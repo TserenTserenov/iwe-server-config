@@ -212,6 +212,22 @@ render_iwe_status() {
     echo "| Scout | 🟡 | статус Scout не определён (preflight unavailable) |"
   fi
 
+  # Scheduler / feedback-triage (healthcheck)
+  local triage_file="$IWE/DS-agent-workspace/scheduler/feedback-triage/$DATE.md"
+  if [ -f "$triage_file" ]; then
+    echo "| Scheduler/триаж | 🟢 | отчёт за $DATE присутствует |"
+  else
+    local last_triage
+    last_triage=$(ls -t "$IWE/DS-agent-workspace/scheduler/feedback-triage/"*.md 2>/dev/null | head -1 || echo "")
+    if [ -n "$last_triage" ]; then
+      local last_triage_date
+      last_triage_date=$(basename "$last_triage" .md)
+      echo "| Scheduler/триаж | 🔴 | отчёт за $DATE отсутствует. Последний: $last_triage_date — проверить scheduler |"
+    else
+      echo "| Scheduler/триаж | 🔴 | отчёты feedback-triage не найдены — проверить scheduler |"
+    fi
+  fi
+
   # gate_log активность (Ф1 проверка)
   local gate_log="$IWE/.claude/logs/gate_log.jsonl"
   if [ -f "$gate_log" ]; then
@@ -371,6 +387,9 @@ $(render_iwe_status)
 </details>
 
 <details>
+<summary><b>Наработки агентов</b></summary>
+
+<details>
 <summary><b>Наработки Scout (разбор)</b></summary>
 
 $(render_scout)
@@ -381,6 +400,8 @@ $(render_scout)
 <summary><b>📚 KE-кандидаты (Knowledge Extraction)</b></summary>
 
 <!-- PENDING: ke_candidates — bash: grep -rl "status: pending-review" DS-my-strategy/inbox/extraction-reports/ | wc -l. Если 0 → удалить секцию. Если >0 → таблица файлов + SLA DP.SC.004 ≤24ч → запустить /apply-captures -->
+
+</details>
 
 </details>
 
@@ -414,8 +435,12 @@ $(if [[ "$SERVER_MODE" == "1" ]]; then
 else
   echo "<!-- PENDING: world — RSS feeds (curl) для news.topics из day-rhythm-config.yaml + WebSearch fallback. Каждый пункт = markdown URL (feedback_world_section_links.md). -->"
   echo ""
-  echo "- <!-- PENDING --> [заголовок](url) — источник"
-  echo "- <!-- PENDING --> [заголовок](url) — источник"
+  echo "> ⚠️ Data-contract: каждый тезис в секции «Мир» обязан содержать markdown-ссылку на источник [заголовок](url)."
+  echo "> Если источник недоступен — использовать placeholder [источник недоступен](n/a) и пометить 🔴 в «Требует внимания»."
+  echo ""
+  echo "**AI/LLM:** <!-- PENDING --> [заголовок](url) · [заголовок](url)"
+  echo "**Инженерия:** <!-- PENDING --> [заголовок](url) · [заголовок](url)"
+  echo "**Мировые события:** <!-- PENDING --> [заголовок](url) · [заголовок](url)"
 fi)
 
 </details>
@@ -451,7 +476,8 @@ $(render_video)
 <details>
 <summary><b>Требует внимания</b></summary>
 
-<!-- PENDING: attention — собрать из: (1) carry-over WP, (2) IWE-светофор 🟡/🔴, (3) Scout не проверен, (4) обновления Base/IWE, (5) urgent feedback бота, (6) застрявшие заметки. Если пусто — написать «—» или удалить секцию. -->
+<!-- PENDING: attention — собрать из: (1) carry-over WP, (2) IWE-светофор 🟡/🔴, (3) Scout не проверен, (4) обновления Base/IWE, (5) urgent feedback бота, (6) застрявшие заметки, (7) Мир без URL-ссылок, (8) Scheduler/триаж 🔴. Если пусто — написать «—» или удалить секцию. -->
+<!-- PENDING: self-check world — если секция «Мир» не содержит «](http» → добавить пункт: «🔴 Мир: данные без источников — требуется ручное заполнение URL» -->
 
 </details>
 
