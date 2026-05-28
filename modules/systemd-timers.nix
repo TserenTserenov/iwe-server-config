@@ -134,9 +134,15 @@ let
         echo "DIRTY: $repo (transient? grace 30s)"
         ${pkgs.coreutils}/bin/sleep 30
         if [ -n "$(${pkgs.git}/bin/git status --porcelain 2>/dev/null)" ]; then
-          echo "DIRTY: $repo (uncommitted changes — пропускаю pull)"
-          failed+=("$repo (dirty)")
-          continue
+          # Auto-stash for high-churn repos to keep pull working (WP- peer-session fix)
+          if [ "$repo" = "DS-agent-workspace" ] || [ "$repo" = "DS-ecosystem-development" ]; then
+            echo "STASH: $repo (auto-stash before pull)"
+            ${pkgs.git}/bin/git stash push -m "iwe-pull-repos auto-stash $(${pkgs.coreutils}/bin/date '+%Y-%m-%d %H:%M')"
+          else
+            echo "DIRTY: $repo (uncommitted changes — пропускаю pull)"
+            failed+=("$repo (dirty)")
+            continue
+          fi
         fi
         echo "RECOVERED: $repo (был транзиентный dirty, продолжаю pull)"
       fi
