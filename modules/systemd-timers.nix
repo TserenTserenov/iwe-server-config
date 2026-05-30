@@ -131,18 +131,21 @@ let
         # knowledge-mcp reindex и т.п.) могут оставлять untracked/modified файлы на
         # секунды до собственного коммита. Ждём 30s и проверяем повторно — если всё
         # ещё dirty, считаем настоящим локальным изменением и алертим.
+        # Auto-stash для двух репо удалён (WP-7 WD, 2026-05-30) — он маскировал
+        # broken auto-commit (f70e466 regression) и накапливал бы stash@{N}.
+        # Истинный fix — починить writer (DS-agent-workspace auto-commit.sh) и
+        # gitignore (DS-ecosystem-development) — см. runbook docs/runbooks/watchdog-dirty-alert.md.
         echo "DIRTY: $repo (transient? grace 30s)"
         ${pkgs.coreutils}/bin/sleep 30
         if [ -n "$(${pkgs.git}/bin/git status --porcelain 2>/dev/null)" ]; then
-          # Auto-stash for high-churn repos to keep pull working (WP- peer-session fix)
-          if [ "$repo" = "DS-agent-workspace" ] || [ "$repo" = "DS-ecosystem-development" ]; then
-            echo "STASH: $repo (auto-stash before pull)"
-            ${pkgs.git}/bin/git stash push -m "iwe-pull-repos auto-stash $(${pkgs.coreutils}/bin/date '+%Y-%m-%d %H:%M')"
-          else
-            echo "DIRTY: $repo (uncommitted changes — пропускаю pull)"
-            failed+=("$repo (dirty)")
-            continue
-          fi
+          # Включаем `git status --porcelain` вывод (первые 5 путей) в failed[],
+          # чтобы TG-алерт сразу показывал ЧТО dirty, а не только факт dirty.
+          # head -3 чтобы при worst-case (15 dirty repos) не упереться в TG message limit ~4096 chars
+          dirty_paths=$(${pkgs.git}/bin/git status --porcelain 2>/dev/null | ${pkgs.coreutils}/bin/head -3 | ${pkgs.coreutils}/bin/tr '\n' '|')
+          dirty_paths="''${dirty_paths%|}"
+          echo "DIRTY: $repo (uncommitted changes — пропускаю pull): $dirty_paths"
+          failed+=("$repo (dirty: $dirty_paths)")
+          continue
         fi
         echo "RECOVERED: $repo (был транзиентный dirty, продолжаю pull)"
       fi
