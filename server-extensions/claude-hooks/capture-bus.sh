@@ -1,6 +1,6 @@
 #!/bin/bash
 # capture-bus.sh
-# see DP.SC.025 (capture-bus service clause), DP.ROLE.001#R29 (Детектор)
+# see DP.SC.025 (capture-bus service clause), DP.ROLE.001#R47 (Детектор)
 # Dispatcher для capture-механизма. Вызывается harness на PostToolUse / Stop / ...
 # Source config/capture-detectors.sh → запускает enabled детекторы последовательно.
 # Каждый детектор: stdin = harness JSON, stdout = event JSON (или пусто), exit 0.
