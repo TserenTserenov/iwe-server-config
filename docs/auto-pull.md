@@ -61,7 +61,7 @@ PACK-personal                      # Pack-источник для PACK-personal-
 
 - **DS-my-strategy** — почти всегда DIRTY из-за `iwe-sync-fleeting-notes.timer` (каждые 2 мин правит `inbox/fleeting-notes.md`). Точечная синхронизация уже делается через `sync-files.sh`. **Mini-debt:** расширить `sync-files.sh` на `inbox/WP-*.md` и `current/*.md`.
 - **FMT-exocortex-template** — на сервере не git-репо (runtime-копия, обновляется через template-sync flow).
-- **PACK-MIM, PACK-agent-rules, PACK-autonomous-agents, PACK-digital-platform, PACK-ecosystem, PACK-education, PACK-verification** — не клонированы на сервер. **PACK-digital-platform склонирован 7 мая** в рамках S-B (для pack-project), может быть добавлен в pullScript после первого штатного цикла. Остальные — по мере появления потребителей runtime.
+- **PACK-MIM, PACK-agent-rules, PACK-autonomous-agents, PACK-digital-platform, PACK-ecosystem, PACK-verification** — не клонированы на сервер. **PACK-digital-platform склонирован 7 мая** в рамках S-B (для pack-project), может быть добавлен в pullScript после первого штатного цикла. Остальные — по мере появления потребителей runtime.
 
 ## Расписание
 
