@@ -75,7 +75,13 @@ TRIAGE_FILE="$IWE/DS-agent-workspace/scheduler/feedback-triage/$DATE.md"
 if [ -f "$TRIAGE_FILE" ]; then
   TRIAGE_STATUS="ok"
 else
-  TRIAGE_STATUS="fail"
+  # Grace window: generator runs at 00:01 EEST, catch-up may be delayed
+  CURRENT_HOUR=$(date +%H)
+  if [ "$CURRENT_HOUR" -lt 6 ] || { [ "$CURRENT_HOUR" -eq 6 ] && [ "$(date +%M)" -lt 30 ]; }; then
+    TRIAGE_STATUS="pending"
+  else
+    TRIAGE_STATUS="fail"
+  fi
   YESTERDAY=""
   if date -v-1d +%Y-%m-%d > /dev/null 2>&1; then
     YESTERDAY=$(date -v-1d +%Y-%m-%d)
