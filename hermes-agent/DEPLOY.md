@@ -56,9 +56,22 @@ Railway проверяет: `GET /health` → 200.
 
 После деплоя Hermes доступен на:
 ```
-https://hermes-agent.{railway-domain}.railway.app/v1/hermes/invoke
+https://hermes-agent-production-0d5c.up.railway.app/v1/hermes/invoke
 POST { "message": "...", "user_id": "...", "session_id": "..." }
 ```
+
+Healthcheck: `GET https://hermes-agent-production-0d5c.up.railway.app/health`
+
+### 7. Ключ для gateway-mcp
+
+Установить в gateway-mcp (`peaceful-vision` → `gateway-mcp` сервис):
+```
+HERMES_RUNTIME_URL=https://hermes-agent-production-0d5c.up.railway.app
+HERMES_RUNTIME_TIMEOUT=25000
+HERMES_API_KEY=5a279a14e6869b7775d515ed67394b0ce42e73ef85d10f18a92e285eae3e672f
+```
+
+`API_SERVER_KEY` (уже в hermes-agent сервисе) = `HERMES_API_KEY` в gateway-mcp.
 
 ## Варианты развёртывания
 
