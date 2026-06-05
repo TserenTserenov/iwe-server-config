@@ -132,6 +132,31 @@ render_video() {
   fi
 }
 
+# DOC5 (WP-7): секция «Мир» рендерится только при news.enabled: true.
+# При false — секция опускается ЦЕЛИКОМ (не «нет данных», не «выключено»). Включит флаг → вернётся.
+render_world() {
+  local enabled
+  enabled=$(read_yaml "news.enabled")
+  [ "$enabled" != "True" ] && return 0
+  echo "<details>"
+  echo "<summary><b>Мир</b></summary>"
+  echo ""
+  bash "$IWE/scripts/server-news.sh" "$CONFIG" 2>/dev/null || {
+    echo "<!-- PENDING: world — RSS feeds недоступны (server-news.sh завершился с ошибкой). Каждый пункт = markdown URL. -->"
+    echo ""
+    echo "> ⚠️ Data-contract: каждый тезис в секции «Мир» обязан содержать markdown-ссылку на источник [заголовок](url)."
+    echo "> Если источник недоступен — использовать placeholder [источник недоступен](n/a) и пометить 🔴 в «Требует внимания»."
+    echo ""
+    echo "**AI/LLM:** <!-- PENDING --> [заголовок](url) · [заголовок](url)"
+    echo "**Инженерия:** <!-- PENDING --> [заголовок](url) · [заголовок](url)"
+    echo "**Мировые события:** <!-- PENDING --> [заголовок](url) · [заголовок](url)"
+  }
+  echo ""
+  echo "**Вывод:** <!-- PENDING: news-lens — 2-4 предложения: какие из этих новостей релевантны активным РП (WP-350, WP-330, WP-351 и др.). Использовать контекст WeekPlan + WP-Registry. -->"
+  echo ""
+  echo "</details>"
+}
+
 # --- Section: Здоровье платформы (feedback-triage report) ---
 render_bot_qa() {
   local file="$IWE/DS-agent-workspace/scheduler/feedback-triage/$DATE.md"
@@ -511,23 +536,7 @@ $(render_scout)
 
 </details>
 
-<details>
-<summary><b>Мир</b></summary>
-
-$(bash "$IWE/scripts/server-news.sh" "$CONFIG" 2>/dev/null || {
-  echo "<!-- PENDING: world — RSS feeds недоступны (server-news.sh завершился с ошибкой). Каждый пункт = markdown URL. -->"
-  echo ""
-  echo "> ⚠️ Data-contract: каждый тезис в секции «Мир» обязан содержать markdown-ссылку на источник [заголовок](url)."
-  echo "> Если источник недоступен — использовать placeholder [источник недоступен](n/a) и пометить 🔴 в «Требует внимания»."
-  echo ""
-  echo "**AI/LLM:** <!-- PENDING --> [заголовок](url) · [заголовок](url)"
-  echo "**Инженерия:** <!-- PENDING --> [заголовок](url) · [заголовок](url)"
-  echo "**Мировые события:** <!-- PENDING --> [заголовок](url) · [заголовок](url)"
-})
-
-**Вывод:** <!-- PENDING: news-lens — 2-4 предложения: какие из этих новостей релевантны активным РП (WP-350, WP-330, WP-351 и др.). Использовать контекст WeekPlan + WP-Registry. -->
-
-</details>
+$(render_world)
 
 <details>
 <summary><b>Контекст недели (W$WEEK_NUM)</b></summary>
