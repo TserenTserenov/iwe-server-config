@@ -9,8 +9,8 @@
   description = "iwe-server-config — NixOS configuration for Tseren's «Цех» (tsekh-1)";
 
   inputs = {
-    # Nixpkgs 24.11 — текущий stable. Содержит NixOS modules, пакеты.
-    nixpkgs.url = "github:NixOS/nixpkgs/nixos-24.11";
+    # Nixpkgs 25.05 — обновлён с 24.11, нужен buildGo125Module для sops-nix.
+    nixpkgs.url = "github:NixOS/nixpkgs/nixos-25.05";
 
     # disko — декларативная разметка дисков (ZFS-зеркало двух NVMe).
     disko = {
