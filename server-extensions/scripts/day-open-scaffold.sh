@@ -430,7 +430,7 @@ render_scout() {
   fi
 }
 
-# --- Section: Итоги вчера (commits stats) ---
+# --- Section: Итоги вчера (commits stats + sessions) ---
 render_yesterday() {
   local total=0 repos=0
   for repo in "$IWE"/*/; do
@@ -443,6 +443,16 @@ render_yesterday() {
     fi
   done
   echo "**Коммиты:** $total в $repos репо | **РП закрыто:** <!-- PENDING: count из git log + WeekPlan -->"
+  echo
+  # Sessions consolidation (DAP1-B, WP-7): включить сессии вчерашнего дня
+  local sessions_file="$IWE/DS-my-strategy/current/sessions-today.md"
+  if [ -f "$sessions_file" ]; then
+    local file_date
+    file_date=$(grep -m1 'sessions-today:' "$sessions_file" 2>/dev/null | grep -oE '[0-9]{4}-[0-9]{2}-[0-9]{2}' || echo "")
+    if [ "$file_date" = "$YDAY" ]; then
+      tail -n +2 "$sessions_file" | grep -v '^<!--'
+    fi
+  fi
   echo
   echo "<!-- PENDING: ключевое — 1-3 значимых результата вчерашнего дня (требует синтеза из коммитов) -->"
 }
