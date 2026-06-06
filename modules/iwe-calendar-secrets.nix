@@ -63,7 +63,7 @@ in
     # Activation script: собрать credentials в один KEY=VALUE файл
     # который читает server-calendar.sh (SECRETS_FILE=~/.secrets/google-calendar)
     system.activationScripts.iweCalendarSecrets = {
-      deps = [ "sops" "users" "groups" ];
+      deps = [ "setupSecrets" "users" "groups" ];
       text = ''
         SECRETS_DIR="/home/${cfg.user}/.secrets"
         CRED_FILE="$SECRETS_DIR/google-calendar"
