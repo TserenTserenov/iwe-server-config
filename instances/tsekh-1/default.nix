@@ -24,6 +24,7 @@ in
     ../../modules/systemd-timers.nix
     ../../modules/claude-agents.nix
     ../../modules/iwe-extensions-sync.nix
+    ../../modules/iwe-calendar-secrets.nix  # DOC3 — Google Calendar read-only creds
     ./hardware-configuration.nix # генерируется при первой установке
   ];
 
@@ -79,4 +80,10 @@ in
   tsekh.claudeAgents = {
     enable = true;
   };
+
+  tsekh.calendarSecrets = {
+    enable = true;
+  };
+
+  sops.age.sshKeyPaths = [ "/etc/ssh/ssh_host_ed25519_key" ];
 }

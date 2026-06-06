@@ -1,0 +1,5 @@
+creation_rules:
+  - path_regex: secrets/.*\.yaml$
+    age:
+      - age1mvstjajmgt7k7ckp6xsuxr8erntxg90rkc97ug0xhd46aqnnz5yqusmhq2  # local mac (tserentserenov)
+      - age1zkqqz05j0kjxlc2vsdqjphjtusl7q0pzducwtk4k79fmudqww5ksf8qret  # tsekh-1 server (ssh_host_ed25519_key)
