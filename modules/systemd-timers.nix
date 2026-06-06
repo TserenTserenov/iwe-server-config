@@ -361,7 +361,7 @@ in
     systemd.timers."iwe-overnight-scout" = {
       wantedBy    = [ "timers.target" ];
       timerConfig = {
-        OnCalendar = "*-*-* 04:00:00";
+        OnCalendar = "*-*-* 04:00:00 Europe/Moscow";
         Persistent = true;
       };
     };
@@ -648,7 +648,7 @@ in
       wantedBy    = [ "timers.target" ];
       description = "IWE Аудитор — ежедн 04:45 МСК";
       timerConfig = {
-        OnCalendar = "*-*-* 04:45:00";
+        OnCalendar = "*-*-* 04:45:00 Europe/Moscow";
         Persistent = true;
       };
     };
