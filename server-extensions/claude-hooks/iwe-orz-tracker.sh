@@ -173,50 +173,10 @@ if $DAYCLOSE_TRIGGERED; then
   MULTIPLIER=$(echo "$AGENT_TEXT" | grep -oE '~[0-9]+\.[0-9]+x' | head -1 | \
     grep -oE '[0-9]+\.[0-9]+' || echo "0")
   TODAY=$(date +%Y-%m-%d)
-  DAYPLAN_PATH="$IWE_ROOT/DS-my-strategy/current/DayPlan $TODAY.md"
   PAYLOAD=$(python3 -c "
-import json, os, re
-wh = float('${WAKATIME_H}') if '${WAKATIME_H}' else 0.0
-mx = float('${MULTIPLIER}') if '${MULTIPLIER}' else 0.0
-
-# WP-299 Ф4 п.4: автоматический budget_closed_h из DayPlan
-# Парсим markdown-таблицу 'План на сегодня': суммируем колонку h для строк
-# со статусом done/closed/✅. Граничные случаи: '1-2' → берём верхнюю границу.
-budget_closed_h = 0.0
-dayplan_path = '''${DAYPLAN_PATH}'''
-if os.path.exists(dayplan_path):
-    try:
-        with open(dayplan_path, encoding='utf-8') as f:
-            content = f.read()
-        # Берём содержимое <details open><summary>План на сегодня — до закрывающего </details>
-        m = re.search(r'<summary><b>План на сегодня</b></summary>(.+?)</details>', content, re.DOTALL)
-        if m:
-            for line in m.group(1).split('\n'):
-                if not line.startswith('|') or '---' in line or 'Статус' in line or '🚦' in line:
-                    continue
-                cells = [c.strip() for c in line.split('|')[1:-1]]
-                if len(cells) < 5:
-                    continue
-                status = cells[4].lower() if len(cells) > 4 else ''
-                if not any(s in status for s in ['done', 'closed', '✅']):
-                    continue
-                h_cell = cells[3]
-                # Извлекаем число: '1.5' / '1-2' (берём max) / '~2' / '2h'
-                nums = re.findall(r'[0-9]+\.?[0-9]*', h_cell)
-                if nums:
-                    budget_closed_h += max(float(n) for n in nums)
-    except Exception:
-        budget_closed_h = 0.0  # silent fallback — не блокируем emit
-
-payload = {
-    'wakatime_h': wh,
-    'multiplier': mx,
-    'budget_closed_h': round(budget_closed_h, 2),
-    'date': '${TODAY}',
-    'session_id': '${SESSION_ID}',
-    'source': 'day-close-skill'
-}
-print(json.dumps(payload))
+import json
+wh = float('${WAKATIME_H}') if '${WAKATIME_H}' else 0.0; mx = float('${MULTIPLIER}') if '${MULTIPLIER}' else 0.0
+print(json.dumps({'wakatime_h': wh, 'multiplier': mx, 'date': '${TODAY}', 'session_id': '${SESSION_ID}', 'source': 'day-close-skill'}))
 " 2>/dev/null || echo '{}')
   "$EMIT" "day_close" "day-close-${TODAY}" "$PAYLOAD"
 fi

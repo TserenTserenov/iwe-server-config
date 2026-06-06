@@ -1,5 +1,49 @@
 ## Авторские проверки Week Close
 
+### WP-REGISTRY integrity audit (peer-session 2026-06-01-21)
+
+> **Цель:** L2 periodic reconciliation. Semantic check + аудит exemption-tag `[no-registry-touch]`.
+> Не блокирует Week Close — генерирует список расхождений и счётчик обходов.
+
+**Выполнить:**
+
+```bash
+# 1. Semantic check: status в реестре vs placement в inbox/archive
+SEM_OUT=$(python3 ~/IWE/DS-my-strategy/scripts/build-active-wp.py --semantic-check 2>&1 || true)
+SEM_COUNT=$(echo "$SEM_OUT" | grep -cE '^  - WP-' || true)
+echo "=== WP-REGISTRY semantic check ==="
+if [ "$SEM_COUNT" -gt 0 ]; then
+  echo "⚠️  Расхождений: $SEM_COUNT"
+  echo "$SEM_OUT" | grep -E '^  - WP-' | head -20
+  if [ "$SEM_COUNT" -gt 20 ]; then
+    echo "    (показано первые 20 из $SEM_COUNT)"
+  fi
+else
+  echo "✅ Semantic OK — статус в реестре соответствует placement в inbox/archive."
+fi
+
+# 2. Counter exemption-tag [no-registry-touch] за последние 7 дней
+# Scope: subject-only (--pretty='%s'). Иначе narrative-упоминания тега в body
+# создают false positive (см. lessons_grep_counter_narrative_false_positive.md).
+TAG_COUNT=$(cd ~/IWE/DS-my-strategy && git log --since="7 days ago" --pretty='%s' 2>/dev/null | grep -cF '[no-registry-touch]' || true)
+echo ""
+echo "=== Exemption tag [no-registry-touch] audit ==="
+echo "Использовано за 7 дней: $TAG_COUNT"
+if [ "$TAG_COUNT" -gt 2 ]; then
+  echo "⚠️  ВЫШЕ ПОРОГА (>2/неделя). Проверь причины:"
+  cd ~/IWE/DS-my-strategy && git log --since="7 days ago" --pretty='  %h %s' 2>/dev/null | grep -F '[no-registry-touch]'
+  echo ""
+  echo "    Если злоупотребление — обсудить в Strategy Session."
+fi
+```
+
+**Чеклист Week Close:**
+
+- [ ] Semantic-check выполнен. Расхождения (если >0) — добавить в Backlog или закрыть в Strategy Session.
+- [ ] Exemption-tag счётчик ≤2/неделя ИЛИ ≥3 → проверены причины (legit vs abuse).
+
+---
+
 ### Guard: канонический множитель (Ф8.3, WP-139)
 
 > **Цель:** Week Close НЕ завершается при 0x/пустом множителе — силент-фейл парсера невидим.
@@ -27,6 +71,31 @@ echo "$MULT_JSON"
 - Если только `weekly_budget_closed > 0` но `weekly_multiplier == 0` → WakaTime недоступен, не блокер (записать ∞/N/A).
 
 - [ ] **Guard выполнен** — `weekly_multiplier` не 0 (или задокументировано исключение)
+
+---
+
+### Linear sync — закрытие done-РП (Week Close)
+
+> **Цель:** привести Linear в соответствие с REGISTRY.md — закрыть задачи для всех ✅-РП.
+> **Не блокирует Close.** Ошибки Linear — предупреждение, не стоп.
+
+**Алгоритм:**
+
+1. Получить список done-РП из REGISTRY (номера WP-NNN)
+2. Для каждого — проверить статус в Linear через `mcp__ext-linear__search_issues`
+3. Закрыть те, что ещё `In Progress` / `Todo`, через `mcp__ext-linear__update_issue` (state → Done/Cancelled)
+
+```bash
+# Быстрая выборка done-РП из REGISTRY для передачи в Linear
+grep '✅' ~/IWE/DS-my-strategy/docs/WP-REGISTRY.md | \
+  grep -oP 'WP-\d+' | sort -t- -k2 -n | tail -30
+```
+
+**Чеклист:**
+
+- [ ] **Список done-РП получен** из REGISTRY
+- [ ] **Linear проверен** — найдены расхождения (или их нет)
+- [ ] **Linear обновлён** (или зафиксировано «Linear недоступен» с причиной)
 
 ---
 
@@ -151,3 +220,84 @@ fi
 - [ ] **Аудит запущен** (или пропущен с причиной)
 - [ ] **Verdict записан** в Week Close report
 - [ ] **Если ❌** — план починки сформулирован (реализация на следующей сессии или сразу)
+
+---
+
+### Agent Fault L3 — эскалация повторяющихся косяков (WP-316 L3-hook)
+
+> **Цель:** замкнуть петлю — косяки с ≥3 повторами предлагать пилоту записать в CLAUDE.md / distinctions.md.
+> **Не блокирует Close.** Решение — за пилотом, агент предлагает, не пишет автономно.
+
+**Шаг 1.** Запустить decay (убрать dormant записи без повтора >30д):
+```bash
+python3 ~/IWE/DS-my-strategy/scripts/iwe_checklist_memory.py decay
+```
+
+**Шаг 2.** Проверить кандидатов для эскалации (occurrences ≥ 3):
+```bash
+python3 ~/IWE/DS-my-strategy/scripts/iwe_checklist_memory.py escalation-check --threshold 3
+```
+
+**Правила эскалации:**
+- `critical` → предложить добавить в `CLAUDE.md` или `.claude/rules/distinctions.md` **немедленно**
+- `major` с n ≥ 3 → предложить добавить на **текущей неделе**
+- `minor` → только SQLite, без эскалации
+
+**Если пилот соглашается** — предложить формулировку правила; пилот добавляет в CLAUDE.md/distinctions.md сам (или явно говорит «добавь»). После добавления — обновить `context` записи в SQLite (добавить `"escalated_at": "YYYY-MM-DD"`).
+
+**Если пилот откладывает** — записать `"defer_until": "W{N+1}"` в context записи.
+
+**Dry-run scan старых feedback_*.md (необязательно, для метрики):**
+```bash
+python3 ~/IWE/DS-my-strategy/scripts/sync_feedback_to_memory.py 2>&1 | tail -1
+```
+
+**Чеклист:**
+
+- [ ] **Decay запущен** (dormant записи помечены)
+- [ ] **Escalation-check выполнен** (список критичных косяков показан пилоту)
+- [ ] **Решение пилота зафиксировано** (эскалировать / отложить) для каждого critical/major
+
+---
+
+### Session Memory Injector: тренд-отчёт фолтов (WP-316 Ф12, pattern-report)
+
+> **Цель:** один раз в неделю агент получает тренд-анализ своих паттернов косяков — не просто топ-3, а динамику: что растёт, что снижается, что новое.
+> Исполнитель: Claude Sonnet ($0.50, ~30s). Fallback: пропустить молча если DB недоступна.
+
+```bash
+# Pattern-report: тренд-анализ фолтов за неделю (Sonnet, WP-316 Ф12)
+bash ~/IWE/DS-autonomous-agents/scripts/session-memory-inject.sh week-close
+```
+
+**Если вывод содержит 🔴 паттерны с occurrences ≥ 3** → вынести в WeekReport отдельным пунктом «Паттерны косяков недели».
+
+**Если DB недоступна** → пропустить молча (не блокирует Week Close).
+
+- [ ] **Pattern-report получен** (или DB недоступна — задокументировать)
+
+---
+
+### Style Feedback Loop — доучивание агентов по стилю (WP-388 Ф10)
+
+> **Цель:** проанализировать лог нарушений стиля за неделю, сгенерировать fault-reminders для агентов с повторяющимися нарушениями.
+> **Не блокирует Close.** Генерирует HOT fault-reminder, который всплывёт у агента при следующем запуске.
+
+**Выполнить:**
+
+```bash
+# Анализ нарушений за 7 дней, порог = 3 повтора
+python3 ~/IWE/DS-my-strategy/scripts/style-feedback-loop.py --days 7 --threshold 3
+```
+
+**Логика:**
+- count >= 3 по одному правилу у одного агента -> создаётся fault-reminder в `exocortex/fault-reminders/`
+- Fault-reminder загружается агентом при старте сессии через `inject-fault-profile.sh`
+- Если count не падает 2 недели -> переформулировать правило (не наращивать inline)
+- Если count = 0 за 4 недели -> удалить fault-reminder
+
+**Чеклист:**
+
+- [ ] **Style feedback loop запущен** (или нет нарушений за неделю)
+- [ ] **Новые fault-reminders** (если созданы) зафиксированы в Week Close report
+

@@ -3,6 +3,14 @@ name: day-close
 description: "Протокол закрытия дня (Day Close). Алиас для /run-protocol close day — симметрия с /day-open."
 argument-hint: ""
 version: 1.0.0
+layer: L1
+status: active
+triggers:
+  slash: [/day-close]
+  phrases: []
+routing:
+  executor: haiku
+  deterministic: false
 ---
 
 # Day Close (протокол закрытия дня)
@@ -44,19 +52,19 @@ done
 
 **2b.** Обновить DayPlan `DS-my-strategy/current/DayPlan YYYY-MM-DD.md`: статусы ВСЕХ строк (РП + ad-hoc). Done → зачеркнуть.
 
-**2c.** Обновить `DS-my-strategy/docs/WP-REGISTRY.md`: статусы + даты.
+**2c.** Обновить `DS-my-strategy/docs/WP-REGISTRY.md`: статусы + даты + **done-форматирование**. Done-РП → зачеркнуть номер, приоритет, название, репо, бюджет (`~~...~~`); снять bold с названия; эмодзи ✅ НЕ зачёркивать (см. `.claude/rules/formatting.md §Таблицы с РП`). Тильду внутри ячеек заменить (`~6.5h` → `6.5h`).
 
 **2d.** Обновить `DS-my-strategy/inbox/open-sessions.log`: удалить строки закрытых сессий.
 
 **2e.** Governance-синхронизация: новые репо/сервисы за день? → REPOSITORY-REGISTRY, navigation.md, MAP.002.
 
-**2f. WeekReport — ФАКТЫ ДНЯ (ОПТ-5):** Если есть WeekReport W{N} YYYY-MM-DD.md:
+**2f. WeekReport — ФАКТЫ ДНЯ (новый шаг, ОПТ-5):** Если Week Open завершена (есть WeekReport W{N}.md):
   - Открыть `DS-my-strategy/current/WeekReport W{N} YYYY-MM-DD.md`
-  - Добавить новый раздел `<details><summary><b>Итоги {День} {Дата}</b></summary>` **перед** существующими `Итоги ...` (в обратном порядке дат: сегодня → старше). Проверять: вставлять сразу ниже `</details>` W18-summary, а не в конец файла.
-  - Содержимое: коммиты по репо, РП-статусы за день, мультипликатор
-  - **Правило ОПТ-5:** WeekPlan содержит ТОЛЬКО намерения, WeekReport содержит ТОЛЬКО факты
-  - **strategy_day (Пн без DayPlan):** Итоги пишутся как обычный день — только факты. Плановые строки (`strategy_day → план живёт в WeekPlan`) в WeekReport НЕ копировать. Позиция: Пн всегда в конец (самый старый день недели).
-  - Если файла нет (старый цикл) — fallback в WeekPlan, пометить «требует split при следующей strategy-session»
+  - Добавить новый раздел `<details><summary><b>Итоги {День} {Дата}</b></summary>` **перед** `Итоги Пн-Вс` (в обратном порядке дат: сегодня → старше)
+  - Содержимое: коммиты по репо, РП-статусы за день, carry-over блокеры
+  - Формат: смотреть существующие разделы в WeekReport (таблицы, метрики, мультипликатор)
+  - **Правило ОПТ-5:** WeekPlan содержит ТОЛЬКО намерения (план, carry-over на завтра), WeekReport содержит ТОЛЬКО факты (что было, коммиты, результаты)
+  - **strategy_day (Пн без DayPlan):** Итоги пишутся в WeekReport как обычный день — только факты (РП-результаты, коммиты, мультипликатор). Плановые строки (`strategy_day → план живёт в WeekPlan`) в WeekReport НЕ копировать. Позиция в обратной хронологии: если Пн — ставить в конец (самый старый день недели).
 
 **EXTENSION POINT (day-close checks):** `bash .claude/scripts/load-extensions.sh day-close checks` — exit 0 → `Read` каждый файл из вывода (alphabetic) → выполнить. Exit 1 → пропустить. Поддерживает `extensions/day-close.checks.md` И `extensions/day-close.checks.<suffix>.md`.
 
@@ -118,7 +126,7 @@ python3 {{HOME_DIR}}/IWE/DS-my-strategy/scripts/check-index-health.py
 "$IWE_SCRIPTS/day-close.sh"
 ```
 
-Скрипт выполняет: Linear sync, downstream sync (update.sh), backup (memory/ + CLAUDE.md).
+Скрипт выполняет: Linear sync, downstream sync (update.sh), backup (memory/ + CLAUDE.md + AGENTS.md).
 
 ### 6. Мультипликатор IWE
 
@@ -127,16 +135,22 @@ python3 {{HOME_DIR}}/IWE/DS-my-strategy/scripts/check-index-health.py
 **Алгоритм:**
 
 1. **WakaTime** — физическое время за день:
-   - Сначала CLI: `wakatime --today`
-   - Если CLI недоступен → **fallback Neon**: `SELECT payload->>'human_readable', payload->>'total_seconds' FROM public.domain_event WHERE event_type='coding_time' AND account_id='{DT_USER_ID}' AND external_id='wakatime:{DT_USER_ID}:{YYYY-MM-DD}'` (БД `learning`)
+   - Сначала CLI: `~/.wakatime/wakatime-cli --today` (CLI не в PATH, бинарник в `~/.wakatime/`)
+   - Если CLI недоступен → **fallback Neon**: `SELECT payload->>'human_readable', payload->>'total_seconds' FROM learning.public.domain_event WHERE event_type='coding_time' AND account_id='{DT_USER_ID}' AND external_id='wakatime:{DT_USER_ID}:{YYYY-MM-DD}'`
    - Если Neon тоже пуст (данные синхронизируются ночью) → пометить «pending Neon» и пересчитать при следующей сессии
    - Поле: `payload->>'human_readable'` (напр. «9 hrs»); `total_seconds` для мультипликатора
-2. **Бюджет закрыт** — сумма бюджетов по ВСЕМ РП за день:
+2. **Бюджет закрыт — считать ПО ФАКТУ, не по букве плана** (БЛОКИРУЮЩЕЕ, урок 27 мая):
+   - **Шаг 2.0 (обязательный prerequisite):** открыть `<governance-repo>/sessions/00-index.md`, отфильтровать строки за сегодня (`grep "$(date +%Y-%m-%d)"`), составить полный список peer-сессий с числом ходов. Без этого расчёт занижен ×2.
    - done → полный бюджет (или пропорционально фазам для зонтичных)
-   - partial → % выполнения × бюджет
+   - partial → % выполнения × бюджет; **если сверхплановая работа в плановом РП** (например, план Ф1, реализовано Ф1+Ф7) — засчитывать ФАКТ, не плановый бюджет
    - not started → 0h
-   - Мелкие РП (бюджет «—» / merged) → 0.25h, не 0
+   - **ad-hoc peer-сессии (без РП-метки в DayPlan): оценка по числу ходов**, НЕ заглушка 0.25h:
+     - 2-4 хода → 0.25-0.5h
+     - 5-7 ходов → 0.75-1h
+     - 8+ ходов → 1-1.5h
+   - **Мелкие правки/чистки без peer-сессии** (бюджет «—» / merged) → 0.25h
 3. **Мультипликатор дня** = Бюджет закрыт / WakaTime. Формат: `N.Nx`
+4. **Sanity check (БЛОКИРУЮЩЕЕ):** если получившийся мультипликатор <1.5x при дне с ≥10 peer-сессий — пересчитать (вероятен недосчёт ad-hoc или сверхпланового). Показать пилоту 3 метода (буква SKILL / по факту / компромисс) и спросить какой записывать. Урок: `lessons_multiplier_peer_sessions_uncounted.md`.
 
 ### 7. Черновик итогов (показать пользователю)
 
@@ -149,6 +163,7 @@ python3 {{HOME_DIR}}/IWE/DS-my-strategy/scripts/check-index-health.py
 **г) Не забыто?**
 - Незакоммиченные изменения: `${IWE_SCRIPTS}/check-dirty-repos.sh` (сканирует ВСЕ репо, включая вложенные DS-IT-systems/*, DS-MCP/*). Если есть грязные → закоммитить и запушить ДО продолжения.
 - **EXTENSION POINT (day-close checks):** `bash .claude/scripts/load-extensions.sh day-close checks` — exit 0 → `Read` каждый файл из вывода (alphabetic) → выполнить. Exit 1 → пропустить. Поддерживает `extensions/day-close.checks.md` И `extensions/day-close.checks.<suffix>.md`.
+- **Часы саморазвития (WP-310 Ф13c):** записан ли `/slot` за сегодня? Если у пользователя есть бот-аккаунт — спросить «Сколько часов саморазвития сегодня?», предложить кнопки 0/0.5/1/2/3/4 или свой ввод. После ответа: подсказать команду `/slot N` в @aist_pilot_me или @aist_me_bot (handler пишет slot_logged event с source='self_report_daily'). bh.inv обновится при следующем прогоне Аттестатора (04:35 МСК).
 - Незаписанные мысли? (спросить пользователя)
 - Обещания кому-то? (спросить пользователя)
 
@@ -170,11 +185,20 @@ python3 {{HOME_DIR}}/IWE/DS-my-strategy/scripts/check-index-health.py
 
 **Валидация «Завтра начать с» (ADR-207):** поле не пустое + каждый pending РП упомянут + каждый содержит конкретный next action (не «продолжить работу»).
 
+**Postcondition 9a (машинная проверка — НЕ пропускать):**
+```bash
+TODAY=$(date +%Y-%m-%d)
+grep -l "Итоги дня" ~/IWE/DS-my-strategy/archive/day-plans/DayPlan\ ${TODAY}.md 2>/dev/null \
+  | xargs grep -l "${TODAY}" 2>/dev/null \
+  | grep -q . && echo "9a OK" || echo "9a FAIL: итоги не найдены в DayPlan ${TODAY}"
+```
+Результат `9a FAIL` → шаг НЕ помечать completed, вернуться к записи.
+
 **9b.** Дописать сводку итогов в WeekReport (split, ОПТ-5 WP-297):
 - Файл: `DS-my-strategy/current/WeekReport W{N} YYYY-MM-DD.md` (дата = первый день недели)
 - Если файла нет (старый цикл) — fallback в WeekPlan, пометить «требует split в session-prep следующей недели»
 - Формат: `<details><summary><b>Итоги {день} {дата}</b></summary>...</details>`
-- Порядок: свежие итоги СВЕРХУ (обратная хронология). Проверять: вставлять сразу ниже `</details>` W18-summary, а не в конец файла.
+- Порядок: свежие итоги СВЕРХУ (обратная хронология). Проверять: вставлять сразу ниже `</details>` последнего W18-summary, а не в конец файла.
 - Содержание: таблица коммитов по репо, закрытые РП, продвинутые РП, мультипликатор
 
 **Postcondition 9b (машинная проверка — НЕ пропускать):**
@@ -213,7 +237,7 @@ python3 $HOME/IWE/.claude/scripts/rule-classifier.py
 - [ ] Все изменения закоммичены и запушены (по всем репо)
 - [ ] MEMORY.md: done-РП удалены, активные актуальны, drift-scan выполнен (шаг 4б)
 - [ ] Index Health Check (шаг 4в): `check-index-health.py` — все FAIL/WARN разобраны или помечены skip
-- [ ] WP-REGISTRY.md обновлён
+- [ ] WP-REGISTRY.md обновлён: статусы + done-форматирование (done-строки зачёркнуты, ✅ не зачёркнут)
 - [ ] WeekPlan обновлён (grep по номерам РП — ВСЕ упоминания)
 - [ ] DayPlan обновлён (статусы ВСЕХ строк: РП + ad-hoc)
 - [ ] open-sessions.log: строки закрытых сессий удалены
@@ -230,8 +254,8 @@ python3 $HOME/IWE/.claude/scripts/rule-classifier.py
 - [ ] Backup: `day-close.sh` выполнен
 - [ ] **Rule-engine FP-stats** (WP-272 Ф2.5): `python3 ~/IWE/.claude/scripts/fp-stats.py --date $(date +%Y-%m-%d)` → если есть `⚠️ REVISE` (FP > 20%) — записать в «Завтра начать с» правило + FP%. Флоу ревизии: `~/IWE/PACK-agent-rules/revision-flow.md`.
 - [ ] Верификация compliance: /verify запускался сегодня?
-- [ ] WakaTime + Мультипликатор: часы, бюджет, остаток недели
-- [ ] Итоги дня записаны в DayPlan
+- [ ] WakaTime + Мультипликатор: часы / **бюджет ПО ФАКТУ** (sessions/00-index.md перечислен; ad-hoc peer-сессии оценены по числу ходов; сверхплановая работа в плановом РП — по факту); остаток недели. Sanity check: мультипликатор <1.5x при ≥10 peer-сессий = пересчитать
+- [ ] Итоги дня записаны в DayPlan **(postcondition 9a: grep подтверждён)**
 - [ ] Handoff-валидация: «Завтра начать с» содержит ВСЕ pending РП с конкретным next action
 - [ ] Сводка итогов записана в WeekReport (`<details>`, обратная хронология) **(postcondition 9b: grep подтверждён)**
 - [ ] Новое репо → MAPSTRATEGIC.md + Strategy.md

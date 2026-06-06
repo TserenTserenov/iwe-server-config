@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# routing: helper  called-by=day-close  deterministic=true
+# see DP.SC.159, DP.ROLE.059
 # memory-validate.sh — валидация frontmatter memory/*.md (WP-217 Ф10.2)
 #
 # Проверяет: наличие frontmatter, обязательные поля, допустимые значения,

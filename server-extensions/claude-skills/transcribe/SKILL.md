@@ -2,6 +2,17 @@
 name: transcribe
 description: Транскрипция аудио/видео файлов через MLX Whisper (Apple Silicon). Использование: /transcribe path/to/file.mp3
 user_invocable: true
+version: 1.0.0
+layer: L3
+status: active
+triggers:
+  slash: [/transcribe]
+  phrases: []
+routing:
+  executor: script
+  deterministic: true
+  script_path: "scripts/iwe-transcribe.sh"
+  optimization_priority: 2
 ---
 
 # Транскрипция аудио/видео
@@ -37,19 +48,10 @@ python3 -m venv ~/.local/share/mlx-whisper/.venv-whisper
 ### Шаг 3: Транскрипция
 
 ```bash
-~/.local/share/mlx-whisper/.venv-whisper/bin/python -c "
-import mlx_whisper
-result = mlx_whisper.transcribe(
-    '<путь_к_файлу>',
-    path_or_hf_repo='$HOME/.local/share/mlx-whisper/mlx_models/large-v3',
-    language='ru',
-    word_timestamps=True
-)
-print(result['text'])
-"
+bash "$IWE_SCRIPTS/route-task.sh" --skill transcribe --args "<путь_к_файлу>"
 ```
 
-Если язык не русский — пользователь укажет, или убрать `language` для автодетекции.
+Если язык не русский — пользователь укажет, или скрипт автоматически детектирует.
 
 ### Шаг 4: Результат
 

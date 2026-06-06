@@ -2,6 +2,16 @@
 name: iwe-bug-report
 description: Сообщить об ошибке или проблеме платформы IWE. Создаёт GitHub issue в FMT-exocortex-template.
 argument-hint: "[описание проблемы]"
+version: 1.0.0
+layer: L1
+status: active
+triggers:
+  slash: [/iwe-bug-report]
+  phrases: []
+routing:
+  executor: script
+  deterministic: true
+  script_path: "scripts/iwe-bug-report.sh"
 ---
 
 # Отчёт об ошибке платформы IWE

@@ -132,7 +132,7 @@ render_video() {
   fi
 }
 
-# DOC5 (WP-7): секция «Мир» рендерится только при news.enabled: true.
+# DOC5/DOC10 (WP-7): секция «Мир» рендерится только при news.enabled: true.
 # При false — секция опускается ЦЕЛИКОМ (не «нет данных», не «выключено»). Включит флаг → вернётся.
 render_world() {
   local enabled
@@ -178,6 +178,40 @@ render_bot_qa() {
   fi
   echo
   echo "<!-- PENDING: smoke-tests — N passed/failed (если запущены до commit) -->"
+}
+
+# --- Section: Новые задачи в репозиториях (issue sweep, 2 дня) ---
+# Сигнальный канал из day-open/SKILL.md:54 (раньше был только в спеке, не в коде).
+# Ленивый: кэш 1ч + fallback при недоступности gh — не ломает pipeline (требование peer-сессии 2026-06-04-32).
+render_repo_issues() {
+  command -v gh >/dev/null 2>&1 || { echo "_gh CLI недоступен — обзор задач пропущен._"; return; }
+  local cache="/tmp/iwe-issue-sweep-$DATE.md"
+  if [ -f "$cache" ] && [ -n "$(find "$cache" -mmin -60 2>/dev/null)" ]; then
+    cat "$cache"; return
+  fi
+  if ! gh auth status >/dev/null 2>&1; then
+    echo "_gh не авторизован — обзор задач пропущен (проверьте \`gh auth login\`)._"; return
+  fi
+  local since
+  since=$(date -v-2d +%Y-%m-%d 2>/dev/null || date -d "2 days ago" +%Y-%m-%d 2>/dev/null)
+  [ -z "$since" ] && { echo "_не удалось вычислить дату фильтра — пропуск._"; return; }
+  local out="" any=0 repo slug rows
+  for repo in "$IWE"/*/; do
+    [ -d "${repo}.git" ] || continue
+    git -C "$repo" remote get-url origin 2>/dev/null | grep -qi github || continue
+    slug=$(basename "$repo")
+    rows=$( (cd "$repo" && gh issue list --state open --search "created:>=$since" \
+             --json number,title --jq '.[] | "| #\(.number) | \(.title) |"' 2>/dev/null) )
+    if [ -n "$rows" ]; then
+      out="${out}\n**${slug}:**\n\n| # | Заголовок |\n|---|---|\n${rows}\n"
+      any=1
+    fi
+  done
+  if [ "$any" = "1" ]; then
+    printf "%b" "$out" | tee "$cache"
+  else
+    echo "Новых задач за 2 дня нет." | tee "$cache"
+  fi
 }
 
 # --- Section: IWE за ночь (светофор) ---
@@ -327,7 +361,7 @@ auto_generated: true
 
 1. Проверить \`~/Library/LaunchAgents/\` на наличие plist
 2. \`bash $IWE/DS-my-strategy/scripts/install-launchd.sh\` для регистрации
-3. Запустить руками: \`bash $IWE/DS-IT-systems/DS-ai-systems/synchronizer/scripts/scheduler.sh --dry-run\`
+3. Запустить руками: \`bash \${IWE_SCHEDULER_PATH:-$IWE/scripts/scheduler.sh} --dry-run\`
 
 ## Auto-generation note
 
@@ -413,6 +447,52 @@ render_yesterday() {
   echo "<!-- PENDING: ключевое — 1-3 значимых результата вчерашнего дня (требует синтеза из коммитов) -->"
 }
 
+# --- Section: Compact Dashboard (WP-7 Block DOC) ---
+# Выводится в stdout ПОСЛЕ EOF-блока DayPlan через маркер ---COMPACT-DASHBOARD---
+# Читается агентом/пилотом как сводка дня; не входит в DayPlan-файл.
+render_compact_dashboard() {
+  echo ""
+  echo "---COMPACT-DASHBOARD---"
+  echo "## Compact Dashboard — $DAY_NUM $MONTH_RU $YEAR ($DOW_RU)"
+  echo ""
+
+  # Топ РП из sweep (первые 7)
+  local sweep_rows
+  sweep_rows=$(bash "$IWE/scripts/active-wp-sweep.sh" "$IWE/DS-my-strategy/inbox" "$IWE" 2>/dev/null \
+    | grep -E '^\| \*\*WP-' | head -7)
+  if [[ -n "$sweep_rows" ]]; then
+    echo "**Активные РП (top-7):**"
+    echo "$sweep_rows" | sed 's/| нет ([0-9]*д)/| нет активности/'
+    echo ""
+  fi
+
+  # Дедлайны из календаря (если preflight OK)
+  if [[ "$CALENDAR_PF" == "ok" ]]; then
+    echo "**Календарь:** доступен — запустить server-calendar.sh для деталей"
+  else
+    echo "**Календарь:** недоступен (${CALENDAR_PF})"
+  fi
+  echo ""
+
+  # Светофор — критические позиции
+  echo "**IWE за ночь:**"
+  echo "  Scheduler: $(launchctl list 2>/dev/null | grep -qE 'iwe\.(scheduler|feedback)' && echo '🟢' || echo '🔴 не запущен')"
+  local fpf_status
+  if [ -d "$IWE/FPF/.git" ] && git -C "$IWE/FPF" fetch --quiet 2>/dev/null; then
+    local behind; behind=$(git -C "$IWE/FPF" rev-list --count HEAD..origin/main 2>/dev/null || echo "?")
+    fpf_status=$( [ "$behind" = "0" ] && echo "🟢" || echo "🟡 новых: $behind" )
+  else
+    fpf_status="⚪ недоступен"
+  fi
+  echo "  FPF upstream: $fpf_status"
+  echo ""
+  echo "---END-COMPACT-DASHBOARD---"
+}
+
+# --- Pre-compute sweep list для инжекта в PENDING (избежать двойного вызова внутри heredoc) ---
+SWEEP_WP_LIST=$(bash "$IWE/scripts/active-wp-sweep.sh" "$IWE/DS-my-strategy/inbox" "$IWE" 2>/dev/null \
+  | grep -oE '\*\*WP-[0-9]+\*\*' | tr -d '*' | tr '\n' ' ' | sed 's/  */ /g' || true)
+
 # --- Output ---
 cat <<EOF
 ---
@@ -436,7 +516,9 @@ $(bash "$IWE/scripts/active-wp-sweep.sh" "$IWE/DS-my-strategy/inbox" "$IWE" 2>/d
 <details open>
 <summary><b>План на сегодня</b></summary>
 
-<!-- PENDING: today_plan — синтез из WeekPlan W$WEEK_NUM (carry-over из Day Close + in_progress РП + budget_spread). Применить mandatory_daily_wps + daily_checkpoint_wps из day-rhythm-config.yaml. KE-строка: bash $IWE/DS-my-strategy/scripts/ke-queue-stats.sh --dayplan-row (реальный бюджет, не литерал «1h»). -->
+<!-- PENDING: today_plan — синтез из WeekPlan W$WEEK_NUM (carry-over из Day Close + in_progress РП + budget_spread). Применить mandatory_daily_wps + daily_checkpoint_wps из day-rhythm-config.yaml. KE-строка: bash $IWE/DS-my-strategy/scripts/ke-queue-stats.sh --dayplan-row (реальный бюджет, не литерал «1h»).
+Active WPs to include (из sweep + WeekPlan union): $SWEEP_WP_LIST
+-->
 
 | 🚦 | # | РП | h | Статус | Результат |
 |----|---|-----|---|--------|-----------|
@@ -492,6 +574,10 @@ $(render_bot_qa)
 **IWE за ночь (светофор):**
 
 $(render_iwe_status)
+
+**Новые задачи в репозиториях (за 2 дня):**
+
+$(render_repo_issues)
 
 </details>
 
@@ -580,3 +666,5 @@ $(render_video)
 
 *Создан: $DATE (Day Open / day-open-scaffold.sh WP-264 Ф2)*
 EOF
+
+render_compact_dashboard

@@ -1,11 +1,24 @@
 ## Авторские поля отчёта Quick Close
 
-**Деплой бота:** не требуется (WP-222 — Pack-документация + agent-card sync, бот не затронут)
-**Ветки бота:** не трогали в эту сессию
-**Решения за сессию:** 4 (крупных: 2)
-- **Крупное #1:** WP-222 closed full — переформулирован из устаревшего технического (перенос Python→JS) в актуальный (синхронизация документации с фактом + архивация zombie-сервиса). 7 фаз + якорь миграции, ~4h actual vs 8h planned. Коммиты в 5 репо: `fc13f72` (tailor-mcp deprecation), `937e2bf`+`480da0d`+`e484c85` (DS-autonomous-agents agent docs + migration path), `d9dc9c6` (PACK-personal PD.SPEC.001), `38949dd`+`62b4c9d` (PACK-digital-platform DP.SC.020 + MCP-NAMESPACE), `7d13f520`+`8bc1bc13` (DS-my-strategy WP-222 close + WP-149 Block D)
-- **Крупное #2:** WP-149 Block D pending — миграция Портного на ИИ-агент-носителя зарегистрирована как новый блок зонтичного WP-149, не отдельный РП. Двойная привязка: WP-149 D = source-of-truth (роль/носитель), WP-150 Ф8 = pointer (use-case инфры). Блок blocked by WP-150 Ф6+Ф7 (ETA W21-W22)
-- **Решение АрхГейт #2:** digital-twin-mcp оставлен как machine identity (вариант C — alias status quo), переименование отложено до Q3+ из-за production-зависимостей (бот, gateway upstream registry, OAuth registrations)
-- **Урок (зафиксирован в HD #49):** MCP-сервис ≠ Роль ≠ Исполнитель — расширено из двойного различения до тройного. Эмпирический жизненный цикл Портного (30 мар → 6 мая) добавлен как кейс
-- **Capture в distinctions.md:** «Контракт-объект ≠ Способ доставки» — новое короткое правило (формат данных = Pack, способ получения = деталь реализации носителя)
-- **KE warning:** 10 pending-review extraction-reports в DS-my-strategy/inbox/extraction-reports/ — SLA 24h на /apply-captures или /defer-captures (вне scope текущей сессии, но предупреждение зафиксировано)
+**Сессия:** 6 июня 2026 — WP-330 cutover bug fix (Denis P + 2 пользователя)
+
+**Артефакты:**
+
+| Изменение | Где | Коммит |
+|---|---|---|
+| `_migrate_old_marathon_to_new()` — авто-миграция из старой системы | aist_bot pilot | `2c47a83` |
+| `bottleneck_slot='none'` sentinel + diagnose.py + progress.py fix | aist_bot pilot | `008a8a0` |
+| Smoke-тесты diagnose обновлены под 'none' sentinel | aist_bot pilot | `67477db` |
+| Cherry-picks на new-architecture | aist_bot new-arch | `9acb9a2`, `0f6da5f`, `c213eb0`, etc. |
+| Скрипт wp330-cutover-fix.py | neon-migrations | `2420325` |
+| Defer extraction-report 2026-06-06-inbox-check-2 | DS-my-strategy | `77a2b65d0` |
+| Урок: progress.py blind spot добавлен | memory/lessons_subagent_review_peer_complement.md | — |
+
+**Решения:**
+1. **Cutover без миграции** — при деплое новой системы марафона нужна миграция активных пользователей из `intern.marathon_status` → `marathon_progress`.
+2. **bottleneck_slot NOT NULL** — sentinel `'none'` вместо Python `None`. Все пути отображения обновить (diagnose.py + progress.py).
+3. **Субагент слепое пятно** — субагент-reviewer пропустил `progress.py`. Чек-лист: все пути отображения changed-значения.
+
+**Open items:** наблюдение за Denis утром 7 июня (получил ли урок дня 5)
+
+**Верификация:** Haiku R23 — финальный шаг.

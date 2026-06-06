@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# routing: utility  deterministic=true
+# see DP.SC.159, DP.ROLE.059
 # sync-strategy-files.sh — точечный sync inbox/WP-*.md и current/*.md для DS-my-strategy.
 #
 # WP-7 фаза S-C (7 мая 2026). Wrapper над `git fetch + git checkout origin/main -- $files`.

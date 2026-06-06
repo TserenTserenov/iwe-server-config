@@ -3,15 +3,22 @@ name: audit-docs
 description: "Аудит документации репо: детекция drift'а между кодом и docs, отчёт coverage по категориям. Запускается вручную или по triggered drift critical."
 argument-hint: "--repo <path> | ."
 version: 0.1.0
+layer: L3
+status: active
+triggers:
+  slash: [/audit-docs]
+  phrases: []
+routing:
+  executor: sonnet
+  deterministic: false
 ---
 
 # Audit Docs (R24 Аудитор)
 
-> **Роль:** R24 Аудитор (см. `PACK-digital-platform/pack/digital-platform/02-domain-entities/DP.ROLE.001-platform-roles.md`, строка R24 в таблице верификационных ролей; маппинг R24 = VR.R.002).
+> **Роль:** R24 Аудитор. Полное описание: `PACK-digital-platform/pack/digital-platform/02-domain-entities/DP.ROLE.024-auditor.md` (WP-224). Маппинг: R24 = VR.R.002.
 > **Метод:** R24 coverage по категориям + R23 pair-diff между парами `код файл ↔ docs файл`.
 > **Получатель отчёта:** владелец репо в другой временной позиции (категория 3 — внешняя проектная роль). Это аудит в строгом смысле — не автор кода, не ты сейчас.
->
-> **TODO-миграция:** после создания **WP-224** (полноценный `DP.ROLE.024-auditor.md`) — заменить прямую ссылку на строку R24 в `DP.ROLE.001` на ссылку на развёрнутую роль.
+> **Тип роли (DP.D.080):** R24 — контрольная роль. Read-only к аудитуемым артефактам. Отчёт = output-канал, не изменение аудитуемого.
 
 Аргументы: $ARGUMENTS
 

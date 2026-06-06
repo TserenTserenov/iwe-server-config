@@ -5,6 +5,15 @@ argument-hint: "[необязательно: override домена — knowledge
 experimental: true
 sunset: "после DONE WP-222 (Портной, ~июнь 2026) и WP-149 Ф6 (книга ЛР v3)"
 related: [WP-245, WP-222, WP-149, PD.FORM.089, PD.CAT.003, personal-guide-start]
+version: 1.0.0
+layer: L1
+status: active
+triggers:
+  slash: [/personal-guide-render]
+  phrases: []
+routing:
+  executor: sonnet
+  deterministic: false
 ---
 
 # Render персонального руководства
@@ -16,7 +25,7 @@ related: [WP-245, WP-222, WP-149, PD.FORM.089, PD.CAT.003, personal-guide-start]
 ## Контракт скилла
 
 - **Вход:** существующий GitHub-репо `personal-guide` под аккаунтом пилота (создаётся через `/personal-guide-start` или вручную; имя константно для всех пилотов — у каждого один личный аккаунт = один репо). Активная подписка «Бесконечное развитие» (DP.SC.112). Доступ к `dt_read_digital_twin`, `personal_write`.
-- **Выход:** 6 файлов (`README.md`, `profile.md`, `worldview.md`, `methods.md`, `weekly/<YYYY-Www>.md`, `daily/<YYYY-MM-DD>.md`) перезаписаны актуальной версией под текущий RCS+домен. Прежние weekly/daily при пересборке — в `history/` (не удаляются).
+- **Выход:** 6 файлов (`README.md`, `profile.md`, `worldview.md`, `methods.md`, `weekly/<YYYY-Www>.md`, `daily/<YYYY-MM-DD>.md`) перезаписаны актуальной версией под текущий RCS+домен. Прежние weekly/daily при пересборке — в `history/` (не удаляются). При первом запуске (`first-run`) дополнительно — раздача 5 скиллов в `.claude/skills/` пилотского репо (см. Шаг 6.7), чтобы они работали в любом канале Claude Code включая `claude.ai/code`.
 - **Время:** ≤5 мин на пересборку (без диалога), ≤15 мин с диалогом сбора недостающего профиля.
 - **Не делает:** не создаёт репо (это `/personal-guide-start`); не считает баллы (WP-109/WP-121); не запускает по расписанию (Портной, WP-222).
 
@@ -130,6 +139,8 @@ stage_raw = min(W.baseline, M1.baseline, M2.baseline, M4.baseline)
 
 Из «Блок → worldview.md» ступенной заготовки. Подставь `{phase}`. В конце +1 строка: «Мемы в работе на этой неделе: [dissatisfactions]».
 
+**В начало файла, до блока ступенной заготовки** — вставить открывающий нарратив 4 уровней превращения (источник: [PD.FORM.137 §2](`PACK-personal/pack/personal-development/02-domain-entities/formalizations/PD.FORM.137-narrative-4-levels.md`), таблица 4 уровней). Цитировать через включение таблицы с маркером `<!-- source: PD.FORM.137 §2 -->` (не копировать verbatim §2 целиком, только таблицу 4 уровней + 1-предложенческое определение). Это outcome-frame для входящего пилота; основной блок worldview.md (stage-frame) — для пилота уже внутри программы. На ступенях 1-2 без явного запроса не разворачивать §3 (двойственная роль) — это потолок Создателя, преждевременный для Случайного/Практикующего.
+
 ### 6.4. `methods.md`
 
 Из «Блок → methods.md» ступенной заготовки для конкретного bottleneck (выбери ветку). + таблица «Типы работ, в которые встраиваются методы» из доменной вставки.
@@ -141,6 +152,63 @@ stage_raw = min(W.baseline, M1.baseline, M2.baseline, M4.baseline)
 ### 6.6. `daily/<YYYY-MM-DD>.md`
 
 Сегодняшняя дата. Из «Блок → daily/…» ступенной заготовки.
+
+### 6.7. Раздача скиллов в `.claude/skills/` пилотского репо
+
+**Зачем:** скиллы (`/lesson`, `/lesson-close`, `/connect-guide`, `/personal-guide-render`, `/personal-guide-start`) живут в `~/IWE/.claude/skills/` платформы. При работе пилота в **claude.ai/code** (cloud sandbox) user-global `~/.claude/skills/` не пробрасывается. Чтобы скиллы работали в любом канале (VS Code, CLI, browser), нужно их положить в **сам репо** пилота.
+
+Идемпотентная проверка:
+1. Через `personal_search(source: "personal-guide", path: ".claude/skills/lesson/SKILL.md")` проверь, есть ли уже скилл в репо.
+2. Если нет ИЛИ если запуск `first-run` — записать пять скиллов:
+
+```python
+SKILLS_TO_DISTRIBUTE = [
+    "lesson/SKILL.md",
+    "lesson-close/SKILL.md",
+    "connect-guide/SKILL.md",
+    "personal-guide-render/SKILL.md",
+    "personal-guide-start/SKILL.md",
+]
+
+for skill_path in SKILLS_TO_DISTRIBUTE:
+    content = Read(f"~/IWE/.claude/skills/{skill_path}")
+    personal_write(
+        source="personal-guide",
+        path=f".claude/skills/{skill_path}",
+        content=content,
+    )
+```
+
+3. После раздачи — пилот может открыть репо в `claude.ai/code` и сразу использовать `/lesson`, `/lesson-close` и т.д. без локальной установки.
+
+**Failure mode:** если `~/IWE/.claude/skills/` недоступен (платформа другая) — пропустить шаг с warning. Не блокер для остальных 6 файлов.
+
+### 6.8. Reflection-template в `history/` (при first-run)
+
+**Зачем:** пилот ежедневно (≤5 мин) записывает рефлексию по фиксированной форме. Шаблон даёт формат, не уходит в свободный текст. Портной при следующем render читает ответы и подстраивает завтрашний `daily/`.
+
+Идемпотентная проверка:
+1. Через `personal_search(source: "personal-guide", path: "history/reflection-template.md")` проверь, есть ли уже template в репо.
+2. Если нет ИЛИ если запуск `first-run` — записать шаблон:
+
+```python
+template_content = Read("~/IWE/.claude/skills/personal-guide-render/templates/reflection-template.md")
+personal_write(
+    source="personal-guide",
+    path="history/reflection-template.md",
+    content=template_content,
+)
+```
+
+3. Подсказать пилоту в Шаге 7 подтверждения:
+   - «Чтобы записать рефлексию: скопируй `history/reflection-template.md` → `history/<дата>-reflection.md`, заполни, закоммить»
+
+**Обратный контракт (Портной → reflection):**
+- В Шаге 1 следующего render — после `dt_read_digital_twin` дополнительно выполнить `personal_search(source: "personal-guide", path: "history/", pattern: "*-reflection.md")` за последние 7 дней.
+- Ответ на «Что узнал» (раздел 3) → сигнал для PD.FORM.087 фазового перехода (Шаг 2 проверки ступени).
+- Ответ на «Что завтра» (раздел 5) → input для пересборки `daily/<завтра>.md` (Шаг 6.6).
+
+**Failure mode:** если `history/reflection-template.md` не записался — `daily/`, `weekly/` всё равно создаются. Не блокер.
 
 ## Шаг 7. Подтверждение пилоту
 

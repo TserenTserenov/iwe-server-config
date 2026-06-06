@@ -2,6 +2,15 @@
 name: wp-new
 description: Создание нового рабочего продукта (РП) с записью в 5 мест атомарно. Используй когда появляется новая задача, которой нет в плане недели.
 argument-hint: "[название РП]"
+version: 1.0.0
+layer: L1
+status: active
+triggers:
+  slash: [/wp-new]
+  phrases: []
+routing:
+  executor: haiku
+  deterministic: false
 ---
 
 # Создание нового РП
@@ -50,13 +59,14 @@ argument-hint: "[название РП]"
 
 Прочитай текущий бюджет недели из WeekPlan. Предупреди если превышение.
 
-## Шаг 4. Атомарная запись в 5 мест
+## Шаг 4. Атомарная запись в 6 мест
 
 1. **MEMORY.md** → таблица «РП текущей недели» (новая строка)
 2. **DS-strategy/docs/WP-REGISTRY.md** → новая строка (сортировка: от последнего к первому)
 3. **DS-strategy/current/WeekPlan W{N}...** → таблица РП (новая строка)
 4. **DS-strategy/docs/Strategy.md** → таблица «РП → Результаты» (только для РП ≥3h, добавить строку с маппингом)
-5. **DS-strategy/inbox/WP-{N}-{slug}.md** → context file:
+5. **DS-strategy/inbox/WP-{N}-{slug}.md** → context file
+6. **DS-strategy/current/active-wp.md** → пересобрать скриптом `python3 scripts/build-active-wp.py` (derived-файл из WP-REGISTRY.md; pre-commit hook блокирует коммит при drift)
 
 ```markdown
 ---
@@ -91,5 +101,5 @@ verification_class: {closed-loop | open-loop | problem-framing}
 
 ## Шаг 5. Подтверждение
 
-Выведи: *«РП #{N} создан. Записан в MEMORY, Registry, WeekPlan, Strategy (маппинг), context file.»*
-Если РП <3h: *«РП #{N} создан. Записан в MEMORY, Registry, WeekPlan, context file. (маппинг к результату не требуется, бюджет <3h)»*
+Выведи: *«РП #{N} создан. Записан в MEMORY, Registry, WeekPlan, Strategy (маппинг), context file, active-wp пересобран.»*
+Если РП <3h: *«РП #{N} создан. Записан в MEMORY, Registry, WeekPlan, context file, active-wp пересобран. (маппинг к результату не требуется, бюджет <3h)»*

@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# routing: utility  deterministic=true
+# see DP.SC.159, DP.ROLE.059
 # validate-relations.sh — проверяет формат related: в WP context files
 # Использование: ./scripts/validate-relations.sh [dir]
 # По умолчанию: DS-my-strategy/inbox/

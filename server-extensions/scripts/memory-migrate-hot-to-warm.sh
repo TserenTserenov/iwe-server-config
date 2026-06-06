@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# routing: migration  one-time=true
+# see DP.SC.159, DP.ROLE.059
 # memory-migrate-hot-to-warm.sh — автоматическая миграция HOT → WARM (WP-217 Ф10.4)
 #
 # Цель: понизить HOT с переполнения (<150 строк) на размер WARM

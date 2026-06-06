@@ -1,3 +1,17 @@
+---
+name: week-close-pilot
+description: "Скилл IWE — см. тело файла"
+version: 1.0.0
+layer: L3
+status: active
+triggers:
+  slash: [/week-close-pilot]
+  phrases: []
+routing:
+  executor: sonnet
+  deterministic: false
+---
+
 # Скилл: /week-close-pilot — закрытие недели пилота личного руководства
 
 > **Роль:** R27 Навигатор (совмещена с внутренней рефлексией пилота)  

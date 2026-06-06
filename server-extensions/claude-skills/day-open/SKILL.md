@@ -3,6 +3,14 @@ name: day-open
 description: "Протокол открытия дня (Day Open). Собирает вчерашние коммиты, issues, заметки, календарь, бота QA, Scout, мир — формирует DayPlan и compact dashboard."
 argument-hint: ""
 version: 1.1.0
+layer: L1
+status: active
+triggers:
+  slash: [/day-open]
+  phrases: []
+routing:
+  executor: sonnet
+  deterministic: false
 ---
 
 # Day Open (протокол открытия дня)
@@ -20,6 +28,12 @@ Day Open = протокол. Исполнять ТОЛЬКО пошагово ч
 Каждый шаг алгоритма ниже → отдельная задача (pending → in_progress → completed).
 Переход к следующему — ТОЛЬКО после отметки текущего. Шаг невозможен → blocked (не пропускать молча).
 **Почему:** без TodoWrite агент пропускает шаги из-за загрязнения контекста (SOTA.002).
+
+## Профиль повторяющихся ошибок агента
+
+Инжектится в **системный промпт агента** через UserPromptSubmit hook (`.claude/hooks/inject-fault-profile.sh`), НЕ показывается в DayPlan. DayPlan — артефакт пилота, профиль ошибок — внутренний инструмент агента.
+
+Источник правила: peer-сессия 2026-05-30-07 + уточнение пилота 30 мая. Альтернативный путь (для cron-агента без интерактива): инжекция первой строкой в `day-open-scaffold.sh` промпт-инструкцию стратегу.
 
 ## Алгоритм
 
@@ -59,6 +73,7 @@ Fallback: файла нет → пропустить, работать из ко
    Не ограничиваться «2-4 штуки» — план дня отражает реальную нагрузку
 3. **MEMORY.md → «РП текущей недели»:** сверить — нет ли РП, упущенных в WeekPlan (ad-hoc, reopened)
 4. `day-rhythm-config.yaml → mandatory_daily_wps` — обязательные РП (проверить наличие в плане, если нет → добавить)
+5. `day-rhythm-config.yaml → daily_checkpoint_wps` — РП-checkpoint'ы (упомянуть в плане строкой с бюджетом ≤0.5h каждый; пилот при необходимости корректирует). Источник правила: peer-сессия 2026-05-30-07. Альтернативный сигнал: `daily_checkpoint: true` в frontmatter `inbox/WP-N.md` — учитывать наравне с config.
 
 **Слот 1 = саморазвитие.**
 Mandatory РП отсутствуют в WeekPlan → «Требует внимания».
@@ -72,11 +87,39 @@ Mandatory РП отсутствуют в WeekPlan → «Требует вним�
 ### 4b. Помидорки
 Из `day-rhythm-config.yaml → pomodoro`.
 
-### 4c. Календарь
-Из `day-rhythm-config.yaml → calendar_ids` (если указаны) или все доступные календари → list-events → свободные блоки ≥1h (09:00–19:00). Private — пропустить.
+### 4c. Календарь (Day Mode)
+`bash scripts/server-calendar.sh YYYY-MM-DD` — секция «Календарь» для DayPlan.
+
+**Что делает скрипт:**
+1. Запрашивает ВСЕ календари из `calendar_ids` (см. feedback `feedback_calendar_query_day_open` — никаких сокращений).
+2. Фильтрует только по `visibility == "private"` (не по названию).
+3. Классифицирует:
+   - **Встречи** — несколько участников, длительность >30 мин, нет маркеров задачи.
+   - **Напоминания / Тех-операции** — маркеры 🔧 ✅ ⏰ 🔔 📋 ❗ или ключевые слова (backup, проверить, remind, smoke, test), либо ≤30 мин без участников.
+4. Статус относительно текущего времени:
+   - ⏳ предстоит / 🔄 идёт / ✅ завершено.
+5. Считает свободные блоки ≥1h в рамках 09:00–22:00.
+
+**Формат в DayPlan:** две таблицы (Встречи + Напоминания) по шаблону `templates-dayplan.md`.
+
+### 4c-alt. Календарь недели (Week Mode, strategy_day)
+Если сегодня `strategy_day` (из `day-rhythm-config.yaml`) — перед формированием WeekPlan запустить:
+```bash
+bash scripts/server-calendar.sh --week YYYY-MM-DD
+```
+Результат → вставить в WeekPlan секцию **«Календарь недели W{N}»** (шаблон `templates-dayplan.md`). Это позволяет при планировании сразу учитывать встречи и тех-операции.
 
 ### 5. IWE за ночь (светофор)
 update.sh, template-sync, MCP reindex, Scout. 🟢/🟡/🔴.
+
+**Smoke split (peer-консенсус 2026-05-30-07):**
+- **Core smoke (≤10с, синхронно в скаффолде):** `bash $IWE_SCRIPTS/day-open-smoke.sh` — scheduler-pulse (локальный файл `current/.scheduler-last-run`, fallback Neon) + KE-count + oldest-age. Подставлять PASS/FAIL в светофор.
+- **Extended smoke (hourly cron, кэш):** `current/.smoke-cache.json` (TTL 90 мин). Включает dt-collect dry-run, projection cursor age, FPF upstream check. Day Open читает кэш, не запускает заново. Кэш устарел → подставить `stale-cache: <age>`, не падать.
+
+**Scheduler failure modes (различить!):**
+- **Mode A** (`feedback-watchdog-{сегодня}.log` отсутствует И юнита нет в `launchctl list`) → cron не отработал. Авто-создать `inbox/INCIDENT-scheduler-cron-not-fired-YYYY-MM-DD.md`. ≥2 дней → TG-эскалация.
+- **Mode B** (юнит есть, лог есть, отчёт пустой) → всё чисто, жалоб нет = норм 🟢.
+- НЕ литерал «Scheduler/триаж 🔴 — отчёт за сегодня отсутствует» (это слепой placeholder).
 
 **Проверка обновлений:** `cd "$IWE_TEMPLATE" && bash update.sh --check 2>&1`. Если доступно обновление → добавить в «Требует внимания»: «Доступно обновление IWE → `/iwe-update`».
 
@@ -99,6 +142,16 @@ done
 ### 5b. Бот QA
 Feedback-triage report: `DS-agent-workspace/scheduler/feedback-triage/YYYY-MM-DD.md`. Проверить дату файла. Фильтр 2 дня. Нет файла → «нет отчёта». Дельта, urgent.
 
+### 5e. KE-очередь (Knowledge Extraction)
+`bash $IWE_SCRIPTS/ke-queue-stats.sh` → возвращает `(count, oldest_age_days, estimated_minutes)`. Подставлять в DayPlan реальный бюджет (например, `apply-captures 44 reports, oldest 6d, ~3.5h оценка`), НЕ литерал «1h pending».
+
+**SLA-блокер (peer-консенсус 2026-05-30-07):** `oldest_age_days ≥ 3` → строка в «Требует внимания» = 🔴 (не 🟡).
+
+**Auto-batch classifier** (для `apply-captures --auto-batch`):
+- **Primary:** frontmatter `domain:` tag. Отсутствует → auto-reject (pending-review), regex не применяется.
+- **Secondary** (только при `domain: course-content | personal-notes | bot-conversation`): regex проверяет отсутствие ссылок на `.claude/`, `scripts/`, `extensions/`, `memory/feedback_*.md` + объём ≤30 строк.
+- `domain: system | infrastructure | meta-skill` → блок auto-accept (всегда human review).
+
 ### 5c. Контент
 Стратегия маркетинга + draft-list. 1-3 темы.
 
@@ -108,6 +161,28 @@ Scout report. Не проревьюен → «Требует внимания».
 ### 6. Мир
 `day-rhythm-config.yaml → news`. Feeds/WebSearch. `enabled: false` → пропустить.
 **Ссылки на источники обязательны** (URL).
+
+**6a. News Lens (анализ через субагент).**
+После сбора заголовков — вызвать субагент (Haiku, context isolation) с промптом:
+
+> Ты — разведчик новостей. Тебе дан список заголовков + список активных РП пользователя.
+> Задача: написать 2-4 предложения «Что из этого важно для работы сегодня?»
+> Отвечай только на русском. Без перечисления всех новостей — только синтез.
+> Входные данные:
+> НОВОСТИ: {заголовки с темами}
+> АКТИВНЫЕ РП: {топ-5 РП по приоритету из DayPlan}
+
+Вывод субагента → поле **«Вывод:»** в начале секции «Мир». Формат секции:
+
+```
+**Вывод:** <2-4 предложения синтеза>
+
+**AI/LLM:** [Заголовок 1](url) · [Заголовок 2](url) · ...
+**Инженерия:** [Заголовок 1](url) · ...
+**Мировые события:** [Заголовок 1](url) · ...
+```
+
+Субагент недоступен / таймаут → пропустить «Вывод», показать только ссылки.
 
 ### 6b. Требует внимания
 Собрать из шагов 1–6. Нет → не выводить.

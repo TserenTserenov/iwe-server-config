@@ -2,6 +2,17 @@
 name: check-secret
 description: Проверка фрагмента текста на возможные секреты (API keys, tokens, passwords) ПЕРЕД отправкой в чат / коммитом / публикацией. Третий слой защиты поверх pre-commit hook (B7.7a) и PostToolUse redact (B7.7b). Manual gate — пользователь явно вызывает на потенциально чувствительный текст.
 argument-hint: "<text-or-file-path>"
+version: 1.0.0
+layer: L3
+status: active
+triggers:
+  slash: [/check-secret]
+  phrases: []
+routing:
+  executor: script
+  deterministic: true
+  script_path: ".claude/skills/check-secret/check.sh"
+  optimization_priority: 2
 ---
 
 # Check Secret — manual gate (B7.7c, WP-212)
@@ -23,7 +34,7 @@ argument-hint: "<text-or-file-path>"
 ## Шаг 2. Запустить проверку
 
 ```bash
-~/IWE/.claude/skills/check-secret/check.sh "$ARGUMENTS"
+bash "$IWE_SCRIPTS/route-task.sh" --skill check-secret --args "$ARGUMENTS"
 ```
 
 Скрипт принимает либо путь либо текст. Возвращает:
@@ -50,4 +61,4 @@ argument-hint: "<text-or-file-path>"
 - **Расширение:** B7.7a (`secret-leak-block.sh`) и B7.7b (`secret-leak-redact.sh`) — три-слойная защита.
 - **Правило поведения:** Правило 25 в `memory/feedback_behaviour.md` — secrets никогда в чат как плейнтекст.
 - **Runbook:** `DP.RUNBOOK.003-cascade-secret-rotation.md` для процедуры reactive ротации.
-- **Канон паттернов:** `~/IWE/scripts/pre-commit-secret-scan.sh` — единая точка для regex-паттернов; check.sh использует тот же набор.
+- **Канон паттернов:** `$IWE_SCRIPTS/pre-commit-secret-scan.sh` — единая точка для regex-паттернов; check.sh использует тот же набор.

@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# routing: utility  deterministic=true
+# see DP.SC.159, DP.ROLE.059
 # check-script-collisions.sh — проверить коллизии скриптов между ~/IWE/scripts/ и FMT-exocortex-template/scripts/
 #
 # Назначение: S-21 (IWE-staging). Запускается ПЕРЕД промоцией скрипта L3→L1

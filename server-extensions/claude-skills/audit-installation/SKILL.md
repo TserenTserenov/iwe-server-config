@@ -2,6 +2,15 @@
 name: audit-installation
 description: Аудит пользовательской инсталляции IWE. Запускает scripts/iwe-audit.sh + MCP healthcheck + smoke-test ритуала через sentinel-механику (контракт dry-run-contract.md), передаёт отчёт subagent'у в роли VR.R.002 Аудитор (context isolation) → verdict ✅/⚠️/❌ по 6 компонентам (Inventory, L1 drift, DS-strategy, L3 customizations, MCP, ритуал). Используй после restore из бэкапа, после update.sh, или при еженедельной сверке.
 argument-hint: "[--skip-mcp] [--critical]"
+version: 1.0.0
+layer: L1
+status: active
+triggers:
+  slash: [/audit-installation]
+  phrases: []
+routing:
+  executor: haiku
+  deterministic: false
 ---
 
 # Аудит инсталляции IWE

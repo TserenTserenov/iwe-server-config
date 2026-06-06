@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# routing: helper  skill=day-open  called-by=haiku  deterministic=true
+# see DP.SC.159, DP.ROLE.059
 # day-open-preflight.sh — pre-flight healthcheck для Day Open
 # WP-7 ФDay-Open-Hardening
 # Возвращает единый JSON: {"calendar":"ok|fail|pending","scout":"ok|fail|pending","triage":"ok|fail|pending"}
@@ -75,10 +77,7 @@ TRIAGE_FILE="$IWE/DS-agent-workspace/scheduler/feedback-triage/$DATE.md"
 if [ -f "$TRIAGE_FILE" ]; then
   TRIAGE_STATUS="ok"
 else
-  # Grace window 02:00-06:30 EEST: scheduler fires at 00:01 but catch-up may run at 06:03
-  # (strategist-morning + unsatisfied-report). Without grace window the 04:00 overnight-auditor
-  # trigger would produce a false-positive alert before the generator has a chance to run.
-  # BFA3 (WP-7): confirmed this window correctly suppresses false-positive at 04:00. (2026-06-06)
+  # Grace window: generator runs at 00:01 EEST, catch-up may be delayed
   CURRENT_HOUR=$(date +%H)
   if [ "$CURRENT_HOUR" -lt 6 ] || { [ "$CURRENT_HOUR" -eq 6 ] && [ "$(date +%M)" -lt 30 ]; }; then
     TRIAGE_STATUS="pending"

@@ -12,8 +12,8 @@ set -eu
 IWE_WORKSPACE="${IWE_WORKSPACE:-${WORKSPACE_DIR:-$HOME/IWE}}"
 REPORTS_DIR="$IWE_WORKSPACE/DS-my-strategy/inbox/extraction-reports"
 
-# Count extraction-reports with status: pending-review
-PENDING=$(grep -l "status: pending-review" "$REPORTS_DIR"/*.md 2>/dev/null | wc -l)
+# Count extraction-reports with frontmatter status: pending-review (anchored to avoid body text matches)
+PENDING=$(grep -rl "^status: pending-review" "$REPORTS_DIR"/ 2>/dev/null | wc -l)
 
 if [ "$PENDING" -gt 0 ]; then
     echo ""

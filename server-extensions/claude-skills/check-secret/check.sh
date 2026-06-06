@@ -13,7 +13,7 @@ IWE_ROOT="${IWE_ROOT:-$HOME/IWE}"
 LOG_FILE="$IWE_ROOT/.claude/logs/check-secret.jsonl"
 mkdir -p "$(dirname "$LOG_FILE")" 2>/dev/null || true
 
-input="${1:-}"
+input="${*:-}"
 if [ -z "$input" ]; then
   echo "Usage: check.sh <file-path-or-text>"
   echo "       cat file.txt | check.sh -"

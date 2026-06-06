@@ -3,6 +3,14 @@ name: iwe-rules-review
 description: "Еженедельное ревью культуры работы IWE (элемент 14 — Эволюция системы). Запускается при Week Close."
 argument-hint: ""
 version: 1.0.0
+layer: L1
+status: active
+triggers:
+  slash: [/iwe-rules-review]
+  phrases: []
+routing:
+  executor: haiku
+  deterministic: false
 ---
 
 # Ревью культуры работы IWE

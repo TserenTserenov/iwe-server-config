@@ -3,6 +3,18 @@
 > Выполняется в шаге 0 SKILL.md перед шагом 1.
 > Автор: Tseren (author_mode). Слой 3 (extensions).
 
+## 0a-fault. Agent Fault Reminder (WP-316, ОБЯЗАТЕЛЬНО первым)
+
+> Выводит 2-3 горячих напоминания из SQLite базы косяков агента. Выполнять ДО scaffold — пока контекст чистый.
+
+```bash
+python3 ~/IWE/DS-my-strategy/scripts/agent_fault_remind.py --protocol open 2>/dev/null || echo "⚠️ agent_fault_remind.py недоступен — пропуск (non-blocking)"
+```
+
+**Что делать с выводом:** прочитать 2-3 🔴-напоминания → удержать в голове при формировании DayPlan. Если напоминание релевантно сегодняшней задаче — применить немедленно (не «учту позже»).
+
+> **Почему не работало ранее:** скрипт существует с WP-316 (апр 2026), но не был встроен в extensions. Добавлено 2026-05-17 после 3 дней пропуска шага 5e.
+
 ## 0a-pre. Pull-on-Touch для индексных репо (WP-283 follow-up, 6 мая)
 
 Перед scaffold — `git pull --rebase` для двух репо, чьи отчёты используются в светофоре. Иначе ложно-🟡 (локальная копия отстаёт, серверный отчёт уже в origin):
@@ -18,6 +30,31 @@ done
 ```
 
 DS-my-strategy уже покрыт §2 п.4 платформенным правилом. DS-agent-workspace — отдельно потому что scaffold читает scheduler/feedback-triage отчёты ДО первого касания репо в сессии.
+
+## 0a-stale. Архивация зависших DayPlan (WP-356, defense-in-depth)
+
+> Выполнять ДО scaffold. Если Day Close не заархивировал вчерашний DayPlan — сделать это сейчас + записать флаг для alarm в after.md.
+> Источник: peer-сессия 2026-05-29-04-day-open-two-defects.
+
+```bash
+TODAY=$(date +%Y-%m-%d)
+cd "$HOME/IWE/DS-my-strategy"
+# git ls-files: только файлы под git-контролем (идемпотентно при повторном запуске)
+STALE=$(git ls-files current/ 2>/dev/null | grep -E "^current/DayPlan [0-9]{4}-[0-9]{2}-[0-9]{2}\.md$" | grep -v "current/DayPlan $TODAY\.md" || true)
+if [ -n "$STALE" ]; then
+  # while IFS= read -r: корректно обрабатывает пробелы в именах файлов
+  while IFS= read -r f; do
+    [ -n "$f" ] && git mv "$f" "archive/day-plans/"
+  done <<< "$STALE"
+  # Ограничить коммит только archive/day-plans/ — не захватывать чужой staged index
+  git commit -- "archive/day-plans/" -m "archive(day-open): stale DayPlan before new open — Day Close incomplete"
+  # Флаг для after.md: только базовые имена файлов
+  echo "$STALE" | xargs -I{} basename {} > "/tmp/iwe-stale-dayplan-$TODAY.flag"
+  echo "⚠️ Заархивированы зависшие DayPlan (Day Close был неполным)"
+else
+  echo "✅ current/: нет зависших DayPlan"
+fi
+```
 
 ## 0a. Scaffold (детерминированный каркас, БЛОКИРУЮЩЕЕ — WP-264 Ф2)
 

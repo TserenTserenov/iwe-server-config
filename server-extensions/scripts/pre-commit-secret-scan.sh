@@ -1,4 +1,6 @@
 #!/bin/bash
+# routing: hook  trigger=pre-commit  deterministic=true
+# see DP.SC.159, DP.ROLE.059
 # Pre-commit hook: блокирует случайный коммит секретов.
 #
 # Канонический шаблон. Копия в <repo>/.githooks/pre-commit для каждого репо.

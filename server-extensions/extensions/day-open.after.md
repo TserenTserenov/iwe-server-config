@@ -2,6 +2,61 @@
 
 <!-- AUTHOR-ONLY -->
 
+### 5a. Session Memory Injector: инжекция паттернов косяков (WP-316 Ф12, L2-hook)
+
+> **Запускать ПЕРЕД остальными шагами Day Open.** Замыкает петлю обратной связи: агент видит свои паттерны ДО начала дня.
+> Роль: TBD → WP-350. Выбирает 2-3 напоминания контекстно (session_type + текущий WP), не просто топ-3 по trust.
+> Исполнитель по умолчанию: Claude Haiku. В будущем: любой LLM-агент (Hermes model, OpenClaw и др.)
+
+```bash
+# Session Memory Inject: контекстные напоминания (Haiku, ≤45s, $0.25)
+# Fallback автоматический: если claude CLI недоступен → agent_fault_remind.py
+bash ~/IWE/DS-autonomous-agents/scripts/session-memory-inject.sh day-open
+```
+
+**Вчерашние повторы (intra-session guard):**
+```bash
+YESTERDAY=$(date -v-1d +%Y-%m-%d 2>/dev/null || date -d "yesterday" +%Y-%m-%d)
+DB="$HOME/IWE/DS-my-strategy/exocortex/agent-fault-profile/iwe_memory.db"
+if [ -f "$DB" ]; then
+  sqlite3 "$DB" "
+    SELECT '🔴 [' || UPPER(COALESCE(severity,'major')) || '] ' || SUBSTR(content,1,80)
+    FROM facts
+    WHERE fact_type='agent_fault' AND record_date='$YESTERDAY'
+    ORDER BY trust_score DESC LIMIT 5
+  " 2>/dev/null | while read row; do echo "  $row"; done
+fi
+```
+
+**Если есть вчерашние повторы** → добавить секцию в DayPlan «🔴 Вчерашние повторы (держать в уме)».
+**Если нет** → пропустить молча.
+
+> Fault decay запускается раз в неделю (Week Close). Запись нового косяка:
+> `python3 ~/IWE/DS-my-strategy/scripts/iwe_checklist_memory.py record --fault "..." --severity major`
+
+---
+
+### 5a-stale-alarm. Алерт о зависшем DayPlan (WP-356, peer-сессия 2026-05-29-04)
+
+> Если before.md заархивировал стейл-файлы — вставить 🔴 в DayPlan «Требует внимания».
+> Это сигнал пилоту: Day Close был неполным.
+
+```bash
+TODAY=$(date +%Y-%m-%d)
+FLAG="/tmp/iwe-stale-dayplan-$TODAY.flag"
+DAYPLAN="$HOME/IWE/DS-my-strategy/current/DayPlan $TODAY.md"
+if [ -f "$FLAG" ] && [ -f "$DAYPLAN" ]; then
+  # basename + запятая — читаемо при 2+ файлах
+  STALE_FILES=$(cat "$FLAG" | xargs -I{} basename {} | tr '\n' ',' | sed 's/,$//')
+  # Вставить строку после заголовка «Требует внимания» через perl (macOS-совместимо)
+  perl -i -pe "s|(## Требует внимания)|\\$1\n- 🔴 **Day Close не завершил архивацию** — $STALE_FILES автоархивирован при открытии дня. Проверить: был ли Day Close выполнен?|" "$DAYPLAN" 2>/dev/null || true
+  rm -f "$FLAG"
+  echo "🔴 Стейл-алерт добавлен в DayPlan (Day Close был неполным)"
+fi
+```
+
+---
+
 ### Здоровье платформы (секция DayPlan — вставлять между «Календарь» и «IWE за ночь»)
 
 > Агрегированная секция по всем сервисам платформы (бот, digital-twin, gateway, content-pipeline, knowledge-mcp). Внутри — подзаголовки по сервисам. Вставлять как отдельный `<details>`-блок при записи DayPlan.
@@ -105,10 +160,167 @@ for f in "$REPORTS_DIR"/*.md; do
 done
 ```
 
+### 6d. Авто-архивация устаревших WeekReport (bug-2026-05-12)
+
+> WeekReport закрытой недели не должен оставаться в `current/`. Проверяем по week-номеру в имени файла vs текущая неделя ISO.
+
+```bash
+CURRENT_WEEK=$(date +%V)
+CURRENT="$HOME/IWE/DS-my-strategy/current"
+ARCHIVE="$HOME/IWE/DS-my-strategy/archive/week-reports"
+mkdir -p "$ARCHIVE"
+for f in "$CURRENT"/WeekReport\ W*.md; do
+  [ -f "$f" ] || continue
+  wnum=$(basename "$f" | sed -E 's/.*W([0-9]+).*/\1/')
+  if [ "$wnum" -lt "$CURRENT_WEEK" ]; then
+    echo "🗄️  Архивирую $(basename "$f") (W$wnum < W$CURRENT_WEEK)"
+    git -C "$HOME/IWE/DS-my-strategy" mv "$f" "$ARCHIVE/" 2>/dev/null || mv "$f" "$ARCHIVE/"
+  fi
+done
+```
+
+### 7a. Незавершённые диалоговые сессии (DP.SC.154)
+
+> Сканировать `sessions/conversations/*/meta.yaml` — `status: started` + нет `report.md` + `start_time > 6ч назад`.
+> Если есть — вывести в «Требует внимания» (WARN, не BLOCK). Молча пропустить если N=0.
+
+```bash
+CONV_DIR="$HOME/IWE/DS-my-strategy/sessions/conversations"
+SIX_HOURS_AGO=$(date -u -v-6H +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u -d '-6 hours' +%Y-%m-%dT%H:%M:%SZ 2>/dev/null)
+STALE=()
+for meta in "$CONV_DIR"/*/meta.yaml; do
+  [ -f "$meta" ] || continue
+  status=$(grep "^status:" "$meta" | sed 's/^status: *//; s/"//g')
+  [ "$status" != "started" ] && continue
+  session_dir="$(dirname "$meta")"
+  [ -f "${session_dir}/report.md" ] && continue
+  start=$(grep "^start_time:" "$meta" | sed 's/^start_time: *//; s/"//g')
+  [ -n "$start" ] && [ "$start" \< "$SIX_HOURS_AGO" ] && STALE+=("$(basename "$session_dir")")
+done
+if [ ${#STALE[@]} -gt 0 ]; then
+  echo "⚠️  Незавершённые диалоговые сессии (>6ч, нет report.md):"
+  for s in "${STALE[@]}"; do
+    echo "   - $s → bash scripts/peer-session-finalize.sh --finalize $s"
+  done
+fi
+```
+
+### 7c. Незакрытые external-сессии через бот (WP-358 Ф10)
+
+> Сканировать `inbox/agent/sessions/SESSION-*.md` (Telegram-инициированные сессии через `/claude`).
+> Незакрытая = status != "completed" ИЛИ (status: completed И возраст ≥24ч без перемещения в `sessions/external/`).
+> Backfill 52 файлов pre-cutover не делаем — фильтр по mtime ≥ CUTOVER_DATE (см. скрипт).
+> При N>0 — **вставить markdown-секцию в DayPlan** (между «Требует внимания» и «Контекст недели») + продублировать в stdout.
+> Молча пропустить при N=0. Аналог 7a, но для external-канала (DP.SC.162), не peer (DP.SC.154).
+
+```bash
+SECTION=$(bash ~/IWE/DS-my-strategy/scripts/check-open-sessions.sh 2>/dev/null)
+if [ -n "$SECTION" ]; then
+  echo "$SECTION"
+  FILE="$(ls ~/IWE/DS-my-strategy/current/DayPlan\ *.md 2>/dev/null | head -1)"
+  if [ -f "$FILE" ] && ! grep -q "Незакрытые сессии" "$FILE"; then
+    # Вставить перед секцией «Контекст недели» или в конец, если её нет
+    if grep -q "<summary><b>Контекст недели" "$FILE"; then
+      python3 -c "
+import sys
+file=sys.argv[1]; section=sys.argv[2]
+with open(file) as f: lines=f.readlines()
+out=[]
+inserted=False
+for line in lines:
+    if not inserted and '<summary><b>Контекст недели' in line:
+        out.append(section+'\n\n')
+        inserted=True
+    out.append(line)
+with open(file,'w') as f: f.writelines(out)
+" "$FILE" "$SECTION"
+      echo "  ✅ Секция «Незакрытые сессии» вставлена в DayPlan"
+    fi
+  fi
+fi
+```
+
+- [ ] Если есть `SESSION-*` post-cutover в `inbox/agent/sessions/` со status != completed или age≥24ч — секция вставлена в DayPlan со ссылками. Финализация — DP.SC.162 §close.
+
 ### 7b. Верификация DayPlan (БЛОКИРУЮЩЕЕ перед коммитом)
 
 > Загрузить и выполнить `extensions/day-open.checks.md` ПОСЛЕ записи файла DayPlan, ДО `git commit`.
 > Порядок шага 7: записать файл → пройти checks → `git commit` → `git push` → compact dashboard.
+
+### Горлышко недели (секция DayPlan — вставлять в начало «Контекст недели»)
+
+> Динамический bottleneck-анализ на основе текущего WeekPlan + активных РП + git за 7д. Заменяет статическое «фокус недели» — обновляется каждое Day Open.
+> Вставляется как первая подсекция «Контекст недели», ПЕРЕД остальными элементами.
+
+**Автоматическая инъекция (WP-356, peer-сессия 2026-05-29-04):**
+
+```bash
+TODAY=$(date +%Y-%m-%d)
+DAYPLAN="$HOME/IWE/DS-my-strategy/current/DayPlan $TODAY.md"
+
+# 1. Idempotency: пропустить если маркер уже есть
+if grep -q "<!-- BY-SCRIPT: bottleneck-section-from-yaml.sh -->" "$DAYPLAN" 2>/dev/null; then
+  echo "✅ Bottleneck: маркер BY-SCRIPT уже есть — пропуск"
+else
+  # 2. Надёжный выбор последнего YAML по mtime (macOS: stat -f '%m %N')
+  RUNS_DIR="$HOME/IWE/DS-my-strategy/inbox/bottleneck-pick-runs"
+  LATEST_YAML=$(find "$RUNS_DIR" -name "*-weekplan*.yaml" -exec stat -f '%m %N' {} + 2>/dev/null \
+    | sort -n | tail -1 | cut -d' ' -f2-)
+  if [ -z "$LATEST_YAML" ]; then
+    echo "⚠️ Bottleneck: weekplan YAML не найден — вставка пропущена, заполнить вручную через /bottleneck-pick"
+  else
+    # 3. Сгенерировать выжимку с маркером BY-SCRIPT
+    SECTION=$(bash "$HOME/IWE/DS-my-strategy/scripts/bottleneck-section-from-yaml.sh" "$LATEST_YAML" 2>/dev/null)
+    # 4. Вставить в DayPlan по anchor "Горлышко недели" (python3 — portable на macOS)
+    python3 - "$DAYPLAN" "$SECTION" <<'PYEOF'
+import sys, re
+path = sys.argv[1]
+section = sys.argv[2]
+content = open(path).read()
+# Заменить блок от "Горлышко недели" до "Контекст недели W" (сохраняя заголовок недели)
+new_content = re.sub(
+    r'(\*\*Горлышко недели.*?\n)(.*?)(\*\*Контекст недели W)',
+    lambda m: m.group(1) + section.strip() + '\n\n' + m.group(3),
+    content, flags=re.DOTALL
+)
+if new_content != content:
+    open(path, 'w').write(new_content)
+    print('✅ Bottleneck: вставлен из', sys.argv[1].split('/')[-1])
+else:
+    print('⚠️ Bottleneck: anchor не найден — проверить структуру DayPlan')
+PYEOF
+  fi
+fi
+```
+
+**Запрещено:** писать «Горлышко недели» руками — checks заблокируют commit (см. `day-open.checks.md` блок «🔴 Калибровка скилла /bottleneck-pick»). Источник правила: peer-сессия 2026-05-28-04-day-open-checks-fix, фикс косяка 24 мая (feedback_skill_manual_synthesis_bypass).
+
+**Если YAML не найден:** запустить `/bottleneck-pick --target weekplan --layer intra --horizon week --depth 1` вручную → скрипт выше подхватит при следующем прогоне after.md.
+
+Структура выжимки (генерируется скриптом из YAML):
+
+```markdown
+<!-- BY-SCRIPT: bottleneck-section-from-yaml.sh -->
+**Горлышко недели (SC-first, YYYY-MM-DD):**
+
+- **SC-failing:** <DP.SC.NNN>
+- **Bottleneck:** <блок / направление / фаза>
+- **Class:** <Policy / Resource / Cognitive>
+- **Этап 1:** <action_taken из YAML>
+```
+
+**Когда пропустить:**
+- Понедельник до Strategy Session — нет актуального WeekPlan, дождаться сессии
+- Бюджет вычисления >5 мин — отложить на отдельную сессию, оставить пометку «горлышко: см. /bottleneck-pick weekplan»
+- WeekPlan не обновлялся ≥3 дней (стейл-сигнал) — флаг ⚠️ к выжимке
+
+**Platform-уровень (раз в неделю, по понедельникам):**
+
+Дополнительный запуск для cross-system анализа:
+```
+/bottleneck-pick --target b2:aisystant --layer platform --horizon week --depth 2
+```
+Результат сохраняется в `DS-my-strategy/inbox/bottleneck-pick-runs/` и сравнивается с прошлой неделей для bottleneck-shift detection (DP.M.061).
 
 ### 8. Emit day_plan_opened (WP-151 Блок B)
 

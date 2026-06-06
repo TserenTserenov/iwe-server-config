@@ -17,8 +17,12 @@ mkdir -p "$(dirname "$LOG_FILE")" 2>/dev/null || true
 
 input=$(cat)
 
-# Bypass
+# Bypass — но ЛОГИРУЕМ (Гермес 2026-06-05: осознанный обход без лога неотличим от бага).
 if [ -n "${CC_ALLOW_SECRETS:-}" ]; then
+  ts=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+  jq -nc --arg ts "$ts" --arg sid "${CLAUDE_SESSION_ID:-}" \
+    '{ts:$ts, hook:"secret-leak-redact", session_id:$sid, action:"bypass-CC_ALLOW_SECRETS", warn:"вывод НЕ маскирован — все секреты в нём считать скомпрометированными, ротация по DP.RUNBOOK.003"}' \
+    >> "$LOG_FILE" 2>/dev/null || true
   exit 0
 fi
 
@@ -47,9 +51,13 @@ redacted=$(printf '%s' "$tool_output" | sed -E \
   -e 's/napi_[A-Za-z0-9]{30,}/[REDACTED-NEON-KEY]/g' \
   -e 's/postgresql(ql)?:\/\/[^:[:space:]]+:[^@[:space:]]{6,}@/postgresql:\/\/[REDACTED-USER]:[REDACTED-PASS]@/g' \
   -e 's/sk-ant-api[0-9]{2}-[A-Za-z0-9_-]{30,}/[REDACTED-ANTHROPIC-KEY]/g' \
+  -e 's/sk-[A-Za-z0-9]{20,}/[REDACTED-OPENAI-KEY]/g' \
+  -e 's/(live|test)_[A-Za-z0-9_-]{30,}/[REDACTED-YOOKASSA-KEY]/g' \
   -e 's/gh[poshru]_[A-Za-z0-9]{30,}/[REDACTED-GITHUB-TOKEN]/g' \
   -e 's/AKIA[0-9A-Z]{16}/[REDACTED-AWS-KEY]/g' \
+  -e 's/AIza[0-9A-Za-z_-]{35}/[REDACTED-GOOGLE-KEY]/g' \
   -e 's/ust_[A-Za-z0-9]{20,}/[REDACTED-BETTERSTACK]/g' \
+  -e 's/eyJ[A-Za-z0-9_-]+\.eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+/[REDACTED-JWT]/g' \
   -e 's/[0-9]{8,10}:[A-Za-z0-9_-]{35}/[REDACTED-TG-BOT]/g' \
   )
 
@@ -58,7 +66,22 @@ if [ "$redacted" = "$tool_output" ]; then
   exit 0
 fi
 
-# Лог факта редакции (без значений)
+# === Детектор массового вывода (Гермес 2026-06-05): ловим по СОДЕРЖИМОМУ, а не по фразе/команде. ===
+# Любой вывод (shell `railway variables`, MCP-дамп, чтение файла) с ≥3 секретами = bulk-утечка.
+# дельта: новые маркеры минус пред-существующие в исходнике (cold-review M4 — не считать литералы из текста)
+new_markers=$(printf '%s' "$redacted" | grep -o '\[REDACTED-' | wc -l | tr -d ' ')
+pre_markers=$(printf '%s' "$tool_output" | grep -o '\[REDACTED-' | wc -l | tr -d ' ')
+bulk_count=$(( new_markers - pre_markers ))
+warn_prefix=""
+action="redacted"
+if [ "${bulk_count:-0}" -ge 3 ]; then
+  action="bulk-redacted"
+  warn_prefix="⚠️ МАССОВЫЙ ВЫВОД СЕКРЕТОВ: замаскировано $bulk_count ключ(ей) в одном ответе. Эти секреты считать СКОМПРОМЕТИРОВАННЫМИ → ротация по DP.RUNBOOK.003. Не запрашивай весь список переменных — бери значения точечно (по одному имени).
+
+"
+fi
+
+# Лог факта редакции (без значений; для bulk — со счётчиком)
 ts=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
 jq -nc \
   --arg ts "$ts" \
@@ -66,12 +89,14 @@ jq -nc \
   --arg tool "$tool_name" \
   --arg orig_len "${#tool_output}" \
   --arg new_len "${#redacted}" \
-  '{ts:$ts, hook:"secret-leak-redact", session_id:$sid, tool:$tool, original_len:($orig_len|tonumber), redacted_len:($new_len|tonumber), action:"redacted"}' \
+  --arg act "$action" \
+  --arg bulk "$bulk_count" \
+  '{ts:$ts, hook:"secret-leak-redact", session_id:$sid, tool:$tool, original_len:($orig_len|tonumber), redacted_len:($new_len|tonumber), action:$act, redaction_count:($bulk|tonumber)}' \
   >> "$LOG_FILE" 2>/dev/null || true
 
-# Возврат модифицированного output
+# Возврат модифицированного output (+ предупреждение при bulk)
 jq -n \
-  --arg out "$redacted" \
+  --arg out "${warn_prefix}${redacted}" \
   '{hookSpecificOutput: {hookEventName: "PostToolUse", updatedToolOutput: $out}}'
 
 exit 0

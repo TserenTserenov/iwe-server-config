@@ -7,15 +7,47 @@
 set -euo pipefail
 
 # ---------------------------------------------------------------------------
-# Config
+# Config (with resilience fallback — see WP-294)
 # ---------------------------------------------------------------------------
 IWE_WORKSPACE="${IWE_WORKSPACE:-$HOME/IWE}"
+if [[ ! -d "$IWE_WORKSPACE" ]]; then
+  echo "[WARN] IWE_WORKSPACE=$IWE_WORKSPACE не существует, fallback на $HOME/IWE" >&2
+  IWE_WORKSPACE="$HOME/IWE"
+fi
+
 GOV_REPO="${IWE_GOVERNANCE_REPO:-DS-my-strategy}"
+# Resilience: если GOV_REPO задан извне, но в нём нет WP-REGISTRY.md — это не governance repo
+if [[ ! -f "$IWE_WORKSPACE/$GOV_REPO/docs/WP-REGISTRY.md" ]]; then
+  for cand in DS-my-strategy DS-strategy strategy; do
+    if [[ -f "$IWE_WORKSPACE/$cand/docs/WP-REGISTRY.md" ]]; then
+      echo "[WARN] IWE_GOVERNANCE_REPO=$GOV_REPO не содержит WP-REGISTRY.md, fallback на $cand" >&2
+      GOV_REPO="$cand"
+      break
+    fi
+  done
+fi
+if [[ ! -f "$IWE_WORKSPACE/$GOV_REPO/docs/WP-REGISTRY.md" ]]; then
+  echo "[ERROR] Governance repo с WP-REGISTRY.md не найден в $IWE_WORKSPACE" >&2
+  exit 1
+fi
+
 STRATEGY_DIR="$IWE_WORKSPACE/$GOV_REPO"
 INBOX_DIR="$STRATEGY_DIR/inbox"
 ARCHIVE_DIR="$STRATEGY_DIR/archive/wp-contexts"
 REGISTRY_FILE="$STRATEGY_DIR/docs/WP-REGISTRY.md"
 GIT_LOG_DAYS="${WP_SYNC_GIT_DAYS:-14}"
+
+# ---------------------------------------------------------------------------
+# Audit log
+# ---------------------------------------------------------------------------
+log_sync() {
+  local wp_num="${1:-unknown}"
+  local result="${2:-unknown}"
+  local reason="${3:-}"
+  local logfile="$IWE_WORKSPACE/.claude/state/wp-sync.log"
+  mkdir -p "$(dirname "$logfile")"
+  echo "$(date '+%Y-%m-%d %H:%M:%S') | WP-${wp_num} | ${result} | ${reason}" >> "$logfile"
+}
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -209,11 +241,52 @@ count_open_phases() {
 # ---------------------------------------------------------------------------
 main() {
   if [[ $# -lt 1 ]]; then
-    log_err "Usage: wp-sync-bundle.sh WP-N (или просто N)"
+    log_err "Usage: wp-sync-bundle.sh WP-N (или просто N) [--self-test]"
     exit 1
   fi
 
   local input="$1"
+
+  # Self-test mode (diagnostic — see WP-294 Ф7)
+  if [[ "$input" == "--self-test" ]]; then
+    echo "=== WP Sync Bundle Self-Test ==="
+    echo "IWE_WORKSPACE: $IWE_WORKSPACE"
+    echo "GOV_REPO: $GOV_REPO"
+    echo "STRATEGY_DIR: $STRATEGY_DIR"
+    if [[ -f "$REGISTRY_FILE" ]]; then
+      echo "REGISTRY_FILE: OK"
+    else
+      echo "REGISTRY_FILE: MISSING"
+      exit 1
+    fi
+    # Find any real WP from inbox instead of hardcoded number
+    local test_num=""
+    if [[ -d "$INBOX_DIR" ]]; then
+      local first_wp
+      first_wp=$(find "$INBOX_DIR" -maxdepth 1 -name "WP-*.md" 2>/dev/null | sort | head -1 || true)
+      if [[ -n "$first_wp" ]]; then
+        test_num=$(basename "$first_wp" | grep -oE '^WP-[0-9]+' | grep -oE '[0-9]+' || true)
+      fi
+    fi
+    if [[ -z "$test_num" ]]; then
+      # Fallback: pick any WP number from registry first line match
+      test_num=$(grep -oE 'WP-[0-9]+' "$REGISTRY_FILE" 2>/dev/null | head -1 | grep -oE '[0-9]+' || true)
+    fi
+    if [[ -z "$test_num" ]]; then
+      echo "WP lookup: SKIP (no WP files found in inbox or registry)"
+      exit 0
+    fi
+    local test_file
+    test_file=$(find_wp_file "$test_num")
+    if [[ -n "$test_file" ]]; then
+      echo "WP-${test_num} lookup: OK ($test_file)"
+      exit 0
+    else
+      echo "WP-${test_num} lookup: FAIL"
+      exit 1
+    fi
+  fi
+
   local wp_num
   wp_num=$(normalize_wp_num "$input")
 
@@ -222,16 +295,20 @@ main() {
     exit 1
   fi
 
+  log_sync "$wp_num" "START" ""
+
   local wp_file
   wp_file=$(find_wp_file "$wp_num")
 
   if [[ -z "$wp_file" ]]; then
     log_err "WP-${wp_num}: файл не найден в inbox/ или archive/wp-contexts/"
+    log_sync "$wp_num" "FAIL" "file_not_found"
     exit 1
   fi
 
   # Exit 2: parsing error (frontmatter не валиден)
   if ! validate_frontmatter "$wp_file"; then
+    log_sync "$wp_num" "FAIL" "parse_error"
     exit 2
   fi
 
@@ -435,6 +512,8 @@ main() {
       echo "- ⚠️ Есть drift-сигналы — требуют ручной проверки перед применением"
     fi
   fi
+
+  log_sync "$wp_num" "SUCCESS" "related=${related_count} drift=${drift_count}"
 }
 
 main "$@"

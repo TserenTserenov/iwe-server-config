@@ -24,3 +24,6 @@ id_ed25519
 # Direnv
 .direnv/
 .envrc.local
+
+# Audit logs (generated, не коммитить)
+server-extensions/scripts/*.log

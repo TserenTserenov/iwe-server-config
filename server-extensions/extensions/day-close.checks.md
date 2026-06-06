@@ -1,5 +1,39 @@
 ## Авторские проверки Day Close
 
+### 🔴 БЛОКИРУЮЩАЯ ПРОВЕРКА: Архивация DayPlan (WP-356, peer-сессия 2026-05-29-04)
+
+> **Источник:** DayPlan регулярно зависает в current/ (22-24 мая, 29 мая — 5 раз за 2 недели).
+> Архивация DayPlan ОБЯЗАТЕЛЬНА перед финальным коммитом Day Close.
+> Без неё следующий Day Open получит стейл-файл, и day-open.checks.md заблокирует commit.
+
+```bash
+TODAY=$(date +%Y-%m-%d)
+cd "$HOME/IWE/DS-my-strategy"
+# Проверить: DayPlan сегодняшнего дня заархивирован (находится в archive/day-plans/, НЕ в current/)
+ARCHIVED=$(git ls-files archive/day-plans/ 2>/dev/null | grep "DayPlan $TODAY\.md" || true)
+STILL_IN_CURRENT=$(git ls-files current/ 2>/dev/null | grep "DayPlan $TODAY\.md" || true)
+if [ -n "$STILL_IN_CURRENT" ]; then
+  echo "❌ DayPlan $TODAY ещё в current/ — архивировать ДО финального коммита:"
+  echo "   git mv 'current/DayPlan $TODAY.md' archive/day-plans/"
+  echo "   Затем повторить коммит."
+  exit 1
+elif [ -n "$ARCHIVED" ]; then
+  echo "✅ DayPlan $TODAY в archive/day-plans/"
+else
+  echo "⚠️ DayPlan $TODAY не найден ни в current/ ни в archive/ — создан сегодня? Проверить вручную."
+fi
+# Также проверить: нет ли ДРУГИХ стейл-DayPlan в current/ (накопленный мусор)
+OTHER_STALE=$(git ls-files current/ 2>/dev/null | grep -E "^current/DayPlan [0-9]{4}-[0-9]{2}-[0-9]{2}\.md$" | grep -v "DayPlan $TODAY\.md" || true)
+if [ -n "$OTHER_STALE" ]; then
+  echo "❌ Найдены старые DayPlan в current/ (мусор):"
+  echo "$OTHER_STALE"
+  echo "   Архивировать: git mv 'current/DayPlan *.md' archive/day-plans/"
+  exit 1
+fi
+```
+
+- [ ] **DayPlan сегодняшнего дня** → `archive/day-plans/` (проверено bash выше). Если ❌ — коммит заблокирован.
+
 ### Сбор данных (шаг 1) — коммиты ПЕРВИЧНЫ
 
 > **Правило (S-12):** идти от коммитов к РП, не от DayPlan к коммитам.
@@ -61,6 +95,24 @@ fi
 
 - [ ] **DS-agent-workspace чистый:** если грязный — разобрать лог auto-commit, не коммитить вручную по привычке
 
+### 🟡 ПРОВЕРКА: Незакрытые external-сессии (WP-358 Ф10)
+
+> Финализация sessions через `/claude` бот — DP.SC.162 §close.
+> Warning, не block: если есть незакрытые SESSION-* post-cutover — напомнить, но коммит проходит.
+
+```bash
+SECTION=$(bash "$HOME/IWE/DS-my-strategy/scripts/check-open-sessions.sh" 2>/dev/null)
+if [ -n "$SECTION" ]; then
+  COUNT=$(printf '%s\n' "$SECTION" | grep -c '^| \[SESSION-' || true)
+  echo "  🟡 $COUNT незакрытых external-сессии в inbox/agent/sessions/ — рассмотри финализацию (DP.SC.162 §close)"
+  printf '%s\n' "$SECTION" | grep '^| \[SESSION-' | head -5
+else
+  echo "  ✅ Незакрытых external-сессий нет"
+fi
+```
+
+- [ ] Если ⚠️ — оценить, нужна ли финализация прямо сейчас (создать `sessions/external/2026-05/SESSION-<id>/report.md` + `git mv`). Если не сегодня — закоммитить как есть, продолжит висеть до Day Open завтра.
+
 ### Запись в черновик недельного поста (S-19, тестируется)
 
 > **Где живёт черновик:** `DS-Knowledge-Index-Tseren/docs/{YYYY}/{NN}-{месяц}/week-draft-w{NN}.md`
@@ -96,3 +148,31 @@ fi
 - [ ] **Ответы добавлены в черновик:** строки `[День]` обновлены
 - [ ] **Метрики дня записаны:** `week-draft-append.sh` (WakaTime/коммиты/РП) + вручную (бюджет/прогресс месяца)
 - [ ] **Черновик закоммичен:** `git -C ~/IWE/DS-Knowledge-Index-Tseren add docs/ && git commit -m "docs: week-draft W{NN} update"`
+
+### 🔴 Мультипликатор IWE — всегда Method B (по бюджету)
+
+> **Источник:** 2 июня 2026 — метод A (по ходам/времени) дал 1.4x, метод B (по бюджету) — 2.4x. Разница ×1.7 из-за пропущенных сессий и незачтённого бюджета WP. Пилот подтвердил: Method B — единственный правильный.
+
+**Формула Method B:**
+
+```
+Мультипликатор = Бюджет_закрыт / WakaTime
+
+Бюджет_закрыт = сумма:
+  • done РП → полный бюджет (из WP-REGISTRY колонка h)
+  • partial РП → % выполнения × бюджет (оценивать честно по артефактам)
+  • ad-hoc (без РП в DayPlan) → по числу ходов:
+      0 ходов → 0.25h | 2-4 → 0.5h | 5-7 → 0.75h | 8+ → 1-1.5h
+  • FMT / server / прочее без peer-сессий → фактическое время
+```
+
+**ОБЯЗАТЕЛЬНЫЕ шаги перед расчётом:**
+1. Открыть `sessions/00-index.md` → отфильтровать ВСЕ строки за сегодня (включая те, что не вошли в индекс)
+2. Найти папки сессий которых НЕТ в индексе: `ls sessions/$(date +%Y-%m)/$(date +%Y-%m-%d)-*/` vs `grep $(date +%Y-%m-%d) sessions/00-index.md`
+3. Для каждой папки с `report.md` — взять `duration_min` из frontmatter
+4. Проверить сессии с `turns_count: 0` но ненулевым числом файлов `NN-writer.md` — реальные ходы = (кол-во файлов ÷ 2)
+5. Только после полного списка — считать Method B
+
+**НЕ применять Method A (по времени сессий)** — он игнорирует бюджетный кредит выполненных РП и всегда занижает.
+
+**Sanity check (остаётся):** <1.5x при ≥10 peer-сессиях → пересчитать Method B, не показывать три метода, просто пересчитать.

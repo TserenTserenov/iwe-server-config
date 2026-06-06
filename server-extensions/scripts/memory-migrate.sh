@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# routing: migration  one-time=true
+# see DP.SC.159, DP.ROLE.059
 # memory-migrate.sh — добавление отсутствующих frontmatter-полей (WP-217 Ф10.2/Ф10.4)
 #
 # Добавляет поля schema_version/horizon/domains/status/owner в существующие файлы.

@@ -27,6 +27,19 @@ agent: Стратег
 
 # Day Plan: DD месяца YYYY (День недели)
 
+<details>
+<summary><b>Активные РП</b></summary>
+
+> Полная таблица: [active-wp.md](https://github.com/TserenTserenov/DS-my-strategy/blob/main/current/active-wp.md)
+> Ниже — топ по убыванию приоритета (только с активностью за 7д или в плане недели).
+
+| 🚦 | РП | Последний коммит (7д) |
+|----|----|-----------------------|
+| 🔴 | **WP-NNN** Название | commit-hash |
+| 🟡 | **WP-NNN** Название | commit-hash |
+| 🟢 | **WP-NNN** Название | нет (7д) |
+
+</details>
 <details open>
 <summary><b>План на сегодня</b></summary>
 
@@ -43,9 +56,9 @@ agent: Стратег
 <details>
 <summary><b>Календарь (DD месяца)</b></summary>
 
-| Время | Событие | Длит. | Связь с РП |
-|-------|---------|-------|------------|
-| HH:MM | Название | Xh | WP-N / — |
+| Время | Событие | Длит. | Тип | Связь с РП |
+|-------|---------|-------|-----|------------|
+| [HH:MM](google-calendar-url) | Название | Xh | Встреча / Напоминание | WP-N / — |
 
 ⏱ Свободных блоков ≥1h: [слоты]
 
@@ -81,12 +94,39 @@ agent: Стратег
 
 </details>
 <details>
+<summary><b>Наработки агентов</b></summary>
+
+<details>
 <summary><b>Наработки Scout (разбор)</b></summary>
 
 > Отчёт за DD мес — N находок, M capture-кандидатов
 > **Статус ревью:** ⬜ не проверен / ✅ проверен
 
-**Ожидают разбора:** N captures за последние DD дней (без ревью).
+Путь: `DS-agent-workspace/scout/results/YYYY/MM/DD/`
+
+</details>
+
+<details>
+<summary><b>📚 KE-кандидаты (Knowledge Extraction)</b></summary>
+
+> **Pending-review отчётов:** N | Самый старый: YYYY-MM-DD | SLA: ✅ в норме / ⚠️ истёк (DP.SC.004 ≤24ч)
+> Если N = 0 — секцию не выводить.
+
+| Отчёт | Дата | Статус |
+|-------|------|--------|
+| YYYY-MM-DD-inbox-check-N.md | YYYY-MM-DD | pending-review |
+
+Разбор: `/apply-captures`
+
+</details>
+
+</details>
+<details>
+<summary><b>Саморазвитие</b></summary>
+
+**Активный черновик:** [D-NNN](drafts/D-NNN-тема.md) — краткое описание, TTL: YYYY-MM-DD
+**Где остановился:** [стадия]
+**Сегодня:** X мин — [конкретное действие]
 
 </details>
 <details>
@@ -99,6 +139,28 @@ agent: Стратег
 | Заметка | Тип | Предложение | ✅ |
 |---------|-----|-------------|---|
 | «текст» | НЭП / Задача / Черновик / Знание / Шум | → куда | [ ] |
+
+</details>
+<details>
+<summary><b>Контент-план</b></summary>
+
+| # | Тема | Статус | Канал |
+|---|------|--------|-------|
+| N | [тема] | pending | [канал] |
+
+Сегодня: [D-NNN → действие]
+
+</details>
+<details>
+<summary><b>Мир</b></summary>
+
+**Вывод:** [2-4 предложения синтеза новостей через призму активных РП]
+
+**AI/LLM:** [Заголовок](url) · [Заголовок](url)
+**Инженерия:** [Заголовок](url) · [Заголовок](url)
+**Мировые события:** [Заголовок](url)
+
+> ⚠️ Ссылки обязательны. Тезисы без URL = нарушение SKILL.md шаг 6.
 
 </details>
 <details>
@@ -214,6 +276,36 @@ agent: Стратег
 <summary><b>Контент-план W{N}</b></summary>
 
 1. **#NNN Название** — канал, бюджет, дедлайн
+
+</details>
+<details>
+<summary><b>Мир (W{N})</b></summary>
+
+**Вывод:** [2-4 предложения: что из новостей важно для активных РП этой недели]
+
+**AI/LLM:** [Заголовок](url) · [Заголовок](url)
+**Инженерия:** [Заголовок](url)
+
+> ⚠️ Ссылки обязательны.
+
+</details>
+<details>
+<summary><b>Наработки агентов (W{N})</b></summary>
+
+<details>
+<summary><b>Наработки Scout (разбор)</b></summary>
+
+> Накопленные находки за неделю. Статус ревью: ⬜ / ✅
+
+</details>
+
+<details>
+<summary><b>📚 KE-кандидаты (Knowledge Extraction)</b></summary>
+
+> **Pending-review отчётов за неделю:** N | SLA: ✅ / ⚠️ истёк
+> Разбор: `/apply-captures`
+
+</details>
 
 </details>
 <details open>

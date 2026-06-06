@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# routing: helper  skill=iwe-rules-review  called-by=haiku  deterministic=true
+# see DP.SC.159, DP.ROLE.059
 # iwe-drift.sh — MVP drift-отчёт по .claude/sync-manifest.yaml
 #
 # WP-217 Ф3b, черновик 2026-04-10.

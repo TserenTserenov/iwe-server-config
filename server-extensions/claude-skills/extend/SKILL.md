@@ -4,6 +4,15 @@ description: "Каталог расширяемости IWE: что можно �
 argument-hint: "[название протокола или пустое для полного каталога]"
 user_invocable: true
 version: 1.0.0
+layer: L1
+status: active
+triggers:
+  slash: [/extend]
+  phrases: []
+routing:
+  executor: script
+  deterministic: true
+  script_path: ".claude/skills/extend/show-catalog.sh"
 ---
 
 # /extend — Каталог расширяемости IWE

@@ -2,6 +2,15 @@
 name: apply-captures
 description: Разбор extraction-reports со status pending-review — решение R15 (accept/reject/defer), запись в Pack, обновление статуса, коммит. Вызывать при Close при наличии N>0 pending-review отчётов.
 argument-hint: "[путь к конкретному отчёту | пусто = все pending-review]"
+version: 1.0.0
+layer: L1
+status: active
+triggers:
+  slash: [/apply-captures]
+  phrases: []
+routing:
+  executor: sonnet
+  deterministic: false
 ---
 
 # /apply-captures — разбор кандидатов экстрактора
@@ -12,7 +21,7 @@ argument-hint: "[путь к конкретному отчёту | пусто = 
 ## Scope
 
 **Этот скилл делает:**
-- Читает `DS-my-strategy/inbox/extraction-reports/*.md` со `status: pending-review`.
+- Читает `DS-my-strategy/inbox/extraction-reports/*.md` со `status: pending-review` или `status: deferred`.
 - Для каждого кандидата в отчёте — запрашивает решение R15 (accept / reject / defer).
 - Accept → опциональная редактура → валидация → запись файла в Pack → обновление MAP → коммит.
 - Reject → запись причины + паттерна в `feedback-log.md`.
@@ -63,14 +72,16 @@ reason: "дубликат PD.METHOD.006"
 pattern: "проверять существующие METHOD перед предложением нового"
 # --- при defer ---
 reason: "ждёт ArchGate WP-245"
-defer_until: "после WP-245 Ф22"
+defer_until: "после WP-245 Ф22"     # ОБЯЗАТЕЛЬНО — дата YYYY-MM-DD или событие
 ```
+
+**Инвариант defer (peer-session 2026-05-31-22):** `defer_until` — обязательное поле при `decision: defer`. Без него решение invalid. Reason: `deferred` без `defer_until` = masked cancel (см. `memory/lessons_defer_with_explicit_triggers.md`). Формат: дата `YYYY-MM-DD` ИЛИ привязка к событию («после WP-NNN Ф{N}», «при следующем Week Close»).
 
 ## Шаг 1. Найти pending-review отчёты
 
 ```bash
 find ~/IWE/DS-my-strategy/inbox/extraction-reports -name "*.md" \
-  -exec grep -l "^status: pending-review" {} \; | sort
+  -exec grep -l -E "^status: (pending-review|deferred)" {} \; | sort
 ```
 
 Если `$ARGUMENTS` задан путь — работать только с ним.
@@ -167,6 +178,7 @@ git add <target_path> [MAP если был] && git commit -m "feat(KE apply): <i
 Правила:
 - Все кандидаты resolved (accept/reject/defer) → `applied` если ≥1 applied, иначе `rejected` если все reject, `deferred` если есть defer без applied.
 - Часть кандидатов pending → `partially-applied`.
+- **Validation gate (peer-session 2026-05-31-22):** если хотя бы один кандидат имеет `decision: defer` без поля `defer_until` — отчёт НЕ может получить финальный статус `deferred`. Остаётся `partially-applied`. В тело отчёта добавить блок `## Unresolved candidates` со списком `candidate_id` + причиной (отсутствует `defer_until`). Следующий `/apply-captures`-запуск начинает с unresolved-блока. Это закрывает дыру «masked cancel» — отложенные кандидаты без триггера возврата.
 
 Обновить `status:` в frontmatter отчёта и сохранить файл.
 
@@ -193,8 +205,18 @@ git add <target_path> [MAP если был] && git commit -m "feat(KE apply): <i
 | `rejected` | Удалять через 7 дней |
 | `no-pending` | Удалять через 7 дней |
 
-## Close-интеграция (Ф4 WP-247, pending)
+## Интеграция в рабочий процесс
 
-После обкатки этого скилла в `extensions/protocol-close.checks.md` будет добавлен warning:
-«N extraction-reports со status pending-review — запустить /apply-captures перед закрытием сессии.»
-До реализации Ф4: предупреждение выдаётся вручную в protocol-close.md.
+**DayPlan (ежедневный обзор):** Шаблон DayPlan содержит секцию «Наработки ИИ → Экстрактор» с обзором:
+- N pending-review отчётов
+- Дата самого старого отчёта
+- SLA-статус (✅ в норме / ⚠️ истёк)
+- Напоминание: разбор в отдельной сессии `/apply-captures`
+
+**Close Gate:** `extensions/protocol-close.checks.md` — при N > 0 pending-review выдаёт предупреждение ⚠️ и SLA-напоминание (DP.SC.004 §Hard gate). Soft gate — не блокирует Close, но требует решения ≤24ч.
+
+**Полный цикл:**
+1. Cron / `extractor.sh` → создаёт `extraction-reports/*.md` (status: `pending-review`)
+2. Day Open → секция «Наработки ИИ → Экстрактор» в DayPlan показывает N ожидающих
+3. Close → `protocol-close.checks.md` напоминает о SLA
+4. Пользователь запускает `/apply-captures` в отдельной сессии → R15 разбор → запись в Pack

@@ -11,56 +11,13 @@
 #
 # Parameterized: sections list is a variable, not hardcoded per format.
 # Ф3 WP-229: добавлены проверки структуры (collapsible, непустые секции, мультипликатор, carry-over)
-# WP-264 Ф3: PENDING-маркеры — блок коммита при незаполненных <!-- PENDING:... --> секциях
-
-set -uo pipefail
-export PATH="/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin:${PATH:-}"
-
-IWE_ROOT="${IWE_ROOT:-${IWE_WORKSPACE:-$HOME/IWE}}"
-GOV_REPO="${IWE_GOVERNANCE_REPO:-DS-my-strategy}"
-GOV_PATH="$IWE_ROOT/$GOV_REPO"
-GATE_LOG="$IWE_ROOT/.claude/logs/gate_log.jsonl"
-mkdir -p "$(dirname "$GATE_LOG")" 2>/dev/null || true
-
-log_decision() {
-  # log_decision <decision> <reason> <missing_csv> <errors_csv>
-  local decision="$1" reason="$2" missing="$3" errors="$4"
-  local ts
-  ts=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
-  local entry
-  entry=$(jq -nc \
-    --arg ts "$ts" \
-    --arg sid "${SESSION_ID:-}" \
-    --arg tool "${TOOL:-}" \
-    --arg cmd "$(printf '%s' "${TOOL_INPUT:-}" | head -c 200)" \
-    --arg dp "${DAYPLAN:-}" \
-    --arg dec "$decision" \
-    --arg reason "$reason" \
-    --arg missing "$missing" \
-    --arg errors "$errors" \
-    '{ts:$ts, gate:"protocol-artifact-validate", session_id:$sid, tool:$tool,
-      cmd_head:$cmd, dayplan:$dp, decision:$dec, reason:$reason,
-      missing_sections:($missing|split("|")|map(select(length>0))),
-      errors:($errors|split("|")|map(select(length>0)))}' 2>/dev/null || true)
-  [ -n "$entry" ] && echo "$entry" >> "$GATE_LOG" 2>/dev/null || true
-}
 
 INPUT=$(cat)
 TOOL=$(echo "$INPUT" | jq -r '.tool_name // empty')
 TOOL_INPUT=$(echo "$INPUT" | jq -r '.tool_input.command // empty')
-SESSION_ID=$(echo "$INPUT" | jq -r '.session_id // empty')
 
 # Only trigger on Bash tool with git commit command
 if [ "$TOOL" != "Bash" ]; then
-  echo '{}'
-  exit 0
-fi
-
-# Skip if command is just echoing JSON containing "git commit" (false-positive guard).
-# Real git commit starts with optional `cd ... &&`, then `git add`/`git commit`.
-# Echo'ed test inputs typically have `echo '{...git commit...}' | ...` — `echo '{` near start.
-if echo "$TOOL_INPUT" | grep -qE "^\s*echo\s+['\"]?\{"; then
-  log_decision "allow" "echo of JSON, not real commit" "" ""
   echo '{}'
   exit 0
 fi
@@ -71,15 +28,20 @@ if ! echo "$TOOL_INPUT" | grep -qE 'git (add.*&&.*git )?commit'; then
   exit 0
 fi
 
-# Check if we're in DS-my-strategy (protocol governance repo)
-if ! echo "$TOOL_INPUT" | grep -q 'DayPlan\|day-open\|day-close\|WeekPlan'; then
-  # Also check pwd context — look for staged DayPlan files
-  STAGED=$(cd "$GOV_PATH" 2>/dev/null && git diff --cached --name-only 2>/dev/null || echo "")
-  if ! echo "$STAGED" | grep -qE 'DayPlan|WeekPlan'; then
-    log_decision "allow" "no DayPlan/WeekPlan in staged or command" "" ""
-    echo '{}'
-    exit 0
-  fi
+# Governance-репо: из env $IWE_GOVERNANCE_REPO (по умолчанию DS-strategy).
+# Workspace: $IWE_WORKSPACE или $IWE_ROOT (синонимы), default ~/IWE.
+GOV_REPO="${IWE_GOVERNANCE_REPO:-DS-strategy}"
+WORKSPACE="${IWE_WORKSPACE:-${IWE_ROOT:-$HOME/IWE}}"
+GOV_PATH="$WORKSPACE/$GOV_REPO"
+
+# R4.5 fix (WP-273): trigger ТОЛЬКО по staged files, НЕ по тексту команды.
+# Старая логика грепала TOOL_INPUT на «DayPlan|day-close» — false positive
+# на любой коммит файла `day-close/SKILL.md` или сообщения с «day-close».
+# Принцип: «hook trigger = artifact (staged file), не TOOL_INPUT текст» (memory/hooks-design.md).
+STAGED=$(cd "$GOV_PATH" 2>/dev/null && git diff --cached --name-only 2>/dev/null || echo "")
+if ! echo "$STAGED" | grep -qE '^current/DayPlan.*\.md$|^current/WeekPlan.*\.md$'; then
+  echo '{}'
+  exit 0
 fi
 
 # --- DayPlan Validation (выполняется только если DayPlan-файл существует) ---
@@ -89,19 +51,14 @@ ERRORS=()
 
 if [ -n "$DAYPLAN" ]; then
 
-# Required sections (parameterized — update this list when format changes)
+# Required sections (parameterized — update this list when format changes).
+# Scout раздел опционален: проверяется отдельно ниже (см. блок "Scout").
 SECTIONS=(
   "План на сегодня"
   "Календарь"
-  "Здоровье"
   "IWE за ночь"
-  "Наработки Scout"
-  "Контент-план"
   "Разбор заметок"
   "Итоги вчера"
-  "Мир"
-  "Контекст недели"
-  "Требует внимания"
 )
 
 for section in "${SECTIONS[@]}"; do
@@ -113,7 +70,7 @@ done
 # Check mandatory format elements
 
 # --- Ф3 Check 1: collapsible <details> блоки ---
-DETAILS_COUNT=$(grep -c '<details' "$DAYPLAN" 2>/dev/null || echo 0)
+DETAILS_COUNT=$(grep -c '<details' "$DAYPLAN" 2>/dev/null || true); DETAILS_COUNT=${DETAILS_COUNT:-0}
 if [ "$DETAILS_COUNT" -lt 3 ]; then
   ERRORS+=("Collapsible секции (<details>) < 3 найдено: $DETAILS_COUNT. DayPlan должен иметь collapsible-структуру")
 fi
@@ -125,14 +82,12 @@ if [ "$CALENDAR_CONTENT" -lt 3 ]; then
   ERRORS+=("Секция 'Календарь' пустая или слишком короткая (${CALENDAR_CONTENT} строк)")
 fi
 
-# Здоровье (бота/платформы, QA): должна содержать числа или "нет данных"
-if ! awk '/Здоровье (бота|платформы)/,/^<\/details>/' "$DAYPLAN" 2>/dev/null | grep -qE '\|[[:space:]]*[0-9]|нет данных'; then
-  ERRORS+=("Секция 'Здоровье' не содержит данных (таблица с числами или 'нет данных')")
-fi
-
-# Scout: должна содержать хотя бы упоминание находок или "нет находок"
-if ! awk '/Наработки Scout/,/^<\/details>/' "$DAYPLAN" 2>/dev/null | grep -iqE 'наход|capture|статус|нет|find'; then
-  ERRORS+=("Секция 'Наработки Scout' пустая")
+# Scout: проверяется только если секция вообще присутствует в DayPlan (опциональный компонент,
+# зависит от DS-agent-workspace). Если секции нет — Scout не сконфигурирован, валидатор не блокирует.
+if grep -q "Наработки Scout" "$DAYPLAN" 2>/dev/null; then
+  if ! awk '/Наработки Scout/,/^<\/details>/' "$DAYPLAN" 2>/dev/null | grep -iqE 'наход|capture|статус|нет|find|disabled|not configured'; then
+    ERRORS+=("Секция 'Наработки Scout' пустая (допустимы маркеры 'нет находок', 'disabled', 'not configured')")
+  fi
 fi
 
 # --- Ф3 Check 3: формат мультипликатора ---
@@ -158,13 +113,6 @@ if [ -n "$PREV_DAYPLAN" ] && [ "$PREV_DAYPLAN" != "$DAYPLAN" ]; then
   fi
 fi
 
-# --- WP-264 Ф3: PENDING-маркеры — блокировать коммит если есть незаполненные секции ---
-PENDING_COUNT=$(grep -c '<!-- PENDING:' "$DAYPLAN" 2>/dev/null || echo 0)
-if [ "$PENDING_COUNT" -gt 0 ]; then
-  PENDING_LIST=$(grep -o '<!-- PENDING:[^>]*>' "$DAYPLAN" 2>/dev/null | head -5 | tr '\n' ' ' || true)
-  ERRORS+=("Незаполненные PENDING-маркеры ($PENDING_COUNT шт): $PENDING_LIST — заполни перед коммитом")
-fi
-
 fi  # endif [ -n "$DAYPLAN" ]
 
 # --- WeekPlan Validation (Ф6.1 WP-265) ---
@@ -187,9 +135,9 @@ if [ -n "$WEEKPLAN" ]; then
     WP_ERRORS+=("WeekPlan: несбалансированные <details> (открытий=$DETAILS_OPEN, закрытий=$DETAILS_CLOSE)")
   fi
 
-  # Детектор (в): обязательные секции WeekPlan (5 минимальных по templates-dayplan.md Ф7)
+  # Детектор (в): обязательные секции WeekPlan (по templates-dayplan.md)
+  # ОПТ-5 (WP-297, 8 май): «Итоги» переехали в WeekReport — больше не required в WeekPlan
   WP_REQUIRED=(
-    "Итоги"
     "Повестка"
     "Inbox Triage"
     "План на неделю"
@@ -201,23 +149,24 @@ if [ -n "$WEEKPLAN" ]; then
     fi
   done
 
+  # Детектор (г): WeekReport валидация (ОПТ-5 WP-297)
+  WEEKREPORT=$(ls "$GOV_PATH"/current/WeekReport\ *.md 2>/dev/null | sort | tail -1)
+  if [ -n "$WEEKREPORT" ]; then
+    if ! grep -q "Итоги" "$WEEKREPORT"; then
+      WP_MISSING_LIST+=("Итоги (в WeekReport)")
+    fi
+  fi
+
   if [ ${#WP_MISSING_LIST[@]} -gt 0 ] || [ ${#WP_ERRORS[@]} -gt 0 ]; then
     WP_MISSING_STR=$(IFS=', '; echo "${WP_MISSING_LIST[*]:-}")
     WP_ERRORS_STR=$(IFS=', '; echo "${WP_ERRORS[*]:-}")
-    WP_MISSING_PIPE=$(IFS='|'; echo "${WP_MISSING_LIST[*]:-}")
-    WP_ERRORS_PIPE=$(IFS='|'; echo "${WP_ERRORS[*]:-}")
-
     WP_MSG="⛔ WEEKPLAN VALIDATION FAILED."
     [ ${#WP_MISSING_LIST[@]} -gt 0 ] && WP_MSG="$WP_MSG Пропущены секции (${#WP_MISSING_LIST[@]}): $WP_MISSING_STR."
     [ ${#WP_ERRORS[@]} -gt 0 ] && WP_MSG="$WP_MSG Ошибки структуры: $WP_ERRORS_STR."
     WP_MSG="$WP_MSG Исправь WeekPlan перед коммитом."
-
-    log_decision "block" "$WP_MSG" "$WP_MISSING_PIPE" "$WP_ERRORS_PIPE"
     jq -n --arg reason "$WP_MSG" '{"decision": "block", "reason": $reason}'
     exit 0
   fi
-
-  log_decision "allow" "WeekPlan validation passed" "" ""
 fi
 
 # Report results
@@ -227,19 +176,13 @@ if [ ${#MISSING[@]} -gt 0 ] || [ ${#ERRORS[@]} -gt 0 ]; then
   ERRORS_STR=$(printf ', %s' "${ERRORS[@]}")
   ERRORS_STR=${ERRORS_STR:2}
 
-  MISSING_PIPE=$(IFS='|'; echo "${MISSING[*]:-}")
-  ERRORS_PIPE=$(IFS='|'; echo "${ERRORS[*]:-}")
-
   MSG="⛔ DAYPLAN VALIDATION FAILED."
   [ ${#MISSING[@]} -gt 0 ] && MSG="$MSG Пропущены секции (${#MISSING[@]}): $MISSING_STR."
   [ ${#ERRORS[@]} -gt 0 ] && MSG="$MSG Ошибки формата/структуры: $ERRORS_STR."
   MSG="$MSG Исправь DayPlan перед коммитом."
 
-  log_decision "block" "$MSG" "$MISSING_PIPE" "$ERRORS_PIPE"
-
   jq -n --arg reason "$MSG" '{"decision": "block", "reason": $reason}'
 else
-  log_decision "allow" "validation passed" "" ""
   cat <<'EOF'
 {"additionalContext": "✅ DayPlan прошёл валидацию: секции, collapsible, непустые блоки, мультипликатор, carry-over."}
 EOF

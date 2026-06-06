@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# routing: utility  deterministic=true
+# see DP.SC.159, DP.ROLE.059
 # memory-bleed.sh — детектор нарушений memory/ (WP-217 Ф10.2)
 #
 # Обнаруживает: файлы без frontmatter, HOT-переполнение,

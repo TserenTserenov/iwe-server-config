@@ -4,6 +4,14 @@ description: "Обновление IWE с объяснением изменен�
 argument-hint: ""
 user_invocable: true
 version: 1.0.0
+layer: L1
+status: active
+triggers:
+  slash: [/iwe-update]
+  phrases: []
+routing:
+  executor: haiku
+  deterministic: false
 ---
 
 # IWE Update (агент-обновитель)
