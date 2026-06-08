@@ -134,6 +134,10 @@ in
         "/home/tseren/.cache"
         "*.tmp"
         "*.log"
+        "node_modules"
+        ".git"
+        "__pycache__"
+        "*.pyc"
       ];
 
       pruneOpts = [
