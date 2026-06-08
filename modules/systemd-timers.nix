@@ -113,7 +113,6 @@ let
       "PACK-autonomous-agents"
       "PACK-digital-platform"
       "PACK-ecosystem"
-      "PACK-education"
       "PACK-personal"
       "PACK-verification"
     )
@@ -126,7 +125,15 @@ let
         continue
       fi
       cd "$dir" || { failed+=("$repo (cd failed)"); continue; }
-      if [ -n "$(${pkgs.git}/bin/git status --porcelain 2>/dev/null)" ]; then
+      # DS-agent-workspace: исключить scheduler/feedback-triage/*.md из dirty-check.
+      # Эти файлы генерируются агентом в течение дня и коммитятся ночным auto-commit
+      # (synchronizer agent-workspace-commit, 06:00 МСК). Алерт в промежутке = ложное срабатывание.
+      if [ "$repo" = "DS-agent-workspace" ]; then
+        dirty_non_triage=$(${pkgs.git}/bin/git status --porcelain 2>/dev/null | ${pkgs.gnugrep}/bin/grep -v '^?? scheduler/feedback-triage/' || true)
+      else
+        dirty_non_triage=$(${pkgs.git}/bin/git status --porcelain 2>/dev/null)
+      fi
+      if [ -n "$dirty_non_triage" ]; then
         # Grace-период: фоновые синхронизаторы (DS-ai-systems synchronizer auto-commits,
         # knowledge-mcp reindex и т.п.) могут оставлять untracked/modified файлы на
         # секунды до собственного коммита. Ждём 30s и проверяем повторно — если всё
@@ -137,11 +144,16 @@ let
         # gitignore (DS-ecosystem-development) — см. runbook docs/runbooks/watchdog-dirty-alert.md.
         echo "DIRTY: $repo (transient? grace 30s)"
         ${pkgs.coreutils}/bin/sleep 30
-        if [ -n "$(${pkgs.git}/bin/git status --porcelain 2>/dev/null)" ]; then
+        if [ "$repo" = "DS-agent-workspace" ]; then
+          dirty_non_triage_after=$(${pkgs.git}/bin/git status --porcelain 2>/dev/null | ${pkgs.gnugrep}/bin/grep -v '^?? scheduler/feedback-triage/' || true)
+        else
+          dirty_non_triage_after=$(${pkgs.git}/bin/git status --porcelain 2>/dev/null)
+        fi
+        if [ -n "$dirty_non_triage_after" ]; then
           # Включаем `git status --porcelain` вывод (первые 5 путей) в failed[],
           # чтобы TG-алерт сразу показывал ЧТО dirty, а не только факт dirty.
           # head -3 чтобы при worst-case (15 dirty repos) не упереться в TG message limit ~4096 chars
-          dirty_paths=$(${pkgs.git}/bin/git status --porcelain 2>/dev/null | ${pkgs.coreutils}/bin/head -3 | ${pkgs.coreutils}/bin/tr '\n' '|')
+          dirty_paths=$(echo "$dirty_non_triage_after" | ${pkgs.coreutils}/bin/head -3 | ${pkgs.coreutils}/bin/tr '\n' '|')
           dirty_paths="''${dirty_paths%|}"
           echo "DIRTY: $repo (uncommitted changes — пропускаю pull): $dirty_paths"
           failed+=("$repo (dirty: $dirty_paths)")
