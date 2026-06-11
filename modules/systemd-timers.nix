@@ -182,6 +182,71 @@ let
     exit 0
   '';
 
+  # Writer-delivery: пушит локальные коммиты, сделанные сессиями НА СЕРВЕРЕ,
+  # которые иначе зависают (commit-without-push) → divergence → pull-repos alert
+  # каждые 2ч (см. инцидент DS-Knowledge-Index-Tseren, peer-session 2026-06-11-01).
+  # Архитектурный инвариант (выбор пилота): сторож `iwe-pull-repos` остаётся
+  # НАБЛЮДАТЕЛЕМ (только pull + alert), доставка committed-work — отдельный сервис.
+  # Push строго при: clean tree AND ahead>0 AND behind==0 (нет divergence, нет merge,
+  # нет мутации истории). Diverged-репо НЕ трогаем — их ловит pull-repos alert.
+  pushAheadScript = pkgs.writeShellScript "iwe-push-ahead" ''
+    set -uo pipefail
+    export GIT_TERMINAL_PROMPT=0
+    export GIT_SSH_COMMAND="ssh -o BatchMode=yes -o StrictHostKeyChecking=accept-new"
+
+    repos=(
+      "DS-IT-systems/DS-ai-systems"
+      "DS-IT-systems/activity-hub"
+      "DS-MCP/knowledge-mcp"
+      "DS-agent-workspace"
+      "DS-autonomous-agents"
+      "DS-ecosystem-development"
+      "DS-Knowledge-Index-Tseren"
+      "PACK-MIM"
+      "PACK-agent-rules"
+      "PACK-autonomous-agents"
+      "PACK-digital-platform"
+      "PACK-ecosystem"
+      "PACK-personal"
+      "PACK-verification"
+    )
+
+    failed=()
+    for repo in "''${repos[@]}"; do
+      dir="${iwe}/$repo"
+      [ -d "$dir/.git" ] || continue
+      cd "$dir" || continue
+      # Только чистое дерево — dirty-репо не наша забота (их обрабатывает sync/pull).
+      [ -z "$(${pkgs.git}/bin/git status --porcelain 2>/dev/null)" ] || continue
+      # Должен быть upstream tracking branch, иначе push некуда.
+      up=$(${pkgs.git}/bin/git rev-parse --abbrev-ref --symbolic-full-name '@{u}' 2>/dev/null) || continue
+      ${pkgs.coreutils}/bin/timeout 30s ${pkgs.git}/bin/git fetch --quiet 2>/dev/null || continue
+      ahead=$(${pkgs.git}/bin/git rev-list --count "$up"..HEAD 2>/dev/null || echo 0)
+      behind=$(${pkgs.git}/bin/git rev-list --count HEAD.."$up" 2>/dev/null || echo 0)
+      # Push только когда строго впереди и не позади — никакого merge/rebase.
+      if [ "$ahead" -gt 0 ] && [ "$behind" -eq 0 ]; then
+        if ${pkgs.coreutils}/bin/timeout 30s ${pkgs.git}/bin/git push 2>&1; then
+          echo "PUSHED: $repo ($ahead commit(s))"
+        else
+          echo "PUSH-FAIL: $repo"
+          failed+=("$repo (push failed)")
+        fi
+      fi
+    done
+
+    # TG-алерт только при реальном push-failure (не на каждый skip). exit 0 always.
+    if [ "''${#failed[@]}" -gt 0 ]; then
+      msg="⚠️ IWE push-ahead warnings (tsekh-1, $(${pkgs.coreutils}/bin/date '+%Y-%m-%d %H:%M')): ''${failed[*]}"
+      ${pkgs.curl}/bin/curl -s --max-time 10 -X POST \
+        "https://api.telegram.org/bot''${TELEGRAM_BOT_TOKEN}/sendMessage" \
+        -d "chat_id=''${TELEGRAM_CHAT_ID}" \
+        --data-urlencode "text=$msg" \
+        > /dev/null || true
+    fi
+
+    exit 0
+  '';
+
   # Скрипт TG-алерта.
   # TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID — из EnvironmentFile /etc/iwe/env (личный чат).
   # TELEGRAM_TEAM_CHAT_ID — опционально; если задан, алерт дублируется в командный канал.
@@ -251,8 +316,9 @@ in
       description = "IWE Scheduler — центральный диспетчер агентов";
       unitConfig   = commonUnitConfig;
       serviceConfig = commonServiceConfig // {
-        # WP-7 S-A: pre-tick git pull для 7 IWE-репо. Префикс `-` → fail не блокирует ExecStart.
-        ExecStartPre = "-${pullScript}";
+        # WP-7 S-A: pre-tick git pull для IWE-репо (сторож-наблюдатель). Префикс `-` → fail не блокирует ExecStart.
+        # peer-session 2026-06-11-01: push-ahead доставляет clean+ahead коммиты сессий (commit-without-push fix).
+        ExecStartPre = [ "-${pullScript}" "-${pushAheadScript}" ];
         ExecStart    = "${pkgs.bash}/bin/bash ${iwe}/DS-IT-systems/DS-ai-systems/synchronizer/scripts/scheduler.sh dispatch";
         TimeoutSec   = 1800;  # 30 мин — включая pre-tick pull (worst-case 14×60s=14 мин)
       };
