@@ -177,7 +177,18 @@ render_bot_qa() {
     echo "| Urgent | нет данных |"
   fi
   echo
-  echo "<!-- PENDING: smoke-tests — N passed/failed (если запущены до commit) -->"
+  # Шаг 5 SKILL: core smoke синхронно. Раньше оставлялся PENDING-placeholder (bug-2026-06-12).
+  local smoke_script="$IWE/${IWE_GOVERNANCE_REPO:-DS-strategy}/scripts/day-open-smoke.sh" smoke_json
+  if [ -f "$smoke_script" ]; then
+    smoke_json=$(bash "$smoke_script" 2>/dev/null)
+    if [ -n "$smoke_json" ]; then
+      echo "**Smoke-tests:** `$smoke_json`"
+    else
+      echo "**Smoke-tests:** скрипт вернул пусто — проверить `$smoke_script`"
+    fi
+  else
+    echo "**Smoke-tests:** скрипт не найден (`$smoke_script`)"
+  fi
 }
 
 # --- Section: Новые задачи в репозиториях (issue sweep, 2 дня) ---
