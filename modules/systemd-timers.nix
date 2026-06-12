@@ -335,7 +335,7 @@ in
         # 00:00 code-scan+update+week-review(Пн)+unsatisfied-report
         # 02:00 mcp-reindex
         # 03:00 подготовка к template-sync (03:30)
-        # 06:00 strategist-morning (штатно) + extractor + consistency-check
+        # 06:20 strategist-morning (штатно) + extractor + consistency-check — после 06:00-конвейеров
         # 08:00 strategist-morning (единственный catch-up, если 06:00 упал)
         # 09:00/12:00/15:00/18:00/21:00 extractor inbox-check
         # 23:00 note-review + autonomous day-close
@@ -343,7 +343,7 @@ in
           "*-*-* 00:00:00"
           "*-*-* 02:00:00"
           "*-*-* 03:00:00"
-          "*-*-* 06:00:00"
+          "*-*-* 06:20:00"
           "*-*-* 08:00:00"
           "*-*-* 09:00:00"
           "*-*-* 12:00:00"
