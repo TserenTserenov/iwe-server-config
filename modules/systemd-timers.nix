@@ -125,12 +125,14 @@ let
         continue
       fi
       cd "$dir" || { failed+=("$repo (cd failed)"); continue; }
-      # DS-agent-workspace: исключить scheduler/feedback-triage/ и auditor/ из dirty-check.
-      # Оба пути — output ночных агентов, коммитятся auto-commit.sh (git add -A + push,
+      # DS-agent-workspace: исключить scheduler/feedback-triage/ из dirty-check.
+      # Это output ночного агента, коммитится auto-commit.sh (git add -A + push,
       # synchronizer agent-workspace-commit, 05:00+ МСК, см. DS-agent-workspace/scripts/auto-commit.sh).
       # Алерт в окне до auto-commit = ложное срабатывание (peer-session 2026-06-11-01).
+      # auditor/ убран из hardcoded grep (BDR8): теперь он в .gitignore DS-agent-workspace
+      # (BDR6) → git status его не показывает, спецобработка не нужна (gitignore-driven).
       if [ "$repo" = "DS-agent-workspace" ]; then
-        dirty_non_triage=$(${pkgs.git}/bin/git status --porcelain 2>/dev/null | ${pkgs.gnugrep}/bin/grep -v '^?? scheduler/feedback-triage/' | ${pkgs.gnugrep}/bin/grep -v '^?? auditor/' || true)
+        dirty_non_triage=$(${pkgs.git}/bin/git status --porcelain 2>/dev/null | ${pkgs.gnugrep}/bin/grep -v '^?? scheduler/feedback-triage/' || true)
       else
         dirty_non_triage=$(${pkgs.git}/bin/git status --porcelain 2>/dev/null)
       fi
@@ -146,7 +148,7 @@ let
         echo "DIRTY: $repo (transient? grace 30s)"
         ${pkgs.coreutils}/bin/sleep 30
         if [ "$repo" = "DS-agent-workspace" ]; then
-          dirty_non_triage_after=$(${pkgs.git}/bin/git status --porcelain 2>/dev/null | ${pkgs.gnugrep}/bin/grep -v '^?? scheduler/feedback-triage/' | ${pkgs.gnugrep}/bin/grep -v '^?? auditor/' || true)
+          dirty_non_triage_after=$(${pkgs.git}/bin/git status --porcelain 2>/dev/null | ${pkgs.gnugrep}/bin/grep -v '^?? scheduler/feedback-triage/' || true)
         else
           dirty_non_triage_after=$(${pkgs.git}/bin/git status --porcelain 2>/dev/null)
         fi
