@@ -787,11 +787,11 @@ in
     };
 
     # =========================================================
-    # LLM HEALTH CHECK — end-to-end probe LiteLLM endpoint
+    # LLM HEALTH CHECK — end-to-end probe LLM endpoint
     # =========================================================
-    # Зондирует LITELLM_PROXY_URL/v1/chat/completions (max_tokens=1).
-    # При ответе без choices[0].message → TG-алерт немедленно.
-    # Каждые 5 мин. Bug 3 (WP-46 peer-session 2026-06-15).
+    # Режимы: 1) LITELLM_PROXY_URL → /v1/chat/completions; 2) ANTHROPIC_API_KEY → прямой Anthropic.
+    # max_tokens=10 (1→10 fix: Anthropic при max_tokens=1 отдаёт content:[], ds-ai-systems 3eea6d3).
+    # При FAIL → TG-алерт немедленно. Каждые 5 мин. Bug 3 (WP-46 peer-session 2026-06-15).
 
     systemd.services."iwe-llm-health" = {
       description = "IWE — LLM endpoint health probe (every 5 min)";
