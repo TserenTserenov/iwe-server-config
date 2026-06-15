@@ -786,6 +786,34 @@ in
       };
     };
 
+    # =========================================================
+    # LLM HEALTH CHECK — end-to-end probe LiteLLM endpoint
+    # =========================================================
+    # Зондирует LITELLM_PROXY_URL/v1/chat/completions (max_tokens=1).
+    # При ответе без choices[0].message → TG-алерт немедленно.
+    # Каждые 5 мин. Bug 3 (WP-46 peer-session 2026-06-15).
+
+    systemd.services."iwe-llm-health" = {
+      description = "IWE — LLM endpoint health probe (every 5 min)";
+      unitConfig   = commonUnitConfig;
+      serviceConfig = commonServiceConfig // {
+        ExecStart  = "${pkgs.bash}/bin/bash ${iwe}/DS-IT-systems/DS-ai-systems/synchronizer/scripts/llm-health-check.sh";
+        TimeoutSec = 45;
+      };
+      path = commonPath;
+      environment = commonEnv;
+    };
+
+    systemd.timers."iwe-llm-health" = {
+      wantedBy    = [ "timers.target" ];
+      description = "IWE LLM health probe — каждые 5 мин";
+      timerConfig = {
+        OnBootSec       = "1min";
+        OnUnitActiveSec = "5min";
+        Persistent      = true;
+      };
+    };
+
     # НЕ МИГРИРОВАНО: com.exocortex.pomodoro-alert
     # =========================================================
     # pomodoro-alert.py использует macOS Notification Center / osascript.
