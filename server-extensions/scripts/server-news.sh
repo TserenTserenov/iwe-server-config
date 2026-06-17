@@ -126,7 +126,9 @@ def parse_rss(xml_text, feed_url):
                 title = title_el.text if title_el is not None else "(без заголовка)"
                 link_el = entry.find(f"{{{atom_ns}}}link")
                 link = link_el.get("href", "") if link_el is not None else ""
-                date_el = entry.find(f"{{{atom_ns}}}updated") or entry.find(f"{{{atom_ns}}}published")
+                date_el = entry.find(f"{{{atom_ns}}}updated")
+                if date_el is None:
+                    date_el = entry.find(f"{{{atom_ns}}}published")
                 pub_date = parse_date(date_el.text if date_el is not None else "")
                 items.append({"title": title, "link": link, "date": pub_date})
             return items
@@ -137,7 +139,9 @@ def parse_rss(xml_text, feed_url):
             title = title_el.text if title_el is not None else "(без заголовка)"
             link_el = item.find("link")
             link = (link_el.text or "") if link_el is not None else ""
-            date_el = item.find("pubDate") or item.find("{http://purl.org/dc/elements/1.1/}date")
+            date_el = item.find("pubDate")
+            if date_el is None:
+                date_el = item.find("{http://purl.org/dc/elements/1.1/}date")
             pub_date = parse_date(date_el.text if date_el is not None else "")
             items.append({"title": title, "link": link, "date": pub_date})
 

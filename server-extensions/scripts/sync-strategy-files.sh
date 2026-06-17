@@ -54,6 +54,12 @@ if echo "$ALL_FILES" | grep -qx "MEMORY.md"; then
   FILES_TO_SYNC+=("MEMORY.md")
 fi
 
+# exocortex/day-rhythm-config.yaml — day-rhythm config (news/calendar) for server-mode Day Open.
+# exocortex/ is excluded from auto-pull, so this is the only delivery path to the server.
+if echo "$ALL_FILES" | grep -qx "exocortex/day-rhythm-config.yaml"; then
+  FILES_TO_SYNC+=("exocortex/day-rhythm-config.yaml")
+fi
+
 if [ "${#FILES_TO_SYNC[@]}" -eq 0 ]; then
   echo "$TS [sync-strategy-files] no files matched"
   exit 0
