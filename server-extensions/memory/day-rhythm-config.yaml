@@ -11,7 +11,7 @@ day_open:
                                 # Examples: ['primary', 'work@company.com', 'team-calendar-id@group']
 
 news:
-  enabled: false                # Enable news digest at Day Open (requires WebSearch)
+  enabled: true                 # Enable news digest at Day Open (requires WebSearch)
   max_items_per_topic: 3
   topics:
     - name: AI
