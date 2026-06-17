@@ -10,6 +10,11 @@ triggers:
 routing:
   executor: sonnet
   deterministic: false
+agents: single
+interaction: multi-step
+gates_required: []
+gates_enforced: []
+gates_rationale: "операционный скилл; WP Gate применим только при создании нового РП, не для операционных вызовов"
 ---
 
 # Скилл: /week-close-pilot — закрытие недели пилота личного руководства
@@ -22,7 +27,11 @@ routing:
 
 ---
 
-## Порядок выполнения
+## When to use
+
+Скилл IWE — см. тело файла
+
+## Algorithm
 
 ### Шаг 1: Определение недель и пилота
 

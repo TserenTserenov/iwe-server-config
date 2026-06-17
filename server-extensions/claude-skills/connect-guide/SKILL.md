@@ -15,6 +15,11 @@ routing:
   executor: script
   deterministic: true
   script_path: ".claude/skills/connect-guide/connect.sh"
+agents: none
+interaction: one-shot
+gates_required: []
+gates_enforced: []
+gates_rationale: "операционный скилл; WP Gate применим только при создании нового РП, не для операционных вызовов"
 ---
 
 # /connect-guide — подключить персональное руководство (VS Code канал)
@@ -24,12 +29,18 @@ routing:
 > **Парный канал к боту:** `/connect_guide` в Telegram делает то же самое через бот-кнопку.
 > Этот скилл — для пилотов, работающих primary в VS Code / Claude Code (ступени 3-4 по SC.020).
 
+## When to use
+
+Подключить персональное руководство пилота — установить GitHub App «Aisystant Personal Guide» на репо personal-guide. Открывает install-flow в браузере, проверяет успех через github_status MCP. Используй когда пилот говорит «подключи руководство», «установи app», «настрой репо», «connect personal guide» — или для ступени 3-4 (VS Code-primary канал).
+
 ## Контракт скилла
 
 - **Вход:** аккаунт Aisystant с активной подпиской БР; пилот уже прошёл онбординг в Telegram-боте (хотя бы /start, чтобы создалась запись в dt_tokens). Доступ к `mcp__claude_ai_IWE__github_status`.
 - **Выход:** GitHub App установлен на репо `<user>/personal-guide`, mapping (chat_id, installation_id, repo) в Neon secrets DB. Пилот может запускать `/lesson` и `/lesson-close`.
 - **Время:** 3-5 мин (включая выбор репо в GitHub UI).
 - **Не делает:** не создаёт репо `personal-guide` (это `/personal-guide-start`); не делает первый рендер (это `/personal-guide-render`); не запускает first lesson (это `/lesson`).
+
+## Algorithm
 
 ## Шаг 1. Определить identity пилота
 

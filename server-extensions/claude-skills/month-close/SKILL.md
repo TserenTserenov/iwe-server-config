@@ -11,6 +11,11 @@ triggers:
 routing:
   executor: opus
   deterministic: false
+agents: single
+interaction: multi-step
+gates_required: []
+gates_enforced: []
+gates_rationale: "операционный скилл; WP Gate применим только при создании нового РП, не для операционных вызовов"
 ---
 
 # Month Close (протокол закрытия месяца)
@@ -20,6 +25,10 @@ routing:
 > **Принцип:** Month Close = агрегация 4-5 Week Close'ов + переосмысление фазы/калибра. Не повторяет Week Close, опирается на его выходы.
 > **Позиция в ВДВ v9:** стадия 7 «Закрытие месяца». Вход = Report W{N} предыдущего месяца + Strategy.md. Выход = Strategy.md § Результаты месяца (R1-RN) + `archive/MonthClose YYYY-MM.md`.
 > **SKILL.md = L1 платформенный файл.** Пользователь не редактирует напрямую — только через `extensions/`.
+
+## When to use
+
+Протокол закрытия месяца (Month Close). Стадия 7 каскада ВДВ v9 (PD.METHOD.008). Запускается в первый Пн месяца, до Strategy Session.
 
 ## БЛОКИРУЮЩЕЕ: пошаговое исполнение
 
@@ -34,7 +43,7 @@ Month Close = протокол. Исполнять ТОЛЬКО пошагово
 2. **Week Close предыдущей недели выполнен?** Report W{N-1} существует в `current/` или `archive/`. Если нет — СТОП, сначала `/week-close`.
 3. **Month Close прошлого месяца архивирован?** `archive/MonthClose YYYY-MM.md` существует (для месяцев после MVP). Если нет (первый прогон мая 2026) — пропустить проверку.
 
-## Алгоритм
+## Algorithm
 
 ### 0. Extensions (before)
 Загрузить: `bash .claude/scripts/load-extensions.sh month-close before`. Exit 0 → `Read` каждый файл из вывода (alphabetic) → выполнить как первые шаги. Exit 1 → пропустить. Поддерживает `extensions/month-close.before.md` И `extensions/month-close.before.<suffix>.md`.

@@ -13,6 +13,11 @@ routing:
   executor: script
   deterministic: true
   script_path: ".claude/skills/extend/show-catalog.sh"
+agents: none
+interaction: one-shot
+gates_required: []
+gates_enforced: []
+gates_rationale: "операционный скилл; WP Gate применим только при создании нового РП, не для операционных вызовов"
 ---
 
 # /extend — Каталог расширяемости IWE
@@ -20,7 +25,11 @@ routing:
 > **Триггер:** `/extend`, «что я могу расширить?», «как настроить протокол», «как добавить свой шаг».
 > **Роль:** R6 Кодировщик. **Один выход:** карта того, что доступно + конкретные инструкции.
 
-## Алгоритм
+## When to use
+
+Каталог расширяемости IWE: что можно настроить, какие extension points существуют, какие параметры доступны, как установить чужое расширение.
+
+## Algorithm
 
 ### 1. Определить область запроса
 

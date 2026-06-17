@@ -5,9 +5,14 @@ argument-hint: "[путь к конкретному отчёту | пусто = 
 version: 1.0.0
 layer: L1
 status: active
+agents: single
+interaction: multi-step
 triggers:
   slash: [/apply-captures]
   phrases: []
+gates_required: []
+gates_enforced: []
+gates_rationale: "операционный скилл разбора очереди; WP Gate не нужен — вызывается автоматически из Close Gate"
 routing:
   executor: sonnet
   deterministic: false
@@ -18,7 +23,9 @@ routing:
 Полная ВДВ-карта цикла: `DS-my-strategy/inbox/WP-247-ke-pipeline-vdv.md`
 Контракт скилла взят из шагов 5, 6, 6.5, 7 этой карты.
 
-## Scope
+## When to use
+
+### Scope
 
 **Этот скилл делает:**
 - Читает `DS-my-strategy/inbox/extraction-reports/*.md` со `status: pending-review` или `status: deferred`.
@@ -33,7 +40,7 @@ routing:
 - Не создаёт extraction-reports — это R2.
 - Не редактирует содержимое captures.md / fleeting-notes.md.
 
-## ВДВ-контракт (шаги 5–7 из ke-pipeline-vdv.md)
+### ВДВ-контракт (шаги 5–7 из ke-pipeline-vdv.md)
 
 ```
 Вход:   DS-my-strategy/inbox/extraction-reports/*.md  со  status: pending-review
@@ -57,7 +64,9 @@ routing:
   - Коммит в PACK-* (при accept).
 ```
 
-## Формат решения R15
+## Algorithm
+
+### Формат решения R15
 
 Каждый кандидат — структурированное решение:
 
@@ -77,7 +86,7 @@ defer_until: "после WP-245 Ф22"     # ОБЯЗАТЕЛЬНО — дата 
 
 **Инвариант defer (peer-session 2026-05-31-22):** `defer_until` — обязательное поле при `decision: defer`. Без него решение invalid. Reason: `deferred` без `defer_until` = masked cancel (см. `memory/lessons_defer_with_explicit_triggers.md`). Формат: дата `YYYY-MM-DD` ИЛИ привязка к событию («после WP-NNN Ф{N}», «при следующем Week Close»).
 
-## Шаг 1. Найти pending-review отчёты
+### Шаг 1. Найти pending-review отчёты
 
 ```bash
 find ~/IWE/DS-my-strategy/inbox/extraction-reports -name "*.md" \
@@ -87,7 +96,7 @@ find ~/IWE/DS-my-strategy/inbox/extraction-reports -name "*.md" \
 Если `$ARGUMENTS` задан путь — работать только с ним.
 Если отчётов нет → сообщить «Нет pending-review отчётов. Ничего делать не нужно.»
 
-## Шаг 2. Для каждого отчёта: показать кандидатов
+### Шаг 2. Для каждого отчёта: показать кандидатов
 
 Прочитать отчёт. Для каждого кандидата (frontmatter + тело) показать:
 - `id`, `type`, предложенный `target_path`
@@ -96,12 +105,12 @@ find ~/IWE/DS-my-strategy/inbox/extraction-reports -name "*.md" \
 
 Запросить решение R15 по схеме выше. Один вопрос = один кандидат.
 
-## Шаг 3. Accept — редактура (conditional)
+### Шаг 3. Accept — редактура (conditional)
 
 Если `edits_needed: yes` → предложить отредактировать текст совместно с пользователем.
 Если `edits_needed: no` → использовать текст as-is из отчёта.
 
-## Шаг 4 (= ВДВ шаг 6.5). Валидация Pack-сущности
+### Шаг 4 (= ВДВ шаг 6.5). Валидация Pack-сущности
 
 Перед записью проверить три условия:
 
@@ -130,7 +139,7 @@ grep -r "^id: <ID>" ~/IWE/PACK-* | head -5
 - `DP.METHOD.*` → `.../03-methods/`
 - `DP.ROLE.*` → `.../02-domain-entities/` или `.../roles/`
 - `DP.SOTA.*` → `.../06-sota/`
-- `PD.*` → аналогичная структура в `PACK-personal/` или `PACK-MIM/`
+- `PD.*` → аналогичная структура в `PACK-personal/` или другом Pack-репо домена
 
 При сомнении — проверить соседние файлы в целевой директории.
 
@@ -138,7 +147,7 @@ grep -r "^id: <ID>" ~/IWE/PACK-* | head -5
 - `valid` → переходить к Шагу 5
 - `invalid` + причина → reject этого кандидата, записать в feedback-log, продолжить следующий кандидат
 
-## Шаг 5. Запись в Pack и коммит
+### Шаг 5. Запись в Pack и коммит
 
 ### 5а. Записать файл
 
@@ -173,7 +182,7 @@ git add <target_path> [MAP если был] && git commit -m "feat(KE apply): <i
 
 Репо для коммита: то же, что `target_path` (PACK-digital-platform, PACK-personal и т.д.)
 
-## Шаг 6. Обновить status отчёта
+### Шаг 6. Обновить status отчёта
 
 Правила:
 - Все кандидаты resolved (accept/reject/defer) → `applied` если ≥1 applied, иначе `rejected` если все reject, `deferred` если есть defer без applied.
@@ -182,7 +191,7 @@ git add <target_path> [MAP если был] && git commit -m "feat(KE apply): <i
 
 Обновить `status:` в frontmatter отчёта и сохранить файл.
 
-## Шаг 7. Итоговый отчёт
+### Шаг 7. Итоговый отчёт
 
 Вывести сводку:
 ```
@@ -194,7 +203,9 @@ git add <target_path> [MAP если был] && git commit -m "feat(KE apply): <i
   Статус отчёта: applied / partially-applied / rejected / deferred
 ```
 
-## Состояния отчёта (справка)
+## Appendix
+
+### Состояния отчёта (справка)
 
 | Статус | Очистка Session-Prep |
 |--------|----------------------|
@@ -205,7 +216,7 @@ git add <target_path> [MAP если был] && git commit -m "feat(KE apply): <i
 | `rejected` | Удалять через 7 дней |
 | `no-pending` | Удалять через 7 дней |
 
-## Интеграция в рабочий процесс
+### Интеграция в рабочий процесс
 
 **DayPlan (ежедневный обзор):** Шаблон DayPlan содержит секцию «Наработки ИИ → Экстрактор» с обзором:
 - N pending-review отчётов

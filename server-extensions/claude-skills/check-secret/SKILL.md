@@ -13,6 +13,11 @@ routing:
   deterministic: true
   script_path: ".claude/skills/check-secret/check.sh"
   optimization_priority: 2
+agents: none
+interaction: one-shot
+gates_required: []
+gates_enforced: []
+gates_rationale: "операционный скилл; WP Gate применим только при создании нового РП, не для операционных вызовов"
 ---
 
 # Check Secret — manual gate (B7.7c, WP-212)
@@ -22,6 +27,12 @@ routing:
 > **Покрывает паттерны:** Better Stack `ust_`, Telegram bot token, hex secret в env, Neon `napi_`, DATABASE_URL с user:pass, Anthropic `sk-ant-api`, GitHub `ghp_/gho_/ghs_/ghr_/ghu_`, AWS `AKIA`, generic 40+ char API token.
 >
 > **Архитектурное ограничение** (см. B7.7 в WP-212): не покрывает Claude-generated text без tool-use — для этого нужен внешний wrapper над Claude Code.
+
+## When to use
+
+Проверка фрагмента текста на возможные секреты (API keys, tokens, passwords) ПЕРЕД отправкой в чат / коммитом / публикацией. Третий слой защиты поверх pre-commit hook (B7.7a) и PostToolUse redact (B7.7b). Manual gate — пользователь явно вызывает на потенциально чувствительный текст.
+
+## Algorithm
 
 ## Шаг 1. Получить вход
 

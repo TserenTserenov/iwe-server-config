@@ -11,6 +11,11 @@ triggers:
 routing:
   executor: sonnet
   deterministic: false
+agents: single
+interaction: multi-step
+gates_required: []
+gates_enforced: []
+gates_rationale: "операционный скилл; WP Gate применим только при создании нового РП, не для операционных вызовов"
 ---
 
 # Peer Conversation (DP.SC.154)
@@ -23,6 +28,10 @@ routing:
 > Gateway offline ≠ Kimi недоступен.
 
 ---
+
+## When to use
+
+Многотуровый диалог писателя (Claude) с напарником (Kimi) по задаче пилота (DP.SC.154). Ведёт turn-loop, обнаруживает CONSENSUS/ESCALATE, после консенсуса — Decision Gate (зафиксировать vs реализовать → ревью → проверить → задеплоить), синтезирует report.md через Agent tool.
 
 ## Шаг 0. Режим
 
@@ -589,6 +598,8 @@ cost_source: api | estimated | missing
 ---
 
 # Итоговый отчёт
+
+## Algorithm
 
 ## 1. Исходная постановка
 - **Задача:** <цитата из задания пилота, дословно>

@@ -105,10 +105,12 @@ fi
 
 # ── ДЕТЕКТОР: knowledge_extracted ─────────────────────────────────────────
 # Паттерн: "Capture:" в тексте агента (KE-маркер из протокола работы)
-KE_COUNT=$(echo "$AGENT_TEXT" | grep -c "capture:" 2>/dev/null || echo "0")
+# grep -c сам печатает "0" и возвращает код 1 при нуле совпадений — || true
+# гасит код. Прежнее "|| echo 0" дописывало второй "0" → "0\n0" → [: integer error.
+KE_COUNT=$(echo "$AGENT_TEXT" | grep -ci "capture:" 2>/dev/null || true)
 if [ "$KE_COUNT" -gt 0 ]; then
   # Извлечь домен (куда → pack/memory/claude.md)
-  DOMAIN=$(echo "$AGENT_TEXT" | grep -o "capture:.*→.*" | head -1 | sed 's/capture://;s/^[[:space:]]*//' | cut -c1-80 || echo "unknown")
+  DOMAIN=$(echo "$AGENT_TEXT" | grep -io "capture:.*→.*" | head -1 | sed 's/[Cc]apture://;s/^[[:space:]]*//' | cut -c1-80 || echo "unknown")
 
   PAYLOAD=$(python3 -c "
 import json

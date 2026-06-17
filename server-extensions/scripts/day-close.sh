@@ -18,7 +18,9 @@
 set -euo pipefail
 
 # === КОНФИГУРАЦИЯ (настроить при установке) ===
-WORKSPACE_DIR="${WORKSPACE_DIR:-$HOME/IWE}"
+# Load unified environment: WORKSPACE_DIR, IWE_ROOT, IWE_SCRIPTS, etc.
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "$SCRIPT_DIR/../.claude/lib/iwe-env-bootstrap.sh" || exit 1
 GOVERNANCE_REPO="${GOVERNANCE_REPO:-${IWE_GOVERNANCE_REPO:-DS-strategy}}"
 DS_STRATEGY="$WORKSPACE_DIR/$GOVERNANCE_REPO"
 # Slug = $HOME с '/' → '-' (macOS: /Users/x → -Users-x; Linux/WSL: /home/x → -home-x).

@@ -12,11 +12,20 @@ routing:
   executor: script
   deterministic: true
   script_path: ".claude/skills/setup-wakatime/setup.sh"
+agents: none
+interaction: one-shot
+gates_required: []
+gates_enforced: []
+gates_rationale: "операционный скилл; WP Gate применим только при создании нового РП, не для операционных вызовов"
 ---
 
 # Setup WakaTime Time Tracking
 
 Автоматическая настройка WakaTime для отслеживания рабочего времени.
+
+## When to use
+
+Настройка WakaTime time-tracking для Claude Code и VS Code
 
 ## Что устанавливается
 
@@ -24,7 +33,7 @@ routing:
 2. **Хук Claude Code** — автоматический трекинг при работе с Claude (категория "AI Coding")
 3. **WakaTime Desktop App** (опционально) — трекинг фокуса окна (чтение, браузер)
 
-## Инструкция для Claude
+## Algorithm
 
 Выполни шаги последовательно. На каждом шаге проверяй, не сделано ли уже.
 

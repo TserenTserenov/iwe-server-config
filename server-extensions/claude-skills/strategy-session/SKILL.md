@@ -10,11 +10,22 @@ triggers:
 routing:
   executor: opus
   deterministic: false
+agents: single
+interaction: multi-step
+gates_required: []
+gates_enforced: []
+gates_rationale: "операционный скилл; WP Gate применим только при создании нового РП, не для операционных вызовов"
 ---
 
 # Strategy Session — диспетчер
 
 > Один skill, два режима. Выбор по факту наличия артефактов в `{{GOVERNANCE_REPO}}/`.
+
+## When to use
+
+Стратегическая сессия — диспетчер. День-0 (нет Strategy.md/WeekPlan) → initial flow (цели, неудовлетворённости, первый WeekPlan). День-1+ → weekly flow (требует черновик от session-prep). Триггеры — «проведём стратегическую сессию», «первая стратегическая сессия», «strategy session», «давай стратегировать».
+
+## Algorithm
 
 ## Шаг 1. Определить режим
 
@@ -26,7 +37,7 @@ routing:
 | Состояние | Режим | Куда дальше |
 |-----------|-------|-------------|
 | Нет ни Strategy.md, ни WeekPlan | **initial** (день-0) | §2 этого файла |
-| Есть Strategy.md и/или WeekPlan со `status: draft` | **weekly** | `roles/strategist/prompts/strategy-session.md` |
+| Есть Strategy.md и/или WeekPlan со `status: draft` | **weekly** | `roles/strategist/prompts/strategy-session-weekly.md` |
 | Есть Strategy.md, но нет draft WeekPlan | weekly без draft | сообщи пользователю: «нет черновика, запустить session-prep?» |
 
 ---
@@ -78,6 +89,14 @@ routing:
 
 ---
 
+## БЛОКИРУЮЩЕЕ: один шаг за раз
+
+> Нарушение этого правила делает сессию бессмысленной — пилот не вносит свои данные, решения принимаются без него.
+
+**После выполнения ЛЮБОГО шага — СТОП.** Не читать следующий шаг, не продолжать. Ждать сообщения пилота. Следующий шаг — только после его ответа. Это правило действует даже после compaction, даже если gate = `auto`, даже если «очевидно что делать дальше».
+
+---
+
 ## Шаг 3. Weekly flow
 
 Если режим = weekly:
@@ -109,7 +128,7 @@ state-card + 3 топ-неудовлетворённости + ранжиров�
 
 **Режим планирования (Плановик, этапы 5-6 — упаковка недели/дня).**
 Если приоритеты актуальны (discovery не нужен) — Плановик ведёт неделю один (совместный
-ритуал DP.SC.051). Загрузи `{{IWE_TEMPLATE}}/roles/strategist/prompts/strategy-session.md`
+ритуал DP.SC.051). Загрузи `{{IWE_TEMPLATE}}/roles/strategist/prompts/strategy-session-weekly.md`
 и следуй ему: упакуй контекст приоритетов в WeekPlan с бюджетами, распредели по дням, держи
 WIP-лимит (8-15).
 

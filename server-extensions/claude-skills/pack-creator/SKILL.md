@@ -24,6 +24,11 @@ triggers:
 routing:
   executor: sonnet
   deterministic: false
+agents: single
+interaction: multi-step
+gates_required: []
+gates_enforced: []
+gates_rationale: "операционный скилл; WP Gate применим только при создании нового РП, не для операционных вызовов"
 ---
 
 # /pack-creator — сопровождение автора PACK-X по SPF-циклу
@@ -31,6 +36,10 @@ routing:
 > ⚡ **Скилл-проводник, не автор.** Знание оригинирует автор Pack. Скилл удерживает
 > процесс (SPF/process 01-11), защищает инвариант **read-only upstream FPF/SPF**
 > и подстраивает глубину под cp.iwe автора.
+
+## When to use
+
+|
 
 ## Контракт скилла
 
@@ -49,6 +58,8 @@ routing:
 - Автор продолжает работу над PACK-X через несколько сессий — скилл подхватывает
   с `spf_checkpoint` из state-файла.
 - Автор не уверен, какой режим оригинальности выбрать — скилл вызывает R28 Диагност.
+
+## Algorithm
 
 ## Шаг 0 — диагностика автора (R28)
 

@@ -12,11 +12,22 @@ routing:
   executor: script
   deterministic: true
   script_path: "scripts/iwe-bug-report.sh"
+agents: none
+interaction: one-shot
+gates_required: []
+gates_enforced: []
+gates_rationale: "операционный скилл; WP Gate применим только при создании нового РП, не для операционных вызовов"
 ---
 
 # Отчёт об ошибке платформы IWE
 
 Проблема: $ARGUMENTS
+
+## When to use
+
+Сообщить об ошибке или проблеме платформы IWE. Создаёт GitHub issue в FMT-exocortex-template.
+
+## Algorithm
 
 ## Шаг 1. Категоризация
 

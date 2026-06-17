@@ -10,6 +10,11 @@ triggers:
 routing:
   executor: sonnet
   deterministic: false
+agents: single
+interaction: multi-step
+gates_required: []
+gates_enforced: []
+gates_rationale: "операционный скилл; WP Gate применим только при создании нового РП, не для операционных вызовов"
 ---
 
 # Skill: /platform-bottleneck
@@ -20,19 +25,33 @@ routing:
 >
 > SC: DP.SC.152. Носитель: DP.ROLE.054.
 
-## Поведение
+## When to use
 
-При вызове `/platform-bottleneck [--horizon <h>] [--subsystem <s>]` — выполнить:
+Скилл IWE — см. тело файла
+
+## Algorithm
+
+### Шаг 1. Разобрать аргументы
+
+Извлечь `--horizon` и `--subsystem` из аргументов вызова.
+
+### Шаг 2. Делегировать в /bottleneck-pick
+
+Без `--subsystem`:
 
 ```
 /bottleneck-pick --target c2:platform --layer platform [--horizon <h>]
 ```
 
-Если `--subsystem` указан:
+С `--subsystem`:
 
 ```
 /bottleneck-pick --target c2:platform --layer platform --subsystem <s> [--horizon <h>]
 ```
+
+### Шаг 3. Вернуть результат
+
+Результат `/bottleneck-pick` передаётся пилоту без изменений.
 
 ## Полная документация
 

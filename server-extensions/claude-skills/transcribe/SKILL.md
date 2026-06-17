@@ -13,11 +13,20 @@ routing:
   deterministic: true
   script_path: "scripts/iwe-transcribe.sh"
   optimization_priority: 2
+agents: none
+interaction: one-shot
+gates_required: []
+gates_enforced: []
+gates_rationale: "операционный скилл; WP Gate применим только при создании нового РП, не для операционных вызовов"
 ---
 
 # Транскрипция аудио/видео
 
 Транскрипция через MLX Whisper на Apple Silicon. Работает локально, без облака.
+
+## When to use
+
+Транскрипция аудио/видео файлов через MLX Whisper (Apple Silicon). Использование: /transcribe path/to/file.mp3
 
 ## Расположение
 
@@ -25,7 +34,7 @@ routing:
 - **Venv:** `~/.local/share/mlx-whisper/.venv-whisper/`
 - **Модель:** `large-v3` (точная, ~3 ГБ). Единственная используемая модель
 
-## Инструкция для Claude
+## Algorithm
 
 ### Шаг 1: Проверка venv
 

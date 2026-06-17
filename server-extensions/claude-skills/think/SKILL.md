@@ -11,6 +11,11 @@ triggers:
 routing:
   executor: opus
   deterministic: false
+agents: single
+interaction: multi-step
+gates_required: []
+gates_enforced: []
+gates_rationale: "операционный скилл; WP Gate применим только при создании нового РП, не для операционных вызовов"
 ---
 
 # ADI-цикл рассуждения
@@ -18,6 +23,12 @@ routing:
 > FPF B.5 (ADI). Доверие к данным: F-G-R (B.3) — факт/предположение/слух. Сравнение вариантов: A.19 — одинаковые критерии для всех.
 
 Задача: $ARGUMENTS
+
+## When to use
+
+ADI-цикл структурированного рассуждения (Abduction-Deduction-Induction-Audit-Decide). Используй для сложных решений, когда нужно рассмотреть несколько гипотез.
+
+## Algorithm
 
 ## 1. Abduction (генерация гипотез)
 

@@ -11,12 +11,21 @@ triggers:
 routing:
   executor: haiku
   deterministic: false
+agents: single
+interaction: multi-step
+gates_required: []
+gates_enforced: []
+gates_rationale: "операционный скилл; WP Gate применим только при создании нового РП, не для операционных вызовов"
 ---
 
 # Day Close (протокол закрытия дня)
 
 > **Роль:** R1 Стратег. **Бюджет:** ~10 мин.
 > **Принцип:** SKILL.md = L1 платформенный файл. Пользователь не редактирует напрямую — только через `extensions/`.
+
+## When to use
+
+Протокол закрытия дня (Day Close). Алиас для /run-protocol close day — симметрия с /day-open.
 
 ## БЛОКИРУЮЩЕЕ: пошаговое исполнение
 
@@ -25,7 +34,7 @@ Day Close = протокол. Исполнять ТОЛЬКО пошагово �
 Каждый шаг алгоритма → отдельная задача (pending → in_progress → completed).
 Переход к следующему — ТОЛЬКО после отметки текущего. Шаг невозможен → blocked (не пропускать молча).
 
-## Алгоритм
+## Algorithm
 
 ### 0. Extensions (before)
 Загрузить: `bash .claude/scripts/load-extensions.sh day-close before`. Exit 0 → `Read` каждый файл из вывода (alphabetic) → выполнить как первые шаги. Exit 1 → пропустить. Поддерживает `extensions/day-close.before.md` И `extensions/day-close.before.<suffix>.md`.

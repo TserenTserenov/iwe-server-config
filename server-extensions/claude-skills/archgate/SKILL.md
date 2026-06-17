@@ -11,11 +11,22 @@ triggers:
 routing:
   executor: opus
   deterministic: false
+agents: single
+interaction: multi-step
+gates_required: []
+gates_enforced: []
+gates_rationale: "операционный скилл; WP Gate применим только при создании нового РП, не для операционных вызовов"
 ---
 
 # АрхГейт v3 — оценка архитектурного решения
 
 Выполни оценку решения: $ARGUMENTS
+
+## When to use
+
+Оценка архитектурного решения по 7 характеристикам ЭМОГССБ (v3 — профиль без агрегатного балла, conjunctive screening). Используй когда пользователь предлагает архитектурное решение, новый инструмент или системное изменение.
+
+## Algorithm
 
 ## Шаг 0. Принципы (ДО оценки)
 

@@ -68,9 +68,27 @@ bash "$IWE_WORKSPACE/scripts/day-open-scaffold.sh" "$DATE" > "$DAYPLAN_FILE"
 SCAFFOLD_EXIT=$?
 if [ "$SCAFFOLD_EXIT" -eq 2 ]; then
   rm -f "$DAYPLAN_FILE"
+  echo "STRATEGY_DAY=true"
   echo "Сегодня strategy_day, DayPlan не создаётся (SKILL.md шаг 4). План в WeekPlan W${WEEK_NUM}. Пропустить шаги 1-7, перейти к compact dashboard на основе WeekPlan."
 fi
 ```
+
+**Если `STRATEGY_DAY=true`:** сразу вывести compact dashboard из WeekPlan без ожидания полного прогона SKILL.md шагов 1-7:
+
+```bash
+# compact dashboard для strategy_day (не зависит от полного Day Open)
+WEEKPLAN="$IWE_WORKSPACE/DS-my-strategy/current/WeekPlan W${WEEK_NUM} $(date +%Y)-*.md"
+KE_STATS=$(bash "$IWE_WORKSPACE/DS-my-strategy/scripts/ke-queue-stats.sh" --human 2>/dev/null || echo "| KE-очередь | ⚠️ | ke-queue-stats.sh недоступен |")
+echo "--- Compact Dashboard (strategy_day) ---"
+echo "$KE_STATS"
+```
+
+Далее — вывести compact dashboard по шаблону `memory/templates-dayplan.md` с данными из WeekPlan:
+- **Вчера:** коммиты за вчера из всех репо (`git log --oneline --since=yesterday`)
+- **Бюджет:** из WeekPlan frontmatter
+- **ТОС:** из WeekPlan секция «Фокус»
+- **План дня:** топ-3 РП из WeekPlan с `in_progress` или `pending`
+- **Требует внимания:** KE SLA + любые 🔴 из IWE-светофора
 
 **Что заполняет детерминированно (без LLM):**
 - Помидорки (из `day-rhythm-config.yaml`)
@@ -92,6 +110,25 @@ fi
 - Требует внимания (агрегация всех 🟡/🔴 из шагов 1-6)
 
 **Архитектурный принцип** (Ф5 ADR будет): «Enforcement требует наблюдателя вне субъекта». Bash-скрипт — наблюдатель: гарантирует наличие 11 секций ДО того, как Claude начнёт синтез. Claude не может «сократить» структуру, может только заполнять PENDING.
+
+## 0b-ke. Override для шага 5e: KE-очередь (БЛОКИРУЮЩЕЕ)
+
+**Единственный источник данных KE SLA — `ke-queue-stats.sh`.** Не считать вручную через grep/find никогда.
+
+Fallback при недоступности скрипта (exit != 0 или команда не найдена):
+```bash
+KE_STATS=$(bash "$IWE_WORKSPACE/DS-my-strategy/scripts/ke-queue-stats.sh" --human 2>/dev/null)
+if [ -z "$KE_STATS" ]; then
+  echo "| KE-очередь | ⚠️ | ke-queue-stats.sh недоступен — данные KE отсутствуют |"
+fi
+```
+
+**При недоступности скрипта:**
+- Записать в DayPlan: «KE-очередь: данные недоступны (ke-queue-stats.sh не запустился)»
+- НЕ считать файлы через grep/find самостоятельно
+- НЕ использовать цифры из предыдущего DayPlan как «приблизительные»
+
+**Почему запрет ручного подсчёта:** ручной grep захватывает файлы с `defer_until`, которые скрипт корректно исключает. Результат — завышенный count и завышенный oldest_age_days.
 
 ## 0b. Работа с PENDING-маркерами (шаги 1-6)
 

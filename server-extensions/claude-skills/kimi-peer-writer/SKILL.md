@@ -11,6 +11,11 @@ triggers:
 routing:
   executor: sonnet
   deterministic: false
+agents: single
+interaction: multi-step
+gates_required: []
+gates_enforced: []
+gates_rationale: "операционный скилл; WP Gate применим только при создании нового РП, не для операционных вызовов"
 ---
 
 # Kimi Peer Writer (DP.SC.154)
@@ -23,6 +28,10 @@ routing:
 > Gateway offline ≠ Claude недоступен.
 
 ---
+
+## When to use
+
+Peer-сессия DP.SC.154 где Kimi = писатель, Claude = напарник. Запускается простой фразой. Включает ОРЗ Opening и Closing, turn-loop, эскалации, Decision Gate (зафиксировать vs реализовать → ревью → проверить → задеплоить), отложенную финализацию и верификацию.
 
 ## Шаг 0. Режим
 
@@ -511,6 +520,7 @@ with open(meta_path, encoding='utf-8') as f:
             meta[k.strip()] = v.strip().strip('"').strip("'")
 
 writer_agent = meta.get('writer_agent', '')
+peer_agent = meta.get('peer_agent', '')
 start_time = meta.get('start_time', '')
 escalations_count = meta.get('escalations_count', '0')
 task_desc = meta.get('task_description', '')
@@ -561,9 +571,9 @@ Verify-якоря обязательны для код-ссылок (file:line-r
 ---
 schema_version: 1
 session_id: {session_id}
-generated_at: {datetime.datetime.utcnow().isoformat()}Z
+generated_at: {datetime.datetime.now(datetime.timezone.utc).isoformat().replace('+00:00', '')}Z
 writer: {writer_agent}
-peer: <из meta.yaml: peer_agent>
+peer: {peer_agent}
 duration_min: <(end_time − start_time) в минутах, целое>
 escalations_count: {escalations_count}
 result_class: agreed | partial | escalated | not-agreed
@@ -572,12 +582,14 @@ confidence_basis: <обязателен если confidence <= med; иначе o
 ttl_event: <«до merge PR-NNN» | «до WP-NNN» | «до отмены пилотом» | omit>
 cost_usd: <если известно; иначе omit>
 cost_source: api | estimated | missing
-roles: <из meta.yaml: roles — {agent_id: [DP.ROLE.NNN, ...]} или omit если пусто>
-ad_hoc_roles: <из meta.yaml: ad_hoc_roles — {role_name: {agent_id, rationale, first_used_turn}} или omit если пусто>
+roles: <из meta.yaml: roles — {{agent_id: [DP.ROLE.NNN, ...]}} или omit если пусто>
+ad_hoc_roles: <из meta.yaml: ad_hoc_roles — {{role_name: {{agent_id, rationale, first_used_turn}}}} или omit если пусто>
 discovery_turns: <из meta.yaml: discovery_turns, целое; omit если 0>
 ---
 
 # Итоговый отчёт
+
+## Algorithm
 
 ## 1. Исходная постановка
 - **Задача:** <цитата из задания пилота, дословно>
@@ -669,7 +681,7 @@ finally:
     os.unlink(tmp_path)
 
 if result.returncode != 0 or os.path.getsize(report_file) == 0:
-    now = datetime.datetime.utcnow().isoformat() + 'Z'
+    now = datetime.datetime.now(datetime.timezone.utc).isoformat().replace('+00:00', '') + 'Z'
     with open(report_file, 'w', encoding='utf-8') as f:
         f.write(f"""---
 session_id: {session_id}

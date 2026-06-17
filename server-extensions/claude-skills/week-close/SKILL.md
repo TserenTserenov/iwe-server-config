@@ -11,6 +11,11 @@ triggers:
 routing:
   executor: sonnet
   deterministic: false
+agents: single
+interaction: multi-step
+gates_required: []
+gates_enforced: []
+gates_rationale: "операционный скилл; WP Gate применим только при создании нового РП, не для операционных вызовов"
 ---
 
 # Week Close (протокол закрытия недели)
@@ -19,13 +24,17 @@ routing:
 > **Принцип:** SKILL.md = L1 платформенный файл. Пользователь не редактирует напрямую — только через `extensions/`.
 > **Стиль текста:** ретро недели и новый WeekPlan читает пилот → весь текст синтезировать в базе разговорного стиля (S0 база + S1 автор, источник DP.SC.050): русский, без машинных меток, главная мысль первой, код РП и путь не подлежащее.
 
+## When to use
+
+Протокол закрытия недели (Week Close). Ретро 7 дней + carry-over в новую неделю + платформенные шаги (бэкап, dirty repos).
+
 ## БЛОКИРУЮЩЕЕ: пошаговое исполнение
 
 Week Close = протокол. Исполнять ТОЛЬКО пошагово через TodoWrite.
 **Шаг 0 — ПЕРВОЕ действие:** создать список задач прямо сейчас (до любых других действий).
 Каждый шаг алгоритма → отдельная задача (pending → in_progress → completed).
 
-## Алгоритм
+## Algorithm
 
 ### 0. Extensions (before)
 Загрузить: `bash .claude/scripts/load-extensions.sh week-close before`. Exit 0 → `Read` каждый файл из вывода (alphabetic) → выполнить как первые шаги. Exit 1 → пропустить. Поддерживает `extensions/week-close.before.md` И `extensions/week-close.before.<suffix>.md`.

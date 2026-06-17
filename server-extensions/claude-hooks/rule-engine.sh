@@ -622,6 +622,51 @@ check_routing_gate() {
     emit_verdict "warn" "AR.009" "новый файл не совпал с known-patterns — проверь DP.KR.001 §5 (полная карта маршрутизации)"
 }
 
+check_schema_registration_gate() {
+    # AR.234: создание новой кодовой схемы/реестра → чеклист дизайна осей DP.METHOD.054 §5.
+    # ADR-IWE-020: membership живёт в schema-triggers.yaml (один источник, два потребителя).
+    # Уровень — E3-prompted: review (мягкий nudge), не block. Корректность дизайна осей
+    # машина не судит — поднимает вопрос ДО фиксации, пока у агента есть design-контекст.
+    local ctx="${RULE_CONTEXT:-}"
+    [ -z "$ctx" ] && ctx='{}'
+
+    local target_path
+    target_path=$(echo "$ctx" | python3 -c 'import sys,json; d=json.loads(sys.stdin.read() or "{}"); print(d.get("target_path",""))' 2>/dev/null)
+    [ -z "$target_path" ] && { emit_verdict "ok" "AR.234" "no target_path in context"; return; }
+
+    # Exception: существующий файл = экземпляр/edit/rename, не новая схема → AR.211/AR.233
+    [ -f "$target_path" ] && { emit_verdict "ok" "AR.234" "file exists — экземпляр/edit, не новая схема (AR.211/AR.233)"; return; }
+
+    # is_in_scope: тот же конфиг, что читает обёртка-хук (single-source membership)
+    local cfg="${SCHEMA_TRIGGERS_CONFIG:-$HOME/IWE/.claude/hooks/schema-triggers.yaml}"
+    local in_scope
+    in_scope=$(_STG_CFG="$cfg" _STG_PATH="$target_path" python3 - <<'PYEOF' 2>/dev/null || echo "error"
+import os, fnmatch
+cfg = os.environ["_STG_CFG"]
+base = os.path.basename(os.environ["_STG_PATH"])
+try:
+    import yaml
+    with open(cfg) as f:
+        c = yaml.safe_load(f) or {}
+    globs = c.get("path_globs", [])
+except Exception:
+    print("error"); raise SystemExit
+print("yes" if any(fnmatch.fnmatch(base, g) for g in globs) else "no")
+PYEOF
+)
+
+    if [ "$in_scope" = "yes" ]; then
+        emit_verdict "warn" "AR.234" "Новая кодовая схема (${target_path}) — заполни DP.METHOD.054 §5 ДО фиксации: owner (Registration Authority)? ось ортогональна/взаимоисключающа? bounded_context (namespace)? enforcement_mechanism (E0-E3)? §8: новый реестр = запись в registry-catalog.yaml + namespace в реестре нумераций"
+        return
+    fi
+    if [ "$in_scope" = "error" ]; then
+        # fail-open: nudge advisory, не должен блокировать работу при битом конфиге
+        emit_verdict "ok" "AR.234" "schema-triggers.yaml unreadable — fail-open (nudge пропущен)"
+        return
+    fi
+    emit_verdict "ok" "AR.234" "target не схема-файл по schema-triggers.yaml"
+}
+
 check_repo_touch_gate() {
     # AR.010: при первом касании репо — проверить CLAUDE.md на «обязательно загружай»
     # WP-272 Ф5.3: добавлена READ-ONLY защита (tool_name + sub-path check)
@@ -1168,6 +1213,44 @@ for r in reg.get('rules', []):
         run_test 36 "файл вне FMT release scope → ok (N/A)" "ok" \
             RULE_EVENT="version_bump_in_update_manifest_json" \
             RULE_CONTEXT='{"file_path":"/Users/tserentserenov/IWE/DS-my-strategy/inbox/notes.md","release_verification_done":false}'
+
+        # AR.234 Schema Registration Gate (ADR-IWE-020)
+        run_test 37 "новый *-catalog.yaml (в scope, не существует) → warn (дизайн осей)" "warn" \
+            RULE_EVENT="schema_registration_attempt" \
+            RULE_CONTEXT='{"target_path":"/tmp/iwe-dogfood-foo-catalog.yaml","is_new_file":true}'
+        run_test 38 "новый не-схема файл (.md) → ok (вне scope)" "ok" \
+            RULE_EVENT="schema_registration_attempt" \
+            RULE_CONTEXT='{"target_path":"/tmp/iwe-dogfood-notes.md","is_new_file":true}'
+        run_test 39 "существующий registry-файл → ok (экземпляр/edit, не новая схема)" "ok" \
+            RULE_EVENT="schema_registration_attempt" \
+            RULE_CONTEXT="{\"target_path\":\"$HOME/IWE/.claude/rules-registry.yaml\",\"is_new_file\":false}"
+
+        # AR.234 dogfood: живость membership-конфига (ADR-IWE-020 §5 — анти-молчаливая-смерть).
+        # Проверяет: (1) schema-triggers.yaml читается; (2) fired_event совпадает с triggers AR.234 в реестре.
+        DOGFOOD=$(_REG="$REGISTRY" _CFG="${SCHEMA_TRIGGERS_CONFIG:-$HOME/IWE/.claude/hooks/schema-triggers.yaml}" python3 - <<'PYEOF' 2>/dev/null || echo "FAIL config unreadable"
+import os, yaml
+with open(os.environ["_CFG"]) as f:
+    cfg = yaml.safe_load(f) or {}
+fired = cfg.get("fired_event")
+if not fired:
+    print("FAIL no fired_event in schema-triggers.yaml"); raise SystemExit
+with open(os.environ["_REG"]) as f:
+    reg = yaml.safe_load(f) or {}
+ar234 = next((r for r in reg.get("rules", []) if r.get("id") == "AR.234"), None)
+if ar234 is None:
+    print("FAIL AR.234 not in registry"); raise SystemExit
+if fired not in ar234.get("triggers", []):
+    print("FAIL fired_event '%s' not in AR.234.triggers %s" % (fired, ar234.get("triggers"))); raise SystemExit
+print("PASS")
+PYEOF
+)
+        if [ "$DOGFOOD" = "PASS" ]; then
+            echo "PASS Test 40: dogfood — schema-triggers.yaml жив, fired_event совпадает с AR.234.triggers"
+            PASS=$((PASS+1))
+        else
+            echo "FAIL Test 40: dogfood — $DOGFOOD"
+            FAIL=$((FAIL+1))
+        fi
 
         echo ""
         echo "=== Results: $PASS PASS / $FAIL FAIL (total $((PASS+FAIL))) ==="

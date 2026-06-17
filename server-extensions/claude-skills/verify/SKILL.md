@@ -11,6 +11,11 @@ triggers:
 routing:
   executor: sonnet
   deterministic: false
+agents: single
+interaction: multi-step
+gates_required: []
+gates_enforced: []
+gates_rationale: "операционный скилл; WP Gate применим только при создании нового РП, не для операционных вызовов"
 ---
 
 # Верификация артефакта
@@ -20,6 +25,12 @@ routing:
 > **Архитектура:** Ядро (Pack, фиксированное) + Контекст (переменный) — AS.D.004.
 
 Аргументы: $ARGUMENTS
+
+## When to use
+
+Верификация артефакта по эталону из Pack. Загружает роль VR.R.001 (Верификатор) с context isolation — проверяет результат, а не процесс создания.
+
+## Algorithm
 
 ## Шаг 0. Определить тип проверки
 

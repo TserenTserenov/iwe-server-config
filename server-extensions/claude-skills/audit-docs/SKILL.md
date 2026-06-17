@@ -11,6 +11,11 @@ triggers:
 routing:
   executor: sonnet
   deterministic: false
+agents: single
+interaction: multi-step
+gates_required: []
+gates_enforced: []
+gates_rationale: "операционный скилл; WP Gate применим только при создании нового РП, не для операционных вызовов"
 ---
 
 # Audit Docs (R24 Аудитор)
@@ -22,6 +27,10 @@ routing:
 
 Аргументы: $ARGUMENTS
 
+## When to use
+
+Аудит документации репо: детекция drift'а между кодом и docs, отчёт coverage по категориям. Запускается вручную или по triggered drift critical.
+
 ## Что делает
 
 Проходит указанный репо и формирует **отчёт** о расхождениях между кодом и документацией. **Не правит ни код, ни docs** — только отчёт.
@@ -30,13 +39,15 @@ routing:
 
 - `--repo <path>` (обязателен) или `.` (текущая директория).
 
+## Algorithm
+
 ## Шаг 0. Загрузка контекста
 
 При старте обязательно прочитать:
 
 1. `<repo>/CLAUDE.md` целиком — как любой агент в этом репо. В частности § 10 «Известные ловушки/инварианты» (если есть).
 2. `<repo>/docs/.audit-context.yaml` — категории docs, source patterns, file_naming. Без этого файла аудит невозможен — сообщить и остановиться.
-3. `/Users/tserentserenov/IWE/.claude/sync-manifest.yaml` — найти пары, где `source` или `derived` пересекают этот репо. Использовать как дополнительный источник связей «код ↔ docs».
+3. `${IWE_DIR:-$HOME/IWE}/.claude/sync-manifest.yaml` — найти пары, где `source` или `derived` пересекают этот репо. Использовать как дополнительный источник связей «код ↔ docs».
 
 ## Шаг 1. R24 coverage по категориям
 

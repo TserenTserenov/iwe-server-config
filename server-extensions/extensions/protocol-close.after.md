@@ -1,24 +1,22 @@
 ## Авторские поля отчёта Quick Close
 
-**Сессия:** 6 июня 2026 — WP-330 cutover bug fix (Denis P + 2 пользователя)
+**Сессия:** 16 июня 2026 — анализ установочной встречи + различения + пост.
 
 **Артефакты:**
+- `/Users/tserentserenov/Documents/Zoom/.../Оперативка ИТ 16.06.26 — транскрипт.txt` — транскрипт ИТ-встречи
+- `/Users/tserentserenov/Documents/Телемост/Встреча в Телемосте 15.06.26 18-01-30 — транскрипт.txt` — транскрипт Телемост 15.06
+- `PACK-personal/01B-distinctions.md` — D.181 (Опыт≠Метод+SOTA), D.182 (Личное≠Рабочее≠ИР)
+- `PACK-MIM/01B-distinctions.md` — MIM.D.037 (ТВС + Дедлайн≠Срочность)
+- `DS-Knowledge-Index-Tseren/docs/2026/07-июнь/06-06-2026-06-16-conveyor-routine-fires-growth/` — пост №161 draft
 
-| Изменение | Где | Коммит |
-|---|---|---|
-| `_migrate_old_marathon_to_new()` — авто-миграция из старой системы | aist_bot pilot | `2c47a83` |
-| `bottleneck_slot='none'` sentinel + diagnose.py + progress.py fix | aist_bot pilot | `008a8a0` |
-| Smoke-тесты diagnose обновлены под 'none' sentinel | aist_bot pilot | `67477db` |
-| Cherry-picks на new-architecture | aist_bot new-arch | `9acb9a2`, `0f6da5f`, `c213eb0`, etc. |
-| Скрипт wp330-cutover-fix.py | neon-migrations | `2420325` |
-| Defer extraction-report 2026-06-06-inbox-check-2 | DS-my-strategy | `77a2b65d0` |
-| Урок: progress.py blind spot добавлен | memory/lessons_subagent_review_peer_complement.md | — |
+**Что сделали:**
+1. Транскрипт Zoom ИТ-встречи 16.06 и Телемост 15.06 через mlx-whisper.
+2. Анализ установочной встречи практикума СС (14 июня) — P1 задачи выполнены.
+3. D.181, D.182 добавлены в PACK-personal; MIM.D.037 добавлен в PACK-MIM.
+4. Пост №161 «Конвейер жизни: текучка, пожары и развитие» написан, status: draft.
+5. Все три репо запушены.
 
-**Решения:**
-1. **Cutover без миграции** — при деплое новой системы марафона нужна миграция активных пользователей из `intern.marathon_status` → `marathon_progress`.
-2. **bottleneck_slot NOT NULL** — sentinel `'none'` вместо Python `None`. Все пути отображения обновить (diagnose.py + progress.py).
-3. **Субагент слепое пятно** — субагент-reviewer пропустил `progress.py`. Чек-лист: все пути отображения changed-значения.
-
-**Open items:** наблюдение за Denis утром 7 июня (получил ли урок дня 5)
-
-**Верификация:** Haiku R23 — финальный шаг.
+**Open items (следующая сессия):**
+- Пост №161: предложить 3-5 вариантов названия (fault profile: выбрал имя самостоятельно — нарушение DS-Knowledge-Index CLAUDE.md §2)
+- Пост №161: сгенерировать обложку, поменять status: ready
+- Пост №160 (dual-loop-reflexes-llm): финальное название + обложка + status: ready

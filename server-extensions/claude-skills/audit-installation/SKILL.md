@@ -11,6 +11,11 @@ triggers:
 routing:
   executor: haiku
   deterministic: false
+agents: single
+interaction: multi-step
+gates_required: []
+gates_enforced: []
+gates_rationale: "операционный скилл; WP Gate применим только при создании нового РП, не для операционных вызовов"
 ---
 
 # Аудит инсталляции IWE
@@ -20,6 +25,10 @@ routing:
 > **Принцип:** детектор отчитывается, оператор делает (см. `scripts/iwe-drift.sh:7-11`). Auto-fix не входит в обещание.
 
 Аргументы: $ARGUMENTS
+
+## When to use
+
+Аудит пользовательской инсталляции IWE. Запускает scripts/iwe-audit.sh + MCP healthcheck + smoke-test ритуала через sentinel-механику (контракт dry-run-contract.md), передаёт отчёт subagent'у в роли VR.R.002 Аудитор (context isolation) → verdict ✅/⚠️/❌ по 6 компонентам (Inventory, L1 drift, DS-strategy, L3 customizations, MCP, ритуал). Используй после restore из бэкапа, после update.sh, или при еженедельной сверке.
 
 ## Обещание
 
@@ -72,6 +81,8 @@ bash "$AUDIT_SCRIPT" $([ "${ARGUMENTS:-}" = "--critical" ] && echo "--critical")
 Сформировать markdown-секцию `## 4. MCP healthcheck`:
 
 ```markdown
+## Algorithm
+
 ## 4. MCP healthcheck
 
 | Tool | Статус | Латентность | Примечание |

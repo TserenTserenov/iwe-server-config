@@ -60,7 +60,12 @@ def validate_rule(rule, filename):
         errors.append(f"{filename}: procedural rule must have priority 11-15")
 
     tests = rule.get("tests", {})
-    if not tests.get("positive") or not tests.get("negative"):
+    if not isinstance(tests, dict):
+        # Старый формат `tests: [...]` (список) не несёт семантики positive/negative —
+        # помечаем невалидным, НЕ коэрсим. Без этого .get() падает с AttributeError
+        # и роняет весь генератор (WP-419, peer-session 2026-06-14-03).
+        errors.append(f"{filename}: tests must be a dict with positive+negative keys, got {type(tests).__name__}")
+    elif not tests.get("positive") or not tests.get("negative"):
         errors.append(f"{filename}: must have both positive and negative tests")
 
     return errors
@@ -110,9 +115,13 @@ def validate_no_cycles(rules):
     return errors
 
 
-def build_registry():
+def build_registry(skip_invalid=False):
+    """skip_invalid=False (--validate): любая ошибка → exit 2, реестр не пишется (строгий gate).
+    skip_invalid=True (generate): невалидные правила пропускаются с предупреждением, реестр
+    собирается из валидных. Без этого один дрейфующий файл (старый формат tests) блокировал
+    регенерацию всего реестра — генератор был мёртв с 8 мая (WP-419, peer-session 2026-06-14-03)."""
     rules = []
-    all_errors = []
+    invalid_errors = []   # per-file: невалидный файл пропускается
 
     if not PACK_DIR.exists():
         print(f"ERROR: PACK-agent-rules/rules/ not found at {PACK_DIR}", file=sys.stderr)
@@ -121,13 +130,18 @@ def build_registry():
     for rule_file in sorted(PACK_DIR.glob("AR.*.md")):
         fm = parse_frontmatter(rule_file)
         if not fm:
-            all_errors.append(f"{rule_file.name}: no frontmatter")
+            invalid_errors.append(f"{rule_file.name}: no frontmatter")
             continue
 
         errors = validate_rule(fm, rule_file.name)
         if errors:
-            all_errors.extend(errors)
+            invalid_errors.extend(errors)
             continue
+
+        # `related` иногда оформлено списком вместо словаря — нормализуем, иначе .get() падает.
+        related = fm.get("related", {})
+        if not isinstance(related, dict):
+            related = {}
 
         rules.append({
             "id": fm["id"],
@@ -139,25 +153,32 @@ def build_registry():
             "applies_when": fm.get("applies_when", "true"),
             "exceptions": fm.get("exceptions", []),
             "hook": fm["hook"],
-            "conflicts_with": fm.get("related", {}).get("conflicts_with", []),
-            "depends_on": fm.get("related", {}).get("depends_on", []),
-            "superseded_by": fm.get("related", {}).get("superseded_by"),
+            "conflicts_with": related.get("conflicts_with", []),
+            "depends_on": related.get("depends_on", []),
+            "superseded_by": related.get("superseded_by"),
             "source_file": str(rule_file.relative_to(Path.home() / "IWE")),
         })
 
-    # Cross-reference validation после parsing всех правил
-    cross_errors = validate_cross_refs(rules)
-    all_errors.extend(cross_errors)
+    # Cross-ref + cycle: считаются только по собранным валидным правилам.
+    # depends_on на пропущенное (невалидное) правило → предупреждение, не блок (в skip-режиме).
+    ref_errors = validate_cross_refs(rules) + validate_no_cycles(rules)
 
-    # Cycle detection в depends_on графе (Ф4 closure)
-    cycle_errors = validate_no_cycles(rules)
-    all_errors.extend(cycle_errors)
-
-    if all_errors:
-        print("Validation errors:", file=sys.stderr)
-        for e in all_errors:
-            print(f"  {e}", file=sys.stderr)
-        sys.exit(2)
+    if not skip_invalid:
+        all_errors = invalid_errors + ref_errors
+        if all_errors:
+            print("Validation errors:", file=sys.stderr)
+            for e in all_errors:
+                print(f"  {e}", file=sys.stderr)
+            sys.exit(2)
+    else:
+        if invalid_errors:
+            print(f"⚠️  пропущено невалидных правил: {len(invalid_errors)} (см. ниже; чинятся отдельно — ресинк реестра правил)", file=sys.stderr)
+            for e in invalid_errors:
+                print(f"  (skipped) {e}", file=sys.stderr)
+        if ref_errors:
+            print(f"⚠️  cross-ref/cycle предупреждений: {len(ref_errors)} (ссылка на пропущенное правило — не блок)", file=sys.stderr)
+            for e in ref_errors:
+                print(f"  (warn) {e}", file=sys.stderr)
 
     rules.sort(key=lambda r: r["priority"])
 
@@ -172,7 +193,8 @@ def build_registry():
 def main():
     validate_only = "--validate" in sys.argv
 
-    registry = build_registry()
+    # generate: skip-invalid (best-effort реестр из валидных); --validate: строгий gate
+    registry = build_registry(skip_invalid=not validate_only)
 
     if validate_only:
         print(f"OK: {registry['rule_count']} rules validated")

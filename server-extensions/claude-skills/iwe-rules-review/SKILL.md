@@ -11,6 +11,11 @@ triggers:
 routing:
   executor: haiku
   deterministic: false
+agents: single
+interaction: multi-step
+gates_required: []
+gates_enforced: []
+gates_rationale: "операционный скилл; WP Gate применим только при создании нового РП, не для операционных вызовов"
 ---
 
 # Ревью культуры работы IWE
@@ -20,7 +25,11 @@ routing:
 > **Вход:** DP.M.008 (Pack) + данные за неделю (коммиты, DayPlans, Quick Close отчёты).
 > **Выход:** Предложение изменений → одобрение → обновление DP.M.008 + реализаций.
 
-## Алгоритм
+## When to use
+
+Еженедельное ревью культуры работы IWE (элемент 14 — Эволюция системы). Запускается при Week Close.
+
+## Algorithm
 
 ### 1. Загрузить правила
 

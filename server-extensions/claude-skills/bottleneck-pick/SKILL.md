@@ -1,15 +1,24 @@
 ---
 name: bottleneck-pick
-description: "Скилл IWE — см. тело файла"
+description: "Аналитик ограничений (DP.ROLE.054): находит главное ограничение (bottleneck) конкретного конвейера через TOC Five Steps + EC + NBR и строит Stage Dependency Map. Используй ТОЛЬКО при работе с конкретным WP, эпиком, проектом или weekplan (--target WP-NNN|weekplan|pilot:id). НЕ используй для общих вопросов приоритизации без явного системного контекста."
 version: 1.0.0
 layer: L3
 status: active
 triggers:
   slash: [/bottleneck-pick]
-  phrases: []
+  phrases:
+    - "выбери bottleneck"
+    - "какое ограничение сейчас"
+    - "горлышко системы"
+    - "bottleneck-pick"
 routing:
   executor: sonnet
   deterministic: false
+agents: single
+interaction: multi-step
+gates_required: []
+gates_enforced: []
+gates_rationale: "операционный скилл; WP Gate применим только при создании нового РП, не для операционных вызовов"
 ---
 
 # Skill: /bottleneck-pick
@@ -19,6 +28,10 @@ routing:
 > Носитель методики TOC для пилота: Goldratt Five Focusing Steps + Tendon TameFlow Replenishment Cycle + Dettmer Thinking Processes.
 > Реализует роль **Аналитика ограничений (DP.ROLE.054)** через пятифазный ВДВ-каскад.
 > Источник: WP-313 (Ф1 research: Tendon «Tame Your Work Flow», Dettmer, Schragenheim, Goldratt S&T; Ф11 IntegrationGate).
+
+## When to use
+
+Аналитик ограничений (DP.ROLE.054): находит главное ограничение (bottleneck) конкретного конвейера через TOC Five Steps + EC + NBR и строит Stage Dependency Map. Используй ТОЛЬКО при работе с конкретным WP, эпиком, проектом или weekplan (--target WP-NNN|weekplan|pilot:id). НЕ используй для общих вопросов приоритизации без явного системного контекста.
 
 ## Триггеры
 
@@ -74,7 +87,7 @@ routing:
 
 ---
 
-## Алгоритм — пятифазный ВДВ-каскад
+## Algorithm — пятифазный ВДВ-каскад
 
 > Принцип ВДВ (DP.M.060): выход фазы = вход следующей. Каждый вход и выход — физический артефакт.
 

@@ -2,6 +2,23 @@
 
 <!-- AUTHOR-ONLY -->
 
+### 5a-gate. Gate routing за ночь (WP-423 Ф6.4, информационно)
+
+> Показать после overnight-auditor (04:45 UTC). Неблокирующее: если файл отсутствует — пропустить молча.
+> Смысл метрики: какой процент задач прошёл без LLM. Рост % = зрелость реестра рефлексов.
+
+```bash
+GATE_LOG="$HOME/.iwe/gate-decisions.jsonl"
+if [ -f "$GATE_LOG" ] && [ -s "$GATE_LOG" ]; then
+  bash ~/IWE/DS-my-strategy/scripts/gate-metrics.sh "$GATE_LOG" 2>/dev/null \
+    || echo "⚠️ gate-metrics.sh: ошибка — пропуск, неблокирующее"
+else
+  echo "ℹ️ Gate routing: нет данных пока (gate-decisions.jsonl пуст или отсутствует)"
+fi
+```
+
+---
+
 ### 5a. Session Memory Injector: инжекция паттернов косяков (WP-316 Ф12, L2-hook)
 
 > **Запускать ПЕРЕД остальными шагами Day Open.** Замыкает петлю обратной связи: агент видит свои паттерны ДО начала дня.

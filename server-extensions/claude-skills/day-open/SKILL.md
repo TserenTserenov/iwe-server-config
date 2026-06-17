@@ -11,6 +11,11 @@ triggers:
 routing:
   executor: sonnet
   deterministic: false
+agents: single
+interaction: multi-step
+gates_required: []
+gates_enforced: []
+gates_rationale: "операционный скилл; WP Gate применим только при создании нового РП, не для операционных вызовов"
 ---
 
 # Day Open (протокол открытия дня)
@@ -22,6 +27,10 @@ routing:
 > **Issues — только actionable:** пропускать read-only репо (CLAUDE.md) и upstream без push-доступа (Base, чужие fork).
 > **Шаблоны:** ниже (после алгоритма).
 > **Стиль текста:** DayPlan и compact dashboard читает пилот → весь текст синтезировать в базе разговорного стиля (S0 база + S1 автор, источник DP.SC.050): русский, без машинных меток, путь к файлу и код РП не подлежащее (только после русского описания в скобках), главная мысль первой. Применяется и к встроенным блокам-выводам скриптов (Gate-метрики, светофор IWE за ночь).
+
+## When to use
+
+Протокол открытия дня (Day Open). Собирает вчерашние коммиты, issues, заметки, календарь, бота QA, Scout, мир — формирует DayPlan и compact dashboard.
 
 ## БЛОКИРУЮЩЕЕ: пошаговое исполнение
 
@@ -36,7 +45,7 @@ Day Open = протокол. Исполнять ТОЛЬКО пошагово ч
 
 Источник правила: peer-сессия 2026-05-30-07 + уточнение пилота 30 мая. Альтернативный путь (для cron-агента без интерактива): инжекция первой строкой в `day-open-scaffold.sh` промпт-инструкцию стратегу.
 
-## Алгоритм
+## Algorithm
 
 ### 0. Extensions (before)
 Загрузить: `bash .claude/scripts/load-extensions.sh day-open before`. Exit 0 → `Read` каждый файл из вывода (alphabetic) → выполнить содержимое как первые шаги. Exit 1 → пропустить. Поддерживает `extensions/day-open.before.md` И `extensions/day-open.before.<suffix>.md`.

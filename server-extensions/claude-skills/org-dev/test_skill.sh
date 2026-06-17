@@ -7,8 +7,8 @@ set -eu
 
 SKILL_DIR="$(cd "$(dirname "$0")" && pwd)"
 SKILL_FILE="$SKILL_DIR/SKILL.md"
-MIM_M031="/Users/tserentserenov/IWE/PACK-MIM/pack/mim/03-methods/MIM.M.031-rr-guide-routing.md"
-MIM_M030="/Users/tserentserenov/IWE/PACK-MIM/pack/mim/03-methods/MIM.M.030-system-type-diagnosis.md"
+MIM_M031="${IWE_DIR:-$HOME/IWE}/PACK-MIM/pack/mim/03-methods/MIM.M.031-rr-guide-routing.md"
+MIM_M030="${IWE_DIR:-$HOME/IWE}/PACK-MIM/pack/mim/03-methods/MIM.M.030-system-type-diagnosis.md"
 
 fail=0
 

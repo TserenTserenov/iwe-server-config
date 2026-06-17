@@ -11,13 +11,18 @@ triggers:
 routing:
   executor: sonnet
   deterministic: false
+agents: single
+interaction: multi-step
+gates_required: []
+gates_enforced: []
+gates_rationale: "операционный скилл; WP Gate применим только при создании нового РП, не для операционных вызовов"
 ---
 
 # Knowledge Extraction (Capture-to-Pack)
 
 Выполни извлечение знания: $ARGUMENTS
 
-## Scope
+## When to use
 
 **Этот скилл делает:**
 - Inline-capture на рубеже сессии (маршрутизация «что → куда», анонс *«Capture: X → Y»*).
@@ -38,6 +43,8 @@ routing:
 | `/apply-captures` (в разработке, Ф3 WP-247) | R15 Валидатор | Close при N>0 pending-review | Pack-сущности + коммит + обновление status |
 
 Детальная ВДВ-карта цикла: `DS-my-strategy/inbox/WP-247-ke-pipeline-vdv.md`
+
+## Algorithm
 
 ## Шаг 1. Определи тип знания
 

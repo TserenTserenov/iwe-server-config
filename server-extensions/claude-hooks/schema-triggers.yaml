@@ -1,0 +1,31 @@
+# schema-triggers.yaml — membership-конфиг для AR.234 Schema Registration Gate.
+# ADR-IWE-020 (peer-сессия 2026-06-14-50, спин-офф WP-419).
+#
+# Единственный источник истины «что считать новой кодовой схемой».
+# Читают ДВА потребителя (один источник membership, не два места правки):
+#   - schema-registration-gate.sh    → should_fire   (грубо: возбуждать ли событие)
+#   - rule-engine.sh::check_schema_registration_gate → is_in_scope (тонко: verdict)
+#   - schema-registration-postcheck.sh → required_fields (детекция ответа на nudge)
+#
+# fired_event ОБЯЗАН совпадать с одним из triggers AR.234 в rules-registry.yaml —
+# иначе dispatch_event не подцепит правило. Сверяется dogfood-тестом
+# (rule-engine.sh test).
+
+fired_event: schema_registration_attempt
+
+# Грубый glob по basename создаваемого файла (новая файловая схема).
+path_globs:
+  - "*registry*.yaml"
+  - "*registry*.yml"
+  - "*-catalog.yaml"
+  - "*-catalog.yml"
+
+# Обязательные §5-поля DP.METHOD.054, которые должны жить в каноне схемы.
+# Post-write presence-check (schema-registration-postcheck.sh) детектирует,
+# ответил ли агент на nudge: поля заполнены = ответил; пусто = проигнорил →
+# warn в session-warn-log → всплывёт в Close summary.
+required_fields:
+  - owner
+  - schema_version
+
+schema_version: 1

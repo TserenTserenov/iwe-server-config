@@ -44,6 +44,49 @@ fi
 
 ---
 
+### WP-383 пост-закрытие: мониторинг routing + экономики (peer-session 2026-06-10-18)
+
+> **Источник:** peer-консенсус 2026-06-10. Хранитель: Week Close. Не требует открытого РП.
+
+**Выполнить:**
+
+```bash
+# 1. routing-drift.log — проверить наличие и содержимое
+DRIFT_LOG="$HOME/IWE/DS-my-strategy/inbox/WP-383/routing-drift.log"
+if [ -f "$DRIFT_LOG" ]; then
+  DRIFT_COUNT=$(wc -l < "$DRIFT_LOG" | tr -d ' ')
+  echo "=== routing-drift.log: $DRIFT_COUNT записей ==="
+  tail -10 "$DRIFT_LOG"
+  echo "Оцени актуальность routing-таблицы v2 (routing-design-v1.md §3)."
+else
+  echo "routing-drift.log не существует (нет отклонений от таблицы v2)."
+fi
+
+# 2. cost_usd batch check — посчитать report.md без поля
+MONTH=$(date +%Y-%m)
+MISSING=$(grep -rL "cost_usd:" "$HOME/IWE/DS-my-strategy/sessions/$MONTH/" --include="report.md" 2>/dev/null | wc -l | tr -d ' ')
+echo ""
+echo "=== cost_usd: отчётов без поля за текущий месяц: $MISSING ==="
+if [ "$MISSING" -gt 3 ]; then
+  echo "⚠️  Больше 3 отчётов без cost_usd — напомни заполнять поле."
+fi
+
+# 3. Валидация экономики — если накоплено ≥10 отчётов с cost_usd
+FILLED=$(grep -rl "cost_usd:" "$HOME/IWE/DS-my-strategy/sessions/$MONTH/" --include="report.md" 2>/dev/null | wc -l | tr -d ' ')
+if [ "$FILLED" -ge 10 ]; then
+  echo "✅ Накоплено $FILLED отчётов с cost_usd — сверь суммарную экономию с routing-design-v1.md §6."
+  echo "   Порог расхождения: 5%. При >5% — создать задачу на корректировку таблицы v2."
+fi
+```
+
+**Чеклист:**
+
+- [ ] routing-drift.log просмотрен (если существует); таблица v2 актуальна ИЛИ создана задача на корректировку.
+- [ ] cost_usd: ≤3 отчётов без поля за месяц ИЛИ выдано напоминание.
+- [ ] Если накоплено ≥10 отчётов с cost_usd — экономика сверена с routing-design-v1.md §6.
+
+---
+
 ### Guard: канонический множитель (Ф8.3, WP-139)
 
 > **Цель:** Week Close НЕ завершается при 0x/пустом множителе — силент-фейл парсера невидим.
@@ -300,4 +343,69 @@ python3 ~/IWE/DS-my-strategy/scripts/style-feedback-loop.py --days 7 --threshold
 
 - [ ] **Style feedback loop запущен** (или нет нарушений за неделю)
 - [ ] **Новые fault-reminders** (если созданы) зафиксированы в Week Close report
+
+---
+
+### Обзор активности репозиториев за неделю (DOA2, WP-7 2026-06-12)
+
+> **Цель:** пилот видит что сделано за неделю по каждому репо. Не блокирует Week Close.
+> Диапазон: с понедельника 00:00 МСК текущей недели (детерминированно, без state).
+
+**Выполнить:**
+
+```bash
+# Обзор коммитов с понедельника текущей недели по всем IWE-репо
+# Понедельник 00:00 МСК = Monday 00:00 UTC+3
+DAY_OF_WEEK=$(date +%u)  # 1=Пн, 7=Вс
+DAYS_BACK=$((DAY_OF_WEEK - 1))
+MONDAY=$(date -v-${DAYS_BACK}d +%Y-%m-%d 2>/dev/null || date -d "${DAYS_BACK} days ago" +%Y-%m-%d)
+SINCE="${MONDAY} 00:00:00"
+
+echo "=== Активность репозиториев с ${MONDAY} (Пн) ==="
+echo ""
+printf "| %-40s | %7s | %-55s |\n" "Репозиторий" "Коммитов" "Последний коммит"
+printf "|%-42s|%9s|%-57s|\n" "$(printf '%.0s-' {1..42})" "$(printf '%.0s-' {1..9})" "$(printf '%.0s-' {1..57})"
+any=0
+for repo in ~/IWE/*/; do
+  [ -d "${repo}.git" ] || continue
+  slug=$(basename "$repo")
+  n=$(git -C "$repo" log --since="$SINCE" --oneline 2>/dev/null | wc -l | tr -d ' ')
+  [ "${n:-0}" -eq 0 ] && continue
+  last=$(git -C "$repo" log -1 --format='%s (%ad)' --date=format:'%d %b' 2>/dev/null | cut -c1-55)
+  printf "| %-40s | %7s | %-55s |\n" "$slug" "$n" "$last"
+  any=1
+done
+[ "$any" = "0" ] && echo "Коммитов за неделю не найдено."
+echo ""
+echo "Итого репо с активностью: $(for repo in ~/IWE/*/; do [ -d "${repo}.git" ] || continue; n=$(git -C "$repo" log --since="$SINCE" --oneline 2>/dev/null | wc -l | tr -d ' '); [ "${n:-0}" -gt 0 ] && echo 1; done | wc -l | tr -d ' ')"
+```
+
+**Чеклист:**
+
+- [ ] **Обзор репо получен** и вставлен в Week Report
+
+---
+
+### FMT source-of-truth — синхронизация install-hooks.sh (WP-7, 2026-06-17)
+
+> **Цель:** убедиться, что изменения `install-hooks.sh` в авторском IWE отражены в FMT-exocortex-template.
+> Появилось после peer-сессии WP-7/WP-313: Kimi добавил новые проверки в install-hooks.sh — нужно промотировать в шаблон.
+
+**Выполнить:**
+
+```bash
+# Сравнить авторский скрипт с версией в FMT
+diff ~/IWE/scripts/install-hooks.sh ~/IWE/FMT-exocortex-template/scripts/install-hooks.sh
+```
+
+Если есть расхождения — запустить промоцию:
+
+```bash
+bash ~/IWE/scripts/script-promote.sh install-hooks.sh [--dry-run]
+```
+
+**Чеклист:**
+
+- [ ] **Diff проверен** (авторский vs FMT)
+- [ ] **Если расхождение** — промоция выполнена через `script-promote.sh`
 
