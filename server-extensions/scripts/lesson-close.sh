@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # routing: executor=script  deterministic=true  skill=lesson-close  optimization_priority=2
 # see DP.SC.159, DP.ROLE.059
-# lesson-close.sh — закрыть занятие в workbook
+# lesson-close.sh — закрыть занятие в дневном файле (lesson/<date>.md)
 #
 # Usage: lesson-close.sh [YYYY-MM-DD] [--no-push]
 
@@ -9,10 +9,10 @@ set -euo pipefail
 
 DATE="${1:-$(date +%Y-%m-%d)}"
 NO_PUSH="${2:-}"
-FILE="workbook/${DATE}.md"
+FILE="lesson/${DATE}.md"
 
 if [[ ! -f "$FILE" ]]; then
-  echo "ERROR: workbook file not found: $FILE" >&2
+  echo "ERROR: lesson file not found: $FILE" >&2
   exit 1
 fi
 
