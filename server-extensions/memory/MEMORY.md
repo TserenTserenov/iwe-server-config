@@ -61,7 +61,7 @@
 
 > 🔄 **WP-400 LiteLLM Proxy.** **Ф1–Ф4 DONE (2026-06-09):** auth-gateway в проде, все 4 сервиса переключены на `auth-gateway-production-52bf.up.railway.app`. **Осталось:** Ф5 budget-alert $50/day, Ф6 единый платформенный OPENAI_API_KEY. Карточка: `DS-my-strategy/inbox/WP-400.md`.
 
-> ⏳ **WP-401 Разделение GitHub-организаций Aisystant и МИМ (7 июня).** Дедлайн — вторник 10 июня. IWE возможно в отдельную орг `iwe`. Спросить Решата о рисках GitHub в РФ. Handoff: `DS-my-strategy/inbox/WP-401.md`.
+> ⏳ **WP-401 Разделение GitHub-организаций Aisystant и МИМ (7 июня).** Дедлайн — вторник 10 июня. IWE возможно в отдельную орг `iwe`. Спросить Ильшата о рисках GitHub в РФ. Handoff: `DS-my-strategy/inbox/WP-401.md`.
 
 > 🔄 **WP-406 Онбордер — Ф8 приёмка (2026-06-14).** PR #280/#281/#283 влиты в прод 2026-06-11. Авторский прогон = pre-check (не наблюдение). Нужны 2-3 внешних участника до 2026-06-21. Нудж не входит в acceptance.metric. Fallback при недоборе — эскалация к пилоту. Контекст: `inbox/WP-406.md Ф8`.
 
