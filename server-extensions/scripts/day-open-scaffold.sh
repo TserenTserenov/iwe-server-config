@@ -26,12 +26,19 @@ set -uo pipefail
 
 # Load unified environment: WORKSPACE_DIR, IWE_ROOT, IWE_SCRIPTS, etc.
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-source "$SCRIPT_DIR/../.claude/lib/iwe-env-bootstrap.sh" || exit 1
-# Bootstrap exports IWE_ROOT, but the rest of this script uses $IWE. A clean caller
-# (launchd, or the pipeline calling us as a subprocess) does not export IWE, so under
-# `set -u` line ~31 tripped «IWE: unbound variable» and the scaffold aborted — which is
-# why the legacy prompt's "Шаг 0 scaffold" silently fell back to free-form synthesis.
+# Bootstrap sets IWE_ROOT/WORKSPACE_DIR/etc. It may be ABSENT on some hosts — tsekh-1's
+# extension sync does not copy .claude/lib/ — so source it only if present and never let
+# its absence abort the scaffold (the old `|| exit 1` killed every run on tsekh-1, which
+# is why the night generator always fell back to free-form synthesis).
+if [ -f "$SCRIPT_DIR/../.claude/lib/iwe-env-bootstrap.sh" ]; then
+  source "$SCRIPT_DIR/../.claude/lib/iwe-env-bootstrap.sh" || exit 1
+fi
+# Derive the essentials the scaffold + its helpers rely on. Bootstrap exports IWE_ROOT,
+# but the script uses $IWE; a clean caller (launchd / pipeline subprocess) exports
+# neither, so under `set -u` $IWE tripped «unbound variable» a few lines down.
+IWE_ROOT="${IWE_ROOT:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 IWE="${IWE:-$IWE_ROOT}"
+export IWE_ROOT IWE
 DATE="${1:-$(date +%Y-%m-%d)}"
 CONFIG="$IWE/${IWE_GOVERNANCE_REPO:-DS-strategy}/exocortex/day-rhythm-config.yaml"
 SERVER_MODE="${IWE_SERVER_MODE:-0}"  # WP-283: 1 = Linux server, Mac-only MCP недоступен
