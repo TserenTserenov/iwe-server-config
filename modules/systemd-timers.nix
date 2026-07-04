@@ -814,6 +814,65 @@ in
       };
     };
 
+    # =========================================================
+    # 12. ENGAGEMENT COLLECTOR — восстановление 2_collected (WP-463 Ф2)
+    # =========================================================
+    # Заменяет отключённый _dt_sync_engagement бота (aist_bot_newarchitecture,
+    # закомментирован в core/scheduler.py с конца апреля 2026 после переезда на Railway).
+    # Два таймера, один ExecStart (флаг различает режим):
+    #   - iwe-engagement-collector: ежедневно 04:40 МСК (после stage-evaluator 04:35),
+    #     windowed-recompute (7d/30d/90d) для всех согласившихся пользователей.
+    #   - iwe-engagement-collector-full: еженедельно (вс 05:15 МСК), + флаг --full-history —
+    #     пересчёт *_count_total для новых групп (2_9_agency/2_10_worldview/2_11_impact).
+    #     2_6_coding/2_7_iwe исторически windowed-only — full-history их не расширяет.
+    # Env vars (требуются в /etc/iwe/env): LEARNING_URL (или DATABASE_URL_ENGAGEMENT_COLLECTOR)
+    # для domain_event/consent_grant + DT_PROFILER_NEON_URL для digital_twins (отдельная
+    # Neon-база — та же, что у Profiler, см. profiler_subscriber.py:14).
+    # activity-hub commit: см. git log DS-IT-systems/activity-hub -- activity_hub/workers/engagement_collector.py
+    # see inbox/WP-463/WP-463.md, peer-session 2026-07-04-08-wp463-f2-implementation
+
+    systemd.services."iwe-engagement-collector" = {
+      description = "IWE — Engagement Collector, windowed (WP-463 Ф2, 04:40 МСК)";
+      unitConfig  = commonUnitConfig;
+      serviceConfig = commonServiceConfig // {
+        ExecStart  = "${pythonForIWE}/bin/python3 ${iwe}/DS-IT-systems/activity-hub/runner.py engagement-collector";
+        WorkingDirectory = "${iwe}/DS-IT-systems/activity-hub";
+        TimeoutSec = 600;
+      };
+      path = commonPath;
+      environment = commonEnv;
+    };
+
+    systemd.timers."iwe-engagement-collector" = {
+      wantedBy    = [ "timers.target" ];
+      description = "Engagement Collector windowed — ежедн 04:40 МСК (после stage-evaluator)";
+      timerConfig = {
+        OnCalendar = "*-*-* 04:40:00 Europe/Moscow";
+        Persistent = true;
+      };
+    };
+
+    systemd.services."iwe-engagement-collector-full" = {
+      description = "IWE — Engagement Collector, full-history (WP-463 Ф2, воскр 05:15 МСК)";
+      unitConfig  = commonUnitConfig;
+      serviceConfig = commonServiceConfig // {
+        ExecStart  = "${pythonForIWE}/bin/python3 ${iwe}/DS-IT-systems/activity-hub/runner.py engagement-collector --full-history";
+        WorkingDirectory = "${iwe}/DS-IT-systems/activity-hub";
+        TimeoutSec = 1800;  # полный recompute всех согласившихся — дороже windowed-прогона
+      };
+      path = commonPath;
+      environment = commonEnv;
+    };
+
+    systemd.timers."iwe-engagement-collector-full" = {
+      wantedBy    = [ "timers.target" ];
+      description = "Engagement Collector full-history — еженед вс 05:15 МСК";
+      timerConfig = {
+        OnCalendar = "Sun *-*-* 05:15:00 Europe/Moscow";
+        Persistent = true;
+      };
+    };
+
     # НЕ МИГРИРОВАНО: com.exocortex.pomodoro-alert
     # =========================================================
     # pomodoro-alert.py использует macOS Notification Center / osascript.
