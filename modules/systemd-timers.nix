@@ -528,11 +528,15 @@ in
     # =========================================================
     # 9. RENDER PILOT GUIDES — daily (WP-149 Ф12, WP-245 Ф28.7)
     # =========================================================
-    # Только новый daily/YYYY-MM-DD.md — вт–вс 06:00 МСК.
-    # В понедельник не нужен: weekly (#8) уже делает полный рендер.
+    # Новый guide/YYYY-MM-DD.md — каждый день, 06:00 МСК.
+    # WP-149 (2026-07-06, bug-2026-07-06-monday-no-daily-guide): понедельник раньше
+    # был исключён на предположении «weekly (#8) уже делает полный рендер» — это
+    # предположение неверно, weekly-режим пишет только guide/{ISO-неделя}.md, дневной
+    # файл не пишет никогда. Без дневного прогона по понедельникам пилот не получал
+    # дневное занятие ни разу в неделю.
 
     systemd.services."iwe-render-pilot-guides-daily" = {
-      description = "IWE — рендер руководств пилотов (daily, вт–вс 06:00)";
+      description = "IWE — рендер руководств пилотов (daily, каждый день 06:00)";
       unitConfig   = commonUnitConfig;
       serviceConfig = commonServiceConfig // {
         ExecStart  = "${pythonForIWE}/bin/python3 ${iwe}/DS-autonomous-agents/scripts/render-pilot-guides.py --daily";
@@ -544,16 +548,9 @@ in
 
     systemd.timers."iwe-render-pilot-guides-daily" = {
       wantedBy    = [ "timers.target" ];
-      description = "IWE рендер руководств (daily) — вт–вс 06:00 МСК";
+      description = "IWE рендер руководств (daily) — каждый день 06:00 МСК";
       timerConfig = {
-        OnCalendar = [
-          "Tue *-*-* 06:00:00"
-          "Wed *-*-* 06:00:00"
-          "Thu *-*-* 06:00:00"
-          "Fri *-*-* 06:00:00"
-          "Sat *-*-* 06:00:00"
-          "Sun *-*-* 06:00:00"
-        ];
+        OnCalendar = "*-*-* 06:00:00";
         Persistent = true;
       };
     };
