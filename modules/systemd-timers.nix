@@ -475,6 +475,60 @@ in
     };
 
     # =========================================================
+    # 6b. IWE PULL REPOS — каждые 2 часа (WP-7 S-A, peer 2026-06-11-01)
+    # =========================================================
+    # Синхронизирует все IWE-репо (DS-IT-systems, PACK-*, DS-*) с GitHub.
+    # --ff-only (fail-fast на divergence → TG-алерт), grace-период для фоновых синхронизаторов.
+
+    systemd.services."iwe-pull-repos" = {
+      description = "IWE — git pull всех репо (каждые 2 часа)";
+      unitConfig   = commonUnitConfig;
+      serviceConfig = commonServiceConfig // {
+        ExecStart  = "${pullScript}";
+        TimeoutSec = 900;  # 15 мин (14 репо × 60s timeout + margin)
+      };
+      path = commonPath;
+      environment = commonEnv;
+    };
+
+    systemd.timers."iwe-pull-repos" = {
+      wantedBy    = [ "timers.target" ];
+      description = "IWE pull-repos — каждые 2 часа";
+      timerConfig = {
+        OnBootSec       = "5min";
+        OnUnitActiveSec = "2h";
+        Persistent = true;
+      };
+    };
+
+    # =========================================================
+    # 6c. IWE PUSH AHEAD — каждые 2 часа (WP-7 S-A, peer 2026-06-11-01)
+    # =========================================================
+    # Доставляет локальные ahead-коммиты (сделанные сессиями на сервере) обратно на GitHub.
+    # Запускается ПОСЛЕ pull-repos, чтобы свежие изменения не зависали на сервере.
+
+    systemd.services."iwe-push-ahead" = {
+      description = "IWE — git push ahead коммитов (каждые 2 часа)";
+      unitConfig   = commonUnitConfig;
+      serviceConfig = commonServiceConfig // {
+        ExecStart  = "${pushAheadScript}";
+        TimeoutSec = 600;  # 10 мин
+      };
+      path = commonPath;
+      environment = commonEnv;
+    };
+
+    systemd.timers."iwe-push-ahead" = {
+      wantedBy    = [ "timers.target" ];
+      description = "IWE push-ahead — каждые 2 часа (+15 мин после pull)";
+      timerConfig = {
+        OnBootSec       = "20min";
+        OnUnitActiveSec = "2h";
+        Persistent = true;
+      };
+    };
+
+    # =========================================================
     # =========================================================
     # 7. RULE CLASSIFIER (hourly) — ОТКЛЮЧЁН (дубль daily 23:55)
     # =========================================================
