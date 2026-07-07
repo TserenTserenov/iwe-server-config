@@ -85,7 +85,7 @@ let
   #   - --ff-only (без rebase, divergent → fail-fast → TG-алерт)
   #   - timeout 60s per repo (защита от network hang)
   #   - GIT_TERMINAL_PROMPT=0 + BatchMode=yes (детерминированный fail без password prompt)
-  #   - skip dirty репо (защита локальных правок) + grace-период 30s + retry,
+  #   - skip dirty репо (защита локальных правок) + grace-період 30s + retry,
   #     чтобы не алертить на транзиентный dirty от фоновых синхронизаторов
   #     (synchronizer пишет sync-hashes/pulse state, knowledge-mcp reindex и т.п.)
   #   - exit 0 always (не блокирует scheduler tick)
@@ -103,6 +103,7 @@ let
     repos=(
       "DS-IT-systems/DS-ai-systems"
       "DS-IT-systems/activity-hub"
+      "DS-IT-systems/iwe-server"
       "DS-MCP/knowledge-mcp"
       "DS-agent-workspace"
       "DS-autonomous-agents"
@@ -200,6 +201,7 @@ let
     repos=(
       "DS-IT-systems/DS-ai-systems"
       "DS-IT-systems/activity-hub"
+      "DS-IT-systems/iwe-server"
       "DS-MCP/knowledge-mcp"
       "DS-agent-workspace"
       "DS-autonomous-agents"
