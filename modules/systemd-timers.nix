@@ -100,6 +100,25 @@ let
     export GIT_TERMINAL_PROMPT=0
     export GIT_SSH_COMMAND="ssh -o BatchMode=yes -o StrictHostKeyChecking=accept-new"
 
+    # WP-7: pullScript и pushAheadScript ходят по одному и тому же списку
+    # репо и запускаются из ЧЕТЫРЁХ мест — своих таймеров iwe-pull-repos /
+    # iwe-push-ahead (2h цикл) И как ExecStartPre юнита iwe-scheduler.
+    # OnBootSec-сдвиг между двумя таймерами (5min vs 20min) переживает
+    # только до первого рестарта/rebuild любого из них — за 72 дня аптайма
+    # сдвиг схлопнулся, оба сервиса стартовали в одну секунду, конкурентный
+    # `git fetch`/`git pull` на одном working tree задваивал FETCH_HEAD →
+    # `fatal: Cannot rebase onto multiple branches` (peer-session
+    # 2026-07-10-01-tsekh-timer-race, воспроизведено живьём). Non-blocking
+    # flock на общий лок-файл сериализует все четыре источника разом; при
+    # коллизии тик молча пропускается (нет смысла называть конкурента по
+    # имени в логе — их несколько) — следующий тик через 2ч решит вопрос,
+    # ждать здесь незачем.
+    exec 200>"${iwe}/.iwe-git-ops.lock"
+    if ! ${pkgs.util-linux}/bin/flock -n 200; then
+      ${pkgs.util-linux}/bin/logger -t iwe-pull-repos "lock busy, skipping tick"
+      exit 0
+    fi
+
     repos=(
       "DS-IT-systems/DS-ai-systems"
       "DS-IT-systems/activity-hub"
@@ -165,7 +184,12 @@ let
         fi
         echo "RECOVERED: $repo (был транзиентный dirty, продолжаю pull)"
       fi
-      if ${pkgs.coreutils}/bin/timeout 60s ${pkgs.git}/bin/git pull --ff-only 2>&1; then
+      # -c pull.rebase=false: defense-in-depth, независимо от глобального
+      # ~/.gitconfig пользователя (pull.rebase=true на tsekh-1 маршрутизирует
+      # --ff-only через rebase-backend, из-за чего гонка на FETCH_HEAD даёт
+      # hard "Cannot rebase onto multiple branches" вместо более безобидного
+      # merge-конфликта).
+      if ${pkgs.coreutils}/bin/timeout 60s ${pkgs.git}/bin/git -c pull.rebase=false pull --ff-only 2>&1; then
         echo "OK: $repo"
       else
         echo "FAIL: $repo"
@@ -197,6 +221,15 @@ let
     set -uo pipefail
     export GIT_TERMINAL_PROMPT=0
     export GIT_SSH_COMMAND="ssh -o BatchMode=yes -o StrictHostKeyChecking=accept-new"
+
+    # WP-7: тот же lock-файл, что и iwe-pull-repos (см. комментарий там) —
+    # оба сервиса ходят по идентичному списку репо, non-blocking flock
+    # предотвращает конкурентный git fetch/pull на одном working tree.
+    exec 200>"${iwe}/.iwe-git-ops.lock"
+    if ! ${pkgs.util-linux}/bin/flock -n 200; then
+      ${pkgs.util-linux}/bin/logger -t iwe-push-ahead "lock busy, skipping tick"
+      exit 0
+    fi
 
     repos=(
       "DS-IT-systems/DS-ai-systems"
@@ -509,7 +542,12 @@ in
 
     systemd.services."iwe-push-ahead" = {
       description = "IWE — git push ahead коммитов (каждые 2 часа)";
-      unitConfig   = commonUnitConfig;
+      # After = только гигиена порядка (если оба юнита queue'ятся в одной
+      # systemd-транзакции — push подождёт завершения pull). Это НЕ защита
+      # от гонки: если таймеры дрейфанули и стартуют по отдельным транзакциям
+      # секунда в секунду, After= не спасает — от этого защищает flock
+      # в самих скриптах (см. pullScript/pushAheadScript, WP-7).
+      unitConfig   = commonUnitConfig // { After = [ "iwe-pull-repos.service" ]; };
       serviceConfig = commonServiceConfig // {
         ExecStart  = "${pushAheadScript}";
         TimeoutSec = 600;  # 10 мин
