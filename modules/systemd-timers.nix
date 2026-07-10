@@ -603,7 +603,10 @@ in
       description = "IWE — рендер руководств пилотов (weekly, Пн 05:00)";
       unitConfig   = commonUnitConfig;
       serviceConfig = commonServiceConfig // {
-        ExecStart  = "${pythonForIWE}/bin/python3 ${iwe}/DS-autonomous-agents/scripts/render-pilot-guides.py";
+        # 2026-07-10 (директива пилота, WP-149): генерация для managed-пилотов
+        # приостановлена до отдельных путей (платформа / скилл в IWE-шаблоне).
+        # --user сужает рендер только на sovereign-пилота (владельца сервера).
+        ExecStart  = "${pythonForIWE}/bin/python3 ${iwe}/DS-autonomous-agents/scripts/render-pilot-guides.py --user=TserenTserenov";
         TimeoutSec = 1800;
       };
       path = commonPath;
@@ -637,7 +640,8 @@ in
       description = "IWE — рендер руководств пилотов (daily, каждый день 03:00)";
       unitConfig   = commonUnitConfig;
       serviceConfig = commonServiceConfig // {
-        ExecStart  = "${pythonForIWE}/bin/python3 ${iwe}/DS-autonomous-agents/scripts/render-pilot-guides.py --daily";
+        # 2026-07-10 (директива пилота, WP-149): см. пометку у weekly-сервиса выше.
+        ExecStart  = "${pythonForIWE}/bin/python3 ${iwe}/DS-autonomous-agents/scripts/render-pilot-guides.py --daily --user=TserenTserenov";
         TimeoutSec = 600;
       };
       path = commonPath;
@@ -675,6 +679,10 @@ in
     };
 
     systemd.timers."iwe-render-pilot-guides-queue" = {
+      # 2026-07-10 (директива пилота, WP-149): отключено вместе с daily/weekly.
+      # process_queue() не поддерживает --user — фильтр по пилоту здесь невозможен
+      # без правки кода, поэтому таймер целиком остановлен, а не сужен.
+      enable      = false;
       wantedBy    = [ "timers.target" ];
       description = "IWE рендер очереди руководств — каждые 10 мин";
       timerConfig = {
