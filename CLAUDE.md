@@ -7,7 +7,7 @@
 ## Принципы работы
 
 1. **Инстанс ≠ шаблон.** `modules/` — переиспользуемое (станет шаблоном в Q3-Q4 при PMF). `instances/tsekh-1/` — мои константы и секреты. Никогда не хардкодить мои IP/пути/имена в `modules/`.
-2. **Никаких ручных правок на сервере.** Вся работа через правку `.nix` → коммит → `nixos-rebuild switch --flake .#tsekh-1 --target-host root@95.216.75.148`.
+2. **Никаких ручных правок на сервере.** Вся работа через правку `.nix` → коммит → `nixos-rebuild switch --flake .#tsekh-1 --build-host root@95.216.75.148 --target-host root@95.216.75.148`.
 3. **Секреты только через sops-nix.** Plain-text секреты в репо запрещены (см. `.gitignore`).
 4. **Apache 2.0 — лицензия с первого коммита.** Заголовки `# SPDX-License-Identifier: Apache-2.0` в значимых `.nix` файлах.
 5. **Декларативность:** если что-то делается на сервере — оно должно быть в `.nix` файле. Если не нужно делать декларативно (одноразовая отладка) — не коммитить, делать в Rescue mode.
@@ -20,7 +20,7 @@
 1. Tseren формулирует цель («хочу cron для day-open в 08:00 МСК»).
 2. Claude правит модуль (например, `modules/systemd-timers.nix`) или создаёт новый.
 3. Claude фиксирует в Git и отправляет на GitHub.
-4. Claude запускает `nixos-rebuild switch --flake .#tsekh-1 --target-host root@95.216.75.148` через Bash.
+4. Claude запускает `nixos-rebuild switch --flake .#tsekh-1 --build-host root@95.216.75.148 --target-host root@95.216.75.148` через Bash.
 5. NixOS создаёт новую generation, переключает.
 6. Tseren или Claude проверяет работоспособность (smoke).
 7. Если плохо — `git revert` → повторный rebuild → возврат на предыдущую generation.
@@ -46,9 +46,12 @@
 
 ## Полезные команды
 
+> `--build-host` обязателен при деплое с Apple Silicon Mac (aarch64-darwin) — целевая система x86_64-linux,
+> локальная кросс-сборка падает (`Cannot build ... Required system: x86_64-linux`). Собирать нужно на самом сервере.
+
 ```bash
 # Применить новую конфигурацию на сервер
-nixos-rebuild switch --flake .#tsekh-1 --target-host root@95.216.75.148
+nixos-rebuild switch --flake .#tsekh-1 --build-host root@95.216.75.148 --target-host root@95.216.75.148
 
 # Откат на предыдущую generation
 nixos-rebuild --rollback --target-host root@95.216.75.148
