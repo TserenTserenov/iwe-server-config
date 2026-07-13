@@ -39,6 +39,7 @@ let
       echo "  Дамп: $dbname"
       if ${pkgs.postgresql_17}/bin/pg_dump \
           --format=custom \
+          --compress=0 \
           --no-password \
           "$url" \
           > /tmp/restic-neon/"$dbname".dump 2>/tmp/restic-neon/"$dbname".err; then
@@ -138,6 +139,10 @@ in
         ".git"
         "__pycache__"
         "*.pyc"
+        ".venv"
+        "venv"
+        "dist"
+        "build"
       ];
 
       pruneOpts = [
