@@ -87,6 +87,7 @@ in
   tsekh.codeServer = {
     enable        = true;
     workspacePath = values.iweHome;
+    publicHost    = values.ipv4.address;
   };
 
   tsekh.calendarSecrets = {

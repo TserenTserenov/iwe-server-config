@@ -43,6 +43,17 @@ in
       description = "Публичный HTTPS-порт (Caddy, самоподписанный сертификат до появления домена).";
     };
 
+    publicHost = lib.mkOption {
+      type = lib.types.str;
+      description = ''
+        IP или домен, на который вешается virtualHost code-server в Caddy.
+        Должен быть конкретным хостом, НЕ голым ":port" — иначе Caddy
+        трактует безымянный адрес как catch-all automation policy и
+        конфликтует с другими hostless site-блоками (см. modules/caddy.nix,
+        порт без домена = ":port" без tls). Обычно = публичный IPv4 инстанса.
+      '';
+    };
+
     secretsFile = lib.mkOption {
       type = lib.types.path;
       default = ../secrets/code-server.yaml;
@@ -96,7 +107,7 @@ in
     # Caddy уже включён модулем caddy.nix (tsekh.caddy.enable) — здесь просто
     # добавляем ещё один virtualHost на отдельном порту, без домена.
     services.caddy.enable = true;
-    services.caddy.virtualHosts.":${toString cfg.publicPort}" = {
+    services.caddy.virtualHosts."${cfg.publicHost}:${toString cfg.publicPort}" = {
       extraConfig = ''
         tls internal
         reverse_proxy 127.0.0.1:${toString cfg.internalPort}
