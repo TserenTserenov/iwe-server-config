@@ -97,6 +97,13 @@ in
     environment.systemPackages = with pkgs; [ restic postgresql_17 ];
 
     # ===== Neon БД → B2 =====
+    #
+    # pruneOpts НЕ задаём здесь: upstream-модуль services.restic.backups встраивает
+    # "forget --prune" в тот же oneshot-юнит, что и "backup", без "-"-префикса на первой
+    # команде — падение backup (например, исчерпан storage cap на B2) блокирует и prune,
+    # а значит старые копии никогда не чистятся, даже когда сама причина сбоя устранена.
+    # Найдено и задокументировано: DS-my-strategy/sessions/2026-07/2026-07-15-06-betterstack-ssh-tsekh1-hang/.
+    # Очистка вынесена в независимый юнит restic-prune-<name> ниже — не зависит от исхода backup.
     services.restic.backups.neon-dbs = {
       initialize = true;
       repository = "b2:${cfg.b2Bucket}:neon-dbs";
@@ -106,12 +113,6 @@ in
       backupPrepareCommand = "${pgDumpScript}";
       paths = [ "/tmp/restic-neon" ];
       backupCleanupCommand = "rm -rf /tmp/restic-neon";
-
-      pruneOpts = [
-        "--keep-daily 7"
-        "--keep-weekly 4"
-        "--keep-monthly 12"
-      ];
 
       timerConfig = {
         OnCalendar = cfg.onCalendarNeon;
@@ -145,14 +146,63 @@ in
         "build"
       ];
 
-      pruneOpts = [
-        "--keep-daily 7"
-        "--keep-weekly 4"
-        "--keep-monthly 3"
-      ];
-
       timerConfig = {
         OnCalendar = cfg.onCalendarLocal;
+        Persistent = true;
+      };
+    };
+
+    # ===== Независимая очистка старых копий (не зависит от успеха backup) =====
+    systemd.services."restic-prune-neon-dbs" = {
+      description = "restic forget --prune для neon-dbs (независимо от backup)";
+      after = [ "network-online.target" ];
+      wants = [ "network-online.target" ];
+      environment = {
+        RESTIC_CACHE_DIR = "/var/cache/restic-backups-neon-dbs";
+        RESTIC_PASSWORD_FILE = "/etc/restic/password";
+        RESTIC_REPOSITORY = "b2:${cfg.b2Bucket}:neon-dbs";
+      };
+      serviceConfig = {
+        Type = "oneshot";
+        EnvironmentFile = "/etc/restic/b2-env";
+        CacheDirectory = "restic-backups-neon-dbs";
+        CacheDirectoryMode = "0700";
+        PrivateTmp = true;
+        ExecStart = "${pkgs.restic}/bin/restic forget --prune --keep-daily 7 --keep-weekly 4 --keep-monthly 12";
+      };
+    };
+
+    systemd.services."restic-prune-local-files" = {
+      description = "restic forget --prune для local-files (независимо от backup)";
+      after = [ "network-online.target" ];
+      wants = [ "network-online.target" ];
+      environment = {
+        RESTIC_CACHE_DIR = "/var/cache/restic-backups-local-files";
+        RESTIC_PASSWORD_FILE = "/etc/restic/password";
+        RESTIC_REPOSITORY = "b2:${cfg.b2Bucket}:local";
+      };
+      serviceConfig = {
+        Type = "oneshot";
+        EnvironmentFile = "/etc/restic/b2-env";
+        CacheDirectory = "restic-backups-local-files";
+        CacheDirectoryMode = "0700";
+        PrivateTmp = true;
+        ExecStart = "${pkgs.restic}/bin/restic forget --prune --keep-daily 7 --keep-weekly 4 --keep-monthly 3";
+      };
+    };
+
+    systemd.timers."restic-prune-neon-dbs" = {
+      wantedBy = [ "timers.target" ];
+      timerConfig = {
+        OnCalendar = "04:30";
+        Persistent = true;
+      };
+    };
+
+    systemd.timers."restic-prune-local-files" = {
+      wantedBy = [ "timers.target" ];
+      timerConfig = {
+        OnCalendar = "04:45";
         Persistent = true;
       };
     };
