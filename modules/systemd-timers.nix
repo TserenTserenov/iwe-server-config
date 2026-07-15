@@ -310,6 +310,48 @@ let
       send_tg "''${TELEGRAM_TEAM_CHAT_ID}"
     fi
   '';
+
+  # Contract-sync wrapper: запускает sync-contracts.sh, затем (только при success)
+  # health-check active-but-expired + BetterStack heartbeat — портирует шаги
+  # payment-registry/.github/workflows/contract-sync.yml, которые GHA делал
+  # отдельными steps после основного sync. NEON_SUBSCRIPTION_URL/HEARTBEAT_URL/
+  # TELEGRAM_* приходят из commonServiceConfig.EnvironmentFile (/etc/iwe/env).
+  contractSyncWrapper = pkgs.writeShellScript "payment-registry-contract-sync" ''
+    set -uo pipefail
+    "${pkgs.bash}/bin/bash" "${iwe}/payment-registry/scripts/sync-contracts.sh"
+    sync_status=$?
+    if [ "$sync_status" -ne 0 ]; then
+      exit "$sync_status"
+    fi
+
+    # Health check: active-but-expired (см. contract-sync.yml для источника запроса/порога).
+    attempt=1
+    abe=""
+    while [ "$attempt" -le 3 ]; do
+      abe=$(${pkgs.postgresql}/bin/psql "$NEON_SUBSCRIPTION_URL" -tAc \
+        "SELECT count(*) FROM contract WHERE status='active' AND valid_to <= now();" 2>/dev/null | tr -d '[:space:]')
+      if [ -n "$abe" ] && echo "$abe" | ${pkgs.gnugrep}/bin/grep -Eq '^[0-9]+$'; then
+        break
+      fi
+      attempt=$((attempt + 1))
+      ${pkgs.coreutils}/bin/sleep 30
+    done
+    if [ -z "$abe" ] || ! echo "$abe" | ${pkgs.gnugrep}/bin/grep -Eq '^[0-9]+$'; then
+      echo "health check: bad ABE value=[$abe] after 3 attempts"
+      exit 1
+    fi
+    if [ "$abe" -gt 20 ]; then
+      ${pkgs.curl}/bin/curl -s --max-time 10 -X POST \
+        "https://api.telegram.org/bot''${TELEGRAM_BOT_TOKEN}/sendMessage" \
+        -d "chat_id=''${TELEGRAM_CHAT_ID}" \
+        --data-urlencode "text=⚠️ Contract sync (tsekh-1): зелёный, но active-but-expired=''${abe} (порог 20). Возможно продления не доезжают." \
+        > /dev/null || true
+    fi
+
+    # Dead-man's switch: пинг только при полном успехе (как в contract-sync.yml).
+    [ -n "''${HEARTBEAT_URL:-}" ] && ${pkgs.curl}/bin/curl -s --max-time 10 "$HEARTBEAT_URL" > /dev/null
+    exit 0
+  '';
 in
 {
   options.tsekh.timers = {
@@ -976,6 +1018,84 @@ in
       timerConfig = {
         OnCalendar = "Sun *-*-* 05:15:00 Europe/Moscow";
         Persistent = true;
+      };
+    };
+
+    # =========================================================
+    # 13. PAYMENT REGISTRY SYNC — перенос с GitHub Actions (billing quota)
+    # =========================================================
+    # payment-registry/.github/workflows/{payment,subscription,contract}-sync.yml
+    # исчерпывали месячную квоту минут GHA (3 крон-джоба каждые 10-30 мин).
+    # Чистые bash+psql скрипты без ИИ/macOS-зависимостей — переносимы 1:1 на
+    # always-on цех-1 (репозиторий уже клонирован в ${iwe}/payment-registry).
+    # OnFailure=iwe-failure-alert уже покрывает случай «синк упал» — как
+    # GHA failure-алерт в contract-sync.yml. Health-check (active-but-expired)
+    # + BetterStack heartbeat contract-sync реализованы отдельным враппером,
+    # т.к. GHA-версия шлёт их только при success.
+    # Env vars (требуются в /etc/iwe/env): AISYSTANT_PG_URL, NEON_DIRECTUS_URL,
+    # NEON_AIST_BOT_URL, NEON_SUBSCRIPTION_URL, NEON_PERSONA_URL, HEARTBEAT_URL
+    # (BetterStack heartbeat contract-sync). TELEGRAM_BOT_TOKEN/CHAT_ID уже есть.
+
+    systemd.services."payment-registry-sync-payment" = {
+      description = "Payment Registry — incremental payment sync (10 мин)";
+      unitConfig  = commonUnitConfig;
+      serviceConfig = commonServiceConfig // {
+        ExecStart  = "${pkgs.bash}/bin/bash ${iwe}/payment-registry/scripts/incremental-sync.sh";
+        TimeoutSec = 300;
+      };
+      path = commonPath;
+      environment = commonEnv;
+    };
+
+    systemd.timers."payment-registry-sync-payment" = {
+      wantedBy    = [ "timers.target" ];
+      description = "Payment Registry payment sync — каждые 10 мин";
+      timerConfig = {
+        OnBootSec       = "2min";
+        OnUnitActiveSec = "10min";
+        Persistent      = true;
+      };
+    };
+
+    systemd.services."payment-registry-sync-subscription" = {
+      description = "Payment Registry — subscription sync (30 мин)";
+      unitConfig  = commonUnitConfig;
+      serviceConfig = commonServiceConfig // {
+        ExecStart  = "${pkgs.bash}/bin/bash ${iwe}/payment-registry/scripts/sync-subscriptions.sh";
+        TimeoutSec = 300;
+      };
+      path = commonPath;
+      environment = commonEnv;
+    };
+
+    systemd.timers."payment-registry-sync-subscription" = {
+      wantedBy    = [ "timers.target" ];
+      description = "Payment Registry subscription sync — каждые 30 мин";
+      timerConfig = {
+        OnBootSec       = "3min";
+        OnUnitActiveSec = "30min";
+        Persistent      = true;
+      };
+    };
+
+    systemd.services."payment-registry-sync-contract" = {
+      description = "Payment Registry — contract sync + health-check + heartbeat (15 мин)";
+      unitConfig  = commonUnitConfig;
+      serviceConfig = commonServiceConfig // {
+        ExecStart  = "${contractSyncWrapper}";
+        TimeoutSec = 600;
+      };
+      path = commonPath;
+      environment = commonEnv;
+    };
+
+    systemd.timers."payment-registry-sync-contract" = {
+      wantedBy    = [ "timers.target" ];
+      description = "Payment Registry contract sync — каждые 15 мин";
+      timerConfig = {
+        OnBootSec       = "4min";
+        OnUnitActiveSec = "15min";
+        Persistent      = true;
       };
     };
 
