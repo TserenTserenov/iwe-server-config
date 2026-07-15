@@ -1086,7 +1086,13 @@ in
         TimeoutSec = 600;
       };
       path = commonPath;
-      environment = commonEnv;
+      # HEARTBEAT_URL в общем /etc/iwe/env — чужой heartbeat (aist_me_bot,
+      # BETTER_STACK_HEARTBEAT_URL из Railway), не проверенный монитор
+      # contract-sync (был monitor id 463852 в GHA-версии, session
+      # 2026-06-09-07-contract-sync-heartbeat). Обнулено здесь намеренно,
+      # пока не подтверждён верный URL — враппер тогда просто пропускает
+      # пинг (см. contractSyncWrapper), не шлёт сигнал в чужой монитор.
+      environment = commonEnv // { HEARTBEAT_URL = ""; };
     };
 
     systemd.timers."payment-registry-sync-contract" = {
