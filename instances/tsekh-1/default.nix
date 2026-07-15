@@ -23,6 +23,7 @@ in
     # ../../modules/postgres-preprod.nix  # Ф3
     ../../modules/systemd-timers.nix
     ../../modules/claude-agents.nix
+    ../../modules/code-server.nix
     ../../modules/iwe-extensions-sync.nix
     ../../modules/iwe-calendar-secrets.nix  # DOC3 — Google Calendar read-only creds
     ./hardware-configuration.nix # генерируется при первой установке
@@ -79,6 +80,13 @@ in
 
   tsekh.claudeAgents = {
     enable = true;
+  };
+
+  # Браузерный VS Code (WP-488 Ф1 spike). Без домена пока — доступ по
+  # https://95.216.75.148:8443 с самоподписанным сертификатом (см. code-server.nix).
+  tsekh.codeServer = {
+    enable        = true;
+    workspacePath = values.iweHome;
   };
 
   tsekh.calendarSecrets = {
