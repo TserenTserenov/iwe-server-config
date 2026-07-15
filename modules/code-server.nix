@@ -86,24 +86,13 @@ in
     # Environment= (пустая строка при cfg.hashedPassword по умолчанию). Глушим
     # это и передаём хэш только через EnvironmentFile (root-only, не в Nix store).
     #
-    # PATH задаём явно и полностью: systemd-сервисы не наследуют PATH login-шелла
-    # (в отличие от SSH-сессии), поэтому встроенный терминал code-server иначе не
-    # видит бинарники из ~/.npm-global (claude и т.п.) — только то, что перечислено
-    # здесь. Список — тот же набор каталогов, что даёт обычная SSH-сессия tseren,
-    # плюс ~/.npm-global/bin первым.
+    # (PATH для интерактивного терминала code-server не трогаем здесь — NixOS
+    # всё равно пересобирает PATH заново при входе в login-шелл поверх любого
+    # значения, унаследованного от systemd. Доступность claude решена в
+    # modules/claude-agents.nix через /run/current-system/sw/bin — этот путь
+    # входит в PATH всегда, независимо от способа входа.)
     systemd.services.code-server = {
-      environment = lib.mkForce {
-        PATH = lib.concatStringsSep ":" [
-          "/home/${cfg.user}/.npm-global/bin"
-          "/run/wrappers/bin"
-          "/home/${cfg.user}/.nix-profile/bin"
-          "/nix/profile/bin"
-          "/home/${cfg.user}/.local/state/nix/profile/bin"
-          "/etc/profiles/per-user/${cfg.user}/bin"
-          "/nix/var/nix/profiles/default/bin"
-          "/run/current-system/sw/bin"
-        ];
-      };
+      environment = lib.mkForce { };
       serviceConfig.EnvironmentFile = [ envFile ];
     };
 

@@ -35,7 +35,14 @@ in
     # Без него claude (скачанный через npm) падает с "Could not start dynamically linked executable".
     programs.nix-ld.enable = true;
 
-    environment.systemPackages = [ cfg.nodePackage ];
+    environment.systemPackages = [
+      cfg.nodePackage
+      # Тонкая обёртка в /run/current-system/sw/bin/claude — этот каталог
+      # входит в PATH любого шелла (login/non-login, SSH, интерактивный
+      # терминал code-server) без правки глобальной сборки PATH в NixOS.
+      # Сам бинарник остаётся там, где его ставит npm (${claudeBin}).
+      (pkgs.writeShellScriptBin "claude" ''exec "${claudeBin}" "$@"'')
+    ];
 
     systemd.tmpfiles.rules = [
       "d ${npmGlobal} 0755 tseren tseren -"
