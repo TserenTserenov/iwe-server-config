@@ -10,11 +10,17 @@
 #
 # Связь: WP-488 Ф1 (spike), DS-my-strategy/inbox/WP-488/WP-488.md.
 
-{ config, lib, pkgs, ... }:
+{ config, lib, pkgs, inputs, ... }:
 
 let
   cfg = config.tsekh.codeServer;
   envFile = "/etc/code-server/env";
+
+  # code-server из основного nixpkgs (25.05) слишком старый: несёт VS Code 1.91,
+  # а современные расширения (например, Claude Code for VS Code) требуют ^1.94+.
+  # Берём code-server только из nixpkgs-unstable, остальная система остаётся
+  # на стабильном 25.05 — см. flake.nix.
+  pkgsUnstable = import inputs.nixpkgs-unstable { inherit (pkgs) system; };
 in
 {
   options.tsekh.codeServer = {
@@ -72,6 +78,7 @@ in
 
     services.code-server = {
       enable = true;
+      package = pkgsUnstable.code-server;
       host = "127.0.0.1";
       port = cfg.internalPort;
       auth = "password";

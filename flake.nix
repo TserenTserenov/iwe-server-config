@@ -12,6 +12,11 @@
     # Nixpkgs 25.05 — обновлён с 24.11, нужен buildGo125Module для sops-nix.
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-25.05";
 
+    # Только для отдельных пакетов, которым нужна более свежая версия, чем
+    # в основном 25.05 (например code-server — см. modules/code-server.nix).
+    # Система в целом остаётся на стабильном 25.05.
+    nixpkgs-unstable.url = "github:NixOS/nixpkgs/nixos-unstable";
+
     # disko — декларативная разметка дисков (ZFS-зеркало двух NVMe).
     disko = {
       url = "github:nix-community/disko";
