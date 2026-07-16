@@ -1088,13 +1088,13 @@ in
         TimeoutSec = 600;
       };
       path = commonPath;
-      # HEARTBEAT_URL в общем /etc/iwe/env — чужой heartbeat (aist_me_bot,
-      # BETTER_STACK_HEARTBEAT_URL из Railway), не проверенный монитор
-      # contract-sync (был monitor id 463852 в GHA-версии, session
-      # 2026-06-09-07-contract-sync-heartbeat). Обнулено здесь намеренно,
-      # пока не подтверждён верный URL — враппер тогда просто пропускает
-      # пинг (см. contractSyncWrapper), не шлёт сигнал в чужой монитор.
-      environment = commonEnv // { HEARTBEAT_URL = ""; };
+      # BetterStack heartbeat contract-sync (monitor id 463852, session
+      # 2026-06-09-07-contract-sync-heartbeat) — найден 16.07.2026 (WP-244).
+      # period=30min grace=15min: таймер тикает раз в 15 мин, окно 45 мин
+      # до алерта переживает единичный неудачный тик без ложной тревоги.
+      environment = commonEnv // {
+        HEARTBEAT_URL = "https://uptime.betterstack.com/api/v1/heartbeat/q4B73eNRTJp13T8RvGHeaqB4";
+      };
     };
 
     systemd.timers."payment-registry-sync-contract" = {
