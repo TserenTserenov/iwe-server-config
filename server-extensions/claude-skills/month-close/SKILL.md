@@ -67,7 +67,7 @@ done
 
 **1d. Drift месячный.** `bash ${IWE_SCRIPTS:-$HOME/IWE/scripts}/iwe-drift.sh` → выявить пары, где lag вырос за месяц.
 
-**1e. Decision log.** `DS-my-strategy/exocortex/decisions/decision-log-YYYY-MM.md` (WP-109 Ф7, реализация: один файл на месяц) — решения, принятые за месяц.
+**1e. Decision log.** `DS-my-strategy/decisions/decision-log-YYYY-MM.md` (WP-109 Ф7, реализация: один файл на месяц) — решения, принятые за месяц.
 
 **1f. Метрики файлов memory (WP-217 Ф10.2).**
 
@@ -130,6 +130,8 @@ HOT-лимит превышен → понизить horizon в frontmatter ну
 - **T24 Аудит протоколов на обходимые шаги.** Пройти `memory/protocol-*.md` и `.claude/skills/*/SKILL.md` — выявить шаги, которые агент регулярно пропускает (по `behaviour-report.sh`) или человек обходит молча. Решение: удалить / переформулировать / оставить как есть.
 - **T25 Decommission-триаж.** Применить решения из Шага 7 (add-on). Здесь T25 — pointer, не дубль. См. Шаг 7 ниже.
 
+**Квартальная граница (WP-450 Ф6):** номер месяца в `YYYY-MM` закрываемого периода (Шаг 1a) кратен 3 (март/июнь/сентябрь/декабрь) → выполнить дополнительно раздел «Quarterly» в `memory/t-checklist.md` (T26 ревизия `median-ratio.conf`, T27 ревизия порогов M1/M2). Иначе — пропустить молча, не анонсировать.
+
 ### 7. Add-on: Decommission-триаж (WP-226 Ф2) — реализация T25
 
 > Шаг 5 M6 собирает кандидатов → **Шаг 7 применяет** решения → Шаг 6 T25 = указатель на этот шаг. Единая точка выполнения (избегать тройного прогона).
@@ -147,7 +149,7 @@ HOT-лимит превышен → понизить horizon в frontmatter ну
 
 > Обзор решений месяца из WP-109 Ф7 decision register.
 
-1. Открыть `DS-my-strategy/exocortex/decisions/decision-log-YYYY-MM.md` (WP-109 Ф7, один файл на месяц).
+1. Открыть `DS-my-strategy/decisions/decision-log-YYYY-MM.md` (WP-109 Ф7, один файл на месяц).
 2. Для каждого решения месяца ответить:
    - **Оказалось правильным / неправильным / рано судить?**
    - Если неправильное: какой сигнал был пропущен? → кандидат в `memory/feedback_*.md` как урок.
@@ -171,7 +173,17 @@ HOT-лимит превышен → понизить horizon в frontmatter ну
 ### 11. Коммит DS-my-strategy
 
 ```bash
-cd ~/IWE/DS-my-strategy && git add -A && git commit -m "month-close: close YYYY-MM"
+cd ~/IWE/DS-my-strategy
+# НЕ `git add -A`: в общем клоне (multi-agent) сметает чужое pre-staged → mis-attribution
+# (см. sessions/2026-06/2026-06-20-39-*). Перечисли артефакты month-close ЯВНО:
+MONTH_FILES=(
+  "archive/MonthClose YYYY-MM.md"
+  "docs/Strategy.md"
+  # + archive/retired-actions.md, decisions/decision-log-YYYY-MM.md,
+  #   memory/t-checklist.md — добавь те, что фактически правил в этом month-close
+)
+git add "${MONTH_FILES[@]}"
+git commit -m "month-close: close YYYY-MM" -- "${MONTH_FILES[@]}"
 ```
 
 Push при явном триггере «заливай».

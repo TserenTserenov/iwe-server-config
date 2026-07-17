@@ -6,14 +6,14 @@ description: |
   The skill enforces WP Gate precondition, Routing Gate, IntegrationGate hard-check,
   collects parameters in 4 short steps, generates a scaffold SKILL.md from a template,
   shows a draft, writes files, and reminds about verify-skill.sh.
-version: 0.3.1
+version: 0.3.2
 status: experimental
 layer: L1
 agents: single
 interaction: multi-step
 gates_required: [wp]
 gates_enforced: [integration, routing]
-gates_rationale: ""
+gates_rationale: "wp — создание скилла = нетривиальный артефакт (>15 мин), требует согласованного РП до начала (WP Gate precondition). integration — новый скилл-обёртка над инструментом/ролью требует существующих DP.SC.* + DP.ROLE.* до реализации (IntegrationGate hard-block). routing — размещение (Claude/Kimi, project/user, L1-L3) есть решение Routing Gate до scaffold."
 triggers:
   slash:
     - /skill-creator

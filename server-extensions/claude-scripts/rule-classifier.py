@@ -143,6 +143,32 @@ def normalize_context(ctx):
     return {}
 
 
+ADDED_FIELDS = ("llm_verdict", "llm_reason", "llm_confidence", "false_positive", "agreement")
+
+
+def entry_key(entry):
+    """Ключ дедупликации — исходные поля записи без добавленных llm_*."""
+    original = {k: v for k, v in entry.items() if k not in ADDED_FIELDS}
+    return json.dumps(original, sort_keys=True, ensure_ascii=False)
+
+
+def load_already_classified(out_path):
+    """Что уже классифицировано в прошлых часовых прогонах — не дёргать Haiku повторно."""
+    seen = set()
+    if not out_path.exists():
+        return seen
+    with out_path.open(encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                seen.add(entry_key(json.loads(line)))
+            except json.JSONDecodeError:
+                continue
+    return seen
+
+
 def process_journal(target_date, rule_filter=None, limit=None):
     journal = JOURNAL_DIR / f"{target_date}.jsonl"
     if not journal.exists():
@@ -150,12 +176,14 @@ def process_journal(target_date, rule_filter=None, limit=None):
         return 0
 
     out_path = JOURNAL_DIR / f"{target_date}-classified.jsonl"
+    already = load_already_classified(out_path)
 
     classified = 0
+    already_done = 0
     skipped = 0
     errors = 0
 
-    with journal.open(encoding="utf-8") as f, out_path.open("w", encoding="utf-8") as fout:
+    with journal.open(encoding="utf-8") as f, out_path.open("a", encoding="utf-8") as fout:
         for line in f:
             line = line.strip()
             if not line:
@@ -164,6 +192,10 @@ def process_journal(target_date, rule_filter=None, limit=None):
                 entry = json.loads(line)
             except json.JSONDecodeError:
                 errors += 1
+                continue
+
+            if entry_key(entry) in already:
+                already_done += 1
                 continue
 
             verdict = entry.get("verdict")
@@ -209,7 +241,7 @@ def process_journal(target_date, rule_filter=None, limit=None):
             fout.write(json.dumps(entry, ensure_ascii=False) + "\n")
             classified += 1
 
-    print(f"OK: classified={classified}, skipped={skipped}, errors={errors}")
+    print(f"OK: classified={classified}, already_done={already_done}, skipped={skipped}, errors={errors}")
     print(f"     output → {out_path}")
     return 0
 

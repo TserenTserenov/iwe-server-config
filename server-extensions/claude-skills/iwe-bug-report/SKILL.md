@@ -9,9 +9,9 @@ triggers:
   slash: [/iwe-bug-report]
   phrases: []
 routing:
-  executor: script
-  deterministic: true
-  script_path: "scripts/iwe-bug-report.sh"
+  executor: agent
+  model: sonnet
+  deterministic: false
 agents: none
 interaction: one-shot
 gates_required: []

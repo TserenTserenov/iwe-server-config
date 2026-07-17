@@ -4,7 +4,7 @@
 
 > **Источник:** WP-364 Развилка 1 РЕШЕНО (peer-сессия [2026-05-29-23-wp-364-daily-fork](../DS-my-strategy/sessions/2026-05/2026-05-29-23-wp-364-daily-fork/report.md)).
 >
-> **Цель:** связать DayPlan и сегодняшнюю учебную сессию из `personal-guide/`. Если Портной сгенерировал lesson на сегодня — DayPlan получает ссылку в начале «Учебная сессия сегодня». Иначе — секция omit (норма для дня без триггера).
+> **Цель:** связать DayPlan и сегодняшнюю учебную сессию из `personal-guide/guide/`. Если Портной сгенерировал руководство на сегодня — DayPlan получает ссылку в начале «Учебная сессия сегодня». Иначе — секция omit (норма для дня без триггера).
 
 ## Шаг: добавить ссылку на сегодняшнюю lesson в DayPlan
 
@@ -27,15 +27,12 @@ if grep -q "^## Учебная сессия сегодня" "$DAYPLAN_PATH"; the
   exit 0
 fi
 
-# Поиск файла: предпочтительно lesson/, fallback daily/ (миграция WP-364 Ф2)
+# Поиск файла: personal-guide/guide/ (структура после rename lesson/→guide/, commit fb3c753)
 LESSON_FILE=""
 LESSON_LABEL=""
-if [ -f "$PERSONAL_GUIDE/lesson/$DATE.md" ]; then
-  LESSON_FILE="$PERSONAL_GUIDE/lesson/$DATE.md"
-  LESSON_LABEL="lesson/$DATE.md"
-elif [ -f "$PERSONAL_GUIDE/daily/$DATE.md" ]; then
-  LESSON_FILE="$PERSONAL_GUIDE/daily/$DATE.md"
-  LESSON_LABEL="daily/$DATE.md (legacy — до миграции WP-364 Ф2)"
+if [ -f "$PERSONAL_GUIDE/guide/$DATE.md" ]; then
+  LESSON_FILE="$PERSONAL_GUIDE/guide/$DATE.md"
+  LESSON_LABEL="guide/$DATE.md"
 fi
 
 if [ -z "$LESSON_FILE" ]; then
@@ -78,8 +75,8 @@ cd "$HOME/IWE/DS-my-strategy" 2>/dev/null && \
 
 ## Связь с другими подзадачами WP-364 Ф2
 
-- **Lesson contract (Фаза A, prompt.md):** инструкция для Портного включать секцию `apply_to` в выходной JSON. Этот скрипт читает её из готового `lesson/*.md`.
-- **Renaming daily/→lesson/ (Фаза C, render-pilot-guides.py):** до завершения миграции скрипт работает в fallback-режиме на `daily/`. После миграции — primary path `lesson/`.
+- **Lesson contract (Фаза A, prompt.md):** инструкция для Портного включать секцию `apply_to` в выходной JSON. Этот скрипт читает её из готового `guide/*.md`.
+- **Rename `lesson/`→`guide/` (commit `fb3c753`, WP-149):** миграция завершена, `daily/` и `lesson/` в personal-guide больше не существуют — primary и единственный path `guide/`.
 
 ## Откат
 

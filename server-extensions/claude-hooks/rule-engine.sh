@@ -162,8 +162,93 @@ check_arch_gate() {
 
 check_push() {
     # AR.004: «заливай»/«запуши» → commit + push без доп. вопросов
-    # Информационное правило — всегда ok, push должен происходить
+    # Post-condition check (WP-295 Ф5): emits push-state JSON for journal
     emit_verdict "ok" "AR.004" "push trigger — proceed: commit + push без подтверждения"
+    _check_pushed
+}
+
+_safe_timeout() {
+    # portable timeout: gtimeout (homebrew coreutils) > timeout (GNU) > perl alarm
+    local t="$1"; shift
+    if command -v gtimeout &>/dev/null; then
+        gtimeout "$t" "$@"
+    elif command -v timeout &>/dev/null; then
+        timeout "$t" "$@"
+    else
+        perl -e "alarm $t; exec @ARGV" -- "$@"
+    fi
+}
+
+_check_repo_clean() {
+    # WP-295 Ф5: DS-my-strategy has no uncommitted changes at Close time.
+    # Does NOT verify a commit was made this session; scope limited to DS-my-strategy
+    # (home-repo excluded: always has in-progress work from other agents → warn-fatigue).
+    local repo_dir="${RULE_REPO_DIR:-$HOME/IWE/DS-my-strategy}"
+    local status
+    if ! status=$(_safe_timeout 5 git -C "$repo_dir" status --porcelain 2>/dev/null); then
+        printf '{"check":"repo_clean","result":"warn","detail":"git status timed out or failed in %s"}\n' "$repo_dir"
+        return
+    fi
+    if [ -z "$status" ]; then
+        printf '{"check":"repo_clean","result":"ok","detail":"no uncommitted changes in %s"}\n' "$repo_dir"
+    else
+        printf '{"check":"repo_clean","result":"warn","detail":"uncommitted changes in %s — commit before closing"}\n' "$repo_dir"
+    fi
+}
+
+_check_orz_filled() {
+    # WP-295 Ф5: ORZ session file for today exists and has a non-empty # Главный инсайт section.
+    local today month repo_dir sessions_dir orz_file
+    today=$(date +%Y-%m-%d)
+    month=$(date +%Y-%m)
+    repo_dir="${RULE_REPO_DIR:-$HOME/IWE/DS-my-strategy}"
+    sessions_dir="${repo_dir}/sessions/${month}"
+    orz_file=$(find "$sessions_dir" -maxdepth 1 -type f -name "${today}-*.md" 2>/dev/null | head -1)
+    if [ -z "$orz_file" ]; then
+        printf '{"check":"orz_filled","result":"warn","detail":"no ORZ session file found for %s in %s"}\n' "$today" "$sessions_dir"
+        return
+    fi
+    if LC_ALL=en_US.UTF-8 awk '/^#{1,2} Главный инсайт/{found=1; next} found && /[^[:space:]]/{print; exit}' "$orz_file" | grep -q .; then
+        printf '{"check":"orz_filled","result":"ok","detail":"%s"}\n' "$orz_file"
+    else
+        printf '{"check":"orz_filled","result":"warn","detail":"ORZ file exists but # Главный инсайт section is empty: %s"}\n' "$orz_file"
+    fi
+}
+
+_check_pushed() {
+    # WP-295 Ф5: verifies DS-my-strategy has no unpushed commits (all commits reached the remote).
+    local repo_dir="${RULE_REPO_DIR:-$HOME/IWE/DS-my-strategy}"
+    local unpushed
+    if ! unpushed=$(_safe_timeout 5 git -C "$repo_dir" log '@{u}..' --oneline 2>/dev/null); then
+        printf '{"check":"pushed","result":"warn","detail":"could not determine push status in %s (no upstream or timeout)"}\n' "$repo_dir"
+        return
+    fi
+    if [ -z "$unpushed" ]; then
+        printf '{"check":"pushed","result":"ok","detail":"no unpushed commits in %s"}\n' "$repo_dir"
+    else
+        local count
+        count=$(printf '%s' "$unpushed" | wc -l | tr -d ' ')
+        printf '{"check":"pushed","result":"warn","detail":"%s unpushed commit(s) in %s"}\n' "$count" "$repo_dir"
+    fi
+}
+
+_run_postconditions_for_close() {
+    # WP-295 Ф5: deterministic post-condition checks on Close event (on_fail: warn).
+    local rc_result rc_verdict orz_result orz_verdict
+
+    rc_result=$(_check_repo_clean)
+    rc_verdict=$(echo "$rc_result" | python3 -c 'import sys,json; print(json.loads(sys.stdin.read())["result"])' 2>/dev/null)
+
+    orz_result=$(_check_orz_filled)
+    orz_verdict=$(echo "$orz_result" | python3 -c 'import sys,json; print(json.loads(sys.stdin.read())["result"])' 2>/dev/null)
+
+    if [ "$rc_verdict" = "warn" ]; then
+        echo "$rc_result"; return
+    fi
+    if [ "$orz_verdict" = "warn" ]; then
+        echo "$orz_result"; return
+    fi
+    printf '{"check":"postconditions","result":"ok","detail":"repo_clean ok, orz_filled ok"}\n'
 }
 
 check_close() {
@@ -174,9 +259,20 @@ check_close() {
     has_changes=$(echo "$ctx" | python3 -c 'import sys,json; d=json.loads(sys.stdin.read() or "{}"); print(str(d.get("has_uncommitted_changes",False)).lower())' 2>/dev/null)
     if [ "$has_changes" = "true" ]; then
         emit_verdict "warn" "AR.005" "Close-триггер с незакоммиченными изменениями — запусти /run-protocol close (CLAUDE.md §2 п.3)"
-    else
-        emit_verdict "ok" "AR.005" "Close-триггер — запусти /run-protocol close"
+        return
     fi
+
+    # WP-295 Ф5: post-condition checks (deterministic, on_fail: warn)
+    local pc_result pc_verdict pc_detail
+    pc_result=$(_run_postconditions_for_close)
+    pc_verdict=$(echo "$pc_result" | python3 -c 'import sys,json; print(json.loads(sys.stdin.read())["result"])' 2>/dev/null)
+    if [ "$pc_verdict" = "warn" ]; then
+        pc_detail=$(echo "$pc_result" | python3 -c 'import sys,json; print(json.loads(sys.stdin.read())["detail"])' 2>/dev/null)
+        emit_verdict "warn" "AR.005" "Close post-condition: $pc_detail"
+        return
+    fi
+
+    emit_verdict "ok" "AR.005" "Close-триггер — запусти /run-protocol close"
 }
 
 check_pull_on_touch() {
@@ -923,6 +1019,77 @@ check_secret_in_chat() {
     emit_verdict "ok" "AR.111" "no secret signals detected"
 }
 
+check_bypassrls_explicit_where() {
+    # AR.112: SQL с BYPASSRLS / SET ROLE nologin на PII-таблице без явного WHERE
+    # RULE_CONTEXT: {"file_path": "...", "file_content": "...", "command": "..."}
+    local ctx="${RULE_CONTEXT:-}"
+    [ -z "$ctx" ] && ctx='{}'
+
+    local content
+    content=$(echo "$ctx" | python3 -c '
+import sys, json
+d = json.loads(sys.stdin.read() or "{}")
+print(d.get("file_content","") + "\n" + d.get("command",""))
+' 2>/dev/null)
+
+    [ -z "$content" ] && { emit_verdict "ok" "AR.112" "no SQL content in context"; return; }
+
+    # PII-таблицы платформы (sources: PACK-agent-rules AR.112)
+    local pii_tables="learning\.(users|accounts|person_accounts|sessions)|payment\.(accounts|subscriptions)|rewards\.(accounts)"
+    local bypassrls_pattern="BYPASSRLS|SET ROLE.*nologin|SET LOCAL ROLE"
+
+    local has_bypassrls=0 has_pii=0 has_where=0
+    echo "$content" | grep -qiE "$bypassrls_pattern" && has_bypassrls=1
+    echo "$content" | grep -qiE "$pii_tables"        && has_pii=1
+    # WHERE считается достаточным, если есть хотя бы одно WHERE на PII-операцию
+    echo "$content" | grep -qiE "(WHERE|FILTER|LIMIT)[[:space:]]" && has_where=1
+
+    if [ "$has_bypassrls" -eq 1 ] && [ "$has_pii" -eq 1 ] && [ "$has_where" -eq 0 ]; then
+        emit_verdict "warn" "AR.112" "BYPASSRLS/SET ROLE на PII-таблице без явного WHERE — добавь фильтр по user_id/email/tenant ДО отправки запроса (WP-212 incident, feedback_behaviour §Security)"
+        return
+    fi
+
+    emit_verdict "ok" "AR.112" "BYPASSRLS check passed (no unsafe RLS pattern detected)"
+}
+
+check_pii_consent_two_tier() {
+    # AR.113: CREATE TABLE с PII-колонками без consent_grants схемы
+    # RULE_CONTEXT: {"file_path": "...", "file_content": "...", "command": "..."}
+    local ctx="${RULE_CONTEXT:-}"
+    [ -z "$ctx" ] && ctx='{}'
+
+    local content
+    content=$(echo "$ctx" | python3 -c '
+import sys, json
+d = json.loads(sys.stdin.read() or "{}")
+print(d.get("file_content","") + "\n" + d.get("command",""))
+' 2>/dev/null)
+
+    [ -z "$content" ] && { emit_verdict "ok" "AR.113" "no SQL content in context"; return; }
+
+    # PII columns: direct identifiers
+    local pii_cols="email|telegram_id|phone(_number)?|full_name|first_name|last_name|passport|inn\b|snils"
+    local has_create_table=0 has_pii_col=0 has_consent=0
+
+    echo "$content" | grep -qiE "CREATE TABLE" && has_create_table=1
+    echo "$content" | grep -qiE "$pii_cols"   && has_pii_col=1
+    # Consent schema check: references to consent_grants or privacy.consent
+    echo "$content" | grep -qiE "consent_grants|privacy\.consent|gdpr_consent" && has_consent=1
+
+    if [ "$has_create_table" -eq 1 ] && [ "$has_pii_col" -eq 1 ] && [ "$has_consent" -eq 0 ]; then
+        emit_verdict "warn" "AR.113" "CREATE TABLE содержит PII-колонку (${pii_cols}) без ссылки на consent_grants — требуется двухступенчатый opt-in (B7.3): implicit consent в схеме + explicit per-action. Проверь ArchGate §Б чеклист ДО реализации"
+        return
+    fi
+
+    emit_verdict "ok" "AR.113" "PII consent check passed"
+}
+
+# check_git_staged_only() (AR.216, git add -A/-u/.) удалена 2026-07-17 (WP-458 I7):
+# никогда не диспатчилась ни на одно живое событие (triggers в registry —
+# человекочитаемые фразы, не ключевые слова событий; dispatch_event матчит строго).
+# Живая проверка теперь в .claude/hooks/destructive-guard.sh (PreToolUse Bash,
+# реальный deny ДО стейджа, не warn постфактум).
+
 # === Диспатчер ===
 
 dispatch_event() {
@@ -1035,6 +1202,190 @@ PYEOF
         SID="${2:-$SESSION_ID}"
         WARN_LOG="$SESSION_STATE_DIR/session-${SID}-warns.jsonl"
         [ -f "$WARN_LOG" ] && rm -f "$WARN_LOG" && echo "cleared: $WARN_LOG" || echo "nothing to clear"
+        # WP-481 Ф5: trace-маркеры gate (trace-<SID>-*.done)
+        rm -f "$SESSION_STATE_DIR/trace-${SID}-"*.done 2>/dev/null
+        ;;
+    list-gates)
+        # WP-481 Ф5 (CGUS): список gate-ключей протокол-файла (TSV: key<TAB>title).
+        # Теги: [[gate]] (без AR-ссылки → позиционный ключ g1,g2,...) / [[gate:AR.NNN]].
+        # --section "<подстрока H2-заголовка>": один физический файл держит несколько
+        # масштабов (Quick Close/Week Close/Exit Protocol в protocol-close.md) — без
+        # --section гейты всех масштабов сливаются в один список (WP-481 Ф5.1 фикс).
+        PROTO="${TRACE_PROTOCOL:-$HOME/IWE/memory/protocol-close.md}"
+        SECTION=""
+        while [ $# -gt 1 ]; do
+            case "$2" in
+                --protocol) PROTO="$3"; shift 2;;
+                --section)  SECTION="$3"; shift 2;;
+                *) shift;;
+            esac
+        done
+        export _CTS_PROTO="$PROTO" _CTS_SECTION="$SECTION"
+        python3 - << 'PYEOF'
+import os, re, sys
+
+def slice_section(text, section):
+    # Заголовки внутри fenced code block (```...```) — образец разметки, не реальная секция
+    # (пример: protocol-close.md § Формат «Осталось» содержит "## Осталось" как sample).
+    if not section:
+        return text, True
+    lines = text.splitlines()
+    in_fence, fence = [], False
+    for l in lines:
+        if l.lstrip().startswith('```'):
+            fence = not fence
+        in_fence.append(fence)
+    def is_h2(i):
+        return lines[i].startswith('## ') and not in_fence[i]
+    start = next((i for i in range(len(lines)) if is_h2(i) and section in lines[i]), None)
+    if start is None:
+        return '', False
+    end = next((j for j in range(start + 1, len(lines)) if is_h2(j)), len(lines))
+    return '\n'.join(lines[start:end]), True
+
+text = open(os.environ['_CTS_PROTO'], encoding='utf-8').read()
+section = os.environ.get('_CTS_SECTION', '')
+text, found = slice_section(text, section)
+if not found:
+    print(f"error: section not found: {section!r} in {os.environ['_CTS_PROTO']}", file=sys.stderr)
+    sys.exit(1)
+# позиционные ключи (g1,g2,...) без --section пересекаются между масштабами одного файла
+# (Quick Close и Week Close оба нумеруют с g1) — префикс секцией делает ключ уникальным.
+prefix = re.sub(r'[^a-z0-9]+', '-', section.lower()).strip('-') + '-' if section else ''
+n = 0
+for line in text.splitlines():
+    line = re.sub(r'`[^`]*`', '', line)  # теги в inline-code — это легенда/упоминание, не разметка
+    m = re.search(r'\[\[gate(?::([A-Za-z0-9.,]+))?\]\]', line)
+    if not m:
+        continue
+    title = re.sub(r'\[\[.*?\]\]', '', line).strip().lstrip('#').strip()[:100]
+    ids = [x for x in (m.group(1) or '').split(',') if x]
+    if ids:
+        for rid in ids:
+            print(f"{rid}\t{title}")
+    else:
+        n += 1
+        print(f"{prefix}g{n}\t{title}")
+PYEOF
+        ;;
+    mark-gate)
+        # WP-481 Ф5: отметить gate как исполненный в этой сессии (маркер-файл в state).
+        KEY="${2:-}"
+        if [ -z "$KEY" ]; then
+            echo '{"verdict":"warn","rule_id":"TRACE","reason":"mark-gate: key required (см. list-gates)"}'
+            exit 1
+        fi
+        SAFE=$(printf '%s' "$KEY" | tr -c 'A-Za-z0-9._-' '-')
+        touch "$SESSION_STATE_DIR/trace-${SESSION_ID}-${SAFE}.done"
+        printf '{"verdict":"ok","rule_id":"TRACE","reason":"gate marked: %s (session %s)"}\n' "$KEY" "$SESSION_ID"
+        ;;
+    check-trace-satisfaction)
+        # WP-481 Ф5 (CGUS): проверка УДОВЛЕТВОРЁННОСТИ набора gate протокола на трассе сессии,
+        # а не линейности прохождения. Источники satisfaction:
+        #   (1) AR.005 — детерминированное evidence (repo_clean + orz_filled + pushed), маркер не нужен;
+        #   (2) остальные gate — маркер trace-<SID>-<key>.done (пишется `mark-gate`).
+        # Молчание в warn-логе satisfaction НЕ засчитывается (молчание != исполнение).
+        # Verdict: block если ≥1 gate не удовлетворён; [[narrative]] вердикт не меняет никогда.
+        PROTO="${TRACE_PROTOCOL:-$HOME/IWE/memory/protocol-close.md}"
+        EXCLUDE="${TRACE_EXCLUDE:-AR.007}"  # AR.007 — сам акт верификации (R23), не проверяется до своего запуска
+        SECTION=""
+        while [ $# -gt 1 ]; do
+            case "$2" in
+                --protocol) PROTO="$3"; shift 2;;
+                --exclude)  EXCLUDE="$3"; shift 2;;
+                --section)  SECTION="$3"; shift 2;;
+                *) shift;;
+            esac
+        done
+        AR005_OK=0
+        if grep -q '\[\[gate:[^]]*AR\.005' "$PROTO" 2>/dev/null; then
+            _pc=$(_run_postconditions_for_close)
+            _pcv=$(printf '%s' "$_pc" | python3 -c 'import sys,json; print(json.loads(sys.stdin.read())["result"])' 2>/dev/null)
+            _ps=$(_check_pushed)
+            _psv=$(printf '%s' "$_ps" | python3 -c 'import sys,json; print(json.loads(sys.stdin.read())["result"])' 2>/dev/null)
+            [ "$_pcv" = "ok" ] && [ "$_psv" = "ok" ] && AR005_OK=1
+        fi
+        export _CTS_PROTO="$PROTO" _CTS_EXCLUDE="$EXCLUDE" _CTS_SECTION="$SECTION" _CTS_STATE="$SESSION_STATE_DIR" _CTS_SID="$SESSION_ID" _CTS_AR005="$AR005_OK"
+        RESULT=$(python3 - << 'PYEOF'
+import os, re, json
+
+def slice_section(text, section):
+    # Заголовки внутри fenced code block (```...```) — образец разметки, не реальная секция
+    # (пример: protocol-close.md § Формат «Осталось» содержит "## Осталось" как sample).
+    if not section:
+        return text, True
+    lines = text.splitlines()
+    in_fence, fence = [], False
+    for l in lines:
+        if l.lstrip().startswith('```'):
+            fence = not fence
+        in_fence.append(fence)
+    def is_h2(i):
+        return lines[i].startswith('## ') and not in_fence[i]
+    start = next((i for i in range(len(lines)) if is_h2(i) and section in lines[i]), None)
+    if start is None:
+        return '', False
+    end = next((j for j in range(start + 1, len(lines)) if is_h2(j)), len(lines))
+    return '\n'.join(lines[start:end]), True
+
+text = open(os.environ['_CTS_PROTO'], encoding='utf-8').read()
+section = os.environ.get('_CTS_SECTION', '')
+text, found = slice_section(text, section)
+if not found:
+    print(json.dumps({'verdict': 'warn', 'rule_id': 'TRACE', 'protocol': os.environ['_CTS_PROTO'],
+                      'reason': f"section not found: {section!r}"}, ensure_ascii=False))
+    raise SystemExit(2)
+state, sid = os.environ['_CTS_STATE'], os.environ['_CTS_SID']
+exclude = set(x for x in os.environ.get('_CTS_EXCLUDE', '').split(',') if x)
+ar005_ok = os.environ.get('_CTS_AR005') == '1'
+# позиционные ключи (g1,g2,...) без --section пересекаются между масштабами одного файла
+# (Quick Close и Week Close оба нумеруют с g1) — префикс секцией делает ключ уникальным,
+# согласован с list-gates (тот же prefix-расчёт), иначе mark-gate из одного масштаба
+# ложно засчитывался бы в другом при общем SESSION_ID.
+prefix = re.sub(r'[^a-z0-9]+', '-', section.lower()).strip('-') + '-' if section else ''
+gates, n = [], 0
+for line in text.splitlines():
+    line = re.sub(r'`[^`]*`', '', line)  # теги в inline-code — легенда, не разметка
+    m = re.search(r'\[\[gate(?::([A-Za-z0-9.,]+))?\]\]', line)
+    if not m:
+        continue
+    title = re.sub(r'\[\[.*?\]\]', '', line).strip().lstrip('#').strip()[:100]
+    ids = [x for x in (m.group(1) or '').split(',') if x]
+    if ids:
+        for rid in ids:
+            gates.append((rid, title))
+    else:
+        n += 1
+        gates.append((f'{prefix}g{n}', title))
+# narrative: тоже не считать упоминания в inline-code
+narr = len(re.findall(r'\[\[narrative\]\]', re.sub(r'`[^`]*`', '', text)))
+def safe(k):
+    return re.sub(r'[^A-Za-z0-9._-]', '-', k)
+satisfied, unsatisfied, excluded = [], [], []
+for key, title in gates:
+    if key in exclude:
+        excluded.append({'key': key, 'title': title})
+        continue
+    ok = os.path.exists(os.path.join(state, f'trace-{sid}-{safe(key)}.done'))
+    if key == 'AR.005':
+        ok = ok or ar005_ok
+    (satisfied if ok else unsatisfied).append({'key': key, 'title': title})
+verdict = 'block' if unsatisfied else 'ok'
+reason = ('все gate удовлетворены; narrative-пропуски не блокируют'
+          if not unsatisfied else
+          f"{len(unsatisfied)} gate не закрыто: " + ', '.join(g['key'] for g in unsatisfied))
+print(json.dumps({'verdict': verdict, 'rule_id': 'TRACE', 'protocol': os.environ['_CTS_PROTO'],
+                  'satisfied': satisfied, 'unsatisfied': unsatisfied, 'excluded': excluded,
+                  'narrative_steps': narr, 'reason': reason}, ensure_ascii=False))
+PYEOF
+)
+        RC=$?
+        printf '%s\n' "$RESULT"
+        _v=$(printf '%s' "$RESULT" | python3 -c 'import sys,json; print(json.loads(sys.stdin.read())["verdict"])' 2>/dev/null)
+        log_journal "TRACE" "${_v:-ok}" "check-trace-satisfaction: $PROTO"
+        [ "$RC" -ne 0 ] && [ -z "$RESULT" ] && exit 2  # python crash
+        [ "$_v" = "warn" ] && exit 2  # --section не найден в файле
+        [ "${_v:-ok}" = "block" ] && exit 1 || exit 0
         ;;
     list-rules)
         python3 -c "
@@ -1252,14 +1603,131 @@ PYEOF
             FAIL=$((FAIL+1))
         fi
 
+        # WP-481 Ф5 (CGUS): check-trace-satisfaction — удовлетворённость набора gate, не линейность.
+        TRACE_FIX=$(mktemp /tmp/trace-fixture-XXXXXX.md)
+        cat > "$TRACE_FIX" << 'FIXEOF'
+# fixture protocol
+1. Шаг альфа (обязательный) [[gate:AR.999]]
+2. Шаг бета (обязательный, без AR) [[gate]]
+3. Шаг гамма (порядок рассказа) [[narrative]]
+4. Шаг дельта (сам акт верификации) [[gate:AR.007]]
+FIXEOF
+        TRACE_SID="test-trace-$$"
+        # Test 41: маркеров нет → block (AR.999 + g1 не закрыты; AR.007 excluded)
+        T41=$(CLAUDE_SESSION_ID="$TRACE_SID" bash "$0" check-trace-satisfaction --protocol "$TRACE_FIX" 2>/dev/null)
+        T41V=$(printf '%s' "$T41" | python3 -c 'import sys,json; d=json.loads(sys.stdin.read()); print(d["verdict"])' 2>/dev/null)
+        T41U=$(printf '%s' "$T41" | python3 -c 'import sys,json; d=json.loads(sys.stdin.read()); print(",".join(sorted(g["key"] for g in d["unsatisfied"])))' 2>/dev/null)
+        if [ "$T41V" = "block" ] && [ "$T41U" = "AR.999,g1" ]; then
+            echo "PASS Test 41: trace без маркеров → block, unsatisfied = {AR.999, g1} (AR.007 excluded)"
+            PASS=$((PASS+1))
+        else
+            echo "FAIL Test 41: expected block+{AR.999,g1}, got verdict=$T41V unsatisfied=$T41U"
+            FAIL=$((FAIL+1))
+        fi
+        # Test 42: все gate помечены → ok
+        CLAUDE_SESSION_ID="$TRACE_SID" bash "$0" mark-gate AR.999 >/dev/null 2>&1
+        CLAUDE_SESSION_ID="$TRACE_SID" bash "$0" mark-gate g1 >/dev/null 2>&1
+        T42=$(CLAUDE_SESSION_ID="$TRACE_SID" bash "$0" check-trace-satisfaction --protocol "$TRACE_FIX" 2>/dev/null)
+        T42V=$(printf '%s' "$T42" | python3 -c 'import sys,json; print(json.loads(sys.stdin.read())["verdict"])' 2>/dev/null)
+        if [ "$T42V" = "ok" ]; then
+            echo "PASS Test 42: все gate помечены → ok"
+            PASS=$((PASS+1))
+        else
+            echo "FAIL Test 42: expected ok, got $T42"
+            FAIL=$((FAIL+1))
+        fi
+        # Test 43: narrative ни разу не помечен — вердикт всё равно ok (narrative не блокирует)
+        T43N=$(printf '%s' "$T42" | python3 -c 'import sys,json; print(json.loads(sys.stdin.read())["narrative_steps"])' 2>/dev/null)
+        if [ "$T42V" = "ok" ] && [ "$T43N" = "1" ]; then
+            echo "PASS Test 43: narrative-шаг пропущен (не помечен) → вердикт ok, narrative_steps=1"
+            PASS=$((PASS+1))
+        else
+            echo "FAIL Test 43: narrative должен не блокировать (verdict=$T42V narrative_steps=$T43N)"
+            FAIL=$((FAIL+1))
+        fi
+        CLAUDE_SESSION_ID="$TRACE_SID" bash "$0" session-clear "$TRACE_SID" >/dev/null 2>&1
+        rm -f "$TRACE_FIX"
+
+        # WP-481 Ф5.1: --section против РЕАЛЬНОГО protocol-close.md — файл держит 3 масштаба
+        # (Quick Close/Week Close/Exit Protocol) в одном файле; без --section гейты всех
+        # масштабов сливались в один список (Quick Close блокировался незакрытыми Week
+        # Close-гейтами, которые в 3-минутной сессии физически не выполняются).
+        T44=$(bash "$0" list-gates --section "Quick Close" 2>/dev/null)
+        T44_KEYS=$(printf '%s' "$T44" | cut -f1 | sort | tr '\n' ',')
+        if [ "$T44_KEYS" = "AR.005,AR.007,quick-close-g1,quick-close-g2,quick-close-g3,quick-close-g4," ]; then
+            echo "PASS Test 44: list-gates --section 'Quick Close' на protocol-close.md → только гейты Quick Close (Week Close/Exit Protocol не просочились), позиционные ключи с section-префиксом"
+            PASS=$((PASS+1))
+        else
+            echo "FAIL Test 44: expected AR.005,AR.007,quick-close-g1..g4 got $T44_KEYS"
+            FAIL=$((FAIL+1))
+        fi
+        TRACE_SID2="test-trace-section-$$"
+        T45=$(CLAUDE_SESSION_ID="$TRACE_SID2" bash "$0" check-trace-satisfaction --section "Quick Close" --exclude "AR.007,AR.005" 2>/dev/null)
+        T45V=$(printf '%s' "$T45" | python3 -c 'import sys,json; print(json.loads(sys.stdin.read())["verdict"])' 2>/dev/null)
+        T45U=$(printf '%s' "$T45" | python3 -c 'import sys,json; d=json.loads(sys.stdin.read()); print(",".join(sorted(g["key"] for g in d["unsatisfied"])))' 2>/dev/null)
+        if [ "$T45V" = "block" ] && [ "$T45U" = "quick-close-g1,quick-close-g2,quick-close-g3,quick-close-g4" ]; then
+            echo "PASS Test 45: check-trace-satisfaction --section 'Quick Close' (fresh session) → unsatisfied = {quick-close-g1..g4}, Week Close/Exit Protocol gates отсутствуют"
+            PASS=$((PASS+1))
+        else
+            echo "FAIL Test 45: expected block+{quick-close-g1..g4}, got verdict=$T45V unsatisfied=$T45U"
+            FAIL=$((FAIL+1))
+        fi
+        T46=$(bash "$0" list-gates --section "Week Close" 2>/dev/null)
+        T46_KEYS=$(printf '%s' "$T46" | cut -f1 | sort | tr '\n' ',')
+        if [ "$T46_KEYS" = "week-close-g1,week-close-g2,week-close-g3,week-close-g4,week-close-g5," ]; then
+            echo "PASS Test 46: list-gates --section 'Week Close' → только 5 гейтов недели (Quick Close/Exit Protocol не просочились), ключи не коллизят с quick-close-g*"
+            PASS=$((PASS+1))
+        else
+            echo "FAIL Test 46: expected week-close-g1..g5 got $T46_KEYS"
+            FAIL=$((FAIL+1))
+        fi
+        T47=$(bash "$0" list-gates --section "no-such-section-xyz" 2>&1 >/dev/null)
+        if printf '%s' "$T47" | grep -q "section not found"; then
+            echo "PASS Test 47: list-gates --section <несуществующий> → явная ошибка, не тихий whole-file fallback"
+            PASS=$((PASS+1))
+        else
+            echo "FAIL Test 47: expected 'section not found' on stderr, got: $T47"
+            FAIL=$((FAIL+1))
+        fi
+        CLAUDE_SESSION_ID="$TRACE_SID2" bash "$0" session-clear "$TRACE_SID2" >/dev/null 2>&1
+
+        # WP-481 Ф5.1: day-close/SKILL.md теперь размечен своими gate — регрессия на случай,
+        # если разметку случайно сотрут (тогда check вернулся бы к тихому vacuous-ok).
+        T48_KEYS=$(bash "$0" list-gates --protocol .claude/skills/day-close/SKILL.md 2>/dev/null | cut -f1 | sort | tr '\n' ',')
+        T48_COUNT=$(printf '%s' "$T48_KEYS" | tr ',' '\n' | grep -c .)
+        if [ "$T48_COUNT" -ge 15 ] && printf '%s' "$T48_KEYS" | grep -q "AR.005" && printf '%s' "$T48_KEYS" | grep -q "AR.007"; then
+            echo "PASS Test 48: day-close/SKILL.md размечен ($T48_COUNT гейтов, включая AR.005/AR.007) — не vacuous"
+            PASS=$((PASS+1))
+        else
+            echo "FAIL Test 48: expected >=15 keys incl. AR.005+AR.007, got ($T48_COUNT) $T48_KEYS"
+            FAIL=$((FAIL+1))
+        fi
+        TRACE_SID3="test-trace-dayclose-$$"
+        for k in $(printf '%s' "$T48_KEYS" | tr ',' '\n' | grep -v '^AR\.'); do
+            CLAUDE_SESSION_ID="$TRACE_SID3" bash "$0" mark-gate "$k" >/dev/null 2>&1
+        done
+        T49=$(CLAUDE_SESSION_ID="$TRACE_SID3" bash "$0" check-trace-satisfaction --protocol .claude/skills/day-close/SKILL.md --exclude "AR.007,AR.005" 2>/dev/null)
+        T49V=$(printf '%s' "$T49" | python3 -c 'import sys,json; print(json.loads(sys.stdin.read())["verdict"])' 2>/dev/null)
+        if [ "$T49V" = "ok" ]; then
+            echo "PASS Test 49: все позиционные gate day-close помечены → ok (end-to-end mark-gate → check)"
+            PASS=$((PASS+1))
+        else
+            echo "FAIL Test 49: expected ok after marking all positional gates, got $T49"
+            FAIL=$((FAIL+1))
+        fi
+        CLAUDE_SESSION_ID="$TRACE_SID3" bash "$0" session-clear "$TRACE_SID3" >/dev/null 2>&1
+
         echo ""
         echo "=== Results: $PASS PASS / $FAIL FAIL (total $((PASS+FAIL))) ==="
         [ "$FAIL" -eq 0 ] && exit 0 || exit 1
         ;;
     *)
-        echo "Usage: rule-engine.sh {dispatch|list-rules|test|session-summary|session-clear}"
+        echo "Usage: rule-engine.sh {dispatch|list-rules|list-gates|mark-gate|check-trace-satisfaction|test|session-summary|session-clear}"
         echo "  dispatch     — process event (use RULE_EVENT + RULE_CONTEXT env vars)"
         echo "  list-rules   — show all rules in registry"
+        echo "  list-gates   — WP-481 Ф5: gate-ключи протокол-файла (--protocol <file> --section <substring>)"
+        echo "  mark-gate    — WP-481 Ф5: отметить gate исполненным (mark-gate <key>)"
+        echo "  check-trace-satisfaction — WP-481 Ф5.1: block если набор gate не удовлетворён (--protocol/--section/--exclude)"
         echo "  test         — run smoke tests (WP-271 incident simulation)"
         exit 1
         ;;

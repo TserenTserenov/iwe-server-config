@@ -126,6 +126,8 @@ update.sh, template-sync, MCP reindex, Scout. 🟢/🟡/🔴.
 - **Core smoke (≤10с, синхронно в скаффолде):** `bash $IWE_SCRIPTS/day-open-smoke.sh` — scheduler-pulse (локальный файл `current/.scheduler-last-run`, fallback Neon) + KE-count + oldest-age. Подставлять PASS/FAIL в светофор.
 - **Extended smoke (hourly cron, кэш):** `current/.smoke-cache.json` (TTL 90 мин). Включает dt-collect dry-run, projection cursor age, FPF upstream check. Day Open читает кэш, не запускает заново. Кэш устарел → подставить `stale-cache: <age>`, не падать.
 
+**Context-budget (WP-450 Ф3):** `bash "$IWE_WORKSPACE/DS-my-strategy/scripts/verify-context-budget.sh" | tail -5` → записать в DayPlan строку: `hot-каркас: ~N ток | M1 ≤20K: PASS/FAIL | M2 ≤12K: PASS/FAIL`. FAIL не блокирует ритуал — информативно.
+
 **Scheduler failure modes (различить!):**
 - **Mode A** (`feedback-watchdog-{сегодня}.log` отсутствует И юнита нет в `launchctl list`) → cron не отработал. Авто-создать `inbox/INCIDENT-scheduler-cron-not-fired-YYYY-MM-DD.md`. ≥2 дней → TG-эскалация.
 - **Mode B** (юнит есть, лог есть, отчёт пустой) → всё чисто, жалоб нет = норм 🟢.
@@ -169,8 +171,15 @@ Feedback-triage report: `DS-agent-workspace/scheduler/feedback-triage/YYYY-MM-DD
 Scout report. Не проревьюен → «Требует внимания».
 
 ### 6. Мир
-`day-rhythm-config.yaml → news`. Feeds/WebSearch. `enabled: false` → пропустить.
+`day-rhythm-config.yaml → news`. `enabled: false` → пропустить.
 **Ссылки на источники обязательны** (URL).
+
+**Порядок источников (строгий):**
+1. Если `news.topics[].feeds` непустой → fetch каждого URL через `WebFetch` (не WebSearch). WebFetch не требует отдельного разрешения.
+2. Если feeds пустой ИЛИ все WebFetch вернули ошибку → WebSearch (fallback).
+3. Если и WebFetch, и WebSearch недоступны → написать «RSS недоступен (сетевое ограничение)» и пропустить Вывод.
+
+**Антипаттерн:** писать «WebSearch недоступен» без попытки WebFetch = ошибка шага 6.
 
 **6a. News Lens (анализ через субагент).**
 После сбора заголовков — вызвать субагент (Haiku, context isolation) с промптом:
@@ -211,6 +220,15 @@ Scout report. Не проревьюен → «Требует внимания».
 ### 7. Запись
 **7a.** Записать DayPlan в `DS-my-strategy/current/DayPlan YYYY-MM-DD.md` по шаблону ниже. `current/` — рабочая директория для текущего WeekPlan и DayPlan; архивация в `archive/day-plans/` выполняется при Day Close / Week Close. **Исключение:** день = `strategy_day` (из `day-rhythm-config.yaml`) → DayPlan **не** создаётся, план живёт в WeekPlan (см. шаг 4).
 **7b.** Загрузить: `bash .claude/scripts/load-extensions.sh day-open checks`. Exit 0 → `Read` каждый файл из вывода (alphabetic) → выполнить верификацию. Exit 1 → пропустить. БЛОКИРУЮЩЕЕ: commit запрещён до прохождения всех checks. Поддерживает `extensions/day-open.checks.md` И `extensions/day-open.checks.<suffix>.md`.
+
+**7b1. Self-healing (один такт, WP-5 Ф2 09.07).** Не верить «всё зелено» на рефлексе — реально прогнать `bash scripts/day-open-checks-runner.sh "current/DayPlan YYYY-MM-DD.md"` и прочитать вывод. Если есть ❌:
+1. Прочитать конкретную причину каждого провала (файл/строку/раздел из сообщения проверки — не гадать). Провал без текста причины (голое «N block(s) failed» без пояснения) — САМ ПО СЕБЕ повод эскалировать сразу к шагу 4, не гадать, что чинить.
+2. Применить ОДНО исправление на каждый провал (например: дозаполнить раздел, перегенерировать через указанный в сообщении скрипт, поправить формат) — только по тому, что явно предписано текстом ошибки.
+3. Прогнать `day-open-checks-runner.sh` ЕЩЁ РАЗ.
+4. Зелено → продолжить к 7c. Не зелено после одного такта → **не повторять цикл бесконечно** — отчитаться пилоту конкретно, что осталось красным и почему, дождаться решения (это не P5-вопрос, это блокер commit).
+
+Это относится только к интерактивному `/day-open` (есть агент, способный чинить содержимое) — ночной cron-конвейер (`day-open-pipeline.sh`) не может самостоятельно чинить контент, только abort+уведомление.
+
 **7c.** `git commit` + `git push`.
 **7d.** Compact dashboard → вывести в VS Code по шаблону ниже.
 

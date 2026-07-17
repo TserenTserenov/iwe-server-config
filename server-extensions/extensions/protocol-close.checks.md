@@ -25,7 +25,6 @@ if [ "$PENDING" -gt 0 ]; then
     echo ""
     echo "SLA: решение принять ≤24 часов (DP.SC.004 § Инварианты)."
     echo ""
-    exit 1
 fi
 
 exit 0

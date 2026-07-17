@@ -303,6 +303,30 @@ python3 ~/IWE/DS-my-strategy/scripts/sync_feedback_to_memory.py 2>&1 | tail -1
 
 ---
 
+### Distinctions compression detector (WP-450 Ф2, ArchGate Ф3 митигация M1)
+
+> **Цель:** отследить, когда агент путает Tier-B/C различение с соседним понятием из-за сжатой формулировки (3-5 слов). Порог 3+ за 2 недели → сигнал «повысить Tier» до полного текста.
+> **Не блокирует Close.** Режим observation (по умолчанию); `--enforce` для будущей alert-ветки выключен.
+> **Baseline:** primary-тег `fault_subtype='distinction-confusion'` считается только с 2026-07-02 (без retroactive-скана старых записей — нет ground truth для калибровки fallback regex, peer-session 2026-07-02-09).
+
+**Выполнить:**
+
+```bash
+python3 ~/IWE/DS-my-strategy/scripts/verify-distinctions-compression.py --window-days 14 --threshold 3
+```
+
+**Verdict:**
+- `ok` — нет сигналов
+- `watch` — есть случаи, но ниже порога
+- `raise-tier-flag` — primary_count ≥ 3 за 14 дней → предложить пилоту расширить Tier-B формулировку до полного текста в `distinctions.md`
+
+**Чеклист:**
+
+- [ ] **Детектор запущен**, verdict зафиксирован в Week Close report
+- [ ] **Если raise-tier-flag** — предложена формулировка расширения, решение за пилотом
+
+---
+
 ### Session Memory Injector: тренд-отчёт фолтов (WP-316 Ф12, pattern-report)
 
 > **Цель:** один раз в неделю агент получает тренд-анализ своих паттернов косяков — не просто топ-3, а динамику: что растёт, что снижается, что новое.
@@ -408,4 +432,245 @@ bash ~/IWE/scripts/script-promote.sh install-hooks.sh [--dry-run]
 
 - [ ] **Diff проверен** (авторский vs FMT)
 - [ ] **Если расхождение** — промоция выполнена через `script-promote.sh`
+
+---
+
+### day-open-pipeline.sh drift guard — минимальная проверка (WP-7 FMT-PROMOTE-DAYOPEN1, 2026-07-08)
+
+> **Цель:** входная точка Day Open защищена жёстким pre-commit/commit-msg guard'ом (`scripts/dayopen-drift-check.sh`, тег обхода `[no-dayopen-sync]`) — блокирует коммит `scripts/day-open-pipeline.sh` при расхождении с FMT-копией. Этот пункт — не дублирующая проверка, а страховка на случай обхода тегом.
+
+**Выполнить:**
+
+```bash
+TAG_COUNT=$(cd ~/IWE/DS-my-strategy && git log --since="7 days ago" --pretty='%s' 2>/dev/null | grep -cF '[no-dayopen-sync]' || true)
+echo "Обходов [no-dayopen-sync] за 7 дней: $TAG_COUNT"
+[ "$TAG_COUNT" -gt 0 ] && echo "⚠️  Проверь причину обхода — намеренное расхождение или забытая промоция?"
+```
+
+**Чеклист:**
+
+- [ ] **Обходов `[no-dayopen-sync]` за неделю ≤0** ИЛИ причина каждого проверена.
+- [ ] Помни: перенесена пока только точка входа (`day-open-pipeline.sh`), 6 зависимых скриптов — отдельная работа (см. WP-7 FMT-PROMOTE-DAYOPEN1 в `docs/WP-REGISTRY.md`).
+
+---
+
+### WP-423 reflex-реестр — триггер Ф7 + разбор disabled-кандидатов (2026-06-21)
+
+> **Цель (компенсатор закрытия зонтика WP-423):** не дать операционному остатку (Ф6.5 ручная кристаллизация) и будущему триггеру (Ф7 авто-кристаллизатор) стать orphan после закрытия зонтика. Владелец: R33 Старатель (DP.ROLE.050) + пилот.
+
+**Выполнить:**
+
+```bash
+# 1. Триггер Ф7: число ВСЕХ записей reflexes: (enabled + candidate + disabled)
+yq '.reflexes|length' ~/IWE/DS-my-strategy/scripts/executor-catalog.yaml
+# >=50 → пора открывать Ф7 (авто-кристаллизатор; запись в inbox/backlog-with-triggers.md)
+
+# 2. Разбор disabled-кандидатов: пора ли в enabled?
+yq '.reflexes[] | select(.enabled == false) | .id' ~/IWE/DS-my-strategy/scripts/executor-catalog.yaml
+# для каждого: есть положительные кейсы в истории? → replay (DP.SC.040 класс приёмки адаптера B) → пилот approve enabled:true
+```
+
+**Чеклист:**
+
+- [ ] **Триггер Ф7** проверен (`yq '.reflexes|length'` ≥50 → открыть Ф7)
+- [ ] **Disabled-кандидаты** просмотрены (replay-готовые → пилоту на approve)
+
+---
+
+### WP-429 слой-3: проверка реестров (layer3_registry_checker)
+
+> Не прерывает выполнение pipeline — сигналы разбираются вручную или выносятся в `current/content-cleanup-backlog.md`.
+> ⚠️ Пока WP-242 Ф8.5/Ф8.7 (граф) не завершён, сигналы «сирота в производном» требуют ручной проверки — возможен временный артефакт миграции.
+
+**Выполнить:**
+
+```bash
+cd ~/IWE/DS-my-strategy
+python3 inbox/WP-429/layer3_registry_checker.py \
+  --config inbox/WP-429/registry-checker-config.yaml
+# add --fail-on-signals for strict mode (CC-106)
+```
+
+**Чеклист:**
+
+- [ ] Слой-3 чекер запущен. 0 сигналов — ОК. N>0 → разобрать вручную или добавить в `content-cleanup-backlog`.
+
+---
+
+### Темы для видео на следующую неделю (WP-433 движок)
+
+> **Цель:** Контент-план WeekPlan W{N+1} §Контент-план заполнить темами из реального сделанного за неделю.
+> Источники: week-draft (Мир/Сообщество/Человек/Личное/Инсайты) + закрытые РП за 7 дней.
+> Пишет: `DS-Knowledge-Index-Tseren/video/ideas/YYYY-MM-DD-*.md` (5 карточек).
+> Не блокирует Week Close. Ошибки LLM — предупреждение, не стоп.
+
+**Выполнить:**
+
+```bash
+python3 ~/IWE/scripts/video-topics-suggest.py
+```
+
+Скрипт выведет в stdout таблицу — **вставить в WeekPlan W{N+1} секцию §Контент-план**.
+
+Если нужен dry-run (без сохранения файлов):
+```bash
+python3 ~/IWE/scripts/video-topics-suggest.py --dry-run
+```
+
+**Чеклист:**
+
+- [ ] **Движок запущен** (или week-draft отсутствует — задокументировать причину)
+- [ ] **5 тем получены** и таблица вставлена в WeekPlan W{N+1} §Контент-план
+
+---
+
+### Конвейер обновления guide — детектор stale-секций и T2-кандидатов (WP-453 Ф1)
+
+> **Цель:** держать раздел 7 «От использования к созданию» универсального руководства IWE
+> (guide.system-school.ru) в актуальном состоянии при изменениях платформы FMT.
+> Спецификация конвейера: `inbox/WP-453/pipeline-spec.md`. Source-of-truth состояний: `inbox/WP-453/section-state.yaml`.
+> **Не блокирует Close.** Кандидаты выносятся пилоту на решение «обновлять или нет».
+
+**Выполнить:**
+
+```bash
+SS="$HOME/IWE/DS-my-strategy/inbox/WP-453/section-state.yaml"
+echo "=== WP-453: состояние секций раздела 7 ==="
+if [ ! -f "$SS" ]; then
+  echo "ℹ️ section-state.yaml не найден — конвейер ещё не инициализирован."
+else
+  # 1. Stale-секции: сработал триггер Т1/Т2/Т3, обновление не написано
+  STALE=$(yq '.sections[] | select(.status == "stale") | .id' "$SS" 2>/dev/null || grep -B1 'status: stale' "$SS" | grep 'id:' | awk '{print $2}')
+  if [ -n "$STALE" ]; then
+    echo "⚠️ Stale-секции (требуют обновления):"
+    echo "$STALE"
+  else
+    echo "✅ Stale-секций нет."
+  fi
+
+  # 2. T2-кандидаты: практика в FMT ≥3 недель и применена ≥5 раз
+  echo ""
+  echo "T2-кандидаты на включение (pending_candidates):"
+  yq '.pending_candidates // [] | .[] | .name' "$SS" 2>/dev/null || echo "  (yq недоступен — проверь pending_candidates вручную)"
+fi
+```
+
+**Чеклист:**
+
+- [ ] **section-state.yaml проверен** — есть `stale`-секции? (если да → запланировать обновление; зависит от WP-452 Ф1)
+- [ ] **T2-кандидаты просмотрены** — практика ≥3 нед, ≥5 применений → предложить пилоту на включение в раздел 7
+
+---
+
+### Расходы на LLM и инфраструктуру за неделю (WP-444)
+
+> **Цель:** раз в неделю видеть полную картину трат на AI и хостинг. Не блокирует Close.
+> Порог флага: LangFuse-расходы >$10/нед или любой сервис с аномальным ростом → обсудить в Strategy Session.
+
+**Шаг 1. LangFuse — автоматический срез (сервисы бота + симулятора)**
+
+```bash
+# Итоги за 7 дней: токены и расходы по всем подключённым сервисам
+WEEK_AGO=$(date -u -v-7d +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u -d "7 days ago" +%Y-%m-%dT%H:%M:%SZ)
+TODAY=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+
+LF_PK=$(grep LANGFUSE_PUBLIC_KEY ~/IWE/.secrets/langfuse.env | cut -d'"' -f2)
+LF_SK=$(grep LANGFUSE_SECRET_KEY ~/IWE/.secrets/langfuse.env | cut -d'"' -f2)
+
+echo "=== LangFuse: использование за 7 дней ==="
+curl -sf -u "$LF_PK:$LF_SK" \
+  "https://cloud.langfuse.com/api/public/metrics/daily?fromTimestamp=${WEEK_AGO}&toTimestamp=${TODAY}" \
+  | python3 -c "
+import sys, json
+data = json.load(sys.stdin)
+days = data.get('data', [])
+total_input = sum(d.get('inputTokens', 0) for d in days)
+total_output = sum(d.get('outputTokens', 0) for d in days)
+total_cost = sum(d.get('totalCost', 0) for d in days)
+print(f'  Входящих токенов: {total_input:,}')
+print(f'  Исходящих токенов: {total_output:,}')
+print(f'  Итого расходов: \${total_cost:.2f}')
+if total_cost > 10:
+    print(f'  ⚠️  ВЫШЕ ПОРОГА \$10 — обсудить в Strategy Session')
+else:
+    print(f'  ✅ В норме')
+" 2>/dev/null || echo "  ℹ️ LangFuse API недоступен — проверь вручную: cloud.langfuse.com"
+```
+
+**Шаг 2. Что НЕ покрыто LangFuse — проверить вручную**
+
+Открыть консоли (1-2 минуты):
+
+| Сервис | Что смотреть | Ссылка |
+|--------|-------------|--------|
+| Claude Code (VS Code / IDE) | Usage за неделю в разделе Billing | console.anthropic.com/settings/usage |
+| Kimi (Церен пишет с ним) | Баланс и расходы за неделю | platform.moonshot.cn/account/finance |
+| Railway (хостинг всех сервисов) | Estimated cost текущего месяца | railway.com — проект peaceful-vision |
+| OpenRouter (hw-checker) | Использование за неделю | openrouter.ai/account |
+
+**Шаг 3. Итоговая таблица в Week Report**
+
+Добавить в Week Report секцию:
+
+```markdown
+## Расходы на AI и инфраструктуру
+
+| Сервис | Расход за неделю | Тренд | Примечание |
+|--------|-----------------|-------|-----------|
+| Боты + симулятор (LangFuse) | $X.XX | ↑/↓/= | N трасс |
+| Claude Code (IDE) | $X.XX | — | из консоли Anthropic |
+| Kimi | $X.XX | — | из консоли Moonshot |
+| Railway (хостинг) | ~$XX/мес | — | делить на 4 = недельная |
+| OpenRouter (hw-checker) | $X.XX | — | из консоли OR |
+| **Итого** | **$X.XX** | | |
+```
+
+**Чеклист:**
+
+- [ ] **LangFuse-срез получен** (или задокументировано «API недоступен»)
+- [ ] **Anthropic Console просмотрен** — расходы Claude Code за 7 дней записаны
+- [ ] **Railway** — estimated cost текущего месяца записан
+- [ ] **Kimi** — баланс и расходы записаны (если использовался за неделю)
+- [ ] **Итоговая таблица** вставлена в Week Report
+- [ ] **Если итого >$50/нед** — вынести на Strategy Session: что дорого и можно ли оптимизировать
+
+---
+
+### Самотест проверки полноты DayPlan (bug-2026-07-03)
+
+> **Цель:** раз в неделю подтвердить, что проверка секций DayPlan (`extensions/day-open.checks.md`) реально ловит пропажу раздела, а не молча пропускает её.
+> **Источник:** 30 июня — 3 июля раздел «Мир» отсутствовал в DayPlan 4 дня подряд, «Активные РП» — 3 дня, а проверка каждый день докладывала «пройдено». Причина: голый `grep -q "Мир"` совпадал со словом «Мир» в другом месте файла (не с заголовком раздела), а проверка «все РП из priorities.yaml в плане» была сломана шелл-особенностью (word-splitting) и никогда не находила реальных пропусков. Обе починены 3 июля — этот самотест подтверждает, что починка не откатилась.
+> **Не блокирует Close.** Провал самотеста → почини `day-open.checks.md` заново, не игнорируй.
+
+**Выполнить:**
+
+```bash
+# Синтетический DayPlan: специально БЕЗ раздела «Мир» как заголовка,
+# но со словом «Мир» упомянутым в другом разделе (воспроизводит баг 2026-07-03)
+TMP=$(mktemp)
+cat > "$TMP" <<'EOF'
+<details>
+<summary><b>План на сегодня</b></summary>
+| 🚦 | ТВС | # | РП | h | Статус |
+|----|-----|---|-----|---|--------|
+| 🔴 | Т | 1 | **WP-1** | 1 | pending |
+</details>
+<details>
+<summary><b>Требует внимания</b></summary>
+Мир без URL-ссылок — требуется ручное заполнение.
+</details>
+EOF
+
+echo "=== Самотест: проверка секций должна поймать отсутствие «Мир» ==="
+if grep -qE "<summary><b>Мир" "$TMP"; then
+  echo "  ❌ ПРОВАЛ САМОТЕСТА: заголовочная проверка нашла «Мир» там, где его нет — регресс на голый grep -q вернулся"
+else
+  echo "  ✅ Самотест пройден: заголовочная проверка корректно НЕ находит «Мир» (в файле только упоминание слова)"
+fi
+rm -f "$TMP"
+```
+
+**Чеклист:**
+
+- [ ] **Самотест запущен.** Если «ПРОВАЛ» — открыть `extensions/day-open.checks.md`, найти секцию «Секции DayPlan (полнота по шаблону)», убедиться, что используется `<summary><b>$section`, а не голый `$section`.
 

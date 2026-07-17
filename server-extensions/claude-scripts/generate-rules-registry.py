@@ -21,6 +21,14 @@ OUTPUT = Path.home() / "IWE" / ".claude" / "rules-registry.yaml"
 REQUIRED_FIELDS = {"id", "name", "type", "priority", "status", "triggers", "tests", "hook"}
 VALID_TYPES = {"structural", "behavioural", "procedural"}
 VALID_STATUSES = {"active", "draft", "deprecated", "superseded"}
+# WP-295 Ф5: deterministic step pre/post-conditions. Optional, backward-compatible.
+VALID_ON_FAIL = {"warn", "block"}
+# WP-481 Ф5 (CGUS): execution_mode — семантика исполнения правила. Отсутствие поля = "linear"
+# (текущее поведение: правило срабатывает по триггеру в порядке потока). "constraint-satisfaction"
+# — правило = ограничение на трассу сессии: удовлетворяется в любом порядке, проверяется
+# полнота набора при Close (rule-engine.sh check-trace-satisfaction), не линейность.
+# Имя НЕ "enforcement": ключ уже занят в AR.251 (enforcement: E3 — уровень замка, другая ось).
+VALID_EXECUTION_MODES = {"linear", "constraint-satisfaction"}
 
 def parse_frontmatter(filepath):
     """Извлечь YAML frontmatter из markdown файла."""
@@ -68,6 +76,35 @@ def validate_rule(rule, filename):
     elif not tests.get("positive") or not tests.get("negative"):
         errors.append(f"{filename}: must have both positive and negative tests")
 
+    # WP-295 Ф5: optional pre/post-conditions. When present, each must be a mapping
+    # with a non-empty 'check' (named deterministic check resolved by rule-engine.sh)
+    # and 'on_fail' in {warn, block}. Absent field = no conditions (backward-compatible).
+    errors.extend(validate_conditions(rule, filename))
+
+    return errors
+
+
+def validate_conditions(rule, filename):
+    """Validate optional pre_conditions / post_conditions structure (WP-295 Ф5)."""
+    errors = []
+    for field in ("pre_conditions", "post_conditions"):
+        conds = rule.get(field)
+        if conds is None:
+            continue
+        if not isinstance(conds, list):
+            errors.append(f"{filename}: {field} must be a list, got {type(conds).__name__}")
+            continue
+        for i, cond in enumerate(conds):
+            if not isinstance(cond, dict):
+                errors.append(f"{filename}: {field}[{i}] must be a mapping with 'check' and 'on_fail'")
+                continue
+            if not cond.get("check"):
+                errors.append(f"{filename}: {field}[{i}] missing non-empty 'check'")
+            if cond.get("on_fail") not in VALID_ON_FAIL:
+                errors.append(f"{filename}: {field}[{i}] on_fail must be one of {sorted(VALID_ON_FAIL)}, got {cond.get('on_fail')!r}")
+    exm = rule.get("execution_mode")
+    if exm is not None and exm not in VALID_EXECUTION_MODES:
+        errors.append(f"{filename}: execution_mode must be one of {sorted(VALID_EXECUTION_MODES)}, got {exm!r}")
     return errors
 
 def validate_cross_refs(rules):
@@ -143,7 +180,7 @@ def build_registry(skip_invalid=False):
         if not isinstance(related, dict):
             related = {}
 
-        rules.append({
+        rule_entry = {
             "id": fm["id"],
             "name": fm["name"],
             "type": fm["type"],
@@ -153,11 +190,17 @@ def build_registry(skip_invalid=False):
             "applies_when": fm.get("applies_when", "true"),
             "exceptions": fm.get("exceptions", []),
             "hook": fm["hook"],
+            "pre_conditions": fm.get("pre_conditions", []),
+            "post_conditions": fm.get("post_conditions", []),
             "conflicts_with": related.get("conflicts_with", []),
             "depends_on": related.get("depends_on", []),
             "superseded_by": related.get("superseded_by"),
             "source_file": str(rule_file.relative_to(Path.home() / "IWE")),
-        })
+        }
+        # WP-481 Ф5: опциональное поле execution_mode (constraint-satisfaction для протокольных гейтов)
+        if fm.get("execution_mode"):
+            rule_entry["execution_mode"] = fm["execution_mode"]
+        rules.append(rule_entry)
 
     # Cross-ref + cycle: считаются только по собранным валидным правилам.
     # depends_on на пропущенное (невалидное) правило → предупреждение, не блок (в skip-режиме).

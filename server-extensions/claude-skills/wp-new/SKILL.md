@@ -74,14 +74,16 @@ gates_rationale: "операционный скилл; WP Gate применим 
 
 Все шаги ниже автоматизированы скриптом `scripts/create-wp.sh`. Скрипт пишет в 5 мест:
 
-1. **`inbox/WP-{N}-{slug}.md`** → context file
+1. **`inbox/WP-{N}/WP-{N}.md`** → context file (всегда папка — WP-434, см. INBOX-CONVENTION)
 2. **`archive/wp-contexts/WP-{N}-{slug}.md`** → заготовка §Закрытия (stub с frontmatter)
 3. **`docs/WP-REGISTRY.md`** → новая строка таблицы
 4. **`current/WeekPlan W{N}…md`** → новая строка в таблице РП
 5. **`current/active-wp.md`** → пересобирается автоматически (`build-active-wp.py`)
 
-**Вручную после скрипта:**
-- **Linear issue** — через MCP: `create_issue title='WP-{N} {Название}' teamId=TSR`
+**После скрипта — агент вызывает MCP (не вручную):**
+- **Linear issue** — вызвать `mcp__claude_ai_linear__save_issue`:
+  `title: "WP-{N} {Название}"`, `team: "TSR"` <!-- L3-author: teamId=TSR, в шаблоне → {{LINEAR_TEAM_ID}} -->
+  `priority: 2` (P2 → High), description: краткое описание фаз + путь к context file
 - **`docs/Strategy.md` § «РП → Результаты»** — только для РП ≥3h. Передать `--result R{N}` скрипту для автовставки; без флага — добавить вручную.
 
 **Синтаксис скрипта:**
@@ -119,5 +121,13 @@ related: []
 
 ## Шаг 5. Подтверждение
 
-Выведи: *«РП #{N} создан. Скрипт записал в 5 мест: context file, archive stub, Registry, WeekPlan, active-wp пересобран. Linear — вручную.»*
+Выведи: *«РП #{N} создан. Скрипт записал в 5 местах: context file, archive stub, Registry, WeekPlan, active-wp пересобран. Linear — {TSR-NN}.»*
 Если ≥3h и `--result` не передан: добавить «+ добавить маппинг в Strategy.md вручную».
+
+```bash
+# Postcondition check — substitute {N} with the real WP number before running
+WP_NUM={N}   # real number from Step 2
+grep -q "WP-${WP_NUM}" "{{WORKSPACE_DIR}}/{{GOVERNANCE_REPO}}/docs/WP-REGISTRY.md" \
+  && echo "✅ WP-${WP_NUM} найден в WP-REGISTRY.md" \
+  || echo "❌ WP-${WP_NUM} НЕ найден — проверить вывод create-wp.sh выше"
+```

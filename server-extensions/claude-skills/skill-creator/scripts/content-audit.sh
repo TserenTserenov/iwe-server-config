@@ -1,14 +1,32 @@
 #!/usr/bin/env bash
-# content-audit.sh — minimal content check for IWE skills (WP-422 Ф9)
-# Checks 5 structural+content criteria for each skill in .claude/skills/
+# content-audit.sh — minimal content check for IWE skills (WP-422 Ф9 + Ф10)
+# Ф9: 5 structural+content criteria (C1-C5).
+# Ф10: C6 verification-anchor (ВДВ — выгода-действие-верификация), calibrated.
 # Outputs: RED (>=2 issues), YELLOW (1 issue), GREEN (0 issues)
 set -euo pipefail
 
 SKILLS_DIR="${IWE_DIR:-$HOME/IWE}/.claude/skills"
+# SKIP_SKILLS — intentional exemptions, NOT "forgot to remove" (WP-422 Ф10):
+#   skill-creator    — meta-skill that bundles this very script (bootstrap circularity);
+#                      its own quality is gated by verify-skill.sh + /vdv audit (Step 7).
+#   agent-fault      — script-executor skill (argument-hint contract, no numbered steps);
+#   apply-captures   — script-executor skill; both structurally diverge from the step template.
 SKIP_SKILLS="${SKIP_SKILLS:-agent-fault apply-captures skill-creator}"
+
+# C6 verification-anchor vocabulary (Ф10). Broad on purpose — a skill "has a verification
+# notion" if any of: a Verification section (RU/EN), a verify/audit script, an acceptance
+# criterion, or an inline check (Expected/PASS/FAIL/smoke/test -f/проверь).
+C6_ANCHOR_RE='(^## .*[Вв]ерификаци|^## (Verification|Проверка)|[Вв]ерификаци|verify[-_a-z]*\.sh|[-_a-z]*audit\.sh|verify-skill|критери[йи] (готовности|приёмки|приемки)|acceptance|Expected result|Expected:|PASS\b|FAIL\b|smoke|смоук|test -f |проверь|проверить, что|sanity)'
+# Gate-critical = skill performs an irreversible/blocking action or enforces a gate.
+# Narrow on purpose: mere mention of "Pack"/"запиши" does NOT make a skill gate-critical
+# (that flagged 41/43 — manufactured churn). Only real side-effects count.
+C6_GATECRIT_RE='git push|git commit|deploy|skill-promote|promote\.sh|--no-verify'
 
 RED=0; YELLOW=0; GREEN=0
 declare -a RED_LIST YELLOW_LIST
+# C6 advisory: non-gate-critical skills lacking any verification notion. Listed for manual
+# triage, NOT counted as an issue (many are inherently advisory: classifiers, transcribers).
+declare -a C6_ADVISORY_LIST
 
 audit_skill() {
   local name="$1"
@@ -89,6 +107,24 @@ audit_skill() {
     issue_list+=" C5:no_when_to_use"
   fi
 
+  # C6: verification-anchor (Ф10, ВДВ). Calibrated two-tier:
+  #   - gate-critical skill (irreversible action) WITHOUT any verify notion → counted issue;
+  #   - non-gate skill without anchor → advisory only (not counted), for manual triage.
+  local has_anchor=false gate_crit=false
+  grep -qiE "$C6_ANCHOR_RE" "$skill_md" && has_anchor=true
+  grep -qE "$C6_GATECRIT_RE" "$skill_md" && gate_crit=true
+  local genf
+  genf=$(grep -E '^gates_enforced:' "$skill_md" | sed 's/gates_enforced:[[:space:]]*//' | tr -d '[] ' || true)
+  [[ -n "$genf" ]] && gate_crit=true
+  if ! $has_anchor; then
+    if $gate_crit; then
+      issues=$((issues + 1))
+      issue_list+=" C6:gate_critical_no_verification"
+    else
+      C6_ADVISORY_LIST+=("$name")
+    fi
+  fi
+
   # Classify
   if [[ "$issues" -ge 2 ]]; then
     RED=$((RED + 1))
@@ -136,6 +172,15 @@ fi
 if [[ ${#YELLOW_LIST[@]} -gt 0 ]]; then
   echo "=== YELLOW skills (single fix) ==="
   for s in "${YELLOW_LIST[@]}"; do
+    echo "  $s"
+  done
+fi
+if [[ ${#C6_ADVISORY_LIST[@]} -gt 0 ]]; then
+  echo ""
+  echo "=== C6 advisory: no verification anchor, NOT gate-critical (${#C6_ADVISORY_LIST[@]}) ==="
+  echo "    Manual triage: add a verification step only where it genuinely applies."
+  echo "    Inherently advisory skills (classifiers, transcribers, recorders) may stay as-is."
+  for s in "${C6_ADVISORY_LIST[@]}"; do
     echo "  $s"
   done
 fi

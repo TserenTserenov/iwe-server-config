@@ -93,6 +93,13 @@ if [[ -n "$PROTOCOL" ]]; then
       echo "[headless-runner] Клонирую репо для создания task..." >&2
       git clone -b "${IWE_DISPATCHER_REPO_BRANCH:-main}" \
         "$IWE_DISPATCHER_REPO_URL" "${WORKDIR}/${repo_name}" >&2
+      # I12 (WP-458, Волна 4): фрешклон не активирует .githooks по умолчанию —
+      # headless-коммиты в нём шли без commit-msg/pre-commit контролей.
+      local hook_installer="${WORKDIR}/${repo_name}/scripts/install-hooks.sh"
+      if [[ -f "$hook_installer" ]]; then
+        bash "$hook_installer" "${WORKDIR}/${repo_name}" >&2 || \
+          echo "[headless-runner] WARN: install-hooks.sh упал — коммиты в клоне пойдут без git-хуков" >&2
+      fi
     fi
     mkdir -p "$tasks_dir"
 

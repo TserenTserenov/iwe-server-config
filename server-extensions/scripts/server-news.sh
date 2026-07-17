@@ -2,7 +2,7 @@
 # routing: server  deterministic=true
 # see DP.SC.159, DP.ROLE.059
 # server-news.sh — кросс-платформенная замена WebSearch для server-mode
-# see WP-283 (DS-my-strategy/inbox/WP-283-server-day-open-crossplatform.md)
+# see WP-283 (DS-strategy/inbox/WP-283-server-day-open-crossplatform.md)
 #
 # Выводит готовую markdown-секцию «Мир» для DayPlan.
 #
@@ -12,12 +12,13 @@
 #
 # Использование:
 #   bash server-news.sh [CONFIG_PATH]
-#   bash server-news.sh ~/IWE/DS-my-strategy/exocortex/day-rhythm-config.yaml
+#   bash server-news.sh ~/IWE/DS-strategy/exocortex/day-rhythm-config.yaml
 
 set -uo pipefail
 
 IWE="${IWE_ROOT:-$HOME/IWE}"
-CONFIG="${1:-$IWE/DS-my-strategy/exocortex/day-rhythm-config.yaml}"
+GOV_REPO="${IWE_GOVERNANCE_REPO:-DS-strategy}"
+CONFIG="${1:-$IWE/$GOV_REPO/exocortex/day-rhythm-config.yaml}"
 MAX_ITEMS_PER_TOPIC=3
 MAX_AGE_DAYS=2
 

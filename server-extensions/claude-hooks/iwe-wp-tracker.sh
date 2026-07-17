@@ -34,8 +34,9 @@ print(t.get("file_path","") or t.get("path",""))
 
 SESSION_ID=$(echo "$INPUT" | python3 -c 'import sys,json; print(json.loads(sys.stdin.read()).get("session_id",""))' 2>/dev/null)
 
-# Применимо только к inbox/WP-NNN-*.md
-if [[ ! "$FILE_PATH" =~ inbox/WP-([0-9]+)- ]]; then
+# Применимо к любому файлу РП: плоский inbox/WP-N-*.md ИЛИ внутри папки inbox/WP-N/ (WP-434).
+# Широкий матч намеренно: трекер эмитит «активность РП» на любую правку файла РП.
+if [[ ! "$FILE_PATH" =~ inbox/WP-([0-9]+)[-/] ]]; then
   exit 0
 fi
 WP_NUM="${BASH_REMATCH[1]}"

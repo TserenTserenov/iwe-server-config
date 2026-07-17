@@ -1,7 +1,7 @@
 ---
 name: verify
 description: Верификация артефакта по эталону из Pack. Загружает роль VR.R.001 (Верификатор) с context isolation — проверяет результат, а не процесс создания.
-argument-hint: "[code|archgate|capture|wp|chain|adversarial|subsection|section|guide|auto] [путь или id]"
+argument-hint: "[code|archgate|capture|pack|wp|chain|adversarial|subsection|section|guide|ontological|auto] [путь или id]"
 version: 1.0.0
 layer: L1
 status: active
@@ -39,12 +39,14 @@ gates_rationale: "операционный скилл; WP Gate применим 
 | `code` | Проверка кода | Качество кода: логика, edge cases, безопасность, coupling |
 | `archgate` | Проверка реализации АрхГейта | Код соответствует ЭМОГССБ-оценке, принципы воплощены |
 | `capture` | Проверка capture-candidate | UL, полнота, непротиворечивость с Pack |
+| `pack` | Проверка Package-адекватности | Проверяет 11 координат E.4.DPF.DA seed-пакета (Ф1-Ф3 артефакты): SoTA, decision-record, seed-маркер, их достаточность. Используется из `/verify pack` или `pack-creator` Шаг 4 |
 | `wp` | Приёмка рабочего продукта | Критерии done из WP context file |
 | `chain` | Data flow check | Прочитаны ли downstream consumers? Контракты совпадают? (CoVe stage 3) |
 | `adversarial` | Scope & bias check | Scope определён анализом или выводом? Что НЕ прочитано? (Pre-mortem) |
 | `subsection` | Проверка подраздела руководства (SS) | 🔴 v4-lint + 🟡 нарратив/дуга/практика/аналогия (G-L) по CHECKLIST-subsection-v1.md |
 | `section` | Проверка раздела руководства (S) | 🔴 v4-lint section + 🟡 связность SS, дуга по ступеням, охват темы (D-H) по CHECKLIST-section-v1.md |
 | `guide` | Проверка руководства целиком | 🔴 v4-lint guide + 🟡 целостность объекта, дуга, охват узлов мастерства, эпилог (E-I) по CHECKLIST-guide-v1.md |
+| `ontological` | Приёмочная линза сгенерированного доменного контента | «Онтологически vs лексически» + «реальная проблема vs generic» по атомарным claim'ам (Claimify-стиль) — `verify-ontological-adequacy.md`. WP-481 Ф9, seed |
 | `auto` или пусто | Автоопределение | По типу файла и контексту сессии |
 
 **Автоопределение:**
@@ -54,6 +56,7 @@ gates_rationale: "операционный скилл; WP Gate применим 
 - Указан путь к WP context → `wp`
 - Изменения >1 файла + cross-component → предложить `chain`
 - После АрхГейта + код → предложить `adversarial`
+- Только что сгенерирован Pack/DPF-раздел или персональное руководство (pack-creator/personal-guide-render только что отработал) → предложить `ontological` (риск гладкого-но-пустого текста, WP-481 Ф9)
 - Путь содержит `subsection_id: PD.GUIDE.N.SX.SSY` во frontmatter, или один файл подраздела руководства → `subsection`
 - Путь — папка раздела (`S{N}-*/`) или указан `section_id` во frontmatter → `section`
 - Путь — `structure-guide-N.md` или папка руководства целиком → `guide`
@@ -84,8 +87,18 @@ gates_rationale: "операционный скилл; WP Gate применим 
 - Передать sub-agent'у: candidate + manifest + чеклист capture
 - Модель sub-agent'а: Sonnet
 
+**Для `pack`:**
+- Прочитать WP-контекст пакета (WP-474.md или папка пакета)
+- Прочитать файлы артефактов Ф1-Ф3:
+  - `06-sota/{slug}-sota-sheet.md` (Ф1: SoTA-лист)
+  - `.pfad-decision.md` (Ф2: decision record)
+  - `01B-distinctions.md` с маркером `**Maturity:** seed` (Ф3: seed-маркер + mature-lite чек-лист)
+- Передать sub-agent'у промпт: `verify-pack-adequacy-subsection.md` + данные из контекста
+- Модель sub-agent'а: Sonnet
+- **Verdict**: PASS/CONDITIONAL/FAIL по координатам D1-D11 (WP-474 §4)
+
 **Для `wp`:**
-- Прочитать WP context file (`DS-strategy/inbox/WP-{N}-*.md`)
+- Прочитать WP context file (`{{GOVERNANCE_REPO}}/inbox/WP-{N}-*.md`)
 - Прочитать артефакт РП
 - Передать sub-agent'у: артефакт + критерии done + чеклист wp
 - Модель sub-agent'а: по verification_class
@@ -252,6 +265,13 @@ gates_rationale: "операционный скилл; WP Gate применим 
 
 - **Verdict:** PASS = 🔴+🟡 PASS → готов к 🟢 пилот-тесту руководства (≥3 пилота × 6/6, типично 2-4 недели). FAIL = диагностика по конкретным S/SS.
 
+**Для `ontological` (приёмочная линза «онтологически vs лексически» + «реальная проблема vs generic», WP-481 Ф9):**
+- Прочитать проверяемый артефакт (Pack/DPF-раздел, персональное руководство, capture-кандидат)
+- Передать sub-agent'у: артефакт + промпт `.claude/skills/verify/verify-ontological-adequacy.md`
+- Модель sub-agent'а: Sonnet (закрытый цикл — классификация claim'ов по фиксированной рубрике); эскалация на Opus только при явном расхождении между двумя независимыми прогонами (по аналогии с Model Tiering для набора критиков, WP-481 Ф3)
+- **Verdict:** PASS/CONDITIONAL/FAIL по specificity-скору — правила и таблица claim'ов внутри `verify-ontological-adequacy.md` Шаг 4-5
+- **Seed-статус:** пороги не откалиброваны (см. «Ограничения» в промпт-файле) — до калибровки CONDITIONAL считать более надёжным сигналом, чем точная граница PASS/FAIL
+
 ## Шаг 2. Sub-agent: промпт
 
 Sub-agent получает промпт с заполненными данными из шага 1.
@@ -273,6 +293,7 @@ Sub-agent получает промпт с заполненными данным
 | Подраздел руководства (SS) | `DS-principles-curriculum/specs/v4-reference/CHECKLIST-subsection-v1.md` (v1.2+) |
 | Раздел руководства (S) | `DS-principles-curriculum/specs/v4-reference/CHECKLIST-section-v1.md` |
 | Руководство целиком | `DS-principles-curriculum/specs/v4-reference/CHECKLIST-guide-v1.md` |
+| Сгенерированный доменный контент (ontological) | `.claude/skills/verify/verify-ontological-adequacy.md` (seed, пороги не откалиброваны) |
 
 Если эталон не определяется → **СТОП.** Сообщи: «Эталон не найден. Нужен рецензент, не верификатор.»
 
@@ -318,3 +339,6 @@ Sub-agent возвращает verdict:
 - **Принять** → продолжить работу
 - **Исправить** → внести изменения по рекомендациям
 - **Отклонить verdict** → аргументировать почему (→ feedback для обучения)
+
+<!-- USER-SPACE -->
+<!-- /USER-SPACE -->

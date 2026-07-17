@@ -3,10 +3,18 @@
 > Аналог day-close.checks.md. Проходить ЯВНО после записи файла, ДО `git commit`.
 > Каждый пункт = grep/проверка по файлу. Не по памяти.
 
+> **BUGFIX (2026-07-11):** `FILE=$(ls ... | tail -1)`, не `head -1`. Архивация вчерашнего
+> DayPlan происходит в day-open-pipeline.sh ПОСЛЕ проверок (шаг 6, после шага 5) — пока в
+> `current/` лежат сразу вчерашний и сегодняшний план, `ls` сортирует их по алфавиту, и
+> "10" стоит раньше "11". `head -1` брал самый старый файл — почти все блоки этого файла
+> тихо проверяли вчерашний план вместо сегодняшнего каждую ночь, когда вчерашнее Закрытие
+> дня не успевало заранее убрать файл в архив (найдено на ложном "Требует внимания -- ПРОПУЩЕНА").
+> `tail -1` берёт самый свежий по дате файл — это всегда сегодняшний план.
+
 ### BLOCKING: Саморазвитие (шаг 3)
 
 ```bash
-FILE="$(ls ~/IWE/DS-my-strategy/current/DayPlan\ *.md 2>/dev/null | head -1)"
+FILE="$(ls ~/IWE/DS-my-strategy/current/DayPlan\ *.md 2>/dev/null | sort | tail -1)"
 # Проверка 1: секция Саморазвитие есть в файле
 if ! grep -q "Саморазвитие" "$FILE"; then
   echo "  ❌ КРИТИЧЕСКИЙ: секция Саморазвитие (шаг 3) НЕ НАЙДЕНА в DayPlan — COMMIT БЛОКИРОВАН"
@@ -31,17 +39,150 @@ echo "  ✅ Саморазвитие: D-NNN присутствует, PENDING н
 - [ ] Саморазвитие: секция `<details>` ИЛИ явная строка в плане **с конкретным D-NNN** и «где остановился»
 - [ ] Нет формулировки «саморазвитие X мин» без D-NNN или названия руководства + главы
 
+### 🔴 БЛОКИРУЮЩАЯ ПРОВЕРКА: все РП из priorities.yaml в плане (bug-2026-07-01)
+
+> **Источник:** 2026-07-01 WP-453 был в priorities.yaml `today:`, но выпал из таблицы плана.
+> Корень: наивный parse_frontmatter путал вложенный `status:` → РП не попадал в JSON-факты,
+> а промпт запрещал LLM добавлять РП вне JSON. Проверка ловит регресс независимо от причины.
+
+```bash
+FILE="$(ls ~/IWE/DS-my-strategy/current/DayPlan\ *.md 2>/dev/null | sort | tail -1)"
+PRIO="$HOME/IWE/DS-my-strategy/current/priorities.yaml"
+echo "=== Проверка: все РП из priorities.yaml присутствуют в DayPlan ==="
+if [ -f "$PRIO" ]; then
+  WPS=$(python3 -c "
+import yaml,sys
+d=yaml.safe_load(open('$PRIO')) or {}
+for w in (d.get('today') or []):
+    print(str(w).strip())
+" 2>/dev/null)
+  # Scope to the plan table inside "План на сегодня", not the whole file: 2026-07-01
+  # WP-453 was missing from the plan table but present in both the "Утренние приоритеты"
+  # bullet list and the content-plan table, so a whole-file grep gave a false pass.
+  PLAN_TABLE=$(awk '/<summary><b>План на сегодня<\/b><\/summary>/{f=1} f&&/^\|/{print} f&&/<\/details>/{exit}' "$FILE")
+  MISSING=0
+  # BUGFIX (2026-07-03): `for wp in $WPS` не разбивал многострочный $WPS на элементы под zsh
+  # (Bash-инструмент агента фактически исполняет через /bin/zsh, где unquoted-expansion не
+  # делает word-split как в bash), плюс BSD grep трактует многострочный паттерн как список
+  # альтернатив (-e "WP-1" -e "WP-2" ...) — вместе это давало ВСЕГДА ✅ независимо от того,
+  # сколько РП реально отсутствовало в таблице. `while read` работает одинаково в bash и zsh.
+  # BUGFIX (2026-07-11): priorities.yaml хранит "WP-149", а колонка «#» таблицы плана
+  # тогда была голым числом "149" — матчили по границе ячейки `| 149 |`.
+  # BUGFIX (2026-07-14): колонка «#» с тех пор стала сквозным номером строки (1, 2, 3…),
+  # а номер РП переехал внутрь ячейки «РП» жирным текстом (`**WP-483** — название`) —
+  # прежняя проверка по границе ячейки перестала совпадать вообще для любого РП, каждую
+  # ночь давая ложный ❌ на реально присутствующие РП (подтверждено на архиве 07-11: там
+  # формат ещё был "| 149 |", сегодня — "| 1 | **WP-483** — …"). Матчим сам номер с
+  # обязательным префиксом WP- где угодно в строке таблицы (не привязываясь к колонке) —
+  # жирный markdown вокруг него не мешает, а требование префикса не даёт "47" ложно
+  # совпасть внутри "471".
+  # BUGFIX (2026-07-16): формат снова сменился — колонка «#» опять стала голым номером
+  # РП («| 🔴 | В | 483 | **guide-kit** — …»), без префикса WP- нигде в строке. Проверка
+  # по всей таблице разом (grep по $PLAN_TABLE целиком) на реальном плане 16.07 дала ДВЕ
+  # ошибки сразу: ложный ❌ на WP-149/WP-481 (нет текста «WP-» в их строках — новый формат)
+  # И скрытый ложный ✅ для WP-483 (совпало не по его собственной строке, а по случайной
+  # ссылке «после решения WP-483 Ф1.5» внутри строки WP-149) — при таком формате проверка
+  # не защищает вообще ни от чего. Теперь матчим ПОСТРОЧНО: колонка «#» (4-е поле по `|`)
+  # равна голому номеру ИЛИ в этой же строке (не во всей таблице) есть WP-номер с префиксом —
+  # так ловятся оба формата и не текут ссылки между чужими строками.
+  while IFS= read -r wp; do
+    [ -z "$wp" ] && continue
+    num="${wp#WP-}"
+    FOUND=0
+    while IFS= read -r row; do
+      case "$row" in \|*) ;; *) continue ;; esac
+      col3=$(printf '%s' "$row" | awk -F'|' '{gsub(/^[ \t]+|[ \t]+$/,"",$4); print $4}')
+      if [ "$col3" = "$num" ]; then FOUND=1; break; fi
+      if printf '%s' "$row" | grep -qE "WP-${num}([^0-9]|\$)"; then FOUND=1; break; fi
+    done <<< "$PLAN_TABLE"
+    if [ "$FOUND" -eq 0 ]; then
+      echo "  ❌ $wp из priorities.yaml отсутствует в таблице «План на сегодня» — COMMIT БЛОКИРОВАН"
+      MISSING=$((MISSING+1))
+    fi
+  done <<< "$WPS"
+  if [ "$MISSING" -eq 0 ]; then
+    echo "  ✅ Все РП из priorities.yaml присутствуют в плане"
+  else
+    exit 1
+  fi
+else
+  echo "  ⚠️ priorities.yaml не найден — проверка пропущена"
+fi
+```
+
+- [ ] Каждый `WP-NNN` из `priorities.yaml → today:` присутствует в DayPlan. Если ❌ — commit заблокирован.
+
+### 🔴 БЛОКИРУЮЩАЯ ПРОВЕРКА: `<details>` без `<summary>` (баг «Details», bug-2026-07-01)
+
+> **Источник:** 2026-07-01 в 7 секциях DayPlan стоял голый `<details>` без `<summary>` —
+> браузер/VS Code рендерит его как слово "Details". Причина: LLM оборачивал ответ в
+> лишний `<details>`. Инвариант: каждый `<details>` парен с одним `<summary>`.
+
+<!-- GATE-B: always-on -->
+```bash
+FILE="$(ls ~/IWE/DS-my-strategy/current/DayPlan\ *.md 2>/dev/null | sort | tail -1)"
+echo "=== Проверка: баланс <details>/<summary> ==="
+# grep -c печатает "0" (не пусто) даже без совпадений, но выходит с кодом 1;
+# под set -e (см. day-open-checks-runner.sh) голое присваивание с таким кодом
+# молча обрывает блок ДО if — `|| true` обязателен, `:-0` после присваивания
+# не спасает (до него уже не доходит). Тот же класс бага, что NA_COUNT ниже,
+# WP-5 Ф2 09.07 — исходный `|| echo 0` вдобавок дублировал вывод ("0\n0").
+OPENS=$(grep -cE '^<details' "$FILE" 2>/dev/null || true)
+SUMMARIES=$(grep -cE '<summary>' "$FILE" 2>/dev/null || true)
+if [ "$OPENS" -gt "$SUMMARIES" ]; then
+  echo "  ❌ Голый <details> без <summary> ($OPENS открытий vs $SUMMARIES summary) — рендерится как 'Details'. COMMIT БЛОКИРОВАН"
+  exit 1
+else
+  echo "  ✅ Все <details> имеют <summary> ($OPENS/$SUMMARIES)"
+fi
+```
+
+- [ ] Число `<details>` ≤ числу `<summary>`. Если больше — голый блок рендерится как "Details", commit заблокирован.
+
 ### Секции DayPlan (полнота по шаблону)
 
 ```bash
-FILE="$(ls ~/IWE/DS-my-strategy/current/DayPlan\ *.md 2>/dev/null | head -1)"
+FILE="$(ls ~/IWE/DS-my-strategy/current/DayPlan\ *.md 2>/dev/null | sort | tail -1)"
 echo "=== Проверка секций ==="
-for section in "План на сегодня" "Календарь" "Здоровье платформы" "IWE за ночь" "Наработки Scout" "Контент-план" "Разбор заметок" "Итоги вчера" "Мир" "Контекст недели" "Требует внимания"; do
-  if grep -q "$section" "$FILE"; then echo "  ✅ $section"; else echo "  ❌ $section -- ПРОПУЩЕНА"; fi
+# BUGFIX (2026-07-03): голый `grep -q "$section"` даёт ложный ✅, если слово встречается
+# где угодно в файле (напр. «Мир» совпадал со строкой из «Требует внимания», не с реальным
+# заголовком раздела) — «Мир» и «Активные РП» отсутствовали 3-4 дня подряд (30 июня — 3 июля)
+# незамеченными. Теперь для заголовочных секций ищем именно <summary><b>Название.
+# УБРАНО (2026-07-04, WP-7 DOSCAF1): «Активные РП» удалена из шаблона (дублировала
+# current/priorities.yaml + current/active-wp.md) — больше не входит в required-список.
+for section in "План на сегодня" "Календарь" "Здоровье платформы" "Контент-план" "Разбор заметок" "Итоги вчера" "Мир" "Контекст недели" "Требует внимания"; do
+  if grep -qE "<summary><b>$section" "$FILE"; then echo "  ✅ $section"; else echo "  ❌ $section -- ПРОПУЩЕНА"; fi
 done
+# Вложенные bold-текстовые метки внутри «Здоровье платформы» / «Наработки агентов» — не отдельный <details>
+if grep -q "IWE за ночь" "$FILE"; then echo "  ✅ IWE за ночь"; else echo "  ❌ IWE за ночь -- ПРОПУЩЕНА"; fi
+if grep -qE "<summary><b>Наработки агентов" "$FILE"; then echo "  ✅ Наработки агентов"; else echo "  ❌ Наработки агентов -- ПРОПУЩЕНА"; fi
 ```
 
 - [ ] Все 11 секций присутствуют (нет ❌). Если данных нет -- секция с явным «нет данных», не пропуск.
+
+### 🔴 БЛОКИРУЮЩАЯ ПРОВЕРКА: «Требует внимания» присутствует (WP-484 Ф2, 2026-07-13)
+
+> **Источник:** проверка секций выше (блок «Секции DayPlan») только печатает ❌, но не блокирует —
+> ни одна из её 9 строк не вызывает `exit`. «Требует внимания» пропадала вместе с «Мир»/«Горлышко
+> недели» в обоих известных случаях деградированного скаффолда (06-15 day-close-recovery,
+> 07-10 fallback scaffold — оба целиком без секции), но проходила commit незамеченной. Это
+> противоречит инварианту WP-484: «нет данных → явный маркер, никогда тихий пропуск». Эта секция
+> — единственная из 9, для которой сделан отдельный блокирующий гейт: она агрегирует сигналы
+> из 9 разных источников (carry-over, светофор, Scout, KE-SLA, орг-сигналы …), и её тихое
+> исчезновение прячет все 9 сразу, а не один локальный факт, как для остальных 8 секций.
+
+```bash
+FILE="$(ls ~/IWE/DS-my-strategy/current/DayPlan\ *.md 2>/dev/null | sort | tail -1)"
+echo "=== Проверка: «Требует внимания» присутствует ==="
+if grep -qE "<summary><b>Требует внимания" "$FILE"; then
+  echo "  ✅ Требует внимания: секция присутствует"
+else
+  echo "  ❌ Требует внимания: секция ОТСУТСТВУЕТ — COMMIT БЛОКИРОВАН"
+  echo "       Скорее всего DayPlan собран деградированным путём (fallback/recovery scaffold)."
+  echo "       Проверь generated_by в frontmatter и inbox/bugs/ на связанный открытый баг."
+  exit 1
+fi
+```
 
 ### Опциональные шаги алгоритма (проверка по config)
 
@@ -65,14 +206,27 @@ done
 ### 🔴 БЛОКИРУЮЩАЯ ПРОВЕРКА: Разбор заметок — markdown-ссылки на источники
 
 ```bash
-FILE="$(ls ~/IWE/DS-my-strategy/current/DayPlan\ *.md 2>/dev/null | head -1)"
+FILE="$(ls ~/IWE/DS-my-strategy/current/DayPlan\ *.md 2>/dev/null | sort | tail -1)"
 echo "=== Проверка: Разбор заметок — markdown-ссылки ==="
 if grep -q "Разбор заметок" "$FILE"; then
   notes_section=$(sed -n '/Разбор заметок/,/<\/details>/p' "$FILE")
-  # Пропускаем заголовок таблицы и строку-заглушку без данных
-  data_rows=$(echo "$notes_section" | grep -vE '^\| ?Заметка |^\|[\-:]+\|' | grep -cE '\[.+\]\(.+\)')
+  # Пропускаем заголовок таблицы и строку-заглушку без данных.
+  # `|| true` обязателен: без pipefail в этом суб-шелле статус пайпа = статус
+  # последней команды (grep -c); 0 совпадений → grep вернёт 1 → под `set -e`
+  # (снаружи, в day-open-checks-runner.sh) присвоение переменной с таким
+  # статусом молча обрывает блок ДО if/else — ни ✅, ни ❌ не печатались,
+  # просто тишина (найдено 2026-07-09, WP-5 Ф2, тот же класс "runner
+  # никогда реально не исполнялся").
+  data_rows=$(echo "$notes_section" | grep -vE '^\| ?Заметка |^\|[-:]+\|' | grep -cE '\[.+\]\(.+\)' || true)
+  # BUGFIX (2026-07-11): когда inbox/fleeting-notes.md реально пуст (нет новых заметок
+  # со времени последнего Note-Review), явная строка-заглушка «нет заметок» — корректный
+  # ответ, а не пропуск (тот же принцип, что и для остальных секций — см. чеклист выше
+  # «данных нет → явное "нет данных", не пропуск»). Без этой ветки проверка блокировала
+  # commit каждый день без новых заметок, требуя выдумать несуществующую ссылку.
   if [ "$data_rows" -gt 0 ]; then
     echo "  ✅ Разбор заметок: markdown-ссылки присутствуют ($data_rows шт.)"
+  elif echo "$notes_section" | grep -qE '\|[[:space:]]*нет заметок[[:space:]]*\|'; then
+    echo "  ✅ Разбор заметок: заметок нет (явно указано, не пропуск)"
   else
     echo "  ❌ Разбор заметок: нет markdown-ссылок в столбце 'Заметка' — COMMIT БЛОКИРОВАН"
     echo "       Требуется: [«текст заметки»](inbox/fleeting-notes.md) для каждой заметки"
@@ -86,7 +240,7 @@ fi
 ### 🔴 БЛОКИРУЮЩАЯ ПРОВЕРКА: Контент-план — Стратегия заполнена (bug-2026-05-22)
 
 ```bash
-FILE="$(ls ~/IWE/DS-my-strategy/current/DayPlan\ *.md 2>/dev/null | head -1)"
+FILE="$(ls ~/IWE/DS-my-strategy/current/DayPlan\ *.md 2>/dev/null | sort | tail -1)"
 echo "=== Проверка: Контент-план — Стратегия и TTL заполнены ==="
 VIOLATIONS=0
 
@@ -126,7 +280,7 @@ fi
 **Шаг 6 SKILL.md:** «Ссылки на источники обязательны (URL)». Это касается ВСЕХ открытий (авто + ручной).
 
 ```bash
-FILE="$(ls ~/IWE/DS-my-strategy/current/DayPlan\ *.md 2>/dev/null | head -1)"
+FILE="$(ls ~/IWE/DS-my-strategy/current/DayPlan\ *.md 2>/dev/null | sort | tail -1)"
 echo "=== Проверка: Мир должен содержать минимум одну ссылку ==="
 
 # Извлечь секцию Мир
@@ -150,7 +304,7 @@ fi
 > **Триггер:** фразы «отложено», «отложена», «пропущено», «пропустим», «жёсткий ТОС», «не успел», «не запускался» в секциях Мир/Scout/Календарь/Видео БЕЗ соответствующего `enabled: false` в конфиге = НАРУШЕНИЕ.
 
 ```bash
-FILE="$(ls ~/IWE/DS-my-strategy/current/DayPlan\ *.md 2>/dev/null | head -1)"
+FILE="$(ls ~/IWE/DS-my-strategy/current/DayPlan\ *.md 2>/dev/null | sort | tail -1)"
 CFG="$HOME/IWE/memory/day-rhythm-config.yaml"
 echo "=== Проверка: запрещён тихий пропуск секций с enabled:true ==="
 
@@ -182,9 +336,13 @@ check_section "Видео" "video"
 > **Источник:** 3 дня подряд (15-17 мая) пропускался шаг 5e extensions/day-open.after.md. При N>0 pending-review extraction-reports секция `📚 KE-кандидаты` ОБЯЗАНА присутствовать в DayPlan.
 
 ```bash
-FILE="$(ls ~/IWE/DS-my-strategy/current/DayPlan\ *.md 2>/dev/null | head -1)"
+FILE="$(ls ~/IWE/DS-my-strategy/current/DayPlan\ *.md 2>/dev/null | sort | tail -1)"
 REPORTS_DIR="$HOME/IWE/DS-my-strategy/inbox/extraction-reports"
-PENDING=$(grep -rl "status: pending-review" "$REPORTS_DIR"/*.md 2>/dev/null | wc -l | tr -d ' ')
+# `|| true`: под pipefail (наследуется от day-open-checks-runner.sh) статус пайпа —
+# статус самой правой упавшей команды. При 0 pending-report'ов (штатный случай)
+# grep -rl вернёт 1, и это молча оборвёт блок ДО echo/if под set -e — тот же
+# класс бага, что NA_COUNT/OPENS/STALE выше (WP-5 Ф2 09.07).
+PENDING=$(grep -rl "status: pending-review" "$REPORTS_DIR"/*.md 2>/dev/null | wc -l | tr -d ' ' || true)
 echo "KE_PENDING=$PENDING"
 if [ "$PENDING" -gt 0 ]; then
   if grep -q "KE-кандидаты" "$FILE" 2>/dev/null; then
@@ -199,6 +357,28 @@ fi
 ```
 
 - [ ] Если `KE_PENDING > 0` — секция `### 📚 KE-кандидаты` есть в DayPlan. Если нет — вернуться к шагу 5e extensions/day-open.after.md и дописать.
+
+### 🔴 БЛОКИРУЮЩАЯ ПРОВЕРКА: KE-очередь — согласованность параллельных источников (bug-2026-07-12)
+
+> **Источник:** `day-open-smoke.sh` и `ke-queue-stats.sh` считают одну и ту же метрику (KE-очередь: count + oldest_age_days) разными способами фильтрации. 12.07.26 расхождение (132/44д против 9/0д) попало в DayPlan и было замечено только пилотом при ручной сверке. Оба скрипта приведены к одной логике фильтрации, но проверка нужна на случай будущего дрейфа одного из них.
+
+```bash
+echo "=== Проверка: KE-очередь — согласованность day-open-smoke.sh vs ke-queue-stats.sh ==="
+SMOKE_JSON=$(bash ~/IWE/DS-my-strategy/scripts/day-open-smoke.sh 2>/dev/null)
+STATS_JSON=$(bash ~/IWE/DS-my-strategy/scripts/ke-queue-stats.sh 2>/dev/null)
+SMOKE_COUNT=$(echo "$SMOKE_JSON" | python3 -c "import json,sys; print(json.load(sys.stdin)['ke_count'])" 2>/dev/null)
+SMOKE_OLDEST=$(echo "$SMOKE_JSON" | python3 -c "import json,sys; print(json.load(sys.stdin)['ke_oldest_days'])" 2>/dev/null)
+STATS_COUNT=$(echo "$STATS_JSON" | python3 -c "import json,sys; print(json.load(sys.stdin)['count'])" 2>/dev/null)
+STATS_OLDEST=$(echo "$STATS_JSON" | python3 -c "import json,sys; print(json.load(sys.stdin)['oldest_age_days'])" 2>/dev/null)
+if [ -z "$SMOKE_COUNT" ] || [ -z "$STATS_COUNT" ]; then
+  echo "  ⚠️ KE-очередь: не удалось прочитать один из источников (smoke='$SMOKE_JSON', stats='$STATS_JSON') — пропуск, не блокирует"
+elif [ "$SMOKE_COUNT" = "$STATS_COUNT" ] && [ "$SMOKE_OLDEST" = "$STATS_OLDEST" ]; then
+  echo "  ✅ KE-очередь: источники согласованы ($STATS_COUNT отчётов, oldest ${STATS_OLDEST}д)"
+else
+  echo "  ❌ KE-очередь: расхождение — day-open-smoke.sh(count=$SMOKE_COUNT,oldest=$SMOKE_OLDEST) vs ke-queue-stats.sh(count=$STATS_COUNT,oldest=$STATS_OLDEST). COMMIT БЛОКИРОВАН — один из скриптов считает неверно, свериться перед записью в DayPlan."
+  exit 1
+fi
+```
 
 ### Carry-over заметок
 
@@ -233,7 +413,7 @@ fi
 ### 🟡 ПРОВЕРКА: Календарь — данные или явный PENDING (bug-2026-05-19)
 
 ```bash
-FILE="$(ls ~/IWE/DS-my-strategy/current/DayPlan\ *.md 2>/dev/null | head -1)"
+FILE="$(ls ~/IWE/DS-my-strategy/current/DayPlan\ *.md 2>/dev/null | sort | tail -1)"
 echo "=== Проверка: календарь — данные или явный PENDING ==="
 if grep -q "проверить вручную" "$FILE" && ! grep -qE '\| [0-9]{2}:[0-9]{2} \|' "$FILE"; then
   echo "  🟡 Календарь: содержит fallback без реальных данных — требует внимания"
@@ -249,7 +429,7 @@ fi
 > **Источник косяка:** 24 мая Day Open пропустил 4 LLM/external-шага (Горлышко недели, News Lens вывод, smoke-тесты бота, URL для «Мир»). Эти шаги невидимы bash-скаффолду — проверка только по grep содержимого, не по названию секции.
 
 ```bash
-FILE="$(ls ~/IWE/DS-my-strategy/current/DayPlan\ *.md 2>/dev/null | head -1)"
+FILE="$(ls ~/IWE/DS-my-strategy/current/DayPlan\ *.md 2>/dev/null | sort | tail -1)"
 CFG="$HOME/IWE/memory/day-rhythm-config.yaml"
 echo "=== Проверка: LLM-шаги Day Open ==="
 VIOLATIONS=0
@@ -296,7 +476,16 @@ else
 fi
 
 # 4. Запрет (n/a) как валидного URL
-NA_COUNT=$(grep -c '\](n/a)' "$FILE" 2>/dev/null || echo 0)
+# grep -c печатает "0" (не пусто) даже без совпадений, но выходит с кодом 1.
+# `|| echo 0` тогда дублировал вывод ("0\n0" → integer expression expected);
+# просто убрать `|| echo 0` тоже не годится — под set -e (day-open-checks-
+# runner.sh запускает каждый блок в `( set -e; eval ... )`) само присваивание
+# `VAR=$(cmd_с_кодом_1)` молча обрывает блок ДО этой строки, даже если
+# значение уже корректно легло в переменную. Только `|| true` даёт и верное
+# значение, и не убивает блок (найдено 2026-07-09, WP-5 Ф2 — тот же класс
+# "проверка никогда не запускалась", вскрылось только после починки runner'а
+# от бага с NUL-разделителем; первая правка этой строки была неполной).
+NA_COUNT=$(grep -c '\](n/a)' "$FILE" 2>/dev/null || true)
 if [ "$NA_COUNT" -gt 0 ]; then
   echo "  ❌ Найдено $NA_COUNT ссылок [...](n/a) — заглушка не валидна, COMMIT БЛОКИРОВАН"
   echo "       Используй WebSearch fallback или удали ссылку с пометкой '⚠️ нет источника'"
@@ -317,7 +506,10 @@ fi
 
 ```bash
 TODAY=$(date +%Y-%m-%d)
-STALE=$(ls "$HOME/IWE/DS-my-strategy/current/" 2>/dev/null | grep -E "^DayPlan [0-9]{4}-[0-9]{2}-[0-9]{2}\.md$" | grep -v "$TODAY")
+# `|| true`: без него, ноль зависших планов (штатный случай) даёт grep -v exit 1,
+# и под set -e присвоение молча обрывает блок до if — тот же класс бага, что
+# markdown-ссылки/OPENS-SUMMARIES выше (WP-5 Ф2 09.07).
+STALE=$(ls "$HOME/IWE/DS-my-strategy/current/" 2>/dev/null | grep -E "^DayPlan [0-9]{4}-[0-9]{2}-[0-9]{2}\.md$" | grep -v "$TODAY" || true)
 if [ -n "$STALE" ]; then
   echo "  ❌ Зависшие DayPlan в current/:"
   while IFS= read -r f; do
@@ -340,7 +532,7 @@ fi
 > **Markеr:** генератор `bottleneck-section-from-yaml.sh` вставляет `<!-- BY-SCRIPT: bottleneck-section-from-yaml.sh -->` в начало выжимки. Ручная запись маркера не имеет.
 
 ```bash
-FILE="$(ls ~/IWE/DS-my-strategy/current/DayPlan\ *.md 2>/dev/null | head -1)"
+FILE="$(ls ~/IWE/DS-my-strategy/current/DayPlan\ *.md 2>/dev/null | sort | tail -1)"
 TODAY=$(date +%Y-%m-%d)
 DOW=$(date +%u)  # 1=Mon ... 7=Sun
 CFG="$HOME/IWE/memory/day-rhythm-config.yaml"
@@ -360,7 +552,15 @@ elif [ -n "$STRATEGY_DAY" ] && [ "$STRATEGY_DAY" = "$TODAY_DOW" ]; then
 fi
 
 if [ "$SKIP" = "false" ]; then
-  if grep -q "Горлышко недели" "$FILE"; then
+  # Честный fallback-маркер (day-open-bottleneck-patch.sh, WP-484 Ф2): headless-конвейер
+  # не может вызвать LLM-скилл /bottleneck-pick сам, и вместо часового блока каждую ночь
+  # (эмпирически: маркер BY-SCRIPT встретился только в 6 из 139 архивных DayPlan) честно
+  # помечает секцию как отложенную. Никто не выдаёт чужую работу за свою — в отличие от
+  # рукописного текста без обоих маркеров (ветка ниже), эту ветку не за что блокировать,
+  # но и молчать про неё нельзя — 🟡 в «Требует внимания» видимый, не блокирующий.
+  if grep -q "<!-- BOTTLENECK-PENDING:" "$FILE"; then
+    echo "  🟡 Bottleneck: честный маркер BOTTLENECK-PENDING — требует ручного /bottleneck-pick, не блокирует"
+  elif grep -q "Горлышко недели" "$FILE"; then
     # Проверка 1: маркер BY-SCRIPT в выжимке
     if grep -q "<!-- BY-SCRIPT: bottleneck-section-from-yaml.sh -->" "$FILE"; then
       echo "  ✅ Bottleneck: выжимка содержит маркер BY-SCRIPT"
@@ -373,7 +573,10 @@ if [ "$SKIP" = "false" ]; then
       exit 1
     fi
     # Проверка 2: weekplan-YAML за сегодня существует (workflow day-open.after.md использует именно weekplan)
-    YAML_FILE=$(ls "$RUNS_DIR/$TODAY-weekplan"*.yaml 2>/dev/null | head -1)
+    # `|| true`: под pipefail отсутствие файла (ls вернёт 1 на нераскрытый glob)
+    # молча оборвёт блок ДО if — тогда пропадает конкретный текст исправления,
+    # остаётся только глухое "N block(s) failed" (тот же класс бага, WP-5 Ф2 09.07).
+    YAML_FILE=$(ls "$RUNS_DIR/$TODAY-weekplan"*.yaml 2>/dev/null | head -1 || true)
     if [ -z "$YAML_FILE" ]; then
       echo "  ❌ Bottleneck: weekplan-YAML за $TODAY не найден в $RUNS_DIR/"
       echo "       Исправь: запусти /bottleneck-pick --target weekplan --layer intra --horizon week --depth 1"
@@ -426,6 +629,88 @@ exit 0
 ```
 
 - [ ] WP-REGISTRY deep-check выполнен. При orphan_count > 0 — упомянуть в DayPlan «Требует внимания».
+
+### 🔴 БЛОКИРУЮЩАЯ ПРОВЕРКА: Таблица плана — без шаблонных заглушек (bug Block DOF, 2026-07-09)
+
+> **Источник:** WP-7 Block DOF. `fill_chunk()` в `day-open-llm-fill.py` сравнивал с тегом-обёрткой
+> вместо содержимого куска, поэтому секция «План на сегодня» не заполнялась и уходила в коммит
+> с примером-заглушкой из скаффолда (`day-open-scaffold.sh:1003`):
+> `| 🔴 | С | NNN | **<!-- PENDING -->** | X | pending |`. Ни один существующий чек этого не
+> ловил — баг нашёлся только потому, что пилот прямо спросил про полноту открытия дня.
+
+```bash
+FILE="$(ls ~/IWE/DS-my-strategy/current/DayPlan\ *.md 2>/dev/null | sort | tail -1)"
+PLAN_TABLE=$(awk '/<summary><b>План на сегодня<\/b><\/summary>/{f=1} f&&/^\|/{print} f&&/<\/details>/{exit}' "$FILE")
+echo "=== Проверка: таблица плана без шаблонных заглушек (Block DOF) ==="
+if printf '%s\n' "$PLAN_TABLE" | grep -qE '\| *NNN *\||<!-- PENDING -->|\| *X *\|'; then
+  echo "  ❌ КРИТИЧЕСКИЙ: таблица «План на сегодня» содержит шаблонную заглушку (NNN/X/PENDING) вместо реальных данных — COMMIT БЛОКИРОВАН"
+  echo "       Тот же дефект, что Block DOF: fill_chunk() не заполнил секцию, ушёл пример-заглушка."
+  exit 2
+else
+  echo "  ✅ Таблица плана: заглушек не найдено"
+fi
+```
+
+- [ ] Таблица «План на сегодня» не содержит `NNN`, `<!-- PENDING -->` или одиночный `X` вместо реального номера/часов. Если ❌ — commit заблокирован.
+
+### 🔴 БЛОКИРУЮЩАЯ ПРОВЕРКА: «физ» в бюджете дня — не fallback-заглушка (bug-2026-07-16)
+
+> **Источник:** `day-open-budget-patch.py` при отсутствии `phys_hours` в `priorities.yaml`
+> молча подставляет физ = сумма РП (`h_phys = read_phys_hours(...) or h_rp`) → «Плановый
+> мультипликатор ~1.0x». Это не прогноз, а копия суммы: физически невозможное число
+> (36h/36h) для одного дня. 2 из последних 10 открытий (15.07, 11.07) прошли с этой
+> заглушкой, ни один существующий чек её не поймал — старая проверка бюджета (см. ниже)
+> сверяет только формат строки, не содержание. Найдено пилотом напрямую вопросом
+> про полноту открытия — тот же класс, что Block DOF (bug-2026-07-09).
+
+```bash
+FILE="$(ls ~/IWE/DS-my-strategy/current/DayPlan\ *.md 2>/dev/null | sort | tail -1)"
+PRIO="$HOME/IWE/DS-my-strategy/current/priorities.yaml"
+echo "=== Проверка: «физ» в бюджете дня — не fallback-заглушка ==="
+if ! grep -qE "^phys_hours:" "$PRIO" 2>/dev/null; then
+  echo "  ❌ phys_hours не задан в priorities.yaml — budget-patch.py подставит физ = РП (fallback 1.0x). COMMIT БЛОКИРОВАН"
+  echo "       Исправь: добавь 'phys_hours: N' (реалистичная оценка часов на сегодня, потолок пилота — 9ч) в priorities.yaml"
+  exit 1
+fi
+H_PHYS=$(grep -oE '~[0-9.]+h физ' "$FILE" 2>/dev/null | grep -oE '[0-9.]+' | head -1)
+if [ -n "$H_PHYS" ]; then
+  OVER=$(awk -v h="$H_PHYS" 'BEGIN{print (h>14)?1:0}')
+  if [ "$OVER" = "1" ]; then
+    echo "  ❌ «физ» = ${H_PHYS}h — физически невозможно для одного дня (потолок пилота: 9ч). COMMIT БЛОКИРОВАН"
+    exit 1
+  fi
+  echo "  ✅ «физ» = ${H_PHYS}h — в пределах разумного"
+else
+  echo "  ⚠️ Не удалось извлечь «физ» из строки бюджета — проверь вручную"
+fi
+```
+
+- [ ] `priorities.yaml` содержит `phys_hours:` (не fallback-дефолт). «Физ» в DayPlan ≤14ч (потолок пилота — 9ч, выше — предупреждение). Если ❌ — commit заблокирован.
+
+### 🟡 ПРОВЕРКА: раздел здоровья РП-470 (Сон/Пульс) в «Итоги вчера» (bug-2026-07-17)
+
+> **Источник:** DayPlan 16.07 собрался без строки «Сон/Пульс покоя» вовсе — ни данных,
+> ни явного «нет данных». Источник (`health.db` + `day-open.summary-extra.sh`) в тот же
+> день работал исправно (ручной прогон хука дал результат) — шаг молча пропал внутри
+> самой сборки, и ни один из существующих 19 пунктов чек-листа этого не ловил.
+> Не blocking (данных может честно не быть) — но полное отсутствие строки при
+> исполняемом хуке стоит явно предупредить, а не пропускать тихо.
+
+```bash
+FILE="$(ls ~/IWE/DS-my-strategy/current/DayPlan\ *.md 2>/dev/null | sort | tail -1)"
+echo "=== Проверка: раздел здоровья (РП-470) в «Итоги вчера» ==="
+if [ -x "$HOME/IWE/extensions/day-open.summary-extra.sh" ]; then
+  if grep -qE '\*\*Сон:\*\*|Сон и пульс покоя: нет данных' "$FILE"; then
+    echo "  ✅ Раздел здоровья: присутствует (данные или явное «нет данных»)"
+  else
+    echo "  ⚠️ Раздел здоровья (РП-470) отсутствует целиком, хотя хук исполняемый — проверь day-open.summary-extra.sh (лог: logs/day-open-summary-extra.err.log)"
+  fi
+else
+  echo "  ℹ️ day-open.summary-extra.sh не установлен -- пропуск (не авторская конфигурация)"
+fi
+```
+
+- [ ] Если `extensions/day-open.summary-extra.sh` исполняемый -- в «Итоги вчера» либо данные, либо явное «нет данных» (WP-470), не тихий пропуск.
 
 ### Git
 

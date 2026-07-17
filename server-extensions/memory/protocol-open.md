@@ -1,38 +1,31 @@
 ---
 valid_from: 2026-04-07
 originSessionId: 9a0e726a-951e-4408-9e02-94d7eeffbf74
-
 type: protocol
 horizon: warm
 domains: [protocol]
 status: active
 owner: user
 schema_version: 1
-
 name: "Протокол: open"
 description: "Протокол ОРЗ — пошаговые инструкции для ритуала"
 ---
 # Протокол Open (ОРЗ-фрактал)
 
 > **Два масштаба:** День и Сессия. Триггер определяет масштаб.
-> **Источник:** CLAUDE.md § 2 (slim) → этот файл.
-
+> **Источник:** CLAUDE.md § 2 (slim) → этот файл. **CGUS (WP-481 Ф5):** порядок шагов ниже = порядок удержания внимания, НЕ порядок исполнения. `[[gate]]`/`[[gate:AR.NNN]]` = предусловие «без этого работы нет» (блокирует); `[[narrative]]` = демонстрационный порядок (skippable). Вход «с середины» штатен, если все gate соблюдены.
 
 ## § Масштаб: День → skill `/day-open`
 
-> **Триггер:** «открывай» / «открывай день». Полный алгоритм → `.claude/skills/day-open/SKILL.md`.
-> **Исполнение:** пошагово через TodoWrite (каждый шаг = задача, блокирующее). Аналогично Close.
+> **Триггер:** «открывай» / «открывай день». Полный алгоритм → `.claude/skills/day-open/SKILL.md`. **Исполнение:** пошагово через TodoWrite (каждый шаг = задача, блокирующее). Аналогично Close.
 
 > **Вчерашний WakaTime (pending-мультипликатор):** в шаге 1 «Вчера» — проверить наличие `day_close` записи за вчера в Neon (`domain_event WHERE event_type='day_close' AND external_id='day-close-{вчера}'`). Если отсутствует: запросить WakaTime API `summaries?start={вчера}&end={вчера}` → пересчитать мультипликатор → дозаписать в domain_event. Причина: `--today` CLI не даёт данных за прошлый день (WP-299 Ф4 п.3).
 
-
 ## § Масштаб: Сессия (Session Open)
 
-> **Триггер:** Любое задание (кроме Day Open/Close).
-> **Роль:** R6 Кодировщик.
-> **Handoff:** WP context file = Human→Agent handoff. «Осталось» = Agent→Agent handoff.
+> **Триггер:** Любое задание (кроме Day Open/Close). **Роль:** R6 Кодировщик. **Handoff:** WP context file = Human→Agent handoff; «Осталось» = Agent→Agent handoff.
 
-### Шаг 0. Маршрутизатор (DP.ROLE.059) — перед WP Gate
+### Шаг 0. Маршрутизатор (DP.ROLE.059) — перед WP Gate · [[narrative]]
 
 > **Применять если:** входящий запрос содержит routing-tag (`skill=X`, `/X`, явный executor-hint).
 > **Пропустить (перейти к WP Gate):** свободный текст без явного тега — сначала нужно определить РП.
@@ -41,29 +34,22 @@ description: "Протокол ОРЗ — пошаговые инструкци�
 IWE_EXECUTOR_CATALOG=~/IWE/DS-my-strategy/scripts/executor-catalog.yaml \
 bash ~/IWE/scripts/route-task.sh --skill <skill-name>
 ```
-
 **Если тег задан** → Маршрутизатор находит `executor` в executor-catalog.yaml → запускает нужный путь:
-- `executor: script` → прямой вызов script_path (без LLM)
-- `executor: haiku|sonnet|opus` → передать задание нужной модели через SKILL.md
-- `executor: mcp-direct` → вызвать MCP инструмент напрямую
+- `executor: script` → прямой вызов script_path (без LLM); `haiku|sonnet|opus` → передать задание нужной модели через SKILL.md; `mcp-direct` → вызов MCP-инструмента напрямую
 
 **Если тега нет** → вызвать `/artifactor` (DP.ROLE.058) — преобразует сырой запрос в structured request с routing-тегом:
 
 ```bash
 python3 "${IWE_SCRIPTS:-$HOME/IWE/scripts}/artifactor.py" "$REQUEST"
-# exit 0 → JSON, используй routing_tag
-# exit 1 → INSUFFICIENT_INPUT, запросить уточнение у пилота
-# exit 2 → NO_KEYWORD_MATCH, применить LLM-классификацию из SKILL.md
+# exit 0 → JSON (routing_tag) · 1 → INSUFFICIENT_INPUT (уточнить у пилота) · 2 → NO_KEYWORD_MATCH (LLM-классификация из SKILL.md)
 ```
-
 Результат (`structured request` с `routing_tag`) передать обратно в Маршрутизатор. Триггер Артефактора: запрос расплывчат, нет чёткого скилла, нет РП-привязки. **Не вызывать исполнителя напрямую из Артефактора.**
 
-### WP Gate (блокирующее)
+### WP Gate (блокирующее) · [[gate:AR.001]]
 
 **ДО ЛЮБОГО ДЕЙСТВИЯ.**
 
-1. Прочитать MEMORY.md → «РП текущей недели»
-2. Совпадает? → Да: п.3. Нет: шаг 2b.
+1. Прочитать MEMORY.md → «РП текущей недели». Совпадает? → Да: п.3. Нет: шаг 2b.
 2b. Не нашёл в MEMORY.md → grep WP-REGISTRY.md (полный список). Нашёл → п.3. Не нашёл → СТОП.
 
 **ЗАПРЕЩЕНО до проверки:** читать код, исследовать, планировать.
@@ -71,8 +57,8 @@ python3 "${IWE_SCRIPTS:-$HOME/IWE/scripts}/artifactor.py" "$REQUEST"
 #### Совпадает — работаем
 
 1. Ссылаемся на номер РП.
-2. **DayPlan Gate:** РП нет в DayPlan → добавить строку. strategy_day → пропустить.
-3. **Sync Gate (актуализация контекста РП).** Прочитать контекст РП и связанных РП → синхронизировать открытые фазы с тем, что фактически сделано. **Цель:** исключить дублирование работы, ложные блокеры, неверные оценки в Ритуале.
+2. **DayPlan Gate:** РП нет в DayPlan → добавить строку. strategy_day → пропустить. [[gate]]
+3. **Sync Gate (актуализация контекста РП).** Прочитать контекст РП и связанных РП → синхронизировать открытые фазы с тем, что фактически сделано. **Цель:** исключить дублирование работы, ложные блокеры, неверные оценки в Ритуале. [[gate]]
 
    **Race-guard:** если state-файл `.claude/state/wp-sync-<N>.done` существует И его mtime моложе 8 часов — пропустить (sync уже выполнен в этой сессии). Если файл есть, но mtime старше 8h — считать stale: `rm -f` и продолжить заново. Проверка: `find .claude/state/wp-sync-<N>.done -mmin -480 2>/dev/null` (пустой вывод = нет файла или stale → запускать; непустой = свежий → пропускать).
 
@@ -96,8 +82,7 @@ python3 "${IWE_SCRIPTS:-$HOME/IWE/scripts}/artifactor.py" "$REQUEST"
 #### Не совпадает — СТОП
 
 1. «Этой задачи нет в плане на неделю.»
-2. Вывести таблицу РП
-3. Спросить: артефакт, формулировка, репо, бюджет
+2. Вывести таблицу РП; спросить: артефакт, формулировка, репо, бюджет
 3.5. **Предложить связки с активными РП.** Прочитать WeekPlan W{N}.md → grep на тематические пересечения. Таблица: РП / сила (🔴 сильная / 🟡 средняя / 🟢 слабая) / тип (handoff, dependency, продукт-следствие, валидационный случай). Если ни одной связи >🟢 — отметить «РП изолирован» (сигнал: ревизировать формулировку).
 4. Предложить перестановку если бюджет ограничен
 5. Записать **в 5 мест** (атомарно): MEMORY.md, WP-REGISTRY.md, WeekPlan, WP-context file (`verification_class: trivial|closed-loop|open-loop|problem-framing`), Linear (`mcp__linear__create_issue`)
@@ -108,14 +93,14 @@ python3 "${IWE_SCRIPTS:-$HOME/IWE/scripts}/artifactor.py" "$REQUEST"
 - ≤15 мин, вопросы без изменений файлов, экстренные баг-фиксы
 - Второе задание в исключении → *«Перерастает в РП. Записать?»*
 
-
 ### Ритуал согласования
 
-**Шаг 1.** Объявить:
+**Шаг 1.** Объявить: [[gate:AR.001]]
 > **Роль пользователя:** [из 4 ролей HD #31]
 > **Роль Claude:** [DP.ROLE.001]
-> **Работа:** [что]
+> **Работа:** [что] — конкретный предмет текущего рассуждения (не «весь проект», если вопрос не о нём целиком); если существенно — окно/контекст, в котором ответ действует.
 > **РП:** [артефакт]
+> **Целевой переход состояния:** `{ось, из→в}` — permission/belonging/engagement/mastery (WP-457, State-Transition Gate). Ссылка на `states-map-draft.md` или declared FSM-owner; cross-axis — помечать `provisional` до ArchGate (Ф9). Опционально: `signal` — наблюдаемый признак подтверждения перехода (пример: `"нет спонтанных разлогинов 2 недели"`).
 > **Режим (ТВС):** [текущее / важное / срочное] — по конвейерной модели ([[Текущее ≠ Важное ≠ Срочное (ТВС)]])
 > **Класс:** [verification_class]
 > **Метод:** [как]
@@ -138,20 +123,19 @@ python3 "${IWE_SCRIPTS:-$HOME/IWE/scripts}/artifactor.py" "$REQUEST"
 
 **Переключение модели:** Вся сессия → `/model` (только пользователь). Sub-agent → только вниз (Opus→Sonnet/Haiku, Sonnet→Haiku).
 
-**Шаг 1c. Экзоскелетный режим** (problem-framing): 3 вопроса (Что? Зачем? Ограничения?) → 2-3 варианта подхода → пользователь выбирает.
+**Шаг 1c. Экзоскелетный режим** (problem-framing): 3 вопроса (Что? Зачем? Ограничения?) → 2-3 варианта подхода → пользователь выбирает. [[narrative]]
 
-**Шаг 2.** Дождаться согласования.
+**Шаг 2.** Дождаться согласования. [[gate:AR.001]]
 
-**Шаг 3.** Определить файлы/репо. Context file (`<governance-repo>/inbox/WP-{N}*.md`, например DS-my-strategy) — прочитать. Иерархия доверия: код → документы → WP context.
+**Шаг 3.** Определить файлы/репо. Context file (`<governance-repo>/inbox/WP-{N}/WP-{N}.md`, например DS-my-strategy) — прочитать. Иерархия доверия: код → документы → WP context. [[narrative]]
 
-**Шаг 4.** Регистрация в `<governance-repo>/inbox/open-sessions.log` (например DS-my-strategy): `YYYY-MM-DD HH:MM | WP-N | модель | описание`. Исключения — не регистрировать.
+**Шаг 4.** Регистрация в `<governance-repo>/inbox/open-sessions.log` (например DS-my-strategy): `YYYY-MM-DD HH:MM | WP-N | модель | описание`. Исключения — не регистрировать. [[gate]]
 
-**Шаг 4.5. Артефактор (автоматический).** Если класс ∈ {open-loop, problem-framing} И оценка ≥3h → выполнить `/artifactor` inline (без вопроса пользователю). Этапную карту вставить в WP context file (секция `## Этапы` в конец файла). Если класс trivial/closed-loop ИЛИ оценка <3h → пропустить молча.
+**Шаг 4.5. Артефактор (автоматический).** Если класс ∈ {open-loop, problem-framing} И оценка ≥3h → выполнить `/artifactor` inline (без вопроса пользователю). Этапную карту вставить в WP context file (секция `## Этапы` в конец файла). Если класс trivial/closed-loop ИЛИ оценка <3h → пропустить молча. [[narrative]]
 
-**EXTENSION POINT (protocol-open after):** `bash .claude/scripts/load-extensions.sh protocol-open after` — exit 0 → `Read` каждый файл из вывода (alphabetic) → выполнить. Exit 1 → пропустить. Поддерживает `extensions/protocol-open.after.md` И `extensions/protocol-open.after.<suffix>.md`.
+**EXTENSION POINT (protocol-open after):** `bash .claude/scripts/load-extensions.sh protocol-open after` — exit 0 → `Read` каждый файл из вывода (alphabetic) → выполнить. Exit 1 → пропустить. Поддерживает `extensions/protocol-open.after.md` И `extensions/protocol-open.after.<suffix>.md`. [[narrative]]
 
 > Продолжение работы над тем же РП — повторный Ритуал не нужен.
-
 
 ## Зонтичные РП
 
@@ -163,6 +147,5 @@ python3 "${IWE_SCRIPTS:-$HOME/IWE/scripts}/artifactor.py" "$REQUEST"
 - **Auto-triage (Grade 1):** helpful=false → Haiku classify → `feedback_triage` DB → TG alert
 - **Review (Grade 3):** structured report + 2 файловых intake
 - **Прямая команда:** «запиши замечание: X» → fleeting-notes.md
-
 
 <!-- Шаблоны DayPlan/WeekPlan вынесены в skill /day-open (lazy loading, экономия ~8K токенов) -->

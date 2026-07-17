@@ -269,46 +269,17 @@ fi
 > Динамический bottleneck-анализ на основе текущего WeekPlan + активных РП + git за 7д. Заменяет статическое «фокус недели» — обновляется каждое Day Open.
 > Вставляется как первая подсекция «Контекст недели», ПЕРЕД остальными элементами.
 
-**Автоматическая инъекция (WP-356, peer-сессия 2026-05-29-04):**
+**Автоматическая инъекция (WP-356, peer-сессия 2026-05-29-04; переведено на общий скрипт — WP-484 Ф2, 2026-07-13):**
+
+> Раньше эта инструкция инлайнила regex-вставку сама — её anchor (`**Контекст недели W`) разошёлся с фактической разметкой скаффолда (`<summary><b>Контекст недели`) и вставка молча no-op'илась почти всегда (эмпирически: маркер BY-SCRIPT встретился в 6 из 139 архивных DayPlan). Теперь и этот шаг, и headless-конвейер (`day-open-pipeline.sh` шаг 3.5) вызывают один и тот же исправленный скрипт — исправление в одном месте чинит оба пути.
 
 ```bash
 TODAY=$(date +%Y-%m-%d)
 DAYPLAN="$HOME/IWE/DS-my-strategy/current/DayPlan $TODAY.md"
-
-# 1. Idempotency: пропустить если маркер уже есть
-if grep -q "<!-- BY-SCRIPT: bottleneck-section-from-yaml.sh -->" "$DAYPLAN" 2>/dev/null; then
-  echo "✅ Bottleneck: маркер BY-SCRIPT уже есть — пропуск"
-else
-  # 2. Надёжный выбор последнего YAML по mtime (macOS: stat -f '%m %N')
-  RUNS_DIR="$HOME/IWE/DS-my-strategy/inbox/bottleneck-pick-runs"
-  LATEST_YAML=$(find "$RUNS_DIR" -name "*-weekplan*.yaml" -exec stat -f '%m %N' {} + 2>/dev/null \
-    | sort -n | tail -1 | cut -d' ' -f2-)
-  if [ -z "$LATEST_YAML" ]; then
-    echo "⚠️ Bottleneck: weekplan YAML не найден — вставка пропущена, заполнить вручную через /bottleneck-pick"
-  else
-    # 3. Сгенерировать выжимку с маркером BY-SCRIPT
-    SECTION=$(bash "$HOME/IWE/DS-my-strategy/scripts/bottleneck-section-from-yaml.sh" "$LATEST_YAML" 2>/dev/null)
-    # 4. Вставить в DayPlan по anchor "Горлышко недели" (python3 — portable на macOS)
-    python3 - "$DAYPLAN" "$SECTION" <<'PYEOF'
-import sys, re
-path = sys.argv[1]
-section = sys.argv[2]
-content = open(path).read()
-# Заменить блок от "Горлышко недели" до "Контекст недели W" (сохраняя заголовок недели)
-new_content = re.sub(
-    r'(\*\*Горлышко недели.*?\n)(.*?)(\*\*Контекст недели W)',
-    lambda m: m.group(1) + section.strip() + '\n\n' + m.group(3),
-    content, flags=re.DOTALL
-)
-if new_content != content:
-    open(path, 'w').write(new_content)
-    print('✅ Bottleneck: вставлен из', sys.argv[1].split('/')[-1])
-else:
-    print('⚠️ Bottleneck: anchor не найден — проверить структуру DayPlan')
-PYEOF
-  fi
-fi
+bash "$HOME/IWE/DS-my-strategy/scripts/day-open-bottleneck-patch.sh" "$DAYPLAN"
 ```
+
+Если YAML не найден, скрипт вставляет честный маркер `<!-- BOTTLENECK-PENDING -->` (не молчание) — `day-open.checks.md` показывает его как 🟡 в «Требует внимания», не блокирует commit.
 
 **Запрещено:** писать «Горлышко недели» руками — checks заблокируют commit (см. `day-open.checks.md` блок «🔴 Калибровка скилла /bottleneck-pick»). Источник правила: peer-сессия 2026-05-28-04-day-open-checks-fix, фикс косяка 24 мая (feedback_skill_manual_synthesis_bypass).
 
@@ -361,5 +332,74 @@ else
   echo "$RESP" | grep -q '"inserted"' && echo "✅ day_plan_opened → learning.domain_event" || echo "⚠️ emit: $RESP (non-blocking)"
 fi
 ```
+
+### 9. Контент — тема дня (WP-442 Ф9, L3 авторское)
+
+> Запускать в конце Day Open, после сборки DayPlan. Всегда: шаг встроен в LLM-сессию, не bash.
+> Источник истины предложений: `DS-Tseren-Brand/content/topic-log.yaml`
+
+**Шаг 9.1 — Проверить непринятые темы:**
+
+Прочитай `DS-Tseren-Brand/content/topic-log.yaml`. Для каждой записи со статусом `proposed`:
+- Вычисли возраст: сегодня − `proposed`
+- Если 3-7 дней: добавь в DayPlan строку `⚠️ Тема C-NNN «[hook]» ожидает ответа (N дней). Принять / отклонить?`
+- Если 7-14 дней: добавь строку `🔴 Тема C-NNN «[hook]» ожидает 7+ дней. Если неактуально — отклоняй (пишу rejected).`
+- Если >14 дней: обнови статус на `archived` прямо в файле (Edit), добавь в DayPlan информационную строку.
+
+**Шаг 9.2 — Сгенерировать тему дня:**
+
+Прочитай (без дополнительных API-вызовов — всё уже в сессии):
+1. `git log --oneline --since=7.days` для всех IWE-репо — что делал пилот
+2. Последние 2 файла `DS-my-strategy/current/Day-*.md` — контекст, место, настроение
+3. `DS-my-strategy/docs/Dissatisfactions.md` — стратегические неудовлетворённости
+4. `DS-Tseren-Brand/content/topic-log.yaml` — что уже предлагали (не повторять в пределах 14 дней)
+5. `DS-Tseren-Brand/08-content-themes.md` — таксономия O1-O6 для выравнивания
+
+Эвристика выравнивания: посмотри на последние 3 предложенные темы в topic-log. Если все из одной области — предложи из другой.
+
+Эвристика T3: если в topic-log нет записи `type: T3, status: accepted` за последние 14 дней → дополнительно предложи одну T3-тему (видео-скрипт) вместо резервной. Иначе — предлагай обе как T1.
+
+Сформируй 1 основную тему + 1 резервную в формате:
+
+```markdown
+## Контент — тема дня
+**Основная:** [O4/I3/T1] «Крючок-заголовок темы»
+Почему сейчас: <1 строка — связь с текущим контекстом пилота>
+
+**Резервная:** [O5/I5/T1] «Крючок-заголовок»
+```
+
+**Шаг 9.3 — Записать в трекер:**
+
+Добавь новую запись в `DS-Tseren-Brand/content/topic-log.yaml` (в список `topics:`):
+```yaml
+- id: C-NNN  # следующий номер после последнего
+  proposed: YYYY-MM-DD
+  area: OX
+  hypostasis: IX
+  type: TX
+  hook: "..."
+  why_now: "..."
+  status: proposed
+  accepted: null
+  published: null
+  draft_path: null  # path to video/ideas/ or content/posts/ file; set when file is created, not at acceptance
+  notes: ""
+```
+
+Вставь в конец DayPlan перед подписью блок в формате `<details>/<summary>` (совпадает со стилем всех секций DayPlan):
+```markdown
+<details>
+<summary><b>Контент — тема дня</b></summary>
+
+**Основная:** [O-код/I-код/T-код] «Крючок-заголовок темы»
+Почему сейчас: <1 строка — связь с контекстом>
+
+**Резервная:** [O-код/I-код/T-код] «Крючок-заголовок»
+
+</details>
+```
+
+**Ручной запрос:** если пилот пишет «дай темы» или «предложи контент» → выполни шаг 9.2 с 5 вариантами вместо 2. Записать только принятые (статус accepted сразу при выборе).
 
 <!-- /AUTHOR-ONLY -->

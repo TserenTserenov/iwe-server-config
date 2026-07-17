@@ -79,7 +79,13 @@ find_wp_file() {
   local found=""
 
   if [[ -d "$INBOX_DIR" ]]; then
-    found=$(grep -rl "^wp: ${num}$" "$INBOX_DIR" 2>/dev/null | head -1 || true)
+    # WP-434: canonical folder card inbox/WP-N/WP-N.md takes priority over any
+    # grep/glob match — issue #267 (a stale flat duplicate could otherwise win
+    # by filesystem order when both a folder card and a flat file exist).
+    found=$(find "$INBOX_DIR" -maxdepth 2 -path "*/WP-${num}/WP-${num}.md" 2>/dev/null | head -1 || true)
+    if [[ -z "$found" ]]; then
+      found=$(grep -rl "^wp: ${num}$" "$INBOX_DIR" 2>/dev/null | head -1 || true)
+    fi
     if [[ -z "$found" ]]; then
       found=$(find "$INBOX_DIR" -maxdepth 1 -name "WP-${num}.md" 2>/dev/null | head -1 || true)
     fi
@@ -102,7 +108,12 @@ find_wp_file() {
   fi
 
   if [[ -z "$found" && -d "$ARCHIVE_DIR" ]]; then
-    found=$(grep -rl "^wp: ${num}$" "$ARCHIVE_DIR" 2>/dev/null | head -1 || true)
+    # WP-434: same canonical-folder-first priority as the inbox branch above
+    # (issue #267 — archive previously had no folder-card preference at all).
+    found=$(find "$ARCHIVE_DIR" -maxdepth 2 -path "*/WP-${num}/WP-${num}.md" 2>/dev/null | head -1 || true)
+    if [[ -z "$found" ]]; then
+      found=$(grep -rl "^wp: ${num}$" "$ARCHIVE_DIR" 2>/dev/null | head -1 || true)
+    fi
     if [[ -z "$found" ]]; then
       found=$(find "$ARCHIVE_DIR" -maxdepth 1 -name "WP-${num}*.md" 2>/dev/null | head -1 || true)
     fi
@@ -263,7 +274,7 @@ main() {
     local test_num=""
     if [[ -d "$INBOX_DIR" ]]; then
       local first_wp
-      first_wp=$(find "$INBOX_DIR" -maxdepth 1 -name "WP-*.md" 2>/dev/null | sort | head -1 || true)
+      first_wp=$(find "$INBOX_DIR" -maxdepth 2 -name "WP-*.md" 2>/dev/null | sort | head -1 || true)
       if [[ -n "$first_wp" ]]; then
         test_num=$(basename "$first_wp" | grep -oE '^WP-[0-9]+' | grep -oE '[0-9]+' || true)
       fi

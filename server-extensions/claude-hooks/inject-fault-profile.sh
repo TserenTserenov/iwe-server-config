@@ -65,7 +65,7 @@ fi
 # Сформировать additionalContext
 CONTEXT="## 🧠 Профиль повторяющихся ошибок агента (n≥3 за историю сессий)
 
-Применить ДО первой Read/Write/Bash в сессии. Источник: \`agent_fault_remind.py --protocol open\` (база \`inbox/WP-316/f2-poc/iwe_memory.db\`).
+Применить ДО первой Read/Write/Bash в сессии. Источник: \`agent_fault_remind.py --protocol open\` (база \`exocortex/agent-fault-profile/iwe_memory.db\`).
 
 $RELEVANT
 

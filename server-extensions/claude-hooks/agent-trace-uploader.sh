@@ -25,6 +25,22 @@ SOURCE_NAME="agent-trace-recorder"
 CONCURRENT_UPLOADS="${AGENT_TRACE_UPLOAD_CONCURRENCY:-24}"
 CURL_TIMEOUT="${AGENT_TRACE_CURL_TIMEOUT:-30}"
 
+# VPN guard: warn if a VPN is routing default traffic. NordVPN (utun) breaks DNS for
+# *.aisystant.workers.dev / *.neon.tech, causing upload retries. We keep files for retry,
+# but the pilot should know why uploads are stalling.
+if [ "${SKIP_VPN_CHECK:-}" != "1" ]; then
+    _vpn_active=0
+    if command -v scutil >/dev/null 2>&1 && scutil --nc list 2>/dev/null | grep -qi "connected"; then
+        _vpn_active=1
+    elif netstat -rn -f inet 2>/dev/null | grep -E '^default' | grep -qE 'utun|ipsec|ppp'; then
+        _vpn_active=1
+    fi
+
+    if [ "$_vpn_active" -eq 1 ]; then
+        echo "WARNING: active VPN detected. Uploads to event-gateway may fail due to DNS issues; files will be retried. Disable VPN or set SKIP_VPN_CHECK=1 to silence." >&2
+    fi
+fi
+
 # Create dirs before anything writes into LOG_DIR (the pidfile lives there too).
 mkdir -p "$UPLOADED_DIR" "$MALFORMED_DIR" 2>/dev/null || exit 0
 

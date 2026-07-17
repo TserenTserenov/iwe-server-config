@@ -33,6 +33,13 @@ gates_rationale: "операционный скилл; WP Gate применим 
 
 Peer-сессия DP.SC.154 где Kimi = писатель, Claude = напарник. Запускается простой фразой. Включает ОРЗ Opening и Closing, turn-loop, эскалации, Decision Gate (зафиксировать vs реализовать → ревью → проверить → задеплоить), отложенную финализацию и верификацию.
 
+## Scope boundary — не подменяет решения, зарезервированные за пилотом (найдено 2026-07-07)
+
+> Peer-сессия пригодна для: технических решений, дизайна, code review, поиска компромисса между подходами, подготовки кандидатов к решению.
+> **НЕ пригодна** для решений, которые процесс явно закрепляет за человеком (например, R15 Валидатор в `/apply-captures` — accept/reject/defer кандидатов знания; R1 Стратег — приоритеты месяца). Согласие двух агентов между собой — не решение пилота, даже единогласное и хорошо обоснованное.
+>
+> Если задача внутри пир-сессии требует такого решения — писатель обязан остановиться и спросить пилота напрямую в текущем чате (не через turn-файл), прежде чем фиксировать результат. См. `.claude/skills/apply-captures/SKILL.md` раздел «R15 = живой пилот, не агент» и `DS-my-strategy/inbox/bugs/bug-2026-07-07-r15-decisions-bypassed-pilot.md` — прецедент, из-за которого добавлено это ограничение.
+
 ## Шаг 0. Режим
 
 Определить режим из `$ARGUMENTS`:
@@ -442,12 +449,14 @@ echo "$VERIFY_PROMPT" | bash "$HOME/IWE/${IWE_GOVERNANCE_REPO:-DS-strategy}/scri
 ```bash
 cd <repo path>
 git status --short
+# pathspec после `--`: commit ТОЛЬКО свои файлы. Bare `git commit` сметает
+# чужое pre-staged из общего индекса (mis-attribution, см. 2026-06-20-39).
 git add <specific files — НЕ git add . и НЕ git add -u>
 git commit -m "<type>(<scope>): <короткое описание>
 
 Refs: peer-session <SESSION_ID>
 Review iters: <REVIEW_ITER>
-Verify: PASS"
+Verify: PASS" -- <те же specific files>
 git push
 ```
 
@@ -783,11 +792,18 @@ INDEX_COUNT=$(grep -cF "| $SESSION_ID |" "sessions/00-index.md" || echo 0)
 test "$INDEX_COUNT" -eq 1 \
   || { echo "FAIL: 00-index.md: ожидается 1 запись для $SESSION_ID, найдено $INDEX_COUNT"; exit 1; }
 
-git add "sessions/$MONTH/$SESSION_ID/"
-git add "sessions/00-index.md"
-git add "sessions/$MONTH/${TODAY}-${SESSION_SLUG}.md"
-git commit -m "feat(peer): $SESSION_ID (kimi-writer) — <задача кратко>"
-git push
+# pathspec после `--`: commit ТОЛЬКО файлы сессии (mis-attribution, 2026-06-20-39)
+# PR flow (WP-436 Ф2): push to feature branch + auto-merge PR → branch protection on main.
+PATHS=("sessions/$MONTH/$SESSION_ID/" "sessions/00-index.md" "sessions/$MONTH/${TODAY}-${SESSION_SLUG}.md")
+BRANCH="peer/$SESSION_ID"
+git checkout -b "$BRANCH" 2>/dev/null || git checkout "$BRANCH"
+git add "${PATHS[@]}"
+git commit -m "feat(peer): $SESSION_ID (kimi-writer) — <задача кратко>" -- "${PATHS[@]}"
+git push origin "$BRANCH"
+gh pr create --title "feat(peer): $SESSION_ID" \
+  --body "Peer-сессия DP.SC.154. Kimi (writer) + Claude (peer)." \
+  --base main --auto-merge 2>/dev/null \
+  || echo "WARN: gh pr create failed — merge manually or check gh auth"
 ```
 
 Показать пилоту: «Сессия завершена. Отчёт: `sessions/$MONTH/$SESSION_ID/report.md`»

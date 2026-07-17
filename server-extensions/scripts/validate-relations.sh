@@ -16,7 +16,13 @@ checked=0
 with_related=0
 without_related=0
 
-for f in "$DIR"/WP-*.md; do
+# [wp-card-gather WP-434] only canonical cards: flat WP-*.md + folder WP-N/WP-N.md (not sub-files)
+wp_cards=("$DIR"/WP-*.md)
+for _d in "$DIR"/WP-*/; do
+  [ -d "$_d" ] || continue
+  _n=$(basename "$_d"); [ -f "${_d}${_n}.md" ] && wp_cards+=("${_d}${_n}.md")
+done
+for f in "${wp_cards[@]}"; do
   [ -f "$f" ] || continue
   checked=$((checked + 1))
 

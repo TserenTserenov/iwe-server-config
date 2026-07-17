@@ -6,8 +6,14 @@
 # НЕ покрывает: Claude-generated text без tool-use, Read файла с секретами.
 #
 # Bypass:
-#   - env CC_ALLOW_SECRETS=1
-#   - маркер `# secret-ok` в команде (для тестов паттернов)
+#   - env CC_ALLOW_SECRETS=1 (только из реального шелла пилота — хук читает
+#     свой процессный env, не текст ещё не выполненной команды, поэтому
+#     агент не может подставить это через саму Bash-команду)
+#
+# I9 (WP-458, 2026-07-17): маркер `# secret-ok` внутри команды убран —
+# агент сам формирует эту строку, значит мог сам же вписать маркер и снять
+# с себя же собственный стража. Единственный оставшийся bypass требует
+# переменной окружения, которую агент не контролирует.
 #
 # Лог решений: ~/IWE/.claude/logs/secret-leak-block.jsonl
 
@@ -41,15 +47,23 @@ command=$(echo "$input" | jq -r '.tool_input.command // empty' 2>/dev/null)
 [ "$tool_name" != "Bash" ] && exit 0
 [ -z "$command" ] && exit 0
 
-# Bypass: env var
-if [ -n "${CC_ALLOW_SECRETS:-}" ]; then
-  log_decision "bypass-env" "" "$(printf '%s' "$command" | head -c 80)"
-  exit 0
-fi
+# cmd_head для лога — РЕДАКТИРУЕМ секреты (B7.7c: сам лог не должен стать утечкой).
+# Вычисляется ДО любого bypass/exit — до 2026-07-17 bypass-env/bypass-marker
+# логировали "$command" как есть (72+4 живых секрета накопились в этом .jsonl
+# за 12 дней, пока CC_ALLOW_SECRETS=1 стоял в settings.local.json; редакция
+# постфактум + права 0600, см. WP-212 handoff).
+cmd_head=$(printf '%s' "$command" | head -c 200 | sed -E \
+  -e 's/napi_[A-Za-z0-9]{30,}/[REDACTED-NEON]/g' \
+  -e 's#postgresql(ql)?://[^:[:space:]]+:[^@[:space:]]{6,}@#postgresql://[REDACTED]@#g' \
+  -e 's/sk-ant-api[0-9]{2}-[A-Za-z0-9_-]{30,}/[REDACTED-ANTHROPIC]/g' \
+  -e 's/gh[poshru]_[A-Za-z0-9]{30,}/[REDACTED-GH]/g' \
+  -e 's/AKIA[0-9A-Z]{16}/[REDACTED-AWS]/g' \
+  -e 's/ust_[A-Za-z0-9]{20,}/[REDACTED-BS]/g' \
+  -e 's/[0-9]{8,10}:[A-Za-z0-9_-]{35}/[REDACTED-TG]/g')
 
-# Bypass: explicit marker
-if echo "$command" | grep -q '# secret-ok'; then
-  log_decision "bypass-marker" "" "$(printf '%s' "$command" | head -c 80)"
+# Bypass: env var (см. I9 note выше — единственный оставшийся путь)
+if [ -n "${CC_ALLOW_SECRETS:-}" ]; then
+  log_decision "bypass-env" "" "$cmd_head"
   exit 0
 fi
 
@@ -64,21 +78,11 @@ declare -a patterns=(
   "[0-9]{8,10}:[A-Za-z0-9_-]{35}|Telegram bot token"
 )
 
-# cmd_head для лога — РЕДАКТИРУЕМ секреты (B7.7c: сам лог не должен стать утечкой).
-cmd_head=$(printf '%s' "$command" | head -c 200 | sed -E \
-  -e 's/napi_[A-Za-z0-9]{30,}/[REDACTED-NEON]/g' \
-  -e 's#postgresql(ql)?://[^:[:space:]]+:[^@[:space:]]{6,}@#postgresql://[REDACTED]@#g' \
-  -e 's/sk-ant-api[0-9]{2}-[A-Za-z0-9_-]{30,}/[REDACTED-ANTHROPIC]/g' \
-  -e 's/gh[poshru]_[A-Za-z0-9]{30,}/[REDACTED-GH]/g' \
-  -e 's/AKIA[0-9A-Z]{16}/[REDACTED-AWS]/g' \
-  -e 's/ust_[A-Za-z0-9]{20,}/[REDACTED-BS]/g' \
-  -e 's/[0-9]{8,10}:[A-Za-z0-9_-]{35}/[REDACTED-TG]/g')
-
 for entry in "${patterns[@]}"; do
   p="${entry%%|*}"
   label="${entry##*|}"
   if echo "$command" | grep -qE "$p"; then
-    reason="Возможный секрет в Bash-команде (паттерн: $label). Если намеренно (тест/grep) — добавь '# secret-ok' в команду или запусти с CC_ALLOW_SECRETS=1. Если реальный секрет — НЕ передавай через arg, используй \$VAR из env / wrapper из ~/IWE/.secrets/."
+    reason="Возможный секрет в Bash-команде (паттерн: $label). Если намеренно (тест/grep) — попроси пилота запустить с CC_ALLOW_SECRETS=1 (агент сам этот bypass выставить не может). Если реальный секрет — НЕ передавай через arg, используй \$VAR из env / wrapper из ~/IWE/.secrets/."
     log_decision "deny" "$label" "$cmd_head"
     jq -n \
       --arg reason "$reason" \
@@ -98,7 +102,7 @@ read_tools='cat|tac|rev|nl|head|tail|less|more|grep|egrep|fgrep|xxd|hexdump|od|s
 sens_path='\.secrets/|\.railway/|\.env([^A-Za-z0-9]|$)|\.env\.|\.pem([^A-Za-z0-9]|$)|\.p12|\.pfx|/id_rsa|/id_ed25519|\.token([^A-Za-z0-9]|$)|-secret\.|/secrets\.|/credentials\.|\.netrc|wrangler\.toml'
 deny_read() {
   local why="$1"
-  local reason="Чтение секрет-файла через Bash заблокировано (B7.7c, $why). Цепочка рвётся ДО попадания значения в контекст. Используй значение через \$VAR/env, не читай файл. Разовый легитимный дебаг — CC_ALLOW_SECRETS=1 (явное решение пилота) или '# secret-ok' в команде."
+  local reason="Чтение секрет-файла через Bash заблокировано (B7.7c, $why). Цепочка рвётся ДО попадания значения в контекст. Используй значение через \$VAR/env, не читай файл. Разовый легитимный дебаг — CC_ALLOW_SECRETS=1, выставленный пилотом в реальном шелле."
   log_decision "deny-bash-read" "$why" "$cmd_head"
   jq -n --arg reason "$reason" \
     '{hookSpecificOutput: {hookEventName: "PreToolUse", permissionDecision: "deny", permissionDecisionReason: $reason}}'

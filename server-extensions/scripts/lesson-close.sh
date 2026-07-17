@@ -55,7 +55,7 @@ print(f"Updated: $FILE")
 PYEOF
 
 git add "$FILE"
-git commit -m "lesson-close: $DATE"
+git commit -m "lesson-close: $DATE" -- "$FILE"
 
 if [[ "$NO_PUSH" != "--no-push" ]]; then
   git push

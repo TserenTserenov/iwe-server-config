@@ -107,6 +107,7 @@ WP-NNN: pending-фазы (M):
 - Просмотреть `inbox/fleeting-notes.md` за неделю → маршрутизировать невыключенные.
 - Уроки сессий → MEMORY.md + thematic `lessons_*.md` (если есть).
 - Drift-scan недели: что в MEMORY.md устарело за 7 дней.
+- **Проверка полноты переноса перед архивацией (WP-5, 2026-07-10):** `bash {{IWE_SCRIPTS}}/check-wp-transfer-completeness.sh --all {{IWE_ROOT}}` по `inbox/WP-N/` — выводит `results_not_captured`-флаги (проставленные при закрытии без заполненного `results_in`) и файлы в подпапках без учёта в основном контекст-файле. Для каждого warning — пилот решает: (a) действительно нужен перенос знания, найти куда; (b) файл технический/устарел, можно оставить; (c) `results_in` заполнить постфактум. Не блокирует Close.
 
 ### 7. Платформенные шаги
 
@@ -208,13 +209,24 @@ echo "=== Hindsight log (last 20) ===" && cat ~/.iwe/hindsight.log 2>/dev/null |
 ### 11. Закоммитить governance-репо
 
 ```bash
-cd {{WORKSPACE_DIR}}/{{GOVERNANCE_REPO}} && git add -A && git commit -m "week-close: W{N} итоги q:{score}" && git push
+cd {{WORKSPACE_DIR}}/{{GOVERNANCE_REPO}}
+git status --short
+# НЕ git add -A/git add ./git add -u — AGENTS.md CRITICAL (может захватить работу других агентов)
+# Стейджить ТОЛЬКО файлы, изменённые в шагах 1-10 (в массив для pathspec):
+WC_FILES=(<каждый файл явным путём: WeekPlan, WeekReport, WP-REGISTRY, inbox/WP-*.md и т.д.>)
+git add "${WC_FILES[@]}"
+git diff --cached --name-only  # проверить scope — только week-close файлы
+# pathspec после `--`: commit ТОЛЬКО свои файлы, не подметаем чужой индекс
+git commit -m "week-close: W{N} итоги q:{score}" -- "${WC_FILES[@]}"
+git push
 ```
 
 ### 12. Верификация (Haiku R23)
 
+Перед запуском R23 — `bash .claude/hooks/rule-engine.sh check-trace-satisfaction --protocol memory/protocol-close.md --section "Week Close"` (WP-481 Ф5.1: 5 гейтов, размеченных в `protocol-close.md` §Week Close — Бэкап, Memory Validate, R-вопросник, Архивация done-WP, Обновить WeekPlan). Verdict block → вернуться на незакрытый gate, потом R23. JSON вердикта приложить к вводу R23.
+
 Запустить sub-agent Haiku в роли R23 Верификатор (context isolation).
-Передать: чеклист, итоги недели, список обновлённых файлов.
+Передать: чеклист, итоги недели, список обновлённых файлов, JSON вердикта trace-satisfaction.
 
 ---
 
@@ -239,7 +251,7 @@ cd {{WORKSPACE_DIR}}/{{GOVERNANCE_REPO}} && git add -A && git commit -m "week-cl
 - [ ] Governance-репо закоммичено
 - [ ] Peer-сессии недели: WP Gate проверен (только сессии с 2026-06-09):
   ```bash
-  find ~/IWE/DS-my-strategy/sessions -type f -name "peer-prompt.md" \
+  find ~/IWE/${IWE_GOVERNANCE_REPO:-DS-strategy}/sessions -type f -name "peer-prompt.md" \
     | awk -F/ '{d=$(NF-1); match(d,/^[0-9]{4}-[0-9]{2}-[0-9]{2}/); print substr(d,RSTART,RLENGTH) " " $0}' \
     | awk '$1 >= "2026-06-09" {print $2}' \
     | xargs -I{} sh -c 'grep -q "Открытие (WP Gate)" "{}" || echo "WP-GATE-MISS: {}"'
@@ -247,3 +259,6 @@ cd {{WORKSPACE_DIR}}/{{GOVERNANCE_REPO}} && git add -A && git commit -m "week-cl
   ```
 
 Все ✅ → «Неделя закрыта.» Иначе — указать что осталось.
+
+<!-- USER-SPACE -->
+<!-- /USER-SPACE -->

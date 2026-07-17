@@ -1,7 +1,7 @@
 ---
 name: lesson-close
-description: Закрыть занятие, открытое скиллом /lesson. Финализирует lesson/YYYY-MM-DD.md (frontmatter status, метаданные времени, длительность), делает commit + push в репо personal-guide. Триггерит замкнутый контур доставки — после push → GitHub webhook → bot oauth_server.py:/webhook/github/workbook → sync_one_user_to_dt → ЦД обновляется в Neon. Используй когда пилот говорит «закрываем», «всё», «закончили», «закрой урок» — или после явного завершения задания в /lesson.
-argument-hint: "[необязательно: дата урока YYYY-MM-DD; по умолчанию сегодня; либо --skipped если урок был пропущен; --no-push для локального commit без push]"
+description: Закрыть занятие, открытое скиллом /lesson. Финализирует lesson/YYYY-MM-DD.md (frontmatter status, метаданные времени, длительность), делает commit + push в репо personal-guide. Триггерит замкнутый контур доставки — после push → GitHub webhook → bot oauth_server.py:/webhook/github/workbook → sync_one_user_to_dt → ЦД обновляется в Neon. Используй когда пилот говорит «закрываем», «всё», «закончили», «закрой занятие» — или после явного завершения задания в /lesson.
+argument-hint: "[необязательно: дата занятия YYYY-MM-DD; по умолчанию сегодня; либо --skipped если занятие было пропущено; --no-push для локального commit без push]"
 experimental: true
 sunset: "после WP-301 Ф6 (E2E smoke) и WP-149 Block D (ИИ-агент-носитель Портного)"
 related: [WP-149, WP-175, WP-245, WP-301, lesson, PD.METHOD.008]
@@ -29,7 +29,7 @@ gates_rationale: "операционный скилл; WP Gate применим 
 
 ## When to use
 
-Закрыть занятие, открытое скиллом /lesson. Финализирует lesson/YYYY-MM-DD.md (frontmatter status, метаданные времени, длительность), делает commit + push в репо personal-guide. Триггерит замкнутый контур доставки — после push → GitHub webhook → bot oauth_server.py:/webhook/github/workbook → sync_one_user_to_dt → ЦД обновляется в Neon. Используй когда пилот говорит «закрываем», «всё», «закончили», «закрой урок» — или после явного завершения задания в /lesson.
+Закрыть занятие, открытое скиллом /lesson. Финализирует lesson/YYYY-MM-DD.md (frontmatter status, метаданные времени, длительность), делает commit + push в репо personal-guide. Триггерит замкнутый контур доставки — после push → GitHub webhook → bot oauth_server.py:/webhook/github/workbook → sync_one_user_to_dt → ЦД обновляется в Neon. Используй когда пилот говорит «закрываем», «всё», «закончили», «закрой занятие» — или после явного завершения задания в /lesson.
 
 ## Контракт скилла
 
@@ -60,7 +60,7 @@ bash "$IWE_SCRIPTS/route-task.sh" --skill lesson-close --args "<YYYY-MM-DD> [--n
 После успешного выполнения:
 
 ```
-✅ Урок закрыт.
+✅ Занятие закрыто.
 Статус: <status>
 Длительность: <duration_min> мин
 Коммит: <short_sha>
@@ -76,7 +76,7 @@ bash "$IWE_SCRIPTS/route-task.sh" --skill lesson-close --args "<YYYY-MM-DD> [--n
 
 | Ситуация | Действие |
 |---|---|
-| Урок со статусом `done` уже (повторный close) | Сообщи: «Урок уже закрыт. Если нужно переоткрыть — измени status: in_progress вручную или удали finished_at.» |
+| Урок со статусом `done` уже (повторный close) | Сообщи: «Занятие уже закрыто. Если нужно переоткрыть — измени status: in_progress вручную или удали finished_at.» |
 | Нет git remote / нет прав push | Сообщи и предложи проверить `git remote -v` и `gh auth status`. Финальный коммит локально остаётся. |
 | Merge-conflict при push | НЕ разрешать автоматически. Сообщи пилоту: «Кто-то ещё пушил в этот репо. Проверь: `git pull --rebase` и реши конфликт.» |
 | Очень короткое занятие (<3 мин) | Записать как обычно, не оценивать. Поле `duration_min` уйдёт в метрику. |

@@ -67,16 +67,39 @@ else
     [ -n "$TASK_ID" ] && CTX_SUMMARY="task:${TASK_ID}"
 
     NDJSON="${LOG_DIR}/${SESSION_UUID}.ndjson"
+    # WP-295 Ф3: if launched by iwe-multipath, tag this path with its parent run id.
+    MULTIPATH_PARENT="${MULTIPATH_PARENT_ID:-}"
+
     jq -nc \
         --arg sid "$SESSION_UUID" --arg aid "$AGENT_ID" --arg ts "$NOW" \
-        --arg ctx "$CTX_SUMMARY" --arg wp "$WP_ID" \
+        --arg ctx "$CTX_SUMMARY" --arg wp "$WP_ID" --arg mp "$MULTIPATH_PARENT" \
         '{event_type: "agent_session_start", schema_version: "v1", emitted_at: $ts, payload: {
             session_id: $sid,
             agent_id: $aid,
             started_at: $ts,
             context_summary: (if $ctx != "" then $ctx else null end),
-            wp_id: (if $wp != "" then $wp else null end)
+            wp_id: (if $wp != "" then $wp else null end),
+            multipath_parent_id: (if $mp != "" then $mp else null end)
         }}' >> "$NDJSON" 2>/dev/null || true
+
+    # WP-295 Ф2 C-full: link fork session to this new session (Variant A).
+    # Runs once at session creation only. Set FORK_SESSION_ID=<id> in env before
+    # starting a forked Claude session.
+    if [ -n "${FORK_SESSION_ID:-}" ]; then
+        if ! [[ "$FORK_SESSION_ID" =~ ^[0-9]+$ ]]; then
+            echo "WARN: FORK_SESSION_ID is not a valid integer: $FORK_SESSION_ID" >&2
+        elif ! [[ "$SESSION_UUID" =~ ^[0-9a-f-]{36}$ ]]; then
+            echo "WARN: SESSION_UUID is not a valid UUID: $SESSION_UUID" >&2
+        elif [ -n "${AGENT_TRACE_WRITER_URL:-}" ]; then
+            _FORK_RESULT=$(psql "$AGENT_TRACE_WRITER_URL" -t -c \
+                "UPDATE agent_trace.fork_session SET new_session_id = '$SESSION_UUID' WHERE id = $FORK_SESSION_ID" \
+                2>/dev/null || echo "UPDATE 0")
+            if [[ "$_FORK_RESULT" != *"UPDATE 1"* ]]; then
+                echo "WARN: fork_session id=$FORK_SESSION_ID not found or update failed; lineage NOT linked" >&2
+            fi
+            unset _FORK_RESULT
+        fi
+    fi
 fi
 
 NDJSON="${LOG_DIR}/${SESSION_UUID}.ndjson"

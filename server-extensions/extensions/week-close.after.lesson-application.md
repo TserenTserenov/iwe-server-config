@@ -4,7 +4,7 @@
 
 > **Источник:** WP-364 Развилка 1 РЕШЕНО (peer-сессия [2026-05-29-23-wp-364-daily-fork](../DS-my-strategy/sessions/2026-05/2026-05-29-23-wp-364-daily-fork/report.md)).
 >
-> **Принцип:** lesson в `personal-guide/lesson/YYYY-MM-DD.md` собирается под рабочие задачи пилота. Проверка обучения = наблюдение применения в рабочих репо. Без этого шага lesson превращается в декоративный артефакт «прочитал и забыл».
+> **Принцип:** lesson в `personal-guide/guide/YYYY-MM-DD.md` собирается под рабочие задачи пилота. Проверка обучения = наблюдение применения в рабочих репо. Без этого шага lesson превращается в декоративный артефакт «прочитал и забыл».
 
 ## Шаг: Чеклист «Применение lesson недели»
 
@@ -17,14 +17,10 @@ PERSONAL_GUIDE="$HOME/IWE/personal-guide"
 WEEK_START=$(date -v-mon +%Y-%m-%d 2>/dev/null || date -d "last monday" +%Y-%m-%d)
 WEEK_END=$(date +%Y-%m-%d)
 
-# Список lesson за неделю (lesson/ предпочтительнее daily/, пока миграция не завершена)
-LESSONS=$(find "$PERSONAL_GUIDE/lesson" "$PERSONAL_GUIDE/daily" -maxdepth 1 -name "*.md" 2>/dev/null | \
+# Список lesson за неделю (personal-guide/guide/, структура после rename lesson/→guide/, commit fb3c753)
+LESSONS=$(find "$PERSONAL_GUIDE/guide" -maxdepth 1 -name "*.md" 2>/dev/null | \
   awk -F/ -v start="$WEEK_START" -v end="$WEEK_END" \
-    '{ name=$NF; gsub(/\.md$/, "", name);
-       if (name >= start && name <= end) {
-         if (!seen[name]++ || $(NF-1) == "lesson") print
-       }
-     }')
+    '{ name=$NF; gsub(/\.md$/, "", name); if (name >= start && name <= end) print }')
 
 echo "Lesson за неделю:"
 echo "$LESSONS"
