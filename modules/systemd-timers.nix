@@ -129,6 +129,7 @@ let
       "DS-autonomous-agents"
       "DS-ecosystem-development"
       "DS-Knowledge-Index-Tseren"
+      "DS-principles-curriculum"
       "PACK-MIM"
       "PACK-agent-rules"
       "PACK-autonomous-agents"
