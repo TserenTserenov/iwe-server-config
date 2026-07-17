@@ -20,13 +20,14 @@ set -euo pipefail
 # === КОНФИГУРАЦИЯ (настроить при установке) ===
 # Load unified environment: WORKSPACE_DIR, IWE_ROOT, IWE_SCRIPTS, etc.
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=/dev/null
 source "$SCRIPT_DIR/../.claude/lib/iwe-env-bootstrap.sh" || exit 1
 GOVERNANCE_REPO="${GOVERNANCE_REPO:-${IWE_GOVERNANCE_REPO:-DS-strategy}}"
 DS_STRATEGY="$WORKSPACE_DIR/$GOVERNANCE_REPO"
-# Slug = $HOME с '/' → '-' (macOS: /Users/x → -Users-x; Linux/WSL: /home/x → -home-x).
-# Переопределить можно через env IWE_MEMORY_SRC (например, для нестандартного $HOME).
-HOME_SLUG=$(echo "$HOME" | tr '/' '-')
-MEMORY_SRC="${IWE_MEMORY_SRC:-$HOME/.claude/projects/${HOME_SLUG}-IWE/memory}"
+# Slug derived from WORKSPACE_DIR (not $HOME) so it matches Claude's project key
+# regardless of workspace location. Override via IWE_MEMORY_SRC if needed.
+WORKSPACE_SLUG=$(echo "$WORKSPACE_DIR" | tr '/_ ' '-')
+MEMORY_SRC="${IWE_MEMORY_SRC:-$HOME/.claude/projects/${WORKSPACE_SLUG}/memory}"
 EXOCORTEX_DST="$DS_STRATEGY/exocortex"
 # MCP reindex — опциональный компонент (WP-187 iwe-knowledge Gateway заменяет локальный knowledge-mcp).
 # Переопределить путь можно через env IWE_SELECTIVE_REINDEX.
@@ -74,18 +75,57 @@ do_backup() {
 
   # Mirror *.md/*.yaml/*.yml from auto-memory; --delete prunes files removed upstream.
   # CLAUDE.md is excluded so the workspace copy below isn't deleted by --delete.
-  rsync -a --delete \
+  # -L (copy-links) dereferences symlinks so target content is copied, not the link —
+  # prevents a self-referencing ELOOP symlink from recurring here (WP-7 DOC8).
+  # day-rhythm-config.yaml is excluded here and handled separately via merge (see below)
+  # to preserve user-configured keys (e.g. calendar_ids) from being overwritten by template defaults.
+  rsync -aL --delete \
     --exclude='CLAUDE.md' \
+    --exclude='day-rhythm-config.yaml' \
     --include='*.md' --include='*.yaml' --include='*.yml' \
     --exclude='*' \
     "$MEMORY_SRC/" "$EXOCORTEX_DST/"
 
+  # Merge day-rhythm-config.yaml: use auto-memory as base, preserve non-empty user values in dst.
+  # User-configurable keys protected: day_open.calendar_ids
+  local rhythm_src="$MEMORY_SRC/day-rhythm-config.yaml"
+  local rhythm_dst="$EXOCORTEX_DST/day-rhythm-config.yaml"
+  if [ -f "$rhythm_src" ]; then
+    if [ ! -f "$rhythm_dst" ]; then
+      cp "$rhythm_src" "$rhythm_dst"
+    else
+      python3 - "$rhythm_src" "$rhythm_dst" << 'PYEOF'
+import sys, yaml
+
+src_path, dst_path = sys.argv[1], sys.argv[2]
+with open(src_path) as f:
+    src_data = yaml.safe_load(f) or {}
+with open(dst_path) as f:
+    dst_data = yaml.safe_load(f) or {}
+
+merged = dict(src_data)
+
+# Preserve non-empty user values from dst (L4 config, user-editable keys)
+USER_KEYS = [("day_open", "calendar_ids")]
+for section, key in USER_KEYS:
+    dst_val = dst_data.get(section, {}).get(key)
+    if dst_val:  # preserve non-empty dst value over template default
+        merged.setdefault(section, {})[key] = dst_val
+
+with open(dst_path, "w") as f:
+    yaml.dump(merged, f, default_flow_style=False, allow_unicode=True)
+PYEOF
+    fi
+  fi
+
+  # issue #217: обратная подстановка $HOME -> {{HOME_DIR}} делает бэкап ОС-агностичным
+  # (симметрично прямой подстановке в setup.sh и restore-from-exocortex.sh).
   if [ -f "$WORKSPACE_DIR/CLAUDE.md" ]; then
-    cp "$WORKSPACE_DIR/CLAUDE.md" "$EXOCORTEX_DST/CLAUDE.md"
+    sed "s|$HOME|{{HOME_DIR}}|g" "$WORKSPACE_DIR/CLAUDE.md" > "$EXOCORTEX_DST/CLAUDE.md"
   fi
 
   if [ -f "$WORKSPACE_DIR/AGENTS.md" ]; then
-    cp "$WORKSPACE_DIR/AGENTS.md" "$EXOCORTEX_DST/AGENTS.md"
+    sed "s|$HOME|{{HOME_DIR}}|g" "$WORKSPACE_DIR/AGENTS.md" > "$EXOCORTEX_DST/AGENTS.md"
   fi
 
   local count
@@ -266,11 +306,13 @@ print(str(d.get('date','') or ''))
 }
 
 # --- Лог ---
+# Тайминги по шагам (WP-484 Ф2, тема 2) — сбор данных перед решением о staging-архитектуре
+# для ускорения Day Close: нужны реальные числа за несколько дней, не оценка на глаз.
 write_log() {
   local date_str
   date_str=$(date "+%Y-%m-%d %H:%M")
   mkdir -p "$(dirname "$LOG_FILE")"
-  echo "$date_str | day-close | backup=$1 reindex=$2 linear=$3 sessions=$4" >> "$LOG_FILE"
+  echo "$date_str | day-close | backup=$1(${5}s) reindex=$2(${6}s) linear=$3(${7}s) sessions=$4(${8}s)" >> "$LOG_FILE"
 }
 
 # --- Main ---
@@ -309,27 +351,37 @@ main() {
   log "=== Day Close (автоматические шаги) ==="
 
   local backup_status="skip" reindex_status="skip" linear_status="skip" sessions_status="skip"
+  local backup_dur=0 reindex_dur=0 linear_dur=0 sessions_dur=0
 
   if $run_backup; then
+    SECONDS=0
     if do_backup; then backup_status="ok"; else backup_status="fail"; fi
+    backup_dur=$SECONDS
   fi
 
   if $run_reindex; then
+    SECONDS=0
     if do_reindex; then reindex_status="ok"; else reindex_status="fail"; fi
+    reindex_dur=$SECONDS
   fi
 
   if $run_linear; then
+    SECONDS=0
     if do_linear; then linear_status="ok"; else linear_status="fail"; fi
+    linear_dur=$SECONDS
   fi
 
   if $run_sessions; then
+    SECONDS=0
     if do_session_consolidation; then sessions_status="ok"; else sessions_status="fail"; fi
+    sessions_dur=$SECONDS
   fi
 
-  write_log "$backup_status" "$reindex_status" "$linear_status" "$sessions_status"
+  write_log "$backup_status" "$reindex_status" "$linear_status" "$sessions_status" \
+    "$backup_dur" "$reindex_dur" "$linear_dur" "$sessions_dur"
 
   log "=== Готово ==="
-  log "  backup=$backup_status  reindex=$reindex_status  linear=$linear_status  sessions=$sessions_status"
+  log "  backup=$backup_status(${backup_dur}s)  reindex=$reindex_status(${reindex_dur}s)  linear=$linear_status(${linear_dur}s)  sessions=$sessions_status(${sessions_dur}s)"
 }
 
 main "$@"
