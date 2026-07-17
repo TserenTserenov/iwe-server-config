@@ -47,11 +47,11 @@ fi
 HR_STR=""
 [ -n "$HR" ] && HR_STR="${HR%.*} уд/мин"
 
-# Swimming — part of the 12-metric set the pilot approved 2026-07-15 (WP-470 Ф4), already
-# written to health.db by receiver/parse_to_sqlite.py, but never surfaced here until now
-# (bug found 2026-07-17). Optional line: silence on a non-swimming day is not a data gap.
-# Apple Watch reports one row per length/segment (confirmed live: 26 rows = 1000m on
-# 2026-07-15), so this sums the day instead of taking the latest row like HR/sleep above.
+# Swimming — part of the 12-metric set approved for WP-470 Ф4, already written to
+# health.db by receiver/parse_to_sqlite.py, but never surfaced here until now (bug
+# found 2026-07-17). Optional line: silence on a non-swimming day is not a data gap.
+# Apple Watch reports one row per length/segment, not one per day (verified against
+# live data), so this sums the day instead of taking the latest row like HR/sleep above.
 SWIM=$(sqlite3 "$DB" \
   "SELECT ROUND(SUM(qty), 0) FROM health_metrics
    WHERE metric_name='swimming_distance' AND substr(date,1,10)='$YDAY';" 2>>"$LOG") || SWIM=""
