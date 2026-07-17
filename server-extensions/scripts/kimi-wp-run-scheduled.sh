@@ -17,6 +17,11 @@ ID="${1:-}"
 [ -n "$ID" ] || { echo "ERROR: usage: kimi-wp-run-scheduled.sh <id>" >&2; exit 1; }
 
 IWE_ROOT="${IWE_ROOT:-$HOME/IWE}"
+# launchd runs this with a bare environment (no .claude/settings.json injection) —
+# without this, IWE_GOVERNANCE_REPO stays unset and session-guard.sh falls back
+# to the template default, misfiling sessions into the wrong directory.
+# shellcheck source=/dev/null
+source "$IWE_ROOT/.claude/lib/iwe-env-bootstrap.sh" || exit 1
 export PATH="/opt/homebrew/bin:/usr/local/bin:$HOME/.local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
 QUEUE_DIR="$IWE_ROOT/.iwe-runtime/wp-queue"
 QUEUE_FILE="$QUEUE_DIR/queue.tsv"
@@ -30,6 +35,14 @@ mkdir -p "$LOG_DIR"
 cd "$IWE_ROOT" || exit 1
 
 log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*" | tee -a "$LOG"; }
+
+# Sanity check: session-guard.sh writes sessions/open-sessions.log under this
+# repo blind — a wrong IWE_GOVERNANCE_REPO would misfile every session record
+# with no error. Refuse to proceed into a repo that doesn't look real instead.
+if [ ! -f "$IWE_ROOT/$IWE_GOVERNANCE_REPO/docs/WP-REGISTRY.md" ]; then
+  log "ERROR: IWE_GOVERNANCE_REPO='$IWE_GOVERNANCE_REPO' does not look like a real governance repo (no docs/WP-REGISTRY.md) — check IWE_GOVERNANCE_REPO in .exocortex.env"
+  exit 1
+fi
 
 # --- прочитать задание ------------------------------------------------------
 ROW=$(grep "^$ID"$'\t' "$QUEUE_FILE" || true)
@@ -84,7 +97,7 @@ if [ "$IS_TASK" = "1" ]; then
   PROMPT_FILE="$QUEUE_DIR/$ID.prompt"
 elif ! bash "$IWE_ROOT/scripts/session-guard.sh" open \
       --wp "$WP" --task "Scheduled run ($ID)" --slug "sched-$ID" \
-      --files "DS-my-strategy/inbox/$WP/$WP.md" --agent "$AGENT" >>"$LOG" 2>&1; then
+      --files "$IWE_GOVERNANCE_REPO/inbox/$WP/$WP.md" --agent "$AGENT" >>"$LOG" 2>&1; then
   log "ERROR: session-guard open failed"
   set_status failed; report_line failed "session-guard open failed"; cleanup; exit 1
 fi
@@ -97,11 +110,11 @@ if [ ! -f "$PROMPT_FILE" ]; then
   cat > "$PROMPT_FILE" <<EOF
 Автономный запуск по расписанию (планировщик WP-487, DP.SC.192). WP Gate для этого РП уже согласован пилотом заранее — Ритуал согласования не требуется, работай сразу.
 
-Задача: выполни рабочий продукт $WP. Первым делом прочитай контекст: ~/IWE/DS-my-strategy/inbox/$WP/$WP.md. Иерархия доверия: код → документы → WP context.
+Задача: выполни рабочий продукт $WP. Первым делом прочитай контекст: ~/IWE/$IWE_GOVERNANCE_REPO/inbox/$WP/$WP.md. Иерархия доверия: код → документы → WP context.
 
 Правила автономного прогона:
 - Работай только по этому РП, не начинай других задач.
-- Если заблокирован решением пилота — запиши blocker в frontmatter контекст-файла РП (DS-my-strategy/inbox/$WP/$WP.md) и завершись, не жди.
+- Если заблокирован решением пилота — запиши blocker в frontmatter контекст-файла РП ($IWE_GOVERNANCE_REPO/inbox/$WP/$WP.md) и завершись, не жди.
 - Git: стейджь только конкретные свои файлы (никаких git add -A/-u/.), trailer Co-Authored-By по своему агенту.
 - Не начинай операций, которые могут не уложиться в оставшееся время — тебя принудительно завершат по таймауту.
 - По завершении обнови статус фаз в frontmatter контекст-файла РП и запиши краткий итог в ORZ сессии.
