@@ -940,7 +940,10 @@ in
     # =========================================================
     # LLM HEALTH CHECK — end-to-end probe LLM endpoint
     # =========================================================
-    # Режимы: 1) LITELLM_PROXY_URL → /v1/chat/completions; 2) ANTHROPIC_API_KEY → прямой Anthropic.
+    # Режимы: 1) LITELLM_PROXY_URL → /v1/chat/completions; 2) ANTHROPIC_API_KEY (+ опционально
+    # ANTHROPIC_BASE_URL) → Anthropic Messages API, напрямую или через шлюз iwe-llm-proxy.
+    # Здесь используем режим 2 через шлюз — ANTHROPIC_API_KEY в /etc/iwe/env это proxy shared
+    # secret (WP-7, 13.07), не настоящий ключ Anthropic, поэтому режим "напрямую" даёт 401.
     # max_tokens=10 (1→10 fix: Anthropic при max_tokens=1 отдаёт content:[], ds-ai-systems 3eea6d3).
     # При FAIL → TG-алерт немедленно. Каждые 5 мин. Bug 3 (WP-46 peer-session 2026-06-15).
 
@@ -954,7 +957,7 @@ in
       path = commonPath;
       # WP-7: без LITELLM_PROXY_URL проба падает в режим 2 (прямой api.anthropic.com)
       # и тратит нативный ключ Anthropic на probe-трафик каждые 5 минут.
-      environment = commonEnv // { LITELLM_PROXY_URL = "https://litellm-production-2227.up.railway.app"; };
+      environment = commonEnv // { ANTHROPIC_BASE_URL = "https://iwe-llm-proxy-production.up.railway.app"; };
     };
 
     systemd.timers."iwe-llm-health" = {
