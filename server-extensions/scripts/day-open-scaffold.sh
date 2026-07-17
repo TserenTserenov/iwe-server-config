@@ -325,14 +325,19 @@ render_video() {
     return
   fi
   local dirs=("$HOME/Documents/Zoom" "$HOME/Documents/Телемост" "$HOME/Видеозаписи Телемост")
-  local count=0
+  local count=0 any_dir_seen=0
   for d in "${dirs[@]}"; do
     [ -d "$d" ] || continue
+    any_dir_seen=1
     local n
     n=$(find "$d" -mtime 0 \( -name "*.mp4" -o -name "*.mov" -o -name "*.webm" -o -name "*.m4a" -o -name "*.mp3" \) 2>/dev/null | wc -l | tr -d ' ')
     count=$((count + n))
   done
-  if [ "$count" -eq 0 ]; then
+  if [ "$any_dir_seen" -eq 0 ]; then
+    # Day Open runs server-primary (WP-484) — recording folders live on the Mac only,
+    # this host can't see them. Explicit no-data beats a false "0 recordings".
+    echo "> нет данных — папки записи (Zoom/Телемост) не видны из этого окружения (Открытие дня сервер-primary, проверка доступна только с мака)"
+  elif [ "$count" -eq 0 ]; then
     echo "**Видео:** 0 новых записей сегодня"
   else
     echo "**Видео:** $count новых записей сегодня (директории: Zoom / Телемост / Видеозаписи Телемост)"
@@ -509,8 +514,12 @@ render_iwe_status() {
     else
       echo "| LaunchAgents | 🟡 |${agents_bad} |"
     fi
-  else
+  elif [ "$(uname -s)" = "Darwin" ]; then
     echo "| LaunchAgents | ⚪ | launchctl недоступен |"
+  else
+    # Day Open runs server-primary (WP-484) — no launchd on the Linux host, so this
+    # check can't reach the Mac's agents. Explicit no-data beats a silent ⚪.
+    echo "| LaunchAgents | ⚪ | нет данных — проверка мак-агентов недоступна с сервера (Открытие дня сервер-primary) |"
   fi
 
   # template-sync (FMT last commit)
