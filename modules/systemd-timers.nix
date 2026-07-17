@@ -953,6 +953,10 @@ in
       serviceConfig = commonServiceConfig // {
         ExecStart  = "${pkgs.bash}/bin/bash ${iwe}/DS-IT-systems/DS-ai-systems/synchronizer/scripts/llm-health-check.sh";
         TimeoutSec = 45;
+        # /etc/iwe/env (commonServiceConfig) не содержит proxy shared secret —
+        # он живёт в ~/.iwe/.proxy-env (тот же файл, что читает rhetoric-miner.service).
+        # Второй EnvironmentFile переопределяет ANTHROPIC_API_KEY для запросов к шлюзу.
+        EnvironmentFile = [ "/etc/iwe/env" "-/home/tseren/.iwe/.proxy-env" ];
       };
       path = commonPath;
       # WP-7: без LITELLM_PROXY_URL проба падает в режим 2 (прямой api.anthropic.com)
