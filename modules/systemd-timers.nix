@@ -954,7 +954,7 @@ in
       path = commonPath;
       # WP-7: без LITELLM_PROXY_URL проба падает в режим 2 (прямой api.anthropic.com)
       # и тратит нативный ключ Anthropic на probe-трафик каждые 5 минут.
-      environment = commonEnv // { LITELLM_PROXY_URL = "https://iwe-llm-proxy-production.up.railway.app"; };
+      environment = commonEnv // { LITELLM_PROXY_URL = "https://litellm-production-2227.up.railway.app"; };
     };
 
     systemd.timers."iwe-llm-health" = {
