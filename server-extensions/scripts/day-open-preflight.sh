@@ -10,6 +10,12 @@
 
 set -uo pipefail
 
+# portable_date_offset <days_back> [format] — BSD `date -v` (macOS) vs GNU `date -d` (Linux)
+portable_date_offset() {
+  local days="$1" fmt="${2:-%Y-%m-%d}"
+  date -v-"${days}"d +"$fmt" 2>/dev/null || date -d "$days days ago" +"$fmt" 2>/dev/null
+}
+
 # Загрузка Telegram credentials (если доступны)
 AIST_ENV="$HOME/.config/aist/env"
 if [ -f "$AIST_ENV" ]; then
@@ -19,8 +25,9 @@ if [ -f "$AIST_ENV" ]; then
 fi
 
 DATE="${1:-$(date +%Y-%m-%d)}"
-CONFIG="${2:-$HOME/IWE/DS-my-strategy/exocortex/day-rhythm-config.yaml}"
 IWE="${IWE_ROOT:-$HOME/IWE}"
+GOV_REPO="${IWE_GOVERNANCE_REPO:-DS-strategy}"
+CONFIG="${2:-$IWE/$GOV_REPO/exocortex/day-rhythm-config.yaml}"
 
 # --- Calendar: server-calendar.sh ---
 CALENDAR_STATUS="unknown"
@@ -102,12 +109,7 @@ else
     TRIAGE_STATUS="fail"
     TRIAGE_REASON="no report for $DATE"
   fi
-  YESTERDAY=""
-  if date -v-1d +%Y-%m-%d > /dev/null 2>&1; then
-    YESTERDAY=$(date -v-1d +%Y-%m-%d)
-  else
-    YESTERDAY=$(date -d yesterday +%Y-%m-%d)
-  fi
+  YESTERDAY=$(portable_date_offset 1)
   YESTERDAY_FILE="$IWE/DS-agent-workspace/scheduler/feedback-triage/$YESTERDAY.md"
   if [ ! -f "$YESTERDAY_FILE" ] && [ -n "${TELEGRAM_BOT_TOKEN:-}" ] && [ -n "${TELEGRAM_CHAT_ID:-}" ]; then
     curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
@@ -118,7 +120,7 @@ fi
 
 # --- active-wp.md stale check ---
 MEMORY_STATUS="ok"
-ACTIVE_WP="$IWE/DS-my-strategy/current/active-wp.md"
+ACTIVE_WP="$IWE/$GOV_REPO/current/active-wp.md"
 if [ -f "$ACTIVE_WP" ]; then
   if stat -f%m "$ACTIVE_WP" > /dev/null 2>&1; then
     AGE_DAYS=$(( ( $(date +%s) - $(stat -f%m "$ACTIVE_WP") ) / 86400 ))
