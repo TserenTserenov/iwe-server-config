@@ -43,7 +43,9 @@ Day Close = протокол. Исполнять ТОЛЬКО пошагово �
 Day Close — кросс-РП инфраструктурная операция. Открыть упрощённую housekeeping-сессию, чтобы `session-guard` не блокировал коммит файлов, к которым нет привязки к открытому РП (например, backup `exocortex/` или архивация DayPlan).
 
 ```bash
+bash ~/IWE/scripts/day-close-step-log.sh start 0.5
 bash ~/IWE/scripts/session-guard.sh open --housekeeping day-close --agent claude-code
+bash ~/IWE/scripts/day-close-step-log.sh end 0.5
 ```
 
 Закрыть её — только после п. 10 (после `git push`). Если сессия прервалась, TTL 30 мин переименует семафор в `.stale` при следующем запуске.
@@ -53,7 +55,9 @@ bash ~/IWE/scripts/session-guard.sh open --housekeeping day-close --agent claude
 > Инцидент 17.07: сервер (tsekh-1) и пилот вручную закрыли один день независимо, разъезд обнаружился только на commit+push. Применяется одинаково к обоим путям закрытия — серверный `run_claude day-close` (диспетчер `scheduler.sh`) заходит в этот же SKILL.md, отдельно патчить `scheduler.sh` не нужно.
 
 ```bash
+bash ~/IWE/scripts/day-close-step-log.sh start 0.6
 bash {{HOME_DIR}}/IWE/scripts/day-close-lock.sh acquire
+bash ~/IWE/scripts/day-close-step-log.sh end 0.6
 ```
 
 - Exit 0 → лок взят (закоммичен и запушен маркер `day-close-start: YYYY-MM-DD`), продолжать к шагу 1.
@@ -81,13 +85,13 @@ done
 
 ### 2. Governance batch
 
-**2a.** Обновить WeekPlan (`DS-my-strategy/current/Plan W{N}...`): статусы РП. **Grep по номеру РП** — обновить ВСЕ упоминания. [[gate]]
+**2a.** `bash ~/IWE/scripts/day-close-step-log.sh start 2a` — Обновить WeekPlan (`DS-my-strategy/current/Plan W{N}...`): статусы РП. **Grep по номеру РП** — обновить ВСЕ упоминания. `bash ~/IWE/scripts/day-close-step-log.sh end 2a` [[gate]]
 
-**2b.** Обновить DayPlan `DS-my-strategy/current/DayPlan YYYY-MM-DD.md`: статусы ВСЕХ строк (РП + ad-hoc). Done → зачеркнуть. [[gate]]
+**2b.** `bash ~/IWE/scripts/day-close-step-log.sh start 2b` — Обновить DayPlan `DS-my-strategy/current/DayPlan YYYY-MM-DD.md`: статусы ВСЕХ строк (РП + ad-hoc). Done → зачеркнуть. `bash ~/IWE/scripts/day-close-step-log.sh end 2b` [[gate]]
 
-**2c.** Обновить `DS-my-strategy/docs/WP-REGISTRY.md`: статусы + даты + **done-форматирование**. Done-РП → зачеркнуть номер, приоритет, название, репо, бюджет (`~~...~~`); снять bold с названия; эмодзи ✅ НЕ зачёркивать (см. `.claude/rules/formatting.md §Таблицы с РП`). Тильду внутри ячеек заменить (`~6.5h` → `6.5h`). [[gate]]
+**2c.** `bash ~/IWE/scripts/day-close-step-log.sh start 2c` — Обновить `DS-my-strategy/docs/WP-REGISTRY.md`: статусы + даты + **done-форматирование**. Done-РП → зачеркнуть номер, приоритет, название, репо, бюджет (`~~...~~`); снять bold с названия; эмодзи ✅ НЕ зачёркивать (см. `.claude/rules/formatting.md §Таблицы с РП`). Тильду внутри ячеек заменить (`~6.5h` → `6.5h`). `bash ~/IWE/scripts/day-close-step-log.sh end 2c` [[gate]]
 
-**2d.** Обновить `DS-my-strategy/inbox/open-sessions.log`: удалить строки закрытых сессий. [[gate]]
+**2d.** `bash ~/IWE/scripts/day-close-step-log.sh start 2d` — Обновить `DS-my-strategy/inbox/open-sessions.log`: удалить строки закрытых сессий. `bash ~/IWE/scripts/day-close-step-log.sh end 2d` [[gate]]
 
 **2e.** Governance-синхронизация: новые репо/сервисы за день? → REPOSITORY-REGISTRY, navigation.md, MAP.002. [[narrative]]
 
@@ -99,9 +103,11 @@ done
   - **Правило ОПТ-5:** WeekPlan содержит ТОЛЬКО намерения (план, carry-over на завтра), WeekReport содержит ТОЛЬКО факты (что было, коммиты, результаты)
   - **strategy_day (Пн без DayPlan):** Итоги пишутся в WeekReport как обычный день — только факты (РП-результаты, коммиты, мультипликатор). Плановые строки (`strategy_day → план живёт в WeekPlan`) в WeekReport НЕ копировать. Позиция в обратной хронологии: если Пн — ставить в конец (самый старый день недели).
 
-**2g. WP Context Freshness (БЛОКИРУЮЩЕЕ).** [[gate]] 2a-2c обновляют трекеры (WeekPlan/DayPlan/REGISTRY) — статус-строку, не сам контекст-файл РП. Для каждого РП, тронутого хотя бы одной сессией сегодня (`grep "$(date +%Y-%m-%d)" sessions/00-index.md` + одиночные Quick Close сессии за день): открыть `inbox/WP-N/WP-N.md`, свериться с §4/§6 отчётов всех сегодняшних сессий по этому РП — суб-пункты, которые сессия закрыла или нашла уже закрытыми, должны быть отмечены done в контекст-файле, а не только в статус-строке трекера. Несколько сессий трогали один зонтичный РП за день → одно согласованное состояние на конец дня, не разрозненные пере-перезаписи. Source: [2026-07-09-17-close-actualization-gap](../../../DS-my-strategy/sessions/2026-07/2026-07-09-17-close-actualization-gap/report.md).
+**2g. WP Context Freshness (БЛОКИРУЮЩЕЕ).** [[gate]] `bash ~/IWE/scripts/day-close-step-log.sh start 2g`. 2a-2c обновляют трекеры (WeekPlan/DayPlan/REGISTRY) — статус-строку, не сам контекст-файл РП. Для каждого РП, тронутого хотя бы одной сессией сегодня (`grep "$(date +%Y-%m-%d)" sessions/00-index.md` + одиночные Quick Close сессии за день): открыть `inbox/WP-N/WP-N.md` **точечно** (grep по номеру/дате сегодняшней сессии → Read с `offset` вокруг найденной строки, не весь файл целиком — для зонтичных РП полное перечитывание дорого, WP-484 peer-session 2026-07-18-13 находка), свериться с §4/§6 отчётов всех сегодняшних сессий по этому РП — суб-пункты, которые сессия закрыла или нашла уже закрытыми, должны быть отмечены done в контекст-файле, а не только в статус-строке трекера. Несколько сессий трогали один зонтичный РП за день → одно согласованное состояние на конец дня, не разрозненные пере-перезаписи. Source: [2026-07-09-17-close-actualization-gap](../../../DS-my-strategy/sessions/2026-07/2026-07-09-17-close-actualization-gap/report.md). `bash ~/IWE/scripts/day-close-step-log.sh end 2g`
 
 ### 3. Архивация [[gate]]
+
+`bash ~/IWE/scripts/day-close-step-log.sh start 3`
 
 - **DayPlan сегодняшнего дня** → `git mv current/DayPlan $(date +%Y-%m-%d).md archive/day-plans/`. Если есть DayPlan'ы прошлых дней в `current/` (накопленный мусор) — заархивировать их тоже одной командой.
 - Done WP context files → `mv inbox/WP-{N}-*.md → archive/wp-contexts/`
@@ -110,7 +116,11 @@ done
 > MEMORY.md хранит ТОЛЬКО активные РП (in_progress + pending). Done = удалить.
 > Архивация DayPlan ОБЯЗАТЕЛЬНА: следующий Day Open читает carry-over из `archive/day-plans/DayPlan {вчера}.md` и предполагает, что `current/` чистый.
 
+`bash ~/IWE/scripts/day-close-step-log.sh end 3`
+
 ### 4б. Memory Drift Scan [[gate]]
+
+`bash ~/IWE/scripts/day-close-step-log.sh start 4b`
 
 > Страховочная сетка — ловит то, что не обновили в Quick Close сессий за день.
 
@@ -128,7 +138,11 @@ grep -nE "→ ждёт|ждёт|dep:|блокер|blocked:|остановлен|
 
 Анонс при 0 изменениях: *«Drift-scan: проверено N паттернов, устаревших фактов не найдено»*
 
+`bash ~/IWE/scripts/day-close-step-log.sh end 4b`
+
 ### 4в. Index Health Check [[gate]]
+
+`bash ~/IWE/scripts/day-close-step-log.sh start 4v`
 
 > Ловит раздутие индекс-файлов (MEMORY.md, WP-REGISTRY.md, MAPSTRATEGIC.md, *-registry.md, *-index.md, *-catalog.md). Правило: [feedback_memory_index_discipline.md](../../../memory/feedback_memory_index_discipline.md) — шапки и колонки индексов = hook-строки, не дамп контекста.
 
@@ -145,7 +159,11 @@ python3 {{HOME_DIR}}/IWE/DS-my-strategy/scripts/check-index-health.py
 
 Анонс при 0 WARN/FAIL: *«Index-health: N файлов OK, M skip»*. При наличии — перечислить FAIL/WARN с кратким действием.
 
+`bash ~/IWE/scripts/day-close-step-log.sh end 4v`
+
 ### 4. Lesson Hygiene [[gate]]
+
+`bash ~/IWE/scripts/day-close-step-log.sh start 4-lessons`
 
 - Просмотреть секцию «Уроки» в MEMORY.md
 - Урок применялся сегодня? → оставить
@@ -153,15 +171,21 @@ python3 {{HOME_DIR}}/IWE/DS-my-strategy/scripts/check-index-health.py
 - Новый урок за день? → записать в MEMORY.md (краткая строка) + тематический файл (подробно)
 - Цель: ≤8 уроков в MEMORY.md
 
+`bash ~/IWE/scripts/day-close-step-log.sh end 4-lessons`
+
 ### 5. Автоматические шаги [[gate]]
 
 ```bash
+bash ~/IWE/scripts/day-close-step-log.sh start 5
 "$IWE_SCRIPTS/day-close.sh"
+bash ~/IWE/scripts/day-close-step-log.sh end 5
 ```
 
 Скрипт выполняет: Linear sync, downstream sync (update.sh), backup (memory/ + CLAUDE.md + AGENTS.md).
 
 ### 6. Мультипликатор IWE [[gate]]
+
+`bash ~/IWE/scripts/day-close-step-log.sh start 6`
 
 > Условный шаг: если `params.yaml → multiplier_enabled: false` → пропустить.
 
@@ -173,7 +197,7 @@ python3 {{HOME_DIR}}/IWE/DS-my-strategy/scripts/check-index-health.py
    - Если Neon тоже пуст (данные синхронизируются ночью) → пометить «pending Neon» и пересчитать при следующей сессии
    - Поле: `payload->>'human_readable'` (напр. «9 hrs»); `total_seconds` для мультипликатора
 2. **Бюджет закрыт — считать ПО ФАКТУ, не по букве плана** (БЛОКИРУЮЩЕЕ, урок 27 мая):
-   - **Шаг 2.0 (обязательный prerequisite):** открыть `<governance-repo>/sessions/00-index.md`, отфильтровать строки за сегодня (`grep "$(date +%Y-%m-%d)"`), составить полный список peer-сессий с числом ходов. Без этого расчёт занижен ×2.
+   - **Шаг 2.0 (обязательный prerequisite):** открыть `<governance-repo>/sessions/00-index.md`, отфильтровать строки за сегодня (`grep "$(date +%Y-%m-%d)"`), составить полный список peer-сессий с числом ходов. Без этого расчёт занижен ×2. **Число ходов — не пересчитывать вручную**: `turns_count` уже посчитан в `meta.yaml` каждой сессии (`grep turns_count sessions/2026-MM/2026-MM-DD-*/meta.yaml`) — брать оттуда (WP-484 peer-session 2026-07-18-13).
    - done → полный бюджет (или пропорционально фазам для зонтичных)
    - partial → % выполнения × бюджет; **если сверхплановая работа в плановом РП** (например, план Ф1, реализовано Ф1+Ф7) — засчитывать ФАКТ, не плановый бюджет
    - not started → 0h
@@ -184,6 +208,8 @@ python3 {{HOME_DIR}}/IWE/DS-my-strategy/scripts/check-index-health.py
    - **Мелкие правки/чистки без peer-сессии** (бюджет «—» / merged) → 0.25h
 3. **Мультипликатор дня** = Бюджет закрыт / WakaTime. Формат: `N.Nx`
 4. **Sanity check (БЛОКИРУЮЩЕЕ):** если получившийся мультипликатор <1.5x при дне с ≥10 peer-сессий — пересчитать (вероятен недосчёт ad-hoc или сверхпланового). Показать пилоту 3 метода (буква SKILL / по факту / компромисс) и спросить какой записывать. Урок: `lessons_multiplier_peer_sessions_uncounted.md`.
+
+`bash ~/IWE/scripts/day-close-step-log.sh end 6`
 
 ### 7. Черновик итогов (показать пользователю) [[narrative]]
 
@@ -230,6 +256,8 @@ python3 {{HOME_DIR}}/IWE/DS-my-strategy/scripts/check-index-health.py
 
 ### 9. Запись итогов
 
+`bash ~/IWE/scripts/day-close-step-log.sh start 9a`
+
 **9a.** [[gate]] Дописать секцию «Итоги дня» в DayPlan (шаблон — см. `memory/templates-dayplan.md § Шаблон итогов дня`).
 
 **Валидация «Завтра начать с» (ADR-207):** поле не пустое + каждый pending РП упомянут + каждый содержит конкретный next action (не «продолжить работу»).
@@ -242,6 +270,9 @@ grep -l "Итоги дня" ~/IWE/DS-my-strategy/archive/day-plans/DayPlan\ ${TO
   | grep -q . && echo "9a OK" || echo "9a FAIL: итоги не найдены в DayPlan ${TODAY}"
 ```
 Результат `9a FAIL` → шаг НЕ помечать completed, вернуться к записи.
+
+`bash ~/IWE/scripts/day-close-step-log.sh end 9a`
+`bash ~/IWE/scripts/day-close-step-log.sh start 9b`
 
 **9b.** [[gate]] Дописать сводку итогов в WeekReport (split, ОПТ-5 WP-297):
 - Файл: `DS-my-strategy/current/WeekReport W{N} YYYY-MM-DD.md` (дата = первый день недели)
@@ -261,9 +292,12 @@ DAY_NUM=$(date +%-d)
 ```
 Результат `9b FAIL` → шаг НЕ помечать completed, вернуться к записи.
 
+`bash ~/IWE/scripts/day-close-step-log.sh end 9b`
+
 ### 10. Закоммитить DS-my-strategy [[gate:AR.005]]
 
 ```bash
+bash ~/IWE/scripts/day-close-step-log.sh start 10
 cd {{HOME_DIR}}/IWE/DS-my-strategy
 git status --short
 # НЕ git add -A/git add ./git add -u — AGENTS.md CRITICAL (может захватить работу других агентов)
@@ -279,6 +313,7 @@ git push
 
 # Закрыть housekeeping-сессию Day Close (открыта в п. 0.5)
 bash ~/IWE/scripts/session-guard.sh close --housekeeping day-close --agent claude-code
+bash ~/IWE/scripts/day-close-step-log.sh end 10
 ```
 
 ### 10b. Rule Classifier (WP-272 Ф5.2) [[narrative]]
@@ -291,11 +326,17 @@ python3 $HOME/IWE/.claude/scripts/rule-classifier.py
 
 ### 11. Верификация (Haiku R23) [[gate:AR.007]]
 
+`bash ~/IWE/scripts/day-close-step-log.sh start 11`
+
 Перед запуском R23 — `bash .claude/hooks/rule-engine.sh check-trace-satisfaction --protocol .claude/skills/day-close/SKILL.md` (WP-481 Ф5.1: удовлетворённость набора gate протокола, не линейность; narrative-пропуски не блокируют). **Без `--protocol`** дефолт — `memory/protocol-close.md`, который содержит гейты Quick Close/Week Close/Exit Protocol, а не Day Close — блок гарантирован на посторонних гейтах. Шаги 0-10 выше размечены `[[gate]]`/`[[narrative]]` (WP-481 Ф5.1) — каждый `[[gate]]` выведен из соответствующей строки «Чеклист Day Close» ниже, не придуман заново. Verdict block → вернуться на незакрытый gate, потом R23.
 
+**Проверка целостности тайминга шагов (WP-484 peer-session 2026-07-18-13):** `grep "$(date +%Y-%m-%d)" ~/logs/day-close-integrity.log` — есть ли аномалии за сегодня (неизвестный step_id, дубль start, end без start, немонотонность)? И `grep -c "$(date +%Y-%m-%d).*start" ~/logs/day-close-steps.log` vs `grep -c "$(date +%Y-%m-%d).*end" ~/logs/day-close-steps.log` — совпадает число start/end? Не блокирует закрытие дня — только доверие к метрике за сегодня (см. чеклист ниже).
+
 Запустить sub-agent Haiku в роли R23 Верификатор (context isolation).
-Передать: (1) чеклист Day Close, (2) черновик итогов, (3) список обновлённых файлов, (4) результат шага 2g (по каждому РП: контекст-файл поправлен или расхождений не было), (5) JSON вердикта trace-satisfaction.
-По ❌ — исправить до показа пользователю.
+Передать: (1) чеклист Day Close, (2) черновик итогов, (3) список обновлённых файлов, (4) результат шага 2g (по каждому РП: контекст-файл поправлен или расхождений не было), (5) JSON вердикта trace-satisfaction, (6) результат проверки целостности тайминга шагов (аномалии из `day-close-integrity.log` + баланс start/end).
+По ❌ — исправить до показа пользователю. Исключение: ❌ только по пункту «тайминг шагов» (последний чеклист-пункт ниже) — не исправлять постфактум (дописывать правдоподобный timestamp запрещено, это и есть тихая подмена данных), просто показать пилоту предупреждение «данные тайминга за сегодня не заслуживают доверия» и продолжить закрытие дня.
+
+`bash ~/IWE/scripts/day-close-step-log.sh end 11`
 
 ---
 
@@ -329,5 +370,6 @@ python3 $HOME/IWE/.claude/scripts/rule-classifier.py
 - [ ] `current/priorities.yaml` обновлён на завтра (или пилот явно пропустил шаг)
 - [ ] Сводка итогов записана в WeekReport (`<details>`, обратная хронология) **(postcondition 9b: grep подтверждён)**
 - [ ] Новое репо → MAPSTRATEGIC.md + Strategy.md
+- [ ] **Тайминг шагов (WP-484, не блокирует закрытие):** `day-close-integrity.log` за сегодня пуст (нет аномалий) И число `start`/`end` в `day-close-steps.log` за сегодня совпадает — при расхождении просто пометить «данные тайминга за сегодня не заслуживают доверия», не чинить постфактум
 
-Все ✅ → «День закрыт.» Иначе — указать что осталось.
+Все ✅ (кроме тайминга шагов — этот пункт информативный, не блокирует) → «День закрыт.» Иначе — указать что осталось.

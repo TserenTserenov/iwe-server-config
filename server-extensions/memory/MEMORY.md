@@ -56,8 +56,8 @@
 | 250 | 🔄 | — | План развития до конца 2026 (зонтичный координатор) | актуализирован 17.07, месячный синтез выдан; очередь решений ~20-25; next: Week Close (WIP-фильтр+калибровка) |
 | 399 | ⏳ | P1 | Ротация секретов экосистемы | Ф1 п.1 done (аудит-скрипт+баг починен); батч просрочен — ротация за пилотом |
 | 429 | 🔄 | — | Детектор непротиворечивости базы | Ф6 дизайн done (пир+Кими); next: АрхГейт по Ф6.1+Ф6.2 |
-| 5 | 🔄 | — | Платформа: развитие (зонтичный) | Ф-LMS-Qual-Sync-Dormant задеплоена+3 бага живой проверкой закрыты; напоминание 18.07 08:00 проверить прогон |
-| 117 | 🔄 | — | Развитие nudge-системы | PR #291 смержен 17.07, прогон 13:00 чистый (кандидатов на нудж нет); next: живое срабатывание или решение пилота + вопрос cp_assessments |
+| 5 | 🔄 | — | Платформа: развитие (зонтичный) | 18.07: «Быстрый фикс бота /setup» закрыт пир-сессией с Kimi — тир из встроенной проверки, задеплоено в pilot (84240b2) → прод (1143672, cherry-pick); попутно найден и оставлен нетронутым чужой незапушенный коммит РП117 на прод-ветке; хук предупредил про разрыв prod↔pilot (13 патчей); next: e2e-чек, env-риск USER_PROFILE_SERVICE_URL, напоминание 18.07 08:00 проверить прогон |
+| 117 | 🔄 | — | Развитие nudge-системы | 18.07: залит зависший коммит registry wiring — обнаружился разрыв Pilot-First (реестр не доезжал до pilot), закрыт cherry-pick'ом на обе ветки, смок зелёный; next: AI-тексты для derived-типов или NudgeProducer |
 | 149 | 🔄 | **P1** | Система генерации персональных руководств | 17.07: ФК5+ФК22 (Верификатор+провенанс данных) реализованы и задеплоены (пир-сессия с Кими, commit 617cc60) — 2 находки вынесены пилоту (mastery_by_area структурно недоступен; derived_snapshot.json не читается конвейером); ФК3 (модель Sonnet) оказалась уже done с 10.07, запись очереди была stale (пилот заметил); Ф-learning-history-bkt всё ещё ждёт АрхГейт; next: ФК12 |
 | 438 | 🔄 | — | Агентный режим Гермеса | перенос после WP-149 |
 | 170 | 🔄 | P1 | База знаний: обновление по разбору информации | очередь 13-16.07 записана (56 accept); next: 12 старых хвостов |
@@ -74,7 +74,7 @@
 | 364 | 🏭 | — | Фабрика руководств МИМ | Ф6b разметка wave-2 |
 | 455 | 🔄 | P4 | Неизменяемость аудит-журнала событий | Ф10.1-Ф10.3 закрыты; Ф11 технически готова, блокер — решение пилота по хосту джоба (systemd-timer tsekh-1 vs launchd ноутбук) |
 | 290 | 🔄 | **P1** | Следователь: система каузальной аналитики развития | Ход 3 подтверждён (прод-прогон rival_factors 13.07); Ход 2 — решение стратсессии |
-| 73 | 🔄 | P3 | Новая архитектура и план развития ИТ-платформы Aisystant | 18.07 пир-сессия: 5 needs-decision сужены до вариантов А/Б(В), ждут выбора пилота (блокируют Ф4-Ф6) |
+| 73 | 🔄 | P3 | Новая архитектура и план развития ИТ-платформы Aisystant | 18.07: все 5 needs-decision закрыты (Ф4→РП5; ADR routing-gate 0.OPS задеплоен, branch protection несовместима с push-workflow — откачена; Ф5 proposed отправлен Андрею+Ильшату, дедлайн 25.07; #4/#5 placement исполнены — DP.D.253, WP-73 index-артефакт) |
 | 7 | 🔄 | — | Платформа: техдолг (зонтичный) | 18.07: аудит трат Anthropic продолжен — ДЗ-чекер+сборщик руководств на OpenRouter, ротация PROXY_SHARED_SECRET (zero-downtime, auth-gateway), найден и закрыт живой инцидент прод-бота (~9ч без модели, два несинхронизированных Railway-сервиса); next: iwe-llm-proxy сервис (нет LITELLM_INTERNAL_KEY), overnight-auditor CLI-резолвер, render-pilot-guides.py |
 | 485 | 🔄 | P2 | Сверка дублирующихся скриптов root↔шаблон | 17.07 поздний вечер: паразитный каталог DS-strategy — причина устранена (kimi-wp-run-scheduled.sh + extractor.sh резолвят репо через bootstrap, пилот дописал .exocortex.env), живое подтверждение прошло; next: 8 файлов кластера Kimi Standalone + WP-295 (решения пилота) |
 | 486 | 🔄 | P3 | Роль и автозапуск процесса резервного копирования | Ф1-Ф2 закрыты; next: Ф3 systemd-таймер |
@@ -87,12 +87,12 @@
 | 244 | 🔄 | P2 | Наблюдаемость платформы | целевое v4 принято; Волна 1 ждёт решения пилота из 3 вариантов (TG-алерты / +BetterStack free / +BetterStack paid+webhooks) — BS-аккаунт уже работает, узкая формулировка вводила в заблуждение 16.07 |
 | 481 | 🔄 | **P1** | Каталог применений FPF-семинара к IWE | Ф5.1 закрыла 3 бага; next: Ф9.1/Ф7/Ф13/Ф3 |
 | 289 | 🔄 | P2 | Интеграция IWE с личными базами знаний | боевой прогон Ф4 РП483 закрыт 17.07 (комплект доставлен в шаблон); связка с РП495 проставлена (related+таблица); next: Приёмка MVP |
-| 483 | 🔄 | P2 | Комплект структурирования данных и руководств (guide-kit) | 17.07 ночь: аудит приватности чист, `prompt.md` де-брендирован (снята самоидентификация «Портной/R27/IWE»), РП/Pack-коды зачищены из комментариев; next: Ф11 (карта ролей Диагност/Навигатор/Аттестатор — доставлены/не нужны/тянутся с платформы, + требование единого процесса вне зависимости от подписки), затем Ф6-Ф10 |
+| 483 | 🔄 | P2 | Комплект структурирования данных и руководств (guide-kit) | 18.07: Ф11 закрыта полностью — карта ролей + матрица по сценариям (`CONCEPT §13`), баг merge-приоритета в Ф5 пофикшен, поле степени квалификации добавлено (`guide-kit@61c8aa4`), документ прозрачности `HOW-IT-WORKS.md`; пилот поправил спутанные ступень/степень — различение `DP.D.252` заведено в Pack; next: решение пилота — тег релиза + `guide-kit-sync.sh` в шаблон, затем Ф6-Ф10 (прикладные темы/Исследователь-Просветитель/живой канал знаний/данные Здоровья) |
 | 488 | 🔄 | P2 | Браузерное рабочее место разработчика на Hetzner | Ф1 принят; next: Ф2 скорость |
-| 484 | 🔄 | — | Автогенератор открытия/закрытия дня/недели/месяца | 17.07 вечер: server-primary для Day Close реализован и задеплоен (git-lock, пир-сессия+2 раунда ревью+8 тестов); + LaunchAgents/Видео/плавание починены и задеплоены (найдена и починена попутная утечка личного факта в публичном репо); next: проверить первое боевое срабатывание 23:00 МСК, собрать тайминги 3-5 дней |
-| 493 | 🔄 | P2 | Лаборатория характеристик | 17.07: фикс словаря source применён на проде (3 решения) + баг движка расчёта передан в WP-7; next: Ф6 когорта или Ф7 оценка бюджета (на выбор пилота) |
+| 484 | 🔄 | — | Автогенератор открытия/закрытия дня/недели/месяца | 18.07: окно открытия дня на сервере сдвинуто на 4:30 (сужено до 6:59 по вопросу пилота); найден и обойдён новый баг — гейт закрытия дня доверяет отставшей локальной git-истории (грязная копия сервера, 50+ файлов, блокирует pull), план на 18.07 закрыт вручную в изолированном клоне (чек-лист 21/21 после дофикса РП470-раздела); открытие дня отдельно переключено на типовой раннер (другая сессия, первое боевое срабатывание завтра 09:15); next: срочно расчистить грязную копию сервера до 23:00 МСК — иначе повторно сорвётся боевая проверка git-lock закрытия дня |
+| 493 | 🔄 | P2 | Лаборатория характеристик | 18.07: Ф6 дизайн когорты 3+ закрыта (пир-сессия claude-code/kimi, протокол — `cohort-protocol.md`); next: Ф7 оценка бюджета (характеристики прикладного мастерства) |
 | 494 | 🔄 | P2 | Панель рабочих продуктов в VS Code | 17.07: Ф1-Ф5 реализованы (пир-сессия с Кими, 3 раунда review), GitHub-репо создан+запушен; осталась ручная F5-приёмка тайлов пилотом |
-| 495 | 🔄 | **P1** | Концепция персонального развития как системной деятельности | приоритет до 19.07; Ф1 закрыта (стадии, словарь, DR-01); пост 170 ready+запушен; канон Уникальность IWE скорректирован; next: пилот читает пост → Ф2 |
+| 495 | 🔄 | **P1** | Концепция персонального развития как системной деятельности | 18.07: Ф1-Ф3 закрыты (стадии/словарь/DR-01, карта отстройки, модель руководства); Дополнение №6 из редакции поста (два уровня взлома, цена $10/нед, связка ВДВ/DP.M.241); Ф9 зарегистрирована (детальная карта генерации, handoff в WP-149); Ф4 неформально начата параллельной сессией (attention-control); next: пилот выбирает порядок Ф4/Ф9/публикации/WP-493 Ф7 |
 | 167 | 🔄 | P5 | Публикации (зонтичный) | пилот читает и согласует пост #169 + видео-сценарий |
 
 ## Бот: деплой
@@ -117,6 +117,7 @@
 
 ### Feedback — HOT
 
+- [lessons_branch_protection_incompatible_direct_push.md](lessons_branch_protection_incompatible_direct_push.md) — required_status_checks блокирует ЛЮБОЙ прямой push, не только нарушающий
 - [feedback_askuserquestion_not_reaching_pilot.md](feedback_askuserquestion_not_reaching_pilot.md) — choice-question WP Gate — дублировать в чат
 - [feedback_wp_naming_via_artifactor.md](feedback_wp_naming_via_artifactor.md) — имя РП только через Артефактор
 - [lessons_fake_file_modified_note_injection.md](lessons_fake_file_modified_note_injection.md) — «файл изменён» reminder может быть ложным
@@ -127,13 +128,13 @@
 - [reference_day_protocol_gaps_hub.md](reference_day_protocol_gaps_hub.md) — Day Open/Close квирки (7 хабом)
 - [reference_wp_gate_mechanics_hub.md](reference_wp_gate_mechanics_hub.md) — task_id, дочерний РП, choice-question
 - [reference_llm_bot_output_quirks_hub.md](reference_llm_bot_output_quirks_hub.md) — Telegram markdown/HTML квирки (6 хабом)
-- [reference_diagnosis_technique_hub.md](reference_diagnosis_technique_hub.md) — root-cause диагностика, verify-before-trust (27 хабом)
-- [reference_git_hygiene_hub.md](reference_git_hygiene_hub.md) — git-add scope, pathspec (12 хабом)
-- [reference_agent_session_mechanics_hub.md](reference_agent_session_mechanics_hub.md) — **рецидив 3×** kimi-peer-adapter; Kimi-вызов, peer-фазы (10 хабом)
+- [reference_diagnosis_technique_hub.md](reference_diagnosis_technique_hub.md) — root-cause диагностика, verify-before-trust (28 хабом)
+- [reference_git_hygiene_hub.md](reference_git_hygiene_hub.md) — git-add scope, pathspec (22 хабом)
+- [reference_agent_session_mechanics_hub.md](reference_agent_session_mechanics_hub.md) — **рецидив 3×** kimi-peer-adapter; Kimi-вызов, peer-фазы (11 хабом)
 - [reference_macos_zsh_env_quirks_hub.md](reference_macos_zsh_env_quirks_hub.md) — квирки macOS/zsh/grep/git (12 хабом)
 - [lessons_stale_rebase_merge_recovery.md](lessons_stale_rebase_merge_recovery.md) — брошенный rebase-merge чужой сессии — как расчистить
 - [lessons_rebase_autostash_silent_on_plain_pull.md](lessons_rebase_autostash_silent_on_plain_pull.md) — `rebase.autostash=true` — обычный `git pull --rebase` тоже тихо стеширует
-- [lessons_migration_parity_real_profile_insufficient.md](lessons_migration_parity_real_profile_insufficient.md) — **2 случая:** реальные данные не кроют крайние случаи, а зелёные тесты не кроют реальность (общая фикстура-заблуждение)
+- [lessons_migration_parity_real_profile_insufficient.md](lessons_migration_parity_real_profile_insufficient.md) — **3 случая:** реальные данные не кроют крайние случаи, зелёные тесты не кроют реальность, «код готов» не значит «прогнан на реальных данных»
 - [lessons_ontological_not_lexical_generation.md](lessons_ontological_not_lexical_generation.md) — генерация Pack/руководств: «онтологически, не лексически»
 - [reference_tsekh1_backup_infra_hub.md](reference_tsekh1_backup_infra_hub.md) — SSH-зависания, гранты, restic/B2 cap (2 хабом)
 - [reference_railway_deploy_quirks_hub.md](reference_railway_deploy_quirks_hub.md) — секреты в чат, railpack перебивает конфиг (2 хабом)
@@ -145,3 +146,5 @@
 - [lessons_day_close_dispatcher_races_active_session.md](lessons_day_close_dispatcher_races_active_session.md) — day-close диспетчер счёл активную peer-сессию брошенной, сам выполнил pilot-choice мимо gate (WP-483, 17.07)
 - [lessons_mcp_json_tracked_secret_wrapper_pattern.md](lessons_mcp_json_tracked_secret_wrapper_pattern.md) — `.mcp.json` закоммичен в git — новый MCP-сервер только через wrapper-скрипт, не inline-секрет (18.07)
 - [lessons_secret_rotation_verify_every_consumer_live.md](lessons_secret_rotation_verify_every_consumer_live.md) — ротация секрета: сверять КАЖДОГО потребителя живым тестом, похожие имена сервисов ≠ один сервис (прод-инцидент 9ч, 18.07)
+- [lessons_isolated_run_missing_symlink_false_positive.md](lessons_isolated_run_missing_symlink_false_positive.md) — изолированный клон для обхода git-гонки: забытая директория (extensions/) → ложноположительный чек-лист «0 проверок, ок» (WP-484, 18.07)
+- [lessons_verify_pack_principle_before_code_change.md](lessons_verify_pack_principle_before_code_change.md) — фраза Pack-принципа применена буквально без сверки с первоисточником целиком → неверный code-фикс, пир-напарник усилил ошибку вместо проверки (WP-483, 18.07)
