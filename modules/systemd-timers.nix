@@ -1127,6 +1127,35 @@ in
       };
     };
 
+    # =========================================================
+    # 14. BACKUP STRESS TEST — restore-тест бэкапа (WP-486, weekly)
+    # =========================================================
+    # Пир-сессия 17.07 (sessions/2026-07/2026-07-17-20-wp486-systemd-unit-timer/report.md):
+    # суббота 05:00 МСК — после ночных бэкапов (03:30), до ручной активности пилота,
+    # не пересекается с engagement-collector-full (воскресенье 05:15, TimeoutSec 1800).
+    # Отчёты пишутся в DS-ecosystem-development (репозиторий уже в pullScript — путь доступен).
+    # PG fallback скрипта (pg_dump) закрывает commonPath — pythonForIWE/postgresql уже там.
+
+    systemd.services."iwe-backup-stress-test" = {
+      description = "IWE — restore-тест бэкапа Neon-БД (weekly, Сб 05:00)";
+      unitConfig   = commonUnitConfig;
+      serviceConfig = commonServiceConfig // {
+        ExecStart  = "${pkgs.bash}/bin/bash ${iwe}/scripts/backup-stress-test.sh";
+        TimeoutSec = 3600;
+      };
+      path = commonPath;
+      environment = commonEnv;
+    };
+
+    systemd.timers."iwe-backup-stress-test" = {
+      wantedBy    = [ "timers.target" ];
+      description = "IWE backup stress-test — Сб 05:00 МСК";
+      timerConfig = {
+        OnCalendar = "Sat *-*-* 05:00:00";
+        Persistent = true;
+      };
+    };
+
     # НЕ МИГРИРОВАНО: com.exocortex.pomodoro-alert
     # =========================================================
     # pomodoro-alert.py использует macOS Notification Center / osascript.
