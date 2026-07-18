@@ -45,7 +45,11 @@ in
     users.users.tseren = {
       isNormalUser = true;
       description = "Tseren Tserenov";
-      extraGroups = [ "wheel" ]; # sudo
+      # wheel — sudo (без пароля, см. ниже); systemd-journal — чтение journalctl
+      # сервисами под User=tseren (WP-486: iwe-backup-stress-test SC1 читает
+      # journal restic-backups-neon-dbs.service; без группы журнал пуст → ложный FAIL).
+      # Эскалации нет: wheel уже даёт passwordless sudo.
+      extraGroups = [ "wheel" "systemd-journal" ];
       shell = pkgs.bash;
       openssh.authorizedKeys.keys = cfg.tserenSshKeys;
     };
