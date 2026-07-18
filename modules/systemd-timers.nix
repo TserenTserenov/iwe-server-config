@@ -874,9 +874,13 @@ in
       serviceConfig = commonServiceConfig // {
         ExecStart  = "${pkgs.bash}/bin/bash ${iwe}/DS-autonomous-agents/scripts/overnight-auditor.sh";
         TimeoutSec = 1200;
+        # WP-7 (18.07): claude CLI читает ANTHROPIC_API_KEY/ANTHROPIC_BASE_URL сам;
+        # /etc/iwe/env хранит устаревший нативный ключ Anthropic. Тот же приём, что
+        # у iwe-llm-health — второй EnvironmentFile даёт рабочий proxy shared secret.
+        EnvironmentFile = [ "/etc/iwe/env" "-/home/tseren/.iwe/.proxy-env" ];
       };
       path = commonPath;
-      environment = commonEnv;
+      environment = commonEnv // { ANTHROPIC_BASE_URL = "https://auth-gateway-production-52bf.up.railway.app"; };
     };
 
     systemd.timers."iwe-overnight-auditor" = {
