@@ -964,7 +964,10 @@ in
       path = commonPath;
       # WP-7: без LITELLM_PROXY_URL проба падает в режим 2 (прямой api.anthropic.com)
       # и тратит нативный ключ Anthropic на probe-трафик каждые 5 минут.
-      environment = commonEnv // { ANTHROPIC_BASE_URL = "https://iwe-llm-proxy-production.up.railway.app"; };
+      # WP-7 (18.07, инцидент прод-бота): iwe-llm-proxy — отдельный, никогда не
+      # синхронизированный Railway-сервис без LITELLM_INTERNAL_KEY — там же и оба
+      # бота теперь. auth-gateway — тот, что реально проверен end-to-end.
+      environment = commonEnv // { ANTHROPIC_BASE_URL = "https://auth-gateway-production-52bf.up.railway.app"; };
     };
 
     systemd.timers."iwe-llm-health" = {
