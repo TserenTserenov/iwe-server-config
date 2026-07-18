@@ -47,12 +47,22 @@ case "$ACTION" in
   *) usage ;;
 esac
 
+# step_id used verbatim in a file path below — reject path-breaking characters
+# up front (defense-in-depth; all real callers in day-close/SKILL.md are static
+# strings, but a typo'd "2g/../.." should fail loud, not write outside STATE_DIR).
+case "$STEP_ID" in
+  */*|*..*|"") usage ;;
+esac
+
 mkdir -p "$LOG_DIR" "$STATE_DIR"
 
-TODAY="$(date +%Y-%m-%d)"
 NOW_TS="$(date +%s)"
 NOW_HUMAN="$(date "+%Y-%m-%d %H:%M:%S")"
-STATE_FILE="$STATE_DIR/$TODAY-$STEP_ID.start"
+# Не датой в имени: шаг, чей start пришёлся на 23:59, а end — на 00:01 следующих
+# суток, иначе не найдёт свой файл состояния (найдено ревью 18.07) — start/end
+# внутри одного прогона closer'а всегда парные по step_id, дата не нужна для
+# поиска, только для записи в логи ниже.
+STATE_FILE="$STATE_DIR/$STEP_ID.start"
 
 is_allowed_step() {
   for s in $ALLOWED_STEPS; do

@@ -82,6 +82,7 @@ else
 fi
 
 OUT_FILE="$REPO_DIR/archive/MonthClose-facts-${AS_OF}.md"
+mkdir -p "$REPO_DIR/archive"
 
 # iwe_repo_dirs — де-дуп по физическому пути (WP-484, находка 17.07: repo-symlink
 # алиас типа DS-strategy → DS-my-strategy иначе считается вторым репозиторием,
@@ -99,16 +100,20 @@ iwe_repo_dirs() {
   done
 }
 
+GENERATED_AT="$(date -u "+%Y-%m-%dT%H:%M:%SZ")"
+
 {
   echo "---"
   echo "type: month-close-facts"
   echo "period: $AS_OF"
+  echo "generated_at: $GENERATED_AT"
   echo "generated_by: month-close-scaffold.sh"
   echo "---"
   echo
   echo "# Факты для закрытия месяца $AS_OF"
   echo
   echo "> Сгенерировано детерминированно, без LLM (WP-484 Ф5). Интерактивный /month-close читает этот файл на шаге 1 вместо живого сбора. Отсутствующий источник помечен явно, не пропущен молча."
+  echo "> **Проверка свежести перед использованием (обязательно, см. month-close/SKILL.md шаг 1):** \`generated_at\` должен быть НЕ раньше конца месяца \`$AS_OF\` (месяц завершился → факты полные). Прогон в середине месяца (например для ручного теста) даёт частичный, не финальный срез — такой файл не заменяет живой сбор для реального Month Close."
   echo
 
   # --- 1b. Коммиты за месяц ---
