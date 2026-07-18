@@ -418,8 +418,9 @@ in
         # 02:00 mcp-reindex
         # 03:00 подготовка к template-sync (03:30)
         # 04:30 strategist-morning (штатно, WP-484 — открытие дня перенесено раньше)
-        # 06:20 strategist-morning (catch-up, если 04:30 упал) + extractor + consistency-check
-        # 08:00 strategist-morning (последний catch-up, если и 06:20 упал)
+        # 06:20 strategist-morning (единственный catch-up, если 04:30 упал) + extractor + consistency-check
+        # 08:00 catch-up для остальных задач синхронизатора (code-scan/dt-collect/template-sync/…);
+        #       открытие дня сюда больше не попадает (WP-484, окно сокращено 18.07) — см. scheduler.sh
         # 09:00/12:00/15:00/18:00/21:00 extractor inbox-check
         # 23:00 note-review + autonomous day-close
         OnCalendar = [
