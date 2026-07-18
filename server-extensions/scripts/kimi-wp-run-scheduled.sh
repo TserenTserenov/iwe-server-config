@@ -84,9 +84,31 @@ if [ "${IWE_WP_QUEUE_DRYRUN:-0}" = "1" ]; then
   exit 0
 fi
 
-# --- session-guard open -----------------------------------------------------
+# --- collision guard: skip if this WP already has an active session --------
+# Root cause of 6 failed Claude runs, ночь 17-18.07: scheduled run launched
+# while a manual peer-session was already open on the same WP — both edited
+# the context file concurrently, burning the turn budget on lock contention
+# instead of the actual task. No existing check catches this (session-guard.sh
+# open always creates a semaphore, cross-session/cross-agent collision is
+# unchecked) — so skip up front instead of paying for a doomed run.
 IS_TASK=0
 [[ "$WP" =~ ^TASK- ]] && IS_TASK=1
+if [ "$IS_TASK" != "1" ]; then
+  for f in "$IWE_ROOT/.iwe-runtime/sessions/"*.open; do
+    [ -f "$f" ] || continue
+    OTHER_WP=$(grep "^wp: " "$f" | head -1 | cut -d' ' -f2-)
+    [ "$OTHER_WP" = "$WP" ] || continue
+    F_MTIME=$(stat -f %m "$f" 2>/dev/null || stat -c %Y "$f" 2>/dev/null || echo 0)
+    F_AGE=$(( $(date +%s) - F_MTIME ))
+    [ "$F_AGE" -gt 1800 ] && continue  # older than session-guard's own orphan TTL — stale, ignore
+    log "SKIP: $WP already has an active session ($(basename "$f"), age ${F_AGE}s) — avoiding collision"
+    set_status skipped-collision
+    report_line skipped-collision "active session already open: $(basename "$f")"
+    cleanup; exit 0
+  done
+fi
+
+# --- session-guard open -----------------------------------------------------
 if [ "$IS_TASK" = "1" ]; then
   # задача без РП: housekeeping-сессия (без ORZ, без WP Gate)
   if ! bash "$IWE_ROOT/scripts/session-guard.sh" open --housekeeping "sched-$ID" --agent "$AGENT" >>"$LOG" 2>&1; then
