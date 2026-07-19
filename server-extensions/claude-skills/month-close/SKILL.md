@@ -116,6 +116,8 @@ HOT-лимит превышен → понизить horizon в frontmatter ну
 
 Вывод: 1-2 абзаца в `MonthClose YYYY-MM.md § Ревизия проектов`.
 
+`bash .claude/hooks/rule-engine.sh mark-gate month-close-g1` (WP-484 Ф5a — трассировка по ходу, не постфактум на шаге 12).
+
 ### 5. R-вопросник месяца (человек)
 
 Открыть `memory/r-questionnaire.md` → раздел «Month Close — 6 доп. вопросов» → ответить последовательно (M1-M6).
@@ -123,6 +125,8 @@ HOT-лимит превышен → понизить horizon в frontmatter ну
 **Особый статус M6 (decommission):** ответ = список T-действий на перевод в dormant/archived. Агент перед вопросом запускает `bash ${IWE_SCRIPTS:-$HOME/IWE/scripts}/iwe-drift.sh` + читает `sync-manifest.yaml § activity_checks:` → предъявляет кандидатов.
 
 Время: 20-30 мин.
+
+`bash .claude/hooks/rule-engine.sh mark-gate month-close-g2` (WP-484 Ф5a).
 
 ### 6. T-чеклист месяца (агент + человек)
 
@@ -147,6 +151,8 @@ HOT-лимит превышен → понизить horizon в frontmatter ну
    - **dormant → active (реактивация):** вернуть в основной чеклист, пометить `reactivated_from: YYYY-MM-DD`, причина.
 4. Зафиксировать решения в `MonthClose YYYY-MM.md § Decommission`.
 
+`bash .claude/hooks/rule-engine.sh mark-gate month-close-g3` (WP-484 Ф5a).
+
 ### 8. Add-on: Decision log review (WP-226 Ф2)
 
 > Обзор решений месяца из WP-109 Ф7 decision register.
@@ -158,6 +164,8 @@ HOT-лимит превышен → понизить horizon в frontmatter ну
    - Если рано судить: когда пересмотреть? → запись в trigger.
 3. Записать выводы в `MonthClose YYYY-MM.md § Decision log review` — минимум 1 инсайт (если совсем нечего — это само по себе сигнал, что решения не отслеживаются).
 
+`bash .claude/hooks/rule-engine.sh mark-gate month-close-g4` (WP-484 Ф5a).
+
 ### 9. Обновление Strategy.md § Результаты месяца (человек)
 
 1. Закрытые R{N} — пометить done, краткий итог («что получилось», «что осталось»).
@@ -165,6 +173,8 @@ HOT-лимит превышен → понизить horizon в frontmatter ну
 3. Новые R{N} следующего месяца — из черновика Strategy.md § «Черновик: {next month}» → промоция в «Фокус».
 4. Если фаза сдвинулась (шаг 3a) → обновить секцию «Состояние месяца — фаза стратегической позиции».
 5. Если калибр сдвинулся (шаг 3b) → обновить секцию «Калибр личности».
+
+`bash .claude/hooks/rule-engine.sh mark-gate month-close-g5` (WP-484 Ф5a).
 
 **EXTENSION POINT (month-close after):** `bash .claude/scripts/load-extensions.sh month-close after` — exit 0 → `Read` каждый файл из вывода (alphabetic) → выполнить. Exit 1 → пропустить. Поддерживает `extensions/month-close.after.md` И `extensions/month-close.after.<suffix>.md`.
 
@@ -192,8 +202,12 @@ Push при явном триггере «заливай».
 
 ### 12. Верификация (Haiku R23)
 
+> **Trace-satisfaction (WP-484 Ф5a).** До этой фазы (19.07) Month Close вообще не имел gate-механики — только чек-лист ниже, ничем не подкреплённый автоматически.
+
+Перед запуском R23 — `bash .claude/hooks/rule-engine.sh check-trace-satisfaction --protocol memory/protocol-close.md --section "Month Close"` (5 gate: Ревизия проектов, R-вопросник, Decommission-триаж, Decision log review, Strategy.md — каждый помечался `mark-gate month-close-gN` по ходу своего шага 4/5/7/8/9 выше, не одним блоком здесь). Verdict block → вернуться на незакрытый gate, потом R23. JSON вердикта приложить к вводу R23.
+
 Запустить sub-agent Haiku в роли R23 Верификатор (context isolation).
-Передать: (1) чеклист Month Close ниже, (2) `MonthClose YYYY-MM.md`, (3) изменения в Strategy.md.
+Передать: (1) чеклист Month Close ниже, (2) `MonthClose YYYY-MM.md`, (3) изменения в Strategy.md, (4) JSON вердикта trace-satisfaction.
 По ❌ — исправить до показа пользователю.
 
 ---

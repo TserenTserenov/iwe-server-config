@@ -10,6 +10,7 @@ domains: [protocol]
 status: active
 owner: user
 schema_version: 1
+modified: 2026-07-19T14:52:09.030Z
 ---
 # Протокол Close (ОРЗ-фрактал)
 
@@ -143,6 +144,7 @@ cd DS-my-strategy && python3 scripts/process-runner.py start quick-close --slug 
 - [ ] MEMORY.md: статус РП обновлён
 - [ ] Decision log: прочитать записи сессии в `decisions/decision-log-YYYY-MM.md`, скорректировать если неточно
 - [ ] **Docs Gate (условный):** РП затрагивал UX или поведение онбординга (skills, MCP-сервисы, бот `/start`, тиры доступа T0-T4, имена ролей)? → проверить и обновить вводные документы в `FMT-exocortex-template/docs/` (QUICK-START, SETUP-GUIDE, onboarding/, LEARNING-PATH, IWE-HELP) + `/verify` обновлённый файл. Владелец: пользователь. Если не затрагивал → пропустить молча.
+- [ ] **Маршрутизационная сверка (условный, WP-476 Ф6):** сессия создавала/размещала новый артефакт с личными/доменными данными? → взять декларацию «Типы информации → целевые дома» из Ритуала Открытия этой сессии (если была) и сверить с `git diff --name-only`: (а) артефакт лежит именно в заявленном доме своего типа 2.x, не в транзитной мета-папке (`inbox/` для не-РП-контента, корень репо); (б) файл не смешивает разные типы информации (пример дыры: `memory/*.md` без единого `type:` frontmatter — см. `docs/data-pipelines-registry.yaml` PIPE-12 sub_type_routing). Декларации не было, а артефакт с данными появился — расхождение само по себе (Открытие пропустило поле). Расхождение любого рода → не чинить молча, Drift Reporting. Не создавала новый артефакт с данными → пропустить молча.
 - [ ] **Conversational-сессии:** report.md создан ИЛИ status: interrupted (DP.SC.154 Q8)
 - [ ] **Раннер (обязательный, WP-482 Ф3+Ф5):** карточка `RUN-quick-close-<slug>*` существует и в терминальном статусе `completed`/`failed`, `runner_terminated_cleanly` зафиксирован. Нет карточки → ❌, кроме исключений (сессия ≤15 мин / вопрос без изменений файлов).
 
@@ -166,7 +168,7 @@ cd DS-my-strategy && python3 scripts/process-runner.py start quick-close --slug 
 4. **iwe-drift.sh** — полный drift-отчёт в Week Report (S) [[narrative]]
 5. **STAGING.md** — есть `validated`? → предложить промоцию (S+T) [[narrative]]
 6. **iwe-rules-review** — какие правила обходились? (S) [[narrative]]
-7. **R-вопросник** (5-7 вопросов, `memory/r-questionnaire.md`) → ответы в Week Report [[gate]]
+7. **R-вопросник** (3 вопроса, `memory/r-questionnaire.md`, шаг 6b `week-close/SKILL.md`) → ответы в Week Report [[gate]]
 8. **Архивация done-WP** → `archive/wp-contexts/` (T) [[gate]]
 9. **Обновить WeekPlan** — пометить итоги, создать carry-over секцию [[gate]]
 
@@ -176,6 +178,27 @@ cd DS-my-strategy && python3 scripts/process-runner.py start quick-close --slug 
 - distinctions.md > 80 строк без флага в Week Report
 - Week Report без R-ответов
 - MEMORY.md > 200 строк уже 2+ недели подряд
+
+## Month Close (Месяц)
+
+> **Роль:** R1 Стратег (выполнение), R23 Верификатор (Haiku, чеклист). **Бюджет:** 30-45 мин. **Триггер:** первый Пн месяца, перед Strategy Session первой недели.
+> Выполняется через `.claude/skills/month-close/SKILL.md`.
+
+### Шаги Month Close
+
+> **Trace-satisfaction (WP-484 Ф5a):** `bash .claude/hooks/rule-engine.sh check-trace-satisfaction --protocol memory/protocol-close.md --section "Month Close"` (без `--section` в проверку попадают гейты остальных масштабов тоже). Вызывается из `.claude/skills/month-close/SKILL.md` шаг 12, перед R23. До этой фазы (19.07) Month Close вообще не имел gate-трассировки — чек-лист внизу SKILL.md был единственной проверкой, ничем не подкреплённой автоматически.
+
+1. **Ревизия проектов P1-P6** — для каждого активного проекта: что двигало, застыл ли, баланс часов (шаг 4 `month-close/SKILL.md`) [[gate]]
+2. **R-вопросник M1-M6** — ответы записаны в `MonthClose YYYY-MM.md` (шаг 5 `month-close/SKILL.md`) [[gate]]
+3. **Decommission-триаж применён** — таблица переходов active/dormant/archived (шаг 7 `month-close/SKILL.md`) [[gate]]
+4. **Decision log review** — минимум 1 инсайт по решениям месяца (шаг 8 `month-close/SKILL.md`) [[gate]]
+5. **Strategy.md § Результаты месяца обновлён** — R{N} закрыты/перенесены/заведены новые (шаг 9 `month-close/SKILL.md`) [[gate]]
+
+### Симптом пропуска Month Close
+
+- `MonthClose YYYY-MM.md` создан, но R-вопросник M1-M6 пуст
+- Decision log review без инсайта 2+ месяца подряд
+- Strategy.md § Результаты месяца не тронут, хотя Month Close отмечен закрытым
 
 ## Мультипликатор IWE (WP-299 Ф5, шаг 6 Day Close)
 

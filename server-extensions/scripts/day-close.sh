@@ -284,7 +284,7 @@ print(t[11:16] if len(t) >= 16 else '')
     if [ -n "$task_id" ]; then
       entries+=("| $start_time | $task_id | $task_desc |")
     fi
-  done < <(find "$sessions_root" -maxdepth 2 -name "meta.yaml" 2>/dev/null \
+  done < <(find "$sessions_root" -maxdepth 3 -name "meta.yaml" 2>/dev/null \
     | while IFS= read -r f; do
         # Проверяем дату в meta.yaml
         date_val=$(python3 -c "

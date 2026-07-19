@@ -41,6 +41,7 @@ shift || true
 # --- helpers ---
 now_iso() { date -u +"%Y-%m-%dT%H:%M:%SZ"; }
 now_date() { date +"%Y-%m-%d"; }
+now_month() { date +"%Y-%m"; }
 fail() { echo "session-guard: $1" >&2; exit "${2:-1}"; }
 orz_agent_name() {
   case "$1" in
@@ -202,8 +203,9 @@ if [ "$CMD" = "open" ]; then
 
   SESSION_ID="${IWE_SESSION_ID:-$(date +%s)}"
   SEM_FILE="$SESSION_DIR/${AGENT}-${SESSION_ID}.open"
-  ORZ_BASENAME="$(now_date)-${SLUG:-$WP}.md"
+  ORZ_BASENAME="$(now_month)/$(now_date)-${SLUG:-$WP}.md"
   ORZ_FILE="$ORZ_DIR/$ORZ_BASENAME"
+  mkdir -p "$(dirname "$ORZ_FILE")"
   {
     echo "---"
     echo "agent: $AGENT"
@@ -309,7 +311,7 @@ validate_orz() {
 
   # 5. git tracked
   local rel
-  rel="$(basename "$orz")"
+  rel="$(python3 -c "import os,sys; print(os.path.relpath(sys.argv[2], sys.argv[3]))" -- "$orz" "$ORZ_DIR")"
   if ! git -C "$ORZ_DIR" ls-files --error-unmatch "$rel" >/dev/null 2>&1; then
     echo "  ❌ ORZ-файл не добавлен в git index (git add $rel)" >&2
     errors=$((errors + 1))
@@ -347,7 +349,8 @@ if [ "$CMD" = "close" ]; then
   if [ -z "$ORZ_BASENAME" ]; then
     # Fallback для старых семафоров без поля orz_file
     OPENED_DATE=$(grep "^opened_at: " "$SEM_FILE" | cut -d' ' -f2- | cut -dT -f1 || true)
-    ORZ_BASENAME="${OPENED_DATE:-$(now_date)}-${SLUG:-$WP}.md"
+    OPENED_DATE="${OPENED_DATE:-$(now_date)}"
+    ORZ_BASENAME="${OPENED_DATE:0:7}/${OPENED_DATE}-${SLUG:-$WP}.md"
   fi
   ORZ_FILE="$ORZ_DIR/$ORZ_BASENAME"
 
@@ -458,7 +461,7 @@ if [ "$CMD" = "audit" ]; then
         wp=$3; gsub(/\|/,"",wp); print $1, wp
       }
     ' "$OPEN_LOG" | sort -u | while read -r dt wp; do
-      ORZ=$(ls "$ORZ_DIR/$dt"-*"$wp"*.md 2>/dev/null | head -1 || true)
+      ORZ=$(ls "$ORZ_DIR/${dt:0:7}/$dt"-*"$wp"*.md 2>/dev/null | head -1 || true)
       if [ -z "$ORZ" ]; then
         echo "  $dt | $wp | ORZ отсутствует"
       fi
@@ -468,7 +471,7 @@ if [ "$CMD" = "audit" ]; then
 
   # 3. ORZ-файлы с невалидным frontmatter/секциями
   echo "ORZ-файлы с дефектами (после $SINCE):"
-  find "$ORZ_DIR" -maxdepth 1 -name '*.md' -type f ! -name '00-index.md' -newermt "$SINCE" 2>/dev/null | while read -r orz; do
+  find "$ORZ_DIR" -maxdepth 2 -mindepth 2 -name '*.md' -type f ! -name '00-index.md' -newermt "$SINCE" 2>/dev/null | while read -r orz; do
     tmp_errors=$(mktemp)
     orz_agent=$(grep -E "^agent:" "$orz" | sed 's/^agent: *//' | head -1 || true)
     if ! validate_orz "$orz" "${orz_agent:-unknown}" >"$tmp_errors" 2>&1 && [ -s "$tmp_errors" ]; then

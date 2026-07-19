@@ -41,6 +41,8 @@ Week Close = протокол. Исполнять ТОЛЬКО пошагово 
 
 ### 1. Сбор данных за 7 дней
 
+**Предзаготовка (WP-484 Ф4a, если есть).** Проверить `DS-my-strategy/archive/WeekClose-facts-{YYYY-MM-DD}.md` (`{YYYY-MM-DD}` = понедельник закрывающейся недели). Файл найден → прочитать `generated_at` из frontmatter. **Свежий** = `generated_at` не раньше конца недели (воскресенье того же периода — неделя завершилась → факты полные; прогон в середине недели, например ручной тест, даёт частичный срез — не финальный). Свежий → читать из него §1 (коммиты, календарь), §5b (pending-фазы), §6 (полнота переноса), §7a (здоровье бэкапов), §7d (Memory Validate), semantic-check реестра, счётчик `[no-registry-touch]` и §9 (данные R-вопросника, шаг 6b) вместо живого сбора ниже (тот же скрипт `scripts/week-close-scaffold.sh --as-of YYYY-MM-DD` можно прогнать заранее вручную, если ещё не запускался автоматически). Файла нет, или `generated_at` раньше конца недели → выполнять шаги ниже вручную, как раньше (никогда не блокировать Week Close частичной предзаготовкой — тот же принцип «нет данных → явный шаг, не тихая подмена»).
+
 **Коммиты:**
 ```bash
 for repo in $(ls {{WORKSPACE_DIR}}/); do
@@ -121,6 +123,38 @@ WP-NNN: pending-фазы (M):
 5. Для каждого вердикта — явное действие (обновить уверенность на будущее / добавить шаг в чек-лист / завести РП / зафиксировать кандидат в паттерн — §6 Capture-to-Pack). Вердикт без действия = «повисший», не закрывать неделю с повисшими вердиктами.
 6. Если сверенных записей нет — пометить явно «сверка гипотез: 0 записей с наступившей датой» в WeekReport (не пропускать шаг молча).
 
+### 6b. R-вопросник (`memory/r-questionnaire.md`, [[gate]])
+
+> **WP-484 Ф4c.** Раньше существовал только в чек-листе внизу файла (не в нумерованном алгоритме) — реальный Close его пропускал, пока `check-trace-satisfaction` не блокировал финализацию постфактум на шаге 12. Теперь явный шаг здесь.
+
+Данные предзаготовлены §9 предзаготовки Ф4a (`week-close-scaffold.sh`), если файл фактов свежий — иначе прогнать `behaviour-report.sh --period YYYY-MM` и прочитать `PACK-agent-rules/incident-journal.md` вручную.
+
+3 вопроса (полный текст, критерии и антипаттерны → `memory/r-questionnaire.md`):
+1. Системный паттерн из Behaviour Report/incidents — разовое или регулярное?
+2. Какой РП взял больше времени, чем планировалось — и почему одним словом?
+3. Если бы мог отменить одно действие этой недели — что?
+
+Ответы → раздел «R-ответы» в WeekReport. «Нечего ответить» — валидный ответ (3 недели подряд → вопрос кандидат на удаление, решение пилота).
+
+`bash .claude/hooks/rule-engine.sh mark-gate week-close-g3` (WP-484 Ф4d — трассировка по ходу, не постфактум на шаге 12).
+
+### 6c. Архивация done-WP (sweep, [[gate]])
+
+> **WP-484 Ф4d.** Гейт "Архивация done-WP" уже проверяется на шаге 12 (`check-trace-satisfaction`), но раньше не имел собственного явного шага здесь — `archive-done-wp.sh` вызывается по одному WP за раз из Day Close сразу при закрытии; Week Close нужна sweep-проверка: не остался ли done-WP в `inbox/`, пропущенный предыдущими Close.
+
+```bash
+for d in {{WORKSPACE_DIR}}/{{GOVERNANCE_REPO}}/inbox/WP-*/; do
+  n=$(basename "$d"); f="$d/$n.md"
+  [ -f "$f" ] && grep -q "^status: done" "$f" && echo "$f"
+done
+```
+
+> Шаблон намеренно узкий — только канонический `WP-N/WP-N.md` (конвенция WP-434), не любой файл внутри папки. Более широкий `WP-*/WP-*.md` ложно матчит суб-файлы (handoff-заметки, транскрипты занятий), у которых `status: done` относится к суб-артефакту, не к самому РП — проверено живьём при написании этого шага (WP-484 Ф4d): широкий шаблон дал 6 ложных совпадений из 7, только 1 реальный (`WP-486/WP-486.md`, done и не заархивирован).
+
+Найден файл → архивировать: `bash {{IWE_SCRIPTS}}/archive-done-wp.sh <WP_NUM>`. Пусто — нечего архивировать, gate удовлетворён без действия.
+
+`bash .claude/hooks/rule-engine.sh mark-gate week-close-g4`
+
 ### 7. Платформенные шаги
 
 #### 7a. Проверка здоровья бэкапов
@@ -153,6 +187,8 @@ ${IWE_SCRIPTS}/check-dirty-repos.sh
 
 Если есть грязные репо → закоммитить и запушить ДО завершения Week Close.
 
+`bash .claude/hooks/rule-engine.sh mark-gate week-close-g1` (покрывает 7a+7c — WP-484 Ф4d).
+
 #### 7d. Memory Validate (T22b, WP-217 Ф10.2)
 
 ```bash
@@ -161,6 +197,8 @@ bash ${IWE_SCRIPTS}/memory-bleed.sh
 
 **Нарушения** (HOT-лимит, orphans, superseded_by без ссылки) → исправить до коммита Week Close.
 **Кандидаты на понижение горизонта** → информативно, пользователь решает при следующем Month Close.
+
+`bash .claude/hooks/rule-engine.sh mark-gate week-close-g2` (WP-484 Ф4d).
 
 #### 7e. ТО памяти (T, SC.024.3 §5)
 
@@ -202,6 +240,8 @@ echo "=== Hindsight log (last 20) ===" && cat ~/.iwe/hindsight.log 2>/dev/null |
 3. Также дополни секцию **«Сверка РП↔НЭП»** в WeekPlan W{N}: для каждого закрытого РП — какая НЭП снята / какой R-результат продвинут? Это вход в Strategy Session W{N+1}.
 4. Заполни секцию **«Рекомендации изменений в НЭП и Стратегию»** в WeekPlan W{N} — что узнали на этой неделе → что менять в `Dissatisfactions.md` / `Strategy.md`.
 
+`bash .claude/hooks/rule-engine.sh mark-gate week-close-g5` (WP-484 Ф4d).
+
 ### 9. Extensions (after)
 
 Загрузить: `bash .claude/scripts/load-extensions.sh week-close after`. Exit 0 → `Read` каждый файл из вывода (alphabetic) → выполнить. Exit 1 → пропустить. Поддерживает `extensions/week-close.after.md` И `extensions/week-close.after.<suffix>.md`.
@@ -220,22 +260,22 @@ echo "=== Hindsight log (last 20) ===" && cat ~/.iwe/hindsight.log 2>/dev/null |
 
 ### 11. Закоммитить governance-репо
 
+> **Защита от гонки параллельных сессий (WP-484 Ф4b).** Week Close — долгая (~30 мин) ручная сессия; за это время параллельные агентские сессии (Kimi/другие) гарантированно продолжают коммитить в тот же репозиторий (найдено 19.07: финальный коммит пришлось перезапускать 3 раза вручную). `week-close-commit-guard.sh` оборачивает commit+push тем же принципом, что `git-dirty-guard.sh` уже даёт открытию дня: `pull --rebase --autostash` перед стейджингом, retry (до 3 попыток) при отклонённом push, коммитит и пушит ТОЛЬКО переданный pathspec — независимо от того, что успело прилететь на origin между попытками.
+
 ```bash
 cd {{WORKSPACE_DIR}}/{{GOVERNANCE_REPO}}
 git status --short
 # НЕ git add -A/git add ./git add -u — AGENTS.md CRITICAL (может захватить работу других агентов)
-# Стейджить ТОЛЬКО файлы, изменённые в шагах 1-10 (в массив для pathspec):
+# Файлы, изменённые в шагах 1-10 (в массив для pathspec):
 WC_FILES=(<каждый файл явным путём: WeekPlan, WeekReport, WP-REGISTRY, inbox/WP-*.md и т.д.>)
-git add "${WC_FILES[@]}"
-git diff --cached --name-only  # проверить scope — только week-close файлы
-# pathspec после `--`: commit ТОЛЬКО свои файлы, не подметаем чужой индекс
-git commit -m "week-close: W{N} итоги q:{score}" -- "${WC_FILES[@]}"
-git push
+bash {{IWE_SCRIPTS}}/week-close-commit-guard.sh "$(pwd)" "week-close: W{N} итоги q:{score}" "${WC_FILES[@]}"
 ```
+
+Exit 0 — закоммичено и запушено (возможно после retry). Exit 1 — нечего коммитить (уже сделано на предыдущей попытке этого же шага). Exit 2 — реальный конфликт после исчерпанных попыток или ошибка окружения → разобраться вручную (`git status`, `git log --oneline -5`), не игнорировать.
 
 ### 12. Верификация (Haiku R23)
 
-Перед запуском R23 — `bash .claude/hooks/rule-engine.sh check-trace-satisfaction --protocol memory/protocol-close.md --section "Week Close"` (WP-481 Ф5.1: 5 гейтов, размеченных в `protocol-close.md` §Week Close — Бэкап, Memory Validate, R-вопросник, Архивация done-WP, Обновить WeekPlan). Verdict block → вернуться на незакрытый gate, потом R23. JSON вердикта приложить к вводу R23.
+Перед запуском R23 — `bash .claude/hooks/rule-engine.sh check-trace-satisfaction --protocol memory/protocol-close.md --section "Week Close"` (WP-481 Ф5.1: 5 гейтов, размеченных в `protocol-close.md` §Week Close — Бэкап, Memory Validate, R-вопросник, Архивация done-WP, Обновить WeekPlan). **С WP-484 Ф4d** каждый `mark-gate week-close-gN` вызывается по ходу своего шага (6c, 7c/7a, 7d, 6b, 8 выше) — эта проверка теперь читает уже расставленные по ходу маркеры, а не собирает их одним блоком постфактум. Verdict block → вернуться на незакрытый gate, потом R23. JSON вердикта приложить к вводу R23.
 
 Запустить sub-agent Haiku в роли R23 Верификатор (context isolation).
 Передать: чеклист, итоги недели, список обновлённых файлов, JSON вердикта trace-satisfaction.
@@ -251,6 +291,7 @@ git push
 - [ ] Pending фазы активных РП обойдены (`pending-phases-sweep.sh` или fallback grep) — решения зафиксированы
 - [ ] Backlog `docs/Backlog.md` обойдён в следующую Strategy Session (либо триггеры активированы, либо явно «B-NNN живёт без триггеров»)
 - [ ] Captures маршрутизированы, уроки записаны
+- [ ] R-вопросник (3 вопроса, шаг 6b) — ответы записаны в WeekReport
 - [ ] Drift-scan недели: устаревшие факты обновлены
 - [ ] Проверка бэкапов (iwe-backup-check.sh) выполнена
 - [ ] iCloud backup выполнен (если macOS)

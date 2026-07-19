@@ -77,15 +77,16 @@ Peer-сессия DP.SC.154 где Kimi = писатель, Claude = напар�
 SESSIONS_DIR="$HOME/IWE/${IWE_GOVERNANCE_REPO:-DS-strategy}/sessions"
 TODAY=$(date +%Y-%m-%d)
 MONTH=$(date +%Y-%m)
-MONTH_DIR="$SESSIONS_DIR/$MONTH"
-mkdir -p "$MONTH_DIR"
-NUM=$(printf "%02d" $(( $(find "$MONTH_DIR" -maxdepth 1 -type d -name "${TODAY}-[0-9][0-9]-*" 2>/dev/null | wc -l | tr -d ' ') + 1 )))
+DAY=$(date +%d)
+DAY_DIR="$SESSIONS_DIR/$MONTH/$DAY"
+mkdir -p "$DAY_DIR"
+NUM=$(printf "%02d" $(( $(find "$DAY_DIR" -maxdepth 1 -type d -name "${TODAY}-[0-9][0-9]-*" 2>/dev/null | wc -l | tr -d ' ') + 1 )))
 ```
 
 Slug = первые 4 латинских слова из задачи строчными буквами через дефис (не-латиница и дата убираются). Никакой даты в slug — она уже в SESSION_ID. Если латиницы нет → `session`.
 
 `SESSION_ID="${TODAY}-${NUM}-${SLUG}"`
-`SESSION_DIR="${MONTH_DIR}/${SESSION_ID}"`
+`SESSION_DIR="${DAY_DIR}/${SESSION_ID}"`
 
 **1.1 Создать папку:**
 ```bash
@@ -742,14 +743,14 @@ extensions:
 
 **Запрещено:**
 - Создавать `report-v1.md`, `report-v2.md` — одна сессия = один отчёт.
-- Создавать supplement-директории — `sessions/YYYY-MM/<id>/` = единое пространство.
+- Создавать supplement-директории — `sessions/YYYY-MM/DD/<id>/` = единое пространство.
 - Продолжать писать `-writer.md`/`-peer.md` при `status: completed` — статус меняется только после Close-сигнала.
 
 ### 4.3 Обновить sessions/00-index.md
 
 Найти строку с `<SESSION_ID>` и заменить целиком:
 ```
-| <TODAY> | <SESSION_ID> | <задача ≤50> | kimi / claude-code | <TURNS> | <ESCALATIONS> | completed | [report.md](<MONTH>/<SESSION_ID>/report.md) |
+| <TODAY> | <SESSION_ID> | <задача ≤50> | kimi / claude-code | <TURNS> | <ESCALATIONS> | completed | [report.md](<MONTH>/<DAY>/<SESSION_ID>/report.md) |
 ```
 (Bash awk — безопасен для строк с `|`.)
 
@@ -757,7 +758,7 @@ extensions:
 
 Slug-часть (без даты и номера): `SESSION_SLUG=$(echo "$SESSION_ID" | sed -E 's/^[0-9]{4}-[0-9]{2}-[0-9]{2}-[0-9]{2}-//')`
 
-Записать `${IWE_GOVERNANCE_REPO:-DS-strategy}/sessions/<MONTH>/<TODAY>-<SESSION_SLUG>.md` (Write):
+Записать `${IWE_GOVERNANCE_REPO:-DS-strategy}/sessions/<MONTH>/<TODAY>-<SESSION_SLUG>.md` (Write) — Quick Close файл плоский под месячной папкой, без DD/ (симметрично session-guard.sh; DD/ — только для peer-session-папок):
 ```markdown
 ---
 date: <TODAY>
@@ -765,7 +766,7 @@ type: peer-session
 writer: kimi-headless
 peer: claude-code
 duration_h: <(end_time - start_time) в часах, 1 знак>
-artifacts: sessions/<MONTH>/<SESSION_ID>/report.md
+artifacts: sessions/<MONTH>/<DAY>/<SESSION_ID>/report.md
 session_id: <SESSION_ID>
 wp: <WP-NNN или unknown>
 ---
@@ -794,7 +795,7 @@ test "$INDEX_COUNT" -eq 1 \
 
 # pathspec после `--`: commit ТОЛЬКО файлы сессии (mis-attribution, 2026-06-20-39)
 # PR flow (WP-436 Ф2): push to feature branch + auto-merge PR → branch protection on main.
-PATHS=("sessions/$MONTH/$SESSION_ID/" "sessions/00-index.md" "sessions/$MONTH/${TODAY}-${SESSION_SLUG}.md")
+PATHS=("sessions/$MONTH/$DAY/$SESSION_ID/" "sessions/00-index.md" "sessions/$MONTH/${TODAY}-${SESSION_SLUG}.md")
 BRANCH="peer/$SESSION_ID"
 git checkout -b "$BRANCH" 2>/dev/null || git checkout "$BRANCH"
 git add "${PATHS[@]}"
@@ -806,7 +807,7 @@ gh pr create --title "feat(peer): $SESSION_ID" \
   || echo "WARN: gh pr create failed — merge manually or check gh auth"
 ```
 
-Показать пилоту: «Сессия завершена. Отчёт: `sessions/$MONTH/$SESSION_ID/report.md`»
+Показать пилоту: «Сессия завершена. Отчёт: `sessions/$MONTH/$DAY/$SESSION_ID/report.md`»
 
 ---
 
@@ -814,7 +815,7 @@ gh pr create --title "feat(peer): $SESSION_ID" \
 
 При `--interrupt <session_id>`:
 
-1. Извлечь месяц из id: `MONTH=$(echo "$session_id" | cut -c1-7)` → найти `sessions/$MONTH/$session_id/meta.yaml`.
+1. Извлечь месяц и день из id: `MONTH=$(echo "$session_id" | cut -c1-7)`, `DAY=$(echo "$session_id" | cut -c9-10)` → найти `sessions/$MONTH/$DAY/$session_id/meta.yaml`.
 2. Обновить (Bash sed): `status: interrupted`, `end_time: <now>`, `turns_count: <число файлов>`.
 3. Найти строку с `<session_id>` в `sessions/00-index.md` и заменить: статус → `interrupted`, report → `—`.
 4. Commit + push.
@@ -825,7 +826,7 @@ gh pr create --title "feat(peer): $SESSION_ID" \
 
 При `--finalize <session_id>`:
 
-1. Извлечь месяц: `MONTH=$(echo "$session_id" | cut -c1-7)`. Проверить что папка `sessions/$MONTH/$session_id` существует и содержит хотя бы `00-writer.md`.
+1. Извлечь месяц и день: `MONTH=$(echo "$session_id" | cut -c1-7)`, `DAY=$(echo "$session_id" | cut -c9-10)`. Проверить что папка `sessions/$MONTH/$DAY/$session_id` существует и содержит хотя бы `00-writer.md`.
 2. Прочитать `meta.yaml` — взять `task_description`, `start_time`, `escalations_count`.
 3. Выполнить **Шаг 4.2** (синтез report-draft.md через `claude-peer-adapter.sh`) с теми же инвариантами и fallback.
 4. Обновить `meta.yaml` (Bash sed): `status: completed`, `end_time: <now>`, `turns_count: <число файлов>`.

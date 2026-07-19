@@ -106,15 +106,16 @@ if verification_class in ("open-loop", "problem-framing"):
 SESSIONS_DIR="$HOME/IWE/DS-my-strategy/sessions"
 TODAY=$(date +%Y-%m-%d)
 MONTH=$(date +%Y-%m)
-MONTH_DIR="$SESSIONS_DIR/$MONTH"
-mkdir -p "$MONTH_DIR"
-NUM=$(printf "%02d" $(( $(find "$MONTH_DIR" -maxdepth 1 -type d -name "${TODAY}-[0-9][0-9]-*" 2>/dev/null | wc -l | tr -d ' ') + 1 )))
+DAY=$(date +%d)
+DAY_DIR="$SESSIONS_DIR/$MONTH/$DAY"
+mkdir -p "$DAY_DIR"
+NUM=$(printf "%02d" $(( $(find "$DAY_DIR" -maxdepth 1 -type d -name "${TODAY}-[0-9][0-9]-*" 2>/dev/null | wc -l | tr -d ' ') + 1 )))
 ```
 
 Slug = первые 4 латинских слова из задачи строчными буквами через дефис (не-латиница и дата убираются). Никакой даты в slug — она уже в SESSION_ID. Если латиницы нет → `session`.
 
 `SESSION_ID="${TODAY}-${NUM}-${SLUG}"`
-`SESSION_DIR="${MONTH_DIR}/${SESSION_ID}"`
+`SESSION_DIR="${DAY_DIR}/${SESSION_ID}"`
 
 **1.0 Session-guard open (WP-398, обязательно, ДО любых Write/Edit в сессии).** Синхронизирует пир-сессию с `session-guard.sh` Scope gate — без этого коммит на Шаге 4.5 будет заблокирован pre-commit хуком (mtime файлов сессии старше семафора). WP берётся из Шага 0б (найденный или «day-close»/«unknown», если РП не назначен):
 
@@ -575,7 +576,7 @@ extensions:
 
 **Запрещено:**
 - Создавать `report-v1.md`, `report-v2.md` — одна сессия = один отчёт.
-- Создавать supplement-директории — `sessions/YYYY-MM/<id>/` = единое пространство.
+- Создавать supplement-директории — `sessions/YYYY-MM/DD/<id>/` = единое пространство.
 - Продолжать писать `-writer.md`/`-peer.md` при `status: completed` — статус меняется только после Close-сигнала.
 
 ### 4.2b Стиль report.md (DP.SC.050)
@@ -673,7 +674,7 @@ Omit если `implementation_pipeline: false` в meta.yaml.
 
 Найти строку с `<SESSION_ID>` и заменить целиком:
 ```
-| <TODAY> | <SESSION_ID> | <задача ≤50> | claude-code / kimi | <TURNS> | <ESCALATIONS> | completed | [report.md](<MONTH>/<SESSION_ID>/report.md) |
+| <TODAY> | <SESSION_ID> | <задача ≤50> | claude-code / kimi | <TURNS> | <ESCALATIONS> | completed | [report.md](<MONTH>/<DAY>/<SESSION_ID>/report.md) |
 ```
 (Bash awk — безопасен для строк с `|`.)
 
@@ -681,7 +682,7 @@ Omit если `implementation_pipeline: false` в meta.yaml.
 
 Slug-часть (без даты и номера): `SESSION_SLUG=$(echo "$SESSION_ID" | sed -E 's/^[0-9]{4}-[0-9]{2}-[0-9]{2}-[0-9]{2}-//')`
 
-Записать `DS-my-strategy/sessions/<MONTH>/<TODAY>-<SESSION_SLUG>.md` (Write):
+Записать `DS-my-strategy/sessions/<MONTH>/<TODAY>-<SESSION_SLUG>.md` (Write) — Quick Close файл плоский под месячной папкой, без DD/ (симметрично session-guard.sh; DD/ — только для peer-session-папок):
 ```markdown
 ---
 date: <TODAY>
@@ -689,7 +690,7 @@ type: peer-session
 writer: claude-code
 peer: kimi-headless
 duration_h: <(end_time - start_time) в часах, 1 знак>
-artifacts: sessions/<MONTH>/<SESSION_ID>/report.md
+artifacts: sessions/<MONTH>/<DAY>/<SESSION_ID>/report.md
 session_id: <SESSION_ID>
 wp: <WP-NNN или unknown>
 ---
@@ -704,7 +705,7 @@ wp: <WP-NNN или unknown>
 **4.5.0 Заполнить служебный ORZ-скаффолд session-guard** (если Шаг 1.0 создал семафор успешно) — минимально, пойнтером на настоящий отчёт, не дублируя контент:
 
 ```bash
-GUARD_ORZ="$HOME/IWE/DS-my-strategy/sessions/${TODAY}-${SESSION_ID}.md"
+GUARD_ORZ="$HOME/IWE/DS-my-strategy/sessions/$MONTH/${TODAY}-${SESSION_ID}.md"
 if [ -f "$GUARD_ORZ" ]; then
   cat > "$GUARD_ORZ" <<EOF
 ---
@@ -712,23 +713,23 @@ date: $TODAY
 type: work
 wp: <WP-NNN>
 duration_h: <(end_time - start_time) в часах>
-artifacts: [sessions/$MONTH/$SESSION_ID/report.md]
+artifacts: [sessions/$MONTH/$DAY/$SESSION_ID/report.md]
 agent: claude-code
 ---
 
 ## Главный инсайт
 
-См. sessions/$MONTH/$SESSION_ID/report.md §4 (зафиксированное решение).
+См. sessions/$MONTH/$DAY/$SESSION_ID/report.md §4 (зафиксированное решение).
 
 ## Контекст
 
-Пир-сессия $SESSION_ID — полная стенограмма и синтез в sessions/$MONTH/$SESSION_ID/.
+Пир-сессия $SESSION_ID — полная стенограмма и синтез в sessions/$MONTH/$DAY/$SESSION_ID/.
 
 ## Достигнуто
 
 | Артефакт | Описание |
 |----------|----------|
-| sessions/$MONTH/$SESSION_ID/report.md | Итоговый отчёт пир-сессии |
+| sessions/$MONTH/$DAY/$SESSION_ID/report.md | Итоговый отчёт пир-сессии |
 
 ## Ключевые решения
 
@@ -743,7 +744,7 @@ fi
 cd "$HOME/IWE/DS-my-strategy"
 # pathspec после `--`: commit ТОЛЬКО файлы сессии, не подметаем чужое
 # pre-staged из общего индекса (mis-attribution, см. 2026-06-20-39).
-PATHS=("sessions/$MONTH/$SESSION_ID/" "sessions/00-index.md" "sessions/$MONTH/${TODAY}-${SESSION_SLUG}.md")
+PATHS=("sessions/$MONTH/$DAY/$SESSION_ID/" "sessions/00-index.md" "sessions/$MONTH/${TODAY}-${SESSION_SLUG}.md")
 [ -f "$GUARD_ORZ" ] && PATHS+=("$GUARD_ORZ")
 git add "${PATHS[@]}"
 git commit -m "feat(peer): $SESSION_ID — <задача кратко>" -- "${PATHS[@]}"
@@ -766,7 +767,7 @@ IWE_AGENT=claude-code bash "${IWE_SCRIPTS:-$HOME/IWE/scripts}/session-guard.sh" 
 
 Решение: <первый пункт §4 из report.md — одна строка на пальцах, без технических кодов>
 
-Подробный отчёт: sessions/<MONTH>/<SESSION_ID>/report.md
+Подробный отчёт: sessions/<MONTH>/<DAY>/<SESSION_ID>/report.md
 ```
 
 Если report.md пустой или субагент-синтезатор не создал его — показать только ссылку без §4.
@@ -777,7 +778,7 @@ IWE_AGENT=claude-code bash "${IWE_SCRIPTS:-$HOME/IWE/scripts}/session-guard.sh" 
 
 При `--interrupt <session_id>`:
 
-1. Извлечь месяц из id: `MONTH=$(echo "$session_id" | cut -c1-7)` → найти `sessions/$MONTH/$session_id/meta.yaml`.
+1. Извлечь месяц и день из id: `MONTH=$(echo "$session_id" | cut -c1-7)`, `DAY=$(echo "$session_id" | cut -c9-10)` → найти `sessions/$MONTH/$DAY/$session_id/meta.yaml`.
 2. Обновить (Bash sed): `status: interrupted`, `end_time: <now>`, `turns_count: <число файлов>`.
 3. Найти строку с `<session_id>` в `sessions/00-index.md` и заменить: статус → `interrupted`, report → `—`.
 4. Commit + push.
@@ -788,7 +789,7 @@ IWE_AGENT=claude-code bash "${IWE_SCRIPTS:-$HOME/IWE/scripts}/session-guard.sh" 
 
 При `--finalize <session_id>`:
 
-1. Извлечь месяц: `MONTH=$(echo "$session_id" | cut -c1-7)`. Проверить что папка `sessions/$MONTH/$session_id` существует и содержит хотя бы `00-writer.md`.
+1. Извлечь месяц и день: `MONTH=$(echo "$session_id" | cut -c1-7)`, `DAY=$(echo "$session_id" | cut -c9-10)`. Проверить что папка `sessions/$MONTH/$DAY/$session_id` существует и содержит хотя бы `00-writer.md`.
 2. Прочитать `meta.yaml` — взять `task_description`, `start_time`, `escalations_count`.
 3. Выполнить **Шаг 4.2** (синтез report.md через Agent tool) с теми же инвариантами и fallback.
 4. Обновить `meta.yaml` (Bash sed): `status: completed`, `end_time: <now>`, `turns_count: <число файлов>`.
