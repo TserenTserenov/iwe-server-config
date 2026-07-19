@@ -60,6 +60,7 @@ cd DS-my-strategy && python3 scripts/process-runner.py start quick-close --slug 
 
 2. **WP Context File (БЛОКИРУЮЩЕЕ, факт а не шаблон, шаг `wp-context-update` — ai-контракт: вход `[git_diff, session_summary]`, выход `[status, what_tried, what_learned, what_next]`)** — обновить секцию «Осталось» (structured формат): [[gate]]
    - in_progress → structured handoff
+   - **done → Гейт согласования закрытия (WP-5, решение пилота 2026-07-18, вариант Б).** Перед `status: done` проверить: WP-context содержит содержательный факт закрытия (конкретный результат/критерий приёмки этой сессии, не шаблонная фраза)? Пусто/шаблонно → **спросить пилота прямо в чате** («Закрываю РП-N без явного итога закрытия — фиксируем как есть или ещё есть незафиксированный результат?»), закрытие не идёт молча. Содержательный факт уже есть → закрывать без вопроса (не нагружать рутинные закрытия). [[gate]]
    - done → пометить `status: done` **→ и немедленно архивировать (шаг `wp-archive-run`, вход `{"wp","repo"}`, раннер зовёт его сам после `wp-archive-check`):**
      ```bash
      git mv inbox/WP-N archive/wp-contexts/WP-N   # папка
@@ -137,6 +138,7 @@ cd DS-my-strategy && python3 scripts/process-runner.py start quick-close --slug 
 
 - [ ] Всё закоммичено и запушено
 - [ ] WP Context: «Осталось» записано (или done помечен) **и отражает факт, сверенный R23 с `git diff`** — не шаблон
+- [ ] **Гейт закрытия РП:** если `status: done` — WP-context содержит содержательный факт (не пустой outcome/rationale) ИЛИ пилот явно спрошен и ответил
 - [ ] KE: «Что узнали» маршрутизировано (или «нет нового знания»)
 - [ ] MEMORY.md: статус РП обновлён
 - [ ] Decision log: прочитать записи сессии в `decisions/decision-log-YYYY-MM.md`, скорректировать если неточно
