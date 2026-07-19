@@ -92,7 +92,7 @@
 | 493 | 🔄 | P2 | Лаборатория характеристик | Ф7 оценка бюджета |
 | 494 | 🔄 | P2 | Панель рабочих продуктов в VS Code | ручная F5-приёмка пилотом |
 | 495 | 🔄 | **P1** | Концепция персонального развития | пилот выбирает порядок Ф4/Ф9/публикации |
-| 496 | 🔄 | P3 | Журнал гипотез (LPF-регламент обратной связи) | постановка готова, 3 решения пилота перед Ф1 |
+| 496 | 🔄 | P3 | Журнал гипотез (LPF-регламент обратной связи) | 19.07: Ф0-Ф4 done — журнал+regламент+skill+АрхГейт роли; ждёт сверки H-001 (не раньше 01.09) |
 | 167 | 🔄 | P5 | Публикации (зонтичный) | пилот согласует пост #169 + видео |
 
 ## Бот: деплой
@@ -156,3 +156,4 @@
 - [lessons_openrouter_403_is_spend_limit_not_stale_key.md](lessons_openrouter_403_is_spend_limit_not_stale_key.md) — 403 ≠ 401: сначала лимит трат, не ключ
 - [lessons_git_branches_not_remotes_false_positive_stale_pr.md](lessons_git_branches_not_remotes_false_positive_stale_pr.md) — врёт на старых PR-ветках
 - [lessons_runner_wp_archive_umbrella_false_trigger.md](lessons_runner_wp_archive_umbrella_false_trigger.md) — раннер архивирует ВЕСЬ зонтичный РП при status:done одной фазы
+- [lessons_knowledge_index_publisher_race_rebase.md](lessons_knowledge_index_publisher_race_rebase.md) — правка поста после публикатора → push отбивается, чинить rebase не force
