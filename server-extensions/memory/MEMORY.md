@@ -69,7 +69,7 @@
 | 452 | 🔄 | P3 | Гайд разработчика IWE | Ф2 стиль кода |
 | 453 | 🔄 | P4 | Конвейер обновления руководства IWE | ждёт WP-452 Ф2-Ф3 |
 | 349 | 🔄 | — | Онбординг на MCP | Ф31 тексты, 3-4ч |
-| 245 | 🔄 | P5 | Программа личного развития | 19.07: концепт «метод изменения себя» (изоморфен оргизменению) + план 10 фаз (`WP-245-metod-implementation-plan.md`), проверен верификатором (6 правок вшиты); связки 149/495/151/493/494/427/419/483; next: реализация в новой сессии (Блок 1 — сведение циклов MIM.M.003/6/9-стадий) |
+| 245 | 🔄 | P5 | Программа личного развития | 19.07: Блок 1 (Ф-M1…M5) + Ф-M6 метода изменения себя реализованы и верифицированы (2 прохода субагента, 1 задвоение найдено и закрыто); Ф-M7/M8 блокированы РП495 Ф4/Ф5 (не начаты) — доложено, не обойдено; next: пилот решает — ждать РП495 или взяться за Ф4/Ф5 |
 | 364 | 🏭 | — | Фабрика руководств МИМ | Ф6b разметка wave-2 |
 | 455 | 🔄 | P4 | Неизменяемость аудит-журнала событий | блокер: хост джоба (решение пилота) |
 | 290 | 🔄 | **P1** | Следователь: каузальная аналитика | Ход 2 — решение стратсессии |
@@ -88,8 +88,8 @@
 | 289 | 🔄 | P2 | Интеграция IWE с личными базами знаний | Приёмка MVP |
 | 483 | 🔄 | P2 | Комплект структурирования данных (guide-kit) | решение пилота по Ф9 (транспорт/серверная часть) |
 | 488 | 🔄 | P2 | Браузерное рабочее место на Hetzner | Ф2 скорость |
-| 484 | 🔄 | — | Автогенератор открытия/закрытия дня (зонтичный) | наблюдать боевые pull/push циклы |
-| 493 | 🔄 | P2 | Лаборатория характеристик | Ф7 оценка бюджета |
+| 484 | 🔄 | — | Автогенератор открытия/закрытия дня (зонтичный) | 19.07 веч.: закрыт последний непрокрытый git pull (шаг 4.6 day-open-pipeline.sh, git-dirty-guard.sh) - оба места защищены; разовая проверка гонки сервер/Мак запланирована на 20.07 09:20 |
+| 493 | 🔄 | P2 | Лаборатория характеристик | 19.07: Ф7+Ф5 закрыты (шов с WP-471 — маппинг этажей, конфликта нет); next: Ф8/Ф9 репо (решение пилота по таймингу) |
 | 494 | 🔄 | P2 | Панель рабочих продуктов в VS Code | ручная F5-приёмка пилотом |
 | 495 | 🔄 | **P1** | Концепция персонального развития | пилот выбирает порядок Ф4/Ф9/публикации |
 | 496 | 🔄 | P3 | Журнал гипотез (LPF-регламент обратной связи) | 19.07: Ф0-Ф4 done — журнал+regламент+skill+АрхГейт роли; ждёт сверки H-001 (не раньше 01.09) |
@@ -117,43 +117,23 @@
 
 ### Feedback — HOT
 
-- [lessons_grep_substring_draft_status_false_positive.md](lessons_grep_substring_draft_status_false_positive.md) — массовая операция по статусу файла — якорный паттерн, не подстрока
-- [lessons_branch_protection_incompatible_direct_push.md](lessons_branch_protection_incompatible_direct_push.md) — блокирует ЛЮБОЙ прямой push
 - [feedback_askuserquestion_not_reaching_pilot.md](feedback_askuserquestion_not_reaching_pilot.md) — choice-question — дублировать в чат
-- [feedback_wp_naming_via_artifactor.md](feedback_wp_naming_via_artifactor.md) — имя РП только через Артефактор
-- [lessons_fake_file_modified_note_injection.md](lessons_fake_file_modified_note_injection.md) — «файл изменён» может быть ложным
 - [routing-vocab.md](routing-vocab.md) — фраза → путь, читать ПЕРЕД Write
 - [feedback_response_clarity_for_pilot.md](feedback_response_clarity_for_pilot.md) — A1-A11 правила ответа
 - [feedback_explicit_approval_covers_hook_false_positive.md](feedback_explicit_approval_covers_hook_false_positive.md) — одобренная команда → ложняк хука не требует переспроса
 - [reference_no_invented_facts_hub.md](reference_no_invented_facts_hub.md) — не выдумывать опыт/имена
 - [user_tseren_personal_life.md](user_tseren_personal_life.md) — Tseren (НЕ Дмитрий), Кипр
 - [reference_day_protocol_gaps_hub.md](reference_day_protocol_gaps_hub.md) — Day Open/Close квирки (7)
-- [reference_wp_gate_mechanics_hub.md](reference_wp_gate_mechanics_hub.md) — task_id, дочерний РП
+- [reference_wp_gate_mechanics_hub.md](reference_wp_gate_mechanics_hub.md) — task_id, дочерний РП, имя через Артефактор (6)
 - [reference_llm_bot_output_quirks_hub.md](reference_llm_bot_output_quirks_hub.md) — TG markdown/HTML квирки (6)
-- [reference_diagnosis_technique_hub.md](reference_diagnosis_technique_hub.md) — root-cause, verify-before-trust (28)
-- [reference_git_hygiene_hub.md](reference_git_hygiene_hub.md) — git-add scope, pathspec (22)
+- [reference_diagnosis_technique_hub.md](reference_diagnosis_technique_hub.md) — root-cause, verify-before-trust (36)
+- [reference_git_hygiene_hub.md](reference_git_hygiene_hub.md) — git-add scope, pathspec, rebase/reset квирки (29)
 - [reference_agent_session_mechanics_hub.md](reference_agent_session_mechanics_hub.md) — рецидив 3× kimi-peer-adapter (11)
 - [reference_macos_zsh_env_quirks_hub.md](reference_macos_zsh_env_quirks_hub.md) — квирки macOS/zsh/grep/git (12)
-- [lessons_stale_rebase_merge_recovery.md](lessons_stale_rebase_merge_recovery.md) — брошенный rebase-merge чужой сессии, как расчистить
-- [lessons_rebase_autostash_silent_on_plain_pull.md](lessons_rebase_autostash_silent_on_plain_pull.md) — autostash=true — обычный pull --rebase тоже тихо стеширует
-- [lessons_migration_parity_real_profile_insufficient.md](lessons_migration_parity_real_profile_insufficient.md) — реальные данные не кроют крайние случаи
 - [lessons_ontological_not_lexical_generation.md](lessons_ontological_not_lexical_generation.md) — Pack/руководства — «онтологически, не лексически»
 - [reference_tsekh1_backup_infra_hub.md](reference_tsekh1_backup_infra_hub.md) — SSH-зависания, restic/B2 cap (2)
 - [reference_railway_deploy_quirks_hub.md](reference_railway_deploy_quirks_hub.md) — секреты в чат, railpack (2)
-- [reference_fmt_process_practices_hub.md](reference_fmt_process_practices_hub.md) — /skill-creator, issue-close (2)
-- [lessons_hot_diff_guard_line_level_false_positive.md](lessons_hot_diff_guard_line_level_false_positive.md) — Ф5-страж: точечный фикс = ложный «gone»
-- [lessons_same_name_script_different_repo_different_function.md](lessons_same_name_script_different_repo_different_function.md) — путь совпал ≠ функция та же (репо-омоним)
-- [lessons_wp_sync_bundle_body_match_not_frontmatter.md](lessons_wp_sync_bundle_body_match_not_frontmatter.md) — матчит по body, не `related:` — сверять вручную (2×)
-- [lessons_process_runner_handler_credential_masking.md](lessons_process_runner_handler_credential_masking.md) — рефлекс-хендлер со stdout в карточке — маскировать креды сразу
-- [lessons_day_close_dispatcher_races_active_session.md](lessons_day_close_dispatcher_races_active_session.md) — диспетчер счёл активную peer-сессию брошенной, обошёл gate
-- [lessons_mcp_json_tracked_secret_wrapper_pattern.md](lessons_mcp_json_tracked_secret_wrapper_pattern.md) — `.mcp.json` в git → новый MCP только через wrapper-скрипт, не inline-секрет
-- [lessons_secret_rotation_verify_every_consumer_live.md](lessons_secret_rotation_verify_every_consumer_live.md) — ротация секрета: сверять КАЖДОГО потребителя живым тестом
-- [lessons_component_sync_is_not_version_cut.md](lessons_component_sync_is_not_version_cut.md) — синк ≠ срез версии всем
-- [lessons_isolated_run_missing_symlink_false_positive.md](lessons_isolated_run_missing_symlink_false_positive.md) — изолированный клон без extensions/ → ложный чек-лист
-- [lessons_verify_pack_principle_before_code_change.md](lessons_verify_pack_principle_before_code_change.md) — сверять Pack-принцип с первоисточником
-- [lessons_dirty_far_behind_clone_is_stale_mirror.md](lessons_dirty_far_behind_clone_is_stale_mirror.md) — отставший клон = зеркало, лечить сбросом
-- [lessons_reset_hard_safety_needs_ancestry_not_just_content_diff.md](lessons_reset_hard_safety_needs_ancestry_not_just_content_diff.md) — «reset --hard безопасен» требует ancestry-, не только content-проверки
-- [lessons_openrouter_403_is_spend_limit_not_stale_key.md](lessons_openrouter_403_is_spend_limit_not_stale_key.md) — 403 ≠ 401: сначала лимит трат, не ключ
-- [lessons_git_branches_not_remotes_false_positive_stale_pr.md](lessons_git_branches_not_remotes_false_positive_stale_pr.md) — врёт на старых PR-ветках
-- [lessons_runner_wp_archive_umbrella_false_trigger.md](lessons_runner_wp_archive_umbrella_false_trigger.md) — раннер архивирует ВЕСЬ зонтичный РП при status:done одной фазы
-- [lessons_knowledge_index_publisher_race_rebase.md](lessons_knowledge_index_publisher_race_rebase.md) — правка поста после публикатора → push отбивается, чинить rebase не force
+- [reference_fmt_process_practices_hub.md](reference_fmt_process_practices_hub.md) — /skill-creator, issue-close, sync≠version-cut (3)
+- [reference_process_runner_quirks_hub.md](reference_process_runner_quirks_hub.md) — креды в карточке, race с активной сессией, umbrella-архивация (3)
+- [reference_secrets_credentials_hub.md](reference_secrets_credentials_hub.md) — .mcp.json wrapper, ротация-верификация, 403≠401 (3)
+- [lessons_shared_registry_axis_needs_ownership_check.md](lessons_shared_registry_axis_needs_ownership_check.md) — новая ось в платформенном реестре: сначала «чья это ось», потом «дробить или нет»
