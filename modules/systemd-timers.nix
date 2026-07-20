@@ -651,10 +651,10 @@ in
     # 8. RENDER PILOT GUIDES — weekly (WP-149 Ф12, WP-245 Ф28.7)
     # =========================================================
     # Полный рендер всех 6 файлов персонального руководства каждому пилоту.
-    # Понедельник 05:00 МСК — перед рабочей неделей.
+    # Понедельник 02:00 EEST — перед рабочей неделей, с запасом до утра.
 
     systemd.services."iwe-render-pilot-guides-weekly" = {
-      description = "IWE — рендер руководств пилотов (weekly, Пн 05:00)";
+      description = "IWE — рендер руководств пилотов (weekly, Пн 02:00 EEST)";
       unitConfig   = commonUnitConfig;
       serviceConfig = commonServiceConfig // {
         # 2026-07-10 (директива пилота, WP-149): генерация для managed-пилотов
@@ -669,9 +669,13 @@ in
 
     systemd.timers."iwe-render-pilot-guides-weekly" = {
       wantedBy    = [ "timers.target" ];
-      description = "IWE рендер руководств — Пн 05:00 МСК";
+      description = "IWE рендер руководств — Пн 02:00 EEST";
       timerConfig = {
-        OnCalendar = "Mon *-*-* 05:00:00";
+        # 2026-07-20 (директива пилота): перенос с 05:00 на 02:00 — руководство
+        # должно быть готово к утру с запасом. Явный TZ-суффикс (было наследование
+        # от системной зоны хоста, Europe/Helsinki) — 02:00 EEST держится и зимой,
+        # когда Хельсинки уходит на UTC+2, а Кипр/EEST-эквивалент — нет.
+        OnCalendar = "Mon *-*-* 02:00:00 Europe/Nicosia";
         Persistent = true;
       };
     };
@@ -679,7 +683,7 @@ in
     # =========================================================
     # 9. RENDER PILOT GUIDES — daily (WP-149 Ф12, WP-245 Ф28.7)
     # =========================================================
-    # Новый guide/YYYY-MM-DD.md — каждый день, 03:00 МСК.
+    # Новый guide/YYYY-MM-DD.md — каждый день, 02:00 EEST.
     # WP-149 (2026-07-06, bug-2026-07-06-monday-no-daily-guide): понедельник раньше
     # был исключён на предположении «weekly (#8) уже делает полный рендер» — это
     # предположение неверно, weekly-режим пишет только guide/{ISO-неделя}.md, дневной
@@ -691,7 +695,7 @@ in
     # Разовую запись можно удалить после того, как она сработает.
 
     systemd.services."iwe-render-pilot-guides-daily" = {
-      description = "IWE — рендер руководств пилотов (daily, каждый день 03:00)";
+      description = "IWE — рендер руководств пилотов (daily, каждый день 02:00 EEST)";
       unitConfig   = commonUnitConfig;
       serviceConfig = commonServiceConfig // {
         # 2026-07-10 (директива пилота, WP-149): см. пометку у weekly-сервиса выше.
@@ -704,12 +708,12 @@ in
 
     systemd.timers."iwe-render-pilot-guides-daily" = {
       wantedBy    = [ "timers.target" ];
-      description = "IWE рендер руководств (daily) — каждый день 03:00 МСК (переход 2026-07-07, см. OnCalendar)";
+      description = "IWE рендер руководств (daily) — каждый день 02:00 EEST (переход 2026-07-20, см. OnCalendar)";
       timerConfig = {
-        OnCalendar = [
-          "2026-07-07 06:00:00"  # разовая: последний запуск по старому расписанию 06:00
-          "*-*-* 03:00:00"       # новое расписание, действует с 2026-07-08
-        ];
+        # 2026-07-20 (директива пилота): перенос с 03:00 на 02:00 — тот же мотив,
+        # что у weekly-таймера выше. Явный TZ-суффикс вместо наследования от
+        # системной зоны хоста (Europe/Helsinki) — держит 02:00 EEST и зимой.
+        OnCalendar = "*-*-* 02:00:00 Europe/Nicosia";
         Persistent = true;
       };
     };
