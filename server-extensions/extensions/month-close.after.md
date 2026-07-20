@@ -33,10 +33,10 @@ owner: user
 
 ```bash
 python3 ~/IWE/DS-my-strategy/scripts/build-strategic-context.py
-git -C ~/IWE/DS-my-strategy add current/strategic-context.yaml
+git -C ~/IWE/DS-my-strategy add machine/strategic-context.yaml
 ```
 
-Скрипт собирает `current/strategic-context.yaml` (цели R месяца, топ-НЭП, ТОС недели, привязки РП→R, активные проекты) для рендера персонального руководства. Exit 1 = какая-то секция не собралась (`missing` непуст) — файл всё равно записан, но источники надо починить и перезапустить. Также запускать на Strategy Session при смене фокуса месяца.
+Скрипт собирает `machine/strategic-context.yaml` (цели R месяца, топ-НЭП, ТОС недели, привязки РП→R, активные проекты) для рендера персонального руководства. Exit 1 = какая-то секция не собралась (`missing` непуст) — файл всё равно записан, но источники надо починить и перезапустить. Также запускать на Strategy Session при смене фокуса месяца.
 
 ## Шаг A2. Подсказка пользователю про следующую Strategy Session
 

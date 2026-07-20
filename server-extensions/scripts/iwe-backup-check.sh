@@ -89,11 +89,10 @@ if [ ! -d "$IWE_ROOT" ]; then
     exit 2
 fi
 
-# Baseline — локальный runtime-счётчик, не пилот-читаемый артефакт и не в git
-# (2026-07-20: current/ зарезервирована под ежедневное чтение пилотом). Путь
-# абсолютный, от IWE_ROOT (не от SCRIPT_DIR — тот перезаписывается
-# iwe-env-bootstrap.sh на своё расположение при source выше; вычислен ПОСЛЕ
-# парсинга аргументов, чтобы --root учитывался).
+# Baseline живёт в DS-my-strategy/current/ (New-files guard: коммит требует
+# тега [allow:current]). Путь абсолютный, от IWE_ROOT (не от SCRIPT_DIR — тот
+# перезаписывается iwe-env-bootstrap.sh на своё расположение при source выше;
+# вычислен ПОСЛЕ парсинга аргументов, чтобы --root учитывался).
 REPO_DIR="$IWE_ROOT/DS-my-strategy"
 BASELINE_FILE="$REPO_DIR/.state/backup-baseline.json"
 BASELINE_THRESHOLD_PCT=80
