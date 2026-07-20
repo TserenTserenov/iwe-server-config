@@ -404,9 +404,15 @@ in
         ExecStartPre = [ "-${pullScript}" "-${pushAheadScript}" ];
         ExecStart    = "${pkgs.bash}/bin/bash ${iwe}/DS-IT-systems/DS-ai-systems/synchronizer/scripts/scheduler.sh dispatch";
         TimeoutSec   = 1800;  # 30 мин — включая pre-tick pull (worst-case 14×60s=14 мин)
+        # WP-484 (20.07): scheduler.sh запускает strategist.sh, который вызывает claude CLI
+        # напрямую (`"$CLAUDE_PATH" -p "$prompt"`) — тот же класс потребителя, что уже
+        # переведён на прокси у iwe-overnight-auditor ниже (WP-7, 18.07). claude CLI сам
+        # читает ANTHROPIC_API_KEY/ANTHROPIC_BASE_URL из окружения; второй EnvironmentFile
+        # даёт рабочий proxy shared secret тем же приёмом.
+        EnvironmentFile = [ "/etc/iwe/env" "-/home/tseren/.iwe/.proxy-env" ];
       };
       path = commonPath;
-      environment = commonEnv;
+      environment = commonEnv // { ANTHROPIC_BASE_URL = "https://auth-gateway-production-52bf.up.railway.app"; };
     };
 
     systemd.timers."iwe-scheduler" = {
