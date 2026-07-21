@@ -81,5 +81,41 @@ in
       };
     };
 
+    # Встроенный автообновитель CLI (`claude`, при запуске в интерактивной
+    # сессии) не может писать в ${npmGlobal} без переменных окружения npm
+    # пользователя tseren — падает молча с "Auto-update failed". Тот же
+    # npm install -g поверх уже установленной версии — штатный способ
+    # обновления, идемпотентен.
+    systemd.services."iwe-update-claude" = {
+      description = "IWE — обновление Claude CLI до последней версии";
+      after       = [ "network-online.target" ];
+      wants       = [ "network-online.target" ];
+      path        = [ cfg.nodePackage pkgs.bash pkgs.coreutils ];
+      serviceConfig = {
+        Type            = "oneshot";
+        User            = "tseren";
+        StandardOutput  = "journal";
+        StandardError   = "journal";
+        ExecStart       = pkgs.writeShellScript "update-claude-cli" ''
+          set -euo pipefail
+          export HOME="/home/tseren"
+          export NPM_CONFIG_PREFIX="${npmGlobal}"
+          before=$(${claudeBin} --version 2>&1 | head -1 || echo "не установлен")
+          npm install -g @anthropic-ai/claude-code 2>&1
+          after=$(${claudeBin} --version 2>&1 | head -1)
+          echo "Claude CLI: $before -> $after"
+        '';
+      };
+    };
+
+    systemd.timers."iwe-update-claude" = {
+      description = "IWE — ежедневное обновление Claude CLI";
+      wantedBy    = [ "timers.target" ];
+      timerConfig = {
+        OnCalendar = "*-*-* 03:30:00 Europe/Nicosia";
+        Persistent = true;
+      };
+    };
+
   };
 }
