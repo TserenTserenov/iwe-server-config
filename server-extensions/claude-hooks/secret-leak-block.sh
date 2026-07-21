@@ -99,7 +99,16 @@ done
 # Снимаем escape (\) и кавычки ("') — обходы c\at / c""at / 'cat' (cold-review C4).
 unescaped=$(printf '%s' "$command" | tr -d '\\"'\')
 read_tools='cat|tac|rev|nl|head|tail|less|more|grep|egrep|fgrep|xxd|hexdump|od|strings|base64|openssl|jq|yq|python|python3|node|ruby|perl|awk|sed|dd|wc|tr|cut|paste|column|fmt|expand|tee|bat|mapfile|readarray|source'
-sens_path='\.secrets/|\.railway/|\.env([^A-Za-z0-9]|$)|\.env\.|\.pem([^A-Za-z0-9]|$)|\.p12|\.pfx|/id_rsa|/id_ed25519|\.token([^A-Za-z0-9]|$)|-secret\.|/secrets\.|/credentials\.|\.netrc|wrangler\.toml'
+# Граница слева ((^|[^A-Za-z0-9._-])) на каждом суб-паттерне: без неё "-secret\." матчил
+# любую substring в тексте команды, не только реальный путь — заблокировало git commit -m
+# с сообщением коммита, упоминающим имя файла claude-subscription-secret.nix (WP-7 21.07,
+# живой инцидент). "-secret\." дополнительно сужен до типичных секрет-расширений
+# (yaml/yml/json/env/txt/ini/conf) — "-secret.nix"/"-secret.sh" это код по имени, не секрет.
+_b='(^|[^A-Za-z0-9._-])'
+# secrets/*.(yaml|yml|json) без ведущей точки (sops-nix паттерн — repo secrets/google-calendar.yaml,
+# claude-subscription.yaml) не был покрыт исходным ".secrets/"/"secrets\." (те требуют ведущую точку
+# ИЛИ точку сразу после "secrets", ни один не матчит голый каталог) — обнаружено тем же живым тестом.
+sens_path="${_b}\\.secrets/|${_b}\\.railway/|${_b}\\.env([^A-Za-z0-9]|\$)|${_b}\\.env\\.|${_b}\\.pem([^A-Za-z0-9]|\$)|${_b}\\.p12|${_b}\\.pfx|${_b}/id_rsa|${_b}/id_ed25519|${_b}\\.token([^A-Za-z0-9]|\$)|${_b}-secret\\.(yaml|yml|json|env|txt|ini|conf)|${_b}/secrets\\.|${_b}secrets/[^[:space:]]*\\.(yaml|yml|json)|${_b}/credentials\\.|${_b}\\.netrc|${_b}wrangler\\.toml"
 deny_read() {
   local why="$1"
   local reason="Чтение секрет-файла через Bash заблокировано (B7.7c, $why). Цепочка рвётся ДО попадания значения в контекст. Используй значение через \$VAR/env, не читай файл. Разовый легитимный дебаг — CC_ALLOW_SECRETS=1, выставленный пилотом в реальном шелле."

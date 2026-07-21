@@ -87,6 +87,15 @@ case "/$target_n/" in
   */.secrets/*) matched=".secrets/ dir" ;;
   */.railway/*) matched=".railway/ dir" ;;
 esac
+# sops-nix repo-secrets/ без ведущей точки (напр. iwe-server-config/secrets/*.yaml) —
+# отдельная проверка на target_n целиком (не на "/x/" срез выше): "secrets/" может быть
+# на глубине >1, а срез матчит только непосредственных соседей по пути (cold-review WP-7).
+if [ -z "$matched" ]; then
+  case "$target_n" in
+    */secrets/*.yaml|*/secrets/*.yml|*/secrets/*.json|secrets/*.yaml|secrets/*.yml|secrets/*.json)
+      matched="secrets/ dir (sops)" ;;
+  esac
+fi
 # по basename (нормализованному)
 if [ -z "$matched" ]; then
   case "$base_n" in
@@ -94,7 +103,10 @@ if [ -z "$matched" ]; then
     *.pem|*.key|*.p12|*.pfx)           matched="private-key" ;;
     *.token)                            matched="*.token" ;;
     id_rsa|id_rsa.*|id_ed25519|id_ed25519.*) matched="ssh-key" ;;
-    *-secret.*|secrets.*|credentials.*) matched="secret/creds file" ;;
+    # WP-7 21.07: *-secret.* совпадал с любым расширением, включая .nix/.sh — блокировал
+    # Read кода вроде claude-subscription-secret.nix (Nix-модуль, деплоящий секрет, сам
+    # не секрет). Сужено до расширений, которые реально бывают у файлов с секретами.
+    *-secret.yaml|*-secret.yml|*-secret.json|*-secret.env|*-secret.txt|*-secret.ini|*-secret.conf|secrets.yaml|secrets.yml|secrets.json|credentials.yaml|credentials.yml|credentials.json) matched="secret/creds file" ;;
     .netrc|.proxy-env|.proxy-secret)   matched=".netrc/proxy" ;;
     wrangler.toml)                      matched="wrangler.toml" ;;
   esac

@@ -88,7 +88,7 @@
 | 289 | 🔄 | P2 | Интеграция IWE с личными базами знаний | Приёмка MVP |
 | 483 | 🔄 | P2 | Комплект структурирования данных (guide-kit) | 20.07: Ф5b закрыта полностью — LLM-генерация applied_note (прикладная мини-секция), независимая проверка нашла и закрыла 1 находку (нестроковый LLM-ответ ронял прогон), 316/316 тестов, guide-kit@47741c0; Ф6-Ф8 по-прежнему ждут РП495 Ф4-Ф5 |
 | 488 | 🔄 | P2 | Браузерное рабочее место на Hetzner | Ф2 скорость |
-| 484 | 🔄 | — | Автогенератор открытия/закрытия дня (зонтичный) | 21.07: dirty-tree guard добавлен в week-open-day-section-patch.sh (Ф3) — последнее место гонки того же класса, что чинили 19.07 в day-open-pipeline.sh, было пропущено; закоммичено и запушено на цехе-1 (09ed500ed) |
+| 484 | 🔄 | — | Автогенератор открытия/закрытия дня (зонтичный) | 21.07 веч.: 6/7 причин сбоя открытия недели устранены (WORKPLAN.md-регресс, таймауты, симлинк памяти); WeekPlan W30 собран вручную (4d07941a8); осталась причина 7 — Railway 5-мин timeout, нужен streaming в auth-gateway.py. + Ф-Sweep-Perf: active-wp-sweep.sh виснет намертво при 118+ РП × 67 репо (O(РП×репо) без параллелизма/кэша) — диагностика полная, фикс за пилотом |
 | 493 | 🔄 | P2 | Лаборатория характеристик | 20.07: сверка — открытых действий нет, всё закрыто (README организации iwesys подтверждено вживую). Ф4 по-прежнему ждёт данных (не раньше конца августа/сентября) |
 | 494 | 🔄 | P2 | Панель рабочих продуктов в VS Code | ручная F5-приёмка пилотом |
 | 495 | 🔄 | **P1** | Концепция персонального развития | 20.07: Ф9 черновик карты навигации DP.M.241 написан как предложение (не владелец Pack, ждёт решения владельца метода — РП149); Ф7 прогон идёт (5-8 человек, критерий день1 vs день7-10), блокер прогона — качество генерации в РП149 |
@@ -118,6 +118,7 @@
 
 ### Feedback — HOT
 
+- [lessons_gate_marker_granularity_mismatch.md](lessons_gate_marker_granularity_mismatch.md) — giving-up маркер должен писаться в тот же state-файл, что проверяет входной гейт цикла
 - [feedback_askuserquestion_not_reaching_pilot.md](feedback_askuserquestion_not_reaching_pilot.md) — choice-question — дублировать в чат
 - [routing-vocab.md](routing-vocab.md) — фраза → путь, читать ПЕРЕД Write
 - [feedback_response_clarity_for_pilot.md](feedback_response_clarity_for_pilot.md) — A1-A11 правила ответа
@@ -129,7 +130,7 @@
 - [reference_day_protocol_gaps_hub.md](reference_day_protocol_gaps_hub.md) — Day Open/Close квирки (7)
 - [reference_wp_gate_mechanics_hub.md](reference_wp_gate_mechanics_hub.md) — task_id, дочерний РП, имя через Артефактор (6)
 - [reference_llm_bot_output_quirks_hub.md](reference_llm_bot_output_quirks_hub.md) — TG markdown/HTML квирки (6)
-- [reference_diagnosis_technique_hub.md](reference_diagnosis_technique_hub.md) — root-cause, verify-before-trust (36)
+- [reference_diagnosis_technique_hub.md](reference_diagnosis_technique_hub.md) — root-cause, verify-before-trust (37)
 - [reference_git_hygiene_hub.md](reference_git_hygiene_hub.md) — git-add scope, pathspec, rebase/reset квирки (29)
 - [lessons_verify_branch_before_commit_pilot_first.md](lessons_verify_branch_before_commit_pilot_first.md) — Pilot-First репо: проверить ветку ДО commit, не только перед push
 - [reference_agent_session_mechanics_hub.md](reference_agent_session_mechanics_hub.md) — рецидив 3× kimi-peer-adapter (11)
@@ -148,4 +149,5 @@
 - [lessons_git_cherry_patch_id_not_content.md](lessons_git_cherry_patch_id_not_content.md) — git cherry сравнивает по patch-id, не по содержимому — большой список разрыва может быть шумом
 - [lessons_stale_checkbox_after_parallel_phase_closed_it.md](lessons_stale_checkbox_after_parallel_phase_closed_it.md) — открытый чек-бокс needs-decision может быть уже исполнен соседней фазой того же дня — сверять факт (`gh repo view`/`ls`), не только маркер
 - [lessons_llm_probe_http000_diagnose_edge_not_app.md](lessons_llm_probe_http000_diagnose_edge_not_app.md) — LLM probe HTTP 000 через Railway-прокси: пустые deploy-логи в окне сбоя = обрыв на edge/сети, не в коде прокси
-- [lessons_session_guard_housekeeping_reason_path_injection.md](lessons_session_guard_housekeeping_reason_path_injection.md) — housekeeping-reason с пробелами/двоеточием ломает session-guard.sh; note-file падает при нескольких открытых семафорах
+- [lessons_session_guard_housekeeping_reason_path_injection.md](lessons_session_guard_housekeeping_reason_path_injection.md) — housekeeping-reason с пробелами/двоеточием ломает session-guard.sh; note-file падает при нескольких открытых семафорах; close ДО commit стирает scope
+- [lessons_active_wp_sweep_scale_hang.md](lessons_active_wp_sweep_scale_hang.md) — active-wp-sweep.sh O(РП×репо) без параллелизма/кэша зависает при росте базы (118+×67)
