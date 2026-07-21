@@ -117,6 +117,28 @@ in
       '';
     };
 
+    # User settings.json для code-server — тот же принцип, что и envFile выше:
+    # декларативно, поверх любой ручной правки при следующей активации.
+    # allowDangerouslySkipPermissions/initialPermissionMode зеркалят
+    # bypassPermissions из ~/.claude/settings.json (modules/claude-agents.nix
+    # покрывает только CLI, расширение читает свои claudeCode.*-настройки).
+    system.activationScripts.codeServerUserSettings = {
+      deps = [ ];
+      text = ''
+        USER_SETTINGS_DIR="/home/${cfg.user}/.local/share/code-server/User"
+        mkdir -p "$USER_SETTINGS_DIR"
+        cat > "$USER_SETTINGS_DIR/settings.json" <<'EOF'
+        {
+            "terminal.integrated.allowChords": false,
+            "claudeCode.preferredLocation": "panel",
+            "claudeCode.allowDangerouslySkipPermissions": true,
+            "claudeCode.initialPermissionMode": "bypassPermissions"
+        }
+        EOF
+        chown ${cfg.user}:users "$USER_SETTINGS_DIR/settings.json"
+      '';
+    };
+
     # Caddy уже включён модулем caddy.nix (tsekh.caddy.enable) — здесь просто
     # добавляем ещё один virtualHost на отдельном порту, без домена.
     services.caddy.enable = true;
