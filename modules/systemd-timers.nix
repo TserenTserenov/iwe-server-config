@@ -409,7 +409,19 @@ in
         # переведён на прокси у iwe-overnight-auditor ниже (WP-7, 18.07). claude CLI сам
         # читает ANTHROPIC_API_KEY/ANTHROPIC_BASE_URL из окружения; второй EnvironmentFile
         # даёт рабочий proxy shared secret тем же приёмом.
-        EnvironmentFile = [ "/etc/iwe/env" "-/home/tseren/.iwe/.proxy-env" ];
+        #
+        # WP-7 (21.07): пилот перевёл этот сервис с платного API-ключа на личную
+        # подписку Claude (claude-subscription-secret.nix) — тот же инцидент, что
+        # породил ретрай-лимит выше по цепочке (session-prep без порога попыток).
+        # Claude CLI выбирает auth-источник по приоритету (ANTHROPIC_AUTH_TOKEN >
+        # ANTHROPIC_API_KEY > ... > CLAUDE_CODE_OAUTH_TOKEN) — оставшийся в /etc/iwe/env
+        # ANTHROPIC_API_KEY молча победил бы токен подписки, если его не убрать явно.
+        # UnsetEnvironment — единственный способ перебить EnvironmentFile= (Environment=""
+        # не работает, EnvironmentFile применяется поверх: systemd issue #9788).
+        # /etc/iwe/env не трогаем — общий файл для сервисов, которым API-ключ всё ещё нужен
+        # (iwe-llm-health probe и др.).
+        EnvironmentFile = [ "/etc/iwe/env" "-/home/tseren/.iwe/.proxy-env" "/home/tseren/.secrets/claude-subscription" ];
+        UnsetEnvironment = [ "ANTHROPIC_BASE_URL" "ANTHROPIC_API_KEY" ];
       };
       path = commonPath;
       environment = commonEnv // { ANTHROPIC_BASE_URL = "https://auth-gateway-production-52bf.up.railway.app"; };

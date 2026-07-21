@@ -26,6 +26,7 @@ in
     ../../modules/code-server.nix
     ../../modules/iwe-extensions-sync.nix
     ../../modules/iwe-calendar-secrets.nix  # DOC3 — Google Calendar read-only creds
+    ../../modules/claude-subscription-secret.nix  # WP-7 21.07 — OAuth-токен подписки для iwe-scheduler
     ./hardware-configuration.nix # генерируется при первой установке
   ];
 
@@ -91,6 +92,10 @@ in
   };
 
   tsekh.calendarSecrets = {
+    enable = true;
+  };
+
+  tsekh.claudeSubscriptionSecret = {
     enable = true;
   };
 
