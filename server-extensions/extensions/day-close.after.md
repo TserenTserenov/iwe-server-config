@@ -99,4 +99,20 @@ bash "$HOME/IWE/DS-my-strategy/scripts/day-open-pipeline.sh" --force >> \
 echo "🔄 DayPlan пересобирается свежими данными (фоново, --force)"
 ```
 
+### Heartbeat для Day Open guard (WP-5 Ubuntu-audit П1, 2026-07-22)
+
+> **Источник:** внешний Ubuntu-аудит шаблона нашёл, что гард «вчера закрыт» в `day-open-pipeline.sh` ловил текст commit message (только НАЧАЛО закрытия, не завершение) — ровно та гонка со stale-данными, от которой гард должен защищать. Новый гард (уже задеплоен, `10376452f`) читает присутствие архивного DayPlan в git — этот шаг просто дополняет диагностику heartbeat-файлом (не обязателен для самой гарантии, но упрощает разбор при сбое).
+
+> Выполнить **после** `git push` шага 10 (Закоммитить DS-my-strategy) — DayPlan уже реально закоммичен на этом этапе.
+
+```bash
+mkdir -p ~/.claude/state
+jq -n \
+  --arg date "$(date +%Y-%m-%d)" \
+  --arg commit "$(git -C "$HOME/IWE/DS-my-strategy" rev-parse HEAD)" \
+  --arg ts "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+  '{date: $date, commit_hash: $commit, timestamp: $ts, status: "success"}' \
+  > ~/.claude/state/day-close-last-success.json
+```
+
 <!-- /AUTHOR-ONLY -->
