@@ -108,7 +108,14 @@ _b='(^|[^A-Za-z0-9._-])'
 # secrets/*.(yaml|yml|json) без ведущей точки (sops-nix паттерн — repo secrets/google-calendar.yaml,
 # claude-subscription.yaml) не был покрыт исходным ".secrets/"/"secrets\." (те требуют ведущую точку
 # ИЛИ точку сразу после "secrets", ни один не матчит голый каталог) — обнаружено тем же живым тестом.
-sens_path="${_b}\\.secrets/|${_b}\\.railway/|${_b}\\.env([^A-Za-z0-9]|\$)|${_b}\\.env\\.|${_b}\\.pem([^A-Za-z0-9]|\$)|${_b}\\.p12|${_b}\\.pfx|${_b}/id_rsa|${_b}/id_ed25519|${_b}\\.token([^A-Za-z0-9]|\$)|${_b}-secret\\.(yaml|yml|json|env|txt|ini|conf)|${_b}/secrets\\.|${_b}secrets/[^[:space:]]*\\.(yaml|yml|json)|${_b}/credentials\\.|${_b}\\.netrc|${_b}wrangler\\.toml"
+#
+# "-secret\." БЕЗ границы _b слева (независимый живой тест, WP-7 21.07): _b требует
+# не-word-символ перед началом матча — верно для путей вида ".secrets/foo" (сегмент с
+# начала), но "-secret" сам ЕСТЬ суффикс имени файла (foo-secret.yaml, db-secret.yaml) —
+# перед дефисом всегда стоит буква слова "foo"/"db", граница с _b там никогда не находится,
+# и весь суб-паттерн переставал матчить реальные секрет-файлы этого вида. Расширение
+# (yaml|yml|...) само по себе уже достаточно узкое — не нужна дополнительная граница.
+sens_path="${_b}\\.secrets/|${_b}\\.railway/|${_b}\\.env([^A-Za-z0-9]|\$)|${_b}\\.env\\.|${_b}\\.pem([^A-Za-z0-9]|\$)|${_b}\\.p12|${_b}\\.pfx|${_b}/id_rsa|${_b}/id_ed25519|${_b}\\.token([^A-Za-z0-9]|\$)|-secret\\.(yaml|yml|json|env|txt|ini|conf)|${_b}/secrets\\.|${_b}secrets/[^[:space:]]*\\.(yaml|yml|json)|${_b}/credentials\\.|${_b}\\.netrc|${_b}wrangler\\.toml"
 deny_read() {
   local why="$1"
   local reason="Чтение секрет-файла через Bash заблокировано (B7.7c, $why). Цепочка рвётся ДО попадания значения в контекст. Используй значение через \$VAR/env, не читай файл. Разовый легитимный дебаг — CC_ALLOW_SECRETS=1, выставленный пилотом в реальном шелле."
