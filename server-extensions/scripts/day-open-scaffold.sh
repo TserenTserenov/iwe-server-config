@@ -1046,34 +1046,51 @@ render_compact_dashboard() {
 }
 
 # --- Section: Саморазвитие (active draft, deterministic) ---
-# The active draft comes from draft-list.md, not the LLM. Handing this to the LLM
+# The active draft comes from topic-log.yaml, not the LLM. Handing this to the LLM
 # with the file absent produced a hallucinated "D-001" (2026-07-01). "Где остановился"
 # is the pilot's own progress — we never fabricate it (see feedback_no_invented_personal_history).
+#
+# 2026-07-06 (WP-442 Ф11): drafts/draft-list.md retired — registry moved to
+# DS-Tseren-Brand/content/topic-log.yaml (topics: list, one entry per id, `status`
+# replaces the old markdown "stage" column). "черновик" maps to status: written
+# (draft file exists, needs work) — proposed/accepted have no file yet, ready/published
+# are past the editing stage this section prompts for.
 render_self_dev() {
-  local draft_list="$IWE/${IWE_GOVERNANCE_REPO:-DS-strategy}/drafts/draft-list.md"
-  if [ ! -f "$draft_list" ]; then
-    echo "**Активный черновик:** нет данных (drafts/draft-list.md не найден)"
+  local topic_log="$IWE/DS-Tseren-Brand/content/topic-log.yaml"
+  if [ ! -f "$topic_log" ]; then
+    echo "**Активный черновик:** нет данных (DS-Tseren-Brand/content/topic-log.yaml не найден)"
     return
   fi
-  # Registry rows are newest-first; take the first one whose stage column is "черновик".
+  if ! command -v python3 >/dev/null 2>&1; then
+    echo "**Активный черновик:** нет данных (python3 недоступен для чтения topic-log.yaml)"
+    return
+  fi
   local row
-  row=$(awk -F'|' '
-    /^\| *\*\*D-[0-9]+\*\*/ {
-      stage=$4; gsub(/^[ \t]+|[ \t]+$/, "", stage);
-      if (stage=="черновик") { print; exit }
-    }' "$draft_list")
+  row=$(python3 -c "
+import yaml
+try:
+    with open('$topic_log') as f:
+        d = yaml.safe_load(f) or {}
+except Exception as e:
+    print('__error__\x1f' + str(e).replace(chr(10), ' ')[:200])
+    raise SystemExit
+for t in reversed(d.get('topics') or []):
+    if t.get('status') == 'written' and t.get('draft_path'):
+        print(str(t.get('id', '')) + '\x1f' + str(t['draft_path']))
+        break
+" 2>/dev/null)
   if [ -z "$row" ]; then
-    echo "**Активный черновик:** нет активных черновиков в draft-list.md"
+    echo "**Активный черновик:** нет активных черновиков (status: written) в topic-log.yaml"
     return
   fi
   local dnum path
-  dnum=$(echo "$row" | grep -oE 'D-[0-9]+' | head -1)
-  path=$(echo "$row" | grep -oE '\(\./[^)]+\)' | head -1 | tr -d '()' | sed 's#^\./#drafts/#')
-  if [ -n "$path" ]; then
-    echo "**Активный черновик:** [$dnum]($path)"
-  else
-    echo "**Активный черновик:** $dnum (ссылка не распознана в draft-list.md)"
+  dnum="${row%%$'\x1f'*}"
+  path="${row#*$'\x1f'}"
+  if [ "$dnum" = "__error__" ]; then
+    echo "**Активный черновик:** нет данных (ошибка чтения topic-log.yaml: $path)"
+    return
   fi
+  echo "**Активный черновик:** [$dnum]($path)"
   echo "**Где остановился:** открой файл черновика — прогресс ведёт пилот."
   echo "**Сегодня:** 60-90 мин на редактирование / структурирование."
 }
