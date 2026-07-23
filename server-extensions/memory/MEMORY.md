@@ -31,7 +31,8 @@
 
 | WP | ст | P | Название | next (≤10 слов) |
 |-----|----|----|----------|----------------|
-| 500 | ⏳ | P2 | Аудит IWE: безопасность, токены, SOTA — разбор находок | утечка ключа OpenAI в git-истории устранена 23.07 (внепланово); разбор Ф1-Ф21 не начат, начать с Ф1 |
+| 500 | 🔄 | P2 | Аудит IWE: безопасность, токены, SOTA — разбор находок | утечка ключа OpenAI в git-истории устранена 23.07 (ротация подтверждена пилотом); разбор Ф1-Ф21 не начат, начать с Ф1 |
+| 501 | 🔄 | P2 | Headless-канал автономного выполнения задач | 23.07: Ф2.1 п.1+п.2 закрыты (root cause CLI-в-режиме-прокси, healthcheck litellm — фантомный Railway-проект), 7/7 независимо верифицировано; next Ф2 остаток |
 | 498 | 🔄 | P2 | Наставник ИИ: оперативная помощь в чате | собрать Ф4 (маршрутизация + grounding) в context-sufficiency gate |
 | 183 | 🔄 | — | CRM как система | DROP БД directus (решение 24.07) |
 | 467 | 🔄 | **P1** | Архитектура подписок через Ори | решение Д10 блокирует Ф3 |
@@ -88,11 +89,11 @@
 | 481 | 🔄 | **P1** | Каталог применений FPF-семинара к IWE | триаж 3 кандидатов Ф16 пилотом; параллельно Ф9.1/Ф7/Ф13/Ф3 |
 | 289 | 🔄 | P2 | Интеграция IWE с личными базами знаний | Приёмка MVP |
 | 483 | 🔄 | P2 | Комплект структурирования данных (guide-kit) | Ф6-Ф8 ждут РП495 Ф4-Ф5 |
-| 488 | 🔄 | P2 | Браузерное рабочее место на Hetzner | Ф2 скорость/команда |
+| 488 | 🔄 | P2 | Браузерное рабочее место на Hetzner | railway MCP заведён на цех-1, проверить в новой IDE-сессии; Ф2 скорость/команда |
 | 484 | 🔄 | — | Автогенератор открытия/закрытия дня (зонтичный) | выбор пилота: порядок фаз Ф8-Ф14 |
 | 493 | 🔄 | P2 | Лаборатория характеристик | Ф4 ждёт данных (конец августа — сентябрь) |
 | 494 | 🔄 | P2 | Панель рабочих продуктов в VS Code | ручная F5-приёмка пилотом |
-| 495 | 🔄 | **P1** | Концепция персонального развития | Ф7 прогон (блокер — генерация РП149); Ф9 ждёт владельца метода |
+| 495 | 🔄 | **P1** | Концепция персонального развития | 23.07: Ф8 черновик РП1 собран (12/13, placeholder — ждёт живых данных пробной группы); P1-окно закрылось 4 дня назад, нужна переоценка приоритета пилотом |
 | 496 | 🔄 | P3 | Журнал гипотез (LPF-регламент обратной связи) | сверка «Актуальных» агентом на Week Close |
 | 167 | 🔄 | P5 | Публикации (зонтичный) | пилот утверждает порядок 28 постов; публикатор стартует с Ф-А3 |
 | 497 | 🔄 | P5 | Материалы исследования AGI | Ф1 ready; Ф9 публикация на клубе — ручной шаг пилота |
@@ -119,28 +120,22 @@
 
 ### Feedback — HOT
 
-- [lessons_bash_cwd_not_persistent_across_calls.md](lessons_bash_cwd_not_persistent_across_calls.md) — cwd между Bash-вызовами не гарантирован, git-команды уходят в чужое репо — только `git -C` и абсолютные пути
-- [lessons_claude_permissions_cli_vs_vscode_extension.md](lessons_claude_permissions_cli_vs_vscode_extension.md) — bypassPermissions CLI ≠ claudeCode.* расширения VS Code, два независимых уровня
-- [lessons_nixos_rebuild_from_mac_needs_nix_run.md](lessons_nixos_rebuild_from_mac_needs_nix_run.md) — nixos-rebuild нет на Маке — `nix run nixpkgs#nixos-rebuild`, проверять лог, не только exit-код `| tail`
-- [lessons_systemd_environmentfile_unset_and_sops_nested_key.md](lessons_systemd_environmentfile_unset_and_sops_nested_key.md) — UnsetEnvironment вместо Environment="" для systemd; sops-секрет требует вложенный YAML-ключ
-- [lessons_gate_marker_granularity_mismatch.md](lessons_gate_marker_granularity_mismatch.md) — giving-up маркер должен писаться в тот же state-файл, что проверяет входной гейт цикла
 - [feedback_askuserquestion_not_reaching_pilot.md](feedback_askuserquestion_not_reaching_pilot.md) — choice-question — дублировать в чат
 - [feedback_s33_scope_already_answered.md](feedback_s33_scope_already_answered.md) — scope S-33 уже разграничен пилотом в сессии → констатировать, не переспрашивать
 - [routing-vocab.md](routing-vocab.md) — фраза → путь, читать ПЕРЕД Write
 - [feedback_response_clarity_for_pilot.md](feedback_response_clarity_for_pilot.md) — A1-A11 правила ответа
 - [feedback_explicit_approval_covers_hook_false_positive.md](feedback_explicit_approval_covers_hook_false_positive.md) — одобренная команда → ложняк хука не требует переспроса
 - [feedback_post_draft_dedup_before_new.md](feedback_post_draft_dedup_before_new.md) — новый материал для постов → сначала обогатить черновик, новый только если нет подходящего
-- [lessons_zsh_read_secret_releak.md](lessons_zsh_read_secret_releak.md) — секрет-гейт B7.7c блокирует по пути в команде; Write+Bash-по-скрипту как легитимный обход
 - [reference_no_invented_facts_hub.md](reference_no_invented_facts_hub.md) — не выдумывать опыт/имена
 - [user_tseren_personal_life.md](user_tseren_personal_life.md) — Tseren (НЕ Дмитрий), Кипр
 - [reference_day_protocol_gaps_hub.md](reference_day_protocol_gaps_hub.md) — Day Open/Close квирки (7)
 - [reference_wp_gate_mechanics_hub.md](reference_wp_gate_mechanics_hub.md) — task_id, дочерний РП, имя через Артефактор (6)
 - [reference_llm_bot_output_quirks_hub.md](reference_llm_bot_output_quirks_hub.md) — TG markdown/HTML квирки (6)
-- [reference_diagnosis_technique_hub.md](reference_diagnosis_technique_hub.md) — root-cause, verify-before-trust (37)
-- [reference_git_hygiene_hub.md](reference_git_hygiene_hub.md) — git-add scope, pathspec, rebase/reset квирки (29)
+- [reference_diagnosis_technique_hub.md](reference_diagnosis_technique_hub.md) — root-cause, verify-before-trust (48)
+- [reference_git_hygiene_hub.md](reference_git_hygiene_hub.md) — git-add scope, pathspec, rebase/reset квирки (32)
 - [lessons_verify_branch_before_commit_pilot_first.md](lessons_verify_branch_before_commit_pilot_first.md) — Pilot-First репо: проверить ветку ДО commit, не только перед push
 - [reference_agent_session_mechanics_hub.md](reference_agent_session_mechanics_hub.md) — рецидив 3× kimi-peer-adapter (11)
-- [reference_macos_zsh_env_quirks_hub.md](reference_macos_zsh_env_quirks_hub.md) — квирки macOS/zsh/grep/git (12)
+- [reference_macos_zsh_env_quirks_hub.md](reference_macos_zsh_env_quirks_hub.md) — квирки macOS/zsh/grep/git (15)
 - [lessons_ontological_not_lexical_generation.md](lessons_ontological_not_lexical_generation.md) — Pack/руководства — «онтологически, не лексически»
 - [reference_tsekh1_backup_infra_hub.md](reference_tsekh1_backup_infra_hub.md) — SSH-зависания, restic/B2 cap (2)
 - [reference_railway_deploy_quirks_hub.md](reference_railway_deploy_quirks_hub.md) — секреты в чат, railpack (2)
@@ -148,12 +143,6 @@
 - [reference_process_runner_quirks_hub.md](reference_process_runner_quirks_hub.md) — креды в карточке, race с активной сессией, umbrella-архивация (3)
 - [reference_secrets_credentials_hub.md](reference_secrets_credentials_hub.md) — .mcp.json wrapper, ротация-верификация, 403≠401 (3)
 - [lessons_shared_registry_axis_needs_ownership_check.md](lessons_shared_registry_axis_needs_ownership_check.md) — новая ось в платформенном реестре: сначала «чья это ось», потом «дробить или нет»
-- [lessons_ci_diff_base_empty_tree_fallback.md](lessons_ci_diff_base_empty_tree_fallback.md) — diff-гейт в CI: fallback на empty-tree hash, не HEAD~1; тестировать гейт против его же policy-текста
-- [lessons_manual_commit_bypasses_runner_merges_with_parallel_agent.md](lessons_manual_commit_bypasses_runner_merges_with_parallel_agent.md) — обход раннера git commit -- path может слить правку с параллельным чужим коммитом
-- [lessons_mock_accepts_any_argv_misses_cli_regressions.md](lessons_mock_accepts_any_argv_misses_cli_regressions.md) — мок subprocess.run, принимающий любые argv, не ловит регрессию несуществующего CLI-флага — нужен ассерт на реальную команду или живой прогон
-- [lessons_checklist_done_artifact_missing_from_disk.md](lessons_checklist_done_artifact_missing_from_disk.md) — чек-лист «закрыто» ≠ файл реально на диске — `ls`/`find` перед тем как проектировать код поверх артефакта
-- [lessons_git_cherry_patch_id_not_content.md](lessons_git_cherry_patch_id_not_content.md) — git cherry сравнивает по patch-id, не по содержимому — большой список разрыва может быть шумом
-- [lessons_stale_checkbox_after_parallel_phase_closed_it.md](lessons_stale_checkbox_after_parallel_phase_closed_it.md) — открытый чек-бокс needs-decision может быть уже исполнен соседней фазой того же дня — сверять факт (`gh repo view`/`ls`), не только маркер
-- [lessons_llm_probe_http000_diagnose_edge_not_app.md](lessons_llm_probe_http000_diagnose_edge_not_app.md) — LLM probe HTTP 000 через Railway-прокси: пустые deploy-логи в окне сбоя = обрыв на edge/сети, не в коде прокси
 - [lessons_session_guard_housekeeping_reason_path_injection.md](lessons_session_guard_housekeeping_reason_path_injection.md) — housekeeping-reason с пробелами/двоеточием ломает session-guard.sh; note-file падает при нескольких открытых семафорах; close ДО commit стирает scope
 - [lessons_active_wp_sweep_scale_hang.md](lessons_active_wp_sweep_scale_hang.md) — active-wp-sweep.sh O(РП×репо) без параллелизма/кэша зависает при росте базы (118+×67)
+- [lessons_gate_marker_granularity_mismatch.md](lessons_gate_marker_granularity_mismatch.md) — giving-up маркер должен писаться в тот же state-файл, что проверяет входной гейт цикла
