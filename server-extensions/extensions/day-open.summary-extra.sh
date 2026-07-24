@@ -3,6 +3,11 @@
 # L1 calls this file if it exists and executable; prints nothing if it doesn't.
 # Author-only: sources personal health data (WP-470), not shipped in FMT-exocortex-template.
 #
+# NOTE (2026-07-24, WP-469/WP-7): this hook intentionally prints NOTHING to stdout.
+# Its stdout used to land in `current/DayPlan {date}.md` (git-tracked, pushed to GitHub) —
+# that leaked sleep/HR/swimming for 09-19.07. The daily summary is now written to
+# ~/Library/IWE/health-data/day-summaries/<date>.md (outside any git repo).
+#
 # Known limitation (peer-session 2026-07-09-08-day-open-sleep-correction, consensus turn 3):
 # resting_heart_rate can have multiple rows per date — Apple recomputes the daily
 # aggregate and resends a refined value later. We pick the latest by received_at
@@ -65,11 +70,19 @@ if [ -n "$SWIM" ] && awk -v v="$SWIM" 'BEGIN{exit !(v>0)}'; then
   SWIM_STR="${SWIM%.*}${SWIM_UNIT:+ $SWIM_UNIT}"
 fi
 
+# Residency fix (WP-469 retrofit-audit, WP-7 phase DayPlan-Health-Residency, 2026-07-24):
+# health values must never reach git-tracked artifacts — DayPlan is committed and pushed
+# to GitHub, so stdout stays EMPTY in every branch. The summary line goes to a local
+# non-git file instead (future local dashboard reads it from there). The old inverse
+# check in day-open.checks.md (required the line in DayPlan) is now a residency guard.
+SUMMARY_DIR="$HOME/Library/IWE/health-data/day-summaries"
+
 if [ -z "$SLEEP_STR" ] && [ -z "$HR_STR" ]; then
-  echo "_Сон и пульс покоя: нет данных за $YDAY (WP-470 в процессе)_"
+  echo "$(date -u +%FT%TZ) YDAY=$YDAY: нет данных сна/пульса (WP-470)" >>"$LOG"
   exit 0
 fi
 
 OUT="**Сон:** ${SLEEP_STR:-нет данных} | **Пульс покоя:** ${HR_STR:-нет данных}"
 [ -n "$SWIM_STR" ] && OUT="$OUT | **Плавание:** ${SWIM_STR}"
-echo "$OUT"
+mkdir -p "$SUMMARY_DIR"
+printf '%s\n' "$OUT" >"$SUMMARY_DIR/$YDAY.md"
