@@ -1,11 +1,7 @@
 #!/bin/bash
 # Extension hook for Month Close (extensions/month-close.after.health.md).
-# Builds the "Здоровье (РП-470)" section — weekly table + month total + trend + honest
-# coverage marker — and writes it to a LOCAL non-git file:
-#   ~/Library/IWE/health-data/month-summaries/YYYY-MM.md
-# stdout carries only a value-free pointer line for `archive/MonthClose YYYY-MM.md`.
-# Residency (WP-469 retrofit-audit, WP-7 phase DayPlan-Health-Residency, 2026-07-24):
-# MonthClose is git-tracked and pushed — health values must never appear in it.
+# Prints the "Здоровье (РП-470)" section for `archive/MonthClose YYYY-MM.md`:
+# weekly table + month total + trend + honest coverage marker.
 # Author-only: sources personal health data (WP-470), not shipped in FMT-exocortex-template.
 #
 # Design (approved by pilot 2026-07-18, discussion in chat):
@@ -32,17 +28,13 @@ LOG="$HOME/IWE/DS-my-strategy/logs/day-open-summary-extra.err.log"
 # missing line is unexplainable post factum.
 mkdir -p "$(dirname "$LOG")"
 
-SUMMARY_DIR="$HOME/Library/IWE/health-data/month-summaries"
-OUTFILE="$SUMMARY_DIR/$MONTH.md"
-
 if [ ! -f "$DB" ]; then
   echo "$(date -u +%FT%TZ) MONTH=$MONTH: health.db отсутствует по пути $DB" >>"$LOG"
   echo "_Здоровье (РП-470): нет данных за $MONTH — health.db не найден_"
   exit 0
 fi
 
-mkdir -p "$SUMMARY_DIR"
-python3 - "$DB" "$MONTH" >"$OUTFILE" <<'PYEOF'
+python3 - "$DB" "$MONTH" <<'PYEOF'
 import calendar
 import json
 import sqlite3
@@ -194,6 +186,3 @@ print(f"| **Итог месяца** | **{fmt_sleep(m_sleep)}** | **{fmt_hr(m_hr)
 print()
 print(f"Тренд (первая → последняя неделя): сон {t_sleep}, пульс {t_hr}, плавание {t_swim}.")
 PYEOF
-
-# Value-free pointer — the only thing MonthClose (git-tracked) is allowed to carry.
-echo "_Здоровье (РП-470): срез месяца записан локально вне git — \`~/Library/IWE/health-data/month-summaries/$MONTH.md\` (резидентность WP-469; значения в MonthClose не публикуются)_"
