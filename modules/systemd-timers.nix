@@ -53,8 +53,11 @@ let
   # postgresql — psql для unsatisfied-report.sh и других синхронизаторов.
   # nodejs — npx для knowledge-mcp/scripts/reindex.sh (mcp reindex task).
   # perl — используется в template-sync.sh (line 113, YAML парсинг).
+  # /run/wrappers — setuid-обёртки NixOS (в т.ч. sudo); без неё скрипты, вызывающие
+  # `sudo` под systemd (backup-stress-test.sh SC4/SC5), падают с "нет sudo?"
+  # (WP-317 инцидент 25.07.2026: FAIL=2 WARN=3 из-за отсутствия sudo в PATH юнита).
   commonPath = with pkgs; [ git openssh bash curl jq gawk caffeinate-stub postgresql pythonForIWE nodejs perl gh ]
-    ++ [ "/home/tseren/.npm-global" ];
+    ++ [ "/home/tseren/.npm-global" "/run/wrappers" ];
 
   commonEnv = {
     HOME = "/home/tseren";
