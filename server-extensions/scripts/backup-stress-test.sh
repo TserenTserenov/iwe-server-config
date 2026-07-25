@@ -15,8 +15,8 @@ RESTIC_PWD_FILE="/etc/restic/password"
 RESTIC_B2_ENV="/etc/restic/b2-env"
 RESTIC_REPO_NEON="b2:aisystant-neon-backup:neon-dbs"
 PG="${HOME}/.nix-profile/bin/pg_dump"
-# Fallback: system pg
-[ ! -x "$PG" ] && PG=$(which pg_dump 2>/dev/null || echo "pg_dump")
+# Fallback: system pg (command -v — builtin, не зависит от пакета `which` в PATH юнита)
+[ ! -x "$PG" ] && PG=$(command -v pg_dump 2>/dev/null || echo "pg_dump")
 
 PASS=0
 FAIL=0
@@ -195,7 +195,7 @@ if ! run_sc "SC4"; then
   if [[ -n "$FIRST_URL" ]]; then
     ACTUAL_DBS=$(sudo bash -c "
       export PGPASSWORD='$(echo "$FIRST_URL" | grep -oP ':\K[^@]+')'
-      $(which pg_dump | xargs dirname)/psql '$FIRST_URL' -t -c \
+      $(command -v pg_dump | xargs dirname)/psql '$FIRST_URL' -t -c \
         \"SELECT datname FROM pg_database WHERE datistemplate=false AND datname != 'postgres' ORDER BY datname\" 2>/dev/null \
       | tr -d ' '
     " 2>/dev/null | grep -v '^$' | sort)
