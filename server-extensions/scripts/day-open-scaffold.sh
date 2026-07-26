@@ -961,14 +961,26 @@ render_yesterday() {
     echo "**Коммиты:** $total в $repos репо | **РП закрыто:** нет данных (Day Close за $YDAY не найден)"
   fi
   echo
-  # Extension point: авторский hook для дополнительных сигналов состояния (напр. сон/пульс
-  # покоя). L1 не знает, что именно печатает hook — вся логика в extensions/, которых
-  # у пользователей шаблона без своего extension-файла просто не будет.
-  if [ -x "$IWE/extensions/day-open.summary-extra.sh" ]; then
+  # Extension point: авторские hooks для дополнительных сигналов состояния (напр. сон/пульс
+  # покоя, Focus To-Do время). L1 не знает, что именно печатает hook — вся логика в
+  # extensions/, которых у пользователей шаблона без своих extension-файлов просто не будет.
+  #
+  # Glob по маске `day-open.*-extra.sh` (не одно жёстко зашитое имя) — WP-470 26.07 нашёл,
+  # что второй источник (Focus To-Do) не мог подключиться без правки этого файла заново на
+  # каждый новый источник. Все остальные extension-точки шаблона (week-close/month-close/
+  # strategy-session summary, day-open before/after/checks) уже используют паттерн
+  # `<protocol>.<hook>.<suffix>.md` через load-extensions.sh; здесь тот же принцип для
+  # исполняемых .sh-хуков, чей stdout идёт напрямую в детерминированный bash-рендер
+  # DayPlan, а не читается агентом как .md-инструкция — поэтому load-extensions.sh (ищет
+  # только *.md) не переиспользован, а сделан параллельный glob под тем же соглашением
+  # об именах.
+  local extra_hook
+  for extra_hook in "$IWE"/extensions/day-open.*-extra.sh; do
+    [ -x "$extra_hook" ] || continue
     local extra_summary
-    extra_summary=$("$IWE/extensions/day-open.summary-extra.sh" "$YDAY" 2>/dev/null)
+    extra_summary=$("$extra_hook" "$YDAY" 2>/dev/null)
     [ -n "$extra_summary" ] && { echo "$extra_summary"; echo; }
-  fi
+  done
   # Sessions consolidation (DAP1-B/1-C, WP-7): включить РП сессий вчерашнего дня
   local day_report_file="$IWE/${IWE_GOVERNANCE_REPO:-DS-strategy}/current/DayReport-${YDAY}.md"
   if [ -f "$day_report_file" ]; then
