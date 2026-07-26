@@ -639,6 +639,40 @@ in
     };
 
     # =========================================================
+    # 6d. NIGHT CYCLE WEEK — Вс 04:00 (WP-484 Ф16, перенесено из DS-my-strategy 2026-07-26)
+    # =========================================================
+    # Закрытие/открытие недели (close день → close неделя → актуализация РП → open неделя + Пн).
+    # Скрипт-логика (night-cycle-week.sh) остаётся в DS-my-strategy — прикладной репо
+    # не декларирует ЗАПУСК, только ЧТО запускать. Раньше юнит был raw .service/.timer
+    # внутри DS-my-strategy/.iwe-runtime/systemd + install-night-cycle-timer.sh —
+    # тот же класс дрейфа деплой↔репо, что уже ловился дважды (litellm-конфиг в
+    # DS-my-strategy/deploy/ 09.07, планировщик вовлечённости искали не в *-config 07.07).
+    # См. memory/project_deploy_config_repo_drift_night_cycle.md, WP-7 Ф-NightCycle-Repo-Drift.
+
+    systemd.services."night-cycle-week" = {
+      description = "IWE — Night Cycle: close/open недели (Вс 04:00)";
+      unitConfig   = commonUnitConfig;
+      serviceConfig = commonServiceConfig // {
+        ExecStart      = "${pkgs.bash}/bin/bash ${iwe}/DS-my-strategy/scripts/night-cycle-week.sh";
+        WorkingDirectory = "${iwe}/DS-my-strategy";
+        TimeoutSec     = 1800;  # 30 мин (как в исходном .service)
+        Restart        = "no";
+      };
+      path = commonPath;
+      environment = commonEnv;
+    };
+
+    systemd.timers."night-cycle-week" = {
+      wantedBy    = [ "timers.target" ];
+      description = "Night Cycle Week — Вс 04:00";
+      timerConfig = {
+        OnCalendar = "Sun *-*-* 04:00:00";
+        Persistent = true;
+        AccuracySec = "1s";
+      };
+    };
+
+    # =========================================================
     # =========================================================
     # 7. RULE CLASSIFIER (hourly) — ОТКЛЮЧЁН (дубль daily 23:55)
     # =========================================================
