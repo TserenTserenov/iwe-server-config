@@ -69,10 +69,19 @@ def trend(cur_total, prev_total, step_min):
     return "→ стабильно"
 
 
-mid = start + timedelta(days=(end - start).days // 2)
-first_half = half_sum(sec_by_day, start, mid)
-second_half = half_sum(sec_by_day, mid + timedelta(days=1), end)
-t_focus = trend(second_half, first_half, 30)
+# Trend end excludes today — a same-day run (manual mid-week check, per SKILL.md)
+# would otherwise compare a full first half against a still-in-progress today,
+# reading as a false drop purely from fewer hours having happened yet. The full
+# range (incl. today) still feeds total_sec/covered below — only the trend split
+# treats today as not-yet-comparable.
+trend_end = min(end, date.today() - timedelta(days=1))
+if trend_end >= start:
+    mid = start + timedelta(days=(trend_end - start).days // 2)
+    first_half = half_sum(sec_by_day, start, mid)
+    second_half = half_sum(sec_by_day, mid + timedelta(days=1), trend_end)
+    t_focus = trend(second_half, first_half, 30)
+else:
+    t_focus = "—"
 
 total_sec = sum(sec_by_day.values())
 total_pomos = sum(count_by_day.values())

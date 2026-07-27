@@ -90,7 +90,11 @@ m_sec = sum(sec_by_day.values())
 m_pomos = sum(count_by_day.values())
 m_h, m_m = divmod(m_sec // 60, 60)
 
-valid_weeks = [w for w in weeks if week_sum(sec_by_day, w[1], w[2]) > 0]
+# Trend compares week TOTALS, so a week clipped short (month boundary, or the
+# still-running current week) must be excluded — otherwise a week with fewer days
+# summed reads as a cliff-drop against a full week, not as a change in focus. 4+
+# days (more than half a 7-day week) is the cutoff for "enough days to compare".
+valid_weeks = [w for w in weeks if week_sum(sec_by_day, w[1], w[2]) > 0 and (w[2] - w[1]).days + 1 >= 4]
 t_focus = "—"
 if len(valid_weeks) >= 2:
     first_wk, last_wk = valid_weeks[0], valid_weeks[-1]

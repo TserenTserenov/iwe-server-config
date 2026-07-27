@@ -183,6 +183,18 @@ bash ~/IWE/scripts/day-close-step-log.sh end 5
 
 Скрипт выполняет: Linear sync, downstream sync (update.sh), backup (memory/ + CLAUDE.md + AGENTS.md).
 
+### 5b. Facts Digest (ledger) — WP-484 Ф16.3 [[narrative]]
+
+```bash
+bash ~/IWE/scripts/day-close-step-log.sh start 5b
+bash "{{HOME_DIR}}/IWE/DS-my-strategy/scripts/day-close-prepare.sh" || true
+bash ~/IWE/scripts/day-close-step-log.sh end 5b
+```
+
+Записывает одно событие `facts_digest` в дневной ledger (`DS-my-strategy/machine/ledger/day-YYYY-MM-DD.yaml`) — источник данных для завтрашнего Day Open (шаг «4.3. Ledger render», `day-open-ledger-render-patch.py`, WP-484 Ф16.2). Место шага: сразу после автоматических шагов (5), потому что `day-close-prepare.sh` читает `linear=...` из свежего лога `day-close.sh` (шаг 5) и требует, чтобы данные по коммитам/сессиям за день уже устоялись. Идемпотентно (проверяет по факту в ledger, не по exit-коду) — повторный запуск в тот же день не создаёт дубль.
+
+**Некритичный шаг (как и `10b. Rule Classifier` ниже):** `|| true` — сбой `day-close-prepare.sh` или недоступность `ledger-append.sh` НЕ блокирует остальной прогон Day Close. При сбое Day Open просто покажет честный PENDING вместо реальных данных вместо того, чтобы прогон остановился (CONCEPT-night-cycle.md §5: «сбой шага → Telegram + честный PENDING, не блокирует остальной прогон»).
+
 ### 6. Мультипликатор IWE [[gate]]
 
 `bash ~/IWE/scripts/day-close-step-log.sh start 6`

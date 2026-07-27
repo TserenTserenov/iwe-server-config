@@ -687,7 +687,7 @@ fi
 
 - [ ] `priorities.yaml` содержит `phys_hours:` (не fallback-дефолт). «Физ» в DayPlan ≤14ч (потолок пилота — 9ч, выше — предупреждение). Если ❌ — commit заблокирован.
 
-### 🔴 ПРОВЕРКА: health-значений в DayPlan быть НЕ должно (резидентность WP-469, фаза WP-7 DayPlan-Health-Residency)
+### 🔴 БЛОКИРУЮЩАЯ ПРОВЕРКА: health-значений в DayPlan быть НЕ должно (резидентность WP-469, фаза WP-7 DayPlan-Health-Residency)
 
 > **Источник:** retrofit-audit WP-469 (24.07.2026) — сон/пульс/плавание коммитились в
 > `current/DayPlan {date}.md` и уходили на GitHub 09–19.07. Решение пилота 24.07:
@@ -702,8 +702,12 @@ fi
 ```bash
 FILE="$(ls ~/IWE/DS-my-strategy/current/DayPlan\ *.md 2>/dev/null | sort | tail -1)"
 echo "=== Проверка: health-значения в DayPlan запрещены (WP-469) ==="
-if grep -qE '\*\*(Сон|Пульс покоя|Плавание):\*\*|Сон и пульс покоя: нет данных' "$FILE"; then
-  echo "  ❌ Health-строка найдена в DayPlan — нарушение резидентности WP-469. Убрать ДО коммита; срез дня — ~/Library/IWE/health-data/day-summaries/"
+if [ -z "$FILE" ] || [ ! -f "$FILE" ]; then
+  echo "  ⚠️ DayPlan-файл не найден — проверка резидентности пропущена (не блокирует)"
+elif grep -qE '\*\*(Сон|Пульс покоя|Плавание):\*\*|Сон и пульс покоя: нет данных' "$FILE"; then
+  echo "  ❌ Health-строка найдена в DayPlan — нарушение резидентности WP-469 — COMMIT БЛОКИРОВАН"
+  echo "       Убрать ДО коммита; срез дня — ~/Library/IWE/health-data/day-summaries/"
+  exit 2
 else
   echo "  ✅ Health-значений в DayPlan нет (резидентность WP-469 соблюдена)"
 fi

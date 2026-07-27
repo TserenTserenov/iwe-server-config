@@ -60,11 +60,18 @@ def half_sum(d, lo, hi):
     return sum(v for k, v in d.items() if lo.isoformat() <= k <= hi.isoformat())
 
 
-mid = start + timedelta(days=(end - start).days // 2)
-first_half = half_sum(sec_by_day, start, mid)
-second_half = half_sum(sec_by_day, mid + timedelta(days=1), end)
-diff_min = (second_half - first_half) / 60
-t_focus = ("↑" if diff_min >= 30 else "↓" if diff_min <= -30 else "→ стабильно") + (f" ({diff_min:+.0f}м)" if abs(diff_min) >= 30 else "")
+# Trend end excludes today — see week-close.focustodo-extra.sh for why (same
+# comparison shape here: strategy-session's PERIOD_END is normally today, per
+# strategy-session.after.focustodo.md's `date +%Y-%m-%d`).
+trend_end = min(end, date.today() - timedelta(days=1))
+if trend_end >= start:
+    mid = start + timedelta(days=(trend_end - start).days // 2)
+    first_half = half_sum(sec_by_day, start, mid)
+    second_half = half_sum(sec_by_day, mid + timedelta(days=1), trend_end)
+    diff_min = (second_half - first_half) / 60
+    t_focus = ("↑" if diff_min >= 30 else "↓" if diff_min <= -30 else "→ стабильно") + (f" ({diff_min:+.0f}м)" if abs(diff_min) >= 30 else "")
+else:
+    t_focus = "—"
 
 total_sec = sum(sec_by_day.values())
 total_pomos = sum(count_by_day.values())
