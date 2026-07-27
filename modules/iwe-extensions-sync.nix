@@ -40,6 +40,7 @@ in
       "d /home/${cfg.user}/IWE/.claude/skills 0755 ${cfg.user} users -"
       "d /home/${cfg.user}/IWE/.claude/hooks 0755 ${cfg.user} users -"
       "d /home/${cfg.user}/IWE/.claude/scripts 0755 ${cfg.user} users -"
+      "d /home/${cfg.user}/IWE/.claude/lib 0755 ${cfg.user} users -"
       "d /home/${cfg.user}/IWE/extensions 0755 ${cfg.user} users -"
       "d /home/${cfg.user}/IWE/scripts 0755 ${cfg.user} users -"
       "d /home/${cfg.user}/.claude/projects/-Users-${cfg.user}-IWE/memory 0755 ${cfg.user} users -"
@@ -77,6 +78,12 @@ in
         ${pkgs.rsync}/bin/rsync -a --delete \
           ${src}/claude-scripts/ \
           /home/${cfg.user}/IWE/.claude/scripts/
+
+        # WP-7 Ф-Backup-Resilience-Audit (27.07): check-dirty-repos.sh source'ит эту
+        # библиотеку — раньше .claude/lib/ вообще не входил в синхронизацию.
+        ${pkgs.rsync}/bin/rsync -a --delete \
+          ${src}/claude-lib/ \
+          /home/${cfg.user}/IWE/.claude/lib/
 
         ${pkgs.rsync}/bin/rsync -a \
           ${src}/memory/ \
