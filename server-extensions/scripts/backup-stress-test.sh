@@ -87,11 +87,8 @@ if ! run_sc "SC1"; then
     TEST_DUMP="/tmp/restic-neon-sc1-test/${TEST_DBNAME}.dump"
     mkdir -p /tmp/restic-neon-sc1-test
 
-    # WP-7 Ф-Backup-Resilience-Audit: sudo здесь был не нужен — $TEST_DB_URL уже в
-    # локальной переменной непривилегированного процесса (root требовался только для
-    # чтения neon-connections на шаге выше), а sudo пишет полную командную строку,
-    # включая пароль, в системный журнал. pg_dump сам разбирает пароль из URL.
-    if "$PG" --format=custom --no-password "$TEST_DB_URL" \
+    if sudo PGPASSWORD="$(echo "$TEST_DB_URL" | grep -oP ':\K[^@]+')" \
+       "$PG" --format=custom --no-password "$TEST_DB_URL" \
        > "$TEST_DUMP" 2>/dev/null; then
       SIZE=$(du -sh "$TEST_DUMP" | cut -f1)
       pass "SC1: Ручной pg_dump успешен ($TEST_DBNAME: $SIZE)"
@@ -118,9 +115,7 @@ if ! run_sc "SC2"; then
     DUMP_OK="/tmp/sc2-ok-${TEST_DBNAME}.dump"
     DUMP_BAD="/tmp/sc2-bad-${TEST_DBNAME}.dump"
 
-    # WP-7 Ф-Backup-Resilience-Audit: sudo не нужен, $TEST_DB_URL уже в локальной
-    # переменной, sudo пишет полную команду (с паролём) в системный журнал.
-    if "$PG" --format=custom --no-password "$TEST_DB_URL" > "$DUMP_OK" 2>/dev/null; then
+    if sudo "$PG" --format=custom --no-password "$TEST_DB_URL" > "$DUMP_OK" 2>/dev/null; then
       # Портим ЗАГОЛОВОК файла (первые 512 байт — магия pg custom format)
       cp "$DUMP_OK" "$DUMP_BAD"
       SIZE=$(stat -c%s "$DUMP_BAD")
@@ -198,14 +193,12 @@ if ! run_sc "SC4"; then
   # Получаем реальный список из Neon через первый URL в списке
   FIRST_URL=$(sudo grep -m1 'postgresql://' "$NEON_CONNECTIONS" 2>/dev/null || echo "")
   if [[ -n "$FIRST_URL" ]]; then
-    # WP-7 Ф-Backup-Resilience-Audit: раньше это оборачивалось в `sudo bash -c "..."`
-    # с паролем прямо в строке — sudo пишет полную команду в системный журнал
-    # (реально утекло 26.07). $FIRST_URL уже локальная переменная непривилегированного
-    # процесса, psql сам берёт пароль из URL — ни sudo, ни отдельный PGPASSWORD не нужны.
-    PSQL_BIN="$(dirname "$PG")/psql"
-    ACTUAL_DBS=$("$PSQL_BIN" "$FIRST_URL" -t -c \
-        "SELECT datname FROM pg_database WHERE datistemplate=false AND datname != 'postgres' ORDER BY datname" \
-        2>/dev/null | tr -d ' ' | grep -v '^$' | sort)
+    ACTUAL_DBS=$(sudo bash -c "
+      export PGPASSWORD='$(echo "$FIRST_URL" | grep -oP ':\K[^@]+')'
+      $(which pg_dump | xargs dirname)/psql '$FIRST_URL' -t -c \
+        \"SELECT datname FROM pg_database WHERE datistemplate=false AND datname != 'postgres' ORDER BY datname\" 2>/dev/null \
+      | tr -d ' '
+    " 2>/dev/null | grep -v '^$' | sort)
 
     if [[ -n "$ACTUAL_DBS" ]]; then
       ACTUAL_COUNT=$(echo "$ACTUAL_DBS" | grep -c . || echo 0)
@@ -217,7 +210,7 @@ if ! run_sc "SC4"; then
         fail "SC4: Пропущены БД: $MISSING (в Neon: $ACTUAL_COUNT, в бэкапе: $BACKED_COUNT)"
       fi
     else
-      warn "SC4: Не удалось получить список БД из Neon (psql недоступен)"
+      warn "SC4: Не удалось получить список БД из Neon (psql недоступен без sudo psql)"
       # Fallback: просто показываем что в списке
       pass "SC4 (частичный): В списке бэкапа $BACKED_COUNT БД: $(echo "$BACKED_UP" | tr '\n' ' ')"
     fi
@@ -251,8 +244,7 @@ if ! run_sc "SC5"; then
     warn "SC5: Нет ~/.secrets/neon и ~/.config/aist/env — нельзя сравнить"
     # Проверяем что пароль реально работает — делаем тест pg_dump
     TEST_URL=$(sudo grep -m1 'postgresql://' "$NEON_CONNECTIONS" 2>/dev/null)
-    # WP-7 Ф-Backup-Resilience-Audit: тот же фикс — sudo убран, URL уже локальный.
-    if "$PG" --format=plain --no-password "$TEST_URL" --schema-only -t pg_catalog.pg_class \
+    if sudo "$PG" --format=plain --no-password "$TEST_URL" --schema-only -t pg_catalog.pg_class \
        > /dev/null 2>&1; then
       pass "SC5: Пароль в $NEON_CONNECTIONS рабочий (тест pg_dump schema-only OK)"
     else
