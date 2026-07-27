@@ -27,6 +27,7 @@ in
     ../../modules/iwe-extensions-sync.nix
     ../../modules/iwe-calendar-secrets.nix  # DOC3 — Google Calendar read-only creds
     ../../modules/claude-subscription-secret.nix  # WP-7 21.07 — OAuth-токен подписки для iwe-scheduler
+    ../../modules/bitcoind-ots-verify.nix  # WP-455 Ф11 hardening 27.07 — независимая верификация OTS-якорей
     ./hardware-configuration.nix # генерируется при первой установке
   ];
 
