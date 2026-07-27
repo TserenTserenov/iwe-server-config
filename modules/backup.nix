@@ -152,6 +152,13 @@ in
       };
     };
 
+    # WP-7 Ф-Backup-Resilience-Audit (27.07): у local-files, в отличие от neon-dbs,
+    # не было никакого сигнала о сбое — OnFailure пустой (systemctl show подтвердил).
+    # iwe-failure-alert@ уже существует и используется всеми IWE-сервисами
+    # (systemd-timers.nix, TG-алерт из /etc/iwe/env) — просто подключаем его сюда,
+    # не изобретаем отдельный heartbeat-монитор.
+    systemd.services."restic-backups-local-files".unitConfig.OnFailure = "iwe-failure-alert@%n.service";
+
     # ===== Независимая очистка старых копий (не зависит от успеха backup) =====
     systemd.services."restic-prune-neon-dbs" = {
       description = "restic forget --prune для neon-dbs (независимо от backup)";
