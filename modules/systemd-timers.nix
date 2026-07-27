@@ -639,7 +639,7 @@ in
     };
 
     # =========================================================
-    # 6d. NIGHT CYCLE WEEK — Вс 04:00 (WP-484 Ф16, перенесено из DS-my-strategy 2026-07-26)
+    # 6d. NIGHT CYCLE WEEK — ОТКЛЮЧЁН 27.07 (WP-484: дубль week-open-orchestrator.sh)
     # =========================================================
     # Закрытие/открытие недели (close день → close неделя → актуализация РП → open неделя + Пн).
     # Скрипт-логика (night-cycle-week.sh) остаётся в DS-my-strategy — прикладной репо
@@ -648,9 +648,20 @@ in
     # тот же класс дрейфа деплой↔репо, что уже ловился дважды (litellm-конфиг в
     # DS-my-strategy/deploy/ 09.07, планировщик вовлечённости искали не в *-config 07.07).
     # См. memory/project_deploy_config_repo_drift_night_cycle.md, WP-7 Ф-NightCycle-Repo-Drift.
+    #
+    # ОТКЛЮЧЕНО 27.07 (WP-484 Ф16.3, архитектурное решение пилота): этот таймер и
+    # week-open-orchestrator.sh (wired через scheduler.sh, Вс 23:00+) дублировали друг
+    # друга — оба реально исполнялись в ночь 26→27.07. Сравнение кода: orchestrator
+    # имеет git-lock+идемпотентность, session-guard интеграцию, точечный git add;
+    # этот скрипт — проще, без lock'а, без session-guard (упёрся бы в scope-gate),
+    # плюс таймер Вс 04:00 семантически рано (неделя ещё не закрыта физически на 04:00
+    # воскресенья). Пилот выбрал week-open-orchestrator.sh каноническим. `wantedBy`
+    # снят (та же техника, что у §7 RULE CLASSIFIER выше) — юнит остаётся объявлен на
+    # случай отката, но не активируется. Требует `nixos-rebuild switch` на tsekh-1,
+    # чтобы применилось (это редактирование само по себе таймер не останавливает).
 
     systemd.services."night-cycle-week" = {
-      description = "IWE — Night Cycle: close/open недели (Вс 04:00)";
+      description = "IWE — Night Cycle: close/open недели (Вс 04:00) — ОТКЛЮЧЁН, см. комментарий выше";
       unitConfig   = commonUnitConfig;
       serviceConfig = commonServiceConfig // {
         ExecStart      = "${pkgs.bash}/bin/bash ${iwe}/DS-my-strategy/scripts/night-cycle-week.sh";
@@ -663,8 +674,9 @@ in
     };
 
     systemd.timers."night-cycle-week" = {
-      wantedBy    = [ "timers.target" ];
-      description = "Night Cycle Week — Вс 04:00";
+      # wantedBy НЕ задан (было [ "timers.target" ]) → таймер не активируется автоматически.
+      # Для отката вернуть wantedBy = [ "timers.target" ];
+      description = "Night Cycle Week — Вс 04:00 (ОТКЛЮЧЁН 27.07, дубль week-open-orchestrator.sh)";
       timerConfig = {
         OnCalendar = "Sun *-*-* 04:00:00";
         Persistent = true;
