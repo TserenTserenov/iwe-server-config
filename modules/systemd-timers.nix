@@ -1216,6 +1216,34 @@ in
       serviceConfig = commonServiceConfig // {
         ExecStart  = "${pkgs.bash}/bin/bash ${iwe}/scripts/backup-stress-test.sh";
         TimeoutSec = 3600;
+        # Heartbeat против silent-skip (WP-7 Ф-Backup-Resilience-Audit, находка 2):
+        # OnFailure=iwe-failure-alert@ (commonUnitConfig) уже ловит краш/FAIL самого
+        # теста (скрипт делает exit 1 при FAIL>0) — но не ловит случай "таймер вообще
+        # не сработал" (систем выключена/таймер отключён в момент тика). ExecStartPost
+        # выполняется ТОЛЬКО при exit 0 основного скрипта — значит при FAIL пинг не
+        # уйдёт, что и нужно: сигнал "провалился" уже есть отдельно, этот пинг —
+        # только "тест реально запускался и прошёл". Требует ручного шага пилота:
+        # создать heartbeat-монитор в BetterStack (UI, 2 мин) и положить его
+        # ping-URL в /etc/monitoring/backup-heartbeat-url-stresstest (не в git).
+        # Файла нет → скрипт тихо пропускает пинг, юнит не падает.
+        ExecStartPost = pkgs.writeShellScript "backup-stress-test-heartbeat-ping" ''
+          url_file="/etc/monitoring/backup-heartbeat-url-stresstest"
+          if [ ! -f "$url_file" ]; then
+            echo "Stress-test heartbeat: $url_file не найден, пропускаю" >&2
+            exit 0
+          fi
+          url=$(tr -d '[:space:]' < "$url_file")
+          if [ -z "$url" ]; then
+            echo "Stress-test heartbeat: пустой URL, пропускаю" >&2
+            exit 0
+          fi
+          ${pkgs.curl}/bin/curl \
+            --silent --show-error \
+            --max-time 10 --retry 3 --retry-delay 5 \
+            "$url" > /dev/null \
+            && echo "Stress-test heartbeat OK" \
+            || echo "Stress-test heartbeat FAIL (не критично)" >&2
+        '';
       };
       path = commonPath;
       environment = commonEnv;
