@@ -70,6 +70,13 @@ let
   # + PATH-добавка для user-space venv opentimestamps-client (нет в nixpkgs).
   wp455OtsLdPreload = "/nix/store/2fxp204b9jh1s3lpggdlnws44vvzw1w9-openssl-3.4.3/lib/libcrypto.so";
   wp455OtsPath = commonPath ++ [ "/home/tseren/.local" ];
+  # X1 (F11-anchoring-rollout-design.md §4): off-DB копия .ots-доказательств,
+  # закрывает класс "Neon PITR/branch-reset переписал историю ниже SQL". Клон
+  # remote bare-репо DS-IT-systems/audit-timestamps уже на диске (pilot go 22.07).
+  wp455OtsEnv = commonEnv // {
+    LD_PRELOAD              = wp455OtsLdPreload;
+    AUDIT_TIMESTAMPS_REPO_DIR = "${iwe}/DS-IT-systems/audit-timestamps";
+  };
 
   commonServiceConfig = {
     User            = "tseren";
@@ -1308,7 +1315,7 @@ in
         TimeoutSec       = 300;
       };
       path        = wp455OtsPath;
-      environment = commonEnv // { LD_PRELOAD = wp455OtsLdPreload; };
+      environment = wp455OtsEnv;
     };
 
     systemd.timers."wp455-ots-anchor" = {
@@ -1329,7 +1336,7 @@ in
         TimeoutSec       = 300;
       };
       path        = wp455OtsPath;
-      environment = commonEnv // { LD_PRELOAD = wp455OtsLdPreload; };
+      environment = wp455OtsEnv;
     };
 
     systemd.timers."wp455-ots-upgrade" = {
