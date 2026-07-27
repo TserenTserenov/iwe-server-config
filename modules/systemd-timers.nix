@@ -66,6 +66,11 @@ let
     HOME = "/home/tseren";
   };
 
+  # WP-455 Ф11: NixOS-фикс для python-bitcoinlib (см. комментарий у systemd.services.wp455-ots-*)
+  # + PATH-добавка для user-space venv opentimestamps-client (нет в nixpkgs).
+  wp455OtsLdPreload = "/nix/store/2fxp204b9jh1s3lpggdlnws44vvzw1w9-openssl-3.4.3/lib/libcrypto.so";
+  wp455OtsPath = commonPath ++ [ "/home/tseren/.local" ];
+
   commonServiceConfig = {
     User            = "tseren";
     Type            = "oneshot";
@@ -1262,6 +1267,100 @@ in
     # =========================================================
     # pomodoro-alert.py использует macOS Notification Center / osascript.
     # Остаётся на Mac. Серверная альтернатива — Telegram-алерт (Ф5).
+
+    # =========================================================
+    # WP-455 Ф11 — OTS Bitcoin-анкоринг hash-chain (2026-07-27)
+    # =========================================================
+    # Ввод в эксплуатацию регулярного якорения tip'ов domain_event hash-chain
+    # через OpenTimestamps. Дизайн: DS-my-strategy/inbox/WP-455/F11-anchoring-rollout-design.md.
+    # Go пилота получен 22.07; хост-независимая часть (миграции 295/296,
+    # ots-anchor.py/ots-upgrade.py) применена в тот же день.
+    #
+    # Референсные .service/.timer файлы лежат в DS-my-strategy/scripts/systemd/
+    # (написаны для обычного Linux с `cp` в /etc/systemd/system) — на NixOS этот
+    # путь read-only, поэтому единицы объявлены здесь декларативно; файлы в
+    # DS-my-strategy остаются как переносимая документация дизайна, не как то,
+    # что реально устанавливается на tsekh-1.
+    #
+    # Секрет LEARNING_OTS_WRITER (узкая роль ots_anchor_writer — INSERT + column-scoped
+    # UPDATE(ots_file, verified_at) на public.ots_anchors, см. миграция 296) добавлен
+    # в общий /etc/iwe/env (не в отдельный файл — тот же паттерн, что у всех
+    # остальных джоб в этом модуле) вручную 27.07.
+    #
+    # NixOS-специфичный фикс: python-bitcoinlib (зависимость otsclient) грузит
+    # libssl/libcrypto через ctypes.util.find_library(), который на NixOS ничего
+    # не находит (нет глобального ldconfig-кэша) — без LD_PRELOAD падает
+    # AttributeError на BN_add. Путь ниже — openssl-3.4.3, часть closure
+    # /run/current-system на момент реализации (не будет собран GC, пока жива эта
+    # генерация); при апгрейде openssl в конфиге — перепроверить путь.
+    #
+    # opentimestamps-client не упакован в nixpkgs — установлен user-space venv
+    # (~/.local/venvs/wp455-ots, `python3 -m venv` + `pip install opentimestamps-client`),
+    # бинарник симлинкнут в ~/.local/bin/ots. `path` ниже добавляет ~/.local/bin
+    # в PATH джобы, чтобы `shutil.which("ots")` внутри ots-anchor.py его нашёл.
+
+    systemd.services."wp455-ots-anchor" = {
+      description = "WP-455 OTS Anchor — daily Bitcoin anchoring of domain_event hash-chain tips";
+      unitConfig   = commonUnitConfig;
+      serviceConfig = commonServiceConfig // {
+        ExecStart        = "${pkgs.bash}/bin/bash ${iwe}/DS-my-strategy/scripts/wp455-ots-anchor.sh";
+        WorkingDirectory = "${iwe}/DS-my-strategy/scripts";
+        TimeoutSec       = 300;
+      };
+      path        = wp455OtsPath;
+      environment = commonEnv // { LD_PRELOAD = wp455OtsLdPreload; };
+    };
+
+    systemd.timers."wp455-ots-anchor" = {
+      wantedBy    = [ "timers.target" ];
+      description = "WP-455 OTS Anchor — ежедн 03:00 UTC";
+      timerConfig = {
+        OnCalendar = "*-*-* 03:00:00 UTC";
+        Persistent = true;
+      };
+    };
+
+    systemd.services."wp455-ots-upgrade" = {
+      description = "WP-455 OTS Upgrade — verify Bitcoin confirmations every 4h";
+      unitConfig   = commonUnitConfig;
+      serviceConfig = commonServiceConfig // {
+        ExecStart        = "${pkgs.bash}/bin/bash ${iwe}/DS-my-strategy/scripts/wp455-ots-upgrade.sh";
+        WorkingDirectory = "${iwe}/DS-my-strategy/scripts";
+        TimeoutSec       = 300;
+      };
+      path        = wp455OtsPath;
+      environment = commonEnv // { LD_PRELOAD = wp455OtsLdPreload; };
+    };
+
+    systemd.timers."wp455-ots-upgrade" = {
+      wantedBy    = [ "timers.target" ];
+      description = "WP-455 OTS Upgrade — каждые 4ч (:15, смещено от anchor)";
+      timerConfig = {
+        OnCalendar = "*-*-* 00/4:15:00 UTC";
+        Persistent = true;
+      };
+    };
+
+    systemd.services."wp455-ots-watchdog" = {
+      description = "WP-455 OTS Watchdog — dead-man's switch for anchoring (F12)";
+      unitConfig   = commonUnitConfig;
+      serviceConfig = commonServiceConfig // {
+        ExecStart        = "${pkgs.bash}/bin/bash ${iwe}/DS-my-strategy/scripts/wp455-ots-watchdog.sh";
+        WorkingDirectory = "${iwe}/DS-my-strategy/scripts";
+        TimeoutSec       = 60;
+      };
+      path        = commonPath;
+      environment = commonEnv;
+    };
+
+    systemd.timers."wp455-ots-watchdog" = {
+      wantedBy    = [ "timers.target" ];
+      description = "WP-455 OTS Watchdog — ежечасно";
+      timerConfig = {
+        OnCalendar = "*-*-* *:00:00 UTC";
+        Persistent = true;
+      };
+    };
 
   };
 }
