@@ -191,7 +191,12 @@ if [ "$CMD" = "open" ]; then
   while IFS= read -r STALE; do
     [ -z "$STALE" ] && continue
     [ -f "$STALE" ] || continue
-    STALE_MTIME=$(stat -f %m "$STALE" 2>/dev/null || stat -c %Y "$STALE" 2>/dev/null || echo "")
+    # GNU stat first: on Linux, `stat -f ...` means "filesystem status", not
+    # BSD's "format string" — it exits 0 with an unrelated multi-line dump
+    # instead of failing, so a BSD-first order never reaches the correct GNU
+    # fallback on Linux hosts (live-reproduced on tsekh-1, 27.07: the garbage
+    # dump fed into `$(( ... ))` arithmetic crashed with "unbound variable").
+    STALE_MTIME=$(stat -c %Y "$STALE" 2>/dev/null || stat -f %m "$STALE" 2>/dev/null || echo "")
     [ -z "$STALE_MTIME" ] && continue
     STALE_AGE=$(( $(date +%s) - STALE_MTIME ))
     if [ "$STALE_AGE" -gt 1800 ]; then
