@@ -3,7 +3,8 @@
 # modules/backup.nix — декларативные резервные копии через restic → B2.
 #
 # Два задания:
-#   neon-dbs  — pg_dump всех Neon БД (список URL в /etc/restic/neon-connections)
+#   neon-dbs  — pg_dump ЛЮБЫХ PostgreSQL-серверов из списка URL (не только Neon,
+#               несмотря на название файла/задания — см. ниже)
 #   local     — /home/tseren + /etc/restic (сами конфиги секретов)
 #
 # Секреты (создаются вручную на сервере, не в git):
@@ -15,7 +16,14 @@
 #   # комментарии игнорируются
 #   postgresql://user:pass@ep-xxx.neon.tech/dbname?sslmode=require
 #
-# Связь: WP-138 Ф2.
+# WP-7 Ф-Backup-Resilience-Audit (27.07): дамп-скрипт не привязан к хосту neon.tech —
+# читает любой postgresql:// URL построчно. Переиспользовано для Railway Postgres
+# bot_data (peaceful-vision, публичный TCP-прокси *.proxy.rlwy.net — *.railway.internal
+# с этого сервера недостижим). SC4 стресс-теста (drift-проверка полноты) написан под
+# regex `neon.tech/` и Railway-запись не учитывает — покрытие Railway проверяется только
+# общим fail_count/heartbeat, не отдельной строкой в отчёте SC4.
+#
+# Связь: WP-138 Ф2, WP-7 Ф-Backup-Resilience-Audit.
 
 { config, lib, pkgs, ... }:
 
