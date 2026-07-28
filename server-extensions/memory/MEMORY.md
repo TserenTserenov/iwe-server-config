@@ -26,8 +26,7 @@
 
 ## Текущая работа
 
-> Источник: WeekPlan W{N} + WP-REGISTRY.md. Полный контекст каждого РП только в `DS-my-strategy/inbox/WP-{N}/WP-{N}.md` — эта таблица только пойнтер (≤10 слов на `next`), детали сюда не дублировать.
-> **W29 (13-19.07):** ТОС — запуск персонального руководства. Пул: 149,289,417,406+476,469+401,415+481,482,483. План: `current/WeekPlan W29 2026-07-13.md`.
+> Источник: WeekPlan W{N} + WP-REGISTRY.md. Полный контекст каждого РП только в `DS-my-strategy/inbox/WP-{N}/WP-{N}.md` — эта таблица только пойнтер (≤10 слов на `next`), детали сюда не дублировать. Текущий план недели: `current/WeekPlan W31*.md`.
 
 | WP | ст | P | Название | next (≤10 слов) |
 |-----|----|----|----------|----------------|
@@ -59,11 +58,10 @@
 | 251 | 🔄 | — | Системы службы продвижения | Ф4 живая сессия с Алёной (блокер) |
 | 250 | 🔄 | — | План развития до конца 2026 (зонтичный) | Week Close (WIP-фильтр+калибровка) |
 | 399 | ⏳ | P1 | Ротация секретов экосистемы | батч просрочен, ротация за пилотом |
-| ~~429~~ | ✅ | — | ~~Детектор непротиворечивости базы~~ | ~~28.07: CC-125 разобран пилотом — 6 карточек легализованы в routing.yaml (allow_dir_exceptions), остаток → WP-508 (перенос) + по касанию (frontmatter). Все фазы Ф1-Ф6 доставлены, РП закрыт~~ |
 | 508 | 🔄 | P3 | Приведение PACK-digital-platform к контракту размещения | зарегистрирован 28.07 из CC-125; перенос 71 файла DP.D с backlink-проверкой |
 | 5 | 🔄 | — | Платформа: развитие (зонтичный) | 27.07: живой прогон Ubuntu в контейнере done (scheduler/incident/date fallback подтверждены), баг PyYAML починен — детали `inbox/WP-5/WP-5.md` |
 | 117 | 🔄 | — | Развитие nudge-системы | Ф-adapt ждёт 4 недели рантайма |
-| 149 | 🔄 | **P1** | Персональные руководства | 28.07 веч.: enabled fail-closed (решение пилота) + слияние вердикта судьи чек-листа в символ строки — оба задеплоены (DS-autonomous-agents 26efada/a454994/пробел-тестов-закрыт, DS-platform-infra 82ccebb), независимо проверены (моя проверка + 2 фоновых субагента); next живое подтверждение ночь 28→29.07 |
+| 149 | 🔄 | **P1** | Персональные руководства | стенд 28.07: жёлтый честный, план ФС-1..ФС-5 готов; next quick wins + решения Р1/Р2 |
 | 438 | 🔄 | — | Агентный режим Гермеса | перенос после WP-149 |
 | 170 | 🔄 | P1 | База знаний: обновление | 37 карточек записано, 110/225 обработано; Kimi недоступен (token guard) — продолжать соло |
 | 415 | 🔄 | P2 | Конвейер орг-GitHub | Конвейер 1 |
@@ -92,7 +90,7 @@
 | 289 | 🔄 | P2 | Интеграция IWE с личными базами знаний | Приёмка MVP |
 | 483 | 🔄 | P2 | Комплект структурирования данных (guide-kit) | Ф6-Ф8 ждут РП495 Ф4-Ф5 |
 | 488 | 🔄 | P2 | Браузерное рабочее место на Hetzner | railway MCP заведён на цех-1, проверить в новой IDE-сессии; Ф2 скорость/команда |
-| 484 | 🔄 | — | Автогенератор открытия/закрытия дня (зонтичный) | 28.07: facts_digest guard дофикшен (2 раунда критики Codex закрыли 2 дыры), GNU/Linux stat + lsof/ss фиксы, всё запушено; next `night-cycle-day.sh` оркестратор (архрешение есть, реализация не начата) |
+| 484 | 🔄 | — | Автогенератор открытия/закрытия дня (зонтичный) | 28.07 веч.: `night-cycle-day.sh` оркестратор Ф16.2 2b построен и запушен, закрыта реальная гонка двойной записи facts_digest (--dedup-by-kind в ledger-append.sh); next пир-сессия с Codex + решение пилота о включении в расписание |
 | 493 | 🔄 | P2 | Лаборатория характеристик | Ф4 ждёт данных (конец августа — сентябрь) |
 | 494 | 🔄 | P2 | Панель рабочих продуктов в VS Code | ручная F5-приёмка пилотом |
 | 495 | 🔄 | **P1** | Концепция персонального развития | 23.07: Ф8 черновик РП1 собран (12/13, placeholder — ждёт живых данных пробной группы); P1-окно закрылось 4 дня назад, нужна переоценка приоритета пилотом |
@@ -123,37 +121,19 @@
 
 ### Feedback — HOT
 
-- [lessons_wp503_stand_found_bugs_beyond_review_plan.md](lessons_wp503_stand_found_bugs_beyond_review_plan.md) — отбор карточек ≠ сканирование дрейфа (2 слоя фильтрации); один класс бага чинить сразу во всех местах, не по первому найденному
+- [lessons_check_then_append_race_needs_dedup_inside_lock.md](lessons_check_then_append_race_needs_dedup_inside_lock.md) — caller-side «уже есть?»-проверка снаружи flock = гонка даже при атомарной записи; дедуп переносить внутрь лока
+- [lessons_runner_and_manual_step_race_on_shared_index.md](lessons_runner_and_manual_step_race_on_shared_index.md) — раннер и ручной шаг Close оба пишут в sessions/00-index.md независимо → запускать раннер первым, не последним
 - [feedback_askuserquestion_not_reaching_pilot.md](feedback_askuserquestion_not_reaching_pilot.md) — choice-question — дублировать в чат
-- [lessons_two_agent_consensus_still_needs_independent_review.md](lessons_two_agent_consensus_still_needs_independent_review.md) — расхождение выводов → проверить, с какого хоста/источника данные, не только внутреннюю логику
 - [feedback_kimi_peer_quality_concern.md](feedback_kimi_peer_quality_concern.md) — Кими плохо работает в пир-сессиях — усиленно верифицировать его находки независимо
-- [feedback_s33_scope_already_answered.md](feedback_s33_scope_already_answered.md) — scope S-33 уже разграничен пилотом в сессии → констатировать, не переспрашивать
 - [routing-vocab.md](routing-vocab.md) — фраза → путь, читать ПЕРЕД Write
 - [feedback_response_clarity_for_pilot.md](feedback_response_clarity_for_pilot.md) — A1-A11 правила ответа
-- [feedback_explicit_approval_covers_hook_false_positive.md](feedback_explicit_approval_covers_hook_false_positive.md) — одобренная команда → ложняк хука не требует переспроса
-- [feedback_post_draft_dedup_before_new.md](feedback_post_draft_dedup_before_new.md) — новый материал для постов → сначала обогатить черновик, новый только если нет подходящего
 - [reference_no_invented_facts_hub.md](reference_no_invented_facts_hub.md) — не выдумывать опыт/имена
 - [user_tseren_personal_life.md](user_tseren_personal_life.md) — Tseren (НЕ Дмитрий), Кипр
 - [reference_day_protocol_gaps_hub.md](reference_day_protocol_gaps_hub.md) — Day Open/Close квирки (7)
 - [reference_wp_gate_mechanics_hub.md](reference_wp_gate_mechanics_hub.md) — task_id, дочерний РП, имя через Артефактор (6)
-- [reference_llm_bot_output_quirks_hub.md](reference_llm_bot_output_quirks_hub.md) — TG markdown/HTML квирки (6)
 - [reference_diagnosis_technique_hub.md](reference_diagnosis_technique_hub.md) — root-cause, verify-before-trust (48)
 - [reference_git_hygiene_hub.md](reference_git_hygiene_hub.md) — git-add scope, pathspec, rebase/reset квирки (32)
-- [lessons_verify_branch_before_commit_pilot_first.md](lessons_verify_branch_before_commit_pilot_first.md) — Pilot-First репо: проверить ветку ДО commit, не только перед push
-- [reference_agent_session_mechanics_hub.md](reference_agent_session_mechanics_hub.md) — рецидив 3× kimi-peer-adapter (11)
 - [reference_macos_zsh_env_quirks_hub.md](reference_macos_zsh_env_quirks_hub.md) — квирки macOS/zsh/grep/git (15)
-- [lessons_ontological_not_lexical_generation.md](lessons_ontological_not_lexical_generation.md) — Pack/руководства — «онтологически, не лексически»
-- [reference_tsekh1_backup_infra_hub.md](reference_tsekh1_backup_infra_hub.md) — SSH-зависания, restic/B2 cap (2)
-- [reference_railway_deploy_quirks_hub.md](reference_railway_deploy_quirks_hub.md) — секреты в чат, railpack (2)
-- [reference_fmt_process_practices_hub.md](reference_fmt_process_practices_hub.md) — /skill-creator, issue-close, sync≠version-cut (3)
 - [reference_process_runner_quirks_hub.md](reference_process_runner_quirks_hub.md) — креды в карточке, race с активной сессией, umbrella-архивация (3)
 - [reference_secrets_credentials_hub.md](reference_secrets_credentials_hub.md) — .mcp.json wrapper, ротация-верификация, 403≠401 (3)
-- [lessons_shared_registry_axis_needs_ownership_check.md](lessons_shared_registry_axis_needs_ownership_check.md) — новая ось в платформенном реестре: сначала «чья это ось», потом «дробить или нет»
-- [lessons_session_guard_housekeeping_reason_path_injection.md](lessons_session_guard_housekeeping_reason_path_injection.md) — housekeeping-reason с пробелами/двоеточием ломает session-guard.sh; note-file падает при нескольких открытых семафорах; close ДО commit стирает scope
-- [lessons_active_wp_sweep_scale_hang.md](lessons_active_wp_sweep_scale_hang.md) — active-wp-sweep.sh O(РП×репо) без параллелизма/кэша зависает при росте базы (118+×67)
-- [lessons_gate_marker_granularity_mismatch.md](lessons_gate_marker_granularity_mismatch.md) — giving-up маркер должен писаться в тот же state-файл, что проверяет входной гейт цикла
-- [lessons_new_sentinel_gate_must_test_parallel_sessions.md](lessons_new_sentinel_gate_must_test_parallel_sessions.md) — новый sentinel/marker-гейт без session_id в общем каталоге путает параллельные сессии
-- [lessons_commit_push_repo_field_is_relative_path.md](lessons_commit_push_repo_field_is_relative_path.md) — раннер: repos[] абсолютный путь, commits[].repo относительный от IWE_ROOT — разный контракт похожих полей
-- [lessons_structural_gate_verify_full_history_not_one_sample.md](lessons_structural_gate_verify_full_history_not_one_sample.md) — gate по заголовкам документа — верифицировать на полной истории файлов, не на одном живом примере (2-й рецидив issue #318)
-- [lessons_sibling_code_reference_may_be_unverified.md](lessons_sibling_code_reference_may_be_unverified.md) — образец кода из соседнего файла кодовой базы может быть непроверенным на всех целевых платформах с самого начала — проверять живьём, не только читать
-- [lessons_runner_and_manual_step_race_on_shared_index.md](lessons_runner_and_manual_step_race_on_shared_index.md) — раннер и ручной шаг Close оба пишут в sessions/00-index.md независимо → запускать раннер первым, не последним
+- Остальные уроки/hubs (20 шт., demoted 28.07) → [MEMORY-warm.md](MEMORY-warm.md)
