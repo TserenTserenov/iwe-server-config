@@ -156,6 +156,23 @@ extract_related_wps() {
     || true
 }
 
+# Extract WP numbers from blockers: block in frontmatter (symmetric to
+# extract_related_wps — see WP-503 Ф6 peer-session 2026-07-28: blockers:
+# schema is not standardized (5/~100 cards, 3 different shapes), but any
+# shape that embeds a WP-NNN reference is caught by the same regex).
+extract_blocker_wps() {
+  local file="$1"
+  awk '
+    /^---$/ { fm_count++; next }
+    fm_count != 1 { next }
+    /^blockers:/ { in_blockers=1; next }
+    in_blockers && /^[a-z_]+:/ && !/^  / { in_blockers=0; next }
+    in_blockers { print }
+  ' "$file" 2>/dev/null \
+    | grep -oE 'WP-[0-9]+' \
+    || true
+}
+
 # Get relation type for a given WP number from current file's frontmatter
 get_rel_type() {
   local file="$1"
@@ -344,13 +361,15 @@ main() {
   # Collect related WPs
   local related_from_fm
   related_from_fm=$(extract_related_wps "$wp_file" | grep -oE '[0-9]+' || true)
+  local related_from_blockers
+  related_from_blockers=$(extract_blocker_wps "$wp_file" | grep -oE '[0-9]+' || true)
   local related_from_body
   related_from_body=$(grep_body_wps "$wp_file")
 
   # Merge, deduplicate, exclude self, limit to 30
   local all_related
   all_related=$(
-    { echo "$related_from_fm"; echo "$related_from_body"; } \
+    { echo "$related_from_fm"; echo "$related_from_blockers"; echo "$related_from_body"; } \
     | grep -E '^[0-9]+$' \
     | grep -v "^${wp_num}$" \
     | sort -nu \
