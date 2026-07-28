@@ -191,7 +191,11 @@ if [ "$CMD" = "open" ]; then
   while IFS= read -r STALE; do
     [ -z "$STALE" ] && continue
     [ -f "$STALE" ] || continue
-    STALE_MTIME=$(stat -f %m "$STALE" 2>/dev/null || stat -c %Y "$STALE" 2>/dev/null || echo "")
+    # GNU-first (bug-2026-07-24, inbox/bugs/): on Linux, `stat -f` doesn't fail,
+    # it prints "filesystem status" garbage — the BSD-first order below used to
+    # silently accept that garbage as a "successful" first branch, never reaching
+    # the GNU fallback.
+    STALE_MTIME=$(stat -c %Y "$STALE" 2>/dev/null || stat -f %m "$STALE" 2>/dev/null || echo "")
     [ -z "$STALE_MTIME" ] && continue
     STALE_AGE=$(( $(date +%s) - STALE_MTIME ))
     if [ "$STALE_AGE" -gt 1800 ]; then

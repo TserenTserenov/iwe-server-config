@@ -149,6 +149,41 @@ fi
 - [ ] **Метрики дня записаны:** `week-draft-append.sh` (WakaTime/коммиты/РП) + вручную (бюджет/прогресс месяца)
 - [ ] **Черновик закоммичен:** `git -C ~/IWE/DS-Knowledge-Index-Tseren add docs/ && git commit -m "docs: week-draft W{NN} update"`
 
+### Рефлексия дня — прямой опрос (WP-484, второй канал получения рядом с ботовым `/reflect`)
+
+> **Источник:** пилот 28.07 уточнил, что закрытие дня должно само предлагать написать рефлексию, не только напоминать про `/reflect` в боте постфактум (см. п. «Задача 1» хендоффа РП149 28.07 вечер — 1.12 `reflection_status: absent` держит жёлтый вердикт чек-листа персонального руководства). Оба канала пишут в один и тот же файл (`history/{месяц}/{дата}-reflection.md` в персональном репозитории `personal-guide`), который читает ночной рендер (`get_pilot_reflections`, `DS-autonomous-agents/scripts/render-pilot-guides.py`) — выбор канала не важен, важно что файл за сегодня появился.
+
+```bash
+TODAY=$(date +%Y-%m-%d)
+MONTH="${TODAY:0:7}"
+REFLECTION_PATH="history/$MONTH/$TODAY-reflection.md"
+if gh api "repos/TserenTserenov/personal-guide/contents/$REFLECTION_PATH" >/dev/null 2>&1; then
+  echo "✅ Рефлексия за $TODAY уже есть ($REFLECTION_PATH) — не спрашивать повторно"
+else
+  echo "🟡 Рефлексии за $TODAY нет — спросить пилота прямо сейчас (см. пункт ниже)"
+fi
+```
+
+- [ ] **Если 🟡 — спросить пилота:** «Что ты сегодня узнал (Q3)? Какое намерение на завтра (Q5)?» Допустимый ответ: пропустить (пилот явно говорит «не сегодня») или 1-2 предложения на каждый вопрос.
+- [ ] **Если пилот ответил** — записать канонический формат и закоммитить в его личный репозиторий:
+  ```bash
+  cat > /tmp/reflection-$TODAY.md <<'EOF'
+  ## 3. Что узнал
+
+  <ответ пилота на Q3>
+
+  ## 5. Что завтра
+
+  <ответ пилота на Q5>
+  EOF
+  gh api --method PUT "repos/TserenTserenov/personal-guide/contents/$REFLECTION_PATH" \
+    -f message="reflect: $TODAY (day-close)" \
+    -f content="$(base64 < /tmp/reflection-$TODAY.md)" \
+    -f branch="main"
+  rm /tmp/reflection-$TODAY.md
+  ```
+- [ ] **Если пилот пропустил** — не создавать файл (честный `reflection_status: absent` в чек-листе — не баг, реальный сигнал поведения, см. хендофф РП149 28.07).
+
 ### 🔴 Мультипликатор IWE — всегда Method B (по бюджету)
 
 > **Источник:** 2 июня 2026 — метод A (по ходам/времени) дал 1.4x, метод B (по бюджету) — 2.4x. Разница ×1.7 из-за пропущенных сессий и незачтённого бюджета WP. Пилот подтвердил: Method B — единственный правильный.
