@@ -165,7 +165,7 @@ fi
 ```
 
 - [ ] **Если 🟡 — спросить пилота:** «Что ты сегодня узнал (Q3)? Какое намерение на завтра (Q5)?» Допустимый ответ: пропустить (пилот явно говорит «не сегодня») или 1-2 предложения на каждый вопрос.
-- [ ] **Если пилот ответил** — записать канонический формат и закоммитить в его личный репозиторий:
+- [ ] **Если пилот ответил** — записать канонический формат и закоммитить в его личный репозиторий. Между проверкой выше и этим шагом файл мог появиться (бот `/reflect` в параллели, пока пилот отвечал в чате) — GitHub требует `sha` существующего файла для PUT, без него запрос падает с `422`, поэтому берём `sha` заново прямо перед записью, не полагаясь на результат проверки выше:
   ```bash
   cat > /tmp/reflection-$TODAY.md <<'EOF'
   ## 3. Что узнал
@@ -176,10 +176,18 @@ fi
 
   <ответ пилота на Q5>
   EOF
-  gh api --method PUT "repos/TserenTserenov/personal-guide/contents/$REFLECTION_PATH" \
+  EXISTING_SHA=$(gh api "repos/TserenTserenov/personal-guide/contents/$REFLECTION_PATH" --jq '.sha' 2>/dev/null || true)
+  SHA_ARGS=()
+  [ -n "$EXISTING_SHA" ] && SHA_ARGS=(-f "sha=$EXISTING_SHA")
+  if gh api --method PUT "repos/TserenTserenov/personal-guide/contents/$REFLECTION_PATH" \
     -f message="reflect: $TODAY (day-close)" \
     -f content="$(base64 < /tmp/reflection-$TODAY.md)" \
-    -f branch="main"
+    -f branch="main" \
+    "${SHA_ARGS[@]}" >/dev/null 2>&1; then
+    echo "✅ Рефлексия за $TODAY записана"
+  else
+    echo "❌ Запись рефлексии не удалась — файл мог измениться между проверкой и записью, сообщить пилоту и повторить шаг вручную"
+  fi
   rm /tmp/reflection-$TODAY.md
   ```
 - [ ] **Если пилот пропустил** — не создавать файл (честный `reflection_status: absent` в чек-листе — не баг, реальный сигнал поведения, см. хендофф РП149 28.07).
