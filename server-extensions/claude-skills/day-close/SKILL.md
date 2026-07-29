@@ -266,6 +266,10 @@ bash ~/IWE/scripts/day-close-step-log.sh end 5b
 
 Пользователь читает черновик → корректирует → одобряет.
 
+```bash
+bash ~/IWE/DS-my-strategy/scripts/ledger-append.sh day $(date +%F) conversational_close_done '{"source":"interactive-skill"}'
+```
+
 ### 9. Запись итогов
 
 `bash ~/IWE/scripts/day-close-step-log.sh start 9a`

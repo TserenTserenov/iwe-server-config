@@ -16,6 +16,7 @@ modified: 2026-07-19T14:52:09.030Z
 
 > **Три масштаба:** Сессия (Quick Close), День (Day Close), Неделя (Week Close).
 > **Точка входа:** Вызвать Skill `run-protocol` с нужным аргументом (см. таблицу ниже).
+> **Порядок чтения (WP-484.md:1953, ошибка 28.07):** если разговор перед Close шёл про конкретный РП — прочитать сегодняшние записи его WP-context ПЕРВЫМ действием, только потом открывать сам протокол. Протокол раньше контекста = причина ошибки «принял фразу пилота за отсылку к прошлому решению, не перечитав contextfile».
 > **Принцип:** Quick Close = «не потерять» (inline, без TodoWrite, ~3 мин). Day/Week Close = через SKILL.md + TodoWrite (принудительное исполнение).
 > **CGUS (WP-481 Ф5):** порядок шагов = порядок удержания внимания, НЕ порядок исполнения. `[[gate]]`/`[[gate:AR.NNN]]` = предусловие (блокирует); `[[narrative]]` = демонстрационный порядок (skippable). Close проверяет удовлетворённость набора gate, не линейность прохождения.
 
@@ -113,12 +114,17 @@ cd DS-my-strategy && python3 scripts/process-runner.py start quick-close --slug 
 
 ### Отчёт Quick Close
 
+> Значения — не шаблонный текст, а данные уже пройденных шагов раннера (`process-runner.py status <run_id>` отдаёт JSON со всеми выходами шагов) — агент читает и рендерит детерминированно, без нового LLM-вызова.
+
 ```
-**РП:** #N — [название]
-**Статус:** done / in_progress
-**Git:** закоммичено + запушено ✅
+**РП:** #N — [название] (из wp-context-update.wp)
+**Статус:** done / in_progress / in_progress_background (из wp-context-update.status)
+**Длительность:** N мин, M ходов (из gather-session-facts.duration_min, turns)
+**Git:** K коммитов в J репо, запушено ✅ (из commit-push.commits, посчитать repo/count)
+**Рефлексия:** [ответ на вопрос §18, если задавался] / — (порог не пройден)
 **EXTENSION POINT (protocol-close after):** `bash .claude/scripts/load-extensions.sh protocol-close after` — exit 0 → `Read` каждый файл из вывода (alphabetic) → выполнить. Exit 1 → пропустить. Поддерживает `extensions/protocol-close.after.md` И `extensions/protocol-close.after.<suffix>.md`.
 **Handoff:** → WP context «Осталось» обновлён / done
+**Фон:** [если status=in_progress_background] «можно закрывать сессию, доработаю и пришлю итог в Telegram» (канал есть) / «доработаю при следующем открытии, сейчас можно продолжать или закрыть — но фоново ничего не идёт» (канала нет)
 ```
 
 ### Верификация Quick Close (Haiku R23) · [[gate:AR.007]]

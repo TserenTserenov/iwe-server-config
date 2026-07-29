@@ -68,7 +68,7 @@
 | 415 | 🔄 | P2 | Конвейер орг-GitHub | Конвейер 1 |
 | 285 | 🔄 | — | Международная инфраструктура Track B | тесты-спецификации у Андрея |
 | 401 | 🔄 | **P1** | Разделение GitHub-организаций | Ф6.1 manifest.sh |
-| 406 | 🔄 | **P1** | Онбордер | Ф20 приёмка в Telegram (за пилотом) |
+| 406 | 🔄 | **P1** | Онбордер | 29.07: Ф24 концепция входа собрана (6 тактов, файл в inbox/WP-406), 8 решений пилота Д1-Д8 (минимум Д1+Д3); Ф20/Ф22 ждут пилота |
 | 456 | 🔄 | P3 | Онбордер англоязычной IWE (браузер) | EN-приёмка ожидает пилота |
 | 405 | 🔄 | — | Англоязычная платформа IWE | Ф4 Language Policy FMT |
 | 452 | 🔄 | P3 | Гайд разработчика IWE | Ф2 стиль кода |
@@ -98,7 +98,7 @@
 | 496 | 🔄 | P3 | Журнал гипотез (LPF-регламент обратной связи) | сверка «Актуальных» агентом на Week Close |
 | 167 | 🔄 | P5 | Публикации (зонтичный) | пилот утверждает порядок 28 постов; публикатор стартует с Ф-А3 |
 | 497 | 🔄 | P5 | Материалы исследования AGI | Ф1 ready; Ф9 публикация на клубе — ручной шаг пилота |
-| 391 | 🔄 | **P1** | Браузерный IWE — мультимодельный вход (Kimi) | 28.07 ночь: Ф7.6 — оплата через подписку платформы вместо личного ключа Moonshot (решение пилота: продукт с покупной подпиской, не разовое демо); прокси платформы получил новый вход без потери вызовов инструментов (auth-gateway 17f1f7a), адаптер переведён на общий токен входа (kimi-adapter 5321d6c), оба задеплоены и независимо проверены (45+34 теста); блокирует WP-385 Ф5 — next живой прогон реального сценария входа (нужен пилот или тестовый новичок) |
+| 391 | 🔄 | **P1** | Браузерный IWE — стенд МИМ (mim-iwe), мультимодельный вход | 29.07: Ф8 — модель под капотом обезличена, сервис Railway переименован kimi-adapter→mim-iwe (новый домен mim-iwe-production.up.railway.app), UI сайта МИМ убрал слово Kimi; независимая проверка нашла и мы починили 1 битую ссылку; блокирует WP-385 Ф5 — next живой прогон реального сценария входа (нужен пилот или тестовый новичок) |
 
 ## Бот: деплой
 
@@ -127,6 +127,7 @@
 - [lessons_check_then_append_race_needs_dedup_inside_lock.md](lessons_check_then_append_race_needs_dedup_inside_lock.md) — caller-side «уже есть?»-проверка снаружи flock = гонка даже при атомарной записи; дедуп переносить внутрь лока
 - [lessons_runner_and_manual_step_race_on_shared_index.md](lessons_runner_and_manual_step_race_on_shared_index.md) — раннер и ручной шаг Close оба пишут в sessions/00-index.md независимо → запускать раннер первым, не последним
 - [lessons_synthetic_fixture_must_come_from_real_producer.md](lessons_synthetic_fixture_must_come_from_real_producer.md) — тест на придуманной строке зелёный, даже если regex не совпадает с реальным выводом продюсера → фикстуры парсера строить через сам продюсер
+- [lessons_railway_service_rename_does_not_move_domain.md](lessons_railway_service_rename_does_not_move_domain.md) — переименование Railway-сервиса не переносит домен автоматически → нужен отдельный serviceDomainCreate + domain delete
 - [feedback_askuserquestion_not_reaching_pilot.md](feedback_askuserquestion_not_reaching_pilot.md) — choice-question — дублировать в чат
 - [feedback_kimi_peer_quality_concern.md](feedback_kimi_peer_quality_concern.md) — Кими плохо работает в пир-сессиях — усиленно верифицировать его находки независимо
 - [lessons_peer_writer_verify_card_type_before_generalizing.md](lessons_peer_writer_verify_card_type_before_generalizing.md) — писатель тоже ошибается (тип карточки, мотив пилота) — проверять frontmatter/цитату, не обобщать по памяти

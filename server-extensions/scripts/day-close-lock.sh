@@ -128,7 +128,9 @@ acquire() {
   local state
   state=$(check_today_history)
   if [ "$state" = "closed" ]; then
-    log "День уже закрыт сегодня (найден коммит day-close:) — выхожу, повторный прогон не нужен"
+    local closed_at
+    closed_at=$(git log HEAD --since="$(date +%Y-%m-%d) 00:00" --grep="day-close: $(date +%Y-%m-%d)" --format="%cd" --date=format:%H:%M | head -1)
+    log "Механическая часть дня уже закрыта (маркер ${closed_at:-неизвестно}) — разговорная часть (рефлексия, приоритеты) отдельно, проверить наличие секции «Итоги дня». Повторный автоматический прогон не нужен."
     exit 1
   fi
   if [[ "$state" == start:* ]]; then
