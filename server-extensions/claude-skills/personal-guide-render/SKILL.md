@@ -1,6 +1,6 @@
 ---
 name: personal-guide-render
-description: Тонкий клиент — собирает персональное руководство пилота через локальный шлюз (mcp__iwe-local-gateway__render_personal_guide). Используй когда пилот просит «пересобери руководство», «обнови мой план», «собери руководство на сегодня».
+description: Тонкий клиент — запускает сборку персонального руководства (инструмент шлюза render_personal_guide, при его отсутствии — серверный запуск на tsekh-1). Используй когда пилот просит «пересобери руководство», «обнови мой план», «собери руководство на сегодня».
 argument-hint: "[необязательно: дата в формате YYYY-MM-DD, по умолчанию сегодня]"
 experimental: false
 related: [WP-149, personal-guide-start, DP.SC.187]
@@ -55,7 +55,9 @@ gates_rationale: "операционный скилл; WP Gate применим 
 
 ## Шаг 2. Запустить сборку
 
-Вызови `mcp__iwe-local-gateway__render_personal_guide(date=<date>)`.
+Если инструмент `mcp__iwe-local-gateway__render_personal_guide` есть в списке доступных MCP-инструментов — вызови его с `date=<date>`.
+
+**Если инструмента нет** (текущее состояние: рабочий демон собран из `DS-MCP/local-gateway`, 5 инструментов без render; шестой инструмент существует только в сборке из `iwesys/iwe-local-gateway` — WP-499 Ф16 ревью, 2026-07-29) — запустить сборку на сервере tsekh-1: команда `render-pilot-guides.py --daily --user=TserenTserenov` (документированный ручной запуск → `DS-autonomous-agents/PROCESSES.md`, env из `/etc/iwe/env`; исторический вызов шёл через `ssh tsekh-1-root` + `systemd-run --uid=tseren`).
 
 ## Шаг 3. Отчёт пилоту
 

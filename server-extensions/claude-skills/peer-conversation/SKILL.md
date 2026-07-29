@@ -1,13 +1,13 @@
 ---
 name: peer-conversation
-description: Многотуровый диалог писателя (Claude) с напарником (Kimi) по задаче пилота (DP.SC.154). Ведёт turn-loop, обнаруживает CONSENSUS/ESCALATE, после консенсуса — Decision Gate (зафиксировать vs реализовать → ревью → проверить → задеплоить), синтезирует report.md через Agent tool.
-argument-hint: "<описание задачи> | --list | --interrupt <session_id> | --finalize <session_id>"
-version: 1.3.0
+description: Многотуровый диалог писателя (Claude) с напарником (любой из kimi/codex/hermes/claude-headless) по задаче пилота (DP.SC.154). Ведёт turn-loop, обнаруживает CONSENSUS/ESCALATE, после консенсуса — Decision Gate (зафиксировать vs реализовать → ревью → проверить → задеплоить), синтезирует report.md через Agent tool.
+argument-hint: "<описание задачи> [--peer kimi|codex|hermes|claude] | --list | --interrupt <session_id> | --finalize <session_id>"
+version: 1.4.0
 layer: L3
 status: active
 triggers:
   slash: [/peer-conversation]
-  phrases: ["начни peer-сессию", "запусти диалог с Кими", "peer-сессия"]
+  phrases: ["начни peer-сессию", "запусти диалог с Кими", "запусти диалог с Codex", "peer-сессия"]
 routing:
   executor: sonnet
   deterministic: false
@@ -22,16 +22,16 @@ gates_rationale: "операционный скилл; WP Gate применим 
 
 Задача: $ARGUMENTS
 
-> **Архитектура:** я (Claude) = писатель, Kimi = напарник.
-> Kimi вызывается через `kimi-peer-adapter.sh` напрямую — Bash tool, stdin pipe.
-> `list_peer_statuses` (Local Gateway) — координация файлов, **не** проверка доступности Kimi CLI.
-> Gateway offline ≠ Kimi недоступен.
+> **Архитектура:** я (Claude) = писатель всегда (Skill tool доступен только мне в этой сессии). Напарник — параметр `--peer` (default `kimi`), любой из зарегистрированных вендоров (§0в).
+> Напарник вызывается через свой `<vendor>-peer-adapter.sh` напрямую — Bash tool, stdin pipe. Контракт одинаковый у всех: stdin = промпт, stdout = реплика, exit 0-5 (см. §0в).
+> `list_peer_statuses` (Local Gateway) — координация файлов, **не** проверка доступности напарника CLI.
+> Gateway offline ≠ напарник недоступен.
 
 ---
 
 ## When to use
 
-Многотуровый диалог писателя (Claude) с напарником (Kimi) по задаче пилота (DP.SC.154). Ведёт turn-loop, обнаруживает CONSENSUS/ESCALATE, после консенсуса — Decision Gate (зафиксировать vs реализовать → ревью → проверить → задеплоить), синтезирует report.md через Agent tool.
+Многотуровый диалог писателя (Claude) с напарником (любой зарегистрированный вендор — Kimi, Codex, Hermes, или второй Claude-инстанс headless) по задаче пилота (DP.SC.154). Ведёт turn-loop, обнаруживает CONSENSUS/ESCALATE, после консенсуса — Decision Gate (зафиксировать vs реализовать → ревью → проверить → задеплоить), синтезирует report.md через Agent tool.
 
 ## Scope boundary — не подменяет решения, зарезервированные за пилотом (найдено 2026-07-07)
 
@@ -47,7 +47,35 @@ gates_rationale: "операционный скилл; WP Gate применим 
 - `--list` → прочитать `DS-my-strategy/sessions/00-index.md`, вывести таблицу. Стоп.
 - `--interrupt <id>` → перейти к **Шагу 5 (interrupt-режим)**. Стоп после.
 - `--finalize <id>` → перейти к **Шагу 6 (finalize-режим)**. Стоп после.
-- Иначе → новая сессия, продолжать к Шагу 0б.
+- Иначе → новая сессия, продолжать к Шагу 0в.
+
+---
+
+## Шаг 0в. Выбор напарника (`--peer`)
+
+> **Добавлено 2026-07-29 (АрхГейт: вариант «параметризовать» против «отдельный скилл на вендора» — эволюционируемость заблокировала копипаст, см. `sessions/2026-07/2026-07-29-*-wp401-peer-vendor.md`).**
+
+Извлечь `--peer <vendor>` из `$ARGUMENTS`. Нет флага → `PEER_VENDOR="kimi"` (обратная совместимость с версией до 1.4.0).
+
+**Реестр вендоров** (единственное место маппинга — OwnerIntegrity; новый вендор добавляется только здесь):
+
+| `PEER_VENDOR` | Адаптер | `peer_agent` (meta.yaml) | Поддерживает `--add-dir` | Поддерживает `--model` | Особый флаг |
+|---|---|---|---|---|---|
+| `kimi` | `scripts/kimi-peer-adapter.sh` | `kimi-headless` | да | да | — |
+| `codex` | `scripts/codex-peer-adapter.sh` | `codex` | да | да | — |
+| `hermes` | `scripts/hermes-peer-adapter.sh` | `hermes` | **нет** | **нет** | `--session-id <id>` вместо |
+| `claude` | `scripts/claude-peer-adapter.sh` | `claude-code-headless` | да | да | — |
+
+Неизвестный `PEER_VENDOR` (не из таблицы) → СТОП, сообщить пилоту: «Напарник `<vendor>` не зарегистрирован. Известные: kimi, codex, hermes, claude. Добавить нового — правка таблицы выше + написание `<vendor>-peer-adapter.sh` по контракту §0в.1.»
+
+**§0в.1 Общий контракт адаптера** (для добавления нового вендора): stdin = полный промпт хода (Bash pipe, не inline `echo` — inline попадает в командную строку и хук B7.7c может ложно заблокировать повторные вызовы); stdout = одна реплика с frontmatter; exit `0` = OK, `1` = general error, `2` = content-filter/PII violation, `3` = PII hard block, `4` = `--add-dir` too large, `5` = уже идёт сессия (pidfile lock). Коды 2-5 — не обязательны для нового адаптера, но `0`/`1` обязательны (Шаг 3.1 проверяет `exit ≠ 0` как «напарник не ответил»).
+
+Анонсировать пилоту одной строкой:
+```
+Напарник: <PEER_VENDOR> (<peer_agent>)
+```
+
+Значения `ADAPTER_PATH="$HOME/IWE/DS-my-strategy/<адаптер из таблицы>"` и `PEER_AGENT_ID="<peer_agent из таблицы>"` используются везде ниже вместо хардкода `kimi-peer-adapter.sh`/`kimi-headless`.
 
 ---
 
@@ -58,10 +86,10 @@ gates_rationale: "операционный скилл; WP Gate применим 
 Анонс пилоту:
 ```
 Открываю peer-сессию (DP.SC.154)
-Роль: Писатель (Claude) | Напарник: Kimi
+Роль: Писатель (Claude) | Напарник: <PEER_VENDOR> (<PEER_AGENT_ID>)
 Задача: <задача>
 РП: WP-NNN «<название>» | или: не найден в плане
-Метод: turn-loop ≤10 ходов | Модель напарника: kimi-headless
+Метод: turn-loop ≤10 ходов
 ```
 
 Если РП **не найден** в плане недели → полный WP Gate Ритуал (`memory/protocol-open.md §Сессия`):
@@ -140,8 +168,8 @@ session_id: "<SESSION_ID>"
 start_time: "<ISO-8601 UTC>"
 end_time: ""
 writer_agent: "claude-code"
-peer_agent: "kimi-headless"
-peer_cmd: "kimi-peer-adapter"
+peer_agent: "<PEER_AGENT_ID из §0в>"
+peer_cmd: "<PEER_VENDOR>-peer-adapter"
 peer_model: ""
 status: "started"
 turns_count: 0
@@ -183,7 +211,7 @@ swap_history: []     # [{turn, from, to, reason}] — журнал SWAP_WRITER �
 
 **1.3 Добавить строку в `sessions/00-index.md`** сверху таблицы (первая строка таблицы после `|---|`):
 ```
-| <TODAY> | <SESSION_ID> | <задача ≤50 симв> | claude-code / kimi | 0 | 0 | started | — |
+| <TODAY> | <SESSION_ID> | <задача ≤50 симв> | claude-code / <PEER_VENDOR> | 0 | 0 | started | — |
 ```
 
 ---
@@ -213,7 +241,7 @@ consensus: none
 
 Переменные: `TURN=1`, `ESCALATIONS=0`, `DONE=false`.
 
-### 3.1 Вызов Кими
+### 3.1 Вызов напарника
 
 Прочитать все предыдущие реплики из `SESSION_DIR` в порядке нумерации.
 Составить промпт:
@@ -230,7 +258,7 @@ consensus: none
 ---
 turn: <TURN>
 role: peer
-agent_id: kimi-headless
+agent_id: <PEER_AGENT_ID>
 timestamp: <ISO-8601 UTC>
 consensus: none | proposed | reached | escalate
 ---
@@ -244,19 +272,27 @@ CONSENSUS: <резюме> — если считаешь что договори�
 ESCALATE_TO_USER: <причина> — если писатель игнорирует существенное возражение
 ```
 
-Вызов Кими через Bash:
+Вызов напарника через Bash — флаги зависят от вендора (таблица §0в):
+
 ```bash
 PEER_FILE="${SESSION_DIR}/$(printf '%02d' $TURN)-peer.md"
-echo "<промпт>" | bash "$HOME/IWE/DS-my-strategy/scripts/kimi-peer-adapter.sh" \
-  --add-dir "$SESSION_DIR" \
-  2>/dev/null > "$PEER_FILE"
+if [ "$PEER_VENDOR" = "hermes" ]; then
+  # hermes-peer-adapter.sh не принимает --add-dir/--model — свой --session-id
+  echo "<промпт>" | bash "$ADAPTER_PATH" \
+    --session-id "$SESSION_ID" \
+    2>/dev/null > "$PEER_FILE"
+else
+  echo "<промпт>" | bash "$ADAPTER_PATH" \
+    --add-dir "$SESSION_DIR" \
+    2>/dev/null > "$PEER_FILE"
+fi
 ```
 
-Если файл пустой или exit ≠ 0 → сообщить пилоту: «Kimi не ответил. Повторить или прервать?»
+Если файл пустой или exit ≠ 0 → сообщить пилоту: «<PEER_VENDOR> не ответил. Повторить или прервать?»
 
 ### 3.2 Показать пилоту
 
-Прочитать `$PEER_FILE`. Вывести ключевые тезисы Кими (не всю реплику дословно — краткое резюме + цитаты ключевых позиций).
+Прочитать `$PEER_FILE`. Вывести ключевые тезисы напарника (не всю реплику дословно — краткое резюме + цитаты ключевых позиций).
 
 ### 3.3 Проверить маркеры
 
@@ -278,11 +314,11 @@ pilot_response: ""
 # Эскалация <N> (ход <TURN>)
 
 **Причина:** <причина>
-**Реплика Кими:** <PEER_FILE>
+**Реплика напарника:** <PEER_FILE>
 **Ответ пилота:** (ввести ниже)
 ```
 
-- Сообщить пилоту: «Кими эскалирует: <причина>. Нужно твоё решение.»
+- Сообщить пилоту: «<PEER_VENDOR> эскалирует: <причина>. Нужно твоё решение.»
 - Дождаться ответа пилота, записать в `pilot_response` в escalation-файл.
 - Обновить `meta.yaml`: `escalations_count: <ESCALATIONS>` (Bash sed).
 
@@ -305,7 +341,7 @@ timestamp: <now>
 consensus: none
 ---
 
-<Моя реплика: ответ на аргументы Кими + учёт направления пилота>
+<Моя реплика: ответ на аргументы напарника + учёт направления пилота>
 ```
 
 `TURN += 1` → вернуться к 3.1.
@@ -674,7 +710,7 @@ Omit если `implementation_pipeline: false` в meta.yaml.
 
 Найти строку с `<SESSION_ID>` и заменить целиком:
 ```
-| <TODAY> | <SESSION_ID> | <задача ≤50> | claude-code / kimi | <TURNS> | <ESCALATIONS> | completed | [report.md](<MONTH>/<DAY>/<SESSION_ID>/report.md) |
+| <TODAY> | <SESSION_ID> | <задача ≤50> | claude-code / <PEER_VENDOR> | <TURNS> | <ESCALATIONS> | completed | [report.md](<MONTH>/<DAY>/<SESSION_ID>/report.md) |
 ```
 (Bash awk — безопасен для строк с `|`.)
 
@@ -688,7 +724,7 @@ Slug-часть (без даты и номера): `SESSION_SLUG=$(echo "$SESSIO
 date: <TODAY>
 type: peer-session
 writer: claude-code
-peer: kimi-headless
+peer: <PEER_AGENT_ID>
 duration_h: <(end_time - start_time) в часах, 1 знак>
 artifacts: sessions/<MONTH>/<DAY>/<SESSION_ID>/report.md
 session_id: <SESSION_ID>
