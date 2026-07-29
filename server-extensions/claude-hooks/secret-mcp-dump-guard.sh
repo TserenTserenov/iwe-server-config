@@ -9,8 +9,11 @@
 # известные форматы, но (а) срабатывает PostToolUse — оригинал уже в transcript,
 # (б) не ловит неизвестные форматы. Правильный фикс — НЕ тянуть весь список.
 #
-# Поведение: DENY известных bulk-secret инструментов. Bypass — CC_ALLOW_SECRETS=1
-# (осознанное решение, когда список действительно нужен). Лог.
+# Поведение: DENY известных bulk-secret инструментов. Bypass — CC_ALLOW_SECRETS_INPUT=1
+# (осознанное решение, когда список действительно нужен; переименовано из
+# CC_ALLOW_SECRETS I10/WP-500 2026-07-29 — единая семантика с secret-leak-block.sh:
+# этот флаг разрешает ВЫЗОВ инструмента, вывод отдельно маскирует secret-leak-redact.sh
+# под CC_ALLOW_SECRETS_OUTPUT). Лог.
 #
 # Лог: ~/IWE/.claude/logs/secret-mcp-dump-guard.jsonl
 # see: WP-212 B7.7d, AR.111, peer-session 2026-06-05-17
@@ -48,12 +51,12 @@ case "$tn" in
 esac
 
 # Bypass: осознанный override пилота/агента
-if [ "${CC_ALLOW_SECRETS:-}" = "1" ]; then
+if [ "${CC_ALLOW_SECRETS_INPUT:-}" = "1" ]; then
   log_decision "bypass-env" "$tool_name"
   exit 0
 fi
 
-reason="Инструмент ${tool_name} возвращает ВЕСЬ набор переменных/секретов разом — живые ключи (платёжный, Anthropic, токены, пароли БД) попадут в контекст и в transcript Anthropic. Затирание это не гарантирует (срабатывает поздно + не ловит неизвестные форматы). Возьми нужное значение точечно (по имени конкретной переменной) или используй его через окружение сервиса, не вытягивая список. Если список действительно нужен целиком — запусти с CC_ALLOW_SECRETS=1 (осознанно)."
+reason="Инструмент ${tool_name} возвращает ВЕСЬ набор переменных/секретов разом — живые ключи (платёжный, Anthropic, токены, пароли БД) попадут в контекст и в transcript Anthropic. Затирание это не гарантирует (срабатывает поздно + не ловит неизвестные форматы). Возьми нужное значение точечно (по имени конкретной переменной) или используй его через окружение сервиса, не вытягивая список. Если список действительно нужен целиком — запусти с CC_ALLOW_SECRETS_INPUT=1 (осознанно)."
 log_decision "deny" "$tool_name"
 jq -n --arg reason "$reason" \
   '{hookSpecificOutput: {hookEventName: "PreToolUse", permissionDecision: "deny", permissionDecisionReason: $reason}}'

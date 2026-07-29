@@ -6,14 +6,22 @@
 # НЕ покрывает: Claude-generated text без tool-use, Read файла с секретами.
 #
 # Bypass:
-#   - env CC_ALLOW_SECRETS=1 (только из реального шелла пилота — хук читает
-#     свой процессный env, не текст ещё не выполненной команды, поэтому
-#     агент не может подставить это через саму Bash-команду)
+#   - env CC_ALLOW_SECRETS_INPUT=1 (только из реального шелла пилота — хук
+#     читает свой процессный env, не текст ещё не выполненной команды,
+#     поэтому агент не может подставить это через саму Bash-команду)
 #
 # I9 (WP-458, 2026-07-17): маркер `# secret-ok` внутри команды убран —
 # агент сам формирует эту строку, значит мог сам же вписать маркер и снять
 # с себя же собственный стража. Единственный оставшийся bypass требует
 # переменной окружения, которую агент не контролирует.
+#
+# I10 (WP-500, 2026-07-29): CC_ALLOW_SECRETS переименован в CC_ALLOW_SECRETS_INPUT
+# и отделён от CC_ALLOW_SECRETS_OUTPUT (secret-leak-redact.sh). Живой инцидент:
+# один общий флаг разрешал и выполнение команды, и одновременно снимал маскирование
+# вывода этой же команды — 3 живые утечки пароля прошли через незащищённый вывод,
+# пока флаг стоял ради одной легитимной ротации. Разрешение на ВВОД команды и
+# разрешение на ПОКАЗ вывода без маски — разные по риску решения, второе стоит
+# отдельного явного согласия пилота.
 #
 # Лог решений: ~/IWE/.claude/logs/secret-leak-block.jsonl
 
@@ -62,7 +70,7 @@ cmd_head=$(printf '%s' "$command" | head -c 200 | sed -E \
   -e 's/[0-9]{8,10}:[A-Za-z0-9_-]{35}/[REDACTED-TG]/g')
 
 # Bypass: env var (см. I9 note выше — единственный оставшийся путь)
-if [ -n "${CC_ALLOW_SECRETS:-}" ]; then
+if [ -n "${CC_ALLOW_SECRETS_INPUT:-}" ]; then
   log_decision "bypass-env" "" "$cmd_head"
   exit 0
 fi
@@ -82,7 +90,7 @@ for entry in "${patterns[@]}"; do
   p="${entry%%|*}"
   label="${entry##*|}"
   if echo "$command" | grep -qE "$p"; then
-    reason="Возможный секрет в Bash-команде (паттерн: $label). Если намеренно (тест/grep) — попроси пилота запустить с CC_ALLOW_SECRETS=1 (агент сам этот bypass выставить не может). Если реальный секрет — НЕ передавай через arg, используй \$VAR из env / wrapper из ~/IWE/.secrets/."
+    reason="Возможный секрет в Bash-команде (паттерн: $label). Если намеренно (тест/grep) — попроси пилота запустить с CC_ALLOW_SECRETS_INPUT=1 (агент сам этот bypass выставить не может; вывод команды всё равно останется замаскирован, пока пилот отдельно не разрешит CC_ALLOW_SECRETS_OUTPUT=1). Если реальный секрет — НЕ передавай через arg, используй \$VAR из env / wrapper из ~/IWE/.secrets/."
     log_decision "deny" "$label" "$cmd_head"
     jq -n \
       --arg reason "$reason" \
@@ -118,7 +126,7 @@ _b='(^|[^A-Za-z0-9._-])'
 sens_path="${_b}\\.secrets/|${_b}\\.railway/|${_b}\\.env([^A-Za-z0-9]|\$)|${_b}\\.env\\.|${_b}\\.pem([^A-Za-z0-9]|\$)|${_b}\\.p12|${_b}\\.pfx|${_b}/id_rsa|${_b}/id_ed25519|${_b}\\.token([^A-Za-z0-9]|\$)|-secret\\.(yaml|yml|json|env|txt|ini|conf)|${_b}/secrets\\.|${_b}secrets/[^[:space:]]*\\.(yaml|yml|json)|${_b}/credentials\\.|${_b}\\.netrc|${_b}wrangler\\.toml"
 deny_read() {
   local why="$1"
-  local reason="Чтение секрет-файла через Bash заблокировано (B7.7c, $why). Цепочка рвётся ДО попадания значения в контекст. Используй значение через \$VAR/env, не читай файл. Разовый легитимный дебаг — CC_ALLOW_SECRETS=1, выставленный пилотом в реальном шелле."
+  local reason="Чтение секрет-файла через Bash заблокировано (B7.7c, $why). Цепочка рвётся ДО попадания значения в контекст. Используй значение через \$VAR/env, не читай файл. Разовый легитимный дебаг — CC_ALLOW_SECRETS_INPUT=1, выставленный пилотом в реальном шелле."
   log_decision "deny-bash-read" "$why" "$cmd_head"
   jq -n --arg reason "$reason" \
     '{hookSpecificOutput: {hookEventName: "PreToolUse", permissionDecision: "deny", permissionDecisionReason: $reason}}'

@@ -18,7 +18,9 @@
 #
 # Bypass:
 #   - CC_ALLOW_SECRET_PATH=<abs-path>  — разрешает ровно этот файл (realpath match). Logged.
-#   - CC_ALLOW_SECRETS=1               — emergency override пилота (вся сессия). Logged как emergency.
+#   - CC_ALLOW_SECRETS_INPUT=1         — emergency override пилота (вся сессия). Logged как emergency.
+#     (переименовано из CC_ALLOW_SECRETS — I10/WP-500 2026-07-29, единая семантика
+#     "разрешение на вход" с secret-leak-block.sh / secret-mcp-dump-guard.sh)
 #
 # Лог решений: ~/IWE/.claude/logs/secret-file-read-block.jsonl
 # see also: AR.111, DP.RUNBOOK.003, peer-session 2026-06-05-17
@@ -130,7 +132,7 @@ fi
 # === Файл — секрет. Проверяем bypass. ===
 
 # Emergency override пилота (вся сессия)
-if [ "${CC_ALLOW_SECRETS:-}" = "1" ]; then
+if [ "${CC_ALLOW_SECRETS_INPUT:-}" = "1" ]; then
   log_decision "emergency-override" "$matched" "$target"
   exit 0
 fi
@@ -146,7 +148,7 @@ if [ -n "${CC_ALLOW_SECRET_PATH:-}" ]; then
 fi
 
 # DENY
-reason="Чтение файла с секретом заблокировано (B7.7c, паттерн: $matched). Цепочка утечки рвётся ДО попадания значения в контекст. Если нужно именно это значение — НЕ читай файл: используй его через shell (\$VAR из env / wrapper из .secrets/). Если чтение легитимно (например, разовый дебаг ровно этого файла) — запусти сессию с CC_ALLOW_SECRET_PATH=$(realpath "$target" 2>/dev/null || echo "$target"). Глобальный обход (вся сессия) — только CC_ALLOW_SECRETS=1, по явному решению пилота."
+reason="Чтение файла с секретом заблокировано (B7.7c, паттерн: $matched). Цепочка утечки рвётся ДО попадания значения в контекст. Если нужно именно это значение — НЕ читай файл: используй его через shell (\$VAR из env / wrapper из .secrets/). Если чтение легитимно (например, разовый дебаг ровно этого файла) — запусти сессию с CC_ALLOW_SECRET_PATH=$(realpath "$target" 2>/dev/null || echo "$target"). Глобальный обход (вся сессия) — только CC_ALLOW_SECRETS_INPUT=1, по явному решению пилота."
 log_decision "deny" "$matched" "$target"
 jq -n --arg reason "$reason" \
   '{hookSpecificOutput: {hookEventName: "PreToolUse", permissionDecision: "deny", permissionDecisionReason: $reason}}'

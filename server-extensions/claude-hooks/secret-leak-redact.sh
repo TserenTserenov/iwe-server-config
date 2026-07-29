@@ -5,7 +5,12 @@
 # ОГРАНИЧЕНИЕ: оригинал остаётся в conversation transcript. Hook защищает от
 # re-использования Claude'ом в собственных ответах, но не от full forensics.
 #
-# Bypass: env CC_ALLOW_SECRETS=1
+# Bypass: env CC_ALLOW_SECRETS_OUTPUT=1 (отдельно от CC_ALLOW_SECRETS_INPUT в
+# secret-leak-block.sh — I10, WP-500, 2026-07-29). Живой инцидент: до разделения
+# один общий флаг разрешал выполнение команды И одновременно снимал маскирование
+# её вывода — 3 живые утечки пароля прошли через незащищённый вывод, пока флаг
+# стоял ради одной легитимной ротации. Маскирование вывода остаётся включено по
+# умолчанию, даже когда пилот разрешил ввод команды — это отдельное решение.
 # Лог: ~/IWE/.claude/logs/secret-leak-redact.jsonl
 
 set -uo pipefail
@@ -18,10 +23,10 @@ mkdir -p "$(dirname "$LOG_FILE")" 2>/dev/null || true
 input=$(cat)
 
 # Bypass — но ЛОГИРУЕМ (Гермес 2026-06-05: осознанный обход без лога неотличим от бага).
-if [ -n "${CC_ALLOW_SECRETS:-}" ]; then
+if [ -n "${CC_ALLOW_SECRETS_OUTPUT:-}" ]; then
   ts=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
   jq -nc --arg ts "$ts" --arg sid "${CLAUDE_SESSION_ID:-}" \
-    '{ts:$ts, hook:"secret-leak-redact", session_id:$sid, action:"bypass-CC_ALLOW_SECRETS", warn:"вывод НЕ маскирован — все секреты в нём считать скомпрометированными, ротация по DP.RUNBOOK.003"}' \
+    '{ts:$ts, hook:"secret-leak-redact", session_id:$sid, action:"bypass-CC_ALLOW_SECRETS_OUTPUT", warn:"вывод НЕ маскирован — все секреты в нём считать скомпрометированными, ротация по DP.RUNBOOK.003"}' \
     >> "$LOG_FILE" 2>/dev/null || true
   exit 0
 fi
