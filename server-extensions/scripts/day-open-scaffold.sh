@@ -778,24 +778,29 @@ render_scout() {
 }
 
 # --- Section: Разбор заметок (fleeting-notes) ---
-# Парсит inbox/fleeting-notes.md на наличие непрочитанных заметок (строки **Title**).
-# Если пусто → "нет заметок" без маркера PENDING → LLM секцию не трогает.
-# Если есть → строки таблицы с реальными заголовками и PENDING на Тип/Предложение.
-# Bold **text** в GitHub не создаёт якорей — ссылки без #якорь.
+# Pilot-only review (2026-07-30, WP-484 F29): lists EVERY note still awaiting the
+# pilot's decision — bold "**Title**" (new) plus agent-marked "**Title** 🔄" and
+# "**Title** ✅предложено" tails. A note leaves this list only when the pilot's
+# decision is recorded in archive/notes/Notes-Archive.md, so undecided notes
+# reappear in every DayPlan by construction.
+# Empty → "нет неразобранных заметок" without PENDING marker → LLM leaves section alone.
+# Otherwise → rows with real titles, PENDING on Тип/Предложение; decision cell is
+# the pilot's — rendered as ⏳ and never auto-filled.
+# Bold **text** creates no GitHub anchors — links carry no #anchor.
 render_fleeting_notes() {
   local notes_file="$IWE/${IWE_GOVERNANCE_REPO:-DS-strategy}/inbox/fleeting-notes.md"
 
-  # Extract titles of new unprocessed notes (lines matching **Title**)
+  # Every bold-titled note counts as undecided, incl. 🔄 / ✅предложено tails
   local new_notes
-  new_notes=$(grep -E '^\*\*[^*]+\*\*[[:space:]]*$' "$notes_file" 2>/dev/null \
-    | sed 's/^\*\*//; s/\*\*[[:space:]]*$//')
+  new_notes=$(grep -E '^\*\*[^*]+\*\*[[:space:]]*(🔄|✅предложено.*)?$' "$notes_file" 2>/dev/null \
+    | sed -E 's/^\*\*//; s/\*\*[[:space:]]*(🔄|✅предложено.*)?$//')
 
   if [ -z "$new_notes" ]; then
-    printf '| нет заметок | — | — | ✅ |\n'
+    printf '| нет неразобранных заметок | — | — | — |\n'
   else
     while IFS= read -r title; do
       # Link to file without anchor — bold text has no GitHub markdown anchor
-      printf '| [«%s»](../inbox/fleeting-notes.md) | <!-- PENDING --> | <!-- PENDING --> | [ ] |\n' "$title"
+      printf '| [«%s»](../inbox/fleeting-notes.md) | <!-- PENDING --> | <!-- PENDING --> | ⏳ ждёт пилота |\n' "$title"
     done <<< "$new_notes"
   fi
 }
@@ -1205,10 +1210,12 @@ ${DAY_CLOSE_CARRY_OVER:-нет (Day Close не найден)}
 <details>
 <summary><b>Разбор заметок</b></summary>
 
-<!-- Источник: inbox/fleeting-notes.md. Строки **Title** = непрочитанные. Ссылки без якоря — bold не создаёт GitHub-якорей. -->
+<!-- Источник: inbox/fleeting-notes.md. Решает ТОЛЬКО пилот (30.07.2026, WP-484 Ф29): агент заполняет лишь Тип/Предложение. Неразобранные повторяются здесь каждый день; решение пилота фиксируется в archive/notes/Notes-Archive.md («Разбор: дата — Решение пилота: …»). Ссылки без якоря — bold не создаёт GitHub-якорей. -->
 
-| Заметка | Тип | Предложение | ✅ |
-|---------|-----|-------------|---|
+> Решает только пилот: ниже — предложения. Заметка уходит из очереди только после вашего решения (запись с датой в Notes-Archive.md); неразобранное вернётся завтра.
+
+| Заметка | Тип | Предложение | Решение пилота |
+|---------|-----|-------------|----------------|
 $(render_fleeting_notes)
 
 </details>
