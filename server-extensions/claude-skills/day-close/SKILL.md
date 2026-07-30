@@ -362,6 +362,7 @@ python3 $HOME/IWE/.claude/scripts/rule-classifier.py
 - [ ] Все изменения закоммичены и запушены (по всем репо)
 - [ ] MEMORY.md: done-РП удалены, активные актуальны, drift-scan выполнен (шаг 4б)
 - [ ] Index Health Check (шаг 4в): `check-index-health.py` — все FAIL/WARN разобраны или помечены skip
+- [ ] **FPF sync decision-log (РП499 Ф15 Б3):** нет строк `pending` старше 7 дней в `DS-my-strategy/inbox/fpf-sync-decision-log.md` — `awk -F'|' -v cutoff="$(date -v-7d +%Y-%m-%d)" 'NR>2{gsub(/ /,"",$2);gsub(/ /,"",$5);if($5=="pending"&&$2<cutoff)print $2}' DS-my-strategy/inbox/fpf-sync-decision-log.md`; непустой вывод → сообщить пилоту список дат, не решать самостоятельно (решение задним числом — за пилотом)
 - [ ] WP-REGISTRY.md обновлён: статусы + done-форматирование (done-строки зачёркнуты, ✅ не зачёркнут)
 - [ ] WeekPlan обновлён (grep по номерам РП — ВСЕ упоминания)
 - [ ] DayPlan обновлён (статусы ВСЕХ строк: РП + ad-hoc)
