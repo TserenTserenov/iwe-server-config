@@ -174,10 +174,10 @@ cd DS-my-strategy && python3 scripts/process-runner.py start quick-close --slug 
 4. **iwe-drift.sh** — полный drift-отчёт в Week Report (S) [[narrative]]
 5. **STAGING.md** — есть `validated`? → предложить промоцию (S+T) [[narrative]]
 6. **iwe-rules-review** — какие правила обходились? (S) [[narrative]]
-7. **R-вопросник** (3 вопроса, `memory/r-questionnaire.md`, шаг 6b `week-close/SKILL.md`) → ответы в Week Report [[gate]]
+7. **R-вопросник** (3 вопроса, `memory/r-questionnaire.md`, шаг 3 Части А `week-close/SKILL.md`, WP-484 30.07 — переставлен к началу) → ответы в Week Report [[gate]]
 8. **Архивация done-WP** → `archive/wp-contexts/` (T) [[gate]]
 9. **Обновить WeekPlan** — пометить итоги, создать carry-over секцию [[gate]]
-10. **Ретро недели свободным текстом** (WP-484, 30.07) — вопрос-рефлексия задан пилоту, ответ записан в ledger через `pilot_answer/preclose_retro` (шаг 3e `week-close/SKILL.md`) [[gate]]
+10. **Ретро недели свободным текстом** (WP-484, 30.07) — вопрос-рефлексия задан пилоту, ответ записан в ledger через `pilot_answer/preclose_retro` (шаг 1 Части А `week-close/SKILL.md`, переставлен к началу 30.07 вечер) [[gate]]
 
 ### Симптом пропуска Week Close
 
@@ -200,7 +200,7 @@ cd DS-my-strategy && python3 scripts/process-runner.py start quick-close --slug 
 3. **Decommission-триаж применён** — таблица переходов active/dormant/archived (шаг 7 `month-close/SKILL.md`) [[gate]]
 4. **Decision log review** — минимум 1 инсайт по решениям месяца (шаг 8 `month-close/SKILL.md`) [[gate]]
 5. **Strategy.md § Результаты месяца обновлён** — R{N} закрыты/перенесены/заведены новые (шаг 9 `month-close/SKILL.md`) [[gate]]
-6. **Ретро месяца свободным текстом** (WP-484, 30.07) — вопрос-рефлексия задан пилоту, ответ записан в ledger через `pilot_answer/preclose_retro` (шаг 3c `month-close/SKILL.md`) [[gate]]
+6. **Ретро месяца свободным текстом** (WP-484, 30.07) — вопрос-рефлексия задан пилоту, ответ записан в ledger через `pilot_answer/preclose_retro` (шаг 0.5 `month-close/SKILL.md`, переставлен к началу 30.07 вечер) [[gate]]
 
 ### Симптом пропуска Month Close
 
