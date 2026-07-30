@@ -176,15 +176,16 @@ end_time: ""
 writer_agent: "claude-code"
 peer_agent: "<первый PEER_AGENT_ID из §0в>"      # backward-compat (PEER_COUNT==1: единственный); полный список — peer_agents
 peer_cmd: "<первый PEER_VENDOR>-peer-adapter"     # backward-compat; полный список — peer_cmds
-peer_agents: []      # WP-509: [PEER_AGENT_ID, ...] в порядке PEER_VENDORS, длина 1 при PEER_COUNT==1 (дублирует peer_agent)
-peer_cmds: []         # WP-509: ["<vendor>-peer-adapter", ...], та же длина/порядок
-round_order: []       # WP-509: [vendor, ...] — фиксированный порядок раунда, только при PEER_COUNT>=2
+peer_agents: ["<PEER_AGENT_ID>", "..."]   # WP-509: в порядке PEER_VENDORS, длина 1 при PEER_COUNT==1 (дублирует peer_agent); §4.2 читает ТОЛЬКО это поле для report.md peer: при PEER_COUNT>=2
+peer_cmds: ["<vendor>-peer-adapter", "..."]   # WP-509: та же длина/порядок, что peer_agents
+round_order: ["<vendor>", "..."]   # WP-509: фиксированный порядок раунда (= PEER_VENDORS), только при PEER_COUNT>=2
+write_token_holder: "writer_agent"   # WP-509: держатель write token сейчас; default = writer_agent, меняется только через подтверждённый ACCEPT_HANDOFF (см. §3р.3)
 peer_model: ""
 status: "started"
 turns_count: 0
 turns_limit: 10        # PEER_COUNT==1: лимит реплик, без изменений с v4
 rounds_limit: 6         # WP-509: лимит раундов, применяется только при PEER_COUNT>=2, НЕ переопределяет turns_limit
-round_skips: {}        # WP-509: {round_NN: [vendor, ...]} — кто не ответил/пропустил раунд
+round_skips: {}        # WP-509: {round_NN: [vendor, ...]} — кто не ответил/пропустил раунд; исключаются из требования "консенсус у каждого" в §3р.3
 handoff_history: []    # WP-509: [{round, from, to, reason}] — журнал OFFER_HANDOFF/ACCEPT_HANDOFF (write token, DP.SC.154 «Write token ≠ process_position»)
 escalations_count: 0
 extensions: []
@@ -371,16 +372,16 @@ consensus: none
 
 ### 3р.1 Вызов каждого напарника по порядку раунда
 
-Для `vendor` в `round_order` (по очереди, не параллельно — каждый следующий видит реплики предыдущих этого же раунда):
+`WRITE_TOKEN_HOLDER` — читать из `meta.yaml.write_token_holder` (default, записанный на Шаге 1.2, = `writer_agent`: писатель держит write token, пока не было ни одного `ACCEPT_HANDOFF`). Значение передаётся в промпт явно — напарники не обязаны сами читать `meta.yaml` в поисках держателя.
 
-```bash
-PEER_FILE="${SESSION_DIR}/$(printf '%02d' $ROUND)-peer-${vendor}.md"
-PROMPT_FILE=$(mktemp)   # промпт во временный файл, не inline — тот же B7.7c-риск, что в §0в.1
-cat > "$PROMPT_FILE" <<'EOF'
+Для `vendor` в `round_order` (по очереди, не параллельно — каждый следующий видит реплики предыдущих этого же раунда) составить промпт:
+
+```
 Ты — напарник (peer agent) в диалоговой сессии (DP.SC.154, N>2 участников).
 Сессия: <SESSION_ID>
 Раунд: <ROUND> из <rounds_limit>
 Задача: <задача>
+Текущий держатель write token: <WRITE_TOKEN_HOLDER>
 
 Прочитай ВСЕ файлы журнала в <SESSION_DIR> по порядку (00-writer.md, 01-peer-*.md, ...) —
 включая реплики других напарников этого и предыдущих раундов, не только писателя.
@@ -410,7 +411,14 @@ ESCALATE_TO_USER: <причина> — если есть проигнориро�
 OFFER_HANDOFF: <agent_id> — <причина> — если хочешь предложить свой write token другому (только если ты сейчас держатель)
 ACCEPT_HANDOFF — если принимаешь предложенный тебе OFFER_HANDOFF
 REQUEST_HANDOFF: <причина> — необязывающая просьба к держателю
-EOF
+```
+
+Вызов напарника через Bash (промпт — во временный файл, не inline `echo` — тот же B7.7c-риск, что в §0в.1):
+
+```bash
+PEER_FILE="${SESSION_DIR}/$(printf '%02d' $ROUND)-peer-${vendor}.md"
+PROMPT_FILE=$(mktemp)
+# записать промпт (см. шаблон выше) в $PROMPT_FILE
 cat "$PROMPT_FILE" | bash "${ADAPTER_PATH[$vendor]}" --add-dir "$SESSION_DIR" 2>/dev/null > "$PEER_FILE"
 STATUS=$?
 rm -f "$PROMPT_FILE"
@@ -424,15 +432,23 @@ rm -f "$PROMPT_FILE"
 
 ### 3р.3 Проверить маркеры у всех реплик раунда
 
-- `ESCALATE_TO_USER` у любого напарника → тот же процесс, что в §3.3 (запись `escalation-NN.md`, пауза на ответ пилота).
-- `OFFER_HANDOFF`/`ACCEPT_HANDOFF`/`REQUEST_HANDOFF` → обновить `meta.yaml.handoff_history` (append `{round, from, to, reason}` при подтверждённом `ACCEPT_HANDOFF`). `REQUEST_HANDOFF` без ответного `OFFER_HANDOFF` держателя — не меняет ничего, просьба зафиксирована в реплике и всё.
-- `CONSENSUS` — «консенсус раунда»: `DONE=true` только когда у КАЖДОГО напарника раунда есть либо `CONSENSUS`, либо `PASS` без встречных возражений в теле реплики. Хотя бы один содержательный контраргумент без `CONSENSUS` → раунд не закрыт, к 3р.4.
+Применяется к репликам напарников этого раунда (3р.1) **и**, при возврате из 3р.4, к реплике писателя того же раунда — обработка маркеров одинаковая для обеих ролей, разница только в том, что писатель пишет последним в раунде.
+
+- `ESCALATE_TO_USER` у любого участника (включая писателя) → тот же процесс, что в §3.3 (запись `escalation-NN.md`, пауза на ответ пилота).
+- `OFFER_HANDOFF`/`ACCEPT_HANDOFF`/`REQUEST_HANDOFF` у любого участника → при подтверждённом `ACCEPT_HANDOFF` (реплика-адресат отвечает на `OFFER_HANDOFF` предыдущей реплики) — append `{round, from, to, reason}` в `meta.yaml.handoff_history` И обновить `meta.yaml.write_token_holder` на нового держателя. `REQUEST_HANDOFF` без ответного `OFFER_HANDOFF` держателя — не меняет ничего, просьба зафиксирована в реплике и всё.
+- `CONSENSUS` — «консенсус раунда»: `DONE=true` только когда у КАЖДОГО участника раунда, **кроме перечисленных в `meta.yaml.round_skips` этого раунда**, есть либо `CONSENSUS`, либо `PASS` без встречных возражений в теле реплики. Хотя бы один содержательный контраргумент без `CONSENSUS` у непропущенного участника → раунд не закрыт.
 
 ### 3р.4 Реплика писателя
 
-Если `ROUND >= rounds_limit` (default 6) → см. 3р.6 (спор без консенсуса), иначе `DONE=true` → Шаг 3.5.
+Если 3р.3 уже установил `DONE=true` по репликам напарников этого раунда → писатель реплику в этом раунде не пишет, сразу к Шагу 3.5 (Decision Gate).
 
-Иначе — писатель отвечает (может адресовать разных напарников по-разному, `$(printf '%02d' $ROUND)-writer.md`, тот же формат frontmatter, что в Шаге 2), `ROUND += 1` → 3р.1.
+Иначе — писатель отвечает (`$(printf '%02d' $ROUND)-writer.md`, тот же формат frontmatter, что в Шаге 2, плюс те же маркеры `CONSENSUS`/`ESCALATE_TO_USER`/`OFFER_HANDOFF`/`ACCEPT_HANDOFF`/`REQUEST_HANDOFF`, что и у напарников — писатель тоже может держать или передавать write token). Применить к этой реплике проверку маркеров из 3р.3.
+
+Если после этого `DONE=true` (писатель сам поставил `CONSENSUS`, приняв позицию раунда) → Шаг 3.5.
+
+Иначе, если `ROUND >= rounds_limit` (default 6) → к 3р.5 (спор без консенсуса).
+
+Иначе — `ROUND += 1` → 3р.1.
 
 ### 3р.5 Спор между 3+ позициями (после исчерпания rounds_limit без консенсуса)
 
@@ -825,8 +841,10 @@ Omit если `implementation_pipeline: false` в meta.yaml.
 - **Ссылки:** review-NN.md, verify-NN.md
 
 ## 7. Метаданные и навигация
-- **Журнал:** ссылки на все NN-writer.md / NN-peer.md по порядку
+- **Журнал:** ссылки на все NN-writer.md / NN-peer.md (или NN-peer-<vendor>.md при PEER_COUNT>=2) по порядку
 - **Связанные артефакты:** Pack-IDs, файлы (PR, спецификации) — если упоминались
+- **Пропуски раундов** (только при PEER_COUNT>=2 и непустом `meta.yaml.round_skips`): кто и в каком раунде не ответил — omit если пусто
+- **Передача write token** (только при PEER_COUNT>=2 и непустом `meta.yaml.handoff_history`): раунд → от кого → к кому → причина, по каждой записи — omit если пусто
 - **Стоимость:** $X (источник: api / estimated / missing) — omit если missing
 ```
 

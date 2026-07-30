@@ -92,14 +92,14 @@
 | 289 | 🔄 | P2 | Интеграция IWE с личными базами знаний | Приёмка MVP |
 | 483 | 🔄 | P2 | Комплект структурирования данных (guide-kit) | Ф6-Ф8 ждут РП495 Ф4-Ф5 |
 | 488 | 🔄 | P2 | Браузерное рабочее место на Hetzner | railway MCP заведён на цех-1, проверить в новой IDE-сессии; Ф2 скорость/команда |
-| 484 | 🔴 | — | Автогенератор открытия/закрытия дня (зонтичный) | 30.07 поздн. веч. (косяк, поручение пилота — читать СНАЧАЛА): рефлексия при закрытии реализована для дня/недели/месяца/пир-сессий, но на собственном закрытии сессии агент не задал вопрос по-настоящему (написал придуманный ответ за пилота вместо вопроса) — пилот поймал, велел записать и чинить в новой сессии. Root cause найден: `session-guard.sh open` НИКОГДА не вызывается обычным Ритуалом открытия (`protocol-open.md`) — только пир-сессиями/Day Close, поэтому `gather-session-facts.sh` не может измерить длительность обычной сессии. Начать новую сессию с секции «🔴 Косяк» в конце `inbox/WP-484/WP-484.md` — решение пилота: делать ли `session-guard.sh open` обязательным шагом WP Gate. Более ранний прогресс (Ф26/Ф29/чек-лист аудита) не тронут, см. файл. |
+| 484 | 🔄 | — | Автогенератор открытия/закрытия дня (зонтичный) | 30.07 веч.: пир-сессия с Kimi закрыла «Косяк» — session-guard.sh open/close переезжают в хуки SessionStart/SessionEnd (подтверждено `.claude/settings.json:406-424`), не в текст протокола открытия; auto-orphan семафоров чинить по opened_at не mtime (живой пример — семафор WP-507 провисел 4.5ч); рефлексия → structured ledger-событие с полем статуса. Решение ждёт АрхГейта пилота перед реализацией — `sessions/2026-07/30/2026-07-30-10-wp484-session-guard-mandatory/report.md`. |
 | 493 | 🔄 | P2 | Лаборатория характеристик | Ф4 ждёт данных (конец августа — сентябрь) |
 | 494 | 🔄 | P2 | Панель рабочих продуктов в VS Code | ручная F5-приёмка пилотом |
 | 495 | 🔄 | **P1** | Концепция персонального развития | 23.07: Ф8 черновик РП1 собран (12/13, placeholder — ждёт живых данных пробной группы); P1-окно закрылось 4 дня назад, нужна переоценка приоритета пилотом |
 | 496 | 🔄 | P3 | Журнал гипотез (LPF-регламент обратной связи) | сверка «Актуальных» агентом на Week Close |
 | 167 | 🔄 | P5 | Публикации (зонтичный) | пилот утверждает порядок 28 постов; публикатор стартует с Ф-А3 |
 | 497 | 🔄 | P5 | Материалы исследования AGI | Ф1 ready; Ф9 публикация на клубе — ручной шаг пилота |
-| 304 | 🔄 | P3 | Сайты aisystant.com (мир) и МИМ (Россия): концепция и обновление | 30.07: Ф0 закрыта (концепция + мировой опыт); 8 решений за пилотом |
+| 304 | 🔄 | P3 | Сайты aisystant.com (мир) и МИМ (Россия): концепция и обновление | 30.07: репозиторий aisystant-com создан и залит (VitePress, ru), aisystant-front заархивирован; контент углублён (проблема≠задача, 5 природ, Первые принципы, отстройка от ИИ-инструментов); next пилот правит, EN-перевод, деплой (Андрей) |
 | 391 | 🔄 | **P1** | Браузерный IWE — стенд МИМ (mim-iwe), мультимодельный вход | 29.07: Ф9 — GitHub-репозиторий переименован kimi-adapter→mim-iwe вслед за Railway-сервисом, попутно найден и починен разрыв автодеплоя (Railway хранил старую привязку — serviceConnect восстановил связь), плюс мердж ops-alert в бота и фикс рассинхрона заголовка уведомлений; двойная независимая проверка подтвердила без расхождений; блокирует WP-385 Ф5 — next живой прогон реального сценария входа (нужен пилот или тестовый новичок) |
 
 ## Бот: деплой
@@ -128,23 +128,14 @@
 
 ### Feedback — HOT
 
-- [lessons_sandbox_copy_not_enough_for_ledger_write_scripts.md](lessons_sandbox_copy_not_enough_for_ledger_write_scripts.md) — тестируя скрипт с `ledger-append.sh`, обязательно `export IWE_LEDGER_DIR=<песочница>` — копия файлов в /tmp не изолирует запись, скрипт резолвит `$HOME/IWE` сам
+- [lessons_kimi_peer_adapter_turn_missing_frontmatter.md](lessons_kimi_peer_adapter_turn_missing_frontmatter.md) — kimi-peer-adapter.sh иногда возвращает ход без frontmatter + 1 битый байт, маркеры CONSENSUS/ESCALATE парсятся всё равно
 - [lessons_note_file_path_must_be_repo_relative_not_prefixed.md](lessons_note_file_path_must_be_repo_relative_not_prefixed.md) — `note-file <path>` внутри репо передавать БЕЗ префикса имени репозитория, иначе scope gate молча блокирует commit после честной регистрации
 - [feedback_notes_pilot_only_review.md](feedback_notes_pilot_only_review.md) — заметки разбирает ТОЛЬКО пилот: агент предлагает, решение+дата → Notes-Archive, неразобранное повторяется в каждом Day Open; ночной авторазбор отключён 30.07
-- [feedback_server_primary_diagnose_first.md](feedback_server_primary_diagnose_first.md) — вопросы про такты (открытие/закрытие дня) разбирать с primary-машины (цех, ssh-логи), не с локального Мака
-- [lessons_lockdir_existence_not_ownership_proof.md](lessons_lockdir_existence_not_ownership_proof.md) — mkdir-fallback блокировка: существование каталога после попыток ≠ доказательство владения, владение = только успех самой операции mkdir
-- [lessons_sunday_tuesday_different_iso_weeks.md](lessons_sunday_tuesday_different_iso_weeks.md) — guard-маркер по `%V`, пишущийся в Вс и читаемый во Вт — разные ISO-недели, писать маркер сразу на обе
-- [lessons_git_add_drops_executable_bit_in_fmt.md](lessons_git_add_drops_executable_bit_in_fmt.md) — новый .sh в FMT-exocortex-template может застейджиться 100644 вместо 100755 → EXECUTABLE-BIT гейт блокирует коммит, чинить `git update-index --chmod=+x`
-- [lessons_check_then_append_race_needs_dedup_inside_lock.md](lessons_check_then_append_race_needs_dedup_inside_lock.md) — caller-side «уже есть?»-проверка снаружи flock = гонка даже при атомарной записи; дедуп переносить внутрь лока
 - [lessons_runner_and_manual_step_race_on_shared_index.md](lessons_runner_and_manual_step_race_on_shared_index.md) — раннер и ручной шаг Close оба пишут в sessions/00-index.md независимо → запускать раннер первым, не последним
-- [lessons_synthetic_fixture_must_come_from_real_producer.md](lessons_synthetic_fixture_must_come_from_real_producer.md) — тест на придуманной строке зелёный, даже если regex не совпадает с реальным выводом продюсера → фикстуры парсера строить через сам продюсер
-- [lessons_railway_service_rename_does_not_move_domain.md](lessons_railway_service_rename_does_not_move_domain.md) — переименование Railway-сервиса не переносит домен автоматически → нужен отдельный serviceDomainCreate + domain delete
-- [lessons_renamed_repo_redirect_hides_wrong_target_commit.md](lessons_renamed_repo_redirect_hides_wrong_target_commit.md) — переименование GitHub-репо не обновляет `remote -v` старых клонов, редирект держит push молча рабочим → коммит уходит не туда, issue в другом репо может ссылаться на недостижимый там SHA
-- [feedback_day_close_mechanical_vs_interactive.md](feedback_day_close_mechanical_vs_interactive.md) — Day Close = механика (day-close-mechanical.sh) + разговор (SKILL.md) параллельно, SKILL.md не архивирован — оба пути на каждое закрытие
+- [feedback_ship_artifact_fast_not_just_discuss.md](feedback_ship_artifact_fast_not_just_discuss.md) — сайт/лендинг → сразу собирать кликабельный макет/репозиторий, не только текстовый план (подтверждено рефлексией РП304)
 - [feedback_subagent_reports_russian.md](feedback_subagent_reports_russian.md) — отчёты субагентов, видимые пилоту — на русском; исследователей брифовать с deliverable RU
 - [feedback_askuserquestion_not_reaching_pilot.md](feedback_askuserquestion_not_reaching_pilot.md) — choice-question — дублировать в чат
 - [feedback_kimi_peer_quality_concern.md](feedback_kimi_peer_quality_concern.md) — Кими плохо работает в пир-сессиях — усиленно верифицировать его находки независимо
-- [lessons_peer_writer_verify_card_type_before_generalizing.md](lessons_peer_writer_verify_card_type_before_generalizing.md) — писатель тоже ошибается (тип карточки, мотив пилота) — проверять frontmatter/цитату, не обобщать по памяти
 - [routing-vocab.md](routing-vocab.md) — фраза → путь, читать ПЕРЕД Write
 - [feedback_response_clarity_for_pilot.md](feedback_response_clarity_for_pilot.md) — A1-A11 правила ответа
 - [reference_no_invented_facts_hub.md](reference_no_invented_facts_hub.md) — не выдумывать опыт/имена
@@ -156,4 +147,4 @@
 - [reference_macos_zsh_env_quirks_hub.md](reference_macos_zsh_env_quirks_hub.md) — квирки macOS/zsh/grep/git (15)
 - [reference_process_runner_quirks_hub.md](reference_process_runner_quirks_hub.md) — креды в карточке, race с активной сессией, umbrella-архивация (3)
 - [reference_secrets_credentials_hub.md](reference_secrets_credentials_hub.md) — .mcp.json wrapper, ротация-верификация, 403≠401 (3)
-- Остальные уроки/hubs (20 шт., demoted 28.07) → [MEMORY-warm.md](MEMORY-warm.md)
+- Остальные уроки/hubs (31 шт., demoted 28.07+30.07) → [MEMORY-warm.md](MEMORY-warm.md)
