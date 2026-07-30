@@ -231,6 +231,20 @@ bash ~/IWE/scripts/day-close-step-log.sh end 5b
 
 **в) Похвала:** что получилось, что было непросто но сделано.
 
+**в.1) Ретро дня (WP-484, решение пилота 30.07 — рефлексия обязательна на всех тактах, CONCEPT-night-cycle.md §22).** [[gate]] Спросить пилота два коротких вопроса:
+- «Что сегодня сработало хорошо?»
+- «Что не сработало? Какой был затык?»
+
+Записать ответ в ledger (не пропускать при пустом ответе — писать «нет ответа»):
+```bash
+python3 -c "import json,sys; print(json.dumps(sys.argv[1]))" "<ответ на вопрос 1>" # экранирование
+```
+```bash
+RETRO_JSON="{\"subtype\": \"preclose_retro\", \"retro_worked\": <экранированный ответ 1>, \"retro_failed\": <экранированный ответ 2>}"
+bash ~/IWE/DS-my-strategy/scripts/ledger-append.sh day "$(date +%F)" pilot_answer "$RETRO_JSON" day-close
+```
+Формулировка и поля идентичны `scripts/day-preclose.sh` — тот же скрипт остаётся терминальным запасным путём, здесь тот же вопрос задаётся прямо в разговоре, без отдельного процесса.
+
 **г) Не забыто?**
 - Незакоммиченные изменения: `${IWE_SCRIPTS}/check-dirty-repos.sh` (сканирует ВСЕ репо, включая вложенные DS-IT-systems/*, DS-MCP/*). Если есть грязные → закоммитить и запушить ДО продолжения. [[gate]]
 - **EXTENSION POINT (day-close checks):** `bash .claude/scripts/load-extensions.sh day-close checks` — exit 0 → `Read` каждый файл из вывода (alphabetic) → выполнить. Exit 1 → пропустить. Поддерживает `extensions/day-close.checks.md` И `extensions/day-close.checks.<suffix>.md`.
@@ -358,6 +372,7 @@ python3 $HOME/IWE/.claude/scripts/rule-classifier.py
 
 ## Чеклист Day Close
 
+- [ ] **Ретро дня задан (шаг 7в.1, WP-484):** оба вопроса заданы пилоту, ответ записан в ledger через `pilot_answer/preclose_retro` (пустой ответ — «нет ответа», не пропуск шага)
 - [ ] **Git-lock взят перед началом работы (шаг 0.6, WP-484 Ф2):** `day-close-lock.sh acquire` вернул 0, день не был закрыт/не закрывался параллельно (финальный коммит `day-close: YYYY-MM-DD` на шаге 10 сам служит завершающей меткой — отдельного снятия лока не требуется)
 - [ ] Все изменения закоммичены и запушены (по всем репо)
 - [ ] MEMORY.md: done-РП удалены, активные актуальны, drift-scan выполнен (шаг 4б)
