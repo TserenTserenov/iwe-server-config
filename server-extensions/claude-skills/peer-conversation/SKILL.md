@@ -1,8 +1,8 @@
 ---
 name: peer-conversation
-description: Многотуровый диалог писателя (Claude) с напарником (любой из kimi/codex/hermes/claude-headless) по задаче пилота (DP.SC.154). Ведёт turn-loop, обнаруживает CONSENSUS/ESCALATE, после консенсуса — Decision Gate (зафиксировать vs реализовать → ревью → проверить → задеплоить), синтезирует report.md через Agent tool.
-argument-hint: "<описание задачи> [--peer kimi|codex|hermes|claude] | --list | --interrupt <session_id> | --finalize <session_id>"
-version: 1.4.0
+description: Многотуровый диалог писателя (Claude) с одним или несколькими напарниками (любой набор из kimi/codex/hermes/claude-headless) по задаче пилота (DP.SC.154). Ведёт turn-loop (2 участника) или round-loop (3+, WP-509), обнаруживает CONSENSUS/ESCALATE, после консенсуса — Decision Gate (зафиксировать vs реализовать → ревью → проверить → задеплоить), синтезирует report.md через Agent tool.
+argument-hint: "<описание задачи> [--peer kimi|codex|hermes|claude[,vendor2,...]] | --list | --interrupt <session_id> | --finalize <session_id>"
+version: 1.5.0
 layer: L3
 status: active
 triggers:
@@ -22,8 +22,8 @@ gates_rationale: "операционный скилл; WP Gate применим 
 
 Задача: $ARGUMENTS
 
-> **Архитектура:** я (Claude) = писатель всегда (Skill tool доступен только мне в этой сессии). Напарник — параметр `--peer` (default `kimi`), любой из зарегистрированных вендоров (§0в).
-> Напарник вызывается через свой `<vendor>-peer-adapter.sh` напрямую — Bash tool, stdin pipe. Контракт одинаковый у всех: stdin = промпт, stdout = реплика, exit 0-5 (см. §0в).
+> **Архитектура:** я (Claude) = писатель всегда (Skill tool доступен только мне в этой сессии). Напарник(и) — параметр `--peer` (default `kimi`), список из одного или нескольких зарегистрированных вендоров (§0в). При 2+ напарниках (N>2 участников целиком) — расширение WP-509, см. §0в и §3р.
+> Каждый напарник вызывается через свой `<vendor>-peer-adapter.sh` напрямую — Bash tool, stdin pipe. Контракт одинаковый у всех: stdin = промпт, stdout = реплика, exit 0-5 (см. §0в). **Напарнику запрещено писать файлы своими инструментами внутри `SESSION_DIR`** — только stdout (гонка file-write vs stdout-capture портит журнал, найдено WP-509 2026-07-30).
 > `list_peer_statuses` (Local Gateway) — координация файлов, **не** проверка доступности напарника CLI.
 > Gateway offline ≠ напарник недоступен.
 
@@ -31,7 +31,7 @@ gates_rationale: "операционный скилл; WP Gate применим 
 
 ## When to use
 
-Многотуровый диалог писателя (Claude) с напарником (любой зарегистрированный вендор — Kimi, Codex, Hermes, или второй Claude-инстанс headless) по задаче пилота (DP.SC.154). Ведёт turn-loop, обнаруживает CONSENSUS/ESCALATE, после консенсуса — Decision Gate (зафиксировать vs реализовать → ревью → проверить → задеплоить), синтезирует report.md через Agent tool.
+Многотуровый диалог писателя (Claude) с одним или несколькими напарниками (любой набор зарегистрированных вендоров — Kimi, Codex, Hermes, второй Claude-инстанс headless) по задаче пилота (DP.SC.154). При одном напарнике — turn-loop (пара реплик). При двух и более напарниках — round-loop (WP-509): каждый раунд высказывается каждый участник. Обнаруживает CONSENSUS/ESCALATE, после консенсуса — Decision Gate (зафиксировать vs реализовать → ревью → проверить → задеплоить), синтезирует report.md через Agent tool.
 
 ## Scope boundary — не подменяет решения, зарезервированные за пилотом (найдено 2026-07-07)
 
@@ -51,11 +51,11 @@ gates_rationale: "операционный скилл; WP Gate применим 
 
 ---
 
-## Шаг 0в. Выбор напарника (`--peer`)
+## Шаг 0в. Выбор напарника(ов) (`--peer`)
 
-> **Добавлено 2026-07-29 (АрхГейт: вариант «параметризовать» против «отдельный скилл на вендора» — эволюционируемость заблокировала копипаст, см. `sessions/2026-07/2026-07-29-*-wp401-peer-vendor.md`).**
+> **Добавлено 2026-07-29** (АрхГейт: вариант «параметризовать» против «отдельный скилл на вендора» — эволюционируемость заблокировала копипаст, см. `sessions/2026-07/2026-07-29-*-wp401-peer-vendor.md`). **Расширено 2026-07-30 (WP-509):** список из N>1 напарников вместо одного.
 
-Извлечь `--peer <vendor>` из `$ARGUMENTS`. Нет флага → `PEER_VENDOR="kimi"` (обратная совместимость с версией до 1.4.0).
+Извлечь `--peer <vendor1,vendor2,...>` из `$ARGUMENTS` (через запятую, без пробелов). Нет флага → `PEER_VENDORS=(kimi)` (обратная совместимость с версией до 1.4.0). Один vendor без запятой → `PEER_VENDORS=(<vendor>)`, поведение идентично версии 1.4.0 — отдельного code path для одного напарника не заводить, `PEER_COUNT=${#PEER_VENDORS[@]}` управляет веткой (turn loop §3 при `PEER_COUNT==1`, round loop §3р при `PEER_COUNT>=2`).
 
 **Реестр вендоров** (единственное место маппинга — OwnerIntegrity; новый вендор добавляется только здесь):
 
@@ -66,16 +66,22 @@ gates_rationale: "операционный скилл; WP Gate применим 
 | `hermes` | `scripts/hermes-peer-adapter.sh` | `hermes` | **нет** | **нет** | `--session-id <id>` вместо |
 | `claude` | `scripts/claude-peer-adapter.sh` | `claude-code-headless` | да | да | — |
 
-Неизвестный `PEER_VENDOR` (не из таблицы) → СТОП, сообщить пилоту: «Напарник `<vendor>` не зарегистрирован. Известные: kimi, codex, hermes, claude. Добавить нового — правка таблицы выше + написание `<vendor>-peer-adapter.sh` по контракту §0в.1.»
+Каждый элемент `PEER_VENDORS` валидировать отдельно. Неизвестный `PEER_VENDOR` в списке → СТОП **на этом элементе, не на всём списке**: сообщить пилоту, какой конкретно vendor не распознан («Напарник `<vendor>` не зарегистрирован. Известные: kimi, codex, hermes, claude.»), предложить продолжить с оставшимися распознанными или прервать целиком. Добавление нового вендора — правка таблицы выше + написание `<vendor>-peer-adapter.sh` по контракту §0в.1.
 
-**§0в.1 Общий контракт адаптера** (для добавления нового вендора): stdin = полный промпт хода (Bash pipe, не inline `echo` — inline попадает в командную строку и хук B7.7c может ложно заблокировать повторные вызовы); stdout = одна реплика с frontmatter; exit `0` = OK, `1` = general error, `2` = content-filter/PII violation, `3` = PII hard block, `4` = `--add-dir` too large, `5` = уже идёт сессия (pidfile lock). Коды 2-5 — не обязательны для нового адаптера, но `0`/`1` обязательны (Шаг 3.1 проверяет `exit ≠ 0` как «напарник не ответил»).
+**§0в.1 Общий контракт адаптера** (для добавления нового вендора): stdin = полный промпт хода (Bash pipe, не inline `echo` — inline попадает в командную строку и хук B7.7c может ложно заблокировать повторные вызовы); stdout = одна реплика с frontmatter, **без файловых операций напарника внутри `SESSION_DIR`** (см. предостережение в §«Архитектура» — при `--add-dir` некоторые headless-CLI решают сохранить ответ и своим инструментом записи, это гонка с перехватом stdout, портит файл); exit `0` = OK, `1` = general error, `2` = content-filter/PII violation, `3` = PII hard block, `4` = `--add-dir` too large, `5` = уже идёт сессия (pidfile lock). Коды 2-5 — не обязательны для нового адаптера, но `0`/`1` обязательны (Шаг 3.1/3р.1 проверяет `exit ≠ 0` как «напарник не ответил»).
 
-Анонсировать пилоту одной строкой:
+Построить для каждого `vendor` в `PEER_VENDORS`: `ADAPTER_PATH[$vendor]="$HOME/IWE/DS-my-strategy/<адаптер из таблицы>"` и `PEER_AGENT_ID[$vendor]="<peer_agent из таблицы>"` (bash associative arrays; порядок вызова = порядок `PEER_VENDORS`). Используются везде ниже вместо хардкода `kimi-peer-adapter.sh`/`kimi-headless`.
+
+Анонсировать пилоту:
 ```
-Напарник: <PEER_VENDOR> (<peer_agent>)
+Напарник: <PEER_VENDOR> (<peer_agent>)                    # PEER_COUNT == 1, как раньше
 ```
-
-Значения `ADAPTER_PATH="$HOME/IWE/DS-my-strategy/<адаптер из таблицы>"` и `PEER_AGENT_ID="<peer_agent из таблицы>"` используются везде ниже вместо хардкода `kimi-peer-adapter.sh`/`kimi-headless`.
+или при `PEER_COUNT >= 2`:
+```
+Напарники (<PEER_COUNT>):
+  1. kimi (kimi-headless)
+  2. codex (codex)
+```
 
 ---
 
@@ -86,10 +92,10 @@ gates_rationale: "операционный скилл; WP Gate применим 
 Анонс пилоту:
 ```
 Открываю peer-сессию (DP.SC.154)
-Роль: Писатель (Claude) | Напарник: <PEER_VENDOR> (<PEER_AGENT_ID>)
+Роль: Писатель (Claude) | Напарник(и): <PEER_VENDOR (PEER_AGENT_ID)>[, ...]
 Задача: <задача>
 РП: WP-NNN «<название>» | или: не найден в плане
-Метод: turn-loop ≤10 ходов
+Метод: turn-loop ≤10 ходов (PEER_COUNT==1) | round-loop ≤rounds_limit раундов (PEER_COUNT>=2, WP-509)
 ```
 
 Если РП **не найден** в плане недели → полный WP Gate Ритуал (`memory/protocol-open.md §Сессия`):
@@ -168,12 +174,18 @@ session_id: "<SESSION_ID>"
 start_time: "<ISO-8601 UTC>"
 end_time: ""
 writer_agent: "claude-code"
-peer_agent: "<PEER_AGENT_ID из §0в>"
-peer_cmd: "<PEER_VENDOR>-peer-adapter"
+peer_agent: "<первый PEER_AGENT_ID из §0в>"      # backward-compat (PEER_COUNT==1: единственный); полный список — peer_agents
+peer_cmd: "<первый PEER_VENDOR>-peer-adapter"     # backward-compat; полный список — peer_cmds
+peer_agents: []      # WP-509: [PEER_AGENT_ID, ...] в порядке PEER_VENDORS, длина 1 при PEER_COUNT==1 (дублирует peer_agent)
+peer_cmds: []         # WP-509: ["<vendor>-peer-adapter", ...], та же длина/порядок
+round_order: []       # WP-509: [vendor, ...] — фиксированный порядок раунда, только при PEER_COUNT>=2
 peer_model: ""
 status: "started"
 turns_count: 0
-turns_limit: 10
+turns_limit: 10        # PEER_COUNT==1: лимит реплик, без изменений с v4
+rounds_limit: 6         # WP-509: лимит раундов, применяется только при PEER_COUNT>=2, НЕ переопределяет turns_limit
+round_skips: {}        # WP-509: {round_NN: [vendor, ...]} — кто не ответил/пропустил раунд
+handoff_history: []    # WP-509: [{round, from, to, reason}] — журнал OFFER_HANDOFF/ACCEPT_HANDOFF (write token, DP.SC.154 «Write token ≠ process_position»)
 escalations_count: 0
 extensions: []
 result_path: ""
@@ -194,7 +206,7 @@ ad_hoc_roles: {}     # {role_name: {agent_id, rationale, first_used_turn}} — �
 swap_history: []     # [{turn, from, to, reason}] — журнал SWAP_WRITER переходов
 ```
 
-**Если пилот не назначил роли** при запуске сессии — initiator в ход 0 предлагает свою роль и роль напарника (см. DP.SC.154 раздел «Opening сессии: Sequential role-discovery»). Discovery-ходes (0-2) **не входят** в `turns_limit: 10`.
+**Если пилот не назначил роли** при запуске сессии — initiator в ход/раунд 0 предлагает свою роль и роль **каждого** напарника (см. DP.SC.154 раздел «Opening сессии: Sequential role-discovery», при `PEER_COUNT>=2` — раздел «Role-discovery для N>2»). Discovery-ходы/раунды (0-2) **не входят** в `turns_limit`/`rounds_limit`.
 
 **In-session ad-hoc role signal** (DP.SC.154 v4, каскад Pack-расширения уровень 1). При использовании ad-hoc роли (нет в Pack `DP.ROLE.NNN`/`MIM.R.NNN`/`VR.R.NNN`) агент **обязан сразу** объявить пилоту — формат:
 
@@ -209,9 +221,9 @@ swap_history: []     # [{turn, from, to, reason}] — журнал SWAP_WRITER �
 
 Запись в `meta.yaml.ad_hoc_roles` идёт независимо от выбора (для back-up на уровне 2 — Week Close audit). Если пилот выбрал А — после сессии писатель открывает отдельный РП и делает формализацию.
 
-**1.3 Добавить строку в `sessions/00-index.md`** сверху таблицы (первая строка таблицы после `|---|`):
+**1.3 Добавить строку в `sessions/00-index.md`** сверху таблицы (первая строка таблицы после `|---|`). Колонка «Агенты» — при `PEER_COUNT>=2` напарники соединяются через `+`:
 ```
-| <TODAY> | <SESSION_ID> | <задача ≤50 симв> | claude-code / <PEER_VENDOR> | 0 | 0 | started | — |
+| <TODAY> | <SESSION_ID> | <задача ≤50 симв> | claude-code / <PEER_VENDOR1>[+<PEER_VENDOR2>...] | 0 | 0 | started | — |
 ```
 
 ---
@@ -229,7 +241,8 @@ timestamp: <ISO-8601 UTC>
 consensus: none
 ---
 
-<Моя начальная позиция — анализ задачи, тезисы, конкретные вопросы к напарнику.
+<Моя начальная позиция — анализ задачи, тезисы, конкретные вопросы к напарнику(ам).
+При `PEER_COUNT>=2` — предложить содержательную роль каждому напарнику отдельно (не только «роль для группы»), с обоснованием на каждого (DP.SC.154 «Role-discovery для N>2»).
 НЕ пересказ задачи. Позиция с аргументами.>
 ```
 
@@ -237,7 +250,9 @@ consensus: none
 
 ---
 
-## Шаг 3. Turn loop
+## Шаг 3. Turn loop (PEER_COUNT == 1)
+
+> **При `PEER_COUNT >= 2` — пропустить этот шаг целиком, перейти к Шагу 3р (round loop, WP-509).** Этот шаг не менялся с версии 1.4.0 — один напарник, поведение идентично.
 
 Переменные: `TURN=1`, `ESCALATIONS=0`, `DONE=false`.
 
@@ -348,13 +363,92 @@ consensus: none
 
 ---
 
+## Шаг 3р. Round loop (PEER_COUNT >= 2, WP-509)
+
+> **Пропустить, если `PEER_COUNT == 1`** — там действует классический Шаг 3.
+
+Переменные: `ROUND=1`, `ESCALATIONS=0`, `DONE=false`. Порядок раунда = `PEER_VENDORS` в порядке `--peer` (записан в `meta.yaml.round_order` на Шаге 1.2).
+
+### 3р.1 Вызов каждого напарника по порядку раунда
+
+Для `vendor` в `round_order` (по очереди, не параллельно — каждый следующий видит реплики предыдущих этого же раунда):
+
+```bash
+PEER_FILE="${SESSION_DIR}/$(printf '%02d' $ROUND)-peer-${vendor}.md"
+PROMPT_FILE=$(mktemp)   # промпт во временный файл, не inline — тот же B7.7c-риск, что в §0в.1
+cat > "$PROMPT_FILE" <<'EOF'
+Ты — напарник (peer agent) в диалоговой сессии (DP.SC.154, N>2 участников).
+Сессия: <SESSION_ID>
+Раунд: <ROUND> из <rounds_limit>
+Задача: <задача>
+
+Прочитай ВСЕ файлы журнала в <SESSION_DIR> по порядку (00-writer.md, 01-peer-*.md, ...) —
+включая реплики других напарников этого и предыдущих раундов, не только писателя.
+
+ВАЖНО: ответ только в stdout. Не используй свои файловые инструменты ни для одного
+файла в этой папке — это создаёт гонку с перехватом stdout и портит журнал сессии.
+
+Напиши реплику в stdout с frontmatter:
+---
+turn: <ROUND>
+role: peer
+agent_id: <PEER_AGENT_ID>
+content_role: <согласованная роль или предложение, если ещё не согласована>
+process_position: peer
+timestamp: <ISO-8601 UTC>
+consensus: none | proposed | reached | escalate
+---
+
+<Твой ответ>
+
+Правило критика: найди ХОТЯ БЫ ОДИН тезис, с которым не согласен — свой или другого напарника.
+
+Маркеры (строго в начале строки):
+PASS — если нечего добавить в этом раунде (не ошибка, явное право промолчать)
+CONSENSUS: <резюме> — если согласен с итогом
+ESCALATE_TO_USER: <причина> — если есть проигнорированное существенное возражение
+OFFER_HANDOFF: <agent_id> — <причина> — если хочешь предложить свой write token другому (только если ты сейчас держатель)
+ACCEPT_HANDOFF — если принимаешь предложенный тебе OFFER_HANDOFF
+REQUEST_HANDOFF: <причина> — необязывающая просьба к держателю
+EOF
+cat "$PROMPT_FILE" | bash "${ADAPTER_PATH[$vendor]}" --add-dir "$SESSION_DIR" 2>/dev/null > "$PEER_FILE"
+STATUS=$?
+rm -f "$PROMPT_FILE"
+```
+
+Пустой файл или `STATUS != 0` → этот напарник пропущен в этом раунде (не блокирует раунд, DP.SC.154 «Раунды вместо бесконечного круга»): записать `meta.yaml.round_skips.round_<NN>: [..., vendor]`, продолжить со следующим напарником по порядку.
+
+### 3р.2 Показать пилоту
+
+Резюме по КАЖДОМУ напарнику раунда (не только последнему) — кто что сказал, кратко.
+
+### 3р.3 Проверить маркеры у всех реплик раунда
+
+- `ESCALATE_TO_USER` у любого напарника → тот же процесс, что в §3.3 (запись `escalation-NN.md`, пауза на ответ пилота).
+- `OFFER_HANDOFF`/`ACCEPT_HANDOFF`/`REQUEST_HANDOFF` → обновить `meta.yaml.handoff_history` (append `{round, from, to, reason}` при подтверждённом `ACCEPT_HANDOFF`). `REQUEST_HANDOFF` без ответного `OFFER_HANDOFF` держателя — не меняет ничего, просьба зафиксирована в реплике и всё.
+- `CONSENSUS` — «консенсус раунда»: `DONE=true` только когда у КАЖДОГО напарника раунда есть либо `CONSENSUS`, либо `PASS` без встречных возражений в теле реплики. Хотя бы один содержательный контраргумент без `CONSENSUS` → раунд не закрыт, к 3р.4.
+
+### 3р.4 Реплика писателя
+
+Если `ROUND >= rounds_limit` (default 6) → см. 3р.6 (спор без консенсуса), иначе `DONE=true` → Шаг 3.5.
+
+Иначе — писатель отвечает (может адресовать разных напарников по-разному, `$(printf '%02d' $ROUND)-writer.md`, тот же формат frontmatter, что в Шаге 2), `ROUND += 1` → 3р.1.
+
+### 3р.5 Спор между 3+ позициями (после исчерпания rounds_limit без консенсуса)
+
+Применить критерий обратимости (DP.SC.154 «Разрешение спора между 3+ позициями») **до** эскалации:
+- Решение обратимо и в пределах полномочий участников → писатель фиксирует позицию большинства (2 из 3 или большинство при N>3), несогласие меньшинства — в `report.md` §3 «Отвергнутые альтернативы», `DONE=true` → Шаг 3.5.
+- Решение необратимо, вне полномочий, ИЛИ сам вопрос обратимости спорен → `ESCALATE_TO_USER: rounds_limit exhausted, no consensus, irreversible or scope-disputed` → пауза на пилота.
+
+---
+
 ## Шаг 3.5. Decision Gate (после консенсуса)
 
-> **Когда срабатывает:** `DONE=true` через CONSENSUS-маркер в Шаге 3.3 (не через `TURN >= 10` — там сразу Шаг 4).
+> **Когда срабатывает:** `DONE=true` через CONSENSUS-маркер в Шаге 3.3 (турн-loop) или 3р.3 (round-loop) — не через `TURN >= 10`/`ROUND >= rounds_limit` без консенсуса, там сразу Шаг 3р.5 или Шаг 4.
 > **Зачем:** консенсус ≠ реализация. Это **легитимный choice-question** для пилота (выбор объёма работы, не yes/no на готовое решение). Исключение из P5 — пилот сам подтвердил: «здесь от меня нужно согласование» (триггер 2026-05-30, WP-367 Ф5).
 > **Обязательно:** перед запросом — **краткое резюме консенсуса на пальцах**, чтобы пилот мог осознанно выбрать. Запрос без резюме = механический «выберите А/Б» без понимания.
 
-Извлечь резюме консенсуса (`grep "^CONSENSUS:" "$PEER_FILE" | sed 's/^CONSENSUS: //'`).
+Извлечь резюме консенсуса: `PEER_COUNT==1` → `grep "^CONSENSUS:" "$PEER_FILE" | sed 's/^CONSENSUS: //'`. `PEER_COUNT>=2` → пройти все `${SESSION_DIR}/$(printf '%02d' $ROUND)-peer-*.md` последнего раунда, взять резюме первого файла с маркером `CONSENSUS:` (если формулировки разошлись — писатель сводит их одним предложением сам, не берёт произвольно один голос).
 
 **Резюме на пальцах** — обязательная часть. Формат (без технических терминов, кодов, путей):
 
@@ -549,6 +643,35 @@ git push
 
 ---
 
+## Шаг 3.7. Рефлексия перед финализацией (WP-484, решение пилота 30.07)
+
+> **Почему здесь:** пир-сессия — тоже сессия работы, вопрос рефлексии обязателен так же, как и в обычной Quick Close (Ф18), а не только там (Ф28 — этот разрыв и был найден 29.07). Порог и формулировка те же, что уже используются везде — не новый механизм, применение существующего.
+
+**Порог:** тот же порог, что в `quick-close.yaml`, и та же формула вычисления, что уже проверена и починена в `gather-session-facts.sh` (WP-484 Ф26, 30.07 — наивный разбор ISO-даты дал баг «duration_min всегда 0» на BSD-date/macOS, эта же формула переиспользуется, не изобретается заново):
+```bash
+START_TIME=$(grep '^start_time:' "$SESSION_DIR/meta.yaml" | sed -E 's/^start_time: *"?([^"]*)"?$/\1/')
+NOW_EPOCH=$(date -u +%s)
+START_EPOCH=$(date -u -j -f "%Y-%m-%dT%H:%M:%SZ" "$START_TIME" +%s 2>/dev/null \
+    || date -u -d "$START_TIME" +%s 2>/dev/null \
+    || echo "$NOW_EPOCH")
+DURATION_MIN=$(( (NOW_EPOCH - START_EPOCH) / 60 ))
+```
+Если `DURATION_MIN ≤ 15` — пропустить, перейти к Шагу 4 молча (короткая сессия, не задерживать пилота).
+
+Если `duration_min > 15`:
+
+1. Показать пилоту краткий итог (2-3 строки, что сделали в этой пир-сессии — не пересказ turn-файлов, суть).
+2. Спросить: «Что в этой сессии стоит запомнить на будущее — не про саму задачу, а про то, как шла работа?» (дословно вопрос Ф18, `CONCEPT-night-cycle.md §18`).
+3. Записать ответ в дневной ledger:
+   ```bash
+   bash ~/IWE/DS-my-strategy/scripts/ledger-append.sh day "$(date +%F)" session_reflection "{\"wp\": \"<WP-NNN>\", \"answer\": <экранированный ответ>}" peer-conversation
+   ```
+4. Сказать пилоту: «Ты свободен, дальше закрываю сессию сам» — и продолжить Шаг 4 (финализация: report.md, commit, session-guard close) без дальнейшего участия пилота.
+
+Пропуск ответа пилотом (ушёл, не ответил) — не блокировать: записать `"answer": "нет ответа"`, продолжить Шаг 4 как обычно.
+
+---
+
 ## Шаг 4. Финализация
 
 ### 4.1 Обновить meta.yaml
@@ -624,12 +747,12 @@ extensions:
 Промпт субагенту:
 
 ```
-Ты — синтезатор итогов диалога двух агентов (DP.SC.154).
+Ты — синтезатор итогов диалога нескольких агентов (DP.SC.154, писатель + <PEER_COUNT> напарник(а/ов)).
 Задача сессии: <задача>
 
 Стиль: разговорный для пилота (A1-A11). Перепиши, не копируй turn-файлы.
 
-Прочитай все файлы реплик в <SESSION_DIR> (00-writer.md, 01-peer.md, ...) в порядке нумерации.
+Прочитай все файлы реплик в <SESSION_DIR> (00-writer.md, затем 01-peer.md.../01-peer-<vendor>.md... — в порядке нумерации, при PEER_COUNT>=2 несколько файлов на один номер раунда, читать все) в порядке нумерации.
 Если в папке есть `_outcome.md` — прочитай его, он обязателен для §6.
 Если есть review-NN.md / verify-NN.md — включи как якоря в §5/§6.
 Напиши <SESSION_DIR>/report.md строго по схеме ниже.
@@ -642,7 +765,7 @@ schema_version: 1
 session_id: <SESSION_ID>
 generated_at: <ISO-8601 UTC>
 writer: <из meta.yaml: writer_agent>
-peer: <из meta.yaml: peer_agent>
+peer: <из meta.yaml: peer_agent, при PEER_COUNT>=2 — все peer_agents через ", ">
 duration_min: <(end_time − start_time) в минутах, целое>
 escalations_count: <из meta.yaml>
 result_class: agreed | partial | escalated | not-agreed
@@ -662,13 +785,14 @@ cost_source: api | estimated | missing
 - **Первоначальная позиция писателя:** <если зафиксирована в 00-writer.md; omit если нет>
 
 ## 2. Позиции по темам
-Под каждой темой (затронута обеими сторонами и повлияла на итог):
+Под каждой темой (затронута 2+ сторонами и повлияла на итог). При PEER_COUNT==1 — секция «Писатель/Напарник» как раньше. При PEER_COUNT>=2 — по каждому участнику, приславшему позицию, отдельной строкой (не сводить всех напарников в одну общую «Напарник»):
 
 **Тема N: <формулировка>**
-- Инициатор: писатель | напарник
-- **Писатель:** тезис → обоснование → якорь (file:line-range / Pack-ID)
-- **Напарник:** тезис → обоснование → якорь
-- Эволюция (опц.): если позиция менялась — ход и причина
+- Инициатор: <agent_id, кто поднял тему>
+- **<agent_id 1>:** тезис → обоснование → якорь (file:line-range / Pack-ID)
+- **<agent_id 2>:** тезис → обоснование → якорь
+- **<agent_id N>:** ... (по одной строке на каждого участника, высказавшегося по теме)
+- Эволюция (опц.): если позиция менялась — раунд/ход и причина
 - Разрешение: что приняли + чей аргумент перевесил
 
 ## 3. Отвергнутые альтернативы
@@ -708,9 +832,9 @@ Omit если `implementation_pipeline: false` в meta.yaml.
 
 ### 4.3 Обновить sessions/00-index.md
 
-Найти строку с `<SESSION_ID>` и заменить целиком:
+Найти строку с `<SESSION_ID>` и заменить целиком (колонка «Агенты» — та же `+`-склейка при PEER_COUNT>=2, что в Шаге 1.3):
 ```
-| <TODAY> | <SESSION_ID> | <задача ≤50> | claude-code / <PEER_VENDOR> | <TURNS> | <ESCALATIONS> | completed | [report.md](<MONTH>/<DAY>/<SESSION_ID>/report.md) |
+| <TODAY> | <SESSION_ID> | <задача ≤50> | claude-code / <PEER_VENDOR1>[+<PEER_VENDOR2>...] | <TURNS/ROUNDS> | <ESCALATIONS> | completed | [report.md](<MONTH>/<DAY>/<SESSION_ID>/report.md) |
 ```
 (Bash awk — безопасен для строк с `|`.)
 
@@ -724,7 +848,7 @@ Slug-часть (без даты и номера): `SESSION_SLUG=$(echo "$SESSIO
 date: <TODAY>
 type: peer-session
 writer: claude-code
-peer: <PEER_AGENT_ID>
+peer: [<PEER_AGENT_ID>, ...]      # список; при PEER_COUNT==1 — один элемент
 duration_h: <(end_time - start_time) в часах, 1 знак>
 artifacts: sessions/<MONTH>/<DAY>/<SESSION_ID>/report.md
 session_id: <SESSION_ID>
@@ -799,7 +923,7 @@ IWE_AGENT=claude-code bash "${IWE_SCRIPTS:-$HOME/IWE/scripts}/session-guard.sh" 
 ```
 Сессия завершена.
 
-Ходов: <turns_count> | Роли: <writer_agent> (писатель) · <peer_agent> (напарник) | Эскалаций: <escalations_count>
+Ходов/раундов: <turns_count|rounds> | Роли: <writer_agent> (писатель) · <peer_agent(s)> (напарник(и)) | Эскалаций: <escalations_count>
 
 Решение: <первый пункт §4 из report.md — одна строка на пальцах, без технических кодов>
 

@@ -82,6 +82,8 @@ WEEK=$(date +%Y-W%V)
 RETRO_JSON="{\"subtype\": \"preclose_retro\", \"retro_worked\": <экранированный ответ 1>, \"retro_failed\": <экранированный ответ 2>}"
 bash ~/IWE/DS-my-strategy/scripts/ledger-append.sh week "$WEEK" pilot_answer "$RETRO_JSON" week-close
 ```
+`bash .claude/hooks/rule-engine.sh mark-gate week-close-g6` (WP-484, 30.07 — trace-satisfaction для Week Close читает гейты из `memory/protocol-close.md § Week Close`, не из этого файла; без mark-gate шаг помечен `[[gate]]` здесь, но не проверяется механически).
+
 Формулировка и поля идентичны `scripts/week-preclose.sh` — тот же скрипт остаётся терминальным запасным путём.
 
 ### 4. Метрики недели
@@ -298,7 +300,7 @@ Exit 0 — закоммичено и запушено (возможно посл
 
 - [ ] Все изменения закоммичены и запушены (по всем репо)
 - [ ] Ретро 7 дней: closed/partial/not_started/blocked разобраны
-- [ ] **Ретро недели свободным текстом задано (шаг 3e, WP-484):** оба вопроса заданы пилоту, ответ записан в ledger через `pilot_answer/preclose_retro`
+- [ ] Ретро недели свободным текстом задано (шаг 3e, WP-484): оба вопроса заданы пилоту, ответ записан в ledger через `pilot_answer/preclose_retro`
 - [ ] Метрики посчитаны (completion rate, мультипликатор)
 - [ ] Carry-over → W+1 (или явно «нет»)
 - [ ] Pending фазы активных РП обойдены (`pending-phases-sweep.sh` или fallback grep) — решения зафиксированы

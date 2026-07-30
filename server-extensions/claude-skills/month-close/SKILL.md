@@ -117,6 +117,8 @@ MONTH=$(date +%Y-%m)
 RETRO_JSON="{\"subtype\": \"preclose_retro\", \"retro_moved\": <экранированный ответ 1>, \"retro_blocker\": <экранированный ответ 2>}"
 bash ~/IWE/DS-my-strategy/scripts/ledger-append.sh month "$MONTH" pilot_answer "$RETRO_JSON" month-close
 ```
+`bash .claude/hooks/rule-engine.sh mark-gate month-close-g6` (WP-484, 30.07 — trace-satisfaction для Month Close читает гейты из `memory/protocol-close.md § Month Close`, не из этого файла; без mark-gate шаг помечен `[[gate]]` здесь, но не проверяется механически).
+
 Формулировка и поля идентичны `scripts/month-preclose.sh` — тот же скрипт остаётся терминальным запасным путём.
 
 ### 4. Ревизия проектов P1-P6 (человек)
@@ -310,7 +312,7 @@ verified: R23 Верификатор
 - [ ] Мультипликатор месяца рассчитан + сравнение с прошлым
 - [ ] Фаза стратегической позиции пересмотрена (PD.FORM.078)
 - [ ] Калибр пересчитан (PD.CHR.007)
-- [ ] **Ретро месяца свободным текстом задано (шаг 3c, WP-484):** оба вопроса заданы пилоту, ответ записан в ledger через `pilot_answer/preclose_retro`
+- [ ] Ретро месяца свободным текстом задано (шаг 3c, WP-484): оба вопроса заданы пилоту, ответ записан в ledger через `pilot_answer/preclose_retro`
 - [ ] Ревизия проектов P1-P6 выполнена
 - [ ] R-вопросник M1-M6 пройден (ответы в `MonthClose YYYY-MM.md`)
 - [ ] T-чеклист T23-T25 выполнен
