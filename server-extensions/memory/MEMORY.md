@@ -122,6 +122,7 @@
 
 ### Feedback — HOT
 
+- [feedback_server_primary_diagnose_first.md](feedback_server_primary_diagnose_first.md) — вопросы про такты (открытие/закрытие дня) разбирать с primary-машины (цех, ssh-логи), не с локального Мака
 - [lessons_sunday_tuesday_different_iso_weeks.md](lessons_sunday_tuesday_different_iso_weeks.md) — guard-маркер по `%V`, пишущийся в Вс и читаемый во Вт — разные ISO-недели, писать маркер сразу на обе
 - [lessons_git_add_drops_executable_bit_in_fmt.md](lessons_git_add_drops_executable_bit_in_fmt.md) — новый .sh в FMT-exocortex-template может застейджиться 100644 вместо 100755 → EXECUTABLE-BIT гейт блокирует коммит, чинить `git update-index --chmod=+x`
 - [lessons_check_then_append_race_needs_dedup_inside_lock.md](lessons_check_then_append_race_needs_dedup_inside_lock.md) — caller-side «уже есть?»-проверка снаружи flock = гонка даже при атомарной записи; дедуп переносить внутрь лока

@@ -206,19 +206,33 @@ PYEOF
     return 0
   fi
 
+  # WP-484 30.07 (peer-session with Codex, Ф27-2): selective-reindex.sh used to
+  # always exit 0 even when every source failed (silently `continue`d past
+  # ingest.ts errors) — under this script's `set -e`, a real non-zero exit from
+  # either call below would now abort do_reindex() before Шаг 3 (Linear sync)
+  # ever runs, turning one failed source into a fully skipped Day Close instead
+  # of the honest "this step degraded, the rest still ran" CONCEPT §5 pattern
+  # the rest of the pipeline follows. `|| reindex_had_failures=true` catches it
+  # without stopping the script; the caller (protocol-close.md) already reads
+  # do_reindex()'s own return value via $reindex_status further down.
+  local reindex_had_failures=false
+
   # Вызов 1: L2 источники (sources.json — дефолт selective-reindex)
   if [ -n "$l2_sources" ]; then
     log "  L2 источники:$l2_sources"
     # shellcheck disable=SC2086
-    "$SELECTIVE_REINDEX" $l2_sources
+    "$SELECTIVE_REINDEX" $l2_sources || reindex_had_failures=true
   fi
 
   # Вызов 2: L4 источники (sources-personal.json через SOURCES_CONFIG)
   if [ -n "$l4_sources" ]; then
     log "  L4 источники:$l4_sources"
     # shellcheck disable=SC2086
-    SOURCES_CONFIG="$SOURCES_PERSONAL_JSON" "$SELECTIVE_REINDEX" $l4_sources
+    SOURCES_CONFIG="$SOURCES_PERSONAL_JSON" "$SELECTIVE_REINDEX" $l4_sources || reindex_had_failures=true
   fi
+
+  [ "$reindex_had_failures" = "true" ] && return 1
+  return 0
 }
 
 # --- Шаг 3: Linear sync ---

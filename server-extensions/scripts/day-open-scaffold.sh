@@ -230,8 +230,11 @@ extract_strategy_context() {
   fi
 
   # 2. Fallback: pull R-goal / ТОС / priority lines from WeekPlan (formats vary).
+  # Glob tolerates both naming conventions — "WeekPlan W{N} ..." (pre-27.07) and
+  # "WeekPlan {year}-W{N} ... (night-cycle)" (week-open-orchestrator.sh) — newest
+  # by mtime wins, probe artifacts excluded (same defense as day-open-pipeline.sh).
   local weekplan
-  weekplan=$(ls "$IWE/${IWE_GOVERNANCE_REPO:-DS-strategy}/current"/WeekPlan\ W"${week_num}"*.md 2>/dev/null | head -1)
+  weekplan=$(ls -t "$IWE/${IWE_GOVERNANCE_REPO:-DS-strategy}/current"/WeekPlan\ *W"${week_num}"*.md 2>/dev/null | grep -v '(probe)' | head -1)
   if [ -n "$weekplan" ] && [ -f "$weekplan" ]; then
     local tos
     tos=$(grep -E "^\s*[-*]\s*(П[0-9]+|ТОС|R[0-9])" "$weekplan" 2>/dev/null | head -10)

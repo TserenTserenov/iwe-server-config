@@ -10,7 +10,7 @@ domains: [protocol]
 status: active
 owner: user
 schema_version: 1
-modified: 2026-07-19T14:52:09.030Z
+modified: 2026-07-30T03:56:42.843Z
 ---
 # Протокол Close (ОРЗ-фрактал)
 
@@ -43,7 +43,7 @@ modified: 2026-07-19T14:52:09.030Z
 
 ```bash
 cd DS-my-strategy && python3 scripts/process-runner.py start quick-close --slug <slug сессии> \
-  --input '{"agent":"<agent>","slug":"<slug>","session_file":"<путь или null>","repos":["<repo1>", ...]}'
+  --input '{"agent":"<agent>","wp":"<WP-N сессии или null, если сессия без своего РП>","slug":"<slug>","session_file":"<путь или null>","repos":["<repo1>", ...]}'
 ```
 
 Раннер сам ведёт по шагам ниже и останавливается на каждом `pilot`/`ai`/`requires_input`; отвечать `process-runner.py next <run_id> --input '{...}'`, используя текст под каждым шагом как содержание ответа (какой JSON собрать), не как отдельный ручной прогон в обход раннера. Шаг раннера указан в скобках при каждом пункте ниже.
