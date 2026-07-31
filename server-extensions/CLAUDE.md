@@ -14,7 +14,7 @@
 ## 2. ОРЗ-фрактал (Открытие → Работа → Закрытие)
 
 > Пропуск Открытия = незапланированная работа. Пропуск Закрытия = незафиксированный результат.
-> **Сессия:** `protocol-open.md § Сессия` → `protocol-work.md` → `/run-protocol close` · **День:** `/day-open` («открывай») → `/run-protocol day-close` · **Неделя:** `/run-protocol week-close` · **Месяц:** `/month-close` (первый Пн, до Strategy Session).
+> **Сессия:** `protocol-open.md § Сессия` → `protocol-work.md` → `/run-protocol close` · **День:** `/day-open` («открывай») → `/run-protocol day-close` · **Неделя:** `/run-protocol week-close` · **Месяц:** `/month-close` (последние дни месяца или первый Пн, до Strategy Session).
 
 ### Блокирующие правила
 

@@ -10,7 +10,7 @@ domains: [protocol]
 status: active
 owner: user
 schema_version: 1
-modified: 2026-07-30T03:56:42.843Z
+modified: 2026-07-31T13:22:14.494Z
 ---
 # Протокол Close (ОРЗ-фрактал)
 
@@ -199,7 +199,7 @@ cd DS-my-strategy && python3 scripts/process-runner.py start quick-close --slug 
 
 ## Month Close (Месяц)
 
-> **Роль:** R1 Стратег (выполнение), R23 Верификатор (Haiku, чеклист). **Бюджет:** 30-45 мин. **Триггер:** первый Пн месяца, перед Strategy Session первой недели.
+> **Роль:** R1 Стратег (выполнение), R23 Верификатор (Haiku, чеклист). **Бюджет:** 30-45 мин. **Триггер:** последние дни закрываемого месяца, либо первый Пн следующего месяца (если не сделано раньше), перед Strategy Session первой недели.
 > Выполняется через `.claude/skills/month-close/SKILL.md`.
 
 ### Шаги Month Close

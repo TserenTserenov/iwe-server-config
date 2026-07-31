@@ -2,7 +2,7 @@
 name: peer-conversation
 description: Многотуровый диалог писателя (Claude) с одним или несколькими напарниками (любой набор из kimi/codex/hermes/claude-headless) по задаче пилота (DP.SC.154). Ведёт turn-loop (2 участника) или round-loop (3+, WP-509), обнаруживает CONSENSUS/ESCALATE, после консенсуса — Decision Gate (зафиксировать vs реализовать → ревью → проверить → задеплоить), синтезирует report.md через Agent tool.
 argument-hint: "<описание задачи> [--peer kimi|codex|hermes|claude[,vendor2,...]] | --list | --interrupt <session_id> | --finalize <session_id>"
-version: 1.5.1
+version: 1.5.2
 layer: L3
 status: active
 triggers:
@@ -38,13 +38,13 @@ gates_rationale: "операционный скилл; WP Gate применим 
 > Peer-сессия пригодна для: технических решений, дизайна, code review, поиска компромисса между подходами, подготовки кандидатов к решению.
 > **НЕ пригодна** для решений, которые процесс явно закрепляет за человеком (например, R15 Валидатор в `/apply-captures` — accept/reject/defer кандидатов знания; R1 Стратег — приоритеты месяца). Согласие двух агентов между собой — не решение пилота, даже единогласное и хорошо обоснованное.
 >
-> Если задача внутри пир-сессии требует такого решения — писатель обязан остановиться и спросить пилота напрямую в текущем чате (не через turn-файл), прежде чем фиксировать результат. См. `.claude/skills/apply-captures/SKILL.md` раздел «R15 = живой пилот, не агент» и `DS-my-strategy/inbox/bugs/bug-2026-07-07-r15-decisions-bypassed-pilot.md` — прецедент, из-за которого добавлено это ограничение.
+> Если задача внутри пир-сессии требует такого решения — писатель обязан остановиться и спросить пилота напрямую в текущем чате (не через turn-файл), прежде чем фиксировать результат. См. `.claude/skills/apply-captures/SKILL.md` раздел «R15 = живой пилот, не агент» и `${IWE_GOVERNANCE_REPO:-DS-strategy}/inbox/bugs/bug-2026-07-07-r15-decisions-bypassed-pilot.md` — прецедент, из-за которого добавлено это ограничение.
 
 ## Шаг 0. Режим
 
 Определить режим из `$ARGUMENTS`:
 
-- `--list` → прочитать `DS-my-strategy/sessions/00-index.md`, вывести таблицу. Стоп.
+- `--list` → прочитать `${IWE_GOVERNANCE_REPO:-DS-strategy}/sessions/00-index.md`, вывести таблицу. Стоп.
 - `--interrupt <id>` → перейти к **Шагу 5 (interrupt-режим)**. Стоп после.
 - `--finalize <id>` → перейти к **Шагу 6 (finalize-режим)**. Стоп после.
 - Иначе → новая сессия, продолжать к Шагу 0в.
@@ -70,7 +70,30 @@ gates_rationale: "операционный скилл; WP Gate применим 
 
 **§0в.1 Общий контракт адаптера** (для добавления нового вендора): stdin = полный промпт хода (Bash pipe, не inline `echo` — inline попадает в командную строку и хук B7.7c может ложно заблокировать повторные вызовы); stdout = одна реплика с frontmatter, **без файловых операций напарника внутри `SESSION_DIR`** (см. предостережение в §«Архитектура» — при `--add-dir` некоторые headless-CLI решают сохранить ответ и своим инструментом записи, это гонка с перехватом stdout, портит файл); exit `0` = OK, `1` = general error, `2` = content-filter/PII violation, `3` = PII hard block, `4` = `--add-dir` too large, `5` = уже идёт сессия (pidfile lock). Коды 2-5 — не обязательны для нового адаптера, но `0`/`1` обязательны (Шаг 3.1/3р.1 проверяет `exit ≠ 0` как «напарник не ответил»).
 
-Построить для каждого `vendor` в `PEER_VENDORS`: `ADAPTER_PATH[$vendor]="$HOME/IWE/DS-my-strategy/<адаптер из таблицы>"` и `PEER_AGENT_ID[$vendor]="<peer_agent из таблицы>"` (bash associative arrays; порядок вызова = порядок `PEER_VENDORS`). Используются везде ниже вместо хардкода `kimi-peer-adapter.sh`/`kimi-headless`.
+Построить для каждого `vendor` в `PEER_VENDORS`: `ADAPTER_PATH[$vendor]="$HOME/IWE/${IWE_GOVERNANCE_REPO:-DS-strategy}/<адаптер из таблицы>"` и `PEER_AGENT_ID[$vendor]="<peer_agent из таблицы>"` (bash associative arrays; порядок вызова = порядок `PEER_VENDORS`). Используются везде ниже вместо хардкода `kimi-peer-adapter.sh`/`kimi-headless`.
+
+**§0в.2 Проверка доступности vendor'ов (capability-check, WP-509 Ф5).** После построения `ADAPTER_PATH`, до анонса напарников:
+
+1. **Дубликаты** в списке (`--peer codex,codex`) → отклонить: N участников не подменяется повторными вызовами одного напарника; сообщить пилоту, стоп до исправления списка.
+2. **Проверка каждого `vendor`** (накопить доступных в `remaining`):
+   ```bash
+   remaining=()
+   for vendor in "${PEER_VENDORS[@]}"; do
+     ok=true
+     if [[ ! -x "${ADAPTER_PATH[$vendor]}" ]]; then ok=false; fi  # адаптер отсутствует/не исполняем
+     if [[ "$vendor" == hermes ]] && ! command -v hermes >/dev/null 2>&1; then ok=false; fi  # CLI hermes недоступен
+     $ok && remaining+=("$vendor") || :  # недоступный — кандидат на исключение (п. 3)
+   done
+   ```
+   Живой probe-вызов CLI НЕ делать: ошибки всплывут при вызове по контракту адаптера (exit ≠ 0, Шаг 3.1/3р.1); vendor-specific знания сверх `hermes` в скилл не добавлять (иначе Шаг 0в расходится с адаптерами).
+3. **Недоступный vendor** → сообщить пилоту какой именно и почему (нет адаптера / нет CLI), предложить продолжить с оставшимися или прервать — тот же UX, что для незарегистрированного vendor (стоп на элементе, не на списке).
+4. **Нормализация после исключений (атомарно):**
+   ```bash
+   PEER_VENDORS=("${remaining[@]}")
+   PEER_COUNT=${#PEER_VENDORS[@]}
+   round_order=("${PEER_VENDORS[@]}")
+   ```
+   Режим выбирается заново: `PEER_COUNT>=2` → round-loop (§3р), `==1` → turn-loop (§3 — сценарий «запрошены codex,hermes, остался codex» идёт классическим диалогом вдвоём, не усечённым кругом), `==0` → безусловный стоп с сообщением пилоту.
 
 Анонсировать пилоту:
 ```
@@ -87,7 +110,7 @@ gates_rationale: "операционный скилл; WP Gate применим 
 
 ## Шаг 0б. Открытие (WP Gate — только для новой сессии)
 
-Найти WP по задаче: прочитать `DS-my-strategy/WP-REGISTRY.md` (grep по ключевым словам) и `DS-my-strategy/current/WeekPlan W{N}.md`.
+Найти WP по задаче: прочитать `${IWE_GOVERNANCE_REPO:-DS-strategy}/WP-REGISTRY.md` (grep по ключевым словам) и `${IWE_GOVERNANCE_REPO:-DS-strategy}/current/WeekPlan W{N}.md`.
 
 Анонс пилоту:
 ```
@@ -130,14 +153,14 @@ if verification_class in ("open-loop", "problem-framing"):
 
 **Trigger эскалации (лог, не блок):** если пилот 2 раза подряд выбирает агента вопреки подсказке — записать сигнал «routing-таблица устарела или классификация неверна» в `inbox/WP-383/routing-drift.log` (создать при первом срабатывании). Не блокировать выбор пилота.
 
-> Источник таблицы: `DS-my-strategy/inbox/WP-383/routing-design-v1.md §3`. Statefulness-пробел Kimi закрыт автопередачей git-diff в `kimi-peer-adapter.sh` (§8).
+> Источник таблицы: `${IWE_GOVERNANCE_REPO:-DS-strategy}/inbox/WP-383/routing-design-v1.md §3`. Statefulness-пробел Kimi закрыт автопередачей git-diff в `kimi-peer-adapter.sh` (§8).
 
 ---
 
 ## Шаг 1. Инициализация
 
 ```bash
-SESSIONS_DIR="$HOME/IWE/DS-my-strategy/sessions"
+SESSIONS_DIR="$HOME/IWE/${IWE_GOVERNANCE_REPO:-DS-strategy}/sessions"
 TODAY=$(date +%Y-%m-%d)
 MONTH=$(date +%Y-%m)
 DAY=$(date +%d)
@@ -769,7 +792,7 @@ DURATION_MIN=$(( (NOW_EPOCH - START_EPOCH) / 60 ))
 2. Спросить: «Что в этой сессии стоит запомнить на будущее — не про саму задачу, а про то, как шла работа?» (дословно вопрос Ф18, `CONCEPT-night-cycle.md §18`).
 3. Записать ответ в дневной ledger:
    ```bash
-   bash ~/IWE/DS-my-strategy/scripts/ledger-append.sh day "$(date +%F)" session_reflection "{\"wp\": \"<WP-NNN>\", \"answer\": <экранированный ответ>}" peer-conversation
+   bash "$HOME/IWE/${IWE_GOVERNANCE_REPO:-DS-strategy}/scripts/ledger-append.sh" day "$(date +%F)" session_reflection "{\"wp\": \"<WP-NNN>\", \"answer\": <экранированный ответ>}" peer-conversation
    ```
 4. Сказать пилоту: «Ты свободен, дальше закрываю сессию сам» — и продолжить Шаг 4 (финализация: report.md, commit, session-guard close) без дальнейшего участия пилота.
 
@@ -949,7 +972,7 @@ Omit если `implementation_pipeline: false` в meta.yaml.
 
 Slug-часть (без даты и номера): `SESSION_SLUG=$(echo "$SESSION_ID" | sed -E 's/^[0-9]{4}-[0-9]{2}-[0-9]{2}-[0-9]{2}-//')`
 
-Записать `DS-my-strategy/sessions/<MONTH>/<TODAY>-<SESSION_SLUG>.md` (Write) — Quick Close файл плоский под месячной папкой, без DD/ (симметрично session-guard.sh; DD/ — только для peer-session-папок):
+Записать `${IWE_GOVERNANCE_REPO:-DS-strategy}/sessions/<MONTH>/<TODAY>-<SESSION_SLUG>.md` (Write) — Quick Close файл плоский под месячной папкой, без DD/ (симметрично session-guard.sh; DD/ — только для peer-session-папок):
 ```markdown
 ---
 date: <TODAY>
@@ -972,7 +995,7 @@ wp: <WP-NNN или unknown>
 **4.5.0 Заполнить служебный ORZ-скаффолд session-guard** (если Шаг 1.0 создал семафор успешно) — минимально, пойнтером на настоящий отчёт, не дублируя контент:
 
 ```bash
-GUARD_ORZ="$HOME/IWE/DS-my-strategy/sessions/$MONTH/${TODAY}-${SESSION_ID}.md"
+GUARD_ORZ="$HOME/IWE/${IWE_GOVERNANCE_REPO:-DS-strategy}/sessions/$MONTH/${TODAY}-${SESSION_ID}.md"
 if [ -f "$GUARD_ORZ" ]; then
   cat > "$GUARD_ORZ" <<EOF
 ---
@@ -1008,7 +1031,7 @@ fi
 **4.5.1 Commit + push:**
 
 ```bash
-cd "$HOME/IWE/DS-my-strategy"
+cd "$HOME/IWE/${IWE_GOVERNANCE_REPO:-DS-strategy}"
 # pathspec после `--`: commit ТОЛЬКО файлы сессии, не подметаем чужое
 # pre-staged из общего индекса (mis-attribution, см. 2026-06-20-39).
 PATHS=("sessions/$MONTH/$DAY/$SESSION_ID/" "sessions/00-index.md" "sessions/$MONTH/${TODAY}-${SESSION_SLUG}.md")
