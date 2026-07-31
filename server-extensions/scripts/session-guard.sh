@@ -431,6 +431,33 @@ print(os.path.relpath(f, r))
     REL_PATH="$FILE_PATH"
   fi
   [ -n "$REL_PATH" ] || fail "note-file: cannot determine relative path for '$FILE_PATH'" 1
+  # A noted path only protects a commit if it byte-matches what `git diff --cached`
+  # reports later (repo-relative, no repo-name prefix). A repo-name-prefixed path
+  # silently recorded here is bug-2026-07-31-runner-commit-push-stale-retry (gate
+  # keeps blocking after an honest-looking registration). Future files (noted
+  # BEFORE creation — day-close-mechanical pre-notes archive dest, sessions note
+  # files they are about to Write) are legitimate: record verbatim, warn loudly.
+  path_known_to_repo() {
+    [ -e "$1/$2" ] && return 0
+    git -C "$1" ls-files --cached --error-unmatch -- "$2" >/dev/null 2>&1 && return 0
+    git -C "$1" cat-file -e "HEAD:$2" 2>/dev/null && return 0
+    return 1
+  }
+  if [ -n "$REPO_ROOT" ] && ! path_known_to_repo "$REPO_ROOT" "$REL_PATH"; then
+    REPO_NAME=$(basename "$REPO_ROOT")
+    STRIPPED="${REL_PATH#"$REPO_NAME"/}"
+    if [ "$STRIPPED" != "$REL_PATH" ] && path_known_to_repo "$REPO_ROOT" "$STRIPPED"; then
+      echo "note-file: путь '$REL_PATH' нормализован до репо-относительного '$STRIPPED' (префикс имени репозитория отброшен)" >&2
+      REL_PATH="$STRIPPED"
+    elif [ "$STRIPPED" != "$REL_PATH" ]; then
+      # Prefix textually matches the repo name but neither form exists yet —
+      # overwhelmingly the prefix mistake, not a self-named future subdir.
+      echo "note-file: WARNING — '$REL_PATH' начинается с имени репозитория '$REPO_NAME/'; записываю без префикса как '$STRIPPED' (scope gate сравнивает репо-относительные пути)" >&2
+      REL_PATH="$STRIPPED"
+    else
+      echo "note-file: WARNING — '$REL_PATH' пока не существует в репо '$REPO_NAME' (ни на диске, ни в индексе, ни в HEAD); записан как будущий файл. Если это опечатка — scope gate не пропустит staged-файл." >&2
+    fi
+  fi
   # Avoid duplicate consecutive entries
   LAST=$(tail -1 "$SEM_FILE" 2>/dev/null || true)
   if [ "$LAST" != "file: $REL_PATH" ]; then
