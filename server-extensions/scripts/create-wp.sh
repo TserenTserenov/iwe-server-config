@@ -6,7 +6,7 @@
 # see DP.M.010, DP.ROLE.037
 #
 # Использование:
-#   bash create-wp.sh --title "Название" --budget 5h --priority P3 [--slug slug] [--repo "репо"] [--related "WP-150:dependency,WP-167:продукт"]
+#   bash create-wp.sh --title "Название" --budget 5h --priority P3 [--slug slug] [--repo "репо"] [--related "WP-150:dependency,WP-167:продукт"] [--result-kind WorkDone]
 #   bash create-wp.sh --title "Название" --budget 5h --priority P3 --no-consent-check
 #
 # Предусловие: consent state file должен существовать:
@@ -47,6 +47,7 @@ SLUG=""
 REPO=""
 RELATED=""
 RESULT=""
+RESULT_KIND=""
 SKIP_CONSENT=0
 
 while [[ $# -gt 0 ]]; do
@@ -58,6 +59,7 @@ while [[ $# -gt 0 ]]; do
     --repo)     REPO="$2";     shift 2 ;;
     --related)  RELATED="$2";  shift 2 ;;
     --result)   RESULT="$2";   shift 2 ;;
+    --result-kind) RESULT_KIND="$2"; shift 2 ;;
     --no-consent-check) SKIP_CONSENT=1; shift ;;
     *) echo "Неизвестный флаг: $1" >&2; exit 1 ;;
   esac
@@ -65,8 +67,26 @@ done
 
 # --- Валидация ---
 if [[ -z "$TITLE" || -z "$BUDGET" ]]; then
-  echo "Использование: $0 --title \"Название\" --budget 5h [--priority P3] [--slug slug] [--repo репо] [--related \"WP-NNN:тип\"] [--result R3]" >&2
+  echo "Использование: $0 --title \"Название\" --budget 5h [--priority P3] [--slug slug] [--repo репо] [--related \"WP-NNN:тип\"] [--result R3] [--result-kind KindId]" >&2
   exit 1
+fi
+
+# --- Валидация --result-kind через общий гейт-чекер (WP-481 Ф7 шаг 2) ---
+# Те же правила, что у pre-commit Check 14 — физически один валидатор,
+# чтобы create-wp.sh и хук не разошлись (консенсус 2026-07-31-17, ход 1 п.3).
+if [[ -n "$RESULT_KIND" ]]; then
+  KIND_CHECKER="$STRATEGY/scripts/check-result-kind.py"
+  if [[ ! -f "$KIND_CHECKER" ]]; then
+    # fail-closed (консенсус 2026-07-31-17, ход 4 п.2): без чекера result_kind
+    # не записывается вообще — иначе поле уйдёт в карточку без валидации.
+    echo "❌ $KIND_CHECKER не найден — отказ записывать result_kind без валидации (WP-481 Ф7)" >&2
+    exit 1
+  fi
+  if ! python3 "$KIND_CHECKER" --repo "$STRATEGY" --validate-kind "$RESULT_KIND"; then
+    echo "❌ --result-kind '$RESULT_KIND' не принят гейтом (WP-481 Ф7)" >&2
+    exit 1
+  fi
+  echo "✅ result_kind: $RESULT_KIND (валиден, gate_ready)"
 fi
 
 # --- Найти следующий номер WP ---
@@ -211,6 +231,22 @@ ${RELATED_ROWS}
 WPEOF
 
 echo "   ✅ $WP_FILE"
+
+# --- result_kind во frontmatter (WP-481 Ф7 шаг 2) — после записи шаблона ---
+if [[ -n "$RESULT_KIND" ]]; then
+  python3 - "$WP_FILE" "$RESULT_KIND" <<'PYEOF'
+import sys
+path, kind = sys.argv[1:3]
+with open(path, encoding="utf-8") as f:
+    text = f.read()
+anchor = "related: []\n"
+if "result_kind:" not in text and anchor in text:
+    text = text.replace(anchor, anchor + f"result_kind: {kind}\n", 1)
+    with open(path, "w", encoding="utf-8") as f:
+        f.write(text)
+    print(f"   ✅ frontmatter: result_kind: {kind}")
+PYEOF
+fi
 
 # --- Шаг 2: archive stub ---
 echo "2/6 archive stub..."
