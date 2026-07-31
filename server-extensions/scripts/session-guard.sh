@@ -207,7 +207,14 @@ if [ "$CMD" = "open" ]; then
 
   SESSION_ID="${IWE_SESSION_ID:-$(date +%s)}"
   SEM_FILE="$SESSION_DIR/${AGENT}-${SESSION_ID}.open"
-  ORZ_BASENAME="$(now_month)/$(now_date)-${SLUG:-$WP}.md"
+  # WP-484 (31.07, data-pipeline-audit-2026-07-30.md §3.3): a caller-supplied slug
+  # sometimes already carries today's date (Kimi free-text `--slug`, human habit) —
+  # confirmed live on real files, e.g. sessions/2026-07/2026-07-31-2026-07-31-wp510-*.md.
+  # This is the ONE place that assembles the path, so it's the one place that can
+  # enforce "date appears exactly once" regardless of what any caller passes.
+  CLEAN_SLUG="${SLUG:-$WP}"
+  CLEAN_SLUG="${CLEAN_SLUG#"$(now_date)"-}"
+  ORZ_BASENAME="$(now_month)/$(now_date)-${CLEAN_SLUG}.md"
   ORZ_FILE="$ORZ_DIR/$ORZ_BASENAME"
   mkdir -p "$(dirname "$ORZ_FILE")"
   {
@@ -228,6 +235,16 @@ if [ "$CMD" = "open" ]; then
         [ -n "$init_file" ] && echo "file: $init_file"
       done
     fi
+    # Ф32 п.5 (WP-484, 31.07): `open` creates the ORZ scaffold itself below — its
+    # first commit is a brand-new git path (status A), which the scope gate never
+    # mtime-bypasses. Without this line every session's OWN report needed a
+    # separate `note-file` call just to survive the gate it forgot about — live-
+    # reproduced (mktemp sandbox: open → edit ORZ → git add → pre-commit-check
+    # → BLOCK) and matches orphaned untracked ORZ files found sitting in this
+    # session's own `git status` from a prior, unrelated WP. Path is relative to
+    # $ORZ_DIR's PARENT (governance-repo root — sessions/<...>), same convention
+    # every other `file:` line already uses.
+    echo "file: $(basename "$ORZ_DIR")/$ORZ_BASENAME"
   } > "$SEM_FILE"
   # Pointer to active semaphore for PostToolUse hooks
   PTR_FILE="$SESSION_DIR/current-${AGENT}.ptr"
