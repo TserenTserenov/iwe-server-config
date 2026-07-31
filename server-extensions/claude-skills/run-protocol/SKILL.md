@@ -39,7 +39,7 @@ gates_rationale: "операционный скилл; WP Gate применим 
 | `open session` или задание | `memory/protocol-open.md § Сессия` | — |
 | `day-close` / `close day` | `.claude/skills/day-close/SKILL.md` (гейты размечены прямо в Skill-файле, WP-481 Ф5.1 — `protocol-close.md` секции «§ День» не существует) | тот же файл |
 | `close` (без уточнения) | — | `close session` по умолчанию |
-| `close session` | `memory/protocol-close.md § Quick Close` | — |
+| `close session` | `memory/protocol-close.md § Quick Close` (ЧАСТЬ А с пилотом / ЧАСТЬ Б без пилота, DP.D.288 — WP-484 31.07) | — |
 | `week-close` | `memory/protocol-close.md § Week Close` | `.claude/skills/week-close/SKILL.md` |
 
 Если есть Skill-файл → читай его (содержит полный алгоритм + шаблоны). Protocol-файл = краткий маршрутизатор — кроме Day Close, где гейты размечены прямо в Skill-файле (нет отдельного router-раздела в protocol-close.md).
