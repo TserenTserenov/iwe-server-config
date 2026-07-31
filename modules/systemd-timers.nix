@@ -373,6 +373,22 @@ let
     [ -n "''${HEARTBEAT_URL:-}" ] && ${pkgs.curl}/bin/curl -s --max-time 10 "$HEARTBEAT_URL" > /dev/null
     exit 0
   '';
+
+  # Package 6 (audit-2026-07-30-yellow-verdict-fixes.md, checks/2026-07-31.md, провенанс
+  # «база знаний: отсутствует»): server-side эквивалент Mac launchd-обёртки
+  # (DS-autonomous-agents/scripts/prefetch-knowledge-snapshot-wrapper.sh) — та же причина
+  # обёртки: ExecStart (как и launchd ProgramArguments) не делает $(...) подстановку inline,
+  # нужен --now таймстамп для prefetch-knowledge-snapshot.py.
+  prefetchKnowledgeSnapshotWrapper = pkgs.writeShellScript "iwe-prefetch-knowledge-snapshot" ''
+    set -uo pipefail
+    OUT="${iwe}/DS-autonomous-agents/scripts/seeds/knowledge-snapshot.yaml"
+    NOW=$(${pkgs.coreutils}/bin/date -u +%Y-%m-%dT%H:%M:%SZ)
+    ${pkgs.coreutils}/bin/mkdir -p "$(${pkgs.coreutils}/bin/dirname "$OUT")"
+    exec ${pythonForIWE}/bin/python3 \
+      "${iwe}/DS-autonomous-agents/scripts/prefetch-knowledge-snapshot.py" \
+      --out "$OUT" \
+      --now "$NOW"
+  '';
 in
 {
   options.tsekh.timers = {
@@ -1365,6 +1381,43 @@ in
       description = "WP-455 OTS Watchdog — ежечасно";
       timerConfig = {
         OnCalendar = "*-*-* *:00:00 UTC";
+        Persistent = true;
+      };
+    };
+
+    # =========================================================
+    # 15. PREFETCH KNOWLEDGE SNAPSHOT — универсальные руководства для рендера (WP-149 B2)
+    # =========================================================
+    # Package 6 (audit-2026-07-30-yellow-verdict-fixes.md, checks/2026-07-31.md,
+    # провенанс «база знаний: отсутствует / неожиданно»): таймер собирал снимок
+    # только на Mac (com.iwe.prefetch-knowledge-snapshot, 04:30 локально) — ночной
+    # рендер идёт на tsekh-1 и никогда его не видел, снимок физически не доезжал.
+    # Запускается ДО ночного рендера (iwe-render-pilot-guides-daily, 02:00
+    # Europe/Nicosia) — тот же часовой пояс, 30 мин запаса.
+    # Приватность (B7.3, см. докстринг prefetch-knowledge-snapshot.py): запросы к
+    # knowledge-mcp анонимные, PII/owner не передаётся — тот же контракт, что на Mac.
+
+    systemd.services."iwe-prefetch-knowledge-snapshot" = {
+      description = "IWE — снимок универсальных руководств для рендера (WP-149 B2)";
+      unitConfig   = commonUnitConfig;
+      serviceConfig = commonServiceConfig // {
+        ExecStart  = "${prefetchKnowledgeSnapshotWrapper}";
+        # Worst-case скрипта (cold-context review 31.07, В3): _trim_result верифицирует
+        # ссылку у всех RESULTS_LIMIT=10 кандидатов (до 15s HEAD + 15s GET-fallback
+        # каждый) + search с ретраем 40-80s — до ~6.5 мин на программу × 3 программы.
+        # 1500s покрывает это и укладывается в окно 01:30→02:00 до рендера; убитый
+        # по таймауту юнит НЕ пишет файл (запись в конце main) → «отсутствует» + алерт.
+        TimeoutSec = 1500;
+      };
+      path = commonPath;
+      environment = commonEnv;
+    };
+
+    systemd.timers."iwe-prefetch-knowledge-snapshot" = {
+      wantedBy    = [ "timers.target" ];
+      description = "IWE prefetch-knowledge-snapshot — ежедн 01:30 Europe/Nicosia (до рендера 02:00)";
+      timerConfig = {
+        OnCalendar = "*-*-* 01:30:00 Europe/Nicosia";
         Persistent = true;
       };
     };
