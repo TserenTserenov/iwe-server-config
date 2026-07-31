@@ -995,7 +995,18 @@ wp: <WP-NNN или unknown>
 **4.5.0 Заполнить служебный ORZ-скаффолд session-guard** (если Шаг 1.0 создал семафор успешно) — минимально, пойнтером на настоящий отчёт, не дублируя контент:
 
 ```bash
-GUARD_ORZ="$HOME/IWE/${IWE_GOVERNANCE_REPO:-DS-strategy}/sessions/$MONTH/${TODAY}-${SESSION_ID}.md"
+# session-guard.sh open (Шаг 1.0) сам строит имя файла как "$TODAY-$CLEAN_SLUG.md",
+# где CLEAN_SLUG — переданный --slug (= SESSION_ID) с уже вырезанным ведущим
+# "$TODAY-" (session-guard.sh:215-216, WP-484 31.07 — защита от задвоения даты).
+# SESSION_ID здесь ВСЕГДА начинается с "$TODAY-" (Шаг 1: "${TODAY}-${NUM}-${SLUG}"),
+# поэтому наивная склейка "${TODAY}-${SESSION_ID}" ниже задваивала бы дату и
+# искала файл по несуществующему пути — найдено живьём 2026-07-31 (peer-session
+# 2026-07-31-14-wp484-session-close-discipline): несколько чужих ORZ-скаффолдов
+# от прошлых пир-сессий того же дня повисли untracked ровно по этой причине,
+# Шаг 4.5.1 их тоже не подхватывал (`[ -f "$GUARD_ORZ" ]` на неверном пути
+# всегда false → файл не попадал в PATHS → никогда не коммитился).
+CLEAN_SESSION_ID="${SESSION_ID#"$TODAY"-}"
+GUARD_ORZ="$HOME/IWE/${IWE_GOVERNANCE_REPO:-DS-strategy}/sessions/$MONTH/${TODAY}-${CLEAN_SESSION_ID}.md"
 if [ -f "$GUARD_ORZ" ]; then
   cat > "$GUARD_ORZ" <<EOF
 ---

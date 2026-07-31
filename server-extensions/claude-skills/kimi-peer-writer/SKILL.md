@@ -2,7 +2,7 @@
 name: kimi-peer-writer
 description: Peer-сессия DP.SC.154 где Kimi = писатель, Claude = напарник. Запускается простой фразой. Включает ОРЗ Opening и Closing, turn-loop, эскалации, Decision Gate (зафиксировать vs реализовать → ревью → проверить → задеплоить), отложенную финализацию и верификацию.
 argument-hint: "<описание задачи> | --list | --interrupt <session_id> | --finalize <session_id>"
-version: 1.2.0
+version: 1.3.0
 layer: L1
 status: active
 triggers:
@@ -50,6 +50,17 @@ Peer-сессия DP.SC.154 где Kimi = писатель, Claude = напар�
 - Иначе → новая сессия, продолжать к Шагу 0б.
 
 ---
+
+## Шаг 0а. Preflight Gate (WP-484 Ф33 item Г, обязательно ДО любых других действий)
+
+Та же проверка, что `~/.kimi-code/skills/session-open/SKILL.md` уже делает для standalone-сессий Kimi (Ф33, 31.07) — до этой правки у пир-сессий Kimi-писателя не было НИКАКОЙ проверки, что сессия открыта честно (тот же класс дыры, что Ф28: закрытие пир-сессии сочло «у пир-сессии свой протокол» достаточным основанием и обошло вопрос-рефлексию):
+
+```bash
+bash "$HOME/IWE/scripts/kimi-standalone-preflight.sh"
+```
+
+- Exit ≠ 0 (`ERROR: Kimi standalone session is NOT OPEN`) → **СТОП.** Не переходить к Шагу 0б, не открывать WP Gate, не создавать `meta.yaml`/`00-writer.md`, не трогать файлы. Показать пилоту команду из stderr скрипта (`session-guard.sh open --wp WP-N --task "..." --agent kimi`) и ждать, пока сессия не будет открыта явно.
+- Exit 0 (в т.ч. с предупреждением про устаревшую/stale-сессию) → продолжать к Шагу 0б.
 
 ## Шаг 0б. Открытие (WP Gate — только для новой сессии)
 
