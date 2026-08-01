@@ -145,4 +145,5 @@
 - [reference_macos_zsh_env_quirks_hub.md](reference_macos_zsh_env_quirks_hub.md) — квирки macOS/zsh/grep/git (15)
 - [reference_process_runner_quirks_hub.md](reference_process_runner_quirks_hub.md) — креды в карточке, race с активной сессией, umbrella-архивация (3)
 - [reference_secrets_credentials_hub.md](reference_secrets_credentials_hub.md) — .mcp.json wrapper, ротация-верификация, 403≠401 (3)
+- [reference_day_cycle_tsekh1_fallback.md](reference_day_cycle_tsekh1_fallback.md) — день открывается вручную на Маке при падении Цех-1; нужна диагностика (ночь 31.07→01.08)
 - Остальные уроки/hubs (31 шт., demoted 28.07+30.07) → [MEMORY-warm.md](MEMORY-warm.md)
