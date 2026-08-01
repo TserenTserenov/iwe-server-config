@@ -196,22 +196,33 @@ if [ "$CMD" = "open" ]; then
     # any unrelated append (note-file, a stray write into the wrong semaphore)
     # bumps mtime and resets the TTL clock, which is exactly how a truly
     # abandoned semaphore (WP-507, 30.07) survived auto-orphan for 4.5h while
-    # collecting other sessions' files. Falls back to mtime for semaphores
-    # written before this field existed, or if the timestamp fails to parse.
+    # collecting other sessions' files. Falls back to created_at, then to a
+    # loud WARN (no more silent mtime fallback — see WP-484 Ф31 below).
     STALE_OPENED_AT=$(grep "^opened_at: " "$STALE" | cut -d' ' -f2- || true)
     STALE_EPOCH=""
     if [ -n "$STALE_OPENED_AT" ]; then
       STALE_EPOCH=$(date -u -j -f "%Y-%m-%dT%H:%M:%SZ" "$STALE_OPENED_AT" +%s 2>/dev/null \
         || date -u -d "$STALE_OPENED_AT" +%s 2>/dev/null || echo "")
     fi
+    # Fallback to mtime is REMOVED to prevent WP-507-style orphan resurrection
+    # (append-operations updating mtime restart the TTL clock).
+    # If opened_at failed, try created_at (immutable backup added in WP-484 Ф31).
     if [ -z "$STALE_EPOCH" ]; then
-      # GNU-first (bug-2026-07-24, inbox/bugs/): on Linux, `stat -f` doesn't fail,
-      # it prints "filesystem status" garbage — the BSD-first order below used to
-      # silently accept that garbage as a "successful" first branch, never reaching
-      # the GNU fallback.
-      STALE_EPOCH=$(stat -c %Y "$STALE" 2>/dev/null || stat -f %m "$STALE" 2>/dev/null || echo "")
+      STALE_CREATED_AT=$(grep "^created_at: " "$STALE" | cut -d' ' -f2- || true)
+      if [ -n "$STALE_CREATED_AT" ]; then
+        STALE_EPOCH=$(date -u -j -f "%Y-%m-%dT%H:%M:%SZ" "$STALE_CREATED_AT" +%s 2>/dev/null \
+          || date -u -d "$STALE_CREATED_AT" +%s 2>/dev/null || echo "")
+      fi
     fi
-    [ -z "$STALE_EPOCH" ] && continue
+    # Neither timestamp present/parseable (pre-WP-484 semaphore, or corrupt
+    # file): this semaphore can NEVER be auto-orphaned now that mtime fallback
+    # is gone. Independent code review (01.08) flagged the silent version of
+    # this as a scope-gate weakening risk — loud WARN so it surfaces in `audit`
+    # and in whatever log captures open's stderr, instead of vanishing.
+    if [ -z "$STALE_EPOCH" ]; then
+      echo "WARNING: semaphore ($(basename "$STALE")) has no opened_at/created_at — cannot auto-orphan, needs manual cleanup or 'audit' review" >&2
+      continue
+    fi
     STALE_AGE=$(( $(date +%s) - STALE_EPOCH ))
     if [ "$STALE_AGE" -gt 1800 ]; then
       STALE_WP=$(grep "^wp: " "$STALE" | cut -d' ' -f2- || echo "unknown")
@@ -239,6 +250,7 @@ if [ "$CMD" = "open" ]; then
     echo "task: ${TASK:-}"
     echo "slug: ${SLUG:-$WP}"
     echo "opened_at: $(now_iso)"
+    echo "created_at: $(now_iso)"
     echo "session_id: $SESSION_ID"
     echo "orz_file: $ORZ_BASENAME"
     echo "---"

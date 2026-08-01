@@ -2,7 +2,7 @@
 name: peer-conversation
 description: Многотуровый диалог писателя (Claude) с одним или несколькими напарниками (любой набор из kimi/codex/hermes/claude-headless) по задаче пилота (DP.SC.154). Ведёт turn-loop (2 участника) или round-loop (3+, WP-509), обнаруживает CONSENSUS/ESCALATE, после консенсуса — Decision Gate (зафиксировать vs реализовать → ревью → проверить → задеплоить), синтезирует report.md через Agent tool.
 argument-hint: "<описание задачи> [--peer kimi|codex|hermes|claude[,vendor2,...]] | --list | --interrupt <session_id> | --finalize <session_id>"
-version: 1.5.2
+version: 1.5.3
 layer: L3
 status: active
 triggers:
@@ -386,10 +386,22 @@ ESCALATE_TO_USER: <причина> — если писатель игнорир�
 ```bash
 PEER_FILE="${SESSION_DIR}/$(printf '%02d' $TURN)-peer.md"
 if [ "$PEER_VENDOR" = "hermes" ]; then
-  # hermes-peer-adapter.sh не принимает --add-dir/--model — свой --session-id
-  echo "<промпт>" | bash "$ADAPTER_PATH" \
-    --session-id "$SESSION_ID" \
-    2>/dev/null > "$PEER_FILE"
+  # hermes-peer-adapter.sh не принимает --add-dir/--model — свой --session-id.
+  # НЕ путать с $SESSION_ID пир-сессии: адаптер всегда шлёт переданный --session-id
+  # как `--resume <id>` в hermes CLI — на самом первом вызове этой пир-сессии
+  # у Hermes ещё не существует диалога с ID пир-сессии (это два разных
+  # пространства идентификаторов), `hermes chat --resume <несуществующий>`
+  # падает молча (set -euo pipefail в адаптере гасит его же диагностику до того,
+  # как она успевает напечататься) — найдено живьём 2026-07-31/08-01, WP-484/WP-509.
+  # Родной session_id Hermes читаем С ДИСКА (последний уже записанный NN-peer.md),
+  # не из shell-переменной — агент делает каждый вызов отдельным Bash-тулом, и
+  # переменные не переживают границу между вызовами (найдено code review 01.08).
+  HERMES_LAST_ID=$(grep -h "^session_id: " "${SESSION_DIR}"/[0-9][0-9]-peer.md 2>/dev/null | tail -1 | sed 's/^session_id: //')
+  if [ -z "$HERMES_LAST_ID" ]; then
+    echo "<промпт>" | bash "$ADAPTER_PATH" > "$PEER_FILE" 2>/dev/null
+  else
+    echo "<промпт>" | bash "$ADAPTER_PATH" --session-id "$HERMES_LAST_ID" > "$PEER_FILE" 2>/dev/null
+  fi
 else
   echo "<промпт>" | bash "$ADAPTER_PATH" \
     --add-dir "$SESSION_DIR" \
@@ -512,8 +524,24 @@ REQUEST_HANDOFF: <причина> — необязывающая просьба 
 PEER_FILE="${SESSION_DIR}/$(printf '%02d' $ROUND)-peer-${vendor}.md"
 PROMPT_FILE=$(mktemp)
 # записать промпт (см. шаблон выше) в $PROMPT_FILE
-cat "$PROMPT_FILE" | bash "${ADAPTER_PATH[$vendor]}" --add-dir "$SESSION_DIR" 2>/dev/null > "$PEER_FILE"
-STATUS=$?
+if [ "$vendor" = "hermes" ]; then
+  # Тот же контракт и та же ловушка, что в Шаге 3.1 (turn-loop) — hermes не берёт
+  # --add-dir, и переданный --session-id всегда трактуется как --resume. Родной
+  # hermes session_id читаем С ДИСКА (последний уже записанный NN-peer-hermes.md),
+  # не из shell-переменной — агент делает каждый вызов отдельным Bash-тулом, и
+  # переменные не переживают границу между вызовами (найдено code review 01.08).
+  HERMES_LAST_ID=$(grep -h "^session_id: " "${SESSION_DIR}"/[0-9][0-9]-peer-hermes.md 2>/dev/null | tail -1 | sed 's/^session_id: //')
+  if [ -z "$HERMES_LAST_ID" ]; then
+    cat "$PROMPT_FILE" | bash "${ADAPTER_PATH[$vendor]}" > "$PEER_FILE" 2>/dev/null
+    STATUS=$?
+  else
+    cat "$PROMPT_FILE" | bash "${ADAPTER_PATH[$vendor]}" --session-id "$HERMES_LAST_ID" > "$PEER_FILE" 2>/dev/null
+    STATUS=$?
+  fi
+else
+  cat "$PROMPT_FILE" | bash "${ADAPTER_PATH[$vendor]}" --add-dir "$SESSION_DIR" > "$PEER_FILE" 2>/dev/null
+  STATUS=$?
+fi
 rm -f "$PROMPT_FILE"
 ```
 

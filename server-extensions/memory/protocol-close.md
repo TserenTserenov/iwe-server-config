@@ -25,7 +25,7 @@ modified: 2026-07-31T15:36:16.752Z
 | Триггер | Аргумент | Skill |
 |---------|---------|-------|
 | «закрываю сессию» / «всё» / «закрывай» | `close` или `close session` | Quick Close (ниже, inline) |
-| «закрываю день» / «итоги дня» | `close day` | `.claude/skills/day-close/SKILL.md` — **шаг 6: WakaTime + Мультипликатор IWE** |
+| «закрываю день» / «итоги дня» | `close day` | `.claude/skills/day-close/SKILL.md` — **шаг 12: Мультипликатор IWE** |
 | «закрываю неделю» / «итоги недели» | `week-close` | `.claude/skills/week-close/SKILL.md` |
 
 > **`close` без уточнения** → Quick Close (сессия) по умолчанию.
@@ -173,7 +173,7 @@ cd DS-my-strategy && python3 scripts/process-runner.py start quick-close --slug 
 
 ### Шаги Week Close
 
-> **Trace-satisfaction (WP-481 Ф5.1):** `bash .claude/hooks/rule-engine.sh check-trace-satisfaction --protocol memory/protocol-close.md --section "Week Close"` (без `--section` в проверку попадают ещё и гейты Quick Close). Вызывается из `.claude/skills/week-close/SKILL.md` шаг 12, перед R23.
+> **Trace-satisfaction (WP-481 Ф5.1):** `bash .claude/hooks/rule-engine.sh check-trace-satisfaction --protocol memory/protocol-close.md --section "Week Close"` (без `--section` в проверку попадают ещё и гейты Quick Close). Вызывается из `.claude/skills/week-close/SKILL.md` шаг 14, перед R23.
 
 1. **Бэкап + грязные репо** — `backup-icloud.sh` + `check-dirty-repos.sh` (платформа) [[gate]]
 2. **Memory Validate** — `memory-bleed.sh` (HOT-лимит, orphans, superseded_by) [[gate]]
