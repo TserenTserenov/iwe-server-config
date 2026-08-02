@@ -100,7 +100,7 @@ Hot-каркас ≤20K токенов (M1), строгая цель ≤12K (M2)
 
 ## Artifact Naming
 
-**Do not invent artifact names.** Names for sections, documents, RPs, and deliverables must come from the plan/task you received. If the task is silent on a name — report "need clarification on name" instead of making one up.
+**Do not invent artifact names.** Names for documents, RPs and deliverables must come from the plan/task you received. If the task is silent on a name — report "need clarification on name" instead of making one up. **Exception for phases of an existing RP:** create the next unused sequential number (`ФN`) without inventing a title; the phase number itself is sufficient.
 
 ## Drift Reporting
 
