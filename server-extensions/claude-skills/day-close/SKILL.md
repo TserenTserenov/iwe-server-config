@@ -73,7 +73,7 @@ bash ~/IWE/scripts/day-close-step-log.sh end 0.6
 
 > **DP.D.288.** Единственная цель этой части — короткий свод + рефлексия пилота. Никакой механики здесь не считается и не пишется (кроме самого свода из уже готовых данных) — механика вся в Части Б, без пилота.
 
-### 1. Сжатый свод дня [[narrative]]
+### 1. Предварительный свод дня [[narrative]]
 
 ```bash
 for repo in $(ls {{HOME_DIR}}/IWE/); do
@@ -87,7 +87,7 @@ for repo in $(ls {{HOME_DIR}}/IWE/); do
 done
 ```
 
-Показать пилоту 3-5 строк: что сделано сегодня (не таблицу статусов РП — та собирается в Части Б без него). Это и есть «сжатый свод накопленного», который стимулирует рефлексию (DP.D.288), не полный governance-разбор.
+Показать пилоту 3-5 строк: что сделано сегодня (не таблицу статусов РП — та собирается в Части Б без него). Начать с подписи: **«Предварительный свод дня — снимок для рефлексии, не итоговые цифры»**. Это ранний снимок накопленного, который стимулирует рефлексию (DP.D.288); окончательные цифры и проверки появятся только после Части Б.
 
 ### 2. Единый блок вопросов (WP-484 Ф36, 01.08 — было 2 отдельных хода пилота, слито в один) [[gate]]
 
@@ -254,7 +254,7 @@ bash ~/IWE/scripts/day-close-step-log.sh end 5
 
 ```bash
 bash ~/IWE/scripts/day-close-step-log.sh start 5b
-bash "{{HOME_DIR}}/IWE/DS-my-strategy/scripts/day-close-prepare.sh" || true
+bash "{{HOME_DIR}}/IWE/DS-my-strategy/scripts/day-close-prepare.sh" --for-date "$(date +%F)" || true
 bash ~/IWE/scripts/day-close-step-log.sh end 5b
 ```
 
@@ -324,9 +324,7 @@ bash ~/IWE/scripts/day-close-step-log.sh end 5b
 **Postcondition 14a (машинная проверка — НЕ пропускать):**
 ```bash
 TODAY=$(date +%Y-%m-%d)
-grep -l "Итоги дня" ~/IWE/DS-my-strategy/archive/day-plans/DayPlan\ ${TODAY}.md 2>/dev/null \
-  | xargs grep -l "${TODAY}" 2>/dev/null \
-  | grep -q . && echo "14a OK" || echo "14a FAIL: итоги не найдены в DayPlan ${TODAY}"
+bash ~/IWE/DS-my-strategy/scripts/day-close-prepare.sh --verify-dayplan --for-date "$TODAY"
 ```
 Результат `14a FAIL` → шаг НЕ помечать completed, вернуться к записи.
 
@@ -343,11 +341,8 @@ grep -l "Итоги дня" ~/IWE/DS-my-strategy/archive/day-plans/DayPlan\ ${TO
 **Postcondition 14b (машинная проверка — НЕ пропускать):**
 ```bash
 TODAY=$(date +%Y-%m-%d)
-DAY_NUM=$(date +%-d)
-# Сначала проверь WeekReport (split ОПТ-5), fallback на WeekPlan
-( grep -rl "Итоги.*${DAY_NUM}" ~/IWE/DS-my-strategy/current/WeekReport\ W*.md 2>/dev/null \
-  || grep -rl "Итоги.*${DAY_NUM}" ~/IWE/DS-my-strategy/current/WeekPlan\ W*.md 2>/dev/null ) \
-  | grep -q . && echo "14b OK" || echo "14b FAIL: итоги не найдены ни в WeekReport, ни в WeekPlan"
+# Сначала проверяет WeekReport (split ОПТ-5), затем WeekPlan; имена с пробелами безопасны.
+bash ~/IWE/DS-my-strategy/scripts/day-close-prepare.sh --verify-week-summary --for-date "$TODAY"
 ```
 Результат `14b FAIL` → шаг НЕ помечать completed, вернуться к записи.
 
