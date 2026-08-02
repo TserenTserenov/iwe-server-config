@@ -31,6 +31,8 @@ MEMORY_SRC="${IWE_MEMORY_SRC:-$HOME/.claude/projects/${WORKSPACE_SLUG}/memory}"
 EXOCORTEX_DST="$DS_STRATEGY/exocortex"
 # MCP reindex — опциональный компонент (WP-187 iwe-knowledge Gateway заменяет локальный knowledge-mcp).
 # Переопределить путь можно через env IWE_SELECTIVE_REINDEX.
+# do_reindex() exit code for "some branches indexed, some failed" (see do_reindex).
+readonly RC_REINDEX_PARTIAL=3
 SELECTIVE_REINDEX="${IWE_SELECTIVE_REINDEX:-$WORKSPACE_DIR/DS-MCP/knowledge-mcp/scripts/selective-reindex.sh}"
 SOURCES_JSON="${IWE_SOURCES_JSON:-$WORKSPACE_DIR/DS-MCP/knowledge-mcp/scripts/sources.json}"
 SOURCES_PERSONAL_JSON="${IWE_SOURCES_PERSONAL_JSON:-$WORKSPACE_DIR/DS-MCP/knowledge-mcp/scripts/sources-personal.json}"
@@ -215,24 +217,43 @@ PYEOF
   # the rest of the pipeline follows. `|| reindex_had_failures=true` catches it
   # without stopping the script; the caller (protocol-close.md) already reads
   # do_reindex()'s own return value via $reindex_status further down.
-  local reindex_had_failures=false
+  # Count branches so a partial outage stays distinguishable from a total one:
+  # day-close-run.sh:32 blocks the whole Day Close on `reindex=fail`, which is why
+  # 31.07 and 01.08 stalled on a failed L4 while L2 had already indexed 3078/2116 docs.
+  local l2_rc=0 l4_rc=0 ran=0 failed=0
 
   # Вызов 1: L2 источники (sources.json — дефолт selective-reindex)
   if [ -n "$l2_sources" ]; then
     log "  L2 источники:$l2_sources"
+    ran=$((ran + 1))
     # shellcheck disable=SC2086
-    "$SELECTIVE_REINDEX" $l2_sources || reindex_had_failures=true
+    "$SELECTIVE_REINDEX" $l2_sources || l2_rc=$?
+    if [ "$l2_rc" -ne 0 ]; then
+      failed=$((failed + 1))
+      warn "  L2 reindex отказал (код $l2_rc)"
+    fi
   fi
 
   # Вызов 2: L4 источники (sources-personal.json через SOURCES_CONFIG)
   if [ -n "$l4_sources" ]; then
     log "  L4 источники:$l4_sources"
+    ran=$((ran + 1))
     # shellcheck disable=SC2086
-    SOURCES_CONFIG="$SOURCES_PERSONAL_JSON" "$SELECTIVE_REINDEX" $l4_sources || reindex_had_failures=true
+    SOURCES_CONFIG="$SOURCES_PERSONAL_JSON" "$SELECTIVE_REINDEX" $l4_sources || l4_rc=$?
+    if [ "$l4_rc" -ne 0 ]; then
+      failed=$((failed + 1))
+      warn "  L4 reindex отказал (код $l4_rc)"
+    fi
   fi
 
-  [ "$reindex_had_failures" = "true" ] && return 1
-  return 0
+  if [ "$failed" -eq 0 ]; then
+    return 0
+  elif [ "$failed" -lt "$ran" ]; then
+    warn "  reindex: отказала часть веток ($failed из $ran) — Day Close продолжается"
+    return "$RC_REINDEX_PARTIAL"
+  else
+    return 1
+  fi
 }
 
 # --- Шаг 3: Linear sync ---
@@ -390,7 +411,13 @@ main() {
 
   if $run_reindex; then
     SECONDS=0
-    if do_reindex; then reindex_status="ok"; else reindex_status="fail"; fi
+    local reindex_rc=0
+    do_reindex || reindex_rc=$?
+    case "$reindex_rc" in
+      0)                     reindex_status="ok" ;;
+      "$RC_REINDEX_PARTIAL") reindex_status="partial" ;;
+      *)                     reindex_status="fail" ;;
+    esac
     reindex_dur=$SECONDS
   fi
 
