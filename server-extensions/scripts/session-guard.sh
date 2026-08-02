@@ -407,6 +407,22 @@ if [ "$CMD" = "close" ]; then
     fail "ORZ не прошёл валидацию. Исправь замечания выше и повтори close. Семафор остаётся активным." 5
   fi
 
+  # Quick Close — не текстовая декларация: именно терминальная карточка раннера
+  # доказывает, что эта сессия прошла обязательный процесс. Сопоставление по slug
+  # не даёт чужой параллельной карточке закрыть текущую сессию.
+  RUNNER_CARD="$IWE_ROOT/$GOV_REPO/inbox/agent/tasks/RUN-quick-close-${SLUG}"'*.md'
+  RUNNER_OK=""
+  for card in $RUNNER_CARD; do
+    [ -f "$card" ] || continue
+    grep -q '^process_id: quick-close$' "$card" || continue
+    grep -q '^status: completed$' "$card" || continue
+    RUNNER_OK="$card"
+    break
+  done
+  if [ -z "$RUNNER_OK" ]; then
+    fail "Quick Close не завершён для slug '$SLUG': нет terminal RUN-quick-close-${SLUG}*.md. Сначала запусти process-runner.py start quick-close с тем же --slug." 7
+  fi
+
   # agent status idle
   if [ -x "$AGENT_STATUS_SCRIPT" ]; then
     "$AGENT_STATUS_SCRIPT" "$AGENT" idle "" "" 2>/dev/null || true

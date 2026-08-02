@@ -40,14 +40,23 @@ if [ ! -f "$REMIND_SCRIPT" ]; then
   exit 0
 fi
 
+# Личностные и runtime-ошибки нельзя смешивать. Явный субъект приходит из
+# запускающей среды; без него hook не читает персональные записи вообще.
+SUBJECT_KIND="${IWE_FAULT_SUBJECT_KIND:-}"
+SUBJECT_ID="${IWE_FAULT_SUBJECT_ID:-}"
+if [ -z "$SUBJECT_KIND" ] || [ -z "$SUBJECT_ID" ]; then
+  echo '{}'
+  exit 0
+fi
+
 # Запустить скрипт (с timeout если есть, иначе без — на macOS нет timeout по умолчанию)
 if command -v timeout >/dev/null 2>&1; then
-  REMIND_OUT=$(timeout 5 python3 "$REMIND_SCRIPT" --protocol open 2>/dev/null || echo "")
+  REMIND_OUT=$(timeout 5 python3 "$REMIND_SCRIPT" --protocol open --subject-kind "$SUBJECT_KIND" --subject-id "$SUBJECT_ID" 2>/dev/null || echo "")
 elif command -v gtimeout >/dev/null 2>&1; then
-  REMIND_OUT=$(gtimeout 5 python3 "$REMIND_SCRIPT" --protocol open 2>/dev/null || echo "")
+  REMIND_OUT=$(gtimeout 5 python3 "$REMIND_SCRIPT" --protocol open --subject-kind "$SUBJECT_KIND" --subject-id "$SUBJECT_ID" 2>/dev/null || echo "")
 else
   # Fallback без timeout — скрипт быстрый (sqlite-read)
-  REMIND_OUT=$(python3 "$REMIND_SCRIPT" --protocol open 2>/dev/null || echo "")
+  REMIND_OUT=$(python3 "$REMIND_SCRIPT" --protocol open --subject-kind "$SUBJECT_KIND" --subject-id "$SUBJECT_ID" 2>/dev/null || echo "")
 fi
 if [ -z "$REMIND_OUT" ]; then
   echo '{}'

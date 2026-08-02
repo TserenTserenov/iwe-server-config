@@ -215,12 +215,13 @@ CONSENSUS: <резюме> — если считаешь что договори�
 ESCALATE_TO_USER: <причина> — если писатель игнорирует существенное возражение
 ```
 
+Перед вызовом Claude писатель добавляет в промпт минимальную текстовую проекцию предыдущих реплик и фактов. Claude не читает `SESSION_DIR` и не использует инструменты.
+
 Вызов Claude через Bash:
 ```bash
 PEER_FILE="${SESSION_DIR}/$(printf '%02d' $TURN)-peer.md"
 echo "<промпт>" | bash "$HOME/IWE/${IWE_GOVERNANCE_REPO:-DS-strategy}/scripts/claude-peer-adapter.sh" \
-  --add-dir "$SESSION_DIR" \
-  2>/dev/null > "$PEER_FILE"
+  > "$PEER_FILE" 2> "${PEER_FILE%.md}.err"
 ```
 
 Если файл пустой или exit ≠ 0 → сообщить пилоту: «Claude не ответил. Повторить или прервать?»
@@ -392,12 +393,10 @@ EOF
 )
 
 echo "$REVIEW_PROMPT" | bash "$HOME/IWE/${IWE_GOVERNANCE_REPO:-DS-strategy}/scripts/claude-peer-adapter.sh" \
-  --add-dir "$SESSION_DIR" \
-  --add-dir "<repo path1>" --add-dir "<repo path2>" \
-  2>/dev/null > "$REVIEW_FILE"
+  > "$REVIEW_FILE" 2> "${REVIEW_FILE%.md}.err"
 ```
 
-`--add-dir` для каждого репо где есть изменённые файлы (иначе Claude не сможет их прочитать).
+Добавь в `REVIEW_PROMPT` точечный diff и нужные фрагменты файлов. Нельзя передавать каталоги: Claude получает только текстовую проекцию.
 
 ### 3.6.3 Review Outcome
 
@@ -442,11 +441,10 @@ EOF
 )
 
 echo "$VERIFY_PROMPT" | bash "$HOME/IWE/${IWE_GOVERNANCE_REPO:-DS-strategy}/scripts/claude-peer-adapter.sh" \
-  --add-dir "$SESSION_DIR" \
-  --add-dir "<repo path1>" --add-dir "<repo path2>" \
-  --permission-mode acceptEdits \
-  2>/dev/null > "$VERIFY_FILE"
+  > "$VERIFY_FILE" 2> "${VERIFY_FILE%.md}.err"
 ```
+
+Claude в этом вызове не запускает smoke-тесты: он может только оценить переданный текст. Исполняемую проверку запускает писатель локально по отдельному протоколу.
 
 **Результат:**
 - PASS → перейти к 3.6.5.

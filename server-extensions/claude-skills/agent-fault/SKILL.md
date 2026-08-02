@@ -29,11 +29,12 @@ routing:
 
 ## Algorithm
 
-Передать косяк в `iwe_checklist_memory.py record` с указанием severity и описания:
+Передать косяк в `iwe_checklist_memory.py record` с указанием severity, описания и владельца. Владелец обязателен: подтверждённая личность, конкретная среда исполнения или системное правило. Не приписывать runtime-ошибку личности без доказанной связи.
 
 ```bash
 python3 "${IWE_SCRIPTS:-$HOME/IWE/scripts}/iwe_checklist_memory.py" \
-  record --severity major --fault "агент пропустил чеклист"
+  record --severity major --fault "агент пропустил чеклист" \
+  --subject-kind runtime --subject-id codex-cli
 ```
 
 Допустимые значения `--severity`: `critical` | `major` | `minor`.

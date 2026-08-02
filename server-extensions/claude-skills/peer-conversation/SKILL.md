@@ -64,11 +64,11 @@ gates_rationale: "операционный скилл; WP Gate применим 
 | `kimi` | `scripts/kimi-peer-adapter.sh` | `kimi-headless` | да | да | — |
 | `codex` | `scripts/codex-peer-adapter.sh` | `codex` | да | да | — |
 | `hermes` | `scripts/hermes-peer-adapter.sh` | `hermes` | **нет** | **нет** | `--session-id <id>` вместо |
-| `claude` | `scripts/claude-peer-adapter.sh` | `claude-code-headless` | да | да | — |
+| `claude` | `scripts/claude-peer-adapter.sh` | `claude-code-headless` | **нет** | да | text-only; контекст в stdin |
 
 Каждый элемент `PEER_VENDORS` валидировать отдельно. Неизвестный `PEER_VENDOR` в списке → СТОП **на этом элементе, не на всём списке**: сообщить пилоту, какой конкретно vendor не распознан («Напарник `<vendor>` не зарегистрирован. Известные: kimi, codex, hermes, claude.»), предложить продолжить с оставшимися распознанными или прервать целиком. Добавление нового вендора — правка таблицы выше + написание `<vendor>-peer-adapter.sh` по контракту §0в.1.
 
-**§0в.1 Общий контракт адаптера** (для добавления нового вендора): stdin = полный промпт хода (Bash pipe, не inline `echo` — inline попадает в командную строку и хук B7.7c может ложно заблокировать повторные вызовы); stdout = одна реплика с frontmatter, **без файловых операций напарника внутри `SESSION_DIR`** (см. предостережение в §«Архитектура» — при `--add-dir` некоторые headless-CLI решают сохранить ответ и своим инструментом записи, это гонка с перехватом stdout, портит файл); exit `0` = OK, `1` = general error, `2` = content-filter/PII violation, `3` = PII hard block, `4` = `--add-dir` too large, `5` = уже идёт сессия (pidfile lock). Коды 2-5 — не обязательны для нового адаптера, но `0`/`1` обязательны (Шаг 3.1/3р.1 проверяет `exit ≠ 0` как «напарник не ответил»).
+**§0в.1 Общий контракт адаптера** (для добавления нового вендора): stdin = полный промпт хода (Bash pipe, не inline `echo` — inline попадает в командную строку и хук B7.7c может ложно заблокировать повторные вызовы); stdout = одна реплика с frontmatter; exit `0` = OK, `1` = general error, `2` = content-filter/PII violation, `3` = PII hard block, `5` = уже идёт сессия (pidfile lock). Для `claude` действует усиленный контракт WP-458: `--add-dir` запрещён, peer получает только минимальную текстовую проекцию в stdin и не имеет файловых или shell-инструментов. Коды 2-5 — не обязательны для нового адаптера, но `0`/`1` обязательны (Шаг 3.1/3р.1 проверяет `exit ≠ 0` как «напарник не ответил»).
 
 Построить для каждого `vendor` в `PEER_VENDORS`: `ADAPTER_PATH[$vendor]="$HOME/IWE/${IWE_GOVERNANCE_REPO:-DS-strategy}/<адаптер из таблицы>"` и `PEER_AGENT_ID[$vendor]="<peer_agent из таблицы>"` (bash associative arrays; порядок вызова = порядок `PEER_VENDORS`). Используются везде ниже вместо хардкода `kimi-peer-adapter.sh`/`kimi-headless`.
 
@@ -361,7 +361,8 @@ discovery_turns: <N>
 Ход: <TURN> из 10
 Задача: <задача>
 
-Прочитай все файлы журнала в <SESSION_DIR> по порядку (00-writer.md, 01-peer.md, ...).
+Контекстная проекция ниже — единственный источник о сессии. Не читай файлы и не используй инструменты:
+<минимальная текстовая проекция предыдущих реплик и проверяемых фактов>
 
 Напиши реплику в stdout с frontmatter:
 ---
@@ -403,9 +404,8 @@ if [ "$PEER_VENDOR" = "hermes" ]; then
     echo "<промпт>" | bash "$ADAPTER_PATH" --session-id "$HERMES_LAST_ID" > "$PEER_FILE" 2>/dev/null
   fi
 else
-  echo "<промпт>" | bash "$ADAPTER_PATH" \
-    --add-dir "$SESSION_DIR" \
-    2>/dev/null > "$PEER_FILE"
+  printf '%s\n' "<промпт с минимальной текстовой проекцией>" | bash "$ADAPTER_PATH" \
+    > "$PEER_FILE" 2> "${PEER_FILE%.md}.err"
 fi
 ```
 
@@ -488,8 +488,7 @@ consensus: none
 Задача: <задача>
 Текущий держатель write token: <WRITE_TOKEN_HOLDER>
 
-Прочитай ВСЕ файлы журнала в <SESSION_DIR> по порядку (00-writer.md, 01-peer-*.md, ...) —
-включая реплики других напарников этого и предыдущих раундов, не только писателя.
+Для Claude: передай в его stdin минимальную текстовую проекцию всех нужных реплик и фактов этого раунда. Он не читает журнал сессии и не использует инструменты. Для остальных напарников применяй их собственный контракт.
 
 ВАЖНО: ответ только в stdout. Не используй свои файловые инструменты ни для одного
 файла в этой папке — это создаёт гонку с перехватом stdout и портит журнал сессии.
@@ -539,7 +538,11 @@ if [ "$vendor" = "hermes" ]; then
     STATUS=$?
   fi
 else
-  cat "$PROMPT_FILE" | bash "${ADAPTER_PATH[$vendor]}" --add-dir "$SESSION_DIR" > "$PEER_FILE" 2>/dev/null
+  if [ "$vendor" = "claude" ]; then
+    cat "$PROMPT_FILE" | bash "${ADAPTER_PATH[$vendor]}" > "$PEER_FILE" 2> "${PEER_FILE%.md}.err"
+  else
+    cat "$PROMPT_FILE" | bash "${ADAPTER_PATH[$vendor]}" --add-dir "$SESSION_DIR" > "$PEER_FILE" 2>/dev/null
+  fi
   STATUS=$?
 fi
 rm -f "$PROMPT_FILE"
