@@ -2,7 +2,7 @@
 name: apply-captures
 description: Разбор extraction-reports со status pending-review — решение R15 (accept/reject/defer) ЖИВЫМ ПИЛОТОМ, запись в Pack, обновление статуса, коммит. Вызывать при Close при наличии N>0 pending-review отчётов.
 argument-hint: "[путь к конкретному отчёту | пусто = все pending-review]"
-version: 1.2.0
+version: 1.3.0
 layer: L1
 status: active
 agents: single
@@ -20,7 +20,7 @@ routing:
 
 # /apply-captures — разбор кандидатов экстрактора
 
-Полная ВДВ-карта цикла: `DS-my-strategy/inbox/WP-247-ke-pipeline-vdv.md`
+Полная ВДВ-карта цикла: `${IWE_GOVERNANCE_REPO:-DS-strategy}/inbox/WP-247-ke-pipeline-vdv.md`
 Контракт скилла взят из шагов 5, 6, 6.5, 7 этой карты.
 
 ## When to use
@@ -28,7 +28,7 @@ routing:
 ### Scope
 
 **Этот скилл делает:**
-- Читает `DS-my-strategy/inbox/extraction-reports/*.md` со `status: pending-review` или `status: deferred`.
+- Читает `${IWE_GOVERNANCE_REPO:-DS-strategy}/inbox/extraction-reports/*.md` со `status: pending-review` или `status: deferred`.
 - Для каждого кандидата в отчёте — запрашивает решение R15 (accept / reject / defer).
 - Accept → опциональная редактура → валидация → запись файла в Pack → обновление MAP → коммит.
 - Reject → запись причины + паттерна в `feedback-log.md`.
@@ -43,7 +43,7 @@ routing:
 ### ВДВ-контракт (шаги 5–7 из ke-pipeline-vdv.md)
 
 ```
-Вход:   DS-my-strategy/inbox/extraction-reports/*.md  со  status: pending-review
+Вход:   ${IWE_GOVERNANCE_REPO:-DS-strategy}/inbox/extraction-reports/*.md  со  status: pending-review
 Роль:   R15 Валидатор (accept/reject/defer)
         R4 Автор (conditional: редактура при edits_needed: yes)
         Скилл (автоматика записи, валидации, коммита)
@@ -59,7 +59,7 @@ routing:
   Обновить status отчёта по итогам.
 Выход:
   - Обновлённый Pack (новые файлы сущностей).
-  - Обновлённый DS-my-strategy/inbox/feedback-log.md (reject-паттерны).
+  - Обновлённый ${IWE_GOVERNANCE_REPO:-DS-strategy}/inbox/feedback-log.md (reject-паттерны).
   - Отчёт со финальным status (applied / partially-applied / rejected / deferred).
   - Коммит в PACK-* (при accept).
 ```
@@ -77,7 +77,7 @@ routing:
 
 **Если apply-captures вызван внутри пир-сессии** (оба участника — агенты): пир-сессия может готовить кандидатов, проверять дубли/семантику/размещение, спорить о деталях — но на этом шаге обязана остановиться и передать вопрос пилоту напрямую, в текущем интерактивном чате с ним (не через turn-файл диалога с другим агентом), прежде чем зафиксировать решение по любому кандидату.
 
-**Найдено при аудите (2026-07-07):** минимум 4 исторические сессии (`2026-05-24-apply-captures-bulk-review`, `2026-06-11-02-ke-candidates-review-pack`, `2026-06-26-14-apply-captures-r15`, `2026-06-28-09-peer-apply-captures-dp`) зафиксировали решения по 90+ кандидатам целиком внутри диалога Kimi↔Claude, без единой реплики пилота. Полный разбор → `DS-my-strategy/inbox/bugs/bug-2026-07-07-r15-decisions-bypassed-pilot.md`.
+**Найдено при аудите (2026-07-07):** минимум 4 исторические сессии (`2026-05-24-apply-captures-bulk-review`, `2026-06-11-02-ke-candidates-review-pack`, `2026-06-26-14-apply-captures-r15`, `2026-06-28-09-peer-apply-captures-dp`) зафиксировали решения по 90+ кандидатам целиком внутри диалога Kimi↔Claude, без единой реплики пилота. Полный разбор → `${IWE_GOVERNANCE_REPO:-DS-strategy}/inbox/bugs/bug-2026-07-07-r15-decisions-bypassed-pilot.md`.
 
 ### Формат решения R15
 
@@ -105,7 +105,7 @@ defer_until: "после WP-245 Ф22"     # ОБЯЗАТЕЛЬНО — дата 
 ### Шаг 1. Найти pending-review отчёты
 
 ```bash
-find ~/IWE/DS-my-strategy/inbox/extraction-reports -name "*.md" \
+find ~/IWE/${IWE_GOVERNANCE_REPO:-DS-strategy}/inbox/extraction-reports -name "*.md" \
   -exec grep -l -E "^status: (pending-review|deferred)" {} \; | sort
 ```
 
@@ -150,16 +150,37 @@ grep -r "^id: <ID>" ~/IWE/PACK-* | head -5
 
 Если совпадение найдено → вернуть R15 на reject: паттерн `«ID уже занят: <путь>»`.
 
+### 4в-0. Фасетный классификатор (WP-429 Ф6.4)
+
+> **Когда применяется:** до Шага 4в, для кандидатов, у которых `target_path` не задан R2 однозначно (домен/полка неочевидны) — либо всегда как проверка предложенного R2 пути. Пропустить, если R2 уже дал `target_path`, совпадающий с производной полкой Шага 4в ниже.
+
+Четыре явных вопроса R15 (или самопроверка агента перед вопросом пилоту, если ответ выводим детерминированно):
+
+1. **Уровень FPF.** Base (ZP/FP/SP) / Pack (доменное знание) / DS (реализация) / LPF (личное)? Определяет репо-класс.
+2. **Артефактная роль.** AR (правило) / DRR (решение) / lesson (занятие) / protocol (ритуал) / service-clause (обещание) / доменная сущность (D/METHOD/ROLE/FM/SOTA/…)? Определяет kind-код.
+3. **Домен.** Какой Pack? Использовать тот же вызов `knowledge_search`, что и Шаг 0 выше (intra-batch) / kNN-подсказка домена: `knowledge_search(query=<name>+<первые 400 символов текста>, limit=5)` → агрегировать репо соседей. **Confidence band обязателен** (weak/moderate/strong/none — калибровка на реальном golden-set дала repo-level precision ~75%, ниже 80%; это advisory tie-breaker, не финальный ответ): при `weak`/`none` — спросить R15 напрямую, не решать за него.
+4. **Полка.** Производная (1)+(2)+(3) по `routing.yaml` целевого Pack — см. Шаг 4в ниже, не отдельное суждение.
+
+Результат — предложенный `target_path`, который Шаг 4в валидирует машинно.
+
 ### 4в. Расположение файла
 
-Путь `target_path` должен соответствовать типу сущности:
+**SoT — `routing.yaml` целевого Pack** (WP-429 Ф6.1): `<PACK-repo>/pack/<domain>/routing.yaml` → `kinds.<KIND>.dir` даёт каноническую директорию для kind-кода кандидата (`DP.D`, `PD.METHOD`, `VR.M` и т.д.). Прочитать файл, найти секцию по префиксу ID кандидата:
+
+```bash
+grep -A3 "^  <KIND>:" ~/IWE/<PACK-repo>/pack/<domain>/routing.yaml
+```
+
+`dir:` → каноническая директория. `id_pattern:` → проверить соответствие имени файла. `frontmatter_check:` (если не `null`) → соответствующее поле/значение должно быть в кандидате.
+
+**Fallback (Pack без `routing.yaml` ещё не покрыт контрактом):** старое эвристическое правило —
 - `DP.D.*` → `.../02-domain-entities/`
 - `DP.METHOD.*` → `.../03-methods/`
 - `DP.ROLE.*` → `.../02-domain-entities/` или `.../roles/`
 - `DP.SOTA.*` → `.../06-sota/`
 - `PD.*` → аналогичная структура в `PACK-personal/` или другом Pack-репо домена
 
-При сомнении — проверить соседние файлы в целевой директории.
+При сомнении (оба пути) — проверить соседние файлы в целевой директории.
 
 **Результат валидации:**
 - `valid` → переходить к Шагу 4г
@@ -259,7 +280,7 @@ R15 выбирает вариант:
 
 **CLI-эквивалент** (для batch/автоматизации):
 ```bash
-cd ~/IWE/DS-my-strategy
+cd ~/IWE/${IWE_GOVERNANCE_REPO:-DS-strategy}
 OPENROUTER_API_KEY="sk-or-v1-..." WP429_DB_ID=3 WP429_TABLE=concept_graph.concepts \
   python3 inbox/WP-429/f2-poc/detector.py --check-candidate \
     --name "<имя кандидата>" \
@@ -286,7 +307,7 @@ Pack-реестры обычно в:
 
 ### 5в. Записать в feedback-log (при reject)
 
-Файл: `DS-my-strategy/inbox/feedback-log.md` (создать если нет).
+Файл: `${IWE_GOVERNANCE_REPO:-DS-strategy}/inbox/feedback-log.md` (создать если нет).
 Формат записи:
 
 ```markdown

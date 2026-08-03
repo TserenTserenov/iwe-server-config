@@ -2,7 +2,7 @@
 name: peer-conversation
 description: Многотуровый диалог писателя (Claude) с одним или несколькими напарниками (любой набор из kimi/codex/hermes/claude-headless) по задаче пилота (DP.SC.154). Ведёт turn-loop (2 участника) или round-loop (3+, WP-509), обнаруживает CONSENSUS/ESCALATE, после консенсуса — Decision Gate (зафиксировать vs реализовать → ревью → проверить → задеплоить), синтезирует report.md через Agent tool.
 argument-hint: "<описание задачи> [--peer kimi|codex|hermes|claude[,vendor2,...]] | --list | --interrupt <session_id> | --finalize <session_id>"
-version: 1.5.3
+version: 1.5.4
 layer: L3
 status: active
 triggers:
@@ -184,7 +184,7 @@ IWE_AGENT=claude-code bash "${IWE_SCRIPTS:-$HOME/IWE/scripts}/session-guard.sh" 
 
 > **Не хардкодить `~/IWE/scripts/session-guard.sh`.** Пир-сессия 2026-07-31-16-wp484-new-order-cutover сначала внесла такой хардкод по образцу `day-close/SKILL.md`, но холодный ревью нашёл: у обычного пользователя шаблона `setup.sh` НЕ копирует корневую `scripts/` — существует только `FMT-exocortex-template/scripts/`, и `${IWE_SCRIPTS:-...}` резолвится именно туда намеренно (issue #266, commit `835d5ea` — тот же хардкод уже один раз чинили этим фоллбэком). Хардкод в `day-close/SKILL.md` — недокументированный долг, ждущий той же поломки при промоции, не образец для копирования. Для author-mode расхождение реальное (FMT-копия `session-guard.sh` отстаёт от корневой на фиксы WP-484 Нить1) — но лечится синком `template-sync.sh` (с отдельного разрешения пилота, S-33) или личной правкой `~/.iwe-paths`, не хардкодом в файле, который промотируется всем пользователям шаблона.
 
-Если команда упала (exit ≠ 0) — не блокировать сессию: сообщить пилоту одной строкой «session-guard open не сработал (<причина>), продолжаю без семафора — на Шаге 4.5 возможна ручная разблокировка через touch/note-file» и идти дальше. Semaphore-файл session-guard создаёт СВОЙ отдельный ORZ-скаффолд (`sessions/<TODAY>-<SESSION_ID>.md`) — это отдельный служебный файл, не путать с closing-файлом пир-сессии из Шага 4.4 (другой путь, другая схема).
+Если команда упала (exit ≠ 0) — не блокировать сессию: сообщить пилоту одной строкой «session-guard open не сработал (<причина>), продолжаю без семафора — на Шаге 4.5 возможна ручная разблокировка через touch/note-file» и идти дальше. Semaphore-файл session-guard создаёт СВОЙ ORZ-скаффолд-заготовку по пути `sessions/<MONTH>/<TODAY>-<CLEAN_SLUG>.md` — тот же путь, что закрывающий файл пир-сессии из Шага 4.4/4.5.0 (до 2026-08-03 эти два места ошибочно считали разные пути, см. пометку на Шаге 4.4); Шаг 4.5.0 дописывает в этот же файл финальное содержимое, а не создаёт новый.
 
 **1.1 Создать папку:**
 ```bash
@@ -1003,57 +1003,38 @@ Omit если `implementation_pipeline: false` в meta.yaml.
 
 ### 4.4 Закрытие (ОРЗ — сессионный файл рядом с папкой сессии)
 
-Slug-часть (без даты и номера): `SESSION_SLUG=$(echo "$SESSION_ID" | sed -E 's/^[0-9]{4}-[0-9]{2}-[0-9]{2}-[0-9]{2}-//')`
+> **До 2026-08-03 этот шаг и Шаг 4.5.0 писали в файл независимо, разными шаблонами и разными путями** (`SESSION_SLUG` здесь отбрасывал дату И номер сессии, `CLEAN_SESSION_ID` в 4.5.0 отбрасывал только дату) — на диске оставались два сиротских файла вместо одного (пример: `sessions/2026-08/2026-08-03-codex-wp510-strategy-questions.md` рядом с `sessions/2026-08/2026-08-03-04-codex-wp510-strategy-questions.md`). Найдено и исправлено в peer-session `2026-08-03-09-launchd-focustodo-weekly-export`. Теперь запись в файл — единственная, на Шаге 4.5.0; этот шаг только определяет общую переменную пути.
 
-Записать `${IWE_GOVERNANCE_REPO:-DS-strategy}/sessions/<MONTH>/<TODAY>-<SESSION_SLUG>.md` (Write) — Quick Close файл плоский под месячной папкой, без DD/ (симметрично session-guard.sh; DD/ — только для peer-session-папок):
-```markdown
----
-date: <TODAY>
-type: peer-session
-writer: claude-code
-peer: [<PEER_AGENT_ID>, ...]      # список; при PEER_COUNT==1 — один элемент
-duration_h: <(end_time - start_time) в часах, 1 знак>
-artifacts: sessions/<MONTH>/<DAY>/<SESSION_ID>/report.md
-session_id: <SESSION_ID>
-wp: <WP-NNN или unknown>
----
+Slug-часть (без даты, с номером — та же формула, что `session-guard.sh` использует для своего ORZ-скаффолда, `session-guard.sh:241-243`): `SESSION_SLUG="${SESSION_ID#"$TODAY"-}"`
 
-# Главный инсайт
-
-<1-2 строки из §4 report.md — зафиксированное решение>
-```
+Целевой путь (используется здесь и на Шаге 4.5.0): `${IWE_GOVERNANCE_REPO:-DS-strategy}/sessions/<MONTH>/<TODAY>-<SESSION_SLUG>.md` — плоский Quick Close файл под месячной папкой, без DD/ (DD/ — только для peer-session-папок). Тот же путь, что `session-guard.sh` уже создал (или создаст) как свой ORZ-скаффолд на Шаге 1.0 — содержимое пишется один раз, на Шаге 4.5.0.
 
 ### 4.5 Commit + push
 
-**4.5.0 Заполнить служебный ORZ-скаффолд session-guard** (если Шаг 1.0 создал семафор успешно) — минимально, пойнтером на настоящий отчёт, не дублируя контент:
+**4.5.0 Записать закрывающий ОРЗ-файл сессии** (единственная точка записи — формула пути и обоснование см. Шаг 4.4; заодно закрывает служебный семафор session-guard, если Шаг 1.0 его создал):
 
 ```bash
-# session-guard.sh open (Шаг 1.0) сам строит имя файла как "$TODAY-$CLEAN_SLUG.md",
-# где CLEAN_SLUG — переданный --slug (= SESSION_ID) с уже вырезанным ведущим
-# "$TODAY-" (session-guard.sh:215-216, WP-484 31.07 — защита от задвоения даты).
-# SESSION_ID здесь ВСЕГДА начинается с "$TODAY-" (Шаг 1: "${TODAY}-${NUM}-${SLUG}"),
-# поэтому наивная склейка "${TODAY}-${SESSION_ID}" ниже задваивала бы дату и
-# искала файл по несуществующему пути — найдено живьём 2026-07-31 (peer-session
-# 2026-07-31-14-wp484-session-close-discipline): несколько чужих ORZ-скаффолдов
-# от прошлых пир-сессий того же дня повисли untracked ровно по этой причине,
-# Шаг 4.5.1 их тоже не подхватывал (`[ -f "$GUARD_ORZ" ]` на неверном пути
-# всегда false → файл не попадал в PATHS → никогда не коммитился).
-CLEAN_SESSION_ID="${SESSION_ID#"$TODAY"-}"
-GUARD_ORZ="$HOME/IWE/${IWE_GOVERNANCE_REPO:-DS-strategy}/sessions/$MONTH/${TODAY}-${CLEAN_SESSION_ID}.md"
-if [ -f "$GUARD_ORZ" ]; then
-  cat > "$GUARD_ORZ" <<EOF
+# Путь строится ТОЙ ЖЕ формулой, что session-guard.sh использует для своего
+# ORZ-скаффолда (session-guard.sh:241-243, WP-484 31.07 — защита от задвоения
+# даты) — $SESSION_SLUG уже определён на Шаге 4.4. SESSION_ID здесь ВСЕГДА
+# начинается с "$TODAY-" (Шаг 1: "${TODAY}-${NUM}-${SLUG}"), поэтому склейка
+# "${TODAY}-${SESSION_ID}" без предварительного вычитания задваивала бы дату.
+GUARD_ORZ="$HOME/IWE/${IWE_GOVERNANCE_REPO:-DS-strategy}/sessions/$MONTH/${TODAY}-${SESSION_SLUG}.md"
+cat > "$GUARD_ORZ" <<EOF
 ---
 date: $TODAY
-type: work
+type: peer-session
 wp: <WP-NNN>
-duration_h: <(end_time - start_time) в часах>
+writer: claude-code
+peer: [<PEER_AGENT_ID>, ...]      # список; при PEER_COUNT==1 — один элемент
+duration_h: <(end_time - start_time) в часах, 1 знак>
 artifacts: [sessions/$MONTH/$DAY/$SESSION_ID/report.md]
-agent: claude-code
+session_id: $SESSION_ID
 ---
 
 ## Главный инсайт
 
-См. sessions/$MONTH/$DAY/$SESSION_ID/report.md §4 (зафиксированное решение).
+<1-2 строки из §4 report.md — зафиксированное решение>
 
 ## Контекст
 
@@ -1069,8 +1050,9 @@ agent: claude-code
 
 См. report.md §4.
 EOF
-fi
 ```
+
+Если запись упала (директория недоступна, диск полон) — не блокировать финализацию: сообщить пилоту одной строкой и продолжить, Шаг 4.5.1 подхватит `$GUARD_ORZ` в PATHS независимо от результата.
 
 **4.5.1 Commit + push:**
 
@@ -1078,8 +1060,9 @@ fi
 cd "$HOME/IWE/${IWE_GOVERNANCE_REPO:-DS-strategy}"
 # pathspec после `--`: commit ТОЛЬКО файлы сессии, не подметаем чужое
 # pre-staged из общего индекса (mis-attribution, см. 2026-06-20-39).
-PATHS=("sessions/$MONTH/$DAY/$SESSION_ID/" "sessions/00-index.md" "sessions/$MONTH/${TODAY}-${SESSION_SLUG}.md")
-[ -f "$GUARD_ORZ" ] && PATHS+=("$GUARD_ORZ")
+# $GUARD_ORZ (Шаг 4.5.0) — тот же путь, что "$TODAY-$SESSION_SLUG.md" (Шаг 4.4),
+# одна запись вместо двух хардкодов одного и того же файла.
+PATHS=("sessions/$MONTH/$DAY/$SESSION_ID/" "sessions/00-index.md" "$GUARD_ORZ")
 git add "${PATHS[@]}"
 git commit -m "feat(peer): $SESSION_ID — <задача кратко>" -- "${PATHS[@]}"
 git push
