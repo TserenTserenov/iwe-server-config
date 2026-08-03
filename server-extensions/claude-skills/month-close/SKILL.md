@@ -194,11 +194,11 @@ HOT-лимит превышен → понизить horizon в frontmatter ну
 
 `bash .claude/hooks/rule-engine.sh mark-gate month-close-g5` (WP-484 Ф5a).
 
-**EXTENSION POINT (month-close after):** `bash .claude/scripts/load-extensions.sh month-close after` — exit 0 → `Read` каждый файл из вывода (alphabetic) → выполнить. Exit 1 → пропустить. Поддерживает `extensions/month-close.after.md` И `extensions/month-close.after.<suffix>.md`.
-
 ### 10. Запись `MonthClose YYYY-MM.md`
 
 Создать `DS-my-strategy/archive/MonthClose YYYY-MM.md` по шаблону (секция «Шаблон отчёта» ниже). Все разделы заполнены, плейсхолдеры заменены.
+
+**EXTENSION POINT (month-close after):** `bash .claude/scripts/load-extensions.sh month-close after` — exit 0 → `Read` каждый файл из вывода (alphabetic) → выполнить. Exit 1 → пропустить. Поддерживает `extensions/month-close.after.md` И `extensions/month-close.after.<suffix>.md`. **Позиция важна (найдено и исправлено 2026-08-03, РП-470): хуки дописывают секции в уже существующий файл отчёта (`>> "$REPORT_FILE"`) — до этой правки точка расширения стояла ДО этого шага, файла ещё не существовало, секции Здоровья/Фокуса терялись молча (Month Close июля 2026-07, живой пример). У Week Close та же точка расширения верно стоит после записи WeekReport — Month Close было единственным расхождением.**
 
 ### 11. Коммит DS-my-strategy
 
