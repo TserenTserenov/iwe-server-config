@@ -10,7 +10,7 @@
 #   open --housekeeping <reason> [--agent ...]        # фоновая housekeeping-сессия без ORZ
 #   close [--wp WP-N] [--slug "..."] [--agent ...]
 #   close --housekeeping <reason> [--agent ...]       # закрыть housekeeping-сессию
-#   audit [--since YYYY-MM-DD]
+#   audit [--since YYYY-MM-DD] [--cleanup-orphans]
 #   pre-commit-check
 #   note-file <path> [--agent ...]
 #
@@ -43,6 +43,43 @@ now_iso() { date -u +"%Y-%m-%dT%H:%M:%SZ"; }
 now_date() { date +"%Y-%m-%d"; }
 now_month() { date +"%Y-%m"; }
 fail() { echo "session-guard: $1" >&2; exit "${2:-1}"; }
+
+semaphore_epoch() {
+  local semaphore="$1" timestamp=""
+  timestamp=$(grep -E '^(opened_at|created_at): ' "$semaphore" | head -1 | cut -d' ' -f2- || true)
+  [ -n "$timestamp" ] || return 1
+  date -u -j -f "%Y-%m-%dT%H:%M:%SZ" "$timestamp" +%s 2>/dev/null \
+    || date -u -d "$timestamp" +%s 2>/dev/null
+}
+
+sweep_orphaned_semaphores() {
+  local semaphore pid age epoch quarantined=0 ambiguous=0
+  while IFS= read -r semaphore; do
+    [ -f "$semaphore" ] || continue
+    pid=$(grep '^pid: ' "$semaphore" | head -1 | cut -d' ' -f2- || true)
+    if [[ "$pid" =~ ^[0-9]+$ ]]; then
+      if ! kill -0 "$pid" 2>/dev/null; then
+        mv "$semaphore" "${semaphore}.orphaned-dead-pid"
+        echo "WARNING: orphaned semaphore $(basename "$semaphore") quarantined: pid $pid is dead" >&2
+        quarantined=$((quarantined + 1))
+      fi
+      continue
+    fi
+
+    epoch=$(semaphore_epoch "$semaphore" || true)
+    [ -n "$epoch" ] || {
+      echo "WARNING: semaphore $(basename "$semaphore") has no live pid or parseable timestamp; manual review required" >&2
+      ambiguous=$((ambiguous + 1))
+      continue
+    }
+    age=$(( $(date +%s) - epoch ))
+    if [ "$age" -gt 1800 ]; then
+      echo "WARNING: semaphore $(basename "$semaphore") is ${age}s old without pid proof; kept for manual review" >&2
+      ambiguous=$((ambiguous + 1))
+    fi
+  done < <(find "$SESSION_DIR" -name '*.open' -type f 2>/dev/null)
+  echo "Semaphore sweep: quarantined=$quarantined ambiguous=$ambiguous"
+}
 orz_agent_name() {
   case "$1" in
     kimi) echo "kimi-headless" ;;
@@ -124,6 +161,7 @@ FILES=""
 SLUG=""
 AGENT="${IWE_AGENT:-}"
 HOUSEKEEPING=""
+CLEANUP_ORPHANS=0
 POSITIONAL=()
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -134,6 +172,7 @@ while [[ $# -gt 0 ]]; do
     --agent)  AGENT="$2"; shift 2 ;;
     --housekeeping) HOUSEKEEPING="$2"; shift 2 ;;
     --since)  SINCE="$2"; shift 2 ;;
+    --cleanup-orphans) CLEANUP_ORPHANS=1; shift ;;
     --)       shift; POSITIONAL+=("$@"); break ;;
     -*)       shift ;;
     *)        POSITIONAL+=("$1"); shift ;;
@@ -529,6 +568,10 @@ fi
 
 # --- AUDIT ---
 if [ "$CMD" = "audit" ]; then
+  if [ "$CLEANUP_ORPHANS" -eq 1 ]; then
+    sweep_orphaned_semaphores
+    echo
+  fi
   SINCE="${SINCE:-$(date -v-7d +%Y-%m-%d 2>/dev/null || date -d '7 days ago' +%Y-%m-%d)}"
   echo "=== Session Guard Audit (since $SINCE) ==="
   echo
