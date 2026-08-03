@@ -22,25 +22,89 @@ else
   echo "✅ Semantic OK — статус в реестре соответствует placement в inbox/archive."
 fi
 
-# 2. Counter exemption-tag [no-registry-touch] за последние 7 дней
+# 2. Counter exemption-tag [no-registry-touch] за последние 7 дней — 3 категории
+# (пир-сессия 2026-08-03, WP-7: единственный счётчик дошёл до 455/нед при пороге 2.
+# Разбор нашёл, что подавляющее большинство — шум метрики (тег на коммите, который
+# защищённый путь вообще не трогал) либо норма (правка карточки РП или вложенного
+# файла без смены статуса — гард по конструкции требует тег именно на таких коммитах,
+# см. .githooks/commit-msg). Третья категория ниже (смена status: САМОЙ карточки
+# WP-N/WP-N.md, не вложенного файла с собственным status:) в контрольном окне дала
+# 8 коммитов — все проверены вручную: часть оказалась нормальным двухшаговым закрытием
+# (статус меняется одним коммитом, реестр — соседним, оба без тега не проходят гард
+# по отдельности), часть — уборкой уже заброшенных копий давно закрытых РП. Ни одного
+# случая, где реестр СЕЙЧАС расходится с фактом, не нашлось — поэтому здесь нет
+# отдельного порога-тревоги: если категория 3 не пуста, смотри пункт 1 выше
+# (semantic-check) — он проверяет текущее расхождение, а не то, в один коммит оно
+# ушло или в два. (Черновик сессии предлагал 4-ю категорию — «реестр тоже тронут
+# тем же коммитом»; она никак не отличима от «легитимно» в отрыве от контекста, поэтому
+# не мигрировала в реализацию — это осознанное упрощение 4→3, а не пропуск.)
+# Подробности: sessions/2026-08/03/2026-08-03-01-day-close-decisions-review/report.md).
 # Scope: subject-only (--pretty='%s'). Иначе narrative-упоминания тега в body
 # создают false positive (см. lessons_grep_counter_narrative_false_positive.md).
-TAG_COUNT=$(cd ~/IWE/DS-my-strategy && git log --since="7 days ago" --pretty='%s' 2>/dev/null | grep -cF '[no-registry-touch]' || true)
+cd ~/IWE/DS-my-strategy
+GUARD_PATTERN='^inbox/WP-[0-9]+|^archive/wp-contexts/WP-[0-9]+'
+
+# Карточка ли это САМОГО РП (inbox/WP-N/WP-N.md — номер папки=номер файла), а не
+# вложенный файл (inbox/WP-N/bugs/foo.md, inbox/WP-N/notes.md)? Строка, а не regex
+# с backreference — `\1` в ERE не переносим между grep-реализациями (ugrep на этой
+# машине его не поддерживает, проверено живьём при написании этого фикса).
+# Архивная плоская форма (archive/wp-contexts/WP-N-slug.md) остаётся неточной:
+# не отличает настоящую карточку от постороннего файла с тем же префиксом
+# (пример из этого же ревью: WP-131-messages-draft.md рядом с настоящей карточкой
+# WP-131-lms-recommendations.md) — приемлемо, т.к. список ниже кормит человека
+# для беглой сверки с semantic-check, а не блокирующий гейт.
+is_own_card() {
+  case "$1" in
+    inbox/WP-*/WP-*.md)
+      local folder_num="${1#inbox/WP-}"; folder_num="${folder_num%%/*}"
+      local file_num="${1##*/WP-}"; file_num="${file_num%.md}"
+      [ "$folder_num" = "$file_num" ] ;;
+    archive/wp-contexts/WP-[0-9]*.md) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+NO_PATH=0; CONTENT_EDIT=0; STATUS_CHANGED_COUNT=0
+STATUS_SHAS=""
+while read -r sha; do
+  [ -z "$sha" ] && continue
+  FILES=$(git show --name-only --pretty='' "$sha" 2>/dev/null)
+  TOUCHES_GUARD=$(printf '%s\n' "$FILES" | grep -cE "$GUARD_PATTERN" || true)
+  if [ "$TOUCHES_GUARD" -eq 0 ]; then
+    NO_PATH=$((NO_PATH + 1))
+    continue
+  fi
+  STATUS_CHANGED=0
+  while IFS= read -r f; do
+    [ -z "$f" ] && continue
+    is_own_card "$f" || continue
+    git show "$sha" -- "$f" 2>/dev/null | grep -qE '^[+-]status:' && STATUS_CHANGED=1
+  done <<< "$FILES"
+  if [ "$STATUS_CHANGED" -eq 1 ]; then
+    STATUS_CHANGED_COUNT=$((STATUS_CHANGED_COUNT + 1))
+    STATUS_SHAS="$STATUS_SHAS $sha"
+  else
+    CONTENT_EDIT=$((CONTENT_EDIT + 1))
+  fi
+done < <(git log --since="7 days ago" --pretty='%H %s' 2>/dev/null | grep -F '[no-registry-touch]' | cut -d' ' -f1)
+
 echo ""
-echo "=== Exemption tag [no-registry-touch] audit ==="
-echo "Использовано за 7 дней: $TAG_COUNT"
-if [ "$TAG_COUNT" -gt 2 ]; then
-  echo "⚠️  ВЫШЕ ПОРОГА (>2/неделя). Проверь причины:"
-  cd ~/IWE/DS-my-strategy && git log --since="7 days ago" --pretty='  %h %s' 2>/dev/null | grep -F '[no-registry-touch]'
-  echo ""
-  echo "    Если злоупотребление — обсудить в Strategy Session."
+echo "=== Exemption tag [no-registry-touch] audit (3 категории) ==="
+echo "Без затронутого защищённого пути (шум метрики): $NO_PATH"
+echo "Правка карточки/вложенного файла без смены статуса (норма): $CONTENT_EDIT"
+echo "Смена status: самой карточки WP-N.md (не вложенного файла): $STATUS_CHANGED_COUNT"
+if [ "$STATUS_CHANGED_COUNT" -gt 0 ]; then
+  echo "    Коммиты (сверь с semantic-check выше — расхождение СЕЙЧАС важнее, чем в один коммит ушло или в два):"
+  for sha in $STATUS_SHAS; do
+    git log -1 --pretty='      %h %s' "$sha"
+  done
 fi
 ```
 
 **Чеклист Week Close:**
 
-- [ ] Semantic-check выполнен. Расхождения (если >0) — добавить в Backlog или закрыть в Strategy Session.
-- [ ] Exemption-tag счётчик ≤2/неделя ИЛИ ≥3 → проверены причины (legit vs abuse).
+- [ ] Semantic-check выполнен. Расхождения (если >0) — добавить в Backlog или закрыть в Strategy Session. Это единственная проверка, которая ловит СЕЙЧАС-расхождение реестра.
+- [ ] Exemption-tag: категория «смена статуса карточки» непуста → сверена со semantic-check выше (не отдельный порог сама по себе — двухшаговое закрытие статус/реестр отдельными коммитами легитимно и всегда будет попадать в эту категорию).
 
 ---
 
