@@ -103,6 +103,7 @@ cd DS-my-strategy && python3 scripts/process-runner.py start quick-close --slug 
    Автозахват кандидатов знания из транскрипта + git diff в `captures.md`. Таймаут хендлера — 120с (bug-2026-07-31-ke-routing-step-hangs-quick-close), при превышении деградирует в `{ran: false}`, не валит закрытие.
 
 **8. MEMORY.md (шаг `memory-update` — ai-контракт: вход `[wp_status]`, выход `[memory_line]`)** — обновить статус РП (одна строка: `in_progress` / `done`) [[gate]]
+   Запись — по контракту `memory/memory-lifecycle-spec.md §7.5` (S-53): полный Write запрещён; перечитать → узкий Edit СВОЕЙ строки (≤10 слов в next) → проверить; после — git-commit в memory/.
 
 **9. Верификация (шаг `verify-r23`)** — см. раздел «Верификация Quick Close» ниже, теперь идёт полностью в Части Б, без пилота.
 

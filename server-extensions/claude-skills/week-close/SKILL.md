@@ -286,7 +286,7 @@ bash ${IWE_SCRIPTS}/memory-bleed.sh
 
 ```bash
 echo "=== distinctions.md ===" && wc -l {{WORKSPACE_DIR}}/.claude/rules/distinctions.md
-echo "=== MEMORY.md ===" && wc -l {{MEMORY_DIR}}/MEMORY.md
+echo "=== MEMORY.md ===" && wc -l {{MEMORY_DIR}}/MEMORY.md && wc -c {{MEMORY_DIR}}/MEMORY.md
 echo "=== memory/ файлы (mtime >14д) ===" && find {{MEMORY_DIR}} -name "*.md" -mtime +14 -not -name "MEMORY.md" -not -path "*/archive/*" | sort
 ```
 
@@ -294,6 +294,7 @@ echo "=== memory/ файлы (mtime >14д) ===" && find {{MEMORY_DIR}} -name "*.
 |---------|-------|---------|
 | distinctions.md строк | **> 80** | Drift-флаг: нарушено правило DP.KR.001 §6 (1-3 строки на различение). Зафиксировать в Week Report, добавить задачу в техдолг. |
 | MEMORY.md строк | **> 200** | Флаг превышения лимита. Записать в WeekReport предложение архивации старых feedback в `archive/`. |
+| MEMORY.md байт | **> 17 408 (~17KB)** | Флаг бюджета памяти (S-53, WP-7 Ф-MemoryBudget): нормализовать next-поля таблицы (длинные хвосты → WP-карточки, «≤10 слов»), кандидаты → MEMORY-warm.md. Полный замер: `verify-context-budget.sh` секция Memory audit. Порог предварительный — утверждает пилот. |
 | memory/*.md без обращения > 14д | **> 5 файлов** | Записать в WeekReport предложение понизить `horizon: warm` (пилот решает при Month Close). |
 
 #### 13f. Hindsight health check

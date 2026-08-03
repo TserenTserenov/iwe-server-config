@@ -78,7 +78,7 @@
 | 455 | 🔄 | P4 | Неизменяемость аудит-журнала событий | урок про git pull записан, кода не выкатывал |
 | 290 | 🔄 | **P1** | Следователь: каузальная аналитика | Ход 2 — решение стратсессии |
 | 73 | 🔄 | P3 | Новая архитектура ИТ-платформы Aisystant | Ф5 proposed, дедлайн 25.07 |
-| 7 | 🔄 | — | Платформа: техдолг (зонтичный) | 03.08: Ф39 (FMT #344-346) закрыта; детали `inbox/WP-7/WP-7.md`; 3 решения пилота ждут |
+| 7 | 🔄 | — | Платформа: техдолг (зонтичный) | 03.08: Ф-script-contract-gate закрыта (3 раунда фиксов); Ф39 (FMT #344-346) закрыта; детали `inbox/WP-7/WP-7.md`; решения пилота ждут |
 | 485 | 🔄 | P2 | Сверка дублирующихся скриптов root↔шаблон | Ф7-Ф9 (сторож в ритм) |
 | 487 | 🔄 | P3 | Планировщик отложенного запуска РП | живой прогон через очередь |
 | 472 | 🔄 | P3 | Конвейер личного бренда | 2-й человек за пилотом |
@@ -126,6 +126,7 @@
 
 ### Feedback — HOT
 
+- [lessons_regression_test_must_verify_via_same_mechanism_bug_manifests.md](lessons_regression_test_must_verify_via_same_mechanism_bug_manifests.md) — тест сравнивал `$(cat file)` до/после — режет trailing `\n` на обеих сторонах одинаково, слеп к своему же классу бага (03.08)
 - [lessons_card_claims_need_live_artifact_check.md](lessons_card_claims_need_live_artifact_check.md) — карточка РП не доказывает факт: сверять с живым артефактом (02.08 — 7 фантомов)
 - [feedback_no_closing_questions.md](feedback_no_closing_questions.md) — не спрашивай «Что дальше?» после выполнения, выполни → отчитайся
 - [feedback_quick_close_means_fast_for_pilot.md](feedback_quick_close_means_fast_for_pilot.md) — «быстрое закрытие» = коротко для пилота (снять ретро), не агент сокращает работу
@@ -148,4 +149,5 @@
 - [reference_process_runner_quirks_hub.md](reference_process_runner_quirks_hub.md) — креды в карточке, race сессий, umbrella-архивация (3)
 - [reference_secrets_credentials_hub.md](reference_secrets_credentials_hub.md) — .mcp.json wrapper, ротация-верификация, 403≠401 (3)
 - [reference_day_cycle_tsekh1_fallback.md](reference_day_cycle_tsekh1_fallback.md) — день открывается вручную на Маке при падении Цех-1; нужна диагностика (ночь 31.07→01.08)
+- [reference_tsekh1_claude_login_oauth_localhost.md](reference_tsekh1_claude_login_oauth_localhost.md) — вход в Клода на цехе бьёт в localhost Мака (OAuth): входить ручным кодом авторизации (21.07, 03.08)
 - Остальные уроки/hubs (31 шт., demoted 28.07+30.07) → [MEMORY-warm.md](MEMORY-warm.md)
