@@ -199,6 +199,7 @@ session_id: "<SESSION_ID>"
 start_time: "<ISO-8601 UTC>"
 end_time: ""
 writer_agent: "claude-code"
+personality: "<unassigned|UUID>"   # WP-510 Патч 4, слой 3: writer_agent = конструктивная реализация; personality = какая ИИ-личность (если есть авторитетная запись в `current/AI Personalities Registry.md` для текущего хоста/раннера) вела сессию. Ищи по хосту/раннеру в реестре — не выдумывай; нет однозначного совпадения → "unassigned". Маршрутизирующая метка, не допуск к памяти.
 peer_agent: "<первый PEER_AGENT_ID из §0в>"      # backward-compat (PEER_COUNT==1: единственный); полный список — peer_agents
 peer_cmd: "<первый PEER_VENDOR>-peer-adapter"     # backward-compat; полный список — peer_cmds
 peer_agents: ["<PEER_AGENT_ID>", "..."]   # WP-509: в порядке PEER_VENDORS, длина 1 при PEER_COUNT==1 (дублирует peer_agent); §4.2 читает ТОЛЬКО это поле для report.md peer: при PEER_COUNT>=2
