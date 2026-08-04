@@ -1235,6 +1235,23 @@ def slice_section(text, section):
         if l.lstrip().startswith('```'):
             fence = not fence
         in_fence.append(fence)
+    # Явные якоря (<!-- section:<slug>:start/end -->) — приоритет над угадыванием по
+    # H2-заголовку: H2-текст меняется независимо от машинного контракта секции (WP-481
+    # Ф17, bug-2026-08-04-rule-engine-section-slicing-quick-close.md — "Quick Close"
+    # H2 остался только вводным абзацем, реальные гейты уехали под другие заголовки).
+    # Непарные/дублированные/перевёрнутые якоря — явная ошибка (found=False), не
+    # молчаливый откат на H2-fallback: откат на сломанной разметке воспроизвёл бы тот
+    # же класс vacuous-pass, который эти якоря призваны исключить. fenced-блоки
+    # исключены той же логикой, что и H2 ниже — иначе документационный пример якоря
+    # в ```-блоке тихо сойдёт за настоящую границу (review post-consensus, ход 4).
+    slug = re.sub(r'[^a-z0-9]+', '-', section.lower()).strip('-')
+    start_anchor, end_anchor = f'<!-- section:{slug}:start -->', f'<!-- section:{slug}:end -->'
+    starts = [i for i, l in enumerate(lines) if l.strip() == start_anchor and not in_fence[i]]
+    ends = [i for i, l in enumerate(lines) if l.strip() == end_anchor and not in_fence[i]]
+    if starts or ends:
+        if len(starts) != 1 or len(ends) != 1 or starts[0] >= ends[0]:
+            return '', False
+        return '\n'.join(lines[starts[0] + 1:ends[0]]), True
     def is_h2(i):
         return lines[i].startswith('## ') and not in_fence[i]
     start = next((i for i in range(len(lines)) if is_h2(i) and section in lines[i]), None)
@@ -1242,6 +1259,21 @@ def slice_section(text, section):
         return '', False
     end = next((j for j in range(start + 1, len(lines)) if is_h2(j)), len(lines))
     return '\n'.join(lines[start:end]), True
+
+def strip_fenced(text):
+    # H2-fallback может вернуть срез, где fenced-пример (документационный образец
+    # разметки, см. комментарий в slice_section выше) остаётся ВНУТРИ среза —
+    # без этого фильтра подсчёт [[gate...]] ниже принял бы такой пример за
+    # настоящий гейт (review post-consensus, ход 5: живой repro на H2, реально
+    # совпадающем с --section, содержащем fenced-пример с [[gate]] внутри).
+    out, fence = [], False
+    for l in text.splitlines():
+        if l.lstrip().startswith('```'):
+            fence = not fence
+            out.append('')
+            continue
+        out.append('' if fence else l)
+    return '\n'.join(out)
 
 text = open(os.environ['_CTS_PROTO'], encoding='utf-8').read()
 section = os.environ.get('_CTS_SECTION', '')
@@ -1253,7 +1285,7 @@ if not found:
 # (Quick Close и Week Close оба нумеруют с g1) — префикс секцией делает ключ уникальным.
 prefix = re.sub(r'[^a-z0-9]+', '-', section.lower()).strip('-') + '-' if section else ''
 n = 0
-for line in text.splitlines():
+for line in strip_fenced(text).splitlines():
     line = re.sub(r'`[^`]*`', '', line)  # теги в inline-code — это легенда/упоминание, не разметка
     m = re.search(r'\[\[gate(?::([A-Za-z0-9.,]+))?\]\]', line)
     if not m:
@@ -1320,6 +1352,23 @@ def slice_section(text, section):
         if l.lstrip().startswith('```'):
             fence = not fence
         in_fence.append(fence)
+    # Явные якоря (<!-- section:<slug>:start/end -->) — приоритет над угадыванием по
+    # H2-заголовку: H2-текст меняется независимо от машинного контракта секции (WP-481
+    # Ф17, bug-2026-08-04-rule-engine-section-slicing-quick-close.md — "Quick Close"
+    # H2 остался только вводным абзацем, реальные гейты уехали под другие заголовки).
+    # Непарные/дублированные/перевёрнутые якоря — явная ошибка (found=False), не
+    # молчаливый откат на H2-fallback: откат на сломанной разметке воспроизвёл бы тот
+    # же класс vacuous-pass, который эти якоря призваны исключить. fenced-блоки
+    # исключены той же логикой, что и H2 ниже — иначе документационный пример якоря
+    # в ```-блоке тихо сойдёт за настоящую границу (review post-consensus, ход 4).
+    slug = re.sub(r'[^a-z0-9]+', '-', section.lower()).strip('-')
+    start_anchor, end_anchor = f'<!-- section:{slug}:start -->', f'<!-- section:{slug}:end -->'
+    starts = [i for i, l in enumerate(lines) if l.strip() == start_anchor and not in_fence[i]]
+    ends = [i for i, l in enumerate(lines) if l.strip() == end_anchor and not in_fence[i]]
+    if starts or ends:
+        if len(starts) != 1 or len(ends) != 1 or starts[0] >= ends[0]:
+            return '', False
+        return '\n'.join(lines[starts[0] + 1:ends[0]]), True
     def is_h2(i):
         return lines[i].startswith('## ') and not in_fence[i]
     start = next((i for i in range(len(lines)) if is_h2(i) and section in lines[i]), None)
@@ -1327,6 +1376,21 @@ def slice_section(text, section):
         return '', False
     end = next((j for j in range(start + 1, len(lines)) if is_h2(j)), len(lines))
     return '\n'.join(lines[start:end]), True
+
+def strip_fenced(text):
+    # H2-fallback может вернуть срез, где fenced-пример (документационный образец
+    # разметки, см. комментарий в slice_section выше) остаётся ВНУТРИ среза —
+    # без этого фильтра подсчёт [[gate...]] ниже принял бы такой пример за
+    # настоящий гейт (review post-consensus, ход 5: живой repro на H2, реально
+    # совпадающем с --section, содержащем fenced-пример с [[gate]] внутри).
+    out, fence = [], False
+    for l in text.splitlines():
+        if l.lstrip().startswith('```'):
+            fence = not fence
+            out.append('')
+            continue
+        out.append('' if fence else l)
+    return '\n'.join(out)
 
 text = open(os.environ['_CTS_PROTO'], encoding='utf-8').read()
 section = os.environ.get('_CTS_SECTION', '')
@@ -1344,7 +1408,7 @@ ar005_ok = os.environ.get('_CTS_AR005') == '1'
 # ложно засчитывался бы в другом при общем SESSION_ID.
 prefix = re.sub(r'[^a-z0-9]+', '-', section.lower()).strip('-') + '-' if section else ''
 gates, n = [], 0
-for line in text.splitlines():
+for line in strip_fenced(text).splitlines():
     line = re.sub(r'`[^`]*`', '', line)  # теги в inline-code — легенда, не разметка
     m = re.search(r'\[\[gate(?::([A-Za-z0-9.,]+))?\]\]', line)
     if not m:
@@ -1357,8 +1421,8 @@ for line in text.splitlines():
     else:
         n += 1
         gates.append((f'{prefix}g{n}', title))
-# narrative: тоже не считать упоминания в inline-code
-narr = len(re.findall(r'\[\[narrative\]\]', re.sub(r'`[^`]*`', '', text)))
+# narrative: тоже не считать упоминания в inline-code и в fenced-примерах
+narr = len(re.findall(r'\[\[narrative\]\]', re.sub(r'`[^`]*`', '', strip_fenced(text))))
 def safe(k):
     return re.sub(r'[^A-Za-z0-9._-]', '-', k)
 satisfied, unsatisfied, excluded = [], [], []
@@ -1654,31 +1718,31 @@ FIXEOF
         # Close-гейтами, которые в 3-минутной сессии физически не выполняются).
         T44=$(bash "$0" list-gates --section "Quick Close" 2>/dev/null)
         T44_KEYS=$(printf '%s' "$T44" | cut -f1 | sort | tr '\n' ',')
-        if [ "$T44_KEYS" = "AR.005,AR.007,quick-close-g1,quick-close-g2,quick-close-g3,quick-close-g4," ]; then
-            echo "PASS Test 44: list-gates --section 'Quick Close' на protocol-close.md → только гейты Quick Close (Week Close/Exit Protocol не просочились), позиционные ключи с section-префиксом"
+        if [ "$T44_KEYS" = "AR.005,AR.007,quick-close-g1,quick-close-g2,quick-close-g3,quick-close-g4,quick-close-g5,quick-close-g6," ]; then
+            echo "PASS Test 44: list-gates --section 'Quick Close' на protocol-close.md (якорная разметка, WP-481 Ф17) → только гейты Quick Close (Week Close/Exit Protocol не просочились), 6 позиционных + AR.005/AR.007"
             PASS=$((PASS+1))
         else
-            echo "FAIL Test 44: expected AR.005,AR.007,quick-close-g1..g4 got $T44_KEYS"
+            echo "FAIL Test 44: expected AR.005,AR.007,quick-close-g1..g6 got $T44_KEYS"
             FAIL=$((FAIL+1))
         fi
         TRACE_SID2="test-trace-section-$$"
         T45=$(CLAUDE_SESSION_ID="$TRACE_SID2" bash "$0" check-trace-satisfaction --section "Quick Close" --exclude "AR.007,AR.005" 2>/dev/null)
         T45V=$(printf '%s' "$T45" | python3 -c 'import sys,json; print(json.loads(sys.stdin.read())["verdict"])' 2>/dev/null)
         T45U=$(printf '%s' "$T45" | python3 -c 'import sys,json; d=json.loads(sys.stdin.read()); print(",".join(sorted(g["key"] for g in d["unsatisfied"])))' 2>/dev/null)
-        if [ "$T45V" = "block" ] && [ "$T45U" = "quick-close-g1,quick-close-g2,quick-close-g3,quick-close-g4" ]; then
-            echo "PASS Test 45: check-trace-satisfaction --section 'Quick Close' (fresh session) → unsatisfied = {quick-close-g1..g4}, Week Close/Exit Protocol gates отсутствуют"
+        if [ "$T45V" = "block" ] && [ "$T45U" = "quick-close-g1,quick-close-g2,quick-close-g3,quick-close-g4,quick-close-g5,quick-close-g6" ]; then
+            echo "PASS Test 45: check-trace-satisfaction --section 'Quick Close' (fresh session, якорная разметка) → unsatisfied = {quick-close-g1..g6}, Week Close/Exit Protocol gates отсутствуют"
             PASS=$((PASS+1))
         else
-            echo "FAIL Test 45: expected block+{quick-close-g1..g4}, got verdict=$T45V unsatisfied=$T45U"
+            echo "FAIL Test 45: expected block+{quick-close-g1..g6}, got verdict=$T45V unsatisfied=$T45U"
             FAIL=$((FAIL+1))
         fi
         T46=$(bash "$0" list-gates --section "Week Close" 2>/dev/null)
         T46_KEYS=$(printf '%s' "$T46" | cut -f1 | sort | tr '\n' ',')
-        if [ "$T46_KEYS" = "week-close-g1,week-close-g2,week-close-g3,week-close-g4,week-close-g5," ]; then
-            echo "PASS Test 46: list-gates --section 'Week Close' → только 5 гейтов недели (Quick Close/Exit Protocol не просочились), ключи не коллизят с quick-close-g*"
+        if [ "$T46_KEYS" = "week-close-g1,week-close-g2,week-close-g3,week-close-g4,week-close-g5,week-close-g6," ]; then
+            echo "PASS Test 46: list-gates --section 'Week Close' → 6 гейтов недели (WP-484 30.07 добавил «Ретро недели» — фикстура актуализирована), Quick Close/Exit Protocol не просочились, ключи не коллизят с quick-close-g*"
             PASS=$((PASS+1))
         else
-            echo "FAIL Test 46: expected week-close-g1..g5 got $T46_KEYS"
+            echo "FAIL Test 46: expected week-close-g1..g6 got $T46_KEYS"
             FAIL=$((FAIL+1))
         fi
         T47=$(bash "$0" list-gates --section "no-such-section-xyz" 2>&1 >/dev/null)
@@ -1690,6 +1754,132 @@ FIXEOF
             FAIL=$((FAIL+1))
         fi
         CLAUDE_SESSION_ID="$TRACE_SID2" bash "$0" session-clear "$TRACE_SID2" >/dev/null 2>&1
+
+        # WP-481 Ф17: якорная разметка (<!-- section:<slug>:start/end -->) — непарные,
+        # дублированные или перевёрнутые якоря обязаны явно падать (found=False), не
+        # тихо откатываться на H2-fallback — откат на сломанной разметке воспроизвёл бы
+        # тот же vacuous-pass, который якоря призваны исключить (bug-2026-08-04-rule-
+        # engine-section-slicing-quick-close.md).
+        T50_FIX=$(mktemp /tmp/anchor-fixture-XXXXXX.md)
+        cat > "$T50_FIX" << 'FIXEOF'
+## Test Quick (fixture)
+<!-- section:test-quick:start -->
+1. Шаг [[gate]]
+FIXEOF
+        T50=$(bash "$0" list-gates --section "test-quick" --protocol "$T50_FIX" 2>&1 >/dev/null)
+        if printf '%s' "$T50" | grep -q "section not found"; then
+            echo "PASS Test 50: якорь только :start (нет :end) → явная ошибка, не тихий H2-fallback"
+            PASS=$((PASS+1))
+        else
+            echo "FAIL Test 50: expected 'section not found' on stderr, got: $T50"
+            FAIL=$((FAIL+1))
+        fi
+        rm -f "$T50_FIX"
+
+        T51_FIX=$(mktemp /tmp/anchor-fixture-XXXXXX.md)
+        cat > "$T51_FIX" << 'FIXEOF'
+## Test Quick (fixture)
+1. Шаг [[gate]]
+<!-- section:test-quick:end -->
+FIXEOF
+        T51=$(bash "$0" list-gates --section "test-quick" --protocol "$T51_FIX" 2>&1 >/dev/null)
+        if printf '%s' "$T51" | grep -q "section not found"; then
+            echo "PASS Test 51: якорь только :end (нет :start) → явная ошибка"
+            PASS=$((PASS+1))
+        else
+            echo "FAIL Test 51: expected 'section not found' on stderr, got: $T51"
+            FAIL=$((FAIL+1))
+        fi
+        rm -f "$T51_FIX"
+
+        T52_FIX=$(mktemp /tmp/anchor-fixture-XXXXXX.md)
+        cat > "$T52_FIX" << 'FIXEOF'
+## Test Quick (fixture)
+<!-- section:test-quick:start -->
+1. Шаг [[gate]]
+<!-- section:test-quick:start -->
+2. Шаг [[gate]]
+<!-- section:test-quick:end -->
+FIXEOF
+        T52=$(bash "$0" list-gates --section "test-quick" --protocol "$T52_FIX" 2>&1 >/dev/null)
+        if printf '%s' "$T52" | grep -q "section not found"; then
+            echo "PASS Test 52: дубликат :start → явная ошибка"
+            PASS=$((PASS+1))
+        else
+            echo "FAIL Test 52: expected 'section not found' on stderr, got: $T52"
+            FAIL=$((FAIL+1))
+        fi
+        rm -f "$T52_FIX"
+
+        T53_FIX=$(mktemp /tmp/anchor-fixture-XXXXXX.md)
+        cat > "$T53_FIX" << 'FIXEOF'
+## Test Quick (fixture)
+<!-- section:test-quick:end -->
+1. Шаг [[gate]]
+<!-- section:test-quick:start -->
+FIXEOF
+        T53=$(bash "$0" list-gates --section "test-quick" --protocol "$T53_FIX" 2>&1 >/dev/null)
+        if printf '%s' "$T53" | grep -q "section not found"; then
+            echo "PASS Test 53: :end раньше :start → явная ошибка"
+            PASS=$((PASS+1))
+        else
+            echo "FAIL Test 53: expected 'section not found' on stderr, got: $T53"
+            FAIL=$((FAIL+1))
+        fi
+        rm -f "$T53_FIX"
+
+        # Живой repro из code review (ход 4): пара якорей ЦЕЛИКОМ внутри fenced
+        # code block (документационный пример синтаксиса) не должна засчитываться
+        # реальной границей — до фикса возвращала контент примера с exit 0.
+        T54_FIX=$(mktemp /tmp/anchor-fixture-XXXXXX.md)
+        cat > "$T54_FIX" << 'FIXEOF'
+## Формат (пример)
+
+```markdown
+<!-- section:test-quick:start -->
+1. Пример шага [[gate]]
+<!-- section:test-quick:end -->
+```
+
+## Другое
+FIXEOF
+        T54=$(bash "$0" list-gates --section "test-quick" --protocol "$T54_FIX" 2>&1 >/dev/null)
+        if printf '%s' "$T54" | grep -q "section not found"; then
+            echo "PASS Test 54: якоря внутри fenced-примера не засчитываются границей (не vacuous-pass документационного сниппета)"
+            PASS=$((PASS+1))
+        else
+            echo "FAIL Test 54: expected 'section not found' on stderr, got: $T54"
+            FAIL=$((FAIL+1))
+        fi
+        rm -f "$T54_FIX"
+
+        # Живой repro из независимого /verify (ход 5): H2 РЕАЛЬНО совпадает с --section
+        # (fallback срабатывает законно), но внутри среза есть fenced-пример с фейковым
+        # [[gate]] — без strip_fenced() в цикле подсчёта фейк попал бы в список как
+        # настоящий гейт наравне с реальным шагом после блока.
+        T55_FIX=$(mktemp /tmp/anchor-fixture-XXXXXX.md)
+        cat > "$T55_FIX" << 'FIXEOF'
+## test-quick
+
+Реальный контент секции, без якорей (fallback путь).
+
+```markdown
+1. FAKE example gate from docs [[gate]]
+```
+
+2. Настоящий шаг [[gate]]
+
+## Другое
+FIXEOF
+        T55=$(bash "$0" list-gates --section "test-quick" --protocol "$T55_FIX" 2>/dev/null)
+        if [ "$T55" = "$(printf 'test-quick-g1\t2. Настоящий шаг')" ]; then
+            echo "PASS Test 55: fenced fake-gate внутри законного H2-fallback среза не считается, реальный гейт после блока — считается"
+            PASS=$((PASS+1))
+        else
+            echo "FAIL Test 55: expected only 'test-quick-g1\t2. Настоящий шаг', got: $T55"
+            FAIL=$((FAIL+1))
+        fi
+        rm -f "$T55_FIX"
 
         # WP-481 Ф5.1: day-close/SKILL.md теперь размечен своими gate — регрессия на случай,
         # если разметку случайно сотрут (тогда check вернулся бы к тихому vacuous-ok).

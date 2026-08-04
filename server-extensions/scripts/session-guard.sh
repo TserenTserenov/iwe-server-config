@@ -784,6 +784,50 @@ if [ "$CMD" = "audit" ]; then
   exit 0
 fi
 
+# --- RECOVER-ORPHANED (WP-484 Ф49, contract designed 04.08 peer-session
+# 2026-08-04-13-session-ttl-f47-draft, ход 1: Codex В4) ---
+# Карантинный файл — уже честная терминальная запись места, где сессия
+# застряла; переименование обратно в `.open` имитировало бы штатное
+# закрытие, которого не было (явно запрещено в записи Ф49). recover-orphaned
+# вместо этого пишет отдельное ledger-событие и метит файл — сам файл
+# карантина остаётся на диске как есть, историю не переписываем.
+if [ "$CMD" = "recover-orphaned" ]; then
+  ORPHAN_ARG="${POSITIONAL[0]:-}"
+  [ -z "$ORPHAN_ARG" ] && fail "recover-orphaned: missing path argument" 1
+  case "$ORPHAN_ARG" in
+    /*) ORPHAN_FILE="$ORPHAN_ARG" ;;
+    *)  ORPHAN_FILE="$SESSION_DIR/$ORPHAN_ARG" ;;
+  esac
+  [ -f "$ORPHAN_FILE" ] || fail "recover-orphaned: файл не найден: $ORPHAN_FILE" 1
+  case "$(basename "$ORPHAN_FILE")" in
+    *.orphaned-*) : ;;
+    *) fail "recover-orphaned: '$(basename "$ORPHAN_FILE")' не похож на карантинный семафор (ожидается суффикс .orphaned-*)" 1 ;;
+  esac
+
+  REASON=$(basename "$ORPHAN_FILE" | sed -n 's/.*\.orphaned-//p')
+  REC_WP=$(grep "^wp: " "$ORPHAN_FILE" | cut -d' ' -f2- || true)
+  REC_SLUG=$(grep "^slug: " "$ORPHAN_FILE" | cut -d' ' -f2- || true)
+  REC_SID=$(grep "^session_id: " "$ORPHAN_FILE" | cut -d' ' -f2- || echo unknown)
+  REC_PATH=$(python3 -c "import os,sys; print(os.path.relpath(sys.argv[1], sys.argv[2]))" "$ORPHAN_FILE" "$IWE_ROOT")
+
+  EVENT_JSON=$(python3 -c '
+import json, sys
+print(json.dumps({
+    "original_path": sys.argv[1],
+    "quarantine_reason": sys.argv[2],
+    "wp": sys.argv[3] or "unknown",
+    "slug": sys.argv[4] or "unknown",
+    "session_id": sys.argv[5],
+}))
+' "$REC_PATH" "$REASON" "${REC_WP:-}" "${REC_SLUG:-}" "$REC_SID")
+
+  bash "$IWE_ROOT/$GOV_REPO/scripts/ledger-append.sh" day "$(now_date)" session_recovered_closed "$EVENT_JSON" session-guard
+
+  mv "$ORPHAN_FILE" "${ORPHAN_FILE}.recovered"
+  echo "Recovered: $(basename "$ORPHAN_FILE") — session_recovered_closed записан в ledger ($REC_PATH, wp=${REC_WP:-unknown}, session_id=$REC_SID), файл помечен .recovered. Исходный карантинный файл НЕ возвращён в .open — это честная терминальная запись, не имитация штатного закрытия."
+  exit 0
+fi
+
 # --- GIT PRE-COMMIT CHECK ---
 if [ "$CMD" = "pre-commit-check" ]; then
   # WP-484 Ф49: право разрешать коммит истекает по аренде и отзывается у ВСЕГО
@@ -934,4 +978,4 @@ EOF
   exit 0
 fi
 
-fail "Unknown command: $CMD (use: open, close, audit, renew, note-file, pre-commit-check)"
+fail "Unknown command: $CMD (use: open, close, audit, renew, note-file, recover-orphaned, pre-commit-check)"
