@@ -29,9 +29,11 @@ IWE = Path(os.environ.get("IWE", Path.home() / "IWE"))
 KNOWLEDGE = IWE / "DS-Knowledge-Index-Tseren"
 DS_STRATEGY = IWE / "DS-my-strategy"
 
-# WP-484 Ф48c (04.08): was localhost:18765 (Mac-only, unreachable from tsekh-1
+# WP-484 Ф50 (04.08): was localhost:18765 (Mac-only, unreachable from tsekh-1
 # where this actually runs via week-close.after.md) -- flipped to the Railway
-# gateway, same fix as day-open-pipeline.sh/llm-health-check.sh.
+# gateway. This file duplicates iwe-server-config/server-extensions/scripts/
+# video-topics-suggest.py (identical content, separate copy -- WP-485 territory,
+# not resolved here); patched in lockstep to avoid the two drifting apart.
 DEFAULT_PROXY_URL = os.environ.get("LLM_PROXY_URL", "https://iwe-llm-proxy-production.up.railway.app")
 PROXY_TIMEOUT_S = 60
 
