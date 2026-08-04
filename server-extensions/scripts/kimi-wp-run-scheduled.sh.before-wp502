@@ -109,15 +109,13 @@ if [ "$IS_TASK" != "1" ]; then
 fi
 
 # --- session-guard open -----------------------------------------------------
-if [ "$IS_TASK" = "1" ] || [ "$AGENT" = "codex" ]; then
-  # задача без РП или Codex peer pass: housekeeping-сессия (без ORZ, без WP Gate)
+if [ "$IS_TASK" = "1" ]; then
+  # задача без РП: housekeeping-сессия (без ORZ, без WP Gate)
   if ! bash "$IWE_ROOT/scripts/session-guard.sh" open --housekeeping "sched-$ID" --agent "$AGENT" >>"$LOG" 2>&1; then
     log "ERROR: session-guard open (housekeeping) failed"
     set_status failed; report_line failed "session-guard open failed"; cleanup; exit 1
   fi
-  if [ "$IS_TASK" = "1" ]; then
-    [ -f "$QUEUE_DIR/$ID.prompt" ] || { log "ERROR: TASK without prompt file"; set_status failed; report_line failed "TASK without prompt"; bash "$IWE_ROOT/scripts/session-guard.sh" close --housekeeping "sched-$ID" --agent "$AGENT" >>"$LOG" 2>&1; cleanup; exit 1; }
-  fi
+  [ -f "$QUEUE_DIR/$ID.prompt" ] || { log "ERROR: TASK without prompt file"; set_status failed; report_line failed "TASK without prompt"; bash "$IWE_ROOT/scripts/session-guard.sh" close --housekeeping "sched-$ID" --agent "$AGENT" >>"$LOG" 2>&1; cleanup; exit 1; }
   PROMPT_FILE="$QUEUE_DIR/$ID.prompt"
 elif ! bash "$IWE_ROOT/scripts/session-guard.sh" open \
       --wp "$WP" --task "Scheduled run ($ID)" --slug "sched-$ID" \
@@ -127,7 +125,7 @@ elif ! bash "$IWE_ROOT/scripts/session-guard.sh" open \
 fi
 
 # --- промпт -----------------------------------------------------------------
-if [ "$IS_TASK" != "1" ] && [ "$AGENT" != "codex" ]; then
+if [ "$IS_TASK" != "1" ]; then
 PROMPT_FILE="$QUEUE_DIR/$ID.prompt"
 if [ ! -f "$PROMPT_FILE" ]; then
   PROMPT_FILE=$(mktemp)
@@ -215,26 +213,6 @@ case "$AGENT" in
       "$CLAUDE_BIN" -p "$(cat "$PROMPT_FILE")" --max-turns "$MAX_TURNS" --dangerously-skip-permissions >>"$LOG" 2>&1
     RC=$?
     ;;
-  codex)
-    WP502_SCRIPT="$IWE_ROOT/$IWE_GOVERNANCE_REPO/scripts/wp502-codex-peer-pass.sh"
-    if [ ! -x "$WP502_SCRIPT" ]; then
-      log "ERROR: wp502-codex-peer-pass.sh not found/executable: $WP502_SCRIPT"
-      set_status failed; report_line failed "wp502 script missing"
-      bash "$IWE_ROOT/scripts/session-guard.sh" close --housekeeping "sched-$ID" --agent "$AGENT" >>"$LOG" 2>&1 || true
-      cleanup; exit 1
-    fi
-    if [ ! -f "$PROMPT_FILE" ]; then
-      log "ERROR: codex run requires custom prompt (task description)"
-      set_status failed; report_line failed "codex missing prompt"
-      bash "$IWE_ROOT/scripts/session-guard.sh" close --housekeeping "sched-$ID" --agent "$AGENT" >>"$LOG" 2>&1 || true
-      cleanup; exit 1
-    fi
-    TASK_TEXT=$(cat "$PROMPT_FILE")
-    log "starting codex wp502 peer pass (timeout ${TIMEOUT_SEC}s)"
-    perl -e 'my $t=shift; alarm $t; exec @ARGV' -- "$TIMEOUT_SEC" \
-      bash "$WP502_SCRIPT" "$WP" "$TASK_TEXT" >>"$LOG" 2>&1
-    RC=$?
-    ;;
   *)
     log "ERROR: unknown agent $AGENT"; RC=1 ;;
 esac
@@ -250,7 +228,7 @@ set_status "$STATUS"
 report_line "$STATUS" "$NOTE"
 
 # --- session-guard close + самоудаление задачи -------------------------------
-if [ "$IS_TASK" = "1" ] || [ "$AGENT" = "codex" ]; then
+if [ "$IS_TASK" = "1" ]; then
   bash "$IWE_ROOT/scripts/session-guard.sh" close --housekeeping "sched-$ID" --agent "$AGENT" >>"$LOG" 2>&1 || log "WARN: session-guard close non-zero"
 else
   bash "$IWE_ROOT/scripts/session-guard.sh" close --agent "$AGENT" >>"$LOG" 2>&1 || log "WARN: session-guard close non-zero"

@@ -44,6 +44,12 @@ elif echo "$PROMPT" | grep -qE '(закрывай|закрываю|залива�
 EOF
 
 else
+  # Пилот перешёл к другой теме → «намерение закрыть» больше не действует для
+  # неё; ждать TTL блокировало не связанные с закрытием commit'ы (найдено
+  # 04.08.2026, bug-2026-08-04-peer-session-commit-blocked-by-close-runner-gate.md,
+  # решение пилота п.2).
+  SENTINEL_DIR="/tmp/iwe-close-intent"
+  rm -f "$SENTINEL_DIR/$SESSION_ID.flag" 2>/dev/null
   echo '{}'
 fi
 exit 0

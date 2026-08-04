@@ -799,10 +799,25 @@ if [ "$CMD" = "recover-orphaned" ]; then
     *)  ORPHAN_FILE="$SESSION_DIR/$ORPHAN_ARG" ;;
   esac
   [ -f "$ORPHAN_FILE" ] || fail "recover-orphaned: файл не найден: $ORPHAN_FILE" 1
-  case "$(basename "$ORPHAN_FILE")" in
-    *.orphaned-*) : ;;
-    *) fail "recover-orphaned: '$(basename "$ORPHAN_FILE")' не похож на карантинный семафор (ожидается суффикс .orphaned-*)" 1 ;;
+  # Review post-consensus (одноразовый verification-запрос Codex, 04.08): команда
+  # принимала любой путь на диске с подходящим именем — не ослабляет Scope gate
+  # (.recovered не даёт прав коммита), но лишняя способность переименовывать файлы
+  # вне каталога семафоров. Канонизируем и запираем в $SESSION_DIR, отклоняем
+  # symlink и повторный вызов на уже восстановленном файле.
+  CANON_FILE=$(python3 -c "import os,sys; print(os.path.realpath(sys.argv[1]))" "$ORPHAN_FILE")
+  CANON_DIR=$(python3 -c "import os,sys; print(os.path.realpath(sys.argv[1]))" "$SESSION_DIR")
+  case "$CANON_FILE" in
+    "$CANON_DIR"/*) : ;;
+    *) fail "recover-orphaned: '$ORPHAN_FILE' вне каталога семафоров ($SESSION_DIR)" 1 ;;
   esac
+  [ -L "$ORPHAN_FILE" ] && fail "recover-orphaned: '$ORPHAN_FILE' — символическая ссылка, не карантинный файл" 1
+  case "$(basename "$CANON_FILE")" in
+    *.recovered) fail "recover-orphaned: '$(basename "$CANON_FILE")' уже восстановлен" 1 ;;
+    *.orphaned-*) : ;;
+    *) fail "recover-orphaned: '$(basename "$CANON_FILE")' не похож на карантинный семафор (ожидается суффикс .orphaned-*)" 1 ;;
+  esac
+  grep -qE '^(agent|opened_at|session_id): ' "$ORPHAN_FILE" || \
+    fail "recover-orphaned: '$(basename "$CANON_FILE")' не похож на семафор session-guard (нет полей agent:/opened_at:/session_id:)" 1
 
   REASON=$(basename "$ORPHAN_FILE" | sed -n 's/.*\.orphaned-//p')
   REC_WP=$(grep "^wp: " "$ORPHAN_FILE" | cut -d' ' -f2- || true)
@@ -821,10 +836,14 @@ print(json.dumps({
 }))
 ' "$REC_PATH" "$REASON" "${REC_WP:-}" "${REC_SLUG:-}" "$REC_SID")
 
+  # mv ДО ledger-append (не наоборот, review post-consensus Codex): если mv
+  # упадёт — ничего не залогировано, retry безопасен. Если бы ledger писался
+  # первым и упал mv — retry на уже-переименованном файле молча дал бы
+  # дубликат события; здесь повтор просто упрётся в проверку *.recovered выше.
+  mv "$ORPHAN_FILE" "${ORPHAN_FILE}.recovered"
   bash "$IWE_ROOT/$GOV_REPO/scripts/ledger-append.sh" day "$(now_date)" session_recovered_closed "$EVENT_JSON" session-guard
 
-  mv "$ORPHAN_FILE" "${ORPHAN_FILE}.recovered"
-  echo "Recovered: $(basename "$ORPHAN_FILE") — session_recovered_closed записан в ledger ($REC_PATH, wp=${REC_WP:-unknown}, session_id=$REC_SID), файл помечен .recovered. Исходный карантинный файл НЕ возвращён в .open — это честная терминальная запись, не имитация штатного закрытия."
+  echo "Recovered: $(basename "$ORPHAN_FILE") — файл помечен .recovered, session_recovered_closed записан в ledger ($REC_PATH, wp=${REC_WP:-unknown}, session_id=$REC_SID). Исходный карантинный файл НЕ возвращён в .open — это честная терминальная запись, не имитация штатного закрытия."
   exit 0
 fi
 

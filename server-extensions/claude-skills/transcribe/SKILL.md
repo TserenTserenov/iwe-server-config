@@ -1,8 +1,8 @@
 ---
 name: transcribe
-description: Транскрипция аудио/видео файлов через MLX Whisper (Apple Silicon). Использование: /transcribe path/to/file.mp3
+description: "Транскрипция аудио/видео файлов через MLX Whisper (Apple Silicon). Использование: /transcribe path/to/file.mp3"
 user_invocable: true
-version: 1.0.0
+version: 1.0.1
 layer: L3
 status: active
 triggers:
@@ -36,18 +36,16 @@ gates_rationale: "операционный скилл; WP Gate применим 
 
 ## Algorithm
 
-### Шаг 1: Проверка venv
+### Шаг 1: Проверить локальные ресурсы без импорта MLX
 
 ```bash
-~/.local/share/mlx-whisper/.venv-whisper/bin/python -c "import mlx_whisper; print('ok')" 2>/dev/null
+test -x ~/.local/share/mlx-whisper/.venv-whisper/bin/python
+test -d ~/.local/share/mlx-whisper/mlx_models/large-v3
+~/.local/share/mlx-whisper/.venv-whisper/bin/python -c \
+  'import importlib.util; raise SystemExit(importlib.util.find_spec("mlx_whisper") is None)'
 ```
 
-Если ошибка (сломан или отсутствует) — пересоздать:
-```bash
-rm -rf ~/.local/share/mlx-whisper/.venv-whisper
-python3 -m venv ~/.local/share/mlx-whisper/.venv-whisper
-~/.local/share/mlx-whisper/.venv-whisper/bin/pip install mlx-whisper
-```
+Не выполнять `import mlx_whisper` внутри Codex Seatbelt: MLX обращается к Metal уже при импорте и аварийно завершается, если песочница скрыла GPU. Если проверка ресурсов не прошла, сообщить, чего именно нет; не удалять и не пересоздавать окружение без отдельного разрешения пользователя.
 
 ### Шаг 2: Определить файл и модель
 
@@ -56,9 +54,13 @@ python3 -m venv ~/.local/share/mlx-whisper/.venv-whisper
 
 ### Шаг 3: Транскрипция
 
+MLX требует доступ к Metal/GPU. В Codex запустить **всю команду** с точечным `sandbox_permissions: require_escalated` и объяснением: «Разрешить локальному MLX Whisper использовать Apple Metal/GPU для транскрибации указанного файла?». Не запускать предварительный `import mlx_whisper` в обычной песочнице.
+
 ```bash
 bash "$IWE_SCRIPTS/route-task.sh" --skill transcribe --args "<путь_к_файлу>"
 ```
+
+Если скрипт завершился с кодом `77`, запросить точечное разрешение и повторить всю команду один раз. Это отказ песочницы, а не признак сломанного пакета; переустановка не нужна.
 
 Если язык не русский — пользователь укажет, или скрипт автоматически детектирует.
 

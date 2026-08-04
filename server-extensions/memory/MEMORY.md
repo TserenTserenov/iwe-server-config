@@ -58,7 +58,7 @@
 | 250 | 🔄 | — | План развития до конца 2026 (зонтичный) | R1-R6 августа утверждены → Strategy.md § август |
 | 399 | ⏳ | P1 | Ротация секретов экосистемы | батч просрочен, ротация за пилотом |
 | 509 | 🔄 | P2 | Пир-сессии 3+ агентов: роль-дискавери и общий рабочий продукт | S-51 закрыта 3/3; промоция на Week Close |
-| 510 | 🔄 | P3→P1 | ИИ-личности | 04.08 веч.: Патч 4 (personality_id) и дизайн proposed changes (в) закрыты, задеплоены; next: живой кандидат Гари |
+| 510 | 🔄 | P3→P1 | ИИ-личности | 04.08 веч.: Патч 3 (генератор Gary Public Kit) закрыт с Codex; next: Патч 3b MCP-доставка |
 | 5 | 🔄 | — | Платформа: развитие (зонтичный) | детали `inbox/WP-5/WP-5.md` |
 | 117 | 🔄 | — | Развитие nudge-системы | Ф-adapt ждёт 4 недели рантайма |
 | 149 | 🔄 | **P1** | Персональные руководства | остаток закрыт (9f6defc): провенанс, мост weekly, лимит, светофор; ждём checks 05.08 |
@@ -78,7 +78,7 @@
 | 455 | 🔄 | P4 | Неизменяемость аудит-журнала событий | урок про git pull записан, кода не выкатывал |
 | 290 | 🔄 | **P1** | Следователь: каузальная аналитика | Ход 2 — решение стратсессии |
 | 73 | 🔄 | P3 | Новая архитектура ИТ-платформы Aisystant | Ф5 proposed, дедлайн 25.07 |
-| 7 | 🔄 | — | Платформа: техдолг (зонтичный) | 04.08 веч.: +фаза QUICKCLOSE-GAPS1 (3 разрыва конвейера Close — no-remote-путаница commit-push, слепой к terminal-файлам session-guard, дубль session-index-write — найдены живьём при закрытии этой же сессии, не чинил); CI зелёный на 15a38b9 (был красным только в C.UTF-8-локали раннера — тест поймал реальный баг). 04.08: обе пир-сессии с Codex по issues шаблона — все 14 пользовательских закрыты (5 фиксов 720d30f; 3 переноса владельцам gateway#22/#23, knowledge#3); фаза ResidencyGate-Event-Adapter; Ф44 skill доставлен (skill-promote.sh); next: monthly-maintenance/neon-backup алармы; история фаз → `inbox/WP-7/WP-7.md` |
+| 7 | 🔄 | — | Платформа: техдолг (зонтичный) | 04.08 ночь: Ф48 часть 1 закрыта (пир-сессия Codex) — гонка счётчика активных дней бота, deploy pilot@0302ba02; часть 2 (протокол доставки) открыта, нужен АрхГейт; попутно 2 находки в session-guard.sh (не чинил, защищённый файл). 04.08 веч.: +фаза QUICKCLOSE-GAPS1 (4 разрыва конвейера Close — no-remote-путаница commit-push, слепой к terminal-файлам session-guard, дубль session-index-write, repo-wide has_diff вместо diff агента — найдены живьём при закрытии этой же сессии, не чинил); CI зелёный на 15a38b9 (был красным только в C.UTF-8-локали раннера — тест поймал реальный баг). next: QCRUN1 (P0); история фаз → `inbox/WP-7/WP-7.md` |
 | 485 | 🔄 | P2 | Сверка дублирующихся скриптов root↔шаблон | Ф7-Ф9 (сторож в ритм) |
 | 487 | 🔄 | P3 | Планировщик отложенного запуска РП | живой прогон через очередь |
 | 472 | 🔄 | P3 | Конвейер личного бренда | 2-й человек за пилотом |
@@ -90,7 +90,7 @@
 | 289 | 🔄 | P2 | Интеграция IWE с личными базами знаний | Приёмка MVP |
 | 483 | 🔄 | P2 | Комплект структурирования данных (guide-kit) | Ф6 шаги 1-3 закрыты 03.08; шаг 4 (регистрация+код) — будущая сессия |
 | 488 | 🔄 | P2 | Браузерное рабочее место на Hetzner | Ф2 скорость/команда |
-| 484 | 🔄 | **P1** | Автогенератор открытия/закрытия дня (зонтичный) | Ф49 закрыт 04.08; далее договор аренды (АрхГейт) + Ф47 |
+| 484 | 🔄 | **P1** | Автогенератор открытия/закрытия дня (зонтичный) | Ф17+карантин закрыты 04.08; аренда ждёт АрхГейт; Ф47 нужен доразбор |
 | 493 | 🔄 | P2 | Лаборатория характеристик | Ф4 ждёт данных (конец августа) |
 | 494 | 🔄 | P2 | Панель рабочих продуктов в VS Code | ручная F5-приёмка пилотом |
 | 496 | 🔄 | P3 | Журнал гипотез (LPF-регламент обратной связи) | сверка «Актуальных» на Week Close |
@@ -126,35 +126,14 @@
 
 ### Feedback — HOT
 
+- [lessons_process_runner_root_repo_path_is_dot.md](lessons_process_runner_root_repo_path_is_dot.md) — process-runner.py commit-push: корневой репозиторий IWE = `"repo": "."`, не имя git-remote (04.08)
 - [lessons_check_live_diff_before_parallel_infra_fix.md](lessons_check_live_diff_before_parallel_infra_fix.md) — перед пир-сессией на правку общего инфраструктурного файла сверить живой `git diff`, не только `git log` — параллельный агент может держать несохранённую правку той же проблемы (04.08)
 - [lessons_guard_behind_failing_step_never_runs.md](lessons_guard_behind_failing_step_never_runs.md) — корректный сторож не исполняется, если стоит в конвейере за падающим шагом; красный CI отключает всё после точки падения (04.08)
 - [feedback_long_autonomous_work_needs_visibility.md](feedback_long_autonomous_work_needs_visibility.md) — долгий автономный участок (>15-20 мин без апдейта) ощущается пилотом как темнота даже при хорошем итоге — апдейты по вехам, не только в начале (04.08); подтверждено 04.08: апдейты по вехам + один consolidated-вопрос = «отработал полностью сам»
 - [feedback_codex_peer_code_diagnosis_quality.md](feedback_codex_peer_code_diagnosis_quality.md) — Codex в пир-сессиях хорошо держит код-уровневую верификацию, поймал 2 фактических промаха писателя по данным, не на слово (04.08)
-- [lessons_close_fix_now_not_defer.md](lessons_close_fix_now_not_defer.md) — на Close чини сразу то, что ловит механический хук, не жди отдельной фазы; одобренный чек-лист = список открытого, не отчёт о решённом (03.08)
-- [lessons_regression_test_must_verify_via_same_mechanism_bug_manifests.md](lessons_regression_test_must_verify_via_same_mechanism_bug_manifests.md) — тест сравнивал `$(cat file)` до/после — режет trailing `\n` на обеих сторонах одинаково, слеп к своему же классу бага (03.08)
-- [feedback_check_sibling_bug_instances_and_verify_stale_docs.md](feedback_check_sibling_bug_instances_and_verify_stale_docs.md) — почини баг → проверь все точки того же класса, не только заявленную; WP-context может быть устаревшим — при сомнении проверять код напрямую (03.08, Codex дважды поймал на РП-470)
-- [lessons_card_claims_need_live_artifact_check.md](lessons_card_claims_need_live_artifact_check.md) — карточка РП не доказывает факт: сверять с живым артефактом (02.08 — 7 фантомов)
-- [feedback_no_closing_questions.md](feedback_no_closing_questions.md) — не спрашивай «Что дальше?» после выполнения, выполни → отчитайся
+- [feedback_no_closing_questions.md](feedback_no_closing_questions.md) / [feedback_askuserquestion_not_reaching_pilot.md](feedback_askuserquestion_not_reaching_pilot.md) — не спрашивай «Что дальше?» после выполнения; choice-question — дублировать в чат, не полагаться только на инструмент
 - [feedback_quick_close_means_fast_for_pilot.md](feedback_quick_close_means_fast_for_pilot.md) — «быстрое закрытие» = коротко для пилота (снять ретро), не агент сокращает работу
-- [feedback_day_close_preliminary_vs_final_stats.md](feedback_day_close_preliminary_vs_final_stats.md) — ранний свод Day Close подписывать «предварительный», не «по факту» — итог только на позднем проходе
-- [lessons_check_live_sessions_before_editing_shared_governance_files.md](lessons_check_live_sessions_before_editing_shared_governance_files.md) — соло-правка governance-файлов → проверить mtime `.iwe-runtime/sessions/*.open`, не только git-lock (31.07)
-- [feedback_notes_pilot_only_review.md](feedback_notes_pilot_only_review.md) — заметки разбирает ТОЛЬКО пилот: агент предлагает, решение+дата → Notes-Archive, неразобранное повторяется в каждом Day Open; ночной авторазбор отключён 30.07
-- [feedback_ship_artifact_fast_not_just_discuss.md](feedback_ship_artifact_fast_not_just_discuss.md) — сайт/лендинг → сразу кликабельный макет, не только план (подтверждено РП304)
-- [feedback_subagent_reports_russian.md](feedback_subagent_reports_russian.md) — отчёты субагентов пилоту — на русском; брифовать deliverable RU
-- [feedback_askuserquestion_not_reaching_pilot.md](feedback_askuserquestion_not_reaching_pilot.md) — choice-question — дублировать в чат
-- [feedback_kimi_peer_quality_concern.md](feedback_kimi_peer_quality_concern.md) — Кими слаб в пир-сессиях — верифицировать находки независимо
-- [lessons_guard_scope_mismatch.md](lessons_guard_scope_mismatch.md) — сторож, ловящий не то условие или только «своего» субъекта, обучает себя игнорировать
 - [routing-vocab.md](routing-vocab.md) — фраза → путь, читать ПЕРЕД Write
 - [feedback_response_clarity_for_pilot.md](feedback_response_clarity_for_pilot.md) — A1-A11 правила ответа
-- [reference_no_invented_facts_hub.md](reference_no_invented_facts_hub.md) — не выдумывать опыт/имена
 - [user_tseren_personal_life.md](user_tseren_personal_life.md) — Tseren (НЕ Дмитрий), Кипр
-- [reference_day_protocol_gaps_hub.md](reference_day_protocol_gaps_hub.md) — Day Open/Close квирки (7)
-- [reference_wp_gate_mechanics_hub.md](reference_wp_gate_mechanics_hub.md) — task_id, дочерний РП, имя через Артефактор (6)
-- [reference_diagnosis_technique_hub.md](reference_diagnosis_technique_hub.md) — root-cause, verify-before-trust (49)
-- [reference_git_hygiene_hub.md](reference_git_hygiene_hub.md) — git-add scope, pathspec, rebase/reset квирки (32)
-- [reference_macos_zsh_env_quirks_hub.md](reference_macos_zsh_env_quirks_hub.md) — квирки macOS/zsh/grep/git (15)
-- [reference_process_runner_quirks_hub.md](reference_process_runner_quirks_hub.md) — креды в карточке, race сессий, umbrella-архивация (3)
-- [reference_secrets_credentials_hub.md](reference_secrets_credentials_hub.md) — .mcp.json wrapper, ротация-верификация, 403≠401 (3)
-- [reference_day_cycle_tsekh1_fallback.md](reference_day_cycle_tsekh1_fallback.md) — день открывается вручную на Маке при падении Цех-1; нужна диагностика (ночь 31.07→01.08)
-- [reference_tsekh1_claude_login_oauth_localhost.md](reference_tsekh1_claude_login_oauth_localhost.md) — вход в Клода на цехе бьёт в localhost Мака (OAuth): входить ручным кодом авторизации (21.07, 03.08)
-- Остальные уроки/hubs (31 шт., demoted 28.07+30.07) → [MEMORY-warm.md](MEMORY-warm.md)
+- Остальные уроки/hubs (52 шт., demoted 28.07+30.07+04.08) → [MEMORY-warm.md](MEMORY-warm.md)

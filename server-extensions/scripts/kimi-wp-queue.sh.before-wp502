@@ -47,7 +47,7 @@ cmd_add() {
   done
 
   [[ "$wp" =~ ^WP-[0-9]+$ ]] || [[ "$wp" =~ ^TASK-[a-z0-9-]+$ ]] || fail "wp must look like WP-NNN or TASK-<slug>, got: $wp"
-  case "$agent" in kimi|claude|codex) ;; *) fail "agent must be kimi, claude or codex, got: $agent" ;; esac
+  case "$agent" in kimi|claude) ;; *) fail "agent must be kimi or claude, got: $agent" ;; esac
   [[ "$timeout_min" =~ ^[0-9]+$ ]] || fail "--timeout must be minutes (integer)"
   if [[ "$wp" =~ ^TASK- ]]; then
     [ -n "$prompt" ] || fail "TASK-<slug> requires --prompt (no WP context to read)"
