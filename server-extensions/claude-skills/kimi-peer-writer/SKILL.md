@@ -375,7 +375,7 @@ Cold-context code review результатов peer-сессии <SESSION_ID>.
 Изменённые файлы:
 <CHANGED_FILES>
 
-Прочитай каждый файл (используй Read tool через add-dir; для файлов вне SESSION_DIR — абсолютный путь).
+У тебя нет файловых инструментов и доступа к каталогу сессии — весь нужный код уже вставлен выше, в `<CHANGED_FILES>` (диф и фрагменты файлов, добавляет писатель перед вызовом).
 Проверь по чек-листу:
 1. asyncio runtime: ищи 'wait_for(coro)' без 'shield' → coroutine reuse. Fire-and-forget tasks читающие/пишущие одну строку БД из разных мест.
 2. Shell ordering: function call ДО function definition. 'set -u' соблюдён?
@@ -713,22 +713,43 @@ report_file = os.path.join(session_dir, 'report-draft.md')
 gov_repo = os.environ.get('IWE_GOVERNANCE_REPO', 'DS-strategy')
 adapter = os.path.expanduser(f'~/IWE/{gov_repo}/scripts/claude-peer-adapter.sh')
 
+# synth_prompt above already inlines the full transcript, meta.yaml fields and
+# _outcome.md into stdin — claude-peer-adapter.sh is a text-only reviewer by
+# contract (WP-458) and unconditionally rejects --add-dir (exit 64). Passing
+# it here made every synthesis call fail deterministically, not just under
+# some failure condition; found via code review, confirmed by Codex reading
+# the same two files independently, peer-session
+# 2026-08-04-08-wp7-f44-sandbox-review. stderr is now captured (not
+# discarded) so a future regression leaves an actual diagnostic in the
+# fallback stub below instead of the same generic guess every time.
+stderr_path = tmp_path + '.err'
 try:
-    with open(tmp_path, 'r', encoding='utf-8') as stdin_f, open(report_file, 'w', encoding='utf-8') as stdout_f:
+    with open(tmp_path, 'r', encoding='utf-8') as stdin_f, \
+         open(report_file, 'w', encoding='utf-8') as stdout_f, \
+         open(stderr_path, 'w', encoding='utf-8') as stderr_f:
         try:
             result = subprocess.run(
-                ['bash', adapter, '--add-dir', session_dir],
+                ['bash', adapter],
                 stdin=stdin_f,
                 stdout=stdout_f,
-                stderr=subprocess.DEVNULL,
+                stderr=stderr_f,
                 timeout=180
             )
-        except subprocess.TimeoutExpired:
+        except (subprocess.TimeoutExpired, OSError):
+            # Any launch failure, not just a timeout, folds into the same
+            # returncode=1 path below — that branch already reads and cleans
+            # up stderr_path; a narrower except here left it leaking on the
+            # rarer OSError case (found in cold review, same peer-session).
             result = subprocess.CompletedProcess(args=[], returncode=1)
 finally:
     os.unlink(tmp_path)
 
 if result.returncode != 0 or os.path.getsize(report_file) == 0:
+    stderr_tail = ''
+    if os.path.exists(stderr_path):
+        with open(stderr_path, encoding='utf-8') as f:
+            stderr_tail = f.read()[-2000:]
+        os.unlink(stderr_path)
     now = datetime.datetime.now(datetime.timezone.utc).isoformat().replace('+00:00', '') + 'Z'
     with open(report_file, 'w', encoding='utf-8') as f:
         f.write(f"""---
@@ -741,12 +762,22 @@ note: синтез не выполнен (Claude недоступен, верн�
 
 Стенограмма: см. файлы реплик в папке сессии.
 Повтори синтез: `/peer-writer --finalize {session_id}`
+
+## Диагностика (stderr адаптера, для отладки — не для пилота)
+
+```
+returncode: {result.returncode}
+{stderr_tail if stderr_tail else '(stderr пуст)'}
+```
 """)
     sys.exit(1)
+else:
+    if os.path.exists(stderr_path):
+        os.unlink(stderr_path)
 PYEOF
 ```
 
-> **Fallback:** заглушка `report-draft.md` записывается изнутри python-блока выше (строки `if result.returncode != 0 or os.path.getsize(report_file) == 0`). Внешнего bash-fallback не нужно — `sys.exit(1)` уведомляет shell, но скилл идёт дальше к Шагу 4.3 (заглушка уже на диске).
+> **Fallback:** заглушка `report-draft.md` записывается изнутри python-блока выше (строки `if result.returncode != 0 or os.path.getsize(report_file) == 0`). Внешнего bash-fallback не нужно — `sys.exit(1)` уведомляет shell, но скилл идёт дальше к Шагу 4.3 (заглушка уже на диске). Заглушка теперь несёт код возврата и хвост stderr адаптера — секция «Диагностика» служебная (для отладки), синтезатор её не видит и не переносит в финальный report.md.
 
 ### 4.2a Правило отложенной финализации (post-2026-05-22)
 

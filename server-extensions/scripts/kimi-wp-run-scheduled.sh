@@ -162,14 +162,43 @@ case "$AGENT" in
     fi
     # preflight: проверяет, что сессия открыта (мы только что открыли)
     bash "$IWE_ROOT/scripts/kimi-standalone-preflight.sh" >>"$LOG" 2>&1 || log "WARN: preflight non-zero, continuing"
-    # OAuth-refresh lockf — сериализация параллельных kimi (паттерн из kimi-peer-adapter.sh)
-    LOCK_DIR="/tmp/kimi-peer-locks"; mkdir -p "$LOCK_DIR"
-    LOCKF_PREFIX=()
-    command -v lockf >/dev/null 2>&1 && LOCKF_PREFIX=(lockf -k -t 90 "$LOCK_DIR/kimi-oauth-refresh.lock")
+    # OAuth-refresh serialization — same shared lock resource and mkdir-based
+    # mechanism as kimi-peer-adapter.sh (peer-session 2026-08-04-08-wp7-f44-
+    # sandbox-review): must be the SAME lock path, not just the same technique
+    # — a scheduled run and a peer-adapter call racing on Kimi's OAuth refresh
+    # token only actually serialize against each other if they contend for one
+    # identical resource. The prior `lockf` binary is BSD/macOS-only and was
+    # silently skipped when absent (e.g. Linux); no external dependency here.
+    OAUTH_LOCK_DIR="${IWE_PEER_LOCK_DIR:-/tmp/kimi-peer-locks}/kimi-oauth-refresh.lockdir"
+    acquire_oauth_lock() {
+      mkdir -p "$(dirname "$OAUTH_LOCK_DIR")" 2>/dev/null
+      local waited=0
+      while true; do
+        if mkdir "$OAUTH_LOCK_DIR" 2>/dev/null; then
+          echo "$$" > "$OAUTH_LOCK_DIR/pid" 2>/dev/null
+          return 0
+        fi
+        local holder_pid
+        holder_pid=$(cat "$OAUTH_LOCK_DIR/pid" 2>/dev/null | tr -d '[:space:]')
+        if [ -n "$holder_pid" ] && ! kill -0 "$holder_pid" 2>/dev/null; then
+          rm -rf "$OAUTH_LOCK_DIR" 2>/dev/null
+        fi
+        [ "$waited" -ge 90 ] && return 1
+        sleep 1
+        waited=$((waited + 1))
+      done
+    }
+    if ! acquire_oauth_lock; then
+      log "ERROR: OAuth refresh lock busy after 90s — another Kimi process is mid-refresh on $OAUTH_LOCK_DIR"
+      set_status failed; report_line failed "OAuth refresh lock busy after 90s"
+      bash "$IWE_ROOT/scripts/session-guard.sh" close --agent "$AGENT" >>"$LOG" 2>&1
+      cleanup; exit 1
+    fi
     log "starting kimi (timeout ${TIMEOUT_SEC}s, max-steps 100)"
-    "${LOCKF_PREFIX[@]+"${LOCKF_PREFIX[@]}"}" perl -e 'my $t=shift; alarm $t; exec @ARGV' -- "$TIMEOUT_SEC" \
+    perl -e 'my $t=shift; alarm $t; exec @ARGV' -- "$TIMEOUT_SEC" \
       "$KIMI_BIN" --quiet --yolo --max-steps-per-turn "${IWE_WP_QUEUE_MAX_STEPS:-100}" < "$PROMPT_FILE" >>"$LOG" 2>&1
     RC=$?
+    rm -rf "$OAUTH_LOCK_DIR" 2>/dev/null
     ;;
   claude)
     CLAUDE_BIN="$(command -v claude 2>/dev/null || true)"
