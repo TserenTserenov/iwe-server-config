@@ -29,7 +29,10 @@ IWE = Path(os.environ.get("IWE", Path.home() / "IWE"))
 KNOWLEDGE = IWE / "DS-Knowledge-Index-Tseren"
 DS_STRATEGY = IWE / "DS-my-strategy"
 
-DEFAULT_PROXY_URL = os.environ.get("LLM_PROXY_URL", "http://localhost:18765")
+# WP-484 Ф48c (04.08): was localhost:18765 (Mac-only, unreachable from tsekh-1
+# where this actually runs via week-close.after.md) -- flipped to the Railway
+# gateway, same fix as day-open-pipeline.sh/llm-health-check.sh.
+DEFAULT_PROXY_URL = os.environ.get("LLM_PROXY_URL", "https://iwe-llm-proxy-production.up.railway.app")
 PROXY_TIMEOUT_S = 60
 
 MONTH_NAMES_RU = [
@@ -115,10 +118,14 @@ def call_proxy(prompt: str, proxy_url: str) -> str:
         "messages": [{"role": "user", "content": prompt}],
         "max_tokens": 2048,
     }
+    headers = {"Content-Type": "application/json"}
+    proxy_secret = os.environ.get("LLM_PROXY_SECRET", "")
+    if proxy_secret:
+        headers["X-IWE-Internal-Secret"] = proxy_secret
     req = urllib.request.Request(
         f"{proxy_url.rstrip('/')}/v1/messages",
         data=json.dumps(payload).encode("utf-8"),
-        headers={"Content-Type": "application/json"},
+        headers=headers,
         method="POST",
     )
     with urllib.request.urlopen(req, timeout=PROXY_TIMEOUT_S) as resp:

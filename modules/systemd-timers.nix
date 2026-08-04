@@ -458,7 +458,7 @@ in
         UnsetEnvironment = [ "ANTHROPIC_BASE_URL" "ANTHROPIC_API_KEY" ];
       };
       path = commonPath;
-      environment = commonEnv // { ANTHROPIC_BASE_URL = "https://auth-gateway-production-52bf.up.railway.app"; };
+      environment = commonEnv // { ANTHROPIC_BASE_URL = "https://iwe-llm-proxy-production.up.railway.app"; };
     };
 
     systemd.timers."iwe-scheduler" = {
@@ -991,7 +991,7 @@ in
         EnvironmentFile = [ "/etc/iwe/env" "-/home/tseren/.iwe/.proxy-env" ];
       };
       path = commonPath;
-      environment = commonEnv // { ANTHROPIC_BASE_URL = "https://auth-gateway-production-52bf.up.railway.app"; };
+      environment = commonEnv // { ANTHROPIC_BASE_URL = "https://iwe-llm-proxy-production.up.railway.app"; };
     };
 
     systemd.timers."iwe-overnight-auditor" = {
@@ -1079,10 +1079,12 @@ in
       path = commonPath;
       # WP-7: без LITELLM_PROXY_URL проба падает в режим 2 (прямой api.anthropic.com)
       # и тратит нативный ключ Anthropic на probe-трафик каждые 5 минут.
-      # WP-7 (18.07, инцидент прод-бота): iwe-llm-proxy — отдельный, никогда не
-      # синхронизированный Railway-сервис без LITELLM_INTERNAL_KEY — там же и оба
-      # бота теперь. auth-gateway — тот, что реально проверен end-to-end.
-      environment = commonEnv // { ANTHROPIC_BASE_URL = "https://auth-gateway-production-52bf.up.railway.app"; };
+      # WP-484 Ф48c (04.08): поправлено на домен сервиса iwe-llm-proxy (auth-gateway.py,
+      # проект iwe-llm-proxy) — старый auth-gateway-production-52bf был дубликатом,
+      # удалённым 23.07 (WP-501); домен с тех пор отдаёт 404, эта строка молча
+      # переживала каждый nixos-rebuild с 23.07 (см. incident-2026-07-27-litellm-
+      # internal-key-broken-reference.md).
+      environment = commonEnv // { ANTHROPIC_BASE_URL = "https://iwe-llm-proxy-production.up.railway.app"; };
     };
 
     systemd.timers."iwe-llm-health" = {
