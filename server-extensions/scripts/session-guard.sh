@@ -152,11 +152,24 @@ orz_agent_name() {
 #   1 — no open semaphore at all for this agent
 #   2 — ambiguous or requested --wp/--slug matched nothing; candidate list
 #       already printed to stderr, caller should just propagate a failure
+list_candidates() { # list_candidates <agent> — one path per line, newest first
+  ls -t "$SESSION_DIR/${1}"-*.open 2>/dev/null || true
+}
+
+print_candidates() { # print_candidates <candidates> — human-readable list to stderr
+  local cand
+  while IFS= read -r cand; do
+    [ -z "$cand" ] && continue
+    echo "  $(basename "$cand")  wp=$(grep "^wp: " "$cand" | cut -d' ' -f2-)  slug=$(grep "^slug: " "$cand" | cut -d' ' -f2-)" >&2
+  done <<< "$1"
+}
+
 select_semaphore() {
   local agent="$1" want_wp="$2" want_slug="$3"
-  local candidates cand cand_wp cand_slug matched="" count
+  local candidates cand cand_wp cand_slug count
+  local matches=()
 
-  candidates=$(ls -t "$SESSION_DIR/${agent}"-*.open 2>/dev/null || true)
+  candidates=$(list_candidates "$agent")
   [ -z "$candidates" ] && return 1
 
   if [ -n "$want_wp" ] || [ -n "$want_slug" ]; then
@@ -166,14 +179,24 @@ select_semaphore() {
       cand_slug=$(grep "^slug: " "$cand" | cut -d' ' -f2- || true)
       if { [ -n "$want_wp" ] && [ "$cand_wp" = "$want_wp" ]; } || \
          { [ -n "$want_slug" ] && [ "$cand_slug" = "$want_slug" ]; }; then
-        matched="$cand"
-        break
+        matches+=("$cand")
       fi
     done <<< "$candidates"
 
-    if [ -n "$matched" ]; then
-      echo "$matched"
+    if [ "${#matches[@]}" -eq 1 ]; then
+      echo "${matches[0]}"
       return 0
+    fi
+
+    # WP-484 Ф49 (04.08, Codex): раньше здесь стоял `break` на первом совпадении,
+    # то есть при двух открытых сессиях одного РП выбиралась просто новейшая по
+    # mtime — и `close` закрывал не ту сессию, а `note-file` отдавал право на
+    # коммит чужой работе. Совпало несколько — это отказ, а не догадка: уточни
+    # --slug или --session-id.
+    if [ "${#matches[@]}" -gt 1 ]; then
+      echo "session-guard: под wp='$want_wp' slug='$want_slug' подходит несколько сессий агента '$agent' — уточни:" >&2
+      print_candidates "$(printf '%s\n' "${matches[@]}")"
+      return 2
     fi
 
     # Explicit --wp/--slug was given and matched nothing — never silently
@@ -182,12 +205,7 @@ select_semaphore() {
     # operator's own explicit (but mistyped/stale) --wp, defeating the
     # entire point of this fix.
     echo "session-guard: ни один открытый семафор агента '$agent' не совпал с wp='$want_wp' slug='$want_slug':" >&2
-    while IFS= read -r cand; do
-      [ -z "$cand" ] && continue
-      cand_wp=$(grep "^wp: " "$cand" | cut -d' ' -f2- || true)
-      cand_slug=$(grep "^slug: " "$cand" | cut -d' ' -f2- || true)
-      echo "  $(basename "$cand")  wp=$cand_wp  slug=$cand_slug" >&2
-    done <<< "$candidates"
+    print_candidates "$candidates"
     return 2
   fi
 
@@ -665,34 +683,14 @@ if [ "$CMD" = "renew" ]; then
     SEM_FILE="$SESSION_DIR/${RENEW_AGENT}-${SESSION_ID_ARG}.open"
     [ -f "$SEM_FILE" ] || fail "renew: нет открытой сессии ${RENEW_AGENT}-${SESSION_ID_ARG}" 3
   else
-    # select_semaphore берёт ПЕРВОЕ совпадение по wp/slug и прерывает поиск, так
-    # что при двух открытых сессиях одного РП продление молча ушло бы не в ту —
-    # то есть вернуло бы права сессии, которая должна была их потерять (нашёл
-    # Codex, холодное ревью 04.08). Для renew этого достаточно, чтобы считать
-    # неоднозначность отказом: сначала уточни, что продлеваешь.
-    RENEW_MATCHES=()
-    for cand in "$SESSION_DIR/${RENEW_AGENT}"-*.open; do
-      [ -f "$cand" ] || continue
-      cand_wp=$(grep "^wp: " "$cand" | cut -d' ' -f2- || true)
-      cand_slug=$(grep "^slug: " "$cand" | cut -d' ' -f2- || true)
-      if [ -z "${WP:-}" ] && [ -z "${SLUG:-}" ]; then
-        RENEW_MATCHES+=("$cand")
-      elif { [ -n "${WP:-}" ] && [ "$cand_wp" = "$WP" ]; } || \
-           { [ -n "${SLUG:-}" ] && [ "$cand_slug" = "$SLUG" ]; }; then
-        RENEW_MATCHES+=("$cand")
-      fi
-    done
-    if [ "${#RENEW_MATCHES[@]}" -eq 0 ]; then
+    # Отказ при неоднозначности теперь живёт в самом select_semaphore (та же
+    # находка Codex касалась и close/note-file), поэтому renew не держит своей
+    # копии перебора — достаточно пробросить код возврата.
+    SEM_FILE=$(select_semaphore "$RENEW_AGENT" "${WP:-}" "${SLUG:-}") && SG_RC=0 || SG_RC=$?
+    [ "$SG_RC" -eq 2 ] && exit 1
+    if [ "$SG_RC" -ne 0 ] || [ -z "$SEM_FILE" ] || [ ! -f "$SEM_FILE" ]; then
       fail "renew: нет открытой сессии для агента '$RENEW_AGENT' (уточни --wp/--slug/--session-id)" 3
     fi
-    if [ "${#RENEW_MATCHES[@]}" -gt 1 ]; then
-      echo "session-guard: renew — под условие подходит несколько сессий, уточни --session-id:" >&2
-      for cand in "${RENEW_MATCHES[@]}"; do
-        echo "  $(basename "$cand")  wp=$(grep "^wp: " "$cand" | cut -d' ' -f2-)  slug=$(grep "^slug: " "$cand" | cut -d' ' -f2-)" >&2
-      done
-      exit 1
-    fi
-    SEM_FILE="${RENEW_MATCHES[0]}"
   fi
   RENEW_SESSION_ID=$(grep "^session_id: " "$SEM_FILE" | cut -d' ' -f2- || echo "unknown")
   LEASE_TMP="${SEM_FILE}.lease.tmp.$$"
