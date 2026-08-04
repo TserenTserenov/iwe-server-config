@@ -2,7 +2,7 @@
 name: peer-conversation
 description: Многотуровый диалог писателя (Claude) с одним или несколькими напарниками (любой набор из kimi/codex/hermes/claude-headless) по задаче пилота (DP.SC.154). Ведёт turn-loop (2 участника) или round-loop (3+, WP-509), обнаруживает CONSENSUS/ESCALATE, после консенсуса — Decision Gate (зафиксировать vs реализовать → ревью → проверить → задеплоить), синтезирует report.md через Agent tool.
 argument-hint: "<описание задачи> [--peer kimi|codex|hermes|claude[,vendor2,...]] | --list | --interrupt <session_id> | --finalize <session_id>"
-version: 1.5.5
+version: 1.5.6
 layer: L3
 status: active
 triggers:
@@ -1020,12 +1020,16 @@ Slug-часть (без даты, с номером — та же формула
 # даты) — $SESSION_SLUG уже определён на Шаге 4.4. SESSION_ID здесь ВСЕГДА
 # начинается с "$TODAY-" (Шаг 1: "${TODAY}-${NUM}-${SLUG}"), поэтому склейка
 # "${TODAY}-${SESSION_ID}" без предварительного вычитания задваивала бы дату.
+# `agent:` — обязательный ключ по списку session-guard.sh:474 (validate_orz);
+# без него Шаг 4.5.2 (close) падает "в frontmatter отсутствует ключ 'agent:'".
+# `writer:` держим тоже — для согласованности с meta.yaml.writer_agent.
 GUARD_ORZ="$HOME/IWE/${IWE_GOVERNANCE_REPO:-DS-strategy}/sessions/$MONTH/${TODAY}-${SESSION_SLUG}.md"
 cat > "$GUARD_ORZ" <<EOF
 ---
 date: $TODAY
 type: peer-session
 wp: <WP-NNN>
+agent: claude-code
 writer: claude-code
 peer: [<PEER_AGENT_ID>, ...]      # список; при PEER_COUNT==1 — один элемент
 duration_h: <(end_time - start_time) в часах, 1 знак>

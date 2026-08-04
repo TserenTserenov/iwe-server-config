@@ -58,7 +58,7 @@
 | 250 | 🔄 | — | План развития до конца 2026 (зонтичный) | R1-R6 августа утверждены → Strategy.md § август |
 | 399 | ⏳ | P1 | Ротация секретов экосистемы | батч просрочен, ротация за пилотом |
 | 509 | 🔄 | P2 | Пир-сессии 3+ агентов: роль-дискавери и общий рабочий продукт | S-51 закрыта 3/3; промоция на Week Close |
-| 510 | 🔄 | P3→P1 | ИИ-личности | 04.08 веч.: Патч 3 (генератор Gary Public Kit) закрыт с Codex; next: Патч 3b MCP-доставка |
+| 510 | 🔄 | P3→P1 | ИИ-личности | Патч 3b MCP-доставка закрыт с Codex; next: контракт РП-406/B7.3 |
 | 5 | 🔄 | — | Платформа: развитие (зонтичный) | детали `inbox/WP-5/WP-5.md` |
 | 117 | 🔄 | — | Развитие nudge-системы | Ф-adapt ждёт 4 недели рантайма |
 | 149 | 🔄 | **P1** | Персональные руководства | остаток закрыт (9f6defc): провенанс, мост weekly, лимит, светофор; ждём checks 05.08 |
@@ -78,7 +78,7 @@
 | 455 | 🔄 | P4 | Неизменяемость аудит-журнала событий | урок про git pull записан, кода не выкатывал |
 | 290 | 🔄 | **P1** | Следователь: каузальная аналитика | Ход 2 — решение стратсессии |
 | 73 | 🔄 | P3 | Новая архитектура ИТ-платформы Aisystant | Ф5 proposed, дедлайн 25.07 |
-| 7 | 🔄 | — | Платформа: техдолг (зонтичный) | 04.08 ночь: Ф48 часть 1 закрыта (пир-сессия Codex) — гонка счётчика активных дней бота, deploy pilot@0302ba02; часть 2 (протокол доставки) открыта, нужен АрхГейт; попутно 2 находки в session-guard.sh (не чинил, защищённый файл). 04.08 веч.: +фаза QUICKCLOSE-GAPS1 (4 разрыва конвейера Close — no-remote-путаница commit-push, слепой к terminal-файлам session-guard, дубль session-index-write, repo-wide has_diff вместо diff агента — найдены живьём при закрытии этой же сессии, не чинил); CI зелёный на 15a38b9 (был красным только в C.UTF-8-локали раннера — тест поймал реальный баг). next: QCRUN1 (P0); история фаз → `inbox/WP-7/WP-7.md` |
+| 7 | 🔄 | — | Платформа: техдолг (зонтичный) | 04.08 ночь: Ф48 часть 1 закрыта (пир-сессия Codex) — гонка счётчика активных дней бота, deploy pilot@0302ba02; часть 2 (протокол доставки) открыта, нужен АрхГейт; попутно 2 находки в session-guard.sh (не чинил, защищённый файл). 04.08 веч.: +фаза QUICKCLOSE-GAPS1 (4 разрыва конвейера Close — no-remote-путаница commit-push, слепой к terminal-файлам session-guard, дубль session-index-write, repo-wide has_diff вместо diff агента — найдены живьём при закрытии этой же сессии, не чинил); CI зелёный на 15a38b9 (был красным только в C.UTF-8-локали раннера — тест поймал реальный баг). Ф42/QCRUN1 закрыта (095462ee62) — раннер quick-close больше не ломается на «---» в тексте коммита (не тире, как думали); fail-open политика выбрана пилотом. next: ORY-RT1; история фаз → `inbox/WP-7/WP-7.md` |
 | 485 | 🔄 | P2 | Сверка дублирующихся скриптов root↔шаблон | Ф7-Ф9 (сторож в ритм) |
 | 487 | 🔄 | P3 | Планировщик отложенного запуска РП | живой прогон через очередь |
 | 472 | 🔄 | P3 | Конвейер личного бренда | 2-й человек за пилотом |
@@ -126,10 +126,12 @@
 
 ### Feedback — HOT
 
+- [feedback_two_layer_review_catches_different_bugs.md](feedback_two_layer_review_catches_different_bugs.md) — пир-диалог с Codex до кода и холодное код-ревью после кода ловят разные классы дефектов, не взаимозаменяемы (04.08)
 - [lessons_process_runner_root_repo_path_is_dot.md](lessons_process_runner_root_repo_path_is_dot.md) — process-runner.py commit-push: корневой репозиторий IWE = `"repo": "."`, не имя git-remote (04.08)
 - [lessons_check_live_diff_before_parallel_infra_fix.md](lessons_check_live_diff_before_parallel_infra_fix.md) — перед пир-сессией на правку общего инфраструктурного файла сверить живой `git diff`, не только `git log` — параллельный агент может держать несохранённую правку той же проблемы (04.08)
 - [lessons_guard_behind_failing_step_never_runs.md](lessons_guard_behind_failing_step_never_runs.md) — корректный сторож не исполняется, если стоит в конвейере за падающим шагом; красный CI отключает всё после точки падения (04.08)
 - [feedback_long_autonomous_work_needs_visibility.md](feedback_long_autonomous_work_needs_visibility.md) — долгий автономный участок (>15-20 мин без апдейта) ощущается пилотом как темнота даже при хорошем итоге — апдейты по вехам, не только в начале (04.08); подтверждено 04.08: апдейты по вехам + один consolidated-вопрос = «отработал полностью сам»
+- [feedback_close_summary_structure_over_density.md](feedback_close_summary_structure_over_density.md) — A1-A11 (лексика) не гарантируют понятность итога; финал долгой сессии вести «что теперь есть → что это даёт», не «как дошли» (04.08)
 - [feedback_codex_peer_code_diagnosis_quality.md](feedback_codex_peer_code_diagnosis_quality.md) — Codex в пир-сессиях хорошо держит код-уровневую верификацию, поймал 2 фактических промаха писателя по данным, не на слово (04.08)
 - [feedback_no_closing_questions.md](feedback_no_closing_questions.md) / [feedback_askuserquestion_not_reaching_pilot.md](feedback_askuserquestion_not_reaching_pilot.md) — не спрашивай «Что дальше?» после выполнения; choice-question — дублировать в чат, не полагаться только на инструмент
 - [feedback_quick_close_means_fast_for_pilot.md](feedback_quick_close_means_fast_for_pilot.md) — «быстрое закрытие» = коротко для пилота (снять ретро), не агент сокращает работу
