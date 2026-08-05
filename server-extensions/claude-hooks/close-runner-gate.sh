@@ -29,6 +29,8 @@
 
 set -uo pipefail
 
+IWE_ROOT="${CLAUDE_PROJECT_DIR:-$HOME/IWE}"
+
 INPUT=$(cat)
 [ -z "$INPUT" ] && exit 0
 
@@ -58,6 +60,28 @@ RUNNER_MARKER="$RUNNER_MARKER_DIR/$SESSION_ID_SAFE.flag"
 if echo "$COMMAND" | grep -qE 'process-runner\.py[[:space:]]+start[[:space:]]+quick-close'; then
   mkdir -p "$RUNNER_MARKER_DIR" 2>/dev/null
   touch "$RUNNER_MARKER" 2>/dev/null
+
+  # WP-484 Ф56: session-reflection-append.sh (reflex handler) needs to know which
+  # Claude Code session_id this quick-close run belongs to, to find the matching
+  # pilot-witness/<session_id>.jsonl -- reflex handlers only receive {results,
+  # input, run_id} on stdin (process-runner.py run_reflex_handler), never the
+  # harness session_id directly. This hook is the one place that legitimately has
+  # both facts at once (PreToolUse payload has session_id; the observed command has
+  # --slug), so it writes the mapping the handler will read back by run_id.
+  # run_id is PREDICTED here (mirrors process-runner.py:_generate_run_id's common
+  # path, "<process_id>-<slug>") -- if `start` actually fell back to the
+  # nanosecond-suffixed collision path (rare: two quick-close starts with the same
+  # slug in the same run), the mapping simply won't match anything and the append
+  # handler fails closed (witness_unavailable), never silently trusts the caller.
+  SLUG=$(echo "$COMMAND" | grep -oE -- '--slug[[:space:]]+"?[A-Za-z0-9._-]+' | grep -oE '[A-Za-z0-9._-]+$')
+  if [ -n "$SLUG" ]; then
+    HARNESS_MAP_DIR="$IWE_ROOT/.iwe-runtime/quick-close-harness-session"
+    mkdir -p "$HARNESS_MAP_DIR" 2>/dev/null
+    chmod 700 "$HARNESS_MAP_DIR" 2>/dev/null
+    HARNESS_MAP_FILE="$HARNESS_MAP_DIR/quick-close-$SLUG.session_id"
+    printf '%s' "$SESSION_ID" > "$HARNESS_MAP_FILE" 2>/dev/null
+    chmod 600 "$HARNESS_MAP_FILE" 2>/dev/null
+  fi
 fi
 
 # Применимо к блокировке только прямой git commit. process-runner.py сам
