@@ -18,7 +18,7 @@
 # с устаревшим updated_at (> ~15 мин) как stale.
 #
 # Использование:
-#   agent-status-report.sh [--session-id <id>] <agent> <status> [task] [files-csv]
+#   agent-status-report.sh [--session-id <id>] [--personality <unassigned|UUID>] <agent> <status> [task] [files-csv]
 #   agent-status-report.sh claude-code working "WP-395 Ф3" "src/a.ts,src/b.ts"
 #   agent-status-report.sh --session-id 20260604-s1 kimi idle
 #   agent-status-report.sh --gc                    # one-time stale cleanup (client-side)
@@ -31,10 +31,12 @@
 
 GC_MODE=""
 SESSION_ID="default"
+PERSONALITY="unassigned"
 POSITIONAL=()
 while [ $# -gt 0 ]; do
   case "$1" in
     --session-id) SESSION_ID="${2:-default}"; shift 2 ;;
+    --personality) PERSONALITY="${2:-unassigned}"; shift 2 ;;
     --gc)         GC_MODE="1"; shift ;;
     *)            POSITIONAL+=("$1"); shift ;;
   esac
@@ -46,6 +48,7 @@ STATUS="${2:-idle}"
 TASK="${3:-}"
 FILES_CSV="${4:-}"
 [ -z "$SESSION_ID" ] && SESSION_ID="default"
+[ -z "$PERSONALITY" ] && PERSONALITY="unassigned"
 
 SECRETS_DIR="${IWE_SECRETS_DIR:-$HOME/IWE/.secrets}"
 NEON_ENV="$SECRETS_DIR/neon-urls.env"
@@ -59,6 +62,9 @@ if [ -z "$GC_MODE" ]; then
   # Enum синхронизирован с AGENT_STATUS_VALUES (gateway-mcp/src/agent-status.ts).
   # При расширении enum в TS — обновить и здесь.
   case "$STATUS" in idle|working|peer-session|blocked) ;; *) fail "bad status '$STATUS'";; esac
+  if [ "$PERSONALITY" != "unassigned" ] && ! [[ "$PERSONALITY" =~ ^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$ ]]; then
+    fail "bad personality '$PERSONALITY' (expected unassigned or UUID)"
+  fi
 fi
 
 # user_id пилота (Ory sub) — из секрета или env. tr -d: устойчивость к случайному \n в файле.
@@ -80,17 +86,17 @@ command -v psql >/dev/null 2>&1 || fail "psql not installed"
 if [ -n "$GC_MODE" ]; then
   psql "$INDICATORS_URL" -v ON_ERROR_STOP=1 -v uid="$USER_ID" \
     >/dev/null 2>&1 <<'SQL' || fail "gc failed"
-UPDATE agent_status
+UPDATE agent_status.agent_status
 SET status = 'idle'
 WHERE user_id = :'uid'::uuid
   AND status = 'working'
   AND updated_at < now() - interval '4 hours';
-UPDATE agent_status
+UPDATE agent_status.agent_status
 SET status = 'idle'
 WHERE user_id = :'uid'::uuid
   AND status = 'peer-session'
   AND updated_at < now() - interval '2 hours';
-UPDATE agent_status
+UPDATE agent_status.agent_status
 SET status = 'idle'
 WHERE user_id = :'uid'::uuid
   AND status = 'blocked'
@@ -102,12 +108,13 @@ fi
 # UPSERT (зеркалит gateway-mcp/src/agent-status.ts). psql :'var' квотирование = защита от инъекций.
 # files: CSV → text[] через string_to_array; пустое → '{}'.
 psql "$INDICATORS_URL" -v ON_ERROR_STOP=1 \
-  -v uid="$USER_ID" -v ag="$AGENT" -v st="$STATUS" -v tk="$TASK" -v fl="$FILES_CSV" -v sid="$SESSION_ID" \
+  -v uid="$USER_ID" -v ag="$AGENT" -v per="$PERSONALITY" -v st="$STATUS" -v tk="$TASK" -v fl="$FILES_CSV" -v sid="$SESSION_ID" \
   >/dev/null 2>&1 <<'SQL' || fail "db write failed"
-INSERT INTO agent_status (user_id, agent, session_id, status, task, files, updated_at)
+INSERT INTO agent_status.agent_status (user_id, agent, personality, session_id, status, task, files, updated_at)
 VALUES (
   :'uid'::uuid,
   :'ag',
+  :'per',
   :'sid',
   :'st',
   NULLIF(:'tk', ''),
@@ -115,6 +122,7 @@ VALUES (
   now()
 )
 ON CONFLICT (user_id, agent, session_id) DO UPDATE SET
+  personality = EXCLUDED.personality,
   status = EXCLUDED.status,
   task = EXCLUDED.task,
   files = EXCLUDED.files,

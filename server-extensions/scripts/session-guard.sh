@@ -452,7 +452,8 @@ EOF
   printf "%s | %s | %s | %s\n" "$(date '+%Y-%m-%d %H:%M')" "$WP" "$AGENT" "${TASK:-standalone}" >> "$OPEN_LOG"
   # agent status (fail-safe)
   if [ -x "$AGENT_STATUS_SCRIPT" ]; then
-    "$AGENT_STATUS_SCRIPT" "$AGENT" working "${WP}: ${TASK:-standalone}" "${FILES:-}" 2>/dev/null || true
+    "$AGENT_STATUS_SCRIPT" --session-id "$SESSION_ID" --personality "$PERSONALITY" \
+      "$AGENT" working "${WP}: ${TASK:-standalone}" "${FILES:-}" 2>/dev/null || true
   fi
   echo "Session OPEN: $SEM_FILE (WP: $WP, agent: $AGENT, slug: ${SLUG:-$WP})"
   exit 0
@@ -535,6 +536,8 @@ if [ "$CMD" = "close" ]; then
   TASK_FROM_SEM=$(grep "^task: " "$SEM_FILE" | cut -d' ' -f2- || true)
   TASK="${TASK:-$TASK_FROM_SEM}"
   SESSION_ID=$(grep "^session_id: " "$SEM_FILE" | cut -d' ' -f2- || echo "unknown")
+  PERSONALITY_FROM_SEM=$(grep "^personality: " "$SEM_FILE" | cut -d' ' -f2- || true)
+  PERSONALITY_FROM_SEM="${PERSONALITY_FROM_SEM:-unassigned}"
 
   ORZ_BASENAME=$(grep "^orz_file: " "$SEM_FILE" | cut -d' ' -f2- || true)
   if [ -z "$ORZ_BASENAME" ]; then
@@ -568,7 +571,8 @@ if [ "$CMD" = "close" ]; then
 
   # agent status idle
   if [ -x "$AGENT_STATUS_SCRIPT" ]; then
-    "$AGENT_STATUS_SCRIPT" "$AGENT" idle "" "" 2>/dev/null || true
+    "$AGENT_STATUS_SCRIPT" --session-id "$SESSION_ID" --personality "$PERSONALITY_FROM_SEM" \
+      "$AGENT" idle "" "" 2>/dev/null || true
   fi
   mv "$SEM_FILE" "$SEM_FILE.closed" 2>/dev/null || rm -f "$SEM_FILE"
   rm -f "$SEM_FILE.lease"

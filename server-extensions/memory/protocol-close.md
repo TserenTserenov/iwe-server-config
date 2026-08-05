@@ -10,7 +10,7 @@ domains: [protocol]
 status: active
 owner: user
 schema_version: 1
-modified: 2026-08-04T12:39:14.285Z
+modified: 2026-08-05T13:32:26.411Z
 ---
 # Протокол Close (ОРЗ-фрактал)
 
@@ -61,6 +61,8 @@ cd DS-my-strategy && python3 scripts/process-runner.py start quick-close --slug 
 **1a. Pre-commit checks (БЛОКИРУЮЩЕЕ).** `bash .claude/scripts/load-extensions.sh protocol-close checks` — exit 0 → `Read` каждый файл из вывода (alphabetic) → выполнить. Exit 1 → пропустить. **При ❌ commit запрещён** — исправить, повторить checks.
 
 **1b. Commit + Push (БЛОКИРУЮЩЕЕ, шаг `commit-push`, вход `{"commits":[{"repo","paths","message"}, ...]}`).** `git status --short` по ВСЕМ репо, которых касалась сессия. Незафиксированные изменения → `git add <specific paths>` → commit → push через хендлер раннера, не в обход. Провал push → раннер стоит на `blocked-push-failed`, не идти дальше в обход.
+
+**Своя работа уже закоммичена и запушена, коммитить через раннер нечего (WP-484 Ф61, 05.08 — не редкий случай при инкрементальных коммитах по ходу сессии).** НЕ передавать `commits: []` без пояснения — `commit-push.sh` больше не примет это молча, но и не откажет тихо: `next` с входом `{"commits":[],"confirmed_clean_repos":["<repo1>", ...]}` — хендлер сам перепроверит `git status`/`git rev-list @{u}..HEAD` для каждого названного репо и примет как `already-there`, только если заявка подтвердилась. Ложная заявка (реально грязно или есть неотправленные коммиты) → `all_pushed: false`, `blocked-push-failed` как обычно.
 
 ### 2. Короткий свод + рефлексия (шаги `reflection-gate` → `session-reflection-render` → `session-reflection-append` при `reflection_due: true`, WP-484 Ф56 05.08 — три reflex-шага вместо одного ai-шага) [[gate]]
 
