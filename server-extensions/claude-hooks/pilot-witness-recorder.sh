@@ -1,18 +1,19 @@
 #!/bin/bash
-# Pilot Witness Recorder (UserPromptSubmit, WP-484 Ф56, 05.08.2026)
+# Pilot Witness Recorder (UserPromptSubmit, WP-484 Ф56, 2026-08-05)
 #
-# Проблема, которую решает: шаг session-reflection Quick Close раньше принимал
-# `answer` из --input закрывающего агента без проверки, кто его реально написал --
-# судья и нарушитель совпадали (3 рецидива за один день, MAJOR fault). Этот хук
-# пишет каждое настоящее сообщение пилота в отдельный файл-свидетель; хендлер
-# session-reflection-append.sh берёт ответ ТОЛЬКО отсюда, вход агента в answer
-# больше не попадает вообще (WP-484.md §Ф56, консенсус с Codex+Kimi 05.08).
+# Problem this solves: the Quick Close session-reflection step used to accept
+# `answer` from the closing agent's --input with no check on who actually wrote
+# it -- judge and offender were the same party (3 recurrences in one day, MAJOR
+# fault). This hook records every genuine pilot chat message to a dedicated
+# witness file; the session-reflection-append.sh handler sources the answer
+# ONLY from here -- the agent's own input never reaches `answer` at all
+# (WP-484.md §Ф56, consensus with Codex+Kimi 2026-08-05).
 #
-# Пассивный рекодер: НИКОГДА не блокирует ввод пилота (exit всегда 0) -- гарантия
-# честности живёт в fail-closed поведении хендлера append (witness пуст без
-# доверенного маркера автономного запуска => блок закрытия), не в этом хуке.
+# Passive recorder: NEVER blocks pilot input (always exits 0) -- the integrity
+# guarantee lives in the append handler's fail-closed behavior (empty witness
+# with no trusted autonomous marker => Close blocks), not in this hook.
 #
-# Контракт UserPromptSubmit (Claude Code): stdin JSON {"session_id", "prompt", ...}.
+# UserPromptSubmit contract (Claude Code): stdin JSON {"session_id", "prompt", ...}.
 set -uo pipefail
 
 INPUT=$(cat)

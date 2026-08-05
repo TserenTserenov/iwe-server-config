@@ -1,7 +1,7 @@
 ---
 # see DP.SC.160, DP.ROLE.058
 name: artifactor
-description: "Classifies raw pilot request → structured JSON {task_type, class, artifact, budget_estimate, confidence, routing_tag, resolution_path}. Keyword-fast (<200ms) or Haiku fallback (<60s). Does NOT create WP or call executor."
+description: "Classifies raw pilot request → structured JSON {task_type, class, artifact, budget_estimate, confidence, routing_tag, resolution_path, schema_version, expected_result_kind, result_kind_resolution}. Keyword-fast (<200ms) or Haiku fallback (<60s). Does NOT create WP or call executor."
 version: 1.0.0
 layer: L1
 status: active
@@ -31,12 +31,12 @@ gates_rationale: "операционный скилл; WP Gate применим 
 
 ## When to use
 
-Classifies raw pilot request → structured JSON {task_type, class, artifact, budget_estimate, confidence, routing_tag, resolution_path}. Keyword-fast (<200ms) or Haiku fallback (<60s). Does NOT create WP or call executor.
+Classifies raw pilot request → structured JSON {task_type, class, artifact, budget_estimate, confidence, routing_tag, resolution_path, schema_version, expected_result_kind, result_kind_resolution}. Keyword-fast (<200ms) or Haiku fallback (<60s). Does NOT create WP or call executor.
 
 ## Обещание (контракт)
 
 **Вход:** сырой текст запроса пилота (любой длины, без routing-tag)  
-**Выход:** JSON 7 полей → stdout:
+**Выход:** JSON, schema_version 2 (WP-481 Ф7 шаги 3-4) → stdout:
 
 ```json
 {
@@ -46,7 +46,10 @@ Classifies raw pilot request → structured JSON {task_type, class, artifact, bu
   "budget_estimate": "~Xh | ?",
   "confidence": "high | low",
   "routing_tag": "string",
-  "resolution_path": "keyword | llm"
+  "resolution_path": "keyword | llm",
+  "schema_version": 2,
+  "expected_result_kind": "kind_id из PACK-digital-platform/pack/digital-platform/result-kinds-registry.yaml | null",
+  "result_kind_resolution": "static | deferred-to-session | unresolved"
 }
 ```
 
@@ -55,6 +58,10 @@ Classifies raw pilot request → structured JSON {task_type, class, artifact, bu
 - `confidence=high` только при keyword-пути; `confidence=low` при LLM-пути
 - При запросе <5 слов: вернуть `{"error": "INSUFFICIENT_INPUT"}`, стоп
 - `budget_estimate: "?"` только при `problem-framing` или полной неопределённости
+- `expected_result_kind` — дискриминатор ожидаемого kind-а результата (WP-481 Ф7, «не бывает общего результата»), НЕ показатель готовности проверки (`gate_ready` — забота `/verify`, не Артефактора)
+- `result_kind_resolution: "unresolved"` — ни один kind реестра не подходит; классификатор НЕ подменяет ближайшим (анти-утечка в супертип)
+- `result_kind_resolution: "deferred-to-session"` — мета-триггер (например `peer_session`), kind решается внутри самого процесса, не в момент классификации
+- **stdout = CONFIG_ERROR** (exit 3) → реестр kind-ов не читается или устарел относительно `KEYWORD_MAP` (дрейф) — fail-closed, эскалировать пилоту, не игнорировать поле
 
 ## Algorithm
 
@@ -70,10 +77,11 @@ python3 "${IWE_SCRIPTS:-$HOME/IWE/scripts}/artifactor.py" "$ARGUMENTS"
 - **stdout = JSON** (exit 0) → вернуть пилоту, стоп
 - **stdout = INSUFFICIENT_INPUT** (exit 1) → вернуть `{"error": "INSUFFICIENT_INPUT"}`, стоп
 - **stdout = NO_KEYWORD_MATCH** (exit 2) → перейти к Шагу 2
+- **stderr содержит CONFIG_ERROR** (exit 3) → реестр kind-ов недоступен или устарел (дрейф) — эскалировать пилоту одной строкой, НЕ переходить к Шагу 2 (это не «нет keyword-совпадения», а поломка конфигурации)
 
 ### Шаг 2. LLM-классификация (fallback при NO_KEYWORD_MATCH)
 
-Заполнить все 7 полей, используя правила ниже. Вернуть JSON с `resolution_path: "llm"` и `confidence: "low"`.
+Заполнить все 10 полей, используя правила ниже. Вернуть JSON с `resolution_path: "llm"`, `confidence: "low"`, `schema_version: 2`. Для `expected_result_kind`/`result_kind_resolution` — та же логика, что у keyword-пути: подобрать `kind_id` из `PACK-digital-platform/pack/digital-platform/result-kinds-registry.yaml` по смыслу запроса; если ни один явно не подходит — `expected_result_kind: null`, `result_kind_resolution: "unresolved"` (не подменять ближайшим).
 
 **Правила `class`:**
 

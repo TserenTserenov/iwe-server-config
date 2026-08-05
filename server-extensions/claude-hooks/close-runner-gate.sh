@@ -73,7 +73,19 @@ if echo "$COMMAND" | grep -qE 'process-runner\.py[[:space:]]+start[[:space:]]+qu
   # nanosecond-suffixed collision path (rare: two quick-close starts with the same
   # slug in the same run), the mapping simply won't match anything and the append
   # handler fails closed (witness_unavailable), never silently trusts the caller.
-  SLUG=$(echo "$COMMAND" | grep -oE -- '--slug[[:space:]]+"?[A-Za-z0-9._-]+' | grep -oE '[A-Za-z0-9._-]+$')
+  #
+  # Bug found live 2026-08-05 (pilot report from a separate session, same day):
+  # the mapping silently never got created for a real session -- root cause was
+  # this regex only matching `--slug VALUE` (space), not the equally-valid
+  # argparse form `--slug=VALUE` (equals sign), which some callers used. No error
+  # anywhere -- `[ -n "$SLUG" ]` below just quietly skipped the write. Character
+  # class widened to [[:space:]=]+ to accept both forms. `head -1` added because
+  # $COMMAND can be multi-line (e.g. a Bash call whose text merely *quotes* this
+  # substring, like a test script) -- without it, multiple matched lines get
+  # newline-joined by command substitution into one corrupted multi-line SLUG,
+  # self-reproduced live via 2026-08-05-11-wp484-f56-quick-close-witness's own
+  # test tooling (a stray file with an embedded newline in its name was found).
+  SLUG=$(echo "$COMMAND" | grep -oE -- '--slug[[:space:]=]+"?[A-Za-z0-9._-]+' | head -1 | grep -oE '[A-Za-z0-9._-]+$')
   if [ -n "$SLUG" ]; then
     HARNESS_MAP_DIR="$IWE_ROOT/.iwe-runtime/quick-close-harness-session"
     mkdir -p "$HARNESS_MAP_DIR" 2>/dev/null
