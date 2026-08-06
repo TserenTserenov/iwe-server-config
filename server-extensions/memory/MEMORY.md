@@ -60,7 +60,7 @@
 | 510 | 🔄 | P3→P1 | ИИ-личности | Ф21 done, живая проверка прошла; Ф22-кандидат (Кир/Корис) или Ф8 (блокирован РП484/458) |
 | 5 | 🔄 | — | Платформа: развитие (зонтичный) | детали `inbox/WP-5/WP-5.md` |
 | 117 | 🔄 | — | Развитие nudge-системы | переоткрыт 05.08 (ошибочно закрыт по одной фазе, 6 фаз открыты); приёмка stopgap до 30.08 |
-| 149 | 🔄 | **P1** | Персональные руководства | А0/А0b/В+4 находки ревью закрыты; ждём ночь 05→06.08 |
+| 149 | 🔄 | **P1** | Персональные руководства | живой прогон подтвердил 1.3/1.12/2.11; 3 новых жёлтых → HANDOFF-2026-08-06 |
 | 438 | 🔄 | — | Агентный режим Гермеса | перенос после WP-149 |
 | 170 | 🔄 | P1 | База знаний: обновление | партия #1-225 закрыта 03.08 полностью; 05.08 авторская очистка — 6/7 сигналов закрыты (CC-099 rejected) |
 | 415 | 🔄 | P2 | Конвейер орг-GitHub | Конвейер 1 |
@@ -132,7 +132,8 @@
 - [lessons_check_live_diff_before_parallel_infra_fix.md](lessons_check_live_diff_before_parallel_infra_fix.md) — сверить живой `git diff` перед правкой общего файла; если чужой diff МЕНЯЕТСЯ прямо сейчас — ждать тишины (polling), не разовая проверка (04-05.08)
 - [lessons_test_isolation_needs_env_unset_not_just_path_override.md](lessons_test_isolation_needs_env_unset_not_just_path_override.md) — изоляция теста подменой пути к секрет-файлу недостаточна, если процесс наследует реальные credentials из окружения — нужен явный `env -u` (05.08, живой инцидент: 2 тестовых сообщения ушли в боевой Telegram)
 - [lessons_guard_behind_failing_step_never_runs.md](lessons_guard_behind_failing_step_never_runs.md) — корректный сторож не исполняется, если стоит в конвейере за падающим шагом; красный CI отключает всё после точки падения (04.08)
-- [feedback_long_autonomous_work_needs_visibility.md](feedback_long_autonomous_work_needs_visibility.md) — долгий автономный участок (>15-20 мин без апдейта) ощущается пилотом как темнота даже при хорошем итоге — апдейты по вехам, не только в начале (04.08); подтверждено 04.08: апдейты по вехам + один consolidated-вопрос = «отработал полностью сам»
+- [lessons_success_marker_before_success_poisons_retry.md](lessons_success_marker_before_success_poisons_retry.md) — маркер успеха, записанный до финального эффекта, отравляет все retry; «отправлено» = подтверждение получателя, не запуск curl; при миграции — живой тест каждого алерт-канала (06.08, Day Open Ф64)
+- [feedback_long_autonomous_work_needs_visibility.md](feedback_long_autonomous_work_needs_visibility.md) — нарушено 3 раза подряд (04.08 РП149, 05.08 РП484, 06.08 РП510): апдейт только на входе в автономный участок не спасает, если дальше реализация+тесты+ревью+deploy идут молча — апдейт нужен по вехам ВНУТРИ участка
 - [feedback_close_summary_structure_over_density.md](feedback_close_summary_structure_over_density.md) — A1-A11 (лексика) не гарантируют понятность итога; финал долгой сессии вести «что теперь есть → что это даёт», не «как дошли» (04.08)
 - [feedback_codex_peer_code_diagnosis_quality.md](feedback_codex_peer_code_diagnosis_quality.md) — Codex в пир-сессиях хорошо держит код-уровневую верификацию, поймал 2 фактических промаха писателя по данным, не на слово (04.08)
 - [feedback_no_closing_questions.md](feedback_no_closing_questions.md) / [feedback_askuserquestion_not_reaching_pilot.md](feedback_askuserquestion_not_reaching_pilot.md) — не спрашивай «Что дальше?» после выполнения; choice-question — дублировать в чат, не полагаться только на инструмент
