@@ -57,7 +57,8 @@
 | 250 | 🔄 | — | План развития до конца 2026 (зонтичный) | R1-R6 августа утверждены → Strategy.md § август |
 | 399 | ⏳ | P1 | Ротация секретов экосистемы | батч просрочен, ротация за пилотом |
 | 509 | 🔄 | P2 | Пир-сессии 3+ агентов: роль-дискавери и общий рабочий продукт | S-51 закрыта 3/3; промоция на Week Close |
-| 510 | 🔄 | P3→P1 | ИИ-личности | Ф22 закрыта (Элар/Корис/Кир); next живая проверка Кира или Ф8 |
+| 510 | 🔄 | P3→P1 | ИИ-личности | Ф24 автономное тело (IntegrationGate); цели Элара ждут принятия |
+| 512 | 🔄 | P3 | Испытательный стенд непрерывности ИИ-личностей | spin-off РП-510 Ф8 (06.08); next Ф1 — мировой обзор continuity/adversarial/exit практик |
 | 5 | 🔄 | — | Платформа: развитие (зонтичный) | детали `inbox/WP-5/WP-5.md` |
 | 117 | 🔄 | — | Развитие nudge-системы | переоткрыт 05.08 (ошибочно закрыт по одной фазе, 6 фаз открыты); приёмка stopgap до 30.08 |
 | 149 | 🔄 | **P1** | Персональные руководства | 1.11 нарративный фрейм M1-метрики — эксперимент не начат |
@@ -126,6 +127,8 @@
 
 ### Feedback — HOT
 
+- [feedback_elar_address_convention.md](feedback_elar_address_convention.md) — «Элар, …» от пилота → поднять паспорт сборщиком и отвечать из него; SessionStart-привязка ≠ полное ядро (06.08)
+- [feedback_elar_resource_discipline.md](feedback_elar_resource_discipline.md) — следить за расходом токенов, недельный горизонт; автономное окно только с бюджетным предохранителем; большая трата — объявить до запуска (06.08)
 - [lessons_session_guard_select_semaphore_or_bug.md](lessons_session_guard_select_semaphore_or_bug.md) — `session-guard.sh` matches wp OR slug (не AND) когда заданы оба → передавать только `--slug` для точного выбора среди нескольких открытых семафоров одного РП (06.08)
 - [feedback_runner_blocked_by_other_sessions_stuck_not_mine.md](feedback_runner_blocked_by_other_sessions_stuck_not_mine.md) — раннер отказал лимитом из-за ЧУЖИХ зависших прогонов (не моего блокера) → проверить живые ли слоты, доложить факты, обойти только с явным разрешением пилота (05.08)
 - [feedback_two_layer_review_catches_different_bugs.md](feedback_two_layer_review_catches_different_bugs.md) — пир-диалог с Codex до кода и холодное код-ревью после кода ловят разные классы дефектов, не взаимозаменяемы (04.08)
@@ -141,7 +144,7 @@
 - [feedback_quick_close_means_fast_for_pilot.md](feedback_quick_close_means_fast_for_pilot.md) — «быстрое закрытие» = коротко для пилота (снять ретро), не агент сокращает работу
 - [lessons_cloudflare_railway_cross_system_secrets.md](lessons_cloudflare_railway_cross_system_secrets.md) — Cloudflare secrets пишутся вслепую (добавление источника в keyring = ротация всех записей); `railway deployment redeploy`, не `railway redeploy` (05.08)
 - [lessons_marp_visual_verification_required.md](lessons_marp_visual_verification_required.md) — презентацию проверять по рендеру (Read PDF), не по исходнику — список съезжал и текст обрезался незаметно в markdown (05.08)
-- [feedback_git_add_specific_file_not_enough.md](feedback_git_add_specific_file_not_enough.md) — даже именной `git add <file>` не гарантирует чистый коммит в общей рабочей копии — чужие файлы могут быть уже застейджены; `git diff --cached --name-only` обязателен перед commit каждый раз (05.08, живой инцидент)
+- [feedback_git_add_specific_file_not_enough.md](feedback_git_add_specific_file_not_enough.md) — даже проверенный staged-список может расстыковаться до commit (2-й живой инцидент 06.08) — проверять вплотную к commit И сверять `git show --stat` после
 - [routing-vocab.md](routing-vocab.md) — фраза → путь, читать ПЕРЕД Write
 - [feedback_response_clarity_for_pilot.md](feedback_response_clarity_for_pilot.md) — A1-A11 правила ответа
 - [user_tseren_personal_life.md](user_tseren_personal_life.md) — Tseren (НЕ Дмитрий), Кипр
