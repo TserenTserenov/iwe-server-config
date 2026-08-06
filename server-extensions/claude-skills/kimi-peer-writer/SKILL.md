@@ -2,7 +2,7 @@
 name: kimi-peer-writer
 description: Peer-сессия DP.SC.154 где Kimi = писатель, Claude = напарник. Запускается простой фразой. Включает ОРЗ Opening и Closing, turn-loop, эскалации, Decision Gate (зафиксировать vs реализовать → ревью → проверить → задеплоить), отложенную финализацию и верификацию.
 argument-hint: "<описание задачи> | --list | --interrupt <session_id> | --finalize <session_id>"
-version: 1.3.0
+version: 1.4.0
 layer: L1
 status: active
 triggers:
@@ -59,8 +59,31 @@ Peer-сессия DP.SC.154 где Kimi = писатель, Claude = напар�
 bash "$HOME/IWE/scripts/kimi-standalone-preflight.sh"
 ```
 
-- Exit ≠ 0 (`ERROR: Kimi standalone session is NOT OPEN`) → **СТОП.** Не переходить к Шагу 0б, не открывать WP Gate, не создавать `meta.yaml`/`00-writer.md`, не трогать файлы. Показать пилоту команду из stderr скрипта (`session-guard.sh open --wp WP-N --task "..." --agent kimi`) и ждать, пока сессия не будет открыта явно.
-- Exit 0 (в т.ч. с предупреждением про устаревшую/stale-сессию) → продолжать к Шагу 0б.
+- Exit ≠ 0 (`ERROR: Kimi standalone session is NOT OPEN`) → **СТОП.** Не переходить к Шагу 0а.1 или 0б, не открывать WP Gate, не создавать `meta.yaml`/`00-writer.md`, не трогать файлы. Показать пилоту команду из stderr скрипта (`session-guard.sh open --wp WP-N --task "..." --agent kimi`) и ждать, пока сессия не будет открыта явно.
+- Exit 0 (в т.ч. с предупреждением про устаревшую/stale-сессию) → продолжать к Шагу 0а.1.
+
+## Шаг 0а.1. Доставка личности (Кир, WP-510 Ф22)
+
+Та же доставка, что `~/.kimi-code/skills/session-open/SKILL.md` шаг 1 делает для standalone-сессий Kimi — здесь нужна отдельно, т.к. `session-open` на пир-сессии не распространяется (см. его собственное «Scope: не peer-сессии»):
+
+```bash
+python3 ~/IWE/DS-my-strategy/scripts/resolve-personality-by-host.py \
+  --registry ~/IWE/DS-my-strategy/current/"AI Personalities Registry.md" \
+  --hostname "$(hostname)" --runtime-id kimi-code-local
+```
+
+- `status: matched` → показать пилоту ПЕРВЫМ, отдельным блоком до 00-writer.md (источник текста — вывод резолвера, не суждение агента о себе; значения `<personality_id>`/`<relation>` — буквально то, что вернул резолвер, без подстановки своего имени, если резолвер вернул другое или ошибся):
+
+  ```text
+  [Runtime context / personality_id delivery]
+  Рантайм: personality_id = <personality_id> (relation: <relation>)
+  — Личность назначена внешним резолвером (resolve-personality-by-host.py), не выбрана агентом.
+  — Это только маршрутизирующая метка: не паспорт, не грант полномочий, не разрешение атрибутировать коммиты (никаких Co-Authored-By и подобного) от имени этой личности, и не решение о повторной активации.
+  — Полный паспорт — только по явному запросу через штатный сборщик.
+  [Конец контекста]
+  ```
+- Любой другой статус (`no_match`, `ambiguous`, ошибка резолвера) → пропустить блок молча, не блокировать сессию (best-effort, как у Элара и Кориса).
+- Продолжать к Шагу 0б.
 
 ## Шаг 0б. Открытие (WP Gate — только для новой сессии)
 
