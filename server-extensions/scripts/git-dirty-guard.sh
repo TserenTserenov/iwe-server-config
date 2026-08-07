@@ -67,12 +67,35 @@ fi
 # pullScript comment) so this gets its own lock, scoped to .git/. mkdir is used
 # instead of flock — atomic on POSIX and, unlike flock, available on macOS out of
 # the box (this guard runs on both the Mac and the Linux server).
+#
+# Stale-lock recovery (WP-484 Ф70): a killed caller (e.g. systemd's
+# TimeoutStartSec on a hung `git fetch`) cannot run the EXIT trap, so `mkdir`
+# alone left the lock permanently held -- every later call then hit the "busy"
+# branch and returned exit 0, which every caller reads as "clean, proceed",
+# turning the guard into an unconditional rubber stamp with no alert anywhere.
+# Same PID+hostname liveness check already used by ledger-append.sh's
+# mkdir-fallback lock: only reclaim a lock proven dead on THIS host; a live
+# owner, another host, or metadata not yet written is only waited out.
 LOCK_DIR="$GIT_DIR/dirty-guard.lock"
+LOCK_META="$LOCK_DIR/owner"
+HOSTNAME_NOW="${HOSTNAME:-$(hostname 2>/dev/null || echo unknown)}"
 if ! mkdir "$LOCK_DIR" 2>/dev/null; then
-  echo "git-dirty-guard: lock busy, skipping" >&2
-  exit 0
+  if [ -f "$LOCK_META" ]; then
+    OTHER_HOST=$(awk -F= '$1=="host"{print $2}' "$LOCK_META" 2>/dev/null)
+    OTHER_PID=$(awk -F= '$1=="pid"{print $2}' "$LOCK_META" 2>/dev/null)
+    if [ "$OTHER_HOST" = "$HOSTNAME_NOW" ] && [ -n "$OTHER_PID" ] && ! kill -0 "$OTHER_PID" 2>/dev/null; then
+      echo "git-dirty-guard: reclaiming stale lock (pid=$OTHER_PID on $OTHER_HOST no longer running)" >&2
+      rm -rf "$LOCK_DIR" 2>/dev/null
+    fi
+  fi
+  if ! mkdir "$LOCK_DIR" 2>/dev/null; then
+    echo "git-dirty-guard: lock busy (live owner or unproven), skipping" >&2
+    exit 0
+  fi
 fi
-trap 'rmdir "$LOCK_DIR" 2>/dev/null' EXIT
+echo "host=$HOSTNAME_NOW" > "$LOCK_META"
+echo "pid=$$" >> "$LOCK_META"
+trap 'rm -rf "$LOCK_DIR" 2>/dev/null' EXIT
 
 if ! git fetch origin "$BRANCH" --quiet 2>/dev/null; then
   echo "git-dirty-guard: fetch failed (offline?) — nothing to check"

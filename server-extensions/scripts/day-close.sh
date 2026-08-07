@@ -20,6 +20,10 @@ set -euo pipefail
 # === КОНФИГУРАЦИЯ (настроить при установке) ===
 # Load unified environment: WORKSPACE_DIR, IWE_ROOT, IWE_SCRIPTS, etc.
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# iwe-env-bootstrap.sh sets its own $SCRIPT_DIR from its own ${BASH_SOURCE[0]} when
+# sourced below, silently overwriting this one -- capture our own full path first
+# under a name it can't collide with, for the detached reindex re-exec further down.
+DAY_CLOSE_SELF="$SCRIPT_DIR/$(basename "${BASH_SOURCE[0]}")"
 # shellcheck source=/dev/null
 source "$SCRIPT_DIR/../.claude/lib/iwe-env-bootstrap.sh" || exit 1
 GOVERNANCE_REPO="${GOVERNANCE_REPO:-${IWE_GOVERNANCE_REPO:-DS-strategy}}"
@@ -416,7 +420,26 @@ main() {
     backup_dur=$SECONDS
   fi
 
-  if $run_reindex; then
+  if $run_reindex && $do_all; then
+    # process-runner.py bounds this whole script and kills its process GROUP on
+    # timeout (killpg) -- reindex cost scales with how many sources had commits
+    # today, so on a busy day it drags backup/linear/sessions down with it even
+    # though do_reindex() itself is already best-effort. os.setsid() (no `setsid`
+    # binary on macOS) puts the re-exec in its own group, outside that killpg.
+    # `--reindex` alone (tests, manual runs) is unaffected -- stays synchronous.
+    local reindex_log
+    reindex_log="$HOME/logs/day-close-reindex-$(date +%Y-%m-%d).log"
+    mkdir -p "$(dirname "$reindex_log")"
+    log "  Шаг 2/3: Knowledge-MCP reindex — detached, log: $reindex_log"
+    python3 -c '
+import os, subprocess, sys
+os.setsid()
+with open(sys.argv[1], "a") as log:
+    subprocess.Popen(["bash", sys.argv[2], "--reindex"], stdout=log, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL)
+' "$reindex_log" "$DAY_CLOSE_SELF"
+    reindex_status="backgrounded"
+    reindex_dur=0
+  elif $run_reindex; then
     SECONDS=0
     local reindex_rc=0
     do_reindex || reindex_rc=$?

@@ -85,7 +85,7 @@
 | 496 | 🔄 | **P1** | Журнал гипотез (LPF-регламент обратной связи) | Ф5 done (fail-closed сверка починена); next Ф6 догоняющая сверка 39 записей |
 | 289 | 🔄 | P2 | Интеграция IWE с личными базами знаний | Приёмка MVP |
 | 483 | 🔄 | P2 | Комплект структурирования данных (guide-kit) | Ф6 шаги 1-3 закрыты 03.08; шаг 4 (регистрация+код) — будущая сессия |
-| 484 | 🔄 | **P1** | Автогенератор открытия/закрытия дня (зонтичный) | A12-фикс задеплоен на всех агентов (пир с Codex); next — по scope |
+| 484 | 🔄 | **P1** | Автогенератор открытия/закрытия дня (зонтичный) | 07.08 Ф69: план дня починен (tsekh-1 был на 35 коммитов позади); системная хрупкость — открытый пункт |
 | 493 | 🔄 | P2 | Лаборатория характеристик | Ф4 ждёт данных (конец августа) |
 | 494 | 🔄 | P2 | Панель рабочих продуктов в VS Code | дашборд готов и подтверждён; доставка в шаблон отложена до 30.08 |
 | 167 | 🔄 | P5 | Публикации (зонтичный) | пилот утверждает порядок 28 постов |
@@ -117,9 +117,11 @@
 
 - [project_mcp_peer_session_delivery_status.md](project_mcp_peer_session_delivery_status.md) — снимок 30.07: облачный MCP и 2-агентные пир-сессии доставлены всем; DS-MCP-репо и 3+ агента — нет
 - [project_codex_peer_reliability_watch.md](project_codex_peer_reliability_watch.md) — 05.08: пилот отметил, что Codex-напарник игнорирует инструкции — открытое наблюдение, копить примеры до эскалации
+- [project_tsekh1_chronic_git_sync_and_concurrent_agents.md](project_tsekh1_chronic_git_sync_and_concurrent_agents.md) — 07.08: tsekh-1 хронически отстаёт от origin (не разовый Day Open сбой) + несколько живых Claude-сессий делят один checkout — открыто, причина не устранена
 
 ### Feedback — HOT
 
+- [lessons_ssh_heredoc_backtick_local_expansion.md](lessons_ssh_heredoc_backtick_local_expansion.md) — markdown-бэктики в heredoc внутри `ssh host "..."` раскрываются ЛОКАЛЬНОЙ оболочкой как команды до отправки — писать во временный файл и передавать через stdin (07.08)
 - [feedback_elar_address_convention.md](feedback_elar_address_convention.md) — «Элар, …» от пилота → поднять паспорт сборщиком и отвечать из него; SessionStart-привязка ≠ полное ядро (06.08)
 - [feedback_elar_resource_discipline.md](feedback_elar_resource_discipline.md) — следить за расходом токенов, недельный горизонт; автономное окно только с бюджетным предохранителем; большая трата — объявить до запуска (06.08)
 - [lessons_new_script_output_placement_gotchas.md](lessons_new_script_output_placement_gotchas.md) — новый файл-вывод скрипта в DS-my-strategy → проверить `inbox/agent/tasks/` (сканируется как RUN-карточка) и `logs/`+`exocortex/` (в .gitignore целиком) ДО выбора места (06.08)
@@ -131,7 +133,7 @@
 - [lessons_test_isolation_needs_env_unset_not_just_path_override.md](lessons_test_isolation_needs_env_unset_not_just_path_override.md) — изоляция теста подменой пути к секрет-файлу недостаточна, если процесс наследует реальные credentials из окружения — нужен явный `env -u` (05.08, живой инцидент: 2 тестовых сообщения ушли в боевой Telegram)
 - [lessons_guard_behind_failing_step_never_runs.md](lessons_guard_behind_failing_step_never_runs.md) — корректный сторож не исполняется, если стоит в конвейере за падающим шагом; красный CI отключает всё после точки падения (04.08)
 - [lessons_success_marker_before_success_poisons_retry.md](lessons_success_marker_before_success_poisons_retry.md) — маркер успеха, записанный до финального эффекта, отравляет все retry; «отправлено» = подтверждение получателя, не запуск curl; при миграции — живой тест каждого алерт-канала (06.08, Day Open Ф64)
-- [feedback_long_autonomous_work_needs_visibility.md](feedback_long_autonomous_work_needs_visibility.md) — нарушено 3 раза подряд (04.08 РП149, 05.08 РП484, 06.08 РП510): апдейт только на входе в автономный участок не спасает, если дальше реализация+тесты+ревью+deploy идут молча — апдейт нужен по вехам ВНУТРИ участка
+- [feedback_long_autonomous_work_needs_visibility.md](feedback_long_autonomous_work_needs_visibility.md) — нарушено 4 раза подряд (04.08 РП149, 05.08 РП484, 06.08 РП510, 07.08 РП510 Close): апдейт только на входе не спасает; молчание после ОШИБКИ/блока — острее и требует апдейта немедленно, не только на длинных участках
 - [feedback_close_summary_structure_over_density.md](feedback_close_summary_structure_over_density.md) — A1-A11 (лексика) не гарантируют понятность итога; финал долгой сессии вести «что теперь есть → что это даёт», не «как дошли» (04.08)
 - [feedback_codex_peer_code_diagnosis_quality.md](feedback_codex_peer_code_diagnosis_quality.md) — Codex в пир-сессиях хорошо держит код-уровневую верификацию, поймал 2 фактических промаха писателя по данным, не на слово (04.08)
 - [feedback_no_closing_questions.md](feedback_no_closing_questions.md) / [feedback_askuserquestion_not_reaching_pilot.md](feedback_askuserquestion_not_reaching_pilot.md) — не спрашивай «Что дальше?» после выполнения; choice-question — дублировать в чат, не полагаться только на инструмент
