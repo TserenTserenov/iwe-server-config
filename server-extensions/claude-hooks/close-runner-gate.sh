@@ -17,11 +17,14 @@
 #
 # Известные обходы (не закрыты этой версией, задокументированы намеренно —
 # фикс регэкспа под каждый вариант git-инвокации даёт гонку вооружений, не
-# решение; первая версия честного гейта закрывает самый частый путь):
-# `git -c x=y commit`, `(git commit ...)` в subshell, `$(git commit ...)`
-# в command substitution, `git commit-tree`/`git commit-graph` (эти два —
-# ложный ПОЗИТИВ, не обход: plumbing-команды не создают commit истории
-# закрытия сессии, но матчатся тем же regex).
+# решение; системный барьер — автомат обязательства Ф74б, АрхГейт):
+# `sudo git commit`, `eval "git commit"`, alias/функция-обёртка, вызов git
+# из вложенного скрипта. Ф74а (07.08.2026) закрыл: `git -C <repo> commit/push`,
+# `git -c x=y commit`, `--git-dir/--work-tree/--namespace/--exec-path` в обеих
+# формах, `(git commit)` / `$(git commit)`, `command git commit`, мультипробел,
+# многострочные команды, прямой `git push`; заодно снят ложный позитив первой
+# версии на `git commit-tree`/`git commit-graph` (после субкоманды теперь
+# требуется пробел или конец строки).
 #
 # Контракт PreToolUse hook (Claude Code):
 # - Stdin: JSON {"tool_name", "tool_input", "session_id", ...}
@@ -96,12 +99,29 @@ if echo "$COMMAND" | grep -qE 'process-runner\.py[[:space:]]+start[[:space:]]+qu
   fi
 fi
 
-# Применимо к блокировке только прямой git commit. process-runner.py сам
+# Применимо к блокировке только прямой git commit/push. process-runner.py сам
 # вызывает git commit внутри commit-push.sh как subprocess — PreToolUse видит
 # только верхний Bash-вызов LLM (`python3 process-runner.py ...`), не увидит
 # вложенный git commit отдельным tool call, поэтому раннер этим гейтом не
 # блокируется независимо от маркера выше.
-echo "$COMMAND" | grep -qE '(^|[;&|]|&&)\s*git commit' || exit 0
+#
+# WP-484 Ф74а (07.08.2026, пир-сессия 2026-08-07-08-quick-close-runner-bypass):
+# прежний regex ловил только буквальный `git commit` после оператора — стандартная
+# для этого workspace форма `git -C <repo> commit` (а также `-c`, `--git-dir`,
+# `command`, subshell, мультипробел, многострочные команды и любой `git push`)
+# проходила мимо; 07.08 Quick Close был выполнен полностью в обход раннера.
+# Это defence-in-depth, НЕ системный фикс (гонка вооружений признана; системный
+# барьер — автомат обязательства Ф74б, АрхГейт).
+# Нормализация: newline — тот же разделитель команд, что `;` → заменяем на `;`,
+# затем схлопываем повторные пробелы, чтобы `git   commit` не ускользал.
+NORMALIZED_COMMAND=$(printf '%s' "$COMMAND" | tr '\n' ';' | tr -s '[:space:]' ' ')
+# Глобальные флаги git: со значением (-C path, -c k=v, --git-dir/--work-tree/
+# --namespace/--exec-path в форме `=value` или через пробел) и булевы
+# (-P/--paginate/--no-pager, pathspecs-флаги и пр.). После субкоманды требуем
+# пробел или конец строки — поэтому plumbing `commit-tree`/`commit-graph`
+# (ложный позитив первой версии) больше не блокируются.
+GIT_GLOBAL_FLAGS_RE='(-C [^ ]+|-c [^ ]+|--(git-dir|work-tree|namespace|exec-path)(=[^ ]+| [^ ]+)|--(literal-pathspecs|glob-pathspecs|noglob-pathspecs|icase-pathspecs|no-optional-locks|no-lazy-fetch|no-replace-objects|no-pager|paginate|bare)|-P)'
+echo "$NORMALIZED_COMMAND" | grep -qE "(^|[;&|(]) ?(command |builtin |exec )?git( $GIT_GLOBAL_FLAGS_RE)* (commit|push)( |$)" || exit 0
 
 SENTINEL="/tmp/iwe-close-intent/$SESSION_ID_SAFE.flag"
 # Close не объявлен в этой сессии (или sentinel не создан) — не мешать штатной работе.
@@ -127,10 +147,10 @@ fi
 [ -f "$RUNNER_MARKER" ] && exit 0
 
 SENTINEL_CREATED=$(jq -r '.created_at // empty' "$SENTINEL" 2>/dev/null)
-echo "[close-runner-gate] session=$SESSION_ID_SAFE close-intent=$SENTINEL_CREATED no process-runner.py start quick-close observed in this session — blocking direct git commit" >&2
+echo "[close-runner-gate] session=$SESSION_ID_SAFE close-intent=$SENTINEL_CREATED no process-runner.py start quick-close observed in this session — blocking direct git commit/push" >&2
 
 cat >&2 <<EOF
-🚫 Reflex-принуждение к раннеру (WP-482): прямой git commit в обход process-runner.py заблокирован.
+🚫 Reflex-принуждение к раннеру (WP-482): прямой git commit/push в обход process-runner.py заблокирован.
 
 В этой сессии объявлено намерение закрыть сессию ($SENTINEL_CREATED), но вызова
 "process-runner.py start quick-close" в этой же сессии не наблюдалось.
