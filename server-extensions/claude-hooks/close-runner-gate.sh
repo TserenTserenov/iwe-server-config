@@ -144,8 +144,10 @@ NORMALIZED_COMMAND=$(printf '%s' "$COMMAND" | tr '\n' ';' | tr -s '[:space:]' ' 
 # (-P/--paginate/--no-pager, pathspecs-флаги и пр.). После субкоманды требуем
 # пробел или конец строки — поэтому plumbing `commit-tree`/`commit-graph`
 # (ложный позитив первой версии) больше не блокируются.
+# WP-484 Ф74а дополнение (07.08.2026): переменные окружения перед git
+# (`GIT_EDITOR=cat git commit`) тоже ловим, иначе это обход.
 GIT_GLOBAL_FLAGS_RE='(-C [^ ]+|-c [^ ]+|--(git-dir|work-tree|namespace|exec-path)(=[^ ]+| [^ ]+)|--(literal-pathspecs|glob-pathspecs|noglob-pathspecs|icase-pathspecs|no-optional-locks|no-lazy-fetch|no-replace-objects|no-pager|paginate|bare)|-P)'
-echo "$NORMALIZED_COMMAND" | grep -qE "(^|[;&|(]) ?(command |builtin |exec )?git( $GIT_GLOBAL_FLAGS_RE)* (commit|push)( |$)" || exit 0
+echo "$NORMALIZED_COMMAND" | grep -qE "(^|[;&|(]) *(([A-Za-z_][A-Za-z0-9_]*=[^ ]+ *)*)(command |builtin |exec )?git( $GIT_GLOBAL_FLAGS_RE)* (commit|push)( |$)" || exit 0
 
 SENTINEL="/tmp/iwe-close-intent/$SESSION_ID_SAFE.flag"
 # Close не объявлен в этой сессии (или sentinel не создан) — не мешать штатной работе.

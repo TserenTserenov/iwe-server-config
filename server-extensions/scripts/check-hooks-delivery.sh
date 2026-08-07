@@ -10,8 +10,9 @@
 # ВНЕ хук-контура и запускается из конвейеров (day-open-checks-runner).
 #
 # Проверяет: наличие + исполняемость файлов, регистрацию в settings.json под
-# правильным событием с сохранением относительного порядка, неизменность
-# относительно git HEAD, synthetic canary-вызов.
+# правильным событием и matcher-группой с точным сопоставлением basename,
+# относительного пути и порядка, неизменность относительно git HEAD
+# (или pinned manifest, если есть), корректность разрешения команды в hook dir.
 # ЧЕСТНАЯ ГРАНИЦА (консенсус): canary доказывает работоспособность hook-файла,
 # но не факт его загрузки конкретной живой сессией Claude Code.
 #
@@ -22,6 +23,7 @@ set -uo pipefail
 IWE="${IWE_ROOT:-$HOME/IWE}"
 HOOKS_DIR="$IWE/.claude/hooks"
 SETTINGS="$IWE/.claude/settings.json"
+MANIFEST="$HOOKS_DIR/.manifest.json"
 FAIL=0
 
 pass() { echo "  ✅ $1"; }
@@ -38,9 +40,18 @@ required_hooks() {
   esac
 }
 
+# matcher → ожидаемый matcher для хука (empty = always-run группа без matcher)
+expected_matcher() {
+  case "$1" in
+    close-runner-gate.sh) echo "Bash" ;;
+    witness-write-guard.sh) echo "Write|Edit|MultiEdit|Bash" ;;
+    *) echo "" ;;
+  esac
+}
+
 echo "=== Аудит доставки хуков (Ф74в) ==="
 
-# --- 1. Файлы: существование + исполняемость + неизменность vs git HEAD ---
+# --- 1. Файлы: существование + исполняемость + неизменность vs manifest/git HEAD ---
 for event in "${EVENTS[@]}"; do
   for hook in $(required_hooks "$event"); do
     f="$HOOKS_DIR/$hook"
@@ -52,55 +63,121 @@ for event in "${EVENTS[@]}"; do
       fail "$hook: не исполняемый"
       continue
     fi
-    # На Nix-развёрнутых хостах (tsekh-1) ~/IWE может не быть git-репо —
-    # там проверка неизменности неприменима, пропускаем молча.
-    if git -C "$IWE" rev-parse --git-dir >/dev/null 2>&1; then
+    HASH_OUTDATED=0
+    if [ -f "$MANIFEST" ]; then
+      # Pinned manifest: sha256 файла должна совпадать с записанной
+      EXPECTED=$(python3 - "$MANIFEST" "$hook" <<'PYEOF'
+import json, sys, hashlib, hmac
+manifest, name = sys.argv[1], sys.argv[2]
+try:
+    d = json.load(open(manifest))
+except Exception:
+    sys.exit(1)
+print(d.get("sha256", {}).get(name, ""))
+PYEOF
+)
+      if [ -n "$EXPECTED" ]; then
+        ACTUAL=$(sha256sum "$f" 2>/dev/null | awk '{print $1}' || shasum -a 256 "$f" 2>/dev/null | awk '{print $1}')
+        if [ "$EXPECTED" != "$ACTUAL" ]; then
+          fail "$hook: sha256 не совпадает с manifest (outdated)"
+          HASH_OUTDATED=1
+        fi
+      fi
+    fi
+    if [ "$HASH_OUTDATED" -eq 0 ] && git -C "$IWE" rev-parse --git-dir >/dev/null 2>&1; then
       if ! git -C "$IWE" diff --quiet HEAD -- ".claude/hooks/$hook" 2>/dev/null; then
         fail "$hook: рабочая копия отличается от git HEAD (не задеплоенная правка?)"
         continue
       fi
     fi
-    pass "$hook: файл на месте, исполняемый, совпадает с HEAD"
+    pass "$hook: файл на месте, исполняемый, совпадает с эталоном"
   done
 done
 
-# --- 2. Регистрация в settings.json (событие + относительный порядок) ---
+# --- 2. Регистрация в settings.json: exact matcher/path/order verification ---
 if [ ! -f "$SETTINGS" ]; then
-  fail "settings.json отсутствует: $SETTINGS — НИ ОДИН хук не зарегистрирован"
+  fail "settings.json отсутствует: $SETTINGS — НИД ОДИН хук не зарегистрирован"
 else
-  for event in "${EVENTS[@]}"; do
-    registered=$(python3 - "$SETTINGS" "$event" <<'PYEOF'
-import json, sys
-settings, event = sys.argv[1], sys.argv[2]
+  # Используем Python для точного сопоставления: каждый хук должен быть в правильной
+  # matcher-группе, команда должна заканчиваться на .claude/hooks/<basename>,
+  # порядок между группами сохраняется, нет лишних подстрокных совпадений.
+  python3 - "$SETTINGS" "$HOOKS_DIR" <<'PYEOF' | while IFS=$'\t' read -r status hook msg; do
+import json, sys, os, re
+settings_path, hooks_dir = sys.argv[1], sys.argv[2]
+
+events = {
+    "UserPromptSubmit": ["close-gate-reminder.sh", "pilot-witness-recorder.sh"],
+    "PreToolUse": ["close-runner-gate.sh", "witness-write-guard.sh"],
+    "Stop": ["protocol-stop-gate.sh"],
+}
+expected_matcher = {
+    "close-runner-gate.sh": "Bash",
+    "witness-write-guard.sh": "Write|Edit|MultiEdit|Bash",
+}
+
+def matcher_matches(expected, actual):
+    if not expected:
+        return actual is None or actual == ""
+    if actual is None:
+        return False
+    # Оба списка токенов; actual должен содержать все токены expected.
+    expected_tokens = set(expected.split("|"))
+    actual_tokens = set(actual.split("|"))
+    return expected_tokens.issubset(actual_tokens)
+
 try:
-    d = json.load(open(settings))
-except Exception:
-    sys.exit(2)
-cmds = []
-for group in d.get("hooks", {}).get(event, []):
-    for h in group.get("hooks", []):
-        cmds.append(h.get("command", ""))
-print("\n".join(cmds))
+    settings = json.load(open(settings_path))
+except Exception as exc:
+    print(f"FAIL\tsettings.json\tне парсится: {exc}")
+    sys.exit(0)
+
+hooks_cfg = settings.get("hooks", {})
+
+for event, required in events.items():
+    groups = hooks_cfg.get(event, [])
+    # flatten groups preserving order, extracting (matcher, command) for each hook
+    entries = []
+    for group in groups:
+        matcher = group.get("matcher")
+        for h in group.get("hooks", []):
+            cmd = h.get("command", "")
+            entries.append((matcher, cmd))
+    idx = 0
+    for req_hook in required:
+        expected = expected_matcher.get(req_hook)
+        found = False
+        while idx < len(entries):
+            matcher, cmd = entries[idx]
+            # basename команды
+            basename = cmd.split("/")[-1]
+            # exact basename match (no substring)
+            if basename != req_hook:
+                idx += 1
+                continue
+            # matcher match
+            if not matcher_matches(expected, matcher):
+                print(f"FAIL\t{req_hook}\tзарегистрирован в {event}, но matcher {matcher!r} не совпадает с ожидаемым {expected!r}")
+                idx += 1
+                continue
+            # path resolution: expand $CLAUDE_PROJECT_DIR to IWE root and verify it points to hooks_dir
+            expanded = cmd.replace("$CLAUDE_PROJECT_DIR", hooks_dir.replace("/.claude/hooks", ""))
+            if not os.path.normpath(expanded).startswith(os.path.normpath(hooks_dir) + os.sep):
+                print(f"FAIL\t{req_hook}\tкоманда {cmd!r} не разрешается в hooks_dir")
+                idx += 1
+                continue
+            # order check: found at or after current position
+            print(f"OK\t{req_hook}\t{event} matcher={matcher or 'always'} pos={idx+1}")
+            idx += 1
+            found = True
+            break
+        if not found:
+            print(f"FAIL\t{req_hook}\tне найден в {event} (или порядок нарушен)")
 PYEOF
-)
-    if [ $? -eq 2 ]; then
-      fail "settings.json не парсится"
-      break
+    if [ "$status" = "FAIL" ]; then
+      fail "$hook: $msg"
+    elif [ "$status" = "OK" ]; then
+      pass "$hook: $msg"
     fi
-    prev_idx=-1
-    for hook in $(required_hooks "$event"); do
-      idx=$(printf '%s\n' "$registered" | grep -n "$hook" | head -1 | cut -d: -f1)
-      if [ -z "$idx" ]; then
-        fail "$hook: НЕ зарегистрирован в $event ($SETTINGS)"
-        continue
-      fi
-      if [ "$prev_idx" -ge 0 ] && [ "$idx" -le "$prev_idx" ]; then
-        fail "$hook: порядок регистрации в $event нарушен (позиция $idx после $prev_idx)"
-        continue
-      fi
-      prev_idx=$idx
-      pass "$hook: зарегистрирован в $event (позиция $idx)"
-    done
   done
 fi
 
@@ -108,12 +185,15 @@ fi
 CANARY_SID="hooks-delivery-canary-$$"
 
 # close-runner-gate: доброкачественный вызов → exit 0 без вывода
-OUT=$(printf '{"tool_name":"Bash","tool_input":{"command":"ls -la"},"session_id":"%s"}' "$CANARY_SID" \
-  | bash "$HOOKS_DIR/close-runner-gate.sh" 2>/dev/null)
-if [ $? -eq 0 ] && [ -z "$OUT" ]; then
-  pass "canary: close-runner-gate.sh (benign → allow)"
+if OUT=$(printf '{"tool_name":"Bash","tool_input":{"command":"ls -la"},"session_id":"%s"}' "$CANARY_SID" \
+  | bash "$HOOKS_DIR/close-runner-gate.sh" 2>/dev/null); then
+  if [ -z "$OUT" ]; then
+    pass "canary: close-runner-gate.sh (benign → allow)"
+  else
+    fail "canary: close-runner-gate.sh не прошёл benign-вызов (unexpected output: ${OUT:0:80})"
+  fi
 else
-  fail "canary: close-runner-gate.sh не прошёл benign-вызов"
+  fail "canary: close-runner-gate.sh не прошёл benign-вызов (exit non-zero)"
 fi
 
 # close-gate-reminder: фраза закрытия → sentinel + инструкция run-protocol
@@ -139,9 +219,8 @@ else
 fi
 
 # pilot-witness-recorder / witness-write-guard: живой вызов с валидным JSON → exit 0
-printf '{"prompt":"canary","session_id":"%s"}' "$CANARY_SID" \
-  | bash "$HOOKS_DIR/pilot-witness-recorder.sh" >/dev/null 2>&1
-if [ $? -eq 0 ]; then
+if printf '{"prompt":"canary","session_id":"%s"}' "$CANARY_SID" \
+  | bash "$HOOKS_DIR/pilot-witness-recorder.sh" >/dev/null 2>&1; then
   pass "canary: pilot-witness-recorder.sh (exit 0)"
 else
   fail "canary: pilot-witness-recorder.sh exit != 0"
