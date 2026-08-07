@@ -82,7 +82,7 @@ Hot-каркас ≤20K токенов (M1), строгая цель ≤12K (M2)
 
 ## Agent Core (SYNC-CORE → AGENTS.md)
 
-> **WP-394 Ф4.2.** Единое ядро для всех агентов (Claude, Kimi, Hermes). `AGENTS.md` генерируется отсюда скриптом `scripts/sync-agent-instructions.sh` — **не редактировать `AGENTS.md` вручную**. Элаборация → `memory/reference/agent-core.md`.
+> **WP-394 Ф4.2.** Единое ядро для всех агентов (Claude, Kimi, Codex, Hermes). `AGENTS.md` генерируется отсюда скриптом `scripts/sync-agent-instructions.sh` — **не редактировать `AGENTS.md` вручную**. Элаборация → `memory/reference/agent-core.md`.
 
 <!-- SYNC-CORE-START -->
 
@@ -112,7 +112,7 @@ Discrepancy found (file ≠ plan, stale content): **report to pilot, do not sile
 
 ## Status Reporting — Agent Status Registry (РП-395)
 
-**Primary (обязательно):** в начале задачи `agent_status_update(agent=<claude-code|kimi|hermes>, status=working, task=<кратко>, files=[...])`; по завершении — `status=idle`. Статусы: `idle|working|peer-session|blocked`; пилот видит всех через `agent_status_list`. Командный режим (`repo=`) и fail-safe скрипт → `memory/reference/agent-core.md`.
+**Primary (обязательно):** в начале задачи `agent_status_update(agent=<claude-code|kimi|codex|hermes>, status=working, task=<кратко>, files=[...])`; по завершении — `status=idle`. Статусы: `idle|working|peer-session|blocked`; пилот видит всех через `agent_status_list`. Командный режим (`repo=`) и fail-safe скрипт → `memory/reference/agent-core.md`.
 
 ## Long Operation Protocol — 180 s Silence Threshold
 

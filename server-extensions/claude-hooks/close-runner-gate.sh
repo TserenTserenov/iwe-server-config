@@ -51,19 +51,20 @@ SESSION_ID_SAFE=$(printf '%s' "$SESSION_ID" | tr -cd 'A-Za-z0-9._-')
 RUNNER_MARKER_DIR="/tmp/iwe-close-runner-started"
 RUNNER_MARKER="$RUNNER_MARKER_DIR/$SESSION_ID_SAFE.flag"
 
-# Наблюдаем ЛЮБОЙ Bash-вызов этой сессии, стартующий quick-close через раннер —
-# отмечаем session-bound маркер сразу, независимо от того, что произойдёт с
-# commit'ом ниже. Это решает race condition из независимой проверки: карточка
-# RUN-quick-close-*.md в общем каталоге не несёт session_id (WP-482 не меняет
-# process-runner.py под эту правку), поэтому сравнение "есть ли где-то свежая
-# карточка" путало параллельные сессии друг с другом (сессия A видела карточку,
-# запущенную сессией B, и ложно считала раннер своим). Маркер этого хука
-# session-bound по построению — привязан к session_id из PreToolUse payload,
-# который Claude Code не путает между параллельными агентами.
+# Наблюдаем ЛЮБОЙ Bash-вызов этой сессии, стартующий quick-close через раннер.
+# WP-484 Ф74б (07.08.2026, консенсус пир-сессии 2026-08-07-08): session-bound
+# маркер «раннер запущен» больше НЕ ставится по подстроке в тексте команды —
+# это подделывалось банальным `echo 'process-runner.py start quick-close'`.
+# Теперь хук выпускает одноразовый pending-ticket (nonce) и внедряет его в
+# команду через updatedInput; маркер пишет только САМ раннер при атомарном
+# потреблении ticket (close_obligation.consume_ticket) — причинно, после
+# реального старта. Подделка echo создаёт максимум бесполезный ticket.
 if echo "$COMMAND" | grep -qE 'process-runner\.py[[:space:]]+start[[:space:]]+quick-close'; then
-  mkdir -p "$RUNNER_MARKER_DIR" 2>/dev/null
-  touch "$RUNNER_MARKER" 2>/dev/null
-
+  # WP-484 Ф74б: новый запуск раннера = новое поколение. Старый runner-маркер
+  # этой же сессии (если остался от прошлого поколения/проактивного старта)
+  # должен считаться недействительным, иначе stop-check мог бы принять его за
+  # маркер текущего obligation. Сам consume-ticket запишет новый маркер.
+  rm -f "$RUNNER_MARKER" 2>/dev/null
   # WP-484 Ф56: session-reflection-append.sh (reflex handler) needs to know which
   # Claude Code session_id this quick-close run belongs to, to find the matching
   # pilot-witness/<session_id>.jsonl -- reflex handlers only receive {results,
@@ -96,6 +97,29 @@ if echo "$COMMAND" | grep -qE 'process-runner\.py[[:space:]]+start[[:space:]]+qu
     HARNESS_MAP_FILE="$HARNESS_MAP_DIR/quick-close-$SLUG.session_id"
     printf '%s' "$SESSION_ID" > "$HARNESS_MAP_FILE" 2>/dev/null
     chmod 600 "$HARNESS_MAP_FILE" 2>/dev/null
+  fi
+
+  # Ф74б: выпуск ticket + инъекция nonce. Fail-closed: если ticket не выпущен
+  # (ledger недоступен и пр.), инъекции нет — раннер пойдёт ticketless-веткой,
+  # а armed obligation при этом останется неудовлетворённой и Stop-гейт
+  # заблокирует тихое завершение (не молчаливый обход).
+  if [ -n "$SLUG" ]; then
+    TOOL_USE_ID=$(printf '%s' "$INPUT" | jq -r '.tool_use_id // empty' 2>/dev/null)
+    OBLIGATION_CLI="$IWE_ROOT/${IWE_GOVERNANCE_REPO:-DS-my-strategy}/scripts/close_obligation.py"
+    NONCE=$(python3 "$OBLIGATION_CLI" issue-ticket --session-id "$SESSION_ID" --slug "$SLUG" --tool-use-id "$TOOL_USE_ID" 2>/dev/null)
+    if [ -n "$NONCE" ]; then
+      NEW_COMMAND=$(NONCE="$NONCE" python3 -c '
+import os, re, sys
+cmd = sys.stdin.read()
+nonce = os.environ["NONCE"]
+sys.stdout.write(re.sub(r"(process-runner\.py\s+start\s+quick-close)", r"\1 --close-ticket " + nonce, cmd, count=1))
+' <<<"$COMMAND")
+      if [ "$NEW_COMMAND" != "$COMMAND" ]; then
+        jq -nc --arg cmd "$NEW_COMMAND" \
+          '{hookSpecificOutput:{hookEventName:"PreToolUse",updatedInput:{command:$cmd}}}'
+        exit 0
+      fi
+    fi
   fi
 fi
 

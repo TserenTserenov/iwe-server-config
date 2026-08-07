@@ -1,10 +1,15 @@
 #!/bin/bash
-# Close Gate Reminder Hook (v4 — session-bound close-intent sentinel, WP-482)
+# Close Gate Reminder Hook (v6 — close-obligation, WP-484 Ф74б, 07.08.2026)
 # Event: UserPromptSubmit
 # Day Close → ПРЯМАЯ ИНСТРУКЦИЯ вызвать /run-protocol day-close (не напоминание).
-# Session Close → compact-чеклист + sentinel для close-runner-gate.sh (PreToolUse).
-# Read-only на прошлое (не меняет файлы репо), кроме одного sentinel в /tmp.
-# Версия: 2026-04-03. Fix: multiline prompt ломал jq (6-й инцидент 3 апр).
+# Session Close → compact-чеклист + sentinel для close-runner-gate.sh (PreToolUse)
+#   + obligation armed (close_obligation.py) — автомат обязательства Ф74б.
+# Cancel/override фразы пилота → аудируемый переход (ledger close_obligation),
+#   не молчаливое удаление. Ошибки arm/cancel НЕ маскируются || true — hook
+#   честно сообщает неуспех и не заявляет, что obligation создана/снята.
+# Read-only на прошлое (не меняет файлы репо), кроме sentinel в /tmp и state-файлов
+# obligation в .iwe-runtime (через close_obligation.py).
+# Версия: 2026-08-07 (Ф74б). Fix: multiline prompt ломал jq (6-й инцидент 3 апр).
 #
 # Sentinel (WP-482, 25.07.2026): текстовая инструкция «раннер — первое действие
 # Quick Close» уже стояла в protocol-close.md с 17.07 — 24.07 LLM прочитал её
@@ -13,6 +18,13 @@
 # интерпретирует, не может быть механизмом принуждения. Sentinel здесь —
 # только маркер «в этой сессии объявлено намерение Close»; фактическую
 # блокировку прямого `git commit` в обход раннера делает close-runner-gate.sh.
+#
+# Ф74б: obligation НЕ снимается следующим нерелевантным промптом (в отличие от
+# sentinel, чьё удаление на любой другой фразе — фикс 04.08 против ложных
+# блокировок коммитов, он сохранён). Обязательство снимают только: verified
+# completed (Stop-гейт), cancel-close, close-override. Режимы: точный intent
+# («закрывай/закрой») → mode=block; широкая эвристика («заливай/запуши») →
+# mode=warn (консенсус пир-сессии 2026-08-07-08, ход 4-6).
 
 INPUT=$(cat)
 # Устойчивость к многострочным промптам: literal \n в JSON value
@@ -24,32 +36,101 @@ SESSION_ID=$(printf '%s' "$INPUT" | jq -r '.session_id // "unknown"' 2>/dev/null
 SESSION_ID=$(printf '%s' "$SESSION_ID" | tr -cd 'A-Za-z0-9._-')
 [ -n "$SESSION_ID" ] || SESSION_ID="unknown"
 
+IWE_ROOT="${CLAUDE_PROJECT_DIR:-$HOME/IWE}"
+OBLIGATION_CLI="$IWE_ROOT/${IWE_GOVERNANCE_REPO:-DS-my-strategy}/scripts/close_obligation.py"
+SENTINEL_DIR="/tmp/iwe-close-intent"
+REASON=$(printf '%s' "$PROMPT" | cut -c1-200)
+
+_obligation_available() {
+  [ -x "$(command -v python3)" ] && [ -f "$OBLIGATION_CLI" ]
+}
+
+_run_obligation() {
+  python3 "$OBLIGATION_CLI" "$@" 2>&1
+}
+
+# --- Ф74б: явная отмена обязательства пилотом (аудируемый cancel-close) ---
+if echo "$PROMPT" | grep -qE '(не закрывай|не надо закрывать|отмена закрытия|отмени закрытие|отставить закрытие)'; then
+  if _obligation_available; then
+    OUT=$(_run_obligation cancel --session-id "$SESSION_ID" \
+      --action cancel-close --actor pilot --reason "$REASON")
+    RC=$?
+    if [ "$RC" -ne 0 ] || printf '%s' "$OUT" | grep -q '"status": "error"'; then
+      echo '{"additionalContext": "❌ ОШИБКА cancel-close: ledger append не удался, obligation остаётся активной. Не утверждай, что закрытие отменено. Пилот должен разрешить ситуацию вручную или повторить cancel-close позже."}'
+      exit 0
+    fi
+  fi
+  rm -f "$SENTINEL_DIR/$SESSION_ID.flag" 2>/dev/null
+  echo '{"additionalContext": "Обязательство закрытия сессии снято пилотом (cancel-close записан в ledger). Продолжай работу, Quick Close не требуется."}'
+  exit 0
+fi
+
+# --- Ф74б: явный обход раннера по команде пилота (аудируемый close-override) ---
+if echo "$PROMPT" | grep -qE '(в обход раннера|без раннера|в обход process-runner)'; then
+  if _obligation_available; then
+    OUT=$(_run_obligation cancel --session-id "$SESSION_ID" \
+      --action close-override --actor pilot --reason "$REASON")
+    RC=$?
+    if [ "$RC" -ne 0 ] || printf '%s' "$OUT" | grep -q '"status": "error"'; then
+      echo '{"additionalContext": "❌ ОШИБКА close-override: ledger append не удался, obligation остаётся активной. Не утверждай, что пилот разрешил обход раннера."}'
+      exit 0
+    fi
+  fi
+  rm -f "$SENTINEL_DIR/$SESSION_ID.flag" 2>/dev/null
+  echo '{"additionalContext": "Пилот явно разрешил закрытие В ОБХОД раннера (close-override записан в ledger с цитатой). Закрывай вручную, но в отчёте честно назови это «закрытие в обход раннера по команде пилота», а не «Quick Close»."}'
+  exit 0
+fi
+
 # Day Close → ПРИНУДИТЕЛЬНЫЙ вызов /run-protocol
 if echo "$PROMPT" | grep -qE '(итоги дня|закрываю день|закрывай день)'; then
   cat <<'EOF'
 {"additionalContext": "⛔ БЛОКИРУЮЩЕЕ: Day Close выполняется ТОЛЬКО через skill /run-protocol с аргументом 'day-close'. ПЕРВОЕ И ЕДИНСТВЕННОЕ действие = вызвать Skill tool: skill='run-protocol', args='day-close'. НЕ читать protocol-close.md вручную. НЕ выполнять шаги самостоятельно. НЕ писать итоги без /run-protocol. Причина: 5 инцидентов пропуска шагов при ручном исполнении (15, 18, 19, 27 мар). /run-protocol гарантирует пошаговый TodoList + верификацию Haiku R23."}
 EOF
+  exit 0
+fi
 
-# Session Close → /run-protocol close + sentinel для close-runner-gate.sh
-elif echo "$PROMPT" | grep -qE '(закрывай|закрываю|заливай|запуши|закрывай сессию)'; then
-  SENTINEL_DIR="/tmp/iwe-close-intent"
+# Session Close (точный intent) → mode=block; широкая эвристика → mode=warn
+_arm_and_sentinel() {
+  local mode="$1"
+  local broad="$2"
+  if _obligation_available; then
+    OUT=$(_run_obligation arm --session-id "$SESSION_ID" --mode "$mode")
+    RC=$?
+    if [ "$RC" -ne 0 ] || printf '%s' "$OUT" | grep -q '"status": "error"'; then
+      echo '{"additionalContext": "❌ ОШИБКА arm close-obligation: не удалось создать obligation. Не утверждай, что Quick Close заармирован. Без obligation тихое завершение сессии не будет заблокировано на Stop-гейте."}'
+      exit 0
+    fi
+  fi
   mkdir -p "$SENTINEL_DIR" 2>/dev/null
   printf '{"session_id":"%s","created_at":"%s"}' \
     "$SESSION_ID" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
     > "$SENTINEL_DIR/$SESSION_ID.flag" 2>/dev/null
-  echo "[close-gate-reminder] session=$SESSION_ID close-intent sentinel written" >&2
+  echo "[close-gate-reminder] session=$SESSION_ID close-intent sentinel written${broad:+ (broad/warn)}" >&2
+}
+
+if echo "$PROMPT" | grep -qE '(закрывай|закрываю|закрой)'; then
+  _arm_and_sentinel block ""
+
+  cat <<'EOF'
+{"additionalContext": "⛔ БЛОКИРУЮЩЕЕ: Session Close выполняется ТОЛЬКО через skill /run-protocol с аргументом 'close'. ПЕРВОЕ И ЕДИНСТВЕННОЕ действие = вызвать Skill tool: skill='run-protocol', args='close'. НЕ выполнять шаги самостоятельно. /run-protocol гарантирует пошаговый TodoList + верификацию. Обязательство закрытия (Ф74б) зафиксировано: тихое завершение без карточки RUN-quick-close будет заблокировано на Stop."}
+EOF
+  exit 0
+fi
+
+if echo "$PROMPT" | grep -qE '(заливай|запуши|запушь)'; then
+  _arm_and_sentinel warn "1"
 
   cat <<'EOF'
 {"additionalContext": "⛔ БЛОКИРУЮЩЕЕ: Session Close выполняется ТОЛЬКО через skill /run-protocol с аргументом 'close'. ПЕРВОЕ И ЕДИНСТВЕННОЕ действие = вызвать Skill tool: skill='run-protocol', args='close'. НЕ выполнять шаги самостоятельно. /run-protocol гарантирует пошаговый TodoList + верификацию."}
 EOF
-
-else
-  # Пилот перешёл к другой теме → «намерение закрыть» больше не действует для
-  # неё; ждать TTL блокировало не связанные с закрытием commit'ы (найдено
-  # 04.08.2026, bug-2026-08-04-peer-session-commit-blocked-by-close-runner-gate.md,
-  # решение пилота п.2).
-  SENTINEL_DIR="/tmp/iwe-close-intent"
-  rm -f "$SENTINEL_DIR/$SESSION_ID.flag" 2>/dev/null
-  echo '{}'
+  exit 0
 fi
+
+# Пилот перешёл к другой теме → «намерение закрыть» больше не действует для
+# неё; ждать TTL блокировало не связанные с закрытием commit'ы (найдено
+# 04.08.2026, bug-2026-08-04-peer-session-commit-blocked-by-close-runner-gate.md,
+# решение пилота п.2). NB: снимается только sentinel (gate коммитов, Ф74а);
+# obligation Ф74б НЕ снимается — её снимают verified completed / cancel / override.
+rm -f "$SENTINEL_DIR/$SESSION_ID.flag" 2>/dev/null
+echo '{}'
 exit 0

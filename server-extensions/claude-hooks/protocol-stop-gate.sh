@@ -56,6 +56,51 @@ source "$CLAUDE_DIR/lib/iwe-env-bootstrap.sh" || exit 1
 GATE_LOG="$IWE_ROOT/.claude/logs/gate_log.jsonl"
 mkdir -p "$(dirname "$GATE_LOG")" 2>/dev/null || true
 
+# --- WP-484 Ф74б (07.08.2026): автомат обязательства Quick Close ---
+# Проверка ДО раннего выхода по «протокольный скилл не запускался»: рецидив
+# 07.08 — Quick Close полностью в обход раннера — был именно сессией без
+# протокольного скилла. Матрица состояний — в close_obligation.py stop-check
+# (консенсус пир-сессии 2026-08-07-08, ход 4-6).
+#
+# Fail-closed: любой nonzero / невалидный JSON / отсутствующий CLI при наличии
+# close-intent sentinel или close-obligation трактуется как block. Ветки warn/note
+# НЕ делают ранний exit — контекст obligation сохраняется и дополняет итоговое
+# решение protocol-skill/TodoWrite проверок.
+OBLIGATION_CTX=""
+OBLIGATION_ACTION=""
+OBLIGATION_REASON=""
+OBLIGATION_NOTE=""
+OBLIGATION_CLI="$IWE_ROOT/${IWE_GOVERNANCE_REPO:-DS-my-strategy}/scripts/close_obligation.py"
+if [ -n "$SESSION_ID" ] && [ -f "$OBLIGATION_CLI" ]; then
+  OBLIGATION_RC=0
+  OBLIGATION_JSON=$(python3 "$OBLIGATION_CLI" stop-check --session-id "$SESSION_ID" 2>/dev/null) || OBLIGATION_RC=$?
+  if [ "$OBLIGATION_RC" -ne 0 ] || [ -z "$OBLIGATION_JSON" ]; then
+    # Fail-closed: CLI error/unparseable. Блокируем только если есть close-intent или obligation.
+    CLOSE_INTENT_SENTINEL="/tmp/iwe-close-intent/${SESSION_ID}.flag"
+    OBLIGATION_HASH=$(printf '%s' "$SESSION_ID" | python3 -c 'import hashlib,sys; print(hashlib.sha256(sys.stdin.read().encode()).hexdigest()[:32])' 2>/dev/null)
+    OBLIGATION_FILE="$IWE_RUNTIME/close-obligation/${OBLIGATION_HASH}.json"
+    if [ -f "$CLOSE_INTENT_SENTINEL" ] || [ -f "$OBLIGATION_FILE" ]; then
+      OBLIGATION_ACTION="block"
+      OBLIGATION_REASON="close_obligation.py unavailable, returned rc=$OBLIGATION_RC or invalid output while close intent/obligation exists"
+    fi
+  else
+    OBLIGATION_ACTION=$(printf '%s' "$OBLIGATION_JSON" | jq -r '.action // empty' 2>/dev/null)
+    OBLIGATION_REASON=$(printf '%s' "$OBLIGATION_JSON" | jq -r '.reason // empty' 2>/dev/null)
+    OBLIGATION_NOTE=$(printf '%s' "$OBLIGATION_JSON" | jq -r '.note // empty' 2>/dev/null)
+  fi
+
+  if [ "$OBLIGATION_ACTION" = "block" ]; then
+    jq -nc --arg reason "🚫 CLOSE-OBLIGATION (Ф74б): ${OBLIGATION_REASON:-обязательство Quick Close не выполнено}" \
+      '{decision: "block", reason: $reason}'
+    exit 0
+  fi
+  if [ "$OBLIGATION_ACTION" = "warn" ]; then
+    OBLIGATION_CTX="⚠️ CLOSE-OBLIGATION [warn] (Ф74б): ${OBLIGATION_REASON} — упомяни это предупреждение в ответе пилоту явно."
+  elif [ -n "$OBLIGATION_NOTE" ]; then
+    OBLIGATION_CTX="CLOSE-OBLIGATION (Ф74б): $OBLIGATION_NOTE"
+  fi
+fi
+
 # --- Шаг 1: был ли вызов протокольного скилла? ---
 PROTOCOL_SKILL=$(jq -r '
   select(.type == "tool_use" and .name == "Skill")
@@ -65,8 +110,13 @@ PROTOCOL_SKILL=$(jq -r '
   | head -1)
 
 if [ -z "$PROTOCOL_SKILL" ]; then
-  # Протокольный скилл не запускался — gate не нужен
-  echo '{}'
+  # Протокольный скилл не запускался — gate не нужен, но если есть контекст
+  # обязательства (note/warn), его всё равно нужно передать пилоту.
+  if [ -n "$OBLIGATION_CTX" ]; then
+    jq -nc --arg ctx "$OBLIGATION_CTX" '{additionalContext: $ctx}'
+  else
+    echo '{}'
+  fi
   exit 0
 fi
 
@@ -104,13 +154,27 @@ if [ -n "$LOG_ENTRY" ]; then
   echo "$LOG_ENTRY" >> "$GATE_LOG" 2>/dev/null || true
 fi
 
-# --- Шаг 4: action=warn (не block — обкатка 2 нед, WP-229 принцип warn-before-block) ---
+# --- Шаг 4: формировать итоговое решение ---
+# Всегда объединяем с контекстом обязательства, если он есть. Если protocol fired,
+# возвращаем decision:block; если obligation дал warn/note, добавляем additionalContext.
 if [ "$FIRED" = "1" ]; then
-  cat <<EOF
-{"decision": "block", "reason": "⚠️ PROTOCOL-STOP-GATE [warn]: Скилл '$PROTOCOL_SKILL' был вызван, но TodoWrite с ≥$THRESHOLD задачами не найден (найдено: $TODO_MAX). Протокол требует таск-лист ДО начала исполнения. Действие: создай TodoWrite с шагами скилла и пройди протокол заново. (gate_log: $GATE_LOG)"}
+  PROTOCOL_REASON="⚠️ PROTOCOL-STOP-GATE [warn]: Скилл '$PROTOCOL_SKILL' был вызван, но TodoWrite с ≥$THRESHOLD задачами не найден (найдено: $TODO_MAX). Протокол требует таск-лист ДО начала исполнения. Действие: создай TodoWrite с шагами скилла и пройди протокол заново. (gate_log: $GATE_LOG)"
+  if [ -n "$OBLIGATION_CTX" ]; then
+    jq -nc \
+      --arg reason "$PROTOCOL_REASON" \
+      --arg ctx "$OBLIGATION_CTX" \
+      '{decision: "block", reason: $reason, additionalContext: $ctx}'
+  else
+    cat <<EOF
+{"decision": "block", "reason": "$PROTOCOL_REASON"}
 EOF
+  fi
 else
-  echo '{}'
+  if [ -n "$OBLIGATION_CTX" ]; then
+    jq -nc --arg ctx "$OBLIGATION_CTX" '{additionalContext: $ctx}'
+  else
+    echo '{}'
+  fi
 fi
 
 exit 0
