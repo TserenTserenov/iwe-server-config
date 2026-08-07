@@ -38,4 +38,14 @@ if [ "$SEM_AGE" -gt "$STALE_THRESHOLD" ]; then
   echo "Consider closing and reopening the session." >&2
 fi
 
+# WP-484 Ф72: standalone Kimi has no pilot-witness hook, so quick-close needs a
+# trust anchor. Write a session-scoped marker now (launcher context, not agent
+# context) so session-reflection-append.sh can fail-open safely.
+SESSION_ID=$(grep '^session_id: ' "$SEM_FILE" | cut -d' ' -f2- || true)
+if [ -n "$SESSION_ID" ]; then
+  mkdir -p "$IWE_ROOT/.iwe-runtime"
+  : > "$IWE_ROOT/.iwe-runtime/kimi-standalone-${SESSION_ID}.marker"
+  echo "MARKER: $IWE_ROOT/.iwe-runtime/kimi-standalone-${SESSION_ID}.marker"
+fi
+
 echo "OK: $(basename "$SEM_FILE") (age: ${SEM_AGE}s)"
