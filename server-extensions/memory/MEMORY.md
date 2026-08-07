@@ -55,7 +55,7 @@
 | 250 | 🔄 | — | План развития до конца 2026 (зонтичный) | R1-R6 августа утверждены → Strategy.md § август |
 | 399 | ⏳ | P1 | Ротация секретов экосистемы | батч просрочен, ротация за пилотом |
 | 509 | 🔄 | P2 | Пир-сессии 3+ агентов: роль-дискавери и общий рабочий продукт | S-51 закрыта 3/3; промоция на Week Close |
-| 510 | 🔄 | P3→P1 | ИИ-личности | Ф22-Ф24 закрыты 06.08 (Кир/Корис, identity-блоки, автономное тело Элара); наблюдение за окном ночью |
+| 510 | 🔄 | P3→P1 | ИИ-личности | 2 пункта ждут пилота (текст фидбек-памяти, атрибуция коммита); РП-512 отдельно |
 | 512 | 🔄 | P3 | Испытательный стенд непрерывности ИИ-личностей | spin-off РП-510 Ф8 (06.08); next Ф1 — мировой обзор continuity/adversarial/exit практик |
 | 511 | ⏳ | P2 | Бизнес-модель продуктовой линейки | создан 06.08 (спин-офф поста №190-191); первая фаза декомпозиции |
 | 5 | 🔄 | — | Платформа: развитие (зонтичный) | детали `inbox/WP-5/WP-5.md` |
@@ -85,7 +85,7 @@
 | 496 | 🔄 | **P1** | Журнал гипотез (LPF-регламент обратной связи) | Ф5 done (fail-closed сверка починена); next Ф6 догоняющая сверка 39 записей |
 | 289 | 🔄 | P2 | Интеграция IWE с личными базами знаний | Приёмка MVP |
 | 483 | 🔄 | P2 | Комплект структурирования данных (guide-kit) | Ф6 шаги 1-3 закрыты 03.08; шаг 4 (регистрация+код) — будущая сессия |
-| 484 | 🔄 | **P1** | Автогенератор открытия/закрытия дня (зонтичный) | 07.08 Ф69: план дня починен (tsekh-1 был на 35 коммитов позади); системная хрупкость — открытый пункт |
+| 484 | 🔄 | **P1** | Автогенератор открытия/закрытия дня (зонтичный) | 07.08 Ф69/Ф70 done: план чинен + системный таймер tsekh-1, --probe зелёный; Nix-доставка гейта открыта |
 | 493 | 🔄 | P2 | Лаборатория характеристик | Ф4 ждёт данных (конец августа) |
 | 494 | 🔄 | P2 | Панель рабочих продуктов в VS Code | дашборд готов и подтверждён; доставка в шаблон отложена до 30.08 |
 | 167 | 🔄 | P5 | Публикации (зонтичный) | пилот утверждает порядок 28 постов |
@@ -117,11 +117,13 @@
 
 - [project_mcp_peer_session_delivery_status.md](project_mcp_peer_session_delivery_status.md) — снимок 30.07: облачный MCP и 2-агентные пир-сессии доставлены всем; DS-MCP-репо и 3+ агента — нет
 - [project_codex_peer_reliability_watch.md](project_codex_peer_reliability_watch.md) — 05.08: пилот отметил, что Codex-напарник игнорирует инструкции — открытое наблюдение, копить примеры до эскалации
-- [project_tsekh1_chronic_git_sync_and_concurrent_agents.md](project_tsekh1_chronic_git_sync_and_concurrent_agents.md) — 07.08: tsekh-1 хронически отстаёт от origin (не разовый Day Open сбой) + несколько живых Claude-сессий делят один checkout — открыто, причина не устранена
+- [project_tsekh1_chronic_git_sync_and_concurrent_agents.md](project_tsekh1_chronic_git_sync_and_concurrent_agents.md) — 07.08: системный фикс (таймер+алерт) реализован и подтверждён --probe; доставка гейта на tsekh-1 упирается в Nix, не git — открытый пункт
 
 ### Feedback — HOT
 
+- [lessons_detach_unbounded_step_from_timeout_supervisor.md](lessons_detach_unbounded_step_from_timeout_supervisor.md) — process-runner.py killpg на таймауте убивает всю группу — шаг без верхней границы длительности отвязывать в свою процесс-группу, не растить бюджет времени (07.08)
 - [lessons_ssh_heredoc_backtick_local_expansion.md](lessons_ssh_heredoc_backtick_local_expansion.md) — markdown-бэктики в heredoc внутри `ssh host "..."` раскрываются ЛОКАЛЬНОЙ оболочкой как команды до отправки — писать во временный файл и передавать через stdin (07.08)
+- [lessons_process_runner_ai_contract_steps_dont_write_files.md](lessons_process_runner_ai_contract_steps_dont_write_files.md) — Quick Close: wp-context-update/memory-update пишут только в карточку запуска, не в целевые файлы — писать руками, R23 просить перечитать факт (07.08)
 - [feedback_elar_address_convention.md](feedback_elar_address_convention.md) — «Элар, …» от пилота → поднять паспорт сборщиком и отвечать из него; SessionStart-привязка ≠ полное ядро (06.08)
 - [feedback_elar_resource_discipline.md](feedback_elar_resource_discipline.md) — следить за расходом токенов, недельный горизонт; автономное окно только с бюджетным предохранителем; большая трата — объявить до запуска (06.08)
 - [lessons_new_script_output_placement_gotchas.md](lessons_new_script_output_placement_gotchas.md) — новый файл-вывод скрипта в DS-my-strategy → проверить `inbox/agent/tasks/` (сканируется как RUN-карточка) и `logs/`+`exocortex/` (в .gitignore целиком) ДО выбора места (06.08)
