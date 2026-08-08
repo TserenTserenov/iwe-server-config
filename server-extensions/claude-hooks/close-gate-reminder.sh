@@ -121,7 +121,7 @@ if echo "$PROMPT" | grep -qE '(заливай|запуши|запушь)'; then
   _arm_and_sentinel warn "1"
 
   cat <<'EOF'
-{"additionalContext": "⛔ БЛОКИРУЮЩЕЕ: Session Close выполняется ТОЛЬКО через skill /run-protocol с аргументом 'close'. ПЕРВОЕ И ЕДИНСТВЕННОЕ действие = вызвать Skill tool: skill='run-protocol', args='close'. НЕ выполнять шаги самостоятельно. /run-protocol гарантирует пошаговый TodoList + верификацию."}
+{"additionalContext": "⚠️ ПРЕДУПРЕЖДЕНИЕ (Ф74б): похоже, ты упомянул push/заливку. Если это попытка закрыть сессию — Session Close выполняется ТОЛЬКО через skill /run-protocol с аргументом 'close'. ПЕРВОЕ действие = вызвать Skill tool: skill='run-protocol', args='close'. НЕ выполнять шаги самостоятельно. Обязательство закрытия зафиксировано в режиме warn: при отсутствии карточки RUN-quick-close Stop-гейт выдаст предупреждение. Если это не close — скажи явно, и sentinel будет снят."}
 EOF
   exit 0
 fi
