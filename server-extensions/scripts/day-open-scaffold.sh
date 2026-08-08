@@ -799,19 +799,33 @@ render_scout() {
 # Bold **text** creates no GitHub anchors — links carry no #anchor.
 render_fleeting_notes() {
   local notes_file="$IWE/${IWE_GOVERNANCE_REPO:-DS-strategy}/inbox/fleeting-notes.md"
+  local archive_file="$IWE/${IWE_GOVERNANCE_REPO:-DS-strategy}/archive/notes/Notes-Archive.md"
 
   # Every bold-titled note counts as undecided, incl. 🔄 / ✅предложено tails
   local new_notes
   new_notes=$(grep -E '^\*\*[^*]+\*\*[[:space:]]*(🔄|✅предложено.*)?$' "$notes_file" 2>/dev/null \
     | sed -E 's/^\*\*//; s/\*\*[[:space:]]*(🔄|✅предложено.*)?$//')
 
-  if [ -z "$new_notes" ]; then
+  # fleeting-notes.md is bot-owned — a resolved note's title is never removed from it, so cross-check the archive.
+  local archive_norm=""
+  [ -f "$archive_file" ] && archive_norm=$(tr 'Ёё' 'Ее' < "$archive_file")
+
+  local rows=""
+  while IFS= read -r title; do
+    [ -z "$title" ] && continue
+    local title_norm
+    title_norm=$(printf '%s' "$title" | tr 'Ёё' 'Ее')
+    if [ -n "$archive_norm" ] && printf '%s' "$archive_norm" | grep -qF "$title_norm"; then
+      continue
+    fi
+    # Link to file without anchor — bold text has no GitHub markdown anchor
+    rows="${rows}$(printf '| [«%s»](../inbox/fleeting-notes.md) | <!-- PENDING --> | <!-- PENDING --> | ⏳ ждёт пилота |\n' "$title")"
+  done <<< "$new_notes"
+
+  if [ -z "$rows" ]; then
     printf '| нет неразобранных заметок | — | — | — |\n'
   else
-    while IFS= read -r title; do
-      # Link to file without anchor — bold text has no GitHub markdown anchor
-      printf '| [«%s»](../inbox/fleeting-notes.md) | <!-- PENDING --> | <!-- PENDING --> | ⏳ ждёт пилота |\n' "$title"
-    done <<< "$new_notes"
+    printf '%s' "$rows"
   fi
 }
 
@@ -1004,21 +1018,14 @@ render_yesterday() {
   if [ -f "$day_report_file" ]; then
     grep "^| " "$day_report_file" | grep -v "^| РП\|^| Время\|^|---" | sed 's/^/- /'
   else
-    # Fallback: сканировать sessions напрямую за вчера если DayReport отсутствует
+    # 00-index.md is the one place that covers every session-record layout (flat .md files and nested peer-turn folders).
     local sessions_dir="$IWE/${IWE_GOVERNANCE_REPO:-DS-strategy}/sessions"
-    local found=0
-    for session_dir in "$sessions_dir/${YDAY:0:7}"/${YDAY}-*/; do
-      [ -d "$session_dir" ] || continue
-      if [ -f "$session_dir/meta.yaml" ]; then
-        local wp_id
-        wp_id=$(python3 -c "import yaml; d=yaml.safe_load(open('$session_dir/meta.yaml')); print(d.get('task_id','') or '')" 2>/dev/null)
-        if [ -n "$wp_id" ]; then
-          echo "- $wp_id"
-          found=1
-        fi
-      fi
-    done
-    if [ "$found" = "0" ]; then
+    local yday_rows
+    yday_rows=$(grep -F "| $YDAY |" "$sessions_dir/00-index.md" 2>/dev/null \
+      | awk -F'|' '{gsub(/^[ \t]+|[ \t]+$/,"",$4); print $4}')
+    if [ -n "$yday_rows" ]; then
+      echo "$yday_rows" | sed 's/^/- /'
+    else
       echo "_Нет сессий за вчера_"
     fi
   fi
