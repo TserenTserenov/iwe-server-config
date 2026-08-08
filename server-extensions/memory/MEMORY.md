@@ -60,7 +60,7 @@
 | 511 | ⏳ | P2 | Бизнес-модель продуктовой линейки | создан 06.08 (спин-офф поста №190-191); первая фаза декомпозиции |
 | 5 | 🔄 | — | Платформа: развитие (зонтичный) | детали `inbox/WP-5/WP-5.md` |
 | 117 | 🔄 | — | Развитие nudge-системы | переоткрыт 05.08 (ошибочно закрыт по одной фазе, 6 фаз открыты); приёмка stopgap до 30.08 |
-| 149 | 🔄 | **P1** | Персональные руководства | top-up баланса+факты 2.11 задеплоены 07.08; ночь 07→08 проверка |
+| 149 | 🔄 | **P1** | Персональные руководства | 1.11 и порог доливки починены, задеплоены 08.08; 1.3 жёлтый |
 | 438 | 🔄 | — | Агентный режим Гермеса | перенос после WP-149 |
 | 170 | 🔄 | P1 | База знаний: обновление | партия #1-225 закрыта 03.08 полностью; 05.08 авторская очистка — 6/7 сигналов закрыты (CC-099 rejected) |
 | 415 | 🔄 | P2 | Конвейер орг-GitHub | Конвейер 1 |
@@ -122,6 +122,9 @@
 
 ### Feedback — HOT
 
+- [lessons_git_checkout_shared_worktree_risk.md](lessons_git_checkout_shared_worktree_risk.md) — `git checkout -- .` в общей директории может отменить чужие незакоммиченные правки; status и discard — разными командами, не одной цепочкой (08.08)
+- [lessons_sync_core_partial_rule_coverage.md](lessons_sync_core_partial_rule_coverage.md) — AGENTS.md (Kimi/Codex/Hermes) покрывает только 6 из 9 пронумерованных «Блокирующих правил» §2 CLAUDE.md — Push/Close/Чеклист-верификация/Hooks Gate/Автономность/Напоминания/Финиш>отлог физически не доходят (08.08)
+- [lessons_run_card_frozen_after_force_no_reflection.md](lessons_run_card_frozen_after_force_no_reflection.md) — Quick Close карточка после `--force-no-reflection` навсегда виснет на blocked-witness-unavailable по дизайну; факт закрытия смотреть в ledger (session_closed_no_reflection), не в карточке (08.08)
 - [feedback_no_repeated_ritual_prompts.md](feedback_no_repeated_ritual_prompts.md) — механические «скажи ок» поглощать самому: один пилотский слот на сессию, в сообщении с итогом; свою ошибку не превращать в просьбу к пилоту (07.08)
 - [feedback_scope_full_fix_not_incremental_when_pattern_known.md](feedback_scope_full_fix_not_incremental_when_pattern_known.md) — найден системный класс бага (N похожих мест, причина одна) → чинить все N сразу, не оставлять «low priority» остаток; WP-476 07.08 стоило пилоту 4 живых попыток вместо 2
 - [feedback_formal_close_never_silently_incomplete.md](feedback_formal_close_never_silently_incomplete.md) — содержание закрыто ≠ формальный ритуал закрыт (RUN-карточка/семафор до terminal) — говорить об этом в первом «готово», не ждать вопроса пилота; десятый раз одно и то же (07.08)
