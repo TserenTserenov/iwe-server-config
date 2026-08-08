@@ -118,7 +118,7 @@
 - [project_tsekh1_deploy_is_automated_not_manual.md](project_tsekh1_deploy_is_automated_not_manual.md) — 08.08: push в iwe-server-config деплоит на tsekh-1 сам (GitHub Actions deploy-rs), ручной nixos-rebuild не обязателен — проверять `gh run list` перед тем как писать «доставка не выполнена»
 - [project_mcp_peer_session_delivery_status.md](project_mcp_peer_session_delivery_status.md) — снимок 30.07: облачный MCP и 2-агентные пир-сессии доставлены всем; DS-MCP-репо и 3+ агента — нет
 - [project_codex_peer_reliability_watch.md](project_codex_peer_reliability_watch.md) — 05.08: пилот отметил, что Codex-напарник игнорирует инструкции — открытое наблюдение, копить примеры до эскалации
-- [project_tsekh1_chronic_git_sync_and_concurrent_agents.md](project_tsekh1_chronic_git_sync_and_concurrent_agents.md) — 07.08: системный фикс реализован, --probe зелёный, доставка гейта на tsekh-1 подтверждена провенансом+функциональным тестом — закрыто полностью
+- [project_tsekh1_chronic_git_sync_and_concurrent_agents.md](project_tsekh1_chronic_git_sync_and_concurrent_agents.md) — страховка (Ф70 таймер+алерт) держит с 07.08, но 08.08 веч. race между 3 параллельными claude-сессиями на tsekh-1 повторился живьём — корневой фикс (контракт/worktree-изоляция) не реализован
 
 ### Feedback — HOT
 

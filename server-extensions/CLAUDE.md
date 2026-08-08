@@ -23,7 +23,7 @@
 1. **WP Gate:** ЛЮБОЕ задание → `memory/protocol-open.md` ДО начала работы. Новый РП → Ритуал согласования → явное «да»/«делаем»/«открывай»; без этого не регистрировать.
 2. **Push:** «заливай»/«запуши»/«закрывай» → commit + push без вопросов, ДО отчёта Закрытия. Любой Close: `git status --short` по всем репо → незафиксированное commit + push ДО следующего шага.
 3. **Close:** Триггер Закрытия → протокол Закрытия → выполнить.
-4. **Pull-on-Touch:** `git pull --rebase` при первом обращении к репо за сессию (все `~/IWE/*`). Dirty → stash; конфликт → `memory/reference/agent-core.md`.
+4. **Pull-on-Touch:** `scripts/iwe-safe-pull.sh <repo>` при первом обращении к репо за сессию (все `~/IWE/*`), не raw `git pull --rebase --autostash`. Guard отказал → pull пропущен, дерево не тронуто, пометка potentially-stale → `memory/reference/agent-core.md`.
 5. **Чеклист-верификация:** Quick/Day Close — sub-agent Haiku R23 сверяет с чеклистом. Исключения: ≤15 мин или без изменений файлов.
 6. **Hooks/Scripts Bypass Gate (S-33):** без явного разрешения не менять `.claude/hooks|scripts/`, `.iwe-runtime/`, `FMT-exocortex-template/`, не обходить хуки; блок хука → bug-файл + пилоту + ждать. → `.claude/rules-lazy/hooks-bypass-gate.md`.
 7. **Автономность:** не спрашивать подтверждения — выполни → отчитайся. Исключения: необратимо-разрушительное; WP Gate Ритуал; choice-question. → `memory/feedback_behaviour.md` П.1.
