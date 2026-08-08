@@ -306,7 +306,13 @@ if [ "$CMD" = "open" ]; then
       # ambiguous for note-file/close — --slug has nothing to match against.
       echo "slug: $HOUSEKEEPING"
       echo "created_at: $(now_iso)"
-      echo "pid: $$"
+      # $$ here is session-guard.sh's own transient process — already dead by
+      # the time anyone checks it (verified live 08.08: recorded pid was dead
+      # within the same second). $CLAUDE_PID is the actual long-lived Claude
+      # Code process that stays alive for the whole session; other agents keep
+      # today's behavior (transient $$, harmless — dead-pid check just never
+      # fires for them, same as before this fix).
+      echo "pid: ${CLAUDE_PID:-$$}"
       echo "---"
     } > "$HK_FILE"
     echo "Housekeeping OPEN: $HK_FILE (reason: $HOUSEKEEPING)"
@@ -400,6 +406,17 @@ if [ "$CMD" = "open" ]; then
     echo "created_at: $(now_iso)"
     echo "session_id: $SESSION_ID"
     echo "orz_file: $ORZ_BASENAME"
+    # WP-484 (08.08, Kimi diagnosis + pilot report): regular sessions never
+    # recorded a pid at all, so sweep_orphaned_semaphores()'s dead-pid check —
+    # the only auto-detection left since age-based quarantine was retired
+    # 04.08 — had nothing to grab onto; abandoned semaphores just hung open
+    # forever (48 found live 08.08). $CLAUDE_PID is the long-lived Claude Code
+    # process (stable for the whole session, verified live) — NOT $$, which
+    # is session-guard.sh's own transient subprocess, already dead the moment
+    # this script returns (verified live: recorded pid was dead within the
+    # same second). Other agents get no pid line, same as before this fix —
+    # strictly not worse, dead-pid check simply still can't fire for them.
+    [ -n "${CLAUDE_PID:-}" ] && echo "pid: $CLAUDE_PID"
     echo "---"
     # initial --files CSV → append-log entries (git-root-relative expected from caller)
     if [ -n "${FILES:-}" ]; then
