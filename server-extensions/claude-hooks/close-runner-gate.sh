@@ -153,6 +153,24 @@ SENTINEL="/tmp/iwe-close-intent/$SESSION_ID_SAFE.flag"
 # Close не объявлен в этой сессии (или sentinel не создан) — не мешать штатной работе.
 [ -f "$SENTINEL" ] || exit 0
 
+# WP-484 Ф74б-фикс (08.08, Claude Code): широкая эвристика («заливай/запуши» —
+# mode=warn) не должна ЖЁСТКО блокировать git commit/push здесь — иначе сегодняшний
+# фикс close-gate-reminder.sh («⚠️ ПРЕДУПРЕЖДЕНИЕ, а не блокировка») не выполняет
+# свою цель: prompt отвечает warn, а этот PreToolUse-гейт минутой позже всё равно
+# блокирует commit exit 2. Живой репрод: substring-ложный-позитив «запуши» внутри
+# «запушился» (прошедшее время в цитате отчёта, не команда) заармировал mode=warn
+# и заблокировал обычный правочный commit. Fail-closed: любая неопределённость
+# (obligation нечитаем, CLI недоступен, mode пуст/не "warn") — блокируем как раньше,
+# точный close-intent (mode=block) не затронут.
+OBLIGATION_CLI="$IWE_ROOT/${IWE_GOVERNANCE_REPO:-DS-my-strategy}/scripts/close_obligation.py"
+if [ -f "$OBLIGATION_CLI" ]; then
+  OBLIGATION_MODE=$(python3 "$OBLIGATION_CLI" mode --session-id "$SESSION_ID" 2>/dev/null)
+  if [ "$OBLIGATION_MODE" = "warn" ]; then
+    echo "[close-runner-gate] session=$SESSION_ID_SAFE close-intent mode=warn — прямой git commit/push пропущен без блокировки (широкая эвристика, не точный close-intent)" >&2
+    exit 0
+  fi
+fi
+
 # TTL: Quick Close — сессия ~3 мин, но между «закрывай» и commit могут быть
 # уточняющие ходы. 30 минут — с запасом, не session-lifetime (файл не растёт
 # бесконечно: одна сессия перезаписывает свой sentinel при повторном «закрывай»).

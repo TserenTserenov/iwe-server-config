@@ -85,7 +85,7 @@
 | 496 | 🔄 | **P1** | Журнал гипотез (LPF-регламент обратной связи) | Ф5 done (fail-closed сверка починена); next Ф6 догоняющая сверка 39 записей |
 | 289 | 🔄 | P2 | Интеграция IWE с личными базами знаний | Приёмка MVP |
 | 483 | 🔄 | P2 | Комплект структурирования данных (guide-kit) | Ф6 шаги 1-3 закрыты 03.08; шаг 4 (регистрация+код) — будущая сессия |
-| 484 | 🔄 | **P1** | Автогенератор открытия/закрытия дня (зонтичный) | 07.08 Ф69-Ф71 done: план чинен, системный таймер tsekh-1 живёт, --probe зелёный, Nix-доставка подтверждена |
+| 484 | 🔄 | **P1** | Автогенератор открытия/закрытия дня (зонтичный) | 08.08 Ф74а/б/в закрыты, задеплоены на tsekh-1, живьём проверены (критика Кими → доработка); next Ф75/Ф76 (реализация не начата); отдельно: 2 фикса DayPlan (заметки/сессии) задеплоены |
 | 493 | 🔄 | P2 | Лаборатория характеристик | Ф4 ждёт данных (конец августа) |
 | 494 | 🔄 | P2 | Панель рабочих продуктов в VS Code | дашборд готов и подтверждён; доставка в шаблон отложена до 30.08 |
 | 167 | 🔄 | P5 | Публикации (зонтичный) | пилот утверждает порядок 28 постов |
@@ -115,6 +115,7 @@
 
 ### Project — HOT
 
+- [project_tsekh1_deploy_is_automated_not_manual.md](project_tsekh1_deploy_is_automated_not_manual.md) — 08.08: push в iwe-server-config деплоит на tsekh-1 сам (GitHub Actions deploy-rs), ручной nixos-rebuild не обязателен — проверять `gh run list` перед тем как писать «доставка не выполнена»
 - [project_mcp_peer_session_delivery_status.md](project_mcp_peer_session_delivery_status.md) — снимок 30.07: облачный MCP и 2-агентные пир-сессии доставлены всем; DS-MCP-репо и 3+ агента — нет
 - [project_codex_peer_reliability_watch.md](project_codex_peer_reliability_watch.md) — 05.08: пилот отметил, что Codex-напарник игнорирует инструкции — открытое наблюдение, копить примеры до эскалации
 - [project_tsekh1_chronic_git_sync_and_concurrent_agents.md](project_tsekh1_chronic_git_sync_and_concurrent_agents.md) — 07.08: системный фикс реализован, --probe зелёный, доставка гейта на tsekh-1 подтверждена провенансом+функциональным тестом — закрыто полностью
@@ -134,7 +135,7 @@
 - [feedback_runner_blocked_by_other_sessions_stuck_not_mine.md](feedback_runner_blocked_by_other_sessions_stuck_not_mine.md) — раннер отказал лимитом из-за ЧУЖИХ зависших прогонов (не моего блокера) → проверить живые ли слоты, доложить факты, обойти только с явным разрешением пилота (05.08)
 - [feedback_two_layer_review_catches_different_bugs.md](feedback_two_layer_review_catches_different_bugs.md) — пир-диалог с Codex до кода и холодное код-ревью после кода ловят разные классы дефектов, не взаимозаменяемы (04.08)
 - [lessons_process_runner_root_repo_path_is_dot.md](lessons_process_runner_root_repo_path_is_dot.md) — process-runner.py commit-push: корневой репозиторий IWE = `"repo": "."`, не имя git-remote (04.08)
-- [lessons_check_live_diff_before_parallel_infra_fix.md](lessons_check_live_diff_before_parallel_infra_fix.md) — сверить живой `git diff` перед правкой общего файла; если чужой diff МЕНЯЕТСЯ прямо сейчас — ждать тишины (polling), не разовая проверка (04-05.08)
+- [lessons_check_live_diff_before_parallel_infra_fix.md](lessons_check_live_diff_before_parallel_infra_fix.md) — сверить живой `git diff`/git-состояние перед правкой общего файла; чужой процесс подтвердить через `ps aux`, решить ожиданием, слиянием ИЛИ обходом через незанятую копию (04-08.08)
 - [lessons_test_isolation_needs_env_unset_not_just_path_override.md](lessons_test_isolation_needs_env_unset_not_just_path_override.md) — изоляция теста подменой пути к секрет-файлу недостаточна, если процесс наследует реальные credentials из окружения — нужен явный `env -u` (05.08, живой инцидент: 2 тестовых сообщения ушли в боевой Telegram)
 - [lessons_guard_behind_failing_step_never_runs.md](lessons_guard_behind_failing_step_never_runs.md) — корректный сторож не исполняется, если стоит в конвейере за падающим шагом; красный CI отключает всё после точки падения (04.08)
 - [lessons_success_marker_before_success_poisons_retry.md](lessons_success_marker_before_success_poisons_retry.md) — маркер успеха, записанный до финального эффекта, отравляет все retry; «отправлено» = подтверждение получателя, не запуск curl; при миграции — живой тест каждого алерт-канала (06.08, Day Open Ф64)
