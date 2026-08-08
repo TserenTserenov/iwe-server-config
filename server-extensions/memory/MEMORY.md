@@ -85,7 +85,7 @@
 | 496 | 🔄 | **P1** | Журнал гипотез (LPF-регламент обратной связи) | Ф5 done (fail-closed сверка починена); next Ф6 догоняющая сверка 39 записей |
 | 289 | 🔄 | P2 | Интеграция IWE с личными базами знаний | Приёмка MVP |
 | 483 | 🔄 | P2 | Комплект структурирования данных (guide-kit) | Ф6 шаги 1-3 закрыты 03.08; шаг 4 (регистрация+код) — будущая сессия |
-| 484 | 🔄 | **P1** | Автогенератор открытия/закрытия дня (зонтичный) | 08.08 Ф74а/б/в закрыты, задеплоены на tsekh-1, живьём проверены (критика Кими → доработка); next Ф75/Ф76 (реализация не начата); отдельно: 2 фикса DayPlan (заметки/сессии) задеплоены |
+| 484 | 🔄 | **P1** | Автогенератор открытия/закрытия дня (зонтичный) | 08.08 Ф77 закрыта (Pull-on-Touch корневой фикс, задеплоен+подтверждён); next Ф75/Ф76 (реализация не начата) |
 | 493 | 🔄 | P2 | Лаборатория характеристик | Ф4 ждёт данных (конец августа) |
 | 494 | 🔄 | P2 | Панель рабочих продуктов в VS Code | дашборд готов и подтверждён; доставка в шаблон отложена до 30.08 |
 | 167 | 🔄 | P5 | Публикации (зонтичный) | пилот утверждает порядок 28 постов |
@@ -118,7 +118,7 @@
 - [project_tsekh1_deploy_is_automated_not_manual.md](project_tsekh1_deploy_is_automated_not_manual.md) — 08.08: push в iwe-server-config деплоит на tsekh-1 сам (GitHub Actions deploy-rs), ручной nixos-rebuild не обязателен — проверять `gh run list` перед тем как писать «доставка не выполнена»
 - [project_mcp_peer_session_delivery_status.md](project_mcp_peer_session_delivery_status.md) — снимок 30.07: облачный MCP и 2-агентные пир-сессии доставлены всем; DS-MCP-репо и 3+ агента — нет
 - [project_codex_peer_reliability_watch.md](project_codex_peer_reliability_watch.md) — 05.08: пилот отметил, что Codex-напарник игнорирует инструкции — открытое наблюдение, копить примеры до эскалации
-- [project_tsekh1_chronic_git_sync_and_concurrent_agents.md](project_tsekh1_chronic_git_sync_and_concurrent_agents.md) — страховка (Ф70 таймер+алерт) держит с 07.08, но 08.08 веч. race между 3 параллельными claude-сессиями на tsekh-1 повторился живьём — корневой фикс (контракт/worktree-изоляция) не реализован
+- [project_tsekh1_chronic_git_sync_and_concurrent_agents.md](project_tsekh1_chronic_git_sync_and_concurrent_agents.md) — 08.08 РП484 Ф77: корневой фикс (raw --autostash → scripts/iwe-safe-pull.sh переиспользует git-dirty-guard.sh) задеплоен на tsekh-1 и подтверждён живым прогоном
 
 ### Feedback — HOT
 

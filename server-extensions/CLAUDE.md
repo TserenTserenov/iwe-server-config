@@ -90,6 +90,10 @@ Hot-каркас ≤20K токенов (M1), строгая цель ≤12K (M2)
 
 **ЛЮБОЕ задание → протокол Открытия → ДО начала работы.** При создании нового РП: объявить роль, работу, РП, класс верификации, метод, оценку, модель. Дождаться согласования пилота.
 
+## Pull-on-Touch — CRITICAL
+
+**Первое обращение к git-репо за сессию → `scripts/iwe-safe-pull.sh <repo>`, НЕ raw `git pull --rebase --autostash`.** Guard отказал → pull пропущен, дерево не тронуто, пометка potentially-stale, продолжать. Основание → `memory/reference/agent-core.md`.
+
 ## State-Transition Gate — CRITICAL
 
 **Перед любым нетривиальным действием или РП назвать целевой переход состояния пользователя** `{тип состояния, из→в}` (WP-457). Типы — только `DS-my-strategy/docs/state-axes-registry.yaml`, допустимы только `gate_ready: true`; ссылка на declared FSM-owner обязательна, свободный текст не принимается. Нет ссылки или тип не `gate_ready` → действие = inventory → СТОП/отложить. Модель осей → `archive/wp-contexts/WP-457/CONCEPT-user-states.md §5`; cross-axis → `agent-core.md`.
