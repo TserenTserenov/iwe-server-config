@@ -16,6 +16,14 @@
 #   - Для каждого файла из allowlist: проверить отличие от remote → git checkout
 #   - Не трогает inbox/fleeting-notes.md (его обновляет sync-files.sh раз в 2 мин)
 #   - Не делает full pull (избегает конфликта с dirty fleeting-notes)
+#   - Не трогает файл, если в нём есть незакоммиченная правка (dirty guard) или
+#     локальный ещё не запушенный коммит (ahead guard) — иначе `git checkout
+#     origin/main -- $FILE` затирает работу, которая ещё не успела уйти на GitHub
+#     (peer-session 2026-08-08-05-wp406-card-clobber-source, 3 живых инцидента:
+#     WP-506 дважды 07-08.08, WP-406+WP-504 08.08). Идентичный фикс также в
+#     iwe-local-config/scripts/sync-strategy-files.sh — тот репозиторий НЕ
+#     участвует в реальном деплое этого скрипта (найдено при доведении фикса
+#     до продакшена — деплой идёт flake'ом ЭТОГО репо через nixos-upgrade).
 #
 # Запуск: через iwe-sync-strategy-files.timer (раз в 10 мин).
 
@@ -32,6 +40,16 @@ TS=$(date '+%Y-%m-%d %H:%M:%S')
 if ! git fetch "$REMOTE" "$BRANCH" --quiet 2>/dev/null; then
   echo "$TS [sync-strategy-files] fetch failed (offline?)" >&2
   exit 0
+fi
+
+# Repo-wide ahead/diverged check: если HEAD не входит в предки origin/branch,
+# у репо есть локальные коммиты, которых нет на remote (обычный случай —
+# незапушенный коммит любого агента/пилота в этом рабочем дереве). В этом
+# режиме нельзя доверять по-файловому сравнению «отличается от remote» —
+# отличие может значить «моя правка ещё не запушена», а не «я отстал».
+REPO_DIVERGED=false
+if ! git merge-base --is-ancestor HEAD "${REMOTE}/${BRANCH}" 2>/dev/null; then
+  REPO_DIVERGED=true
 fi
 
 # Glob список файлов для синхронизации (read-only в сторону сервера).
@@ -67,6 +85,8 @@ fi
 
 SYNCED=0
 SKIPPED=0
+SKIPPED_DIRTY=0
+SKIPPED_AHEAD=0
 FAILED=0
 
 for FILE in "${FILES_TO_SYNC[@]}"; do
@@ -89,6 +109,34 @@ for FILE in "${FILES_TO_SYNC[@]}"; do
     fi
   fi
 
+  # Dirty guard: рабочее дерево (staged или unstaged) отличается от HEAD для
+  # этого пути — значит есть незакоммиченная правка ИЛИ удаление именно этого
+  # файла (git rm/mv или голый rm без коммита — `git diff HEAD` ловит оба:
+  # для отсутствующего на диске, но отслеживаемого в HEAD пути он тоже вернёт
+  # "отличается"). Для путей, никогда не отслеживавшихся локально, вернёт
+  # "чисто" — безвредно. Не трогаем, что бы ни было на remote.
+  if ! git diff --quiet HEAD -- "$FILE" 2>/dev/null; then
+    SKIPPED_DIRTY=$((SKIPPED_DIRTY + 1))
+    continue
+  fi
+
+  # Ahead guard: файл чист относительно HEAD, но у репо есть незапушенные
+  # коммиты (REPO_DIVERGED), и committed-версия этого пути в HEAD отличается
+  # от remote (включая случай "HEAD его не содержит вовсе" — например, файл
+  # был удалён локальным коммитом) — похоже на локальный коммит по этому
+  # файлу (правку или удаление), который ещё не ушёл на GitHub. Затирать/
+  # воскрешать его было бы тихим откатом уже сохранённой работы.
+  # Компромисс: если divergence на самом деле вызван СОВСЕМ другим файлом, а
+  # этот путь просто новый на remote — тоже пропустим, пока репо не перестанет
+  # расходиться (safety > freshness, тот же принцип, что и выше для dirty).
+  if [ "$REPO_DIVERGED" = true ]; then
+    HEAD_HASH=$(git rev-parse "HEAD:${FILE}" 2>/dev/null || echo "missing")
+    if [ "$HEAD_HASH" != "$REMOTE_HASH" ]; then
+      SKIPPED_AHEAD=$((SKIPPED_AHEAD + 1))
+      continue
+    fi
+  fi
+
   # Update file from remote
   if git checkout "${REMOTE}/${BRANCH}" -- "$FILE" 2>/dev/null; then
     SYNCED=$((SYNCED + 1))
@@ -98,5 +146,9 @@ for FILE in "${FILES_TO_SYNC[@]}"; do
   fi
 done
 
-echo "$TS [sync-strategy-files] synced=$SYNCED skipped=$SKIPPED failed=$FAILED"
+if [ "$((SKIPPED_DIRTY + SKIPPED_AHEAD))" -gt 0 ]; then
+  echo "$TS [sync-strategy-files] WARN: $SKIPPED_DIRTY file(s) skipped-dirty, $SKIPPED_AHEAD file(s) skipped-ahead (local work not yet committed/pushed)" >&2
+fi
+
+echo "$TS [sync-strategy-files] synced=$SYNCED skipped=$SKIPPED skipped_dirty=$SKIPPED_DIRTY skipped_ahead=$SKIPPED_AHEAD failed=$FAILED"
 exit 0
