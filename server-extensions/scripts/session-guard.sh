@@ -9,6 +9,10 @@
 #   open --wp WP-N [--task "..."] [--files "a,b"] [--slug "..."] [--agent claude-code|kimi|hermes] [--personality <unassigned|UUID>]
 #   open --housekeeping <reason> [--agent ...]        # фоновая housekeeping-сессия без ORZ
 #   close [--wp WP-N] [--slug "..."] [--agent ...]
+#   close ... --force-no-reflection "<причина>"       # закрыть без ответа на рефлексию —
+#                                                      # только если раннер стоит именно на
+#                                                      # blocked-witness-unavailable И push уже
+#                                                      # подтверждён (all_pushed: true)
 #   close --housekeeping <reason> [--agent ...]       # закрыть housekeeping-сессию
 #   audit [--since YYYY-MM-DD] [--cleanup-orphans]
 #   renew [--wp WP-N] [--slug "..."] [--agent ...]    # продлить право на коммит
@@ -235,6 +239,7 @@ HOUSEKEEPING=""
 PERSONALITY=""
 SESSION_ID_ARG=""
 CLEANUP_ORPHANS=0
+FORCE_NO_REFLECTION=""
 POSITIONAL=()
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -248,6 +253,7 @@ while [[ $# -gt 0 ]]; do
     --session-id) SESSION_ID_ARG="$2"; shift 2 ;;
     --since)  SINCE="$2"; shift 2 ;;
     --cleanup-orphans) CLEANUP_ORPHANS=1; shift ;;
+    --force-no-reflection) FORCE_NO_REFLECTION="$2"; shift 2 ;;
     --)       shift; POSITIONAL+=("$@"); break ;;
     -*)       shift ;;
     *)        POSITIONAL+=("$1"); shift ;;
@@ -565,6 +571,35 @@ if [ "$CMD" = "close" ]; then
     RUNNER_OK="$card"
     break
   done
+
+  # --force-no-reflection (WP-484, 08.08, пилот): рефлексия про настроение дня
+  # блокирует close, даже когда содержательная работа (commit+push) уже
+  # подтверждена картой раннера — живой разбор показал, что вопрос рефлексии
+  # часто рендерится ПОСЛЕ команды «закрывай», пилот её физически не видит.
+  # Bypass узкий и предметный, не общий «пропусти карту раннера»: требует
+  # ИМЕННО блокировку на этом шаге и подтверждённый push — другой сбой раннера
+  # (упавший push, отменённый до commit-push прогон) этим флагом не спрятать.
+  if [ -z "$RUNNER_OK" ] && [ -n "$FORCE_NO_REFLECTION" ]; then
+    for card in $RUNNER_CARD; do
+      [ -f "$card" ] || continue
+      grep -q '^process_id: quick-close$' "$card" || continue
+      grep -q '^current_step: blocked-witness-unavailable$' "$card" || continue
+      grep -qE '^[[:space:]]*all_pushed: true$' "$card" || continue
+      RUNNER_OK="$card"
+      FORCED_CARD="$card"
+      break
+    done
+    if [ -z "$RUNNER_OK" ]; then
+      fail "force-no-reflection: не нашёл RUN-quick-close-${SLUG}*.md с current_step=blocked-witness-unavailable и all_pushed=true — этот флаг обходит только эту конкретную блокировку, не любой сбой раннера." 7
+    fi
+    FORCE_EVENT=$(python3 -c '
+import json, sys
+print(json.dumps({"wp": sys.argv[1], "slug": sys.argv[2], "agent": sys.argv[3], "card": sys.argv[4], "reason": sys.argv[5]}))
+' "$WP" "$SLUG" "$AGENT" "$FORCED_CARD" "$FORCE_NO_REFLECTION")
+    bash "$IWE_ROOT/$GOV_REPO/scripts/ledger-append.sh" day "$(now_date)" session_closed_no_reflection "$FORCE_EVENT" session-guard
+    echo "force-no-reflection: закрываю без рефлексии ($FORCED_CARD) — причина записана в ledger" >&2
+  fi
+
   if [ -z "$RUNNER_OK" ]; then
     fail "Quick Close не завершён для slug '$SLUG': нет terminal RUN-quick-close-${SLUG}*.md. Сначала запусти process-runner.py start quick-close с тем же --slug." 7
   fi
