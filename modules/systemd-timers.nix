@@ -558,7 +558,10 @@ in
 
     systemd.services."iwe-tsekh1-sync" = {
       description = "IWE — безопасная git-синхронизация DS-my-strategy (каждые 20 мин)";
-      unitConfig   = commonUnitConfig // {
+      # Не используем commonUnitConfig с OnFailure: exit 1 здесь означает
+      # ожидаемый заблокированный тик, а уведомления уже порогово агрегирует
+      # сам tsekh1-git-sync.sh. Общий обработчик снова создал бы дубль каждый тик.
+      unitConfig = {
         After = [ "network-online.target" ];
         Wants = [ "network-online.target" ];
       };
