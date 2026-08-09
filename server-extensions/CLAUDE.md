@@ -177,7 +177,7 @@ Respond in Russian unless the user writes in English.
 - **Read-only репо:** ⛔ **DS-IT-systems/SystemsSchool_bot**, **DS-IT-systems/aisystant**.
 - **Extensions Gate (БЛОКИРУЮЩЕЕ):** пользователи кастомизируют ТОЛЬКО `extensions/*.md` + `params.yaml` (правка `.claude/skills/` или `memory/protocol-*.md` = ошибка); автор (`author_mode: true`) редактирует L1 напрямую — авторский IWE = SoT, доставка в FMT через `DS-ai-systems/setup/scripts/template-sync.sh`.
 - **README.md (FMT-exocortex-template):** изменение структуры — по согласованию с владельцем.
-- **WP Entry Filter (S-47, БЛОКИРУЮЩЕЕ):** новый РП — только при явной связи с R1-R6 месяца или внешнем заказчике; иначе → `inbox/backlog-with-triggers.md`. Исключения: spin-off закрытого РП; прямое поручение пилота.
+- **WP Entry Filter (S-47, БЛОКИРУЮЩЕЕ):** новый РП — только при явной связи с R1-R6 месяца или внешнем заказчике; иначе → `inbox/backlog-with-triggers.md`. Исключения: spin-off закрытого РП; прямое поручение пилота. 🧠 когнитивный (легенда issue #310/#323, `.claude/rules-lazy/blocking-rules-full.md`): чистый текст, никакой хук не проверяет связь нового РП с R1-R6 — ничто не мешает завести РП мимо фильтра (WP-7 GateEnforcement-Audit, 09.08.2026, находка 4 из 5).
 - **Именование РП:** существительное-артефакт, только русский (Pack-ID допустим); реестр ≤80 символов → SYNC-CORE; переименование — синхронно REGISTRY+MEMORY.md+WeekPlan+DayPlan+WP-context.
 - **Память (S-35):** новые `memory/*.md` — обязательный frontmatter; шаблон и горизонты → `memory/memory-lifecycle-spec.md` (единственный источник).
 - **Security Audit Cadence (WP-212, S-36):** per-ArchGate (§Б B7.1 + STRIDE) · Week Close (`security-posture.md §3`) · Daily (tsekh-1) · Month Close (VR.R.002).

@@ -73,6 +73,16 @@ report_line() {  # report_line <status> <note>
 log "=== scheduled run $ID: $WP via $AGENT (timeout ${TIMEOUT_MIN}m) ==="
 set_status running
 
+# bug-2026-07-17-kimi-queue-autostash-conflict-and-orphaned-semaphores п.3:
+# sweep_orphaned_semaphores exists in session-guard.sh (audit --cleanup-orphans)
+# but nothing called it periodically -- orphaned .open files (dead pid or no
+# parseable timestamp) accumulated across a whole night's queue with no
+# cleanup between runs. This runner already fires once per queued WP through
+# the night, which makes it the natural periodic trigger -- no separate cron
+# needed. Best-effort: a sweep failure must not abort this WP's own run.
+bash "$IWE_ROOT/scripts/session-guard.sh" audit --cleanup-orphans >>"$LOG" 2>&1 || \
+  log "WARN: orphan semaphore sweep failed (non-fatal, continuing)"
+
 # --- dry-run (тестовый режим: не запускает LLM, проверяет launchd+plumbing) ---
 if [ "${IWE_WP_QUEUE_DRYRUN:-0}" = "1" ]; then
   log "DRY-RUN: simulating agent run (no LLM call)"
@@ -131,6 +141,17 @@ if [ "$IS_TASK" != "1" ] && [ "$AGENT" != "codex" ]; then
 PROMPT_FILE="$QUEUE_DIR/$ID.prompt"
 if [ ! -f "$PROMPT_FILE" ]; then
   PROMPT_FILE=$(mktemp)
+  # bug-2026-07-17-...-orphaned-semaphores п.4: session-guard.sh open (above)
+  # already computed and scaffolded this exact path -- the old prompt only
+  # said "запиши итог в ORZ сессии" with no path, so the agent picked its own
+  # filename by habit, diverging from the scaffold (14 empty scaffolds found
+  # dead in one night's queue, real ORZ content landing elsewhere). Same
+  # basename formula session-guard.sh itself uses (now_month/now_date-slug.md,
+  # date-prefix stripped from slug if already present) -- computed here
+  # independently rather than parsed out of the open log, so a log-format
+  # change can't silently desync the two again.
+  ORZ_SLUG="sched-$ID"
+  ORZ_PATH="$IWE_GOVERNANCE_REPO/sessions/$(date '+%Y-%m')/$(date '+%Y-%m-%d')-${ORZ_SLUG}.md"
   cat > "$PROMPT_FILE" <<EOF
 Автономный запуск по расписанию (планировщик WP-487, DP.SC.192). WP Gate для этого РП уже согласован пилотом заранее — Ритуал согласования не требуется, работай сразу.
 
@@ -141,7 +162,7 @@ if [ ! -f "$PROMPT_FILE" ]; then
 - Если заблокирован решением пилота — запиши blocker в frontmatter контекст-файла РП ($IWE_GOVERNANCE_REPO/inbox/$WP/$WP.md) и завершись, не жди.
 - Git: стейджь только конкретные свои файлы (никаких git add -A/-u/.), trailer Co-Authored-By по своему агенту.
 - Не начинай операций, которые могут не уложиться в оставшееся время — тебя принудительно завершат по таймауту.
-- По завершении обнови статус фаз в frontmatter контекст-файла РП и запиши краткий итог в ORZ сессии.
+- По завершении обнови статус фаз в frontmatter контекст-файла РП и запиши краткий итог в ORZ-файл, который уже создан по пути: $ORZ_PATH (не создавай новый файл с другим именем — редактируй именно этот).
 EOF
 fi
 fi  # IS_TASK
@@ -246,6 +267,32 @@ case "$RC" in
   *)   STATUS=failed;  NOTE="exit $RC" ;;
 esac
 log "finished: $STATUS (exit $RC)"
+
+# bug-2026-07-17-...-orphaned-semaphores п.1: the agent commits its own work as
+# part of executing the WP, but this runner never independently verified the
+# push actually landed -- the incident it caused (6 real unpushed commits
+# after a night's queue) went unnoticed until a manual `git status` the next
+# morning, because RC=0 from the agent binary says nothing about whether its
+# own push succeeded. Defense-in-depth, not a replacement for the agent's own
+# push: if commits are still ahead of upstream after the run, attempt one
+# explicit push and log the outcome either way, so a silent push failure shows
+# up in the SAME log this runner already writes instead of surfacing days
+# later as a "why isn't this on GitHub" investigation.
+GOV_REPO_DIR="$IWE_ROOT/$IWE_GOVERNANCE_REPO"
+if [ "$IS_TASK" != "1" ] && [ -d "$GOV_REPO_DIR/.git" ]; then
+  AHEAD=$(git -C "$GOV_REPO_DIR" rev-list "@{u}.." --count 2>/dev/null || echo "")
+  if [ -n "$AHEAD" ] && [ "$AHEAD" -gt 0 ]; then
+    log "push-check: $AHEAD unpushed commit(s) in $IWE_GOVERNANCE_REPO after agent run — pushing explicitly"
+    if git -C "$GOV_REPO_DIR" push >>"$LOG" 2>&1; then
+      log "push-check: OK ($AHEAD commit(s) pushed)"
+    else
+      log "push-check: FAILED — $AHEAD commit(s) still unpushed, needs manual attention"
+    fi
+  else
+    log "push-check: up to date with upstream (or no tracking branch), nothing to push"
+  fi
+fi
+
 set_status "$STATUS"
 report_line "$STATUS" "$NOTE"
 

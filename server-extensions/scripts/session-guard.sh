@@ -18,6 +18,11 @@
 #   renew [--wp WP-N] [--slug "..."] [--agent ...]    # продлить право на коммит
 #   pre-commit-check
 #   note-file <path> [--agent ...]
+#   lock-hot-file <path> [--agent ...]    # WP-7 SessionGitRaceIsolation: короткий
+#   unlock-hot-file <path>                # mkdir-замок на файл, который часто
+#                                          # коллизирует между параллельными сессиями
+#                                          # (DayPlan, активная карточка РП, hypotheses-log,
+#                                          # MEMORY.md) — не на всё рабочее дерево
 #
 # Аренда (WP-484 Ф49): существование сессии и её право разрешать коммит — разные
 # вещи. Возраст отзывает только право (по умолчанию 4h, `IWE_SESSION_LEASE_SEC`);
@@ -718,12 +723,96 @@ print(os.path.relpath(f, r))
       echo "note-file: WARNING — '$REL_PATH' пока не существует в репо '$REPO_NAME' (ни на диске, ни в индексе, ни в HEAD); записан как будущий файл. Если это опечатка — scope gate не пропустит staged-файл." >&2
     fi
   fi
+  # A directory is registered as a directory (QUICKCLOSE-GAPS1 п.2): the trailing
+  # slash is what tells the scope gate to cover everything underneath, including
+  # files this session has not written yet. Without it a peer session had to
+  # re-register each of its own files by hand right before committing.
+  if [ -d "$FILE_PATH" ]; then
+    case "$REL_PATH" in
+      */) ;;
+      *) REL_PATH="${REL_PATH}/" ;;
+    esac
+  fi
   # Avoid duplicate consecutive entries
   LAST=$(tail -1 "$SEM_FILE" 2>/dev/null || true)
   if [ "$LAST" != "file: $REL_PATH" ]; then
     echo "file: $REL_PATH" >> "$SEM_FILE"
   fi
   echo "Noted in scope: $REL_PATH"
+  exit 0
+fi
+
+# --- HOT-FILE LOCK (WP-7 SessionGitRaceIsolation, 09.08) ---
+#
+# ArchGate verdict (09.08.2026): a git worktree per session was proposed to stop
+# the repeated collisions on the SAME small set of files (DayPlan, an active WP
+# card, hypotheses-log.md, MEMORY.md — 18+ documented cases in July, 5 more in
+# this single session today, including this very WP-7 card getting clobbered
+# mid-edit). Measured live: worktree creation on this repo (21000+ files) costs
+# several seconds of "Updating files" AND requires updating every script that
+# hardcodes a single $IWE_ROOT/$GOV_REPO path — too much cost for a class of
+# collision confined to ~4 files, not the whole tree. This is the cheaper fix
+# the ArchGate recommended instead: lock only the files that actually keep
+# colliding, not the working tree they live in.
+#
+# Deliberately a session-guard.sh command, not a Claude-Code-only hook: Kimi and
+# Codex peer sessions call this same script for open/close/note-file already
+# (its own header: "единый gate ... для всех агентов"), so a lock here is the
+# one place that can actually be cross-agent. A PreToolUse:Edit hook would only
+# ever see Claude Code's own edits -- today's collisions came from a mix of
+# agent types, so a Claude-only mechanism would have caught a fraction of them.
+# Enforcement is cognitive for Kimi/Codex until their own instructions call it
+# (same class as several findings in GateEnforcement-Audit) -- the FMT hook
+# below is defense-in-depth for the one agent type that supports it, not the
+# whole fix.
+HOT_LOCK_DIR="$IWE_ROOT/.iwe-runtime/hot-file-locks"
+HOT_LOCK_TTL_SEC="${IWE_HOT_LOCK_TTL_SEC:-600}"  # 10 min -- long enough for a real edit+commit, short enough that a crashed holder doesn't block the file for a whole session
+
+_hot_lock_slug() {  # _hot_lock_slug <repo-relative-path> -- filesystem-safe lock dirname
+  echo "$1" | tr '/' '_'
+}
+
+if [ "$CMD" = "lock-hot-file" ]; then
+  HOT_PATH="${POSITIONAL[0]:-}"
+  [ -z "$HOT_PATH" ] && fail "lock-hot-file: missing path argument" 1
+  LOCK_HOLDER_AGENT="${AGENT:-${IWE_AGENT:-claude-code}}"
+  mkdir -p "$HOT_LOCK_DIR"
+  LOCK_PATH="$HOT_LOCK_DIR/$(_hot_lock_slug "$HOT_PATH").lockdir"
+  ATTEMPT=0
+  while ! mkdir "$LOCK_PATH" 2>/dev/null; do
+    if [ -f "$LOCK_PATH/meta" ]; then
+      HELD_AT=$(grep '^locked_at: ' "$LOCK_PATH/meta" 2>/dev/null | cut -d' ' -f2-)
+      HELD_EPOCH=$(date -u -j -f "%Y-%m-%dT%H:%M:%SZ" "$HELD_AT" +%s 2>/dev/null \
+        || date -u -d "$HELD_AT" +%s 2>/dev/null || echo 0)
+      AGE=$(( $(date +%s) - HELD_EPOCH ))
+      if [ "$AGE" -gt "$HOT_LOCK_TTL_SEC" ]; then
+        echo "lock-hot-file: stale lock on '$HOT_PATH' (age ${AGE}s > ttl ${HOT_LOCK_TTL_SEC}s) — reclaiming" >&2
+        rm -rf "$LOCK_PATH"
+        continue
+      fi
+    fi
+    ATTEMPT=$((ATTEMPT + 1))
+    if [ "$ATTEMPT" -gt 30 ]; then
+      HOLDER=$(cat "$LOCK_PATH/agent" 2>/dev/null || echo "unknown")
+      fail "lock-hot-file: '$HOT_PATH' held by '$HOLDER' for >30s, giving up — retry shortly" 1
+    fi
+    sleep 1
+  done
+  {
+    echo "locked_at: $(now_iso)"
+    echo "agent: $LOCK_HOLDER_AGENT"
+  } > "$LOCK_PATH/meta"
+  echo "$LOCK_HOLDER_AGENT" > "$LOCK_PATH/agent"
+  echo "Locked: $HOT_PATH"
+  exit 0
+fi
+
+if [ "$CMD" = "unlock-hot-file" ]; then
+  HOT_PATH="${POSITIONAL[0]:-}"
+  [ -z "$HOT_PATH" ] && fail "unlock-hot-file: missing path argument" 1
+  LOCK_PATH="$HOT_LOCK_DIR/$(_hot_lock_slug "$HOT_PATH").lockdir"
+  rm -rf "$LOCK_PATH"
+  echo "Unlocked: $HOT_PATH"
   exit 0
 fi
 
@@ -903,6 +992,25 @@ print(json.dumps({
   exit 0
 fi
 
+# A registered directory covers everything under it (QUICKCLOSE-GAPS1 п.2, found
+# live 04.08): a peer-conversation opens ONE session directory and then writes a
+# dozen files into it as the run goes on. Before this, every one of those files
+# needed its own note-file call right before the commit -- 13 calls for a single
+# session, and the gate blocked whatever was forgotten, even though `open` had
+# already claimed that exact directory. A directory entry is stored with a
+# trailing slash, so it can never be confused with a file of the same name.
+scope_has_path() {  # scope_has_path <semaphore> <repo-relative-path>
+  local sem="$1" path="$2" entry
+  while IFS= read -r entry; do
+    [ -z "$entry" ] && continue
+    [ "$entry" = "$path" ] && return 0
+    case "$entry" in
+      */) case "$path" in "$entry"*) return 0 ;; esac ;;
+    esac
+  done < <(sed -n 's/^file: //p' "$sem")
+  return 1
+}
+
 # --- GIT PRE-COMMIT CHECK ---
 if [ "$CMD" = "pre-commit-check" ]; then
   # WP-484 Ф49: право разрешать коммит истекает по аренде и отзывается у ВСЕГО
@@ -975,7 +1083,7 @@ EOF
       # Deleted file: check append-log across all active semaphores
       FOUND=0
       for sem in $ACTIVE; do
-        if grep -qF "file: $f" "$sem"; then
+        if scope_has_path "$sem" "$f"; then
           FOUND=1
           break
         fi
@@ -996,7 +1104,7 @@ EOF
       # be explicitly declared via note-file.
       FOUND=0
       for sem in $ACTIVE; do
-        if grep -qF "file: $f" "$sem"; then
+        if scope_has_path "$sem" "$f"; then
           FOUND=1
           break
         fi
@@ -1022,7 +1130,7 @@ EOF
     done
     if [ "$PASS" -eq 0 ]; then
       for sem in $ACTIVE; do
-        if grep -qF "file: $f" "$sem"; then
+        if scope_has_path "$sem" "$f"; then
           PASS=1
           break
         fi

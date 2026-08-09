@@ -408,6 +408,9 @@ else
   printf '%s\n' "<промпт с минимальной текстовой проекцией>" | bash "$ADAPTER_PATH" \
     > "$PEER_FILE" 2> "${PEER_FILE%.md}.err"
 fi
+# Same rule as in the round-loop below: an empty .err is noise, not evidence
+# (WP-481 F13).
+[ -s "${PEER_FILE%.md}.err" ] || rm -f "${PEER_FILE%.md}.err"
 ```
 
 Если файл пустой или exit ≠ 0 → сообщить пилоту: «<PEER_VENDOR> не ответил. Повторить или прервать?»
@@ -546,6 +549,11 @@ else
   fi
   STATUS=$?
 fi
+# Keep the stderr file only when the adapter actually wrote to it. An empty
+# .err carries no diagnostics and just adds noise to the session folder
+# (WP-481 F13: 232 .err files in one week, 115 of them empty). Placed after
+# STATUS is captured so the cleanup cannot clobber the adapter's exit code.
+[ -s "${PEER_FILE%.md}.err" ] || rm -f "${PEER_FILE%.md}.err"
 rm -f "$PROMPT_FILE"
 ```
 

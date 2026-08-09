@@ -20,10 +20,7 @@
 #     локальный ещё не запушенный коммит (ahead guard) — иначе `git checkout
 #     origin/main -- $FILE` затирает работу, которая ещё не успела уйти на GitHub
 #     (peer-session 2026-08-08-05-wp406-card-clobber-source, 3 живых инцидента:
-#     WP-506 дважды 07-08.08, WP-406+WP-504 08.08). Идентичный фикс также в
-#     iwe-local-config/scripts/sync-strategy-files.sh — тот репозиторий НЕ
-#     участвует в реальном деплое этого скрипта (найдено при доведении фикса
-#     до продакшена — деплой идёт flake'ом ЭТОГО репо через nixos-upgrade).
+#     WP-506 дважды 07-08.08, WP-406+WP-504 08.08).
 #
 # Запуск: через iwe-sync-strategy-files.timer (раз в 10 мин).
 
@@ -152,13 +149,3 @@ fi
 
 echo "$TS [sync-strategy-files] synced=$SYNCED skipped=$SKIPPED skipped_dirty=$SKIPPED_DIRTY skipped_ahead=$SKIPPED_AHEAD failed=$FAILED"
 exit 0
-
-# ВНИМАНИЕ ДЛЯ БУДУЩЕГО РЕДАКТОРА (09.08.2026, WP-406).
-# Этот файл — НЕ источник правды. Источник — ~/IWE/scripts/sync-strategy-files.sh
-# НА МАКЕ: scripts/sync-extensions.sh делает `rsync -a --delete` с Мака в
-# server-extensions/, а sync-extensions-auto.sh коммитит и пушит это каждые 2 часа
-# (launchd com.iwe.sync-server-extensions). Правка, внесённая прямо в этот
-# репозиторий, живёт до следующего тика синхронизации и молча откатывается —
-# так уже случилось с фиксом выше: коммит 87328ab (08.08 20:57) был затёрт
-# коммитом cac8838 «sync: auto extensions» (08.08 21:15), и пересборка развернула
-# бы старую версию. Чините на Маке, иначе круг замкнётся снова.
