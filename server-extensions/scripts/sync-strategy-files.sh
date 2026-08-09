@@ -152,3 +152,13 @@ fi
 
 echo "$TS [sync-strategy-files] synced=$SYNCED skipped=$SKIPPED skipped_dirty=$SKIPPED_DIRTY skipped_ahead=$SKIPPED_AHEAD failed=$FAILED"
 exit 0
+
+# ВНИМАНИЕ ДЛЯ БУДУЩЕГО РЕДАКТОРА (09.08.2026, WP-406).
+# Этот файл — НЕ источник правды. Источник — ~/IWE/scripts/sync-strategy-files.sh
+# НА МАКЕ: scripts/sync-extensions.sh делает `rsync -a --delete` с Мака в
+# server-extensions/, а sync-extensions-auto.sh коммитит и пушит это каждые 2 часа
+# (launchd com.iwe.sync-server-extensions). Правка, внесённая прямо в этот
+# репозиторий, живёт до следующего тика синхронизации и молча откатывается —
+# так уже случилось с фиксом выше: коммит 87328ab (08.08 20:57) был затёрт
+# коммитом cac8838 «sync: auto extensions» (08.08 21:15), и пересборка развернула
+# бы старую версию. Чините на Маке, иначе круг замкнётся снова.
