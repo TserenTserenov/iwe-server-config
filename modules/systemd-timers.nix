@@ -547,6 +547,41 @@ in
     };
 
     # =========================================================
+    # 2c. TSEKH-1 GIT SYNC SAFETY NET — WP-484 Ф70/Ф77
+    # =========================================================
+    # Подтягивает DS-my-strategy каждые 20 минут независимо от Day Open.
+    # Скрипт сам различает безопасный stale mirror и реальную работу, не применяет
+    # autostash и агрегирует повторные ошибки перед Telegram-уведомлением.
+    # Юнит ранее устанавливался вручную из DS-my-strategy/scripts/systemd, поэтому
+    # очередной nixos-rebuild удалил его как недекларативный. Здесь находится
+    # каноническое описание запуска; прикладной репозиторий хранит сам скрипт.
+
+    systemd.services."iwe-tsekh1-sync" = {
+      description = "IWE — безопасная git-синхронизация DS-my-strategy (каждые 20 мин)";
+      unitConfig   = commonUnitConfig // {
+        After = [ "network-online.target" ];
+        Wants = [ "network-online.target" ];
+      };
+      serviceConfig = commonServiceConfig // {
+        WorkingDirectory = "${iwe}/DS-my-strategy";
+        ExecStart = "${pkgs.bash}/bin/bash ${iwe}/DS-my-strategy/scripts/tsekh1-git-sync.sh";
+        TimeoutStartSec = 120;
+      };
+      path = commonPath;
+      environment = commonEnv;
+    };
+
+    systemd.timers."iwe-tsekh1-sync" = {
+      wantedBy    = [ "timers.target" ];
+      description = "IWE DS-my-strategy git sync — каждые 20 мин";
+      timerConfig = {
+        OnBootSec       = "2min";
+        OnUnitActiveSec = "20min";
+        Persistent      = true;
+      };
+    };
+
+    # =========================================================
     # 3. ACTIVITY HUB SYNC — ДЕАКТИВИРОВАН (WP-268 Ф-migration, 2 мая 2026)
     # =========================================================
     # sync-lms и sync-iwe заменены новой архитектурой:
