@@ -22,7 +22,6 @@
 #     this round rather than attempt a doomed rebase.
 #
 # Usage: git-dirty-guard.sh <repo-path> [branch]
-# Set GIT_DIRTY_GUARD_TG_ALERTS=false when the caller owns throttled alerting.
 # Exit codes: 0 = repo clean, or safely self-healed — caller may proceed with pull.
 #             1 = real uncommitted work present, or repo mid-rebase/merge — caller must
 #                 NOT pull/rebase this round.
@@ -36,18 +35,8 @@ BRANCH="${2:-}"
 AIST_ENV="$HOME/.config/aist/env"
 [ -f "$AIST_ENV" ] && { set -a; source "$AIST_ENV"; set +a; }
 
-# Interactive callers need an immediate warning, while periodic supervisors need
-# to aggregate repeated failures before notifying. Without this switch the
-# supervisor's throttled alert is preceded by one direct alert on every tick.
-# The default stays fail-safe for every existing caller; only an explicit false
-# value suppresses Telegram delivery. Diagnostics and exit codes are unchanged.
-GIT_DIRTY_GUARD_TG_ALERTS="${GIT_DIRTY_GUARD_TG_ALERTS:-true}"
-
 tg_alert() {
   local msg="$1"
-  case "$GIT_DIRTY_GUARD_TG_ALERTS" in
-    0|false|no|off) return 0 ;;
-  esac
   [ -n "${TELEGRAM_BOT_TOKEN:-}" ] && [ -n "${TELEGRAM_CHAT_ID:-}" ] || return 0
   curl -s --max-time 10 -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
     -d "chat_id=${TELEGRAM_CHAT_ID}" --data-urlencode "text=$msg" > /dev/null || true
