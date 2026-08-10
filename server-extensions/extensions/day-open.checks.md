@@ -508,7 +508,11 @@ fi
 > **Источник:** 22-23-24 мая подряд вчерашний DayPlan оставался в `current/` после Day Close — Day Close протокол не имеет шага архивации DayPlan, Day Open checks этого не ловили.
 
 ```bash
-TODAY=$(date +%Y-%m-%d)
+# DAY_OPEN_EXPECTED_DATE (WP-484 Ф80): week-open-orchestrator.sh runs this checker for a
+# target date that isn't "today" by the system clock (Sun ~23:50 rendering Monday's plan)
+# -- without this override, a freshly-created Monday DayPlan reads as stale-by-date and
+# blocks its own commit. Daytime callers never set it, so TODAY is unchanged for them.
+TODAY="${DAY_OPEN_EXPECTED_DATE:-$(date +%Y-%m-%d)}"
 # `|| true`: без него, ноль зависших планов (штатный случай) даёт grep -v exit 1,
 # и под set -e присвоение молча обрывает блок до if — тот же класс бага, что
 # markdown-ссылки/OPENS-SUMMARIES выше (WP-5 Ф2 09.07).
@@ -536,18 +540,22 @@ fi
 
 ```bash
 FILE="$(ls ~/IWE/DS-my-strategy/current/DayPlan\ *.md 2>/dev/null | sort | tail -1)"
-TODAY=$(date +%Y-%m-%d)
-DOW=$(date +%u)  # 1=Mon ... 7=Sun
+TODAY="${DAY_OPEN_EXPECTED_DATE:-$(date +%Y-%m-%d)}"
+# Same DAY_OPEN_EXPECTED_DATE override as the stale-DayPlan check above -- DOW/weekday
+# name must track the target date too, not the system clock, or a non-Monday strategy_day
+# would wrongly skip (or wrongly run) this check on a night-cycle run (WP-484 Ф80).
+DOW=$(date -d "$TODAY" +%u 2>/dev/null || date -j -f "%Y-%m-%d" "$TODAY" +%u)  # 1=Mon ... 7=Sun
+TODAY_WEEKDAY_NAME=$(date -d "$TODAY" +%A 2>/dev/null || date -j -f "%Y-%m-%d" "$TODAY" +%A)
 CFG="$HOME/IWE/memory/day-rhythm-config.yaml"
 RUNS_DIR="$HOME/IWE/DS-my-strategy/inbox/bottleneck-pick-runs"
 echo "=== Калибровка /bottleneck-pick (BLOCKING) ==="
 
 # Условие пропуска: strategy_day (под секцией day_open: в day-rhythm-config.yaml) или выходной (Сб/Вс)
 STRATEGY_DAY=$(awk '/^day_open:/{flag=1; next} flag && /^[^[:space:]]/{flag=0} flag && /strategy_day:/{print $2; exit}' "$CFG" 2>/dev/null | tr -d '"')
-TODAY_DOW=$(date +%A | tr '[:upper:]' '[:lower:]')
+TODAY_DOW=$(echo "$TODAY_WEEKDAY_NAME" | tr '[:upper:]' '[:lower:]')
 SKIP=false
 if [ "$DOW" -ge 6 ]; then
-  echo "  ℹ️ Выходной ($DOW = $(date +%A)) — проверка пропущена"
+  echo "  ℹ️ Выходной ($DOW = $TODAY_WEEKDAY_NAME) — проверка пропущена"
   SKIP=true
 elif [ -n "$STRATEGY_DAY" ] && [ "$STRATEGY_DAY" = "$TODAY_DOW" ]; then
   echo "  ℹ️ strategy_day ($STRATEGY_DAY) — проверка пропущена (план в WeekPlan, не DayPlan)"
