@@ -796,10 +796,12 @@ in
       description = "IWE — рендер руководств пилотов (weekly, Пн 02:00 EEST)";
       unitConfig   = commonUnitConfig;
       serviceConfig = commonServiceConfig // {
-        # 2026-07-10 (директива пилота, WP-149): генерация для managed-пилотов
-        # приостановлена до отдельных путей (платформа / скилл в IWE-шаблоне).
-        # --user сужает рендер только на sovereign-пилота (владельца сервера).
-        ExecStart  = "${pythonForIWE}/bin/python3 ${iwe}/DS-autonomous-agents/scripts/render-pilot-guides.py --user=TserenTserenov";
+        # 2026-08-10 (директива пилота, WP-149 п.4): открытый раскат — снят --user,
+        # обрабатываются все пилоты с enabled=true (по умолчанию — любой, кто прошёл
+        # стандартный онбординг; конкретный состав команды в этом репозитории не
+        # прописывается, см. WP-406). Было: --user=TserenTserenov, генерация
+        # приостановлена для managed-пилотов до отдельных путей (2026-07-10).
+        ExecStart  = "${pythonForIWE}/bin/python3 ${iwe}/DS-autonomous-agents/scripts/render-pilot-guides.py";
         TimeoutSec = 1800;
       };
       path = commonPath;
@@ -837,8 +839,8 @@ in
       description = "IWE — рендер руководств пилотов (daily, каждый день 02:00 EEST)";
       unitConfig   = commonUnitConfig;
       serviceConfig = commonServiceConfig // {
-        # 2026-07-10 (директива пилота, WP-149): см. пометку у weekly-сервиса выше.
-        ExecStart  = "${pythonForIWE}/bin/python3 ${iwe}/DS-autonomous-agents/scripts/render-pilot-guides.py --daily --user=TserenTserenov";
+        # 2026-08-10 (директива пилота, WP-149 п.4): см. пометку у weekly-сервиса выше.
+        ExecStart  = "${pythonForIWE}/bin/python3 ${iwe}/DS-autonomous-agents/scripts/render-pilot-guides.py --daily";
         TimeoutSec = 600;
       };
       path = commonPath;
