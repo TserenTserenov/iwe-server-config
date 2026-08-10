@@ -116,6 +116,7 @@
 
 ### Project — HOT
 
+- [project_feed_digest_timeout_vitaly_fixed.md](project_feed_digest_timeout_vitaly_fixed.md) — 10.08: баг тайм-аута дайджеста Ленты (3 темы + глубина 3 → упирается в потолок токенов + впустую съеденные 30s на MCP-фазе) — найден, исправлен PR #301, задеплоен, Виталий разблокирован вручную и проверен
 - [project_wp484_chronic_weekplan_failure_pilot_dissatisfaction.md](project_wp484_chronic_weekplan_failure_pilot_dissatisfaction.md) — 10.08: пилот назвал РП484 «сильным узким горлышком» — план недели не собирался автоматом весь месяц, блокирует понедельничную стратсессию; 2 бага починены, но доставка пилоту в тот же вечер не состоялась
 - [project_iwe_local_config_is_pipeline_source.md](project_iwe_local_config_is_pipeline_source.md) — 09.08: `~/IWE` корень = рабочая копия `iwe-local-config`, источник конвейера → Мак scripts/ → rsync 2ч → `iwe-server-config` → сервер; коммит фикса напрямую в `iwe-server-config` затирается ближайшим тиком
 - [project_memory_repo_has_no_remote.md](project_memory_repo_has_no_remote.md) — 09.08: `memory/` без git-remote с самого создания (03.08), резервной копии нет; пилот отложил решение, куда её класть — не переоткрывать как новую проблему

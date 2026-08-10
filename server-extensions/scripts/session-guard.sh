@@ -544,6 +544,25 @@ validate_orz() {
   return $errors
 }
 
+# Closing a session is safe only after its own registered scope is clean.  The
+# Quick Close card proves that the process reached a terminal step, but it does
+# not prove that all files written by the session made it into a commit.  In a
+# shared checkout, removing the semaphore first lets the sync timer rebase over
+# that residue or turn it into a chronic dirty-tree alert.
+session_scope_dirty_paths() { # <semaphore> — prints only dirty registered paths
+  local semaphore="$1" registered_path status
+  while IFS= read -r registered_path; do
+    registered_path="${registered_path#file: }"
+    [ -n "$registered_path" ] || continue
+    status=$(git -C "$(dirname "$ORZ_DIR")" status --porcelain --untracked-files=all -- "$registered_path" 2>/dev/null || true)
+    [ -z "$status" ] && continue
+    while IFS= read -r status_line; do
+      [ -n "$status_line" ] || continue
+      printf '  %s: %s\n' "$registered_path" "$status_line"
+    done <<< "$status"
+  done < <(grep '^file: ' "$semaphore" | sort -u)
+}
+
 # --- CLOSE ---
 if [ "$CMD" = "close" ]; then
   if [ -n "$HOUSEKEEPING" ]; then
@@ -584,6 +603,13 @@ if [ "$CMD" = "close" ]; then
   echo "Session CLOSE: проверяю ORZ $ORZ_FILE ..."
   if ! validate_orz "$ORZ_FILE" "$AGENT"; then
     fail "ORZ не прошёл валидацию. Исправь замечания выше и повтори close. Семафор остаётся активным." 5
+  fi
+
+  SCOPE_DIRTY=$(session_scope_dirty_paths "$SEM_FILE")
+  if [ -n "$SCOPE_DIRTY" ]; then
+    echo "Session CLOSE: в зарегистрированной области остались незакоммиченные файлы:" >&2
+    printf '%s\n' "$SCOPE_DIRTY" >&2
+    fail "Сначала зафиксируй и отправь перечисленные файлы. Семафор остаётся активным." 7
   fi
 
   # Quick Close — не текстовая декларация: именно терминальная карточка раннера
