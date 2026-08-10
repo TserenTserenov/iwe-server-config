@@ -101,7 +101,10 @@ if ! mkdir "$LOCK_DIR" 2>/dev/null; then
   fi
   if ! mkdir "$LOCK_DIR" 2>/dev/null; then
     echo "git-dirty-guard: lock busy (live owner or unproven), skipping" >&2
-    exit 0
+    # A caller that proceeds after this result can rebase while another guard
+    # is still deciding whether the worktree is safe. Lock contention is a
+    # fail-closed condition, not a clean result.
+    exit 1
   fi
 fi
 echo "host=$HOSTNAME_NOW" > "$LOCK_META"

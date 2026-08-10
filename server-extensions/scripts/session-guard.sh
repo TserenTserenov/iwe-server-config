@@ -186,8 +186,13 @@ select_semaphore() {
       [ -z "$cand" ] && continue
       cand_wp=$(grep "^wp: " "$cand" | cut -d' ' -f2- || true)
       cand_slug=$(grep "^slug: " "$cand" | cut -d' ' -f2- || true)
-      if { [ -n "$want_wp" ] && [ "$cand_wp" = "$want_wp" ]; } || \
-         { [ -n "$want_slug" ] && [ "$cand_slug" = "$want_slug" ]; }; then
+      # With both selectors, this must be an intersection.  A work product is
+      # shared by several sessions, so matching it alone can select a stale or
+      # concurrent session even when the caller supplied the exact slug.
+      if { [ -n "$want_wp" ] && [ -n "$want_slug" ] &&
+           [ "$cand_wp" = "$want_wp" ] && [ "$cand_slug" = "$want_slug" ]; } || \
+         { [ -z "$want_slug" ] && [ -n "$want_wp" ] && [ "$cand_wp" = "$want_wp" ]; } || \
+         { [ -z "$want_wp" ] && [ -n "$want_slug" ] && [ "$cand_slug" = "$want_slug" ]; }; then
         matches+=("$cand")
       fi
     done <<< "$candidates"
