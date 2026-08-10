@@ -27,6 +27,9 @@ IWE="${IWE_ROOT:-$HOME/IWE}"
 GUARD="${IWE_SAFE_PULL_GUARD:-$IWE/scripts/git-dirty-guard.sh}"
 
 cd "$REPO" 2>/dev/null || { echo "iwe-safe-pull: cannot cd to $REPO" >&2; exit 1; }
+# Re-resolve to absolute: a relative $REPO is only valid from the original
+# cwd, and $GUARD below does its own `cd "$REPO"` after ours already moved us.
+REPO="$(pwd)"
 
 BRANCH="${2:-}"
 [ -n "$BRANCH" ] || BRANCH=$(git rev-parse --abbrev-ref HEAD 2>/dev/null)
