@@ -85,7 +85,7 @@
 | 496 | 🔄 | **P1** | Журнал гипотез (LPF-регламент обратной связи) | Ф5 done (fail-closed сверка починена); next Ф6 догоняющая сверка 39 записей |
 | 289 | 🔄 | P3 | Интеграция IWE с личными базами знаний | 09.08: Ф11+WP-495 закрыты; SoT-рамка, активного next нет |
 | 483 | 🔄 | P2 | Комплект структурирования данных (guide-kit) | Ф6 шаги 1-3 закрыты 03.08; шаг 4 (регистрация+код) — будущая сессия |
-| 484 | 🔄 | **P1** | Автогенератор открытия/закрытия дня (зонтичный) | 08.08 Ф77 закрыта (Pull-on-Touch корневой фикс, задеплоен+подтверждён); next Ф75/Ф76 (реализация не начата) |
+| 484 | 🔄 | **P1** | Автогенератор открытия/закрытия дня (зонтичный) | 10.08 Ф79: ночь 09→10.08 сгенерировала WeekPlan W33 (контент готов), но коммит упал и повтор принял недоделанный прогон за завершённый — файл висит только на сервере, не запушен; Ф77 (Pull-on-Touch) тоже воспроизвёлся заново — next пилот решает фикс/восстановление |
 | 493 | 🔄 | P2 | Лаборатория характеристик | Ф4 ждёт данных (конец августа) |
 | 494 | 🔄 | P2 | Панель рабочих продуктов в VS Code | дашборд готов и подтверждён; доставка в шаблон отложена до 30.08 |
 | 167 | 🔄 | P5 | Публикации (зонтичный) | пилот утверждает порядок 28 постов |
@@ -119,7 +119,8 @@
 - [project_memory_repo_has_no_remote.md](project_memory_repo_has_no_remote.md) — 09.08: `memory/` без git-remote с самого создания (03.08), резервной копии нет; пилот отложил решение, куда её класть — не переоткрывать как новую проблему
 - [project_tsekh1_deploy_is_automated_not_manual.md](project_tsekh1_deploy_is_automated_not_manual.md) — 08.08: push в iwe-server-config деплоит на tsekh-1 сам (GitHub Actions deploy-rs), ручной nixos-rebuild не обязателен — проверять `gh run list` перед тем как писать «доставка не выполнена»
 - [project_codex_peer_reliability_watch.md](project_codex_peer_reliability_watch.md) — 05.08: пилот отметил, что Codex-напарник игнорирует инструкции — открытое наблюдение, копить примеры до эскалации
-- [project_tsekh1_chronic_git_sync_and_concurrent_agents.md](project_tsekh1_chronic_git_sync_and_concurrent_agents.md) — 08.08 РП484 Ф77: корневой фикс (raw --autostash → scripts/iwe-safe-pull.sh переиспользует git-dirty-guard.sh) задеплоен на tsekh-1 и подтверждён живым прогоном
+- [project_tsekh1_chronic_git_sync_and_concurrent_agents.md](project_tsekh1_chronic_git_sync_and_concurrent_agents.md) — 08.08 РП484 Ф77: корневой фикс (raw --autostash → scripts/iwe-safe-pull.sh переиспользует git-dirty-guard.sh) задеплоен на tsekh-1 и подтверждён живым прогоном; 10.08 РП484 Ф77/Ф79: живой рецидив «cannot cd» на относительном имени репо, фикс неполный, причина найдена — не исправлено
+- [project_ds_my_strategy_stash_pop_120_files_pending.md](project_ds_my_strategy_stash_pop_120_files_pending.md) — 09.08 инцидент git stash pop в DS-my-strategy: ~120 путей на Маке до сих пор показывают дореверт-содержимое (не HEAD) — спорный файл сверять через `git show HEAD:<path>`, не доверять диску напрямую
 
 ### Feedback — HOT
 
