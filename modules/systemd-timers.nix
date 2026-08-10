@@ -59,7 +59,7 @@ let
   # restic — backup-stress-test.sh SC1/SC3 вызывают `restic` (в т.ч. внутри sudo bash -c,
   # который наследует этот же PATH — secure_path в sudoers не задан). Без пакета в commonPath —
   # "restic: command not found" (WP-317, тот же инцидент, довылавлено 25.07.2026).
-  commonPath = with pkgs; [ git openssh bash curl jq gawk procps caffeinate-stub postgresql pythonForIWE nodejs perl gh restic ]
+  commonPath = with pkgs; [ git openssh bash curl jq gawk caffeinate-stub postgresql pythonForIWE nodejs perl gh restic ]
     ++ [ "/home/tseren/.npm-global" "/run/wrappers" ];
 
   commonEnv = {
