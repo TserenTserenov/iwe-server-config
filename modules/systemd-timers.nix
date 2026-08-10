@@ -1044,6 +1044,72 @@ in
     };
 
     # =========================================================
+    # NIGHT CYCLE VERIFY — внешний верификатор дня/недели (WP-484 Ф83/Ф84)
+    # =========================================================
+    # scripts/night-cycle-verify.sh проверяет факт на origin/main, не код
+    # возврата оркестраторов — закрывает класс сбоя Ф79 (STEP 5 отрапортовал
+    # успех, коммит не дошёл до origin). Код и один ручной прогон подтверждены
+    # 10.08 (peer-сессия с Codex), таймера не было вообще (не подключён ни к
+    # одному расписанию — Ф84, подтверждено grep по этому репозиторию). Два
+    # отдельных таймера (day/week), не один с объединённым ExecStart — тот же
+    # приём, что у iwe-engagement-collector/-full: раздельные unit'ы дают
+    # раздельные OnFailure-алерты, не смешивая day- и week-сбой в одном письме.
+    # 05:30/05:40 МСК, не 05:00/05:10 (найдено code review 10.08, Ф84):
+    # strategist-morning ("день") реально стартует не только в 03:00, но и
+    # повторно в 04:30 (scheduler.sh:428, окно 3:00-5:59) с бюджетом
+    # TASK_TIMEOUT_LONG=2400s (40 мин, scheduler.sh:49) на попытку -- то есть
+    # легитимный прогон вправе доработать до 05:10. Верификатор на 05:00
+    # застал бы его ещё в процессе и заявил бы ложный сбой -- ирония ровно
+    # того класса дефекта, ради которого сам верификатор и завели (Ф79/Ф83).
+    # 05:30 -- тот же отступ, что уже выбран для iwe-stage-controller выше по
+    # этой же причине (после 04:30/04:35, см. его комментарий). Для недельной
+    # ветки (Вс, scheduler.sh:341-380) последняя попытка -- около 23:50
+    # + 40 мин таймаут ≈ 00:39, у 05:40 больше четырёх часов запаса; тот же
+    # сдвиг применён и к ней -- не потому что нашёлся тот же риск, а чтобы
+    # не полагаться на менее полную трассировку недельной ветки (review 10.08
+    # прямо отметил, что не проверял её так же тщательно, как дневную).
+
+    systemd.services."iwe-night-cycle-verify-day" = {
+      description = "IWE — внешний верификатор ночного цикла (день)";
+      unitConfig   = commonUnitConfig;
+      serviceConfig = commonServiceConfig // {
+        ExecStart  = "${pkgs.bash}/bin/bash ${iwe}/DS-my-strategy/scripts/night-cycle-verify.sh day";
+        TimeoutSec = 300;
+      };
+      path = commonPath;
+      environment = commonEnv;
+    };
+
+    systemd.timers."iwe-night-cycle-verify-day" = {
+      wantedBy    = [ "timers.target" ];
+      description = "IWE Ночной верификатор (день) — ежедн 05:30 МСК";
+      timerConfig = {
+        OnCalendar = "*-*-* 05:30:00 Europe/Moscow";
+        Persistent = true;
+      };
+    };
+
+    systemd.services."iwe-night-cycle-verify-week" = {
+      description = "IWE — внешний верификатор ночного цикла (неделя)";
+      unitConfig   = commonUnitConfig;
+      serviceConfig = commonServiceConfig // {
+        ExecStart  = "${pkgs.bash}/bin/bash ${iwe}/DS-my-strategy/scripts/night-cycle-verify.sh week";
+        TimeoutSec = 300;
+      };
+      path = commonPath;
+      environment = commonEnv;
+    };
+
+    systemd.timers."iwe-night-cycle-verify-week" = {
+      wantedBy    = [ "timers.target" ];
+      description = "IWE Ночной верификатор (неделя) — ежедн 05:40 МСК";
+      timerConfig = {
+        OnCalendar = "*-*-* 05:40:00 Europe/Moscow";
+        Persistent = true;
+      };
+    };
+
+    # =========================================================
     # FAILURE ALERT — template service (iwe-failure-alert@.service)
     # =========================================================
     # Вызывается через OnFailure=iwe-failure-alert@%N.service от каждого IWE-сервиса.
