@@ -4,6 +4,7 @@ wp: NNN
 status: proposed   # proposed | accepted | superseded-by DR-MM | rejected
 created: YYYY-MM-DD
 basis: гипотеза      # гипотеза | расчёт | наблюдение — на чём основано решение (различение Claim из FPF)
+confidence_tier: черновик  # черновик | достаточно | проверено — насколько решение готово; опционально, гейт Шага 1.7 смотрит только на status+maps_to, это поле не блокирует
 maps_to: []          # куда ляжет решение: раздел SPF-структуры (напр. 01-domain-contract/01B-distinctions.md) или id паттерна (DP.D.NNN); ≥1 обязателен — гейт pack-creator Шаг 1.7
 archgate_profile: "" # опционально: ссылка на профиль ЭМОГССБ (archgate skill), если решение архитектурное; ArchGate ОЦЕНИВАЕТ, DR-запись ХРАНИТ и линкует — не дублировать оценку
 ---
