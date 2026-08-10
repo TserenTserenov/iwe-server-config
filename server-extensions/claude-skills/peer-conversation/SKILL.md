@@ -2,7 +2,7 @@
 name: peer-conversation
 description: Многотуровый диалог писателя (Claude) с одним или несколькими напарниками (любой набор из kimi/codex/hermes/claude-headless) по задаче пилота (DP.SC.154). Ведёт turn-loop (2 участника) или round-loop (3+, WP-509), обнаруживает CONSENSUS/ESCALATE, после консенсуса — Decision Gate (зафиксировать vs реализовать → ревью → проверить → задеплоить), синтезирует report.md через Agent tool.
 argument-hint: "<описание задачи> [--peer kimi|codex|hermes|claude[,vendor2,...]] | --list | --interrupt <session_id> | --finalize <session_id>"
-version: 1.5.6
+version: 1.5.7
 layer: L3
 status: active
 triggers:
@@ -411,6 +411,12 @@ fi
 # Same rule as in the round-loop below: an empty .err is noise, not evidence
 # (WP-481 F13).
 [ -s "${PEER_FILE%.md}.err" ] || rm -f "${PEER_FILE%.md}.err"
+# $PEER_FILE идёт через Bash-редирект, не через Write/Edit — scope gate
+# session-guard его не увидит и заблокирует коммит на Шаге 4.5.1 (найдено
+# 2026-08-10, сессия 2026-08-10-08-wp7-update-fatigue-community: блокировка
+# сразу на обоих peer-файлах сессии). Регистрируем сразу, не дожидаясь блока.
+bash "${IWE_SCRIPTS:-$HOME/IWE/scripts}/session-guard.sh" note-file "$PEER_FILE" \
+  --wp "<WP-NNN из Шага 0б>" --slug "$SESSION_ID" 2>/dev/null || true
 ```
 
 Если файл пустой или exit ≠ 0 → сообщить пилоту: «<PEER_VENDOR> не ответил. Повторить или прервать?»
@@ -555,6 +561,10 @@ fi
 # STATUS is captured so the cleanup cannot clobber the adapter's exit code.
 [ -s "${PEER_FILE%.md}.err" ] || rm -f "${PEER_FILE%.md}.err"
 rm -f "$PROMPT_FILE"
+# Тот же разрыв, что в турн-loop Шага 3.1 (найдено 2026-08-10) — $PEER_FILE
+# идёт через Bash-редирект, scope gate его не видит без явной регистрации.
+bash "${IWE_SCRIPTS:-$HOME/IWE/scripts}/session-guard.sh" note-file "$PEER_FILE" \
+  --wp "<WP-NNN из Шага 0б>" --slug "$SESSION_ID" 2>/dev/null || true
 ```
 
 **3р.1а Валидация реплики (WP-509)**
@@ -860,9 +870,11 @@ mv "$tmpf" "$SESSION_DIR/meta.yaml"
 ### 4.2 Синтез report-draft.md (не report.md — см. 4.2a)
 
 > **Архитектурное ограничение:** Claude-писатель использует Agent tool для синтеза, т.к. Claude может запустить субагента Sonnet внутри сессии. Kimi-писатель (скилл `/peer-writer`) вынужден использовать bash pipe через `claude-peer-adapter.sh`, т.к. Kimi не имеет доступа к Claude Agent tool. Это осознанное различие, а не дрейф.
+>
+> **Субагент не пишет файл сам (найдено 2026-08-10, сессия `2026-08-10-08-wp7-update-fatigue-community`).** Платформенный guardrail блокирует `Write` у субагентов безусловно — это не временный сбой и не зависит от промпта, повтор `--finalize` не поможет. Субагент возвращает готовый текст отчёта как свой финальный ответ; файл пишет писатель (главный агент) сам.
 
-Запустить субагент через Agent tool (Sonnet, context isolation).
-**Fallback:** если `report-draft.md` не создан или пустой после завершения субагента — записать заглушку (Write):
+Запустить субагент через Agent tool (Sonnet, context isolation) — промпт ниже прямо требует вернуть текст, не писать файл.
+**Fallback:** если субагент вернул пустой текст, текст короче нескольких строк, или текст не начинается с `schema_version:` во frontmatter — синтез не удался (не пытаться отличить «недоступен» от «вернул мусор», причина неважна для дальнейшего шага). Писатель сам записывает заглушку (Write) в `report-draft.md`:
 
 ```markdown
 ---
@@ -925,8 +937,11 @@ extensions:
 Прочитай все файлы реплик в <SESSION_DIR> (00-writer.md, затем 01-peer.md.../01-peer-<vendor>.md... — в порядке нумерации, при PEER_COUNT>=2 несколько файлов на один номер раунда, читать все) в порядке нумерации.
 Если в папке есть `_outcome.md` — прочитай его, он обязателен для §6.
 Если есть review-NN.md / verify-NN.md — включи как якоря в §5/§6.
-Напиши <SESSION_DIR>/report.md строго по схеме ниже.
-Не оборачивай в ```markdown``` — пиши markdown напрямую.
+У тебя НЕТ доступа к Write — не пытайся создать файл. Верни готовый текст отчёта
+целиком строго по схеме ниже как свой финальный ответ (это и есть механизм
+доставки — вызывающий агент сам запишет то, что ты вернёшь, в report-draft.md).
+Не оборачивай в ```markdown``` — пиши markdown напрямую, это единственное, что
+должно быть в твоём ответе (без предисловий вида «вот отчёт:»).
 Инвариант: result_class=agreed → §4 непустой; not-agreed → §4 = «Консенсус не достигнут».
 Verify-якоря обязательны для код-ссылок (file:line-range). Теги [synthesized] в §4.
 
@@ -947,8 +962,6 @@ cost_source: api | estimated | missing
 ---
 
 # Итоговый отчёт
-
-## Algorithm
 
 ## 1. Исходная постановка
 - **Задача:** <цитата из задания пилота, дословно>
@@ -1001,6 +1014,12 @@ Omit если `implementation_pipeline: false` в meta.yaml.
 - **Передача write token** (только при PEER_COUNT>=2 и непустом `meta.yaml.handoff_history`): раунд → от кого → к кому → причина, по каждой записи — omit если пусто
 - **Стоимость:** $X (источник: api / estimated / missing) — omit если missing
 ```
+
+Субагент вернул этот текст как финальный ответ (Agent tool без schema возвращает
+его напрямую строкой) — прочитать этот ответ и применить fallback-критерий выше.
+Прошёл проверку → записать (Write) как есть в `${SESSION_DIR}/report-draft.md`.
+Не прошёл → записать заглушку из fallback вместо него. В обоих случаях пишет
+писатель, не субагент.
 
 ### 4.3 Обновить sessions/00-index.md
 

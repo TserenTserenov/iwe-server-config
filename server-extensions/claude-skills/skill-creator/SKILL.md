@@ -6,7 +6,7 @@ description: |
   The skill enforces WP Gate precondition, Routing Gate, IntegrationGate hard-check,
   collects parameters in 4 short steps, generates a scaffold SKILL.md from a template,
   shows a draft, writes files, and reminds about verify-skill.sh.
-version: 0.3.2
+version: 0.4.0
 status: experimental
 layer: L1
 agents: single
@@ -185,6 +185,26 @@ Both commands must pass before the skill is considered created.
 For skills with `interaction: multi-step`: run `/vdv audit` on the Algorithm section.
 Not a gate — does not block creation — but catches steps with missing Input/Output linkage
 before the skill is used in practice.
+
+### Step 7.5 — RSI observation log (WP-516 Ф1, non-blocking)
+
+After Step 7 completes (skill created or updated), append one entry to
+`${IWE_GOVERNANCE_REPO:-DS-strategy}/machine/rsi-observation-log.yaml`:
+
+```yaml
+- date: <YYYY-MM-DD>
+  skill: <name>
+  mode: created | updated
+  prior_lesson_used: <what earlier skill-creator lesson, if any, shaped this run — or "нет">
+  mechanism_changed: <did this run change skill-creator itself — template, scaffold, verify-skill.sh, this SKILL.md — or "нет, только продукт">
+  cost_note: <one line, faster/slower/same vs the last comparable run, if observable — or "нет данных">
+```
+
+Reminder only, not a gate: if the log file is missing, create it with one entry; if
+logging feels forced or the run doesn't fit the schema, skip silently. This is raw
+material for WP-516's 4-condition test (`.claude/process-pattern-catalog.yaml` →
+`RecursionClosesIntoMechanism`), not a verdict — one entry never proves or disproves
+recursive self-improvement on its own.
 
 ## Bundled resources
 
