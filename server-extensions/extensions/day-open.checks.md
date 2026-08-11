@@ -683,7 +683,7 @@ if ! grep -qE "^phys_hours:" "$PRIO" 2>/dev/null; then
   echo "       Исправь: добавь 'phys_hours: N' (реалистичная оценка часов на сегодня, потолок пилота — 9ч) в priorities.yaml"
   exit 1
 fi
-H_PHYS=$(grep -oE '~[0-9.]+h физ' "$FILE" 2>/dev/null | grep -oE '[0-9.]+' | head -1)
+H_PHYS=$(grep -oE '~[0-9.]+h физ|Физ: ?[0-9.]+h' "$FILE" 2>/dev/null | grep -oE '[0-9.]+' | head -1 || true)
 if [ -n "$H_PHYS" ]; then
   OVER=$(awk -v h="$H_PHYS" 'BEGIN{print (h>14)?1:0}')
   if [ "$OVER" = "1" ]; then
