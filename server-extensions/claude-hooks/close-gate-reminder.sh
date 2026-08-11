@@ -140,9 +140,14 @@ _record_close_intent() {
   # первого (найдено code review 2026-08-11: "рефлексия: ... закрывай ... а
   # сейчас просто закрывай" терял всю рефлексию, обрезая после второго
   # повтора). match() находит первое вхождение по конструкции.
+  # WP-520 case 7 adjacent gap (11.08, peer session with Kimi): the broad branch
+  # ("заливай"/"запуши") armed the obligation but never recorded the intent tail,
+  # so "заливай, рефлексия — X" lost the reflection. Same recorder, per-branch
+  # trigger alternation passed as $1 (defaults to the close-trigger set).
+  local trigger_re="${1:-[Зз]акрыва[йю]|[Зз]акрой}"
   local tail
-  tail=$(printf '%s' "$PROMPT_ORIGINAL_CASE" | awk '
-    match($0, /[Зз]акрыва[йю]|[Зз]акрой/) {
+  tail=$(printf '%s' "$PROMPT_ORIGINAL_CASE" | awk -v re="$trigger_re" '
+    match($0, re) {
       print substr($0, RSTART + RLENGTH)
       exit
     }
@@ -169,6 +174,7 @@ fi
 
 if echo "$PROMPT" | grep -qE '(заливай|запуши|запушь)'; then
   _arm_and_sentinel warn "1"
+  _record_close_intent '[Зз]алива[йю]|[Зз]апуш[иь]'
 
   cat <<'EOF'
 {"additionalContext": "⚠️ ПРЕДУПРЕЖДЕНИЕ (Ф74б): похоже, ты упомянул push/заливку. Если это попытка закрыть сессию — Session Close выполняется ТОЛЬКО через skill /run-protocol с аргументом 'close'. ПЕРВОЕ действие = вызвать Skill tool: skill='run-protocol', args='close'. НЕ выполнять шаги самостоятельно. Обязательство закрытия зафиксировано в режиме warn: при отсутствии карточки RUN-quick-close Stop-гейт выдаст предупреждение. Если это не close — скажи явно, и sentinel будет снят."}

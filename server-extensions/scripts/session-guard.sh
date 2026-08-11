@@ -537,8 +537,28 @@ validate_orz() {
   local rel
   rel="$(python3 -c "import os,sys; print(os.path.relpath(sys.argv[2], sys.argv[3]))" -- "$orz" "$ORZ_DIR")"
   if ! git -C "$ORZ_DIR" ls-files --error-unmatch "$rel" >/dev/null 2>&1; then
-    echo "  ❌ ORZ-файл не добавлен в git index (git add $rel)" >&2
-    errors=$((errors + 1))
+    # WP-520 case 8 (11.08, peer session with Kimi): a session whose commit went
+    # to main through an isolated worktree cannot stage the file in the live
+    # checkout (busy on a foreign branch) -- session-guard-release inside the
+    # runner hit exactly this refusal (release log 17:08Z, WP-523 run). A file
+    # present in ANY published remote-tracking ref is a strictly stronger proof
+    # than a staged-only file: accept it as the index-equivalent. The ":./"
+    # prefix keeps the path relative to ORZ_DIR, matching how rel was built.
+    local published_ref=""
+    local remote_ref
+    while IFS= read -r remote_ref; do
+      [ -z "$remote_ref" ] && continue
+      if git -C "$ORZ_DIR" cat-file -e "$remote_ref:./$rel" 2>/dev/null; then
+        published_ref="$remote_ref"
+        break
+      fi
+    done <<< "$(git -C "$ORZ_DIR" for-each-ref --format='%(refname)' refs/remotes 2>/dev/null)"
+    if [ -n "$published_ref" ]; then
+      echo "  ✓ ORZ-файл не в git index, но найден в опубликованном ref '$published_ref' — принят как эквивалент" >&2
+    else
+      echo "  ❌ ORZ-файл не добавлен в git index (git add $rel) и не найден ни в одном refs/remotes/*" >&2
+      errors=$((errors + 1))
+    fi
   fi
 
   return $errors
@@ -549,6 +569,23 @@ validate_orz() {
 # not prove that all files written by the session made it into a commit.  In a
 # shared checkout, removing the semaphore first lets the sync timer rebase over
 # that residue or turn it into a chronic dirty-tree alert.
+# WP-520 case 8 (11.08, peer session with Kimi): the isolated-worktree flow
+# commits session files to main while the live checkout sits on a foreign
+# branch -- an identical untracked copy stays behind and used to block close as
+# "uncommitted work". Content-identical to a published remote blob means the
+# work is already safe; any difference stays a blocker (fail-closed).
+_untracked_matches_published() { # <repo> <root-relative path> — 0 if an identical blob exists in refs/remotes/*
+  local repo="$1" rel="$2" ref
+  while IFS= read -r ref; do
+    [ -z "$ref" ] && continue
+    if git -C "$repo" cat-file -e "$ref:$rel" 2>/dev/null &&
+       git -C "$repo" cat-file blob "$ref:$rel" 2>/dev/null | cmp -s - "$repo/$rel"; then
+      return 0
+    fi
+  done <<< "$(git -C "$repo" for-each-ref --format='%(refname)' refs/remotes 2>/dev/null)"
+  return 1
+}
+
 session_scope_dirty_paths() { # <semaphore> — prints only dirty registered paths
   local semaphore="$1" registered_path status
   while IFS= read -r registered_path; do
@@ -558,6 +595,11 @@ session_scope_dirty_paths() { # <semaphore> — prints only dirty registered pat
     [ -z "$status" ] && continue
     while IFS= read -r status_line; do
       [ -n "$status_line" ] || continue
+      case "$status_line" in
+        "?? "*)
+          _untracked_matches_published "$(dirname "$ORZ_DIR")" "${status_line#'?? '}" && continue
+          ;;
+      esac
       printf '  %s: %s\n' "$registered_path" "$status_line"
     done <<< "$status"
   done < <(grep '^file: ' "$semaphore" | sort -u)
@@ -689,13 +731,24 @@ print(json.dumps({"wp": sys.argv[1], "slug": sys.argv[2], "agent": sys.argv[3], 
   # висят до чужого стороннего `start quick-close`, упёршегося в лимит
   # (единственный триггер reap_orphan_cards в process-runner.py), что может
   # не наступить никогда. --exclude только для happy-path RUNNER_OK: он
-  # completed. Force-путь ($FORCED_CARD) не completed — отменяется наравне
-  # с остальными брошенными прогонами этой сессии, не исключается.
+  # completed.
   if [ -z "${FORCED_CARD:-}" ]; then
     EXCLUDE_RUN_ID=$(grep "^run_id: " "$RUNNER_OK" | head -1 | cut -d' ' -f2- || true)
     python3 "$IWE_ROOT/$GOV_REPO/scripts/process-runner.py" cancel-session quick-close "$SESSION_ID" \
       --exclude "$EXCLUDE_RUN_ID" 2>&1 || echo "cancel-session (happy path) не прошёл — брошенные прогоны, если есть, останутся до планового reap-orphans" >&2
   else
+    # WP-520 (11.08, peer session with Kimi, stuck-dashboard-cards case):
+    # cancel-session matches by owner_session_id, which is null for cards
+    # started without a harness mapping (Kimi CLI) -- it can never cancel the
+    # accepted card, and the card then sits `waiting` on the dashboard until a
+    # foreign `start quick-close` or manual cleanup. The accepted card's run_id
+    # is known right here: cancel it by address first, keep cancel-session as
+    # the sweep for runs that do carry a real owner_session_id.
+    FORCED_RUN_ID=$(grep "^run_id: " "$FORCED_CARD" | head -1 | cut -d' ' -f2- || true)
+    if [ -n "$FORCED_RUN_ID" ]; then
+      python3 "$IWE_ROOT/$GOV_REPO/scripts/process-runner.py" cancel "$FORCED_RUN_ID" \
+        2>&1 || echo "адресный cancel принятой карточки ($FORCED_RUN_ID) не прошёл — карточка останется waiting до планового reap-orphans" >&2
+    fi
     python3 "$IWE_ROOT/$GOV_REPO/scripts/process-runner.py" cancel-session quick-close "$SESSION_ID" \
       2>&1 || echo "cancel-session (force path) не прошёл — брошенные прогоны, если есть, останутся до планового reap-orphans" >&2
   fi
