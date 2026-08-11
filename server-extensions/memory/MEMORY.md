@@ -1,7 +1,6 @@
 # Оперативная память
 
-> **Инструкции:** `~/IWE/CLAUDE.md` | **Навигация:** `memory/navigation.md` | **Source-of-truth:** `DP.EXOCORTEX.001`
-> **Слои:** L1 = платформа. L2 = staging. L3 = авторское.
+> **Инструкции:** `~/IWE/CLAUDE.md` | **Навигация:** `memory/navigation.md` | **SoT:** `DP.EXOCORTEX.001` | Слои: L1 платформа · L2 staging · L3 авторское.
 
 ## БЛОКИРУЮЩИЕ (проверяй ВСЕГДА)
 
@@ -30,6 +29,7 @@
 
 | WP | ст | P | Название | next (≤10 слов) |
 |-----|----|----|----------|----------------|
+| 520 | 🔄 | P2 | Новая версия конвейера закрытия сессии | 11.08: Ф2-уборка+Ф3+Ф4-ядро в проде (пир Codex); area после аудита |
 | 516 | 🔄 | P2 | Контур самоулучшения IWE | Ф2 закрыта 10.08 (6 кандидатов, 0 прошли); next Ф3 — АрхГейт с развилкой из РП481 |
 | 500 | 🔄 | P2 | Аудит IWE: безопасность, токены, SOTA — разбор находок | Ф1-Ф21 не начат — начать с Ф1 |
 | 503 | 🔄 | P1 | Умный конвейер РП | АрхГейт ledger-sync решён (05.08, пир+Codex): lock+publisher; реализация+smoke-тест впереди; токен поллера всё ещё за пилотом |
@@ -105,10 +105,7 @@
 
 > **Pilot-First:** только `pilot`, никогда `new-architecture` первым. Backport = долетело и до `pilot`.
 > **Railway MCP:** `peaceful-vision`; `lavish-delight` не трогать. Автодеплой на push. БД/LLM-прокси: [reference-prod-bot-db-access.md](reference-prod-bot-db-access.md), [reference_llm_proxy_railway_project.md](reference_llm_proxy_railway_project.md)
-
-## Read-only репо
-
-> ⛔ **DS-IT-systems/SystemsSchool_bot**, **DS-IT-systems/aisystant**.
+> ⛔ **Read-only репо:** DS-IT-systems/SystemsSchool_bot, DS-IT-systems/aisystant.
 
 ---
 
@@ -118,44 +115,25 @@
 
 ### Project — HOT
 
-- [project_strategy_session_nep_hypothesis_tracing_gap.md](project_strategy_session_nep_hypothesis_tracing_gap.md) — 10.08: стратегирование не до конца учитывает неудовлетворённости+журнал гипотез при сборке WeekPlan — шаги 06a/06c кандидаты на доработку
-- [project_ledger_day_file_recurring_stash_corruption.md](project_ledger_day_file_recurring_stash_corruption.md) — 10.08: дневной ledger-YAML закоммичен с литеральными конфликт-маркерами 3 раза за день — причина не найдена, кандидат в РП-7
-- [project_feed_digest_timeout_vitaly_fixed.md](project_feed_digest_timeout_vitaly_fixed.md) — 10.08: тайм-аут дайджеста Ленты — найден, исправлен PR #301, задеплоен, пользователь разблокирован
-- [project_wp484_chronic_weekplan_failure_pilot_dissatisfaction.md](project_wp484_chronic_weekplan_failure_pilot_dissatisfaction.md) — 10.08: пилот назвал РП484 «узким горлышком» — план недели не собирался автоматом весь месяц
+- [project_ledger_day_file_recurring_stash_corruption.md](project_ledger_day_file_recurring_stash_corruption.md) — 10.08: дневной ledger-YAML закоммичен с литеральными конфликт-маркерами 3 раза за день — причина не найдена, кандидат в РП-7; 11.08 союз-мердж двух хвостов прошёл чисто (python union + полная валидация)
 - [project_iwe_local_config_is_pipeline_source.md](project_iwe_local_config_is_pipeline_source.md) — 09.08: `~/IWE` = iwe-local-config, конвейер → rsync 2ч → iwe-server-config → сервер; правка напрямую в сервер-репо затирается тиком
 - [project_memory_repo_has_no_remote.md](project_memory_repo_has_no_remote.md) — 09.08: `memory/` без git-remote с создания, резервной копии нет — решение пилота отложено, не переоткрывать
-- [project_tsekh1_deploy_is_automated_not_manual.md](project_tsekh1_deploy_is_automated_not_manual.md) — 08.08: push в iwe-server-config сам деплоит на tsekh-1 — проверять `gh run list`, не писать «доставка не выполнена» вслепую
-- [project_codex_peer_reliability_watch.md](project_codex_peer_reliability_watch.md) — 05.08: пилот отметил, что Codex-напарник игнорирует инструкции — открытое наблюдение, копить примеры
-- [project_day_open_blocked_since_20260809_staged_uncommitted.md](project_day_open_blocked_since_20260809_staged_uncommitted.md) — РЕШЕНО 11.08: regex+set-e/pipefail баг в проверке «физ» бюджета, фикс задеплоен, ретрай на tsekh-1 зелёный
 - [project_tsekh1_chronic_git_sync_and_concurrent_agents.md](project_tsekh1_chronic_git_sync_and_concurrent_agents.md) — 08-10.08 РП484 Ф77/Ф79: корневой фикс autostash→git-dirty-guard задеплоен; живой рецидив «cannot cd» найден, не исправлен
-- [project_ds_my_strategy_stash_pop_120_files_pending.md](project_ds_my_strategy_stash_pop_120_files_pending.md) — 09-10.08: ~84 файла вне WP-149 ещё расходятся с HEAD, не срочно; коммит тут — только explicit pathspec (живая гонка индекса)
+- [project_ds_my_strategy_stash_pop_120_files_pending.md](project_ds_my_strategy_stash_pop_120_files_pending.md) — 09-11.08: чекаут DS-my-strategy живёт на чужих ветках/с чужим staged — коммит только explicit pathspec, в main через worktree+cherry-pick; ~84 файла расходятся с HEAD
 
 ### Feedback — HOT
 
-- [lessons_peer_review_catches_event_vs_time_reap_conflation.md](lessons_peer_review_catches_event_vs_time_reap_conflation.md) — 11.08: «X уже покрывает Y по времени» — проверять построчно, что реально триггерит X, не полагаться на имя/впечатление (Codex поймал: Level 2 stale_age тоже событийный, не таймер)
-- [lessons_check_prior_decisions_before_fresh_archgate.md](lessons_check_prior_decisions_before_fresh_archgate.md) — 11.08: пир-сессия+АрхГейт по гонке сессий (WP-484) одобрены пилотом, ПОТОМ нашёл — тот же вопрос уже отклонён 5 дней назад (Ф59) с двумя возражениями, не пересмотренными
-- [lessons_quick_close_ai_contract_output_must_be_bare_enum.md](lessons_quick_close_ai_contract_output_must_be_bare_enum.md) — 10.08: R23-подобные шаги хотят голый литерал в output-поле, обоснование — отдельным сообщением
-- [lessons_bash_cwd_drift_breaks_relative_cd_scripts.md](lessons_bash_cwd_drift_breaks_relative_cd_scripts.md) — 10.08: iwe-safe-pull.sh падает, если cwd уже внутри `<repo>` — cd ~/IWE и повторить
-- [lessons_residency_gate_check_activation_auto_grants_from_blanket_pregrant.md](lessons_residency_gate_check_activation_auto_grants_from_blanket_pregrant.md) — 10.08: check_activation молча авто-грантит из blanket pre-grant — новый потребитель данных → check_lazy
-- [lessons_close_runner_gate_override_needs_sentinel_rm_too.md](lessons_close_runner_gate_override_needs_sentinel_rm_too.md) — 10.08: close-override снимает obligation, но не sentinel-файл `/tmp/iwe-close-intent/` — чистить отдельно
-- [lessons_verify_plan_against_live_portfolio_not_just_text.md](lessons_verify_plan_against_live_portfolio_not_just_text.md) — 10.08: сводный план сверять с живыми карточками РП, не перечитыванием своего текста
-- [feedback_i_dont_know_do_it_systemically.md](feedback_i_dont_know_do_it_systemically.md) — 10.08: «не знаю, сделай системно» = делегирование с требованием качества, не индифферентность
-- [lessons_git_conflict_marker_region_not_whole_story.md](lessons_git_conflict_marker_region_not_whole_story.md) — 09.08: 3-way merge молча удаляет строки за пределами конфликт-меток — сверять весь файл
-- [lessons_stale_uncommitted_work_is_rescuable_not_untouchable.md](lessons_stale_uncommitted_work_is_rescuable_not_untouchable.md) — 09.08: старое незакоммиченное (mtime>1д+нет процесса+чужой origin не трогал) → коммит безопасен
-- [lessons_session_guard_semaphore_backlog_blocks_any_commit.md](lessons_session_guard_semaphore_backlog_blocks_any_commit.md) — 09.08: стейл-семафоры могут ронять push на случайном файле — чистка кандидат в РП-7
-- [lessons_gitignored_artifacts_lost_on_reclone_check_reflog.md](lessons_gitignored_artifacts_lost_on_reclone_check_reflog.md) — 09.08: «файл пропал» → сначала .gitignore+git reflog, не файловый поиск по диску
-- [lessons_git_checkout_shared_worktree_risk.md](lessons_git_checkout_shared_worktree_risk.md) — 08.08: `git checkout -- .` в общей директории может стереть чужие правки — не в одной цепочке с discard
-- [lessons_sync_core_partial_rule_coverage.md](lessons_sync_core_partial_rule_coverage.md) — 08.08: AGENTS.md покрывает только 6 из 9 блокирующих правил CLAUDE.md §2
-- [lessons_run_card_frozen_after_force_no_reflection.md](lessons_run_card_frozen_after_force_no_reflection.md) — 08.08: карточка после --force-no-reflection зависает по дизайну — факт закрытия смотреть в ledger
-- [feedback_no_repeated_ritual_prompts.md](feedback_no_repeated_ritual_prompts.md) — 07.08: механические «скажи ок» поглощать самому, свою ошибку не превращать в просьбу к пилоту
-- [feedback_scope_full_fix_not_incremental_when_pattern_known.md](feedback_scope_full_fix_not_incremental_when_pattern_known.md) — 07.08: системный класс бага → чинить все места сразу, не оставлять остаток
-- [feedback_formal_close_never_silently_incomplete.md](feedback_formal_close_never_silently_incomplete.md) — 07.08: содержание закрыто ≠ ритуал закрыт — говорить об этом в первом «готово»
-- [lessons_ssh_heredoc_backtick_local_expansion.md](lessons_ssh_heredoc_backtick_local_expansion.md) — 07.08: бэктики в heredoc внутри ssh раскрываются ЛОКАЛЬНО — писать во временный файл
-- [lessons_check_live_diff_before_parallel_infra_fix.md](lessons_check_live_diff_before_parallel_infra_fix.md) — 04-09.08: сверить живой git diff перед правкой общего файла; контестирована ветка → изолированный worktree
+- [lessons_peer_session_found_same_day_earlier_fix_only_half_deployed.md](lessons_peer_session_found_same_day_earlier_fix_only_half_deployed.md) — 11.08: перед разбором хронической жалобы пилота — проверить журнал сессий за день, не решалась ли она уже (утренняя сессия решила гонку закрытия только на Claude-стороне)
+- [lessons_peer_review_catches_event_vs_time_reap_conflation.md](lessons_peer_review_catches_event_vs_time_reap_conflation.md) — 11.08: «X уже покрывает Y» — проверять построчно, что реально триггерит X, не полагаться на имя/впечатление
+- [lessons_check_prior_decisions_before_fresh_archgate.md](lessons_check_prior_decisions_before_fresh_archgate.md) — 11.08: перед новым АрхГейтом проверить, не отклонялся ли тот же вопрос раньше (Ф59-прецедент)
+- [lessons_bash_set_e_pipefail_silent_death_on_empty_grep.md](lessons_bash_set_e_pipefail_silent_death_on_empty_grep.md) — 11.08: `VAR=$(pipeline)` под set-e+pipefail молча умирает на пустом grep — добавлять `\|\| true`
+- [lessons_session_guard_notefile_ambiguous_multi_semaphore.md](lessons_session_guard_notefile_ambiguous_multi_semaphore.md) — 11.08: note-file при 2+ семафорах агента отказывает fail-closed, `\|\| true` глушит отказ — файлы вне scope, гейт валит коммит без имён; регистрация напрямую в свой семафор
 - [lessons_bare_git_commit_can_grab_concurrent_session_staged_file.md](lessons_bare_git_commit_can_grab_concurrent_session_staged_file.md) — 10.08: pathspec на commit не защищает git add — restore+add+commit одним вызовом
 - [lessons_codex_exec_unreliable_citation_audits.md](lessons_codex_exec_unreliable_citation_audits.md) — 10.08: codex exec галлюцинирует цитаты в аудитах точного текста — верифицировать перед доверием
-- [lessons_bash_set_e_pipefail_silent_death_on_empty_grep.md](lessons_bash_set_e_pipefail_silent_death_on_empty_grep.md) — 11.08: `VAR=$(pipeline)` под set-e+pipefail молча умирает на пустом grep — добавлять `\|\| true`
+- [lessons_check_live_diff_before_parallel_infra_fix.md](lessons_check_live_diff_before_parallel_infra_fix.md) — 04-11.08: сверить живой git diff И ТЕКУЩУЮ ВЕТКУ перед правкой общего файла; контестирована ветка → изолированный worktree (11.08: коммит сел на чужую ветку — cherry-pick в main + CAS-возврат ветки)
+- [feedback_scope_full_fix_not_incremental_when_pattern_known.md](feedback_scope_full_fix_not_incremental_when_pattern_known.md) — 07.08: системный класс бага → чинить все места сразу, не оставлять остаток
+- [feedback_formal_close_never_silently_incomplete.md](feedback_formal_close_never_silently_incomplete.md) — 07.08: содержание закрыто ≠ ритуал закрыт — говорить об этом в первом «готово»
 - [routing-vocab.md](routing-vocab.md) — фраза → путь, читать ПЕРЕД Write
 - [feedback_response_clarity_for_pilot.md](feedback_response_clarity_for_pilot.md) — A1-A11 правила ответа
 - [user_tseren_personal_life.md](user_tseren_personal_life.md) — Tseren (НЕ Дмитрий), Кипр
-- Остальные уроки/hubs (73 шт., demoted 28.07+30.07+04.08+09.08) → [MEMORY-warm.md](MEMORY-warm.md)
+- Остальные уроки/hubs (94 шт., demoted 28.07+30.07+04.08+09.08+11.08) → [MEMORY-warm.md](MEMORY-warm.md)

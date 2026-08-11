@@ -625,6 +625,26 @@ if [ "$CMD" = "close" ]; then
     break
   done
 
+  # WP-520 Ф4 (2026-08-11, пир-сессия с Codex; review-01 «deadlock by
+  # construction»): close вызывается и ИЗНУТРИ раннера — шаг session-guard-release
+  # исполняется до того, как карточка физически может стать completed. Узкий
+  # carve-out той же формы, что force-no-reflection ниже: карточка доказывает,
+  # что прогон именно quick-close дошёл до самого release-шага (current_step) и
+  # прошёл верификацию чеклиста (непустой verdict) — любое другое промежуточное
+  # состояние по-прежнему отказ.
+  if [ -z "$RUNNER_OK" ]; then
+    for card in $RUNNER_CARD; do
+      [ -f "$card" ] || continue
+      grep -q '^process_id: quick-close$' "$card" || continue
+      grep -q '^current_step: session-guard-release$' "$card" || continue
+      grep -qE '^[[:space:]]*verdict:[[:space:]]*[^[:space:]]' "$card" || continue
+      # yaml-пустышки (null/~/'') матчатся паттерном выше — отсечь отдельно
+      grep -qE '^[[:space:]]*verdict:[[:space:]]*(null|~|""|'\'\'')[[:space:]]*$' "$card" && continue
+      RUNNER_OK="$card"
+      break
+    done
+  fi
+
   # --force-no-reflection (WP-484, 08.08, пилот): рефлексия про настроение дня
   # блокирует close, даже когда содержательная работа (commit+push) уже
   # подтверждена картой раннера — живой разбор показал, что вопрос рефлексии
