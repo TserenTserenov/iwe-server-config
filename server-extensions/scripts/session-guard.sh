@@ -657,6 +657,22 @@ print(json.dumps({"wp": sys.argv[1], "slug": sys.argv[2], "agent": sys.argv[3], 
     fail "Quick Close не завершён для slug '$SLUG': нет terminal RUN-quick-close-${SLUG}*.md. Сначала запусти process-runner.py start quick-close с тем же --slug." 7
   fi
 
+  # WP-484 Ф87 (пир-сессия с Codex, 11.08): подчистить чужие незавершённые
+  # прогоны ЭТОЙ сессии перед тем, как объявить close успешным — иначе они
+  # висят до чужого стороннего `start quick-close`, упёршегося в лимит
+  # (единственный триггер reap_orphan_cards в process-runner.py), что может
+  # не наступить никогда. --exclude только для happy-path RUNNER_OK: он
+  # completed. Force-путь ($FORCED_CARD) не completed — отменяется наравне
+  # с остальными брошенными прогонами этой сессии, не исключается.
+  if [ -z "${FORCED_CARD:-}" ]; then
+    EXCLUDE_RUN_ID=$(grep "^run_id: " "$RUNNER_OK" | head -1 | cut -d' ' -f2- || true)
+    python3 "$IWE_ROOT/$GOV_REPO/scripts/process-runner.py" cancel-session quick-close "$SESSION_ID" \
+      --exclude "$EXCLUDE_RUN_ID" 2>&1 || echo "cancel-session (happy path) не прошёл — брошенные прогоны, если есть, останутся до планового reap-orphans" >&2
+  else
+    python3 "$IWE_ROOT/$GOV_REPO/scripts/process-runner.py" cancel-session quick-close "$SESSION_ID" \
+      2>&1 || echo "cancel-session (force path) не прошёл — брошенные прогоны, если есть, останутся до планового reap-orphans" >&2
+  fi
+
   # agent status idle
   if [ -x "$AGENT_STATUS_SCRIPT" ]; then
     "$AGENT_STATUS_SCRIPT" --session-id "$SESSION_ID" --personality "$PERSONALITY_FROM_SEM" \

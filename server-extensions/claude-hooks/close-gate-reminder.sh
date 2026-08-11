@@ -114,6 +114,15 @@ _arm_and_sentinel() {
 # vs "это ещё одно поручение" — та классификация ненадёжна регэкспом на
 # свободном тексте (обсуждалось и отклонено в самой сессии). Пустой хвост —
 # тоже валидный факт (голое "закрывай"), не ошибка.
+#
+# skip_reflection (2026-08-11, прямое поручение пилота в этой же сессии,
+# сразу после консенсуса выше): "закрывай без рефлексии" — ОТДЕЛЬНЫЙ явный
+# сигнал, не то же самое, что tail_present=true с raw_text="без рефлексии".
+# Разница для пилота: raw_text показывается ЕМУ ЖЕ обратно как "записал: ...",
+# а skip_reflection означает "не показывай мне ничего про рефлексию вообще,
+# сразу к «ты свободен»" — команда пропуска, не содержание для записи.
+# Проверяется НЕЗАВИСИМО от tail_present: команда может стоять где угодно
+# в хвосте фразы, не обязательно быть всем хвостом целиком.
 _record_close_intent() {
   if ! _obligation_available; then
     return 0
@@ -133,7 +142,13 @@ _record_close_intent() {
       exit
     }
   ' | sed -E 's/^[[:space:],.:;-]+//')
-  python3 "$OBLIGATION_CLI" record-intent --session-id "$SESSION_ID" --raw-text "$tail" >/dev/null 2>&1 || \
+
+  local skip_reflection="false"
+  if echo "$PROMPT" | grep -qE '(без рефлекси|не спрашивай.{0,15}рефлекси|пропусти.{0,15}рефлекси)'; then
+    skip_reflection="true"
+  fi
+
+  python3 "$OBLIGATION_CLI" record-intent --session-id "$SESSION_ID" --raw-text "$tail" --skip-reflection "$skip_reflection" >/dev/null 2>&1 || \
     echo "[close-gate-reminder] session=$SESSION_ID record-intent failed (non-fatal — render falls back to interactive path)" >&2
 }
 
