@@ -840,8 +840,16 @@ in
       unitConfig   = commonUnitConfig;
       serviceConfig = commonServiceConfig // {
         # 2026-08-10 (директива пилота, WP-149 п.4): см. пометку у weekly-сервиса выше.
+        # 2026-08-11 (bug-2026-08-11-daily-render-timeout-team-rollout, WP-149): 600с
+        # хватало на батч из 1 пилота (~2 мин), но первый же прогон на реальном
+        # многопилотном ростере (9 записей) упёрся в лимит и убил процесс, не дойдя
+        # до TserenTserenov — поднято до 1800 (как у weekly-сервиса, тот же батч,
+        # тот же профиль нагрузки). Владелец платформы дополнительно защищён
+        # ORDER BY-приоритетом в load_pilots_from_db(). Временный пластырь: лимит
+        # снова не выдержит рост ростера — постоянное решение (масштабирование
+        # таймаута/юнитов на пилота) см. acceptance criteria в баг-файле.
         ExecStart  = "${pythonForIWE}/bin/python3 ${iwe}/DS-autonomous-agents/scripts/render-pilot-guides.py --daily";
-        TimeoutSec = 600;
+        TimeoutSec = 1800;
       };
       path = commonPath;
       environment = commonEnv;
