@@ -23,7 +23,7 @@ gates_rationale: "операционный скилл; WP Gate применим 
 Задача: $ARGUMENTS
 
 > **Архитектура:** я (Claude) = писатель всегда (Skill tool доступен только мне в этой сессии). Напарник(и) — параметр `--peer` (default `kimi`), список из одного или нескольких зарегистрированных вендоров (§0в). При 2+ напарниках (N>2 участников целиком) — расширение WP-509, см. §0в и §3р.
-> Каждый напарник вызывается через свой `<vendor>-peer-adapter.sh` напрямую — Bash tool, stdin pipe. Контракт одинаковый у всех: stdin = промпт, stdout = реплика, exit 0-5 (см. §0в). **Напарнику запрещено писать файлы своими инструментами внутри `SESSION_DIR`** — только stdout (гонка file-write vs stdout-capture портит журнал, найдено WP-509 2026-07-30).
+> Каждый напарник вызывается через свой `<vendor>-peer-adapter.sh` напрямую — Bash tool, stdin pipe. Контракт одинаковый у всех: stdin = промпт, stdout = реплика, exit 0-7 (см. §0в). **Напарнику запрещено писать файлы своими инструментами внутри `SESSION_DIR`** — только stdout (гонка file-write vs stdout-capture портит журнал, найдено WP-509 2026-07-30).
 > `list_peer_statuses` (Local Gateway) — координация файлов, **не** проверка доступности напарника CLI.
 > Gateway offline ≠ напарник недоступен.
 
@@ -68,7 +68,19 @@ gates_rationale: "операционный скилл; WP Gate применим 
 
 Каждый элемент `PEER_VENDORS` валидировать отдельно. Неизвестный `PEER_VENDOR` в списке → СТОП **на этом элементе, не на всём списке**: сообщить пилоту, какой конкретно vendor не распознан («Напарник `<vendor>` не зарегистрирован. Известные: kimi, codex, hermes, claude.»), предложить продолжить с оставшимися распознанными или прервать целиком. Добавление нового вендора — правка таблицы выше + написание `<vendor>-peer-adapter.sh` по контракту §0в.1.
 
-**§0в.1 Общий контракт адаптера** (для добавления нового вендора): stdin = полный промпт хода (Bash pipe, не inline `echo` — inline попадает в командную строку и хук B7.7c может ложно заблокировать повторные вызовы); stdout = одна реплика с frontmatter; exit `0` = OK, `1` = general error, `2` = content-filter/PII violation, `3` = PII hard block, `5` = уже идёт сессия (pidfile lock). Для `claude` действует усиленный контракт WP-458: `--add-dir` запрещён, peer получает только минимальную текстовую проекцию в stdin и не имеет файловых или shell-инструментов. Коды 2-5 — не обязательны для нового адаптера, но `0`/`1` обязательны (Шаг 3.1/3р.1 проверяет `exit ≠ 0` как «напарник не ответил»).
+**§0в.1 Общий контракт адаптера** (для добавления нового вендора; актуализирован WP-516 Ф5, peer-session 2026-08-11-22-wp516-f5-contract-adapter):
+
+*Транспорт (переносимая часть контракта):*
+- **stdin** = полный промпт хода (Bash pipe, не inline `echo` — inline попадает в командную строку и хук B7.7c может ложно заблокировать повторные вызовы). **Сохранность промпта:** адаптер передаёт stdin целиком либо отказывает ДО запуска с диагностикой (лимит транспорта + фактическая длина в stderr). Молчаливое усечение запрещено (дефект Ф4: hermes обрезал до 4000 без предупреждения).
+- **stdout** = одна реплика, frontmatter (открывающий и закрывающий маркер `---`) с первой непустой строки; служебные сообщения (баннеры CLI, session_id, прогресс) — только в stderr, адаптер обязан очищать stdout. Ответ без валидного frontmatter (нет открывающего `---` с первой непустой строки или нет закрывающего) = нарушение формата → exit `1` с диагностикой. Проверка frontmatter относится к peer-репликам turn-loop; служебные вызовы писателя (review/verify/synth), чей вывод — не peer-реплика, отключают её через `IWE_PEER_PLAIN=1` (это ручка слоя IWE-интеграции, не транспорта). Вызовы turn-loop обязаны явно передавать `IWE_PEER_PLAIN=0`, чтобы ручка не протекала из окружения писателя и не отключила проверку для peer-реплик.
+- **exit-коды:** `0` = OK, `1` = general error (включая нарушение формата реплики), `2` = content-filter/PII violation, `3` = PII hard block, `4` = add-dir error, `5` = уже идёт сессия (pidfile lock), `6` = auth failure, `7` = empty response after trimming. Обязательны только `0`/`1` (Шаг 3.1/3р.1 проверяет `exit ≠ 0` как «напарник не ответил»); коды 2-7 необязательны для нового адаптера, но при использовании — строго с этим смыслом, переопределение запрещено (дефект Ф4: claude-адаптер использовал 4/5 для auth/empty — исправлено на 6/7 в Ф5). Код `6` — транспортно наблюдаемая классификация, хотя конкретные способы аутентификации относятся к слою IWE-интеграции.
+- **Межвендорский whitelist флагов:** `-p`, `--model`, `--add-dir`. Любой другой флаг → немедленный exit `1` с перечнем известных (молчаливый игнор запрещён: создаёт ложное ощущение применённого режима). Адаптер, не поддерживающий межвендорский флаг (таблица §0в), отклоняет его с явной диагностикой «not supported», а не игнорирует. `--permission-mode` сознательно исключён: способен ослабить read-only гарантию sandbox и не имеет переносимой семантики; vendor-specific флаги (напр. `--session-id` у hermes) описываются в строке вендора таблицы §0в, не в межвендорском наборе.
+- **Sandbox-норма (read-only всегда):** peer не пишет файлы — ни в `SESSION_DIR`, ни в дерево писателя. Вызов без `--add-dir` НЕ экспонирует рабочее дерево писателя: корень sandbox = пустой временный каталог (или эквивалент у вендора). `--add-dir` = согласие показать контекст, не согласие на его изменение — режим read-only сохраняется и с `--add-dir` (дефект Ф5: codex без `--add-dir` получал `$PWD` писателя в режиме workspace-write). Приёмочная проверка нормы = два слоя: конфигурационный тест (адаптер принудительно задаёт read-only и корень вне дерева писателя) + поведенческий write-probe (контролируемый запуск с явной инструкцией записи, проверка отсутствия маркер-файла). Вместе они подтверждают отсутствие записи в контролируемом сценарии при корректной конфигурации и НЕ являются доказательством абсолютной невозможности записи.
+- Для `claude` действует усиленный контракт WP-458: `--add-dir` запрещён, peer получает только минимальную текстовую проекцию в stdin и не имеет файловых или shell-инструментов.
+
+*Слой IWE-интеграции (обязателен для полноценного адаптера в IWE, не часть переносимого контракта):* статус-репортинг пилоту, журнал agent-sessions, требования аутентификации вендора, настраиваемый deadline и единая реакция на timeout, pidfile-lock с явным ключом сессии.
+
+*Реестр вендоров (OwnerIntegrity):* таблица §0в выше — единый реестр. Writer-скиллы (peer-conversation, kimi-peer-writer) держат свои маппинги vendor→адаптер согласованными с ней для реально поддерживаемых вендоров (runtime-чтение чужого SKILL.md не требуется и не допускается); добавление вендора = правка реестра + затронутых writer-маппингов одним коммитом.
 
 Построить для каждого `vendor` в `PEER_VENDORS`: `ADAPTER_PATH[$vendor]="$HOME/IWE/${IWE_GOVERNANCE_REPO:-DS-strategy}/<адаптер из таблицы>"` и `PEER_AGENT_ID[$vendor]="<peer_agent из таблицы>"` (bash associative arrays; порядок вызова = порядок `PEER_VENDORS`). Используются везде ниже вместо хардкода `kimi-peer-adapter.sh`/`kimi-headless`.
 
@@ -400,12 +412,12 @@ if [ "$PEER_VENDOR" = "hermes" ]; then
   # переменные не переживают границу между вызовами (найдено code review 01.08).
   HERMES_LAST_ID=$(grep -h "^session_id: " "${SESSION_DIR}"/[0-9][0-9]-peer.md 2>/dev/null | tail -1 | sed 's/^session_id: //')
   if [ -z "$HERMES_LAST_ID" ]; then
-    echo "<промпт>" | bash "$ADAPTER_PATH" > "$PEER_FILE" 2>/dev/null
+    echo "<промпт>" | IWE_PEER_PLAIN=0 bash "$ADAPTER_PATH" > "$PEER_FILE" 2>/dev/null
   else
-    echo "<промпт>" | bash "$ADAPTER_PATH" --session-id "$HERMES_LAST_ID" > "$PEER_FILE" 2>/dev/null
+    echo "<промпт>" | IWE_PEER_PLAIN=0 bash "$ADAPTER_PATH" --session-id "$HERMES_LAST_ID" > "$PEER_FILE" 2>/dev/null
   fi
 else
-  printf '%s\n' "<промпт с минимальной текстовой проекцией>" | bash "$ADAPTER_PATH" \
+  printf '%s\n' "<промпт с минимальной текстовой проекцией>" | IWE_PEER_PLAIN=0 bash "$ADAPTER_PATH" \
     > "$PEER_FILE" 2> "${PEER_FILE%.md}.err"
 fi
 # Same rule as in the round-loop below: an empty .err is noise, not evidence
@@ -543,17 +555,17 @@ if [ "$vendor" = "hermes" ]; then
   # переменные не переживают границу между вызовами (найдено code review 01.08).
   HERMES_LAST_ID=$(grep -h "^session_id: " "${SESSION_DIR}"/[0-9][0-9]-peer-hermes.md 2>/dev/null | tail -1 | sed 's/^session_id: //')
   if [ -z "$HERMES_LAST_ID" ]; then
-    cat "$PROMPT_FILE" | bash "${ADAPTER_PATH[$vendor]}" > "$PEER_FILE" 2>/dev/null
+    cat "$PROMPT_FILE" | IWE_PEER_PLAIN=0 bash "${ADAPTER_PATH[$vendor]}" > "$PEER_FILE" 2>/dev/null
     STATUS=$?
   else
-    cat "$PROMPT_FILE" | bash "${ADAPTER_PATH[$vendor]}" --session-id "$HERMES_LAST_ID" > "$PEER_FILE" 2>/dev/null
+    cat "$PROMPT_FILE" | IWE_PEER_PLAIN=0 bash "${ADAPTER_PATH[$vendor]}" --session-id "$HERMES_LAST_ID" > "$PEER_FILE" 2>/dev/null
     STATUS=$?
   fi
 else
   if [ "$vendor" = "claude" ]; then
-    cat "$PROMPT_FILE" | bash "${ADAPTER_PATH[$vendor]}" > "$PEER_FILE" 2> "${PEER_FILE%.md}.err"
+    cat "$PROMPT_FILE" | IWE_PEER_PLAIN=0 bash "${ADAPTER_PATH[$vendor]}" > "$PEER_FILE" 2> "${PEER_FILE%.md}.err"
   else
-    cat "$PROMPT_FILE" | bash "${ADAPTER_PATH[$vendor]}" --add-dir "$SESSION_DIR" > "$PEER_FILE" 2>/dev/null
+    cat "$PROMPT_FILE" | IWE_PEER_PLAIN=0 bash "${ADAPTER_PATH[$vendor]}" --add-dir "$SESSION_DIR" > "$PEER_FILE" 2>/dev/null
   fi
   STATUS=$?
 fi

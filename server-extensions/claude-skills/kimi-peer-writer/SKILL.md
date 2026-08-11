@@ -1,6 +1,6 @@
 ---
 name: kimi-peer-writer
-description: Peer-сессия DP.SC.154 где Kimi = писатель, Claude = напарник. Запускается простой фразой. Включает ОРЗ Opening и Closing, turn-loop, эскалации, Decision Gate (зафиксировать vs реализовать → ревью → проверить → задеплоить), отложенную финализацию и верификацию.
+description: Peer-сессия DP.SC.154 где Kimi = писатель, напарник — параметр `--peer` (default Claude). Запускается простой фразой. Включает ОРЗ Opening и Closing, turn-loop, эскалации, Decision Gate (зафиксировать vs реализовать → ревью → проверить → задеплоить), отложенную финализацию и верификацию.
 argument-hint: "<описание задачи> | --list | --interrupt <session_id> | --finalize <session_id>"
 version: 1.4.0
 layer: L1
@@ -22,16 +22,16 @@ gates_rationale: "операционный скилл; WP Gate применим 
 
 Задача: $ARGUMENTS
 
-> **Архитектура:** я (Kimi) = писатель, Claude = напарник.
-> Claude вызывается через `claude-peer-adapter.sh` напрямую — Bash tool, stdin pipe.
-> `list_peer_statuses` (Local Gateway) — координация файлов, **не** проверка доступности Claude CLI.
-> Gateway offline ≠ Claude недоступен.
+> **Архитектура:** я (Kimi) = писатель, напарник — параметр `--peer` (Шаг 0а.2, default `claude`).
+> Напарник вызывается через свой `<vendor>-peer-adapter.sh` напрямую — Bash tool, stdin pipe.
+> `list_peer_statuses` (Local Gateway) — координация файлов, **не** проверка доступности CLI напарника.
+> Gateway offline ≠ напарник недоступен.
 
 ---
 
 ## When to use
 
-Peer-сессия DP.SC.154 где Kimi = писатель, Claude = напарник. Запускается простой фразой. Включает ОРЗ Opening и Closing, turn-loop, эскалации, Decision Gate (зафиксировать vs реализовать → ревью → проверить → задеплоить), отложенную финализацию и верификацию.
+Peer-сессия DP.SC.154 где Kimi = писатель, напарник — параметр `--peer` (default Claude). Запускается простой фразой. Включает ОРЗ Opening и Closing, turn-loop, эскалации, Decision Gate (зафиксировать vs реализовать → ревью → проверить → задеплоить), отложенную финализацию и верификацию.
 
 ## Scope boundary — не подменяет решения, зарезервированные за пилотом (найдено 2026-07-07)
 
@@ -83,7 +83,28 @@ python3 ~/IWE/DS-my-strategy/scripts/resolve-personality-by-host.py \
   [Конец контекста]
   ```
 - Любой другой статус (`no_match`, `ambiguous`, ошибка резолвера) → пропустить блок молча, не блокировать сессию (best-effort, как у Элара и Кориса).
-- Продолжать к Шагу 0б.
+- Продолжать к Шагу 0а.2.
+
+## Шаг 0а.2. Напарник: параметр `--peer` (WP-516 Ф5)
+
+Извлечь `--peer <vendor>` из `$ARGUMENTS`. Нет флага → `PEER_VENDOR=claude` (обратная совместимость с версиями до параметризации).
+
+**Маппинг вендоров** (явный, локальный для этого скилла; обязан быть согласован с реестром §0в `peer-conversation/SKILL.md` — норма OwnerIntegrity из §0в.1, расхождение = дефект; runtime-чтение чужого SKILL.md НЕ допускается):
+
+| `PEER_VENDOR` | Адаптер (`ADAPTER`) | `PEER_AGENT_ID` (meta.yaml) | `PEER_CMD` | Модель по умолчанию |
+|---|---|---|---|---|
+| `claude` | `scripts/claude-peer-adapter.sh` | `claude-code` | `claude-peer-adapter` | sonnet |
+| `codex` | `scripts/codex-peer-adapter.sh` | `codex` | `codex-peer-adapter` | — (дефолт CLI) |
+| `hermes` | `scripts/hermes-peer-adapter.sh` | `hermes` | `hermes-peer-adapter` | — |
+
+Неизвестный vendor → СТОП до создания сессии: «Напарник `<vendor>` не зарегистрирован. Известные: claude, codex, hermes.» Добавление вендора = правка реестра §0в peer-conversation + этой таблицы одним коммитом (OwnerIntegrity, §0в.1).
+
+Особенности по вендору (учитывать в turn-loop и промптах):
+- `claude`: усиленный text-only контракт WP-458 — `--add-dir` запрещён адаптером; контекст только текстовой проекцией в stdin.
+- `codex`: read-only sandbox всегда (§0в.1); `--add-dir` даёт чтение отфильтрованной копии, не запись.
+- `hermes`: не поддерживает `--model`/`--add-dir`; лимит промпта 4000 символов — адаптер откажет с диагностикой (§0в.1, сохранность промпта): сокращай текстовую проекцию заранее. Поддерживает `--session-id`.
+
+Дальше по скиллу `$PEER_VENDOR` / `$PEER_AGENT_ID` / `$ADAPTER` / модель напарника подставляются из этой таблицы вместо прежних упоминаний Claude.
 
 ## Шаг 0б. Открытие (WP Gate — только для новой сессии)
 
@@ -92,10 +113,10 @@ python3 ~/IWE/DS-my-strategy/scripts/resolve-personality-by-host.py \
 Анонс пилоту:
 ```
 Открываю peer-сессию (DP.SC.154)
-Роль: Писатель (Kimi) | Напарник: Claude
+Роль: Писатель (Kimi) | Напарник: <PEER_VENDOR>
 Задача: <задача>
 РП: WP-NNN «<название>» | или: не найден в плане
-Метод: turn-loop ≤10 ходов | Модель напарника: Sonnet
+Метод: turn-loop ≤10 ходов | Модель напарника: <из таблицы Шага 0а.2 или «дефолт CLI»>
 ```
 
 Если РП **не найден** в плане недели → полный WP Gate Ритуал (`memory/protocol-open.md §Сессия`):
@@ -135,9 +156,9 @@ session_id: "<SESSION_ID>"
 start_time: "<ISO-8601 UTC>"
 end_time: ""
 writer_agent: "kimi-headless"
-peer_agent: "claude-code"
-peer_cmd: "claude-peer-adapter"
-peer_model: "sonnet"
+peer_agent: "<PEER_AGENT_ID из Шага 0а.2>"
+peer_cmd: "<PEER_CMD из Шага 0а.2>"
+peer_model: "<модель из Шага 0а.2 или \"\" = дефолт CLI>"
 status: "started"
 turns_count: 0
 turns_limit: 10
@@ -173,7 +194,7 @@ swap_history: []     # [{turn, from, to, reason}] — журнал SWAP_WRITER �
 
 **1.3 Добавить строку в `sessions/00-index.md`** сверху таблицы (первая строка таблицы после `|---|`):
 ```
-| <TODAY> | <SESSION_ID> | <задача ≤50 симв> | kimi / claude-code | 0 | 0 | started | — |
+| <TODAY> | <SESSION_ID> | <задача ≤50 симв> | kimi / <PEER_AGENT_ID> | 0 | 0 | started | — |
 ```
 
 ---
@@ -203,7 +224,7 @@ consensus: none
 
 Переменные: `TURN=1`, `ESCALATIONS=0`, `DONE=false`.
 
-### 3.1 Вызов Claude
+### 3.1 Вызов напарника
 
 Прочитать все предыдущие реплики из `SESSION_DIR` в порядке нумерации.
 Составить промпт:
@@ -224,7 +245,7 @@ consensus: none
 ---
 turn: <TURN>
 role: peer
-agent_id: claude-code
+agent_id: <PEER_AGENT_ID>
 timestamp: <ISO-8601 UTC>
 consensus: none | proposed | reached | escalate
 ---
@@ -238,20 +259,20 @@ CONSENSUS: <резюме> — если считаешь что договори�
 ESCALATE_TO_USER: <причина> — если писатель игнорирует существенное возражение
 ```
 
-Перед вызовом Claude писатель добавляет в промпт минимальную текстовую проекцию предыдущих реплик и фактов. Claude не читает `SESSION_DIR` и не использует инструменты.
+Перед вызовом напарника писатель добавляет в промпт минимальную текстовую проекцию предыдущих реплик и фактов. Напарник не читает `SESSION_DIR` и не использует инструменты.
 
-Вызов Claude через Bash:
+Вызов напарника через Bash (адаптер — из таблицы Шага 0а.2):
 ```bash
 PEER_FILE="${SESSION_DIR}/$(printf '%02d' $TURN)-peer.md"
-echo "<промпт>" | bash "$HOME/IWE/${IWE_GOVERNANCE_REPO:-DS-strategy}/scripts/claude-peer-adapter.sh" \
+echo "<промпт>" | IWE_PEER_PLAIN=0 bash "$HOME/IWE/${IWE_GOVERNANCE_REPO:-DS-strategy}/<ADAPTER>" \
   > "$PEER_FILE" 2> "${PEER_FILE%.md}.err"
 ```
 
-Если файл пустой или exit ≠ 0 → сообщить пилоту: «Claude не ответил. Повторить или прервать?»
+Если файл пустой или exit ≠ 0 → сообщить пилоту: «<PEER_VENDOR> не ответил. Повторить или прервать?»
 
 ### 3.2 Показать пилоту
 
-Прочитать `$PEER_FILE`. Вывести ключевые тезисы Claude (не всю реплику дословно — краткое резюме + цитаты ключевых позиций).
+Прочитать `$PEER_FILE`. Вывести ключевые тезисы напарника (не всю реплику дословно — краткое резюме + цитаты ключевых позиций).
 
 ### 3.3 Проверить маркеры
 
@@ -273,11 +294,11 @@ pilot_response: ""
 # Эскалация <N> (ход <TURN>)
 
 **Причина:** <причина>
-**Реплика Claude:** <PEER_FILE>
+**Реплика напарника:** <PEER_FILE>
 **Ответ пилота:** (ввести ниже)
 ```
 
-- Сообщить пилоту: «Claude эскалирует: <причина>. Нужно твоё решение.»
+- Сообщить пилоту: «<PEER_VENDOR> эскалирует: <причина>. Нужно твоё решение.»
 - Дождаться ответа пилота, записать в `pilot_response` в escalation-файл.
 - Обновить `meta.yaml`: `escalations_count: <ESCALATIONS>` (Bash sed).
 
@@ -300,7 +321,7 @@ timestamp: <now>
 consensus: none
 ---
 
-<Моя реплика: ответ на аргументы Claude + учёт направления пилота>
+<Моя реплика: ответ на аргументы напарника + учёт направления пилота>
 ```
 
 `TURN += 1` → вернуться к 3.1.
@@ -358,8 +379,8 @@ implementation_pipeline: false | true
 ## Шаг 3.6. Implementation Pipeline (опциональный)
 
 > **Активируется:** только при `IMPLEMENTATION=true` в Шаге 3.5.
-> **Принцип:** Kimi-writer применяет решение → cold-context Claude через bash pipe делает code review → writer фиксит → Claude через bash pipe запускает smoke (writer не имеет Skill tool) → deploy → секция «Реализация и проверка» в report-draft.md.
-> **Архитектурное ограничение:** Kimi-headless не имеет Agent/Skill tools. Все вызовы внешних агентов идут через `claude-peer-adapter.sh` (stdin pipe) — это осознанная асимметрия с `/peer-conversation`.
+> **Принцип:** Kimi-writer применяет решение → cold-context напарник через bash pipe делает code review → writer фиксит → напарник через bash pipe запускает smoke (writer не имеет Skill tool) → deploy → секция «Реализация и проверка» в report-draft.md.
+> **Архитектурное ограничение:** Kimi-headless не имеет Agent/Skill tools. Все вызовы внешних агентов идут через `<ADAPTER>` из Шага 0а.2 (stdin pipe) — это осознанная асимметрия с `/peer-conversation`.
 
 ### 3.6.1 Implementation
 
@@ -381,7 +402,7 @@ Writer (Kimi) применяет изменения через Edit/Write. За�
 
 Переменные итерации ревью: `REVIEW_ITER=1` при первом входе, инкрементируется в 3.6.3.
 
-Вызов Claude как code reviewer через тот же адаптер что для turn-loop:
+Вызов напарника как code reviewer через тот же адаптер что для turn-loop:
 
 ```bash
 : "${REVIEW_ITER:=1}"
@@ -415,11 +436,11 @@ Cold-context code review результатов peer-сессии <SESSION_ID>.
 EOF
 )
 
-echo "$REVIEW_PROMPT" | bash "$HOME/IWE/${IWE_GOVERNANCE_REPO:-DS-strategy}/scripts/claude-peer-adapter.sh" \
+echo "$REVIEW_PROMPT" | IWE_PEER_PLAIN=1 bash "$HOME/IWE/${IWE_GOVERNANCE_REPO:-DS-strategy}/<ADAPTER>" \
   > "$REVIEW_FILE" 2> "${REVIEW_FILE%.md}.err"
 ```
 
-Добавь в `REVIEW_PROMPT` точечный diff и нужные фрагменты файлов. Нельзя передавать каталоги: Claude получает только текстовую проекцию.
+Добавь в `REVIEW_PROMPT` точечный diff и нужные фрагменты файлов. Нельзя передавать каталоги: напарник получает только текстовую проекцию.
 
 ### 3.6.3 Review Outcome
 
@@ -436,9 +457,9 @@ echo "$REVIEW_PROMPT" | bash "$HOME/IWE/${IWE_GOVERNANCE_REPO:-DS-strategy}/scri
 **Если только OK:**
 - Продолжить к 3.6.4.
 
-### 3.6.4 Smoke Verification (через bash pipe к Claude)
+### 3.6.4 Smoke Verification (через bash pipe к напарнику)
 
-Kimi-writer не имеет Skill tool — `/verify` вызывается через Claude как proxy:
+Kimi-writer не имеет Skill tool — `/verify` вызывается через напарника как proxy:
 
 ```bash
 VERIFY_FILE="${SESSION_DIR}/verify-01.md"
@@ -463,11 +484,11 @@ VERIFY_PROMPT=$(cat <<EOF
 EOF
 )
 
-echo "$VERIFY_PROMPT" | bash "$HOME/IWE/${IWE_GOVERNANCE_REPO:-DS-strategy}/scripts/claude-peer-adapter.sh" \
+echo "$VERIFY_PROMPT" | IWE_PEER_PLAIN=1 bash "$HOME/IWE/${IWE_GOVERNANCE_REPO:-DS-strategy}/<ADAPTER>" \
   > "$VERIFY_FILE" 2> "${VERIFY_FILE%.md}.err"
 ```
 
-Claude в этом вызове не запускает smoke-тесты: он может только оценить переданный текст. Исполняемую проверку запускает писатель локально по отдельному протоколу.
+Напарник в этом вызове не запускает smoke-тесты: он может только оценить переданный текст. Исполняемую проверку запускает писатель локально по отдельному протоколу.
 
 **Результат:**
 - PASS → перейти к 3.6.5.
@@ -527,7 +548,7 @@ git push
 
 ## Шаг 3.7. Рефлексия перед финализацией (WP-484, решение пилота 30.07)
 
-> **Почему здесь:** пир-сессия — тоже сессия работы, вопрос рефлексии обязателен так же, как и в обычной Quick Close (Ф18) — этот же разрыв найден и закрыт 30.07 в `peer-conversation/SKILL.md` (Claude-писатель); здесь тот же фикс для симметричного случая (Kimi-писатель, Claude-напарник). Порог и формулировка идентичны — Claude (напарник) остаётся тем, у кого есть живой канал с пилотом и доступ к Skill/Bash, поэтому шаг ниже исполняет напарник, не писатель.
+> **Почему здесь:** пир-сессия — тоже сессия работы, вопрос рефлексии обязателен так же, как и в обычной Quick Close (Ф18) — этот же разрыв найден и закрыт 30.07 в `peer-conversation/SKILL.md` (Claude-писатель); здесь тот же фикс для симметричного случая (Kimi-писатель). Порог и формулировка идентичны — напарник остаётся тем, у кого есть живой канал с пилотом и доступ к Skill/Bash, поэтому шаг ниже исполняет напарник, не писатель.
 
 **Порог:** та же формула, что в `peer-conversation/SKILL.md` §3.7 (переиспользует починенный в `gather-session-facts.sh`, WP-484 Ф26, разбор даты — не изобретать заново):
 ```bash
@@ -571,9 +592,9 @@ mv "$tmpf" "$SESSION_DIR/meta.yaml"
 
 ### 4.2 Синтез report-draft.md
 
-> **Архитектурное ограничение:** Kimi-писатель использует bash pipe через `claude-peer-adapter.sh`, т.к. Kimi не имеет доступа к Claude Agent tool. Claude-писатель (скилл `/peer-conversation`) использует Agent tool — это осознанное различие, а не дрейф.
+> **Архитектурное ограничение:** Kimi-писатель использует bash pipe через `<ADAPTER>` из Шага 0а.2, т.к. Kimi не имеет доступа к Agent tool. Claude-писатель (скилл `/peer-conversation`) использует Agent tool — это осознанное различие, а не дрейф.
 
-Запустить Claude как синтезатора через bash pipe (context isolation через stdin):
+Запустить напарника как синтезатора через bash pipe (context isolation через stdin):
 ```bash
 
 python3 - "$SESSION_DIR" "$SESSION_ID" <<'PYEOF'
@@ -734,7 +755,7 @@ with tempfile.NamedTemporaryFile(mode='w', suffix='.txt', delete=False, encoding
 
 report_file = os.path.join(session_dir, 'report-draft.md')
 gov_repo = os.environ.get('IWE_GOVERNANCE_REPO', 'DS-strategy')
-adapter = os.path.expanduser(f'~/IWE/{gov_repo}/scripts/claude-peer-adapter.sh')
+adapter = os.path.expanduser(f'~/IWE/{gov_repo}/scripts/' + meta.get('peer_cmd', 'claude-peer-adapter') + '.sh')  # адаптер сессии — из meta.yaml peer_cmd (WP-516 Ф5)
 
 # synth_prompt above already inlines the full transcript, meta.yaml fields and
 # _outcome.md into stdin — claude-peer-adapter.sh is a text-only reviewer by
@@ -756,6 +777,7 @@ try:
                 stdin=stdin_f,
                 stdout=stdout_f,
                 stderr=stderr_f,
+                env={**os.environ, 'IWE_PEER_PLAIN': '1'},  # synth output — не peer-реплика (§0в.1)
                 timeout=180
             )
         except (subprocess.TimeoutExpired, OSError):
@@ -778,7 +800,7 @@ if result.returncode != 0 or os.path.getsize(report_file) == 0:
         f.write(f"""---
 session_id: {session_id}
 generated_at: {now}
-note: синтез не выполнен (Claude недоступен, вернул пустой результат, или таймаут >180с)
+note: синтез не выполнен (напарник недоступен, вернул пустой результат, или таймаут >180с)
 ---
 
 # Итоговый отчёт
@@ -842,7 +864,7 @@ extensions:
 
 Найти строку с `<SESSION_ID>` и заменить целиком:
 ```
-| <TODAY> | <SESSION_ID> | <задача ≤50> | kimi / claude-code | <TURNS> | <ESCALATIONS> | completed | [report.md](<MONTH>/<DAY>/<SESSION_ID>/report.md) |
+| <TODAY> | <SESSION_ID> | <задача ≤50> | kimi / <PEER_AGENT_ID> | <TURNS> | <ESCALATIONS> | completed | [report.md](<MONTH>/<DAY>/<SESSION_ID>/report.md) |
 ```
 (Bash awk — безопасен для строк с `|`.)
 
@@ -856,7 +878,7 @@ Slug-часть (без даты и номера): `SESSION_SLUG=$(echo "$SESSIO
 date: <TODAY>
 type: peer-session
 writer: kimi-headless
-peer: claude-code
+peer: <PEER_AGENT_ID>
 duration_h: <(end_time - start_time) в часах, 1 знак>
 artifacts: sessions/<MONTH>/<DAY>/<SESSION_ID>/report.md
 session_id: <SESSION_ID>
@@ -894,7 +916,7 @@ git add "${PATHS[@]}"
 git commit -m "feat(peer): $SESSION_ID (kimi-writer) — <задача кратко>" -- "${PATHS[@]}"
 git push origin "$BRANCH"
 gh pr create --title "feat(peer): $SESSION_ID" \
-  --body "Peer-сессия DP.SC.154. Kimi (writer) + Claude (peer)." \
+  --body "Peer-сессия DP.SC.154. Kimi (writer) + <PEER_VENDOR> (peer)." \
   --base main --auto-merge 2>/dev/null \
   || echo "WARN: gh pr create failed — merge manually or check gh auth"
 ```
@@ -920,7 +942,7 @@ gh pr create --title "feat(peer): $SESSION_ID" \
 
 1. Извлечь месяц и день: `MONTH=$(echo "$session_id" | cut -c1-7)`, `DAY=$(echo "$session_id" | cut -c9-10)`. Проверить что папка `sessions/$MONTH/$DAY/$session_id` существует и содержит хотя бы `00-writer.md`.
 2. Прочитать `meta.yaml` — взять `task_description`, `start_time`, `escalations_count`.
-3. Выполнить **Шаг 4.2** (синтез report-draft.md через `claude-peer-adapter.sh`) с теми же инвариантами и fallback.
+3. Выполнить **Шаг 4.2** (синтез report-draft.md через адаптер сессии: `scripts/<peer_cmd>.sh`, где `peer_cmd` читается из `meta.yaml` этой сессии — аргумента `--peer` при `--finalize` нет, Шаг 0а.2 не выполняется заново) с теми же инвариантами и fallback.
 4. Обновить `meta.yaml` (Bash sed): `status: completed`, `end_time: <now>`, `turns_count: <число файлов>`.
 5. Обновить строку в `sessions/00-index.md`: статус → `completed`, report → ссылка.
 6. Commit + push.

@@ -657,13 +657,20 @@ if [ "$CMD" = "close" ]; then
       [ -f "$card" ] || continue
       grep -q '^process_id: quick-close$' "$card" || continue
       grep -q '^current_step: blocked-witness-unavailable$' "$card" || continue
-      grep -qE '^[[:space:]]*all_pushed: true$' "$card" || continue
+      # WP-520 (11.08, peer session with Kimi): a session that committed manually
+      # before starting the runner (allowed path, bug-2026-07-17) is routed AROUND
+      # commit-push by commit-push-gate, so all_pushed never appears in its card.
+      # Accept the runner's own measurement instead: gather-session-facts writes
+      # commit_needed=false when THIS session has nothing left to commit -- same
+      # card, same single interpreter of git state (the gather handler), so the
+      # "work is not lost" invariant this bypass guards stays intact.
+      grep -qE '^[[:space:]]*(all_pushed: true|commit_needed: false)$' "$card" || continue
       RUNNER_OK="$card"
       FORCED_CARD="$card"
       break
     done
     if [ -z "$RUNNER_OK" ]; then
-      fail "force-no-reflection: не нашёл RUN-quick-close-${SLUG}*.md с current_step=blocked-witness-unavailable и all_pushed=true — этот флаг обходит только эту конкретную блокировку, не любой сбой раннера." 7
+      fail "force-no-reflection: не нашёл RUN-quick-close-${SLUG}*.md с current_step=blocked-witness-unavailable и (all_pushed=true или commit_needed=false) — этот флаг обходит только эту конкретную блокировку, не любой сбой раннера." 7
     fi
     FORCE_EVENT=$(python3 -c '
 import json, sys
