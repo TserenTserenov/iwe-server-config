@@ -86,7 +86,7 @@
 | 496 | 🔄 | **P1** | Журнал гипотез (LPF-регламент обратной связи) | Ф5 done (fail-closed сверка починена); next Ф6 догоняющая сверка 39 записей |
 | 289 | 🔄 | P3 | Интеграция IWE с личными базами знаний | 09.08: Ф11+WP-495 закрыты; SoT-рамка, активного next нет |
 | 483 | 🔄 | P2 | Комплект структурирования данных (guide-kit) | Ф6 шаги 1-3 закрыты 03.08; шаг 4 (регистрация+код) — будущая сессия |
-| 484 | 🔄 | **P1** | Автогенератор открытия/закрытия дня (зонтичный) | 10.08 Ф84 закрыта (пир-сессия с Codex): таймер верификатора (05:30/05:40) + фикс тупиковой ошибки при отказе push задеплоены и подтверждены; next: живое подтверждение на боевом прогоне недели 17.08 |
+| 484 | 🔄 | **P1** | Автогенератор открытия/закрытия дня (зонтичный) | 11.08 Ф85/Ф86 (пир с Codex): АрхГейт гонки сессий → кандидат E' зафиксирован (не реализован); next: измеримый пилот отдельным заходом (10 живых worktree разобрать + замер на 1 репо); ещё open: живое подтверждение 17.08 |
 | 493 | 🔄 | P2 | Лаборатория характеристик | Ф4 ждёт данных (конец августа) |
 | 494 | 🔄 | P2 | Панель рабочих продуктов в VS Code | дашборд готов и подтверждён; доставка в шаблон отложена до 30.08 |
 | 167 | 🔄 | P5 | Публикации (зонтичный) | пилот утверждает порядок 28 постов |
@@ -125,7 +125,7 @@
 - [project_memory_repo_has_no_remote.md](project_memory_repo_has_no_remote.md) — 09.08: `memory/` без git-remote с самого создания (03.08), резервной копии нет; пилот отложил решение, куда её класть — не переоткрывать как новую проблему
 - [project_tsekh1_deploy_is_automated_not_manual.md](project_tsekh1_deploy_is_automated_not_manual.md) — 08.08: push в iwe-server-config деплоит на tsekh-1 сам (GitHub Actions deploy-rs), ручной nixos-rebuild не обязателен — проверять `gh run list` перед тем как писать «доставка не выполнена»
 - [project_codex_peer_reliability_watch.md](project_codex_peer_reliability_watch.md) — 05.08: пилот отметил, что Codex-напарник игнорирует инструкции — открытое наблюдение, копить примеры до эскалации
-- [project_day_open_blocked_since_20260809_staged_uncommitted.md](project_day_open_blocked_since_20260809_staged_uncommitted.md) — 10.08: Day Open на tsekh-1 в waiting_pilot с 09.08 (1/22 проверка упала), 10.08 каскадом; DayPlan/WeekPlan W33/WeekReport застейджены не закоммичены на сервере — держит tsekh1-sync в отказе, решение за пилотом
+- [project_day_open_blocked_since_20260809_staged_uncommitted.md](project_day_open_blocked_since_20260809_staged_uncommitted.md) — РЕШЕНО 11.08: причина — regex+set-e/pipefail баг в проверке «физ» бюджета (day-open.checks.md), задеплоен фикс, tsekh-1 пересинхронизирован, ретрай зелёный
 - [project_tsekh1_chronic_git_sync_and_concurrent_agents.md](project_tsekh1_chronic_git_sync_and_concurrent_agents.md) — 08.08 РП484 Ф77: корневой фикс (raw --autostash → scripts/iwe-safe-pull.sh переиспользует git-dirty-guard.sh) задеплоен на tsekh-1 и подтверждён живым прогоном; 10.08 РП484 Ф77/Ф79: живой рецидив «cannot cd» на относительном имени репо, фикс неполный, причина найдена — не исправлено
 - [project_ds_my_strategy_stash_pop_120_files_pending.md](project_ds_my_strategy_stash_pop_120_files_pending.md) — 09.08 stash-pop в DS-my-strategy; 10.08 WP-149-часть+44 карточки/скрипта почищены (двумя параллельными сессиями) — ~84 файла вне WP-149 (сессии/тесты/суб-документы) ещё расходятся с HEAD, не срочно; при коммите тут — explicit pathspec (живая гонка индекса подтверждена)
 
@@ -151,6 +151,7 @@
 - [lessons_check_live_diff_before_parallel_infra_fix.md](lessons_check_live_diff_before_parallel_infra_fix.md) — сверить живой `git diff` перед правкой общего файла; контестирован файл → ждать/слить/обойти; контестирована ветка целиком → push через изолированный `git worktree` (04-09.08)
 - [lessons_bare_git_commit_can_grab_concurrent_session_staged_file.md](lessons_bare_git_commit_can_grab_concurrent_session_staged_file.md) — 10.08: pathspec на commit не защищает сам `git add` — индекс может быть загрязнён ДО add; `git restore --staged .` → add → commit одним вплотную вызовом, разрыв между ними — тоже гонка (3 инцидента подряд)
 - [lessons_codex_exec_unreliable_citation_audits.md](lessons_codex_exec_unreliable_citation_audits.md) — 10.08 (WP-517): `codex exec` галлюцинирует цитаты при аудите файлов на точный текст — отчёт правдоподобен, но цитат физически нет в файлах; верифицировать перед тем как доверять
+- [lessons_bash_set_e_pipefail_silent_death_on_empty_grep.md](lessons_bash_set_e_pipefail_silent_death_on_empty_grep.md) — 11.08: `VAR=$(grep|grep|head -1)` под set-e+pipefail молча умирает на нулевых совпадениях, минуя задуманный else/WARN — добавлять `|| true`; так дважды ломался Day Open на tsekh-1
 - [routing-vocab.md](routing-vocab.md) — фраза → путь, читать ПЕРЕД Write
 - [feedback_response_clarity_for_pilot.md](feedback_response_clarity_for_pilot.md) — A1-A11 правила ответа
 - [user_tseren_personal_life.md](user_tseren_personal_life.md) — Tseren (НЕ Дмитрий), Кипр
