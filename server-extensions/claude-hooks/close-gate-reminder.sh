@@ -30,7 +30,8 @@ INPUT=$(cat)
 # Устойчивость к многострочным промптам: literal \n в JSON value
 # невалиден для jq. Заменяем все control chars на пробелы до парсинга.
 SANITIZED=$(printf '%s' "$INPUT" | LC_ALL=C tr '\n\r\t' '   ')
-PROMPT=$(printf '%s' "$SANITIZED" | jq -r '.prompt // empty' | tr '[:upper:]' '[:lower:]')
+PROMPT_ORIGINAL_CASE=$(printf '%s' "$SANITIZED" | jq -r '.prompt // empty')
+PROMPT=$(printf '%s' "$PROMPT_ORIGINAL_CASE" | tr '[:upper:]' '[:lower:]')
 SESSION_ID=$(printf '%s' "$INPUT" | jq -r '.session_id // "unknown"' 2>/dev/null)
 [ -n "$SESSION_ID" ] || SESSION_ID="unknown"
 SESSION_ID=$(printf '%s' "$SESSION_ID" | tr -cd 'A-Za-z0-9._-')
@@ -108,11 +109,40 @@ _arm_and_sentinel() {
   echo "[close-gate-reminder] session=$SESSION_ID close-intent sentinel written${broad:+ (broad/warn)}" >&2
 }
 
+# WP-484, пир-сессия 2026-08-11-05 (консенсус с Codex): фиксирует текст ПОСЛЕ
+# триггерного слова закрытия как есть, без попытки распознать "это рефлексия"
+# vs "это ещё одно поручение" — та классификация ненадёжна регэкспом на
+# свободном тексте (обсуждалось и отклонено в самой сессии). Пустой хвост —
+# тоже валидный факт (голое "закрывай"), не ошибка.
+_record_close_intent() {
+  if ! _obligation_available; then
+    return 0
+  fi
+  # Извлечь текст после ПЕРВОГО вхождения триггерного слова, из оригинального
+  # регистра (PROMPT_ORIGINAL_CASE, не lowercased $PROMPT — иначе raw_text,
+  # который потом дословно показывается пилоту в release-фразе, будет искажён).
+  # awk match()+substr(), не sed: POSIX sed не поддерживает non-greedy `.*?`,
+  # а greedy `^.*слово` матчит до ПОСЛЕДНЕГО вхождения слова во фразе, не до
+  # первого (найдено code review 2026-08-11: "рефлексия: ... закрывай ... а
+  # сейчас просто закрывай" терял всю рефлексию, обрезая после второго
+  # повтора). match() находит первое вхождение по конструкции.
+  local tail
+  tail=$(printf '%s' "$PROMPT_ORIGINAL_CASE" | awk '
+    match($0, /[Зз]акрыва[йю]|[Зз]акрой/) {
+      print substr($0, RSTART + RLENGTH)
+      exit
+    }
+  ' | sed -E 's/^[[:space:],.:;-]+//')
+  python3 "$OBLIGATION_CLI" record-intent --session-id "$SESSION_ID" --raw-text "$tail" >/dev/null 2>&1 || \
+    echo "[close-gate-reminder] session=$SESSION_ID record-intent failed (non-fatal — render falls back to interactive path)" >&2
+}
+
 if echo "$PROMPT" | grep -qE '(закрывай|закрываю|закрой)'; then
   _arm_and_sentinel block ""
+  _record_close_intent
 
   cat <<'EOF'
-{"additionalContext": "⛔ БЛОКИРУЮЩЕЕ: Session Close выполняется ТОЛЬКО через skill /run-protocol с аргументом 'close'. ПЕРВОЕ И ЕДИНСТВЕННОЕ действие = вызвать Skill tool: skill='run-protocol', args='close'. НЕ выполнять шаги самостоятельно. /run-protocol гарантирует пошаговый TodoList + верификацию. Обязательство закрытия (Ф74б) зафиксировано: тихое завершение без карточки RUN-quick-close будет заблокировано на Stop."}
+{"additionalContext": "⛔ БЛОКИРУЮЩЕЕ: Session Close выполняется ТОЛЬКО через skill /run-protocol с аргументом 'close'. ПЕРВОЕ И ЕДИНСТВЕННОЕ действие = вызвать Skill tool: skill='run-protocol', args='close'. НЕ выполнять шаги самостоятельно. /run-protocol гарантирует пошаговый TodoList + верификацию. Обязательство закрытия (Ф74б) зафиксировано: тихое завершение без карточки RUN-quick-close будет заблокировано на Stop. Если в этой же фразе уже была названа рефлексия — она уже записана как close-intent record, повторно не спрашивай (session-reflection-render прочитает её сам)."}
 EOF
   exit 0
 fi

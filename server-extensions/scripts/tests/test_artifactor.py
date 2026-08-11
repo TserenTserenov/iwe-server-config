@@ -38,7 +38,7 @@ ALL_KEYWORDS = list(af.KEYWORD_MAP.items())
 def test_every_keyword_produces_valid_schema_v2(kw, expected):
     """Каждая из всех записей KEYWORD_MAP классифицируется без падения и
     возвращает согласованную форму (schema_version 2, WP-481 Ф7)."""
-    task_type, cls, kind_id = expected
+    task_type, cls, kind_id, artifact = expected
     r = run_artifactor(kw)
     assert r.returncode == 0, r.stderr
     result = json.loads(r.stdout)
@@ -47,6 +47,8 @@ def test_every_keyword_produces_valid_schema_v2(kw, expected):
     assert result["schema_version"] == 2
     assert result["confidence"] == "high"
     assert result["resolution_path"] == "keyword"
+    assert result["artifact"] == artifact
+    assert result["artifact"]
     if kind_id is None:
         assert result["expected_result_kind"] is None
         assert result["result_kind_resolution"] == af.SPECIAL_RESOLUTION[task_type]
@@ -69,6 +71,15 @@ def test_content_plan_is_choice_result_not_episteme():
     r = run_artifactor("нужны темы для постов на неделю")
     result = json.loads(r.stdout)
     assert result["expected_result_kind"] == "ChoiceResult"
+
+
+def test_strategy_has_a_title_for_wp_creation():
+    """Стратегический запрос должен сразу дать название РП, а не пустую
+    строку, из-за которой create-wp.sh не может быть вызван корректно."""
+    r = run_artifactor("актуализируй стратегию")
+    result = json.loads(r.stdout)
+    assert result["task_type"] == "strategy"
+    assert result["artifact"] == "Актуализированная стратегия"
 
 
 def test_spec_writing_is_unresolved_not_method_description():
@@ -126,5 +137,5 @@ def test_special_resolution_covers_exactly_the_none_kind_ids():
     """Инвариант модуля: kind_id=None в KEYWORD_MAP допустим ТОЛЬКО с записью
     в SPECIAL_RESOLUTION — иначе resolve_result_kind падает AssertionError
     (осознанный пропуск, не забытая карта)."""
-    none_task_types = {tt for tt, _, kind_id in af.KEYWORD_MAP.values() if kind_id is None}
+    none_task_types = {tt for tt, _, kind_id, _ in af.KEYWORD_MAP.values() if kind_id is None}
     assert none_task_types == set(af.SPECIAL_RESOLUTION.keys())
