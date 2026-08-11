@@ -22,8 +22,11 @@ if [ "$TOOL" != "Bash" ]; then
   exit 0
 fi
 
-# Check if command contains git commit (but not git commit --amend or other non-standard)
-if ! echo "$TOOL_INPUT" | grep -qE 'git (add.*&&.*git )?commit'; then
+# Trigger only on an actual git commit invocation (git as command word after a
+# command separator), not on any occurrence of the substring "git commit" —
+# e.g. inside a grep pattern, echo text, or commit message being searched for.
+# Same anchoring principle as close-runner-gate.sh:150 (WP-484 Ф74а).
+if ! echo "$TOOL_INPUT" | grep -qE '(^|[;&|(]) *(([A-Za-z_][A-Za-z0-9_]*=[^ ]+ *)*)(command |builtin |exec )?git ([^;&|]* )?commit( |$)'; then
   echo '{}'
   exit 0
 fi

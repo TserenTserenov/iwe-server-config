@@ -86,7 +86,7 @@
 | 496 | 🔄 | **P1** | Журнал гипотез (LPF-регламент обратной связи) | Ф5 done (fail-closed сверка починена); next Ф6 догоняющая сверка 39 записей |
 | 289 | 🔄 | P3 | Интеграция IWE с личными базами знаний | 09.08: Ф11+WP-495 закрыты; SoT-рамка, активного next нет |
 | 483 | 🔄 | P2 | Комплект структурирования данных (guide-kit) | Ф6 шаги 1-3 закрыты 03.08; шаг 4 (регистрация+код) — будущая сессия |
-| 484 | 🔄 | **P1** | Автогенератор открытия/закрытия дня (зонтичный) | 11.08: close-intent record + skip_reflection задеплоены, живой прогон подтверждён; next Ф3 — АрхГейт с развилкой из РП481 |
+| 484 | 🔄 | **P1** | Автогенератор открытия/закрытия дня (зонтичный) | 11.08: Ф87 брошенные Quick Close раннеры — пир-сессия с Codex, реализовано+задеплоено (owner_session_id, cancel-session, reap-orphans); живая приёмка следующим force-close |
 | 493 | 🔄 | P2 | Лаборатория характеристик | Ф4 ждёт данных (конец августа) |
 | 494 | 🔄 | P2 | Панель рабочих продуктов в VS Code | дашборд готов и подтверждён; доставка в шаблон отложена до 30.08 |
 | 167 | 🔄 | P5 | Публикации (зонтичный) | пилот утверждает порядок 28 постов |
@@ -131,6 +131,7 @@
 
 ### Feedback — HOT
 
+- [lessons_peer_review_catches_event_vs_time_reap_conflation.md](lessons_peer_review_catches_event_vs_time_reap_conflation.md) — 11.08: «X уже покрывает Y по времени» — проверять построчно, что реально триггерит X, не полагаться на имя/впечатление (Codex поймал: Level 2 stale_age тоже событийный, не таймер)
 - [lessons_check_prior_decisions_before_fresh_archgate.md](lessons_check_prior_decisions_before_fresh_archgate.md) — 11.08: пир-сессия+АрхГейт по гонке сессий (WP-484) одобрены пилотом, ПОТОМ нашёл — тот же вопрос уже отклонён 5 дней назад (Ф59) с двумя возражениями, не пересмотренными
 - [lessons_quick_close_ai_contract_output_must_be_bare_enum.md](lessons_quick_close_ai_contract_output_must_be_bare_enum.md) — 10.08: R23-подобные шаги хотят голый литерал в output-поле, обоснование — отдельным сообщением
 - [lessons_bash_cwd_drift_breaks_relative_cd_scripts.md](lessons_bash_cwd_drift_breaks_relative_cd_scripts.md) — 10.08: iwe-safe-pull.sh падает, если cwd уже внутри `<repo>` — cd ~/IWE и повторить

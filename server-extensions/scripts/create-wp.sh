@@ -6,7 +6,7 @@
 # see DP.M.010, DP.ROLE.037
 #
 # Использование:
-#   bash create-wp.sh --title "Название" --budget 5h --priority P3 [--slug slug] [--repo "репо"] [--related "WP-150:dependency,WP-167:продукт"] [--result-kind WorkDone]
+#   bash create-wp.sh --title "Название" --budget 5h --priority P3 [--slug slug] [--repo "репо"] [--stake "Оснащённость"] [--related "WP-150:dependency,WP-167:продукт"] [--result-kind WorkDone] [--week-source "прямое поручение пилота"] [--week-result "ожидаемый результат недели"]
 #   bash create-wp.sh --title "Название" --budget 5h --priority P3 --no-consent-check
 #
 # Предусловие: consent state file должен существовать:
@@ -45,9 +45,12 @@ BUDGET=""
 PRIORITY="P3"
 SLUG=""
 REPO=""
+STAKE="—"
 RELATED=""
 RESULT=""
 RESULT_KIND=""
+WEEK_SOURCE="прямое поручение пилота"
+WEEK_RESULT="карточка РП создана"
 SKIP_CONSENT=0
 
 while [[ $# -gt 0 ]]; do
@@ -57,9 +60,12 @@ while [[ $# -gt 0 ]]; do
     --priority) PRIORITY="$2"; shift 2 ;;
     --slug)     SLUG="$2";     shift 2 ;;
     --repo)     REPO="$2";     shift 2 ;;
+    --stake)    STAKE="$2";    shift 2 ;;
     --related)  RELATED="$2";  shift 2 ;;
     --result)   RESULT="$2";   shift 2 ;;
     --result-kind) RESULT_KIND="$2"; shift 2 ;;
+    --week-source) WEEK_SOURCE="$2"; shift 2 ;;
+    --week-result) WEEK_RESULT="$2"; shift 2 ;;
     --no-consent-check) SKIP_CONSENT=1; shift ;;
     *) echo "Неизвестный флаг: $1" >&2; exit 1 ;;
   esac
@@ -67,7 +73,7 @@ done
 
 # --- Валидация ---
 if [[ -z "$TITLE" || -z "$BUDGET" ]]; then
-  echo "Использование: $0 --title \"Название\" --budget 5h [--priority P3] [--slug slug] [--repo репо] [--related \"WP-NNN:тип\"] [--result R3] [--result-kind KindId]" >&2
+  echo "Использование: $0 --title \"Название\" --budget 5h [--priority P3] [--slug slug] [--repo репо] [--stake ставка] [--related \"WP-NNN:тип\"] [--result R3] [--result-kind KindId] [--week-source источник] [--week-result результат]" >&2
   exit 1
 fi
 
@@ -130,6 +136,65 @@ fi
 
 # --- Дата ---
 TODAY=$(date +%Y-%m-%d)
+
+# --- Предпроверка WeekPlan ---
+# Проверяем схему до первой записи: иначе ошибка устаревшей таблицы оставит
+# частично созданный РП в Registry и inbox.
+WEEKPLAN=$(find "$STRATEGY/current" -maxdepth 1 -name "WeekPlan W*.md" 2>/dev/null | sort -r | head -1)
+if [[ -z "$WEEKPLAN" ]]; then
+  echo "❌ WeekPlan не найден в current/ — создание РП остановлено до записи" >&2
+  exit 1
+fi
+
+# --- Предпроверка WP-REGISTRY ---
+if ! python3 - "$REGISTRY" <<'PYEOF'
+import sys
+
+registry_path = sys.argv[1]
+with open(registry_path, encoding="utf-8") as source:
+    lines = source.readlines()
+
+header_line = next((line for line in lines if line.startswith("| #") and "Ставка" in line), None)
+if header_line is None:
+    raise SystemExit("WP-REGISTRY: не найдена таблица с колонкой «Ставка»")
+
+headers = [cell.strip() for cell in header_line.strip().strip("|").split("|")]
+expected_headers = ["#", "P", "Название", "Ст", "Репо", "Ставка", "Бюджет"]
+if headers != expected_headers:
+    raise SystemExit("WP-REGISTRY: несовместимая схема " + " | ".join(headers))
+PYEOF
+then
+  echo "❌ WP-REGISTRY не совместим с create-wp.sh — создание РП остановлено до записи" >&2
+  exit 1
+fi
+
+if ! python3 - "$WEEKPLAN" <<'PYEOF'
+import sys
+
+weekplan_path = sys.argv[1]
+with open(weekplan_path, encoding="utf-8") as source:
+    content = source.read()
+
+header_line = next(
+    (line for line in content.splitlines() if line.startswith("|") and "РП" in line and "Статус" in line),
+    None,
+)
+if header_line is None:
+    raise SystemExit("WeekPlan: не найдена таблица РП с колонками «РП» и «Статус»")
+
+known_columns = {"🚦", "#", "РП", "h", "Источник", "Статус", "Результат недели"}
+headers = [cell.strip() for cell in header_line.strip().strip("|").split("|")]
+unknown_columns = [header for header in headers if header not in known_columns]
+if unknown_columns:
+    raise SystemExit("WeekPlan: неизвестные колонки " + ", ".join(unknown_columns))
+
+if not any(anchor in content for anchor in ("**Бюджет:**", "**Бюджет недели:**", "**Бюджет итого:**")):
+    raise SystemExit("WeekPlan: не найден якорь бюджета для новой строки РП")
+PYEOF
+then
+  echo "❌ WeekPlan не совместим с create-wp.sh — создание РП остановлено до записи" >&2
+  exit 1
+fi
 
 # --- Slug из title (если не задан) ---
 if [[ -z "$SLUG" ]]; then
@@ -270,9 +335,9 @@ echo "   ✅ $ARCHIVE_STUB"
 # --- Шаг 3: WP-REGISTRY.md ---
 echo "3/6 WP-REGISTRY.md..."
 
-python3 - "$REGISTRY" "$WP_NUM" "$PRIORITY" "$TITLE" "$REPO" "$BUDGET" "$GOV_REPO" <<'PYEOF'
+python3 - "$REGISTRY" "$WP_NUM" "$PRIORITY" "$TITLE" "$REPO" "$STAKE" "$BUDGET" "$GOV_REPO" <<'PYEOF'
 import sys
-registry_path, wp_num, priority, title, repo, budget, gov_repo = sys.argv[1:8]
+registry_path, wp_num, priority, title, repo, stake, budget, gov_repo = sys.argv[1:9]
 
 with open(registry_path, "r", encoding="utf-8") as f:
     lines = f.readlines()
@@ -289,8 +354,8 @@ if insert_at is None:
     sys.exit(1)
 
 repo_cell = repo if repo else "{}/inbox/WP-{}/".format(gov_repo, wp_num)
-new_row = "| {} | {} | **{}** | ⏳ | {} | {} |\n".format(
-    wp_num, priority, title, repo_cell, budget
+new_row = "| {} | {} | **{}** | ⏳ | {} | {} | {} |\n".format(
+    wp_num, priority, title, repo_cell, stake, budget
 )
 lines.insert(insert_at, new_row)
 
@@ -311,12 +376,9 @@ fi
 # --- Шаг 3: WeekPlan ---
 echo "4/6 WeekPlan..."
 
-WEEKPLAN=$(find "$STRATEGY/current" -maxdepth 1 -name "WeekPlan W*.md" 2>/dev/null | sort -r | head -1)
-
-if [[ -n "$WEEKPLAN" ]]; then
-  python3 - "$WEEKPLAN" "$WP_NUM" "$TITLE" "$PRIORITY" "$BUDGET" "$GOV_REPO" <<'PYEOF'
+python3 - "$WEEKPLAN" "$WP_NUM" "$TITLE" "$PRIORITY" "$BUDGET" "$WEEK_SOURCE" "$WEEK_RESULT" <<'PYEOF'
 import sys, re
-weekplan_path, wp_num, title, priority, budget, gov_repo = sys.argv[1:7]
+weekplan_path, wp_num, title, priority, budget, week_source, week_result = sys.argv[1:8]
 
 # Маппинг приоритета → светофор
 flag_map = {"P1": "🔴", "P2": "🟡", "P3": "🟢", "P4": "⚪", "P5": "⚪"}
@@ -325,27 +387,46 @@ flag = flag_map.get(priority, "⚪")
 with open(weekplan_path, "r", encoding="utf-8") as f:
     content = f.read()
 
-# Убрать часы из budget для поля h
+# Убрать часы из budget для поля h.
 h_val = re.sub(r"[^0-9\-]", "", budget) or "?"
 
-new_row = "| {} | {} | **{}** — [описание] | {} | pending | W{} | {} |\n".format(
-    flag, wp_num, title, h_val,
-    re.search(r"W(\d+)", weekplan_path).group(1) if re.search(r"W(\d+)", weekplan_path) else "?",
-    gov_repo + "/inbox"
+header_line = next(
+    (line for line in content.splitlines() if line.startswith("|") and "РП" in line and "Статус" in line),
+    None,
 )
+if header_line is None:
+    print("   ❌ WeekPlan: не найдена таблица РП с колонками «РП» и «Статус»", file=sys.stderr)
+    sys.exit(1)
 
-anchor = next((a for a in ["**Бюджет недели:**", "**Бюджет итого:**"] if a in content), None)
+headers = [cell.strip() for cell in header_line.strip().strip("|").split("|")]
+values = {
+    "🚦": flag,
+    "#": wp_num,
+    "РП": "**{}**".format(title),
+    "h": "{}h".format(h_val),
+    "Источник": week_source,
+    "Статус": "pending",
+    "Результат недели": week_result,
+}
+unknown_columns = [header for header in headers if header not in values]
+if unknown_columns:
+    print(
+        "   ❌ WeekPlan: неизвестные колонки {} — строка не добавлена".format(", ".join(unknown_columns)),
+        file=sys.stderr,
+    )
+    sys.exit(1)
+
+new_row = "| " + " | ".join(values[header] for header in headers) + " |\n"
+
+anchor = next((a for a in ["**Бюджет:**", "**Бюджет недели:**", "**Бюджет итого:**"] if a in content), None)
 if anchor:
     content = content.replace(anchor, new_row + anchor, 1)
     with open(weekplan_path, "w", encoding="utf-8") as f:
         f.write(content)
     print("   ✅ WeekPlan: строка WP-{} добавлена".format(wp_num))
 else:
-    print("   ⚠️  WeekPlan: якорь 'Бюджет недели' / 'Бюджет итого' не найден — добавить вручную", file=sys.stderr)
+    print("   ⚠️  WeekPlan: якорь бюджета не найден — добавить вручную", file=sys.stderr)
 PYEOF
-else
-  echo "   ⚠️  WeekPlan не найден в current/ — добавить вручную" >&2
-fi
 
 # --- Шаг 5: Strategy.md (только если --result задан и бюджет ≥3h) ---
 echo "5/6 Strategy.md..."
