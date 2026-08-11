@@ -158,6 +158,14 @@ _record_close_intent() {
     skip_reflection="true"
   fi
 
+  # Broad triggers ("заливай"/"запуши") arrive many times during the commit
+  # phase; a bare one must not clobber an earlier recorded reflection tail with
+  # an empty record (review-01 High, reproduced live). Explicit-trigger calls
+  # (no $1) keep the original semantics: an empty tail is a valid fact.
+  if [ -n "${1:-}" ] && [ -z "$tail" ] && [ "$skip_reflection" = "false" ]; then
+    return 0
+  fi
+
   python3 "$OBLIGATION_CLI" record-intent --session-id "$SESSION_ID" --raw-text "$tail" --skip-reflection "$skip_reflection" >/dev/null 2>&1 || \
     echo "[close-gate-reminder] session=$SESSION_ID record-intent failed (non-fatal — render falls back to interactive path)" >&2
 }

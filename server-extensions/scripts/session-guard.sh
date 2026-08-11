@@ -548,15 +548,19 @@ validate_orz() {
     local remote_ref
     while IFS= read -r remote_ref; do
       [ -z "$remote_ref" ] && continue
-      if git -C "$ORZ_DIR" cat-file -e "$remote_ref:./$rel" 2>/dev/null; then
+      # Content must match too (review-01 Medium): path-only acceptance would
+      # let a locally edited copy pass on legacy semaphores that have no
+      # registered `file:` line for the scope gate's cmp to catch.
+      if git -C "$ORZ_DIR" cat-file -e "$remote_ref:./$rel" 2>/dev/null &&
+         git -C "$ORZ_DIR" cat-file blob "$remote_ref:./$rel" 2>/dev/null | cmp -s - "$orz"; then
         published_ref="$remote_ref"
         break
       fi
     done <<< "$(git -C "$ORZ_DIR" for-each-ref --format='%(refname)' refs/remotes 2>/dev/null)"
     if [ -n "$published_ref" ]; then
-      echo "  ✓ ORZ-файл не в git index, но найден в опубликованном ref '$published_ref' — принят как эквивалент" >&2
+      echo "  ✓ ORZ-файл не в git index, но побайтно совпадает с опубликованным blob в '$published_ref' — принят как эквивалент" >&2
     else
-      echo "  ❌ ORZ-файл не добавлен в git index (git add $rel) и не найден ни в одном refs/remotes/*" >&2
+      echo "  ❌ ORZ-файл не добавлен в git index (git add $rel) и не совпадает ни с одним blob в refs/remotes/*" >&2
       errors=$((errors + 1))
     fi
   fi
@@ -596,8 +600,11 @@ session_scope_dirty_paths() { # <semaphore> — prints only dirty registered pat
     while IFS= read -r status_line; do
       [ -n "$status_line" ] || continue
       case "$status_line" in
-        "?? "*)
-          _untracked_matches_published "$(dirname "$ORZ_DIR")" "${status_line#'?? '}" && continue
+        # ' M' (tracked, modified vs the parked foreign branch's HEAD) joins
+        # '??' for the same reason: a shared checkout parked on another agent's
+        # branch legitimately carries main's newer version of shared scripts.
+        "?? "*|" M "*)
+          _untracked_matches_published "$(dirname "$ORZ_DIR")" "${status_line:3}" && continue
           ;;
       esac
       printf '  %s: %s\n' "$registered_path" "$status_line"
@@ -747,7 +754,7 @@ print(json.dumps({"wp": sys.argv[1], "slug": sys.argv[2], "agent": sys.argv[3], 
     FORCED_RUN_ID=$(grep "^run_id: " "$FORCED_CARD" | head -1 | cut -d' ' -f2- || true)
     if [ -n "$FORCED_RUN_ID" ]; then
       python3 "$IWE_ROOT/$GOV_REPO/scripts/process-runner.py" cancel "$FORCED_RUN_ID" \
-        2>&1 || echo "адресный cancel принятой карточки ($FORCED_RUN_ID) не прошёл — карточка останется waiting до планового reap-orphans" >&2
+        2>&1 || echo "адресный cancel принятой карточки ($FORCED_RUN_ID) не прошёл — причина в строке ERROR выше (уже терминальная карточка при повторном close — штатно)" >&2
     fi
     python3 "$IWE_ROOT/$GOV_REPO/scripts/process-runner.py" cancel-session quick-close "$SESSION_ID" \
       2>&1 || echo "cancel-session (force path) не прошёл — брошенные прогоны, если есть, останутся до планового reap-orphans" >&2
