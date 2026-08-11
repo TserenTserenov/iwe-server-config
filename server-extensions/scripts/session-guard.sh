@@ -724,7 +724,7 @@ if [ "$CMD" = "note-file" ]; then
   SEM_FILE=$(select_semaphore "$NOTE_AGENT" "${WP:-}" "${SLUG:-}") && SG_RC=0 || SG_RC=$?
   [ "$SG_RC" -eq 2 ] && exit 1
   if [ "$SG_RC" -ne 0 ] || [ -z "$SEM_FILE" ] || [ ! -f "$SEM_FILE" ]; then
-    fail "note-file: нет открытой сессии для агента '$NOTE_AGENT'. Для разовой операции открой housekeeping-сессию:\n  session-guard.sh open --housekeeping note-file --agent $NOTE_AGENT\n  session-guard.sh note-file <path> --agent $NOTE_AGENT\n  session-guard.sh close --housekeeping note-file --agent $NOTE_AGENT" 1
+    fail "note-file: нет открытой сессии для агента '$NOTE_AGENT'. Для разовой операции открой housekeeping-сессию:\n  session-guard.sh open --housekeeping note-file --agent $NOTE_AGENT\n  session-guard.sh note-file <path> --agent $NOTE_AGENT\n  git commit ...   # <-- закоммить ДО close: close снимает семафор и коммит перестанет проходить scope gate\n  session-guard.sh close --housekeeping note-file --agent $NOTE_AGENT" 1
   fi
   # Normalize to git-root-relative (resolve symlinks/macOS /tmp vs /private/tmp)
   if [ -f "$FILE_PATH" ] || [ -d "$FILE_PATH" ]; then
