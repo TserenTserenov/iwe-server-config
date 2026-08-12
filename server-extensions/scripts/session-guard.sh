@@ -590,11 +590,19 @@ _untracked_matches_published() { # <repo> <root-relative path> — 0 if an ident
   return 1
 }
 
+# WP-520 Ф8: session-index.md is append-only (each session adds one row above
+# the table), so concurrent writers resolve as a plain git add/add merge --
+# unlike the exclusive files a single session owns. Scoped to this one file,
+# not every shared file: umbrella WP-N.md takes point-edits to a phase, not a
+# pure append, so it keeps the strict check.
+APPEND_SAFE_PATHS="$(basename "$ORZ_DIR")/00-index.md"
+
 session_scope_dirty_paths() { # <semaphore> — prints only dirty registered paths
   local semaphore="$1" registered_path status
   while IFS= read -r registered_path; do
     registered_path="${registered_path#file: }"
     [ -n "$registered_path" ] || continue
+    case " $APPEND_SAFE_PATHS " in *" $registered_path "*) continue ;; esac
     status=$(git -C "$(dirname "$ORZ_DIR")" status --porcelain --untracked-files=all -- "$registered_path" 2>/dev/null || true)
     [ -z "$status" ] && continue
     while IFS= read -r status_line; do
