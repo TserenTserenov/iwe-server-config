@@ -70,7 +70,7 @@
 | 415 | 🔄 | P2 | Конвейер орг-GitHub | Конвейер 1 |
 | 285 | 🔄 | — | Международная инфраструктура Track B | тесты-спецификации у Андрея |
 | 401 | 🔄 | **P1** | Разделение GitHub-организаций | Ф6.1 manifest.sh |
-| 406 | 🔄 | **P1** | Онбордер | 12.08 (вечер): все 4 решения исполнены и в проде; чек-лист Ф20 за пилотом; найден баг раннера reflection-detection (не заведён в bug-inbox) |
+| 406 | 🔄 | **P1** | Онбордер | 12.08: прогон Б Ф-Ж техчасть подтверждена, поведенческая нет (нужен чистый аккаунт); секрет §4 уже заведён; чек-лист Ф20 и баг раннера reflection-detection (не заведён в bug-inbox) — за пилотом |
 | 456 | 🔄 | P3 | Онбордер англоязычной IWE (браузер) | EN-приёмка ожидает пилота |
 | 452 | 🔄 | P3 | Гайд разработчика IWE | Ф2 стиль кода |
 | 453 | 🔄 | P4 | Конвейер обновления руководства IWE | ждёт WP-452 Ф2-Ф3 |
@@ -126,6 +126,7 @@
 
 ### Feedback — HOT
 
+- [lessons_live_run_requires_clean_account.md](lessons_live_run_requires_clean_account.md) — 12.08: живой прогон проактивности модели невалиден на аккаунте с историей IWE — нужен чистый аккаунт (РП406, прогон Б Ф-Ж)
 - [lessons_pull_refused_check_origin_before_wp_start.md](lessons_pull_refused_check_origin_before_wp_start.md) — 11.08: pull-guard отказал → сверить origin через git fetch ДО старта РП, иначе проектируешь уже отгруженное (РП406: бот-половина сделана параллельно за 20 мин до старта)
 - [lessons_quick_close_witness_blocks_autonomous_vscode.md](lessons_quick_close_witness_blocks_autonomous_vscode.md) — 11.08: blocked-witness = штатное «жду живого ответа пилота» (не сбой); двухтактное закрытие автономной сессии, адресное снятие семафора, переоткрытие слага для пост-коммита; кейс №8 → РП-520
 - [lessons_smoke_fixture_bypassing_pipeline_masks_nonpassthrough.md](lessons_smoke_fixture_bypassing_pipeline_masks_nonpassthrough.md) — 11.08: смоук с фикстурой в середину конвейера маскирует непроброс поля — сквозной смоук от входа обязателен (Critical Ф6 пойман ревью)
