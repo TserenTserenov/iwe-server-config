@@ -118,6 +118,8 @@
 
 ### Project — HOT
 
+- [project_ds_my_strategy_repo_divergence_carryover.md](project_ds_my_strategy_repo_divergence_carryover.md) — 12.08 вечер: DS-my-strategy на чужой ветке, +53/-185 от origin/main, 527 незакоммиченных файлов — пилот явно перенёс разбор в новую сессию, начинать оттуда
+- [project_wp520_dashboard_clone_unpushed_fmt_duplicate.md](project_wp520_dashboard_clone_unpushed_fmt_duplicate.md) — 12.08: клон DS-my-strategy-dashboard хранит незапушенный дубль записи FMT delivery failure (2f7335f83) + основной WP-520.md пропускает 12-й живой случай (commit-push.sh)
 - [project_ledger_day_file_recurring_stash_corruption.md](project_ledger_day_file_recurring_stash_corruption.md) — 10.08: дневной ledger-YAML закоммичен с литеральными конфликт-маркерами 3 раза за день — причина не найдена, кандидат в РП-7; 11.08 союз-мердж двух хвостов прошёл чисто (python union + полная валидация)
 - [project_iwe_local_config_is_pipeline_source.md](project_iwe_local_config_is_pipeline_source.md) — 09.08: `~/IWE` = iwe-local-config, конвейер → rsync 2ч → iwe-server-config → сервер; правка напрямую в сервер-репо затирается тиком
 - [project_memory_repo_has_no_remote.md](project_memory_repo_has_no_remote.md) — 09.08: `memory/` без git-remote с создания, резервной копии нет — решение пилота отложено, не переоткрывать

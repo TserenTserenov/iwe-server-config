@@ -58,6 +58,48 @@ now_date() { date +"%Y-%m-%d"; }
 now_month() { date +"%Y-%m"; }
 fail() { echo "session-guard: $1" >&2; exit "${2:-1}"; }
 
+# normalize_remote_url <url> -- same normalization as commit-push.sh
+# (2026-08-12, peer-session close-pipeline-consolidation) so
+# "git@github.com:org/repo.git" and "https://x:tok@github.com/org/repo.git"
+# compare equal regardless of which protocol either checkout was cloned with.
+normalize_remote_url() {
+  sed -E 's#^[a-zA-Z][a-zA-Z0-9+.-]*://##; s#^[^@/]*@##; s#:#/#; s#\.git$##' <<<"$1"
+}
+
+# gov_repo_dir -- where `open` should actually write the ORZ scaffold: the
+# git worktree this invocation is running from, if it's identifiably the same
+# repo as $GOV_REPO (matched by origin remote, or basename for a remote-less
+# checkout). Same bug class as commit-push.sh's old $IWE_ROOT/$repo (2026-08-12,
+# same peer-session): `open` always wrote ORZ files into the canonical
+# $IWE_ROOT/$GOV_REPO checkout even when invoked from a different worktree,
+# so a file created there was invisible to that worktree's own `git status`.
+# Fail closed onto the canonical path only when identity can't be confirmed,
+# not on every worktree caller -- worktree stays the common case here.
+gov_repo_dir() {
+  local canonical="$IWE_ROOT/$GOV_REPO" candidate candidate_rc=0
+  candidate=$(git rev-parse --show-toplevel 2>/dev/null) || candidate_rc=$?
+  [ "$candidate_rc" -eq 0 ] && [ -n "$candidate" ] || { echo "$canonical"; return; }
+  local candidate_remote candidate_remote_rc=0
+  candidate_remote=$(git -C "$candidate" remote get-url origin 2>/dev/null) || candidate_remote_rc=$?
+  if [ "$candidate_remote_rc" -eq 0 ] && [ -n "$candidate_remote" ]; then
+    local canonical_remote
+    canonical_remote=$(git -C "$canonical" remote get-url origin 2>/dev/null || true)
+    if [ -n "$canonical_remote" ] \
+       && [ "$(normalize_remote_url "$candidate_remote")" = "$(normalize_remote_url "$canonical_remote")" ]; then
+      echo "$candidate"
+      return
+    fi
+  elif [ "$candidate_remote_rc" -eq 2 ] && [ "$(basename "$candidate")" = "$GOV_REPO" ]; then
+    # rc 2 = git's own "No such remote 'origin'" -- a repo without one by
+    # construction. Any other nonzero (corrupt config, permission denied)
+    # falls through to canonical instead of trusting basename on a read we
+    # couldn't actually make.
+    echo "$candidate"
+    return
+  fi
+  echo "$canonical"
+}
+
 semaphore_epoch() {
   local semaphore="$1" timestamp=""
   timestamp=$(grep -E '^(opened_at|created_at): ' "$semaphore" | head -1 | cut -d' ' -f2- || true)
@@ -403,7 +445,22 @@ if [ "$CMD" = "open" ]; then
   CLEAN_SLUG="${SLUG:-$WP}"
   CLEAN_SLUG="${CLEAN_SLUG#"$(now_date)"-}"
   ORZ_BASENAME="$(now_month)/$(now_date)-${CLEAN_SLUG}.md"
-  ORZ_FILE="$ORZ_DIR/$ORZ_BASENAME"
+  # gov_repo_dir() (2026-08-12, peer-session close-pipeline-consolidation) --
+  # write the ORZ scaffold into the worktree open was actually invoked from,
+  # not the global $ORZ_DIR. Deliberately local to this one assembly point,
+  # not a reassignment of $ORZ_DIR itself: `close`'s scope-gate check further
+  # down still needs $ORZ_DIR at its original canonical value.
+  #
+  # ORZ_SESSIONS_DIR recorded into the semaphore below (found in code review
+  # of this same fix): `close` runs as a separate invocation, possibly from a
+  # different cwd/process than `open` (e.g. process-runner.py's
+  # session-guard-release.sh handler) -- recomputing gov_repo_dir() there
+  # would silently resolve to a DIFFERENT worktree than the one `open` wrote
+  # into, and `close` would look for the ORZ file in the wrong place. The
+  # semaphore already carries session identity; it's the one place `close`
+  # can read back the resolved directory instead of re-deriving it.
+  ORZ_SESSIONS_DIR="$(gov_repo_dir)/sessions"
+  ORZ_FILE="$ORZ_SESSIONS_DIR/$ORZ_BASENAME"
   mkdir -p "$(dirname "$ORZ_FILE")"
   {
     echo "---"
@@ -416,6 +473,7 @@ if [ "$CMD" = "open" ]; then
     echo "created_at: $(now_iso)"
     echo "session_id: $SESSION_ID"
     echo "orz_file: $ORZ_BASENAME"
+    echo "orz_sessions_dir: $ORZ_SESSIONS_DIR"
     # WP-484 (08.08, Kimi diagnosis + pilot report): regular sessions never
     # recorded a pid at all, so sweep_orphaned_semaphores()'s dead-pid check —
     # the only auto-detection left since age-based quarantine was retired
@@ -655,7 +713,17 @@ if [ "$CMD" = "close" ]; then
     OPENED_DATE="${OPENED_DATE:-$(now_date)}"
     ORZ_BASENAME="${OPENED_DATE:0:7}/${OPENED_DATE}-${SLUG:-$WP}.md"
   fi
-  ORZ_FILE="$ORZ_DIR/$ORZ_BASENAME"
+  # Read back the directory `open` actually resolved via gov_repo_dir() (found
+  # in code review 2026-08-12, same peer-session as the open-side fix): re-
+  # deriving gov_repo_dir() here would resolve against THIS invocation's cwd,
+  # which can differ from open's (a separate process, e.g. process-runner.py's
+  # session-guard-release.sh handler) and silently point at the wrong
+  # worktree. Semaphores written before this fix have no such field --
+  # canonical $ORZ_DIR is the correct fallback for them, since that's where
+  # open put the file at the time.
+  ORZ_SESSIONS_DIR=$(grep "^orz_sessions_dir: " "$SEM_FILE" | cut -d' ' -f2- || true)
+  ORZ_SESSIONS_DIR="${ORZ_SESSIONS_DIR:-$ORZ_DIR}"
+  ORZ_FILE="$ORZ_SESSIONS_DIR/$ORZ_BASENAME"
 
   echo "Session CLOSE: проверяю ORZ $ORZ_FILE ..."
   if ! validate_orz "$ORZ_FILE" "$AGENT"; then
@@ -1000,6 +1068,17 @@ if [ "$CMD" = "renew" ]; then
 fi
 
 if [ "$CMD" = "audit" ]; then
+  # Known gap (2026-08-12, same peer-session as gov_repo_dir()): sections 2-4
+  # below scan $ORZ_DIR (canonical checkout) only, not per-session
+  # orz_sessions_dir from each semaphore -- an `open` invoked from a worktree
+  # writes its ORZ file there, not into canonical, so its session either
+  # false-positives as "ORZ отсутствует" (§2) or is silently skipped from the
+  # frontmatter/dead-untracked checks (§3-4). Not a correctness gate (nothing
+  # here blocks a commit), but it does mean audit output undercounts worktree
+  # sessions -- flagged here instead of silently narrowing scope; extending
+  # these sections to enumerate `git worktree list` for $GOV_REPO is future
+  # work, not done in this pass (kept to the narrower open/close fix agreed
+  # with the pilot).
   if [ "$CLEANUP_ORPHANS" -eq 1 ]; then
     sweep_orphaned_semaphores
     echo
