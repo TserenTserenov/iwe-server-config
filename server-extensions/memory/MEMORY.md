@@ -29,7 +29,7 @@
 
 | WP | ст | P | Название | next (≤10 слов) |
 |-----|----|----|----------|----------------|
-| 520 | 🔄 | P2 | Новая версия конвейера закрытия сессии | 12.08: Ф7 закрыта — десятый случай (retry-loop witness) + null-строка session-index, оба с тестами; next Ф2 backfill до 17.08 |
+| 520 | 🔄 | P2 | Новая версия конвейера закрытия сессии | 13.08 веч: 2 пир-сессии с Codex — 8+3 семафора карантинированы, языковой alert спасён из PR#30 (PR#56); PR#30 conflicting/PR#35 не начат/6 копий+71 stash не тронуты — продолжение в новой сессии пилота |
 | 523 | 🔄 | P3 | Концепция использования MCP2.0 | вердикт C утверждён 11.08 (DRR); остаток Ф2: клиентская матрица + метрики |
 | 521 | 🔄 | P1 | Конвейер генерации руководств и методических материалов | Ф0 done 11.08 (карта DP.MAP.003, пир Kimi); next спайк Ф1 с пилотом |
 | 522 | 🔄 | P2 | Чек-лист участника экосистемы | Д-к добавлен 12.08: Разметчик подсказывает структуру базы — решается на Ф2 |
@@ -128,6 +128,8 @@
 
 ### Feedback — HOT
 
+- [feedback_verify_close_claims_against_ledger.md](feedback_verify_close_claims_against_ledger.md) — 13.08: не доверять тексту WP-карточки о закрытии («снято вручную») — сверять с дневным ledger по session_id, Codex поймал трижды за одну пир-сессию
+- [project_close_gate_cannot_recognize_worktree_delivery.md](project_close_gate_cannot_recognize_worktree_delivery.md) — 13.08: 3 раза за день session-guard close не признал доставку через worktree; force-no-reflection покрывает только witness-гонку, не этот класс — карантинировать напрямую, не тратить циклы на обход
 - [lessons_live_run_requires_clean_account.md](lessons_live_run_requires_clean_account.md) — 12.08: живой прогон проактивности модели невалиден на аккаунте с историей IWE — нужен чистый аккаунт (РП406, прогон Б Ф-Ж)
 - [lessons_pull_refused_check_origin_before_wp_start.md](lessons_pull_refused_check_origin_before_wp_start.md) — 11.08: pull-guard отказал → сверить origin через git fetch ДО старта РП, иначе проектируешь уже отгруженное (РП406: бот-половина сделана параллельно за 20 мин до старта)
 - [lessons_quick_close_witness_blocks_autonomous_vscode.md](lessons_quick_close_witness_blocks_autonomous_vscode.md) — 11.08: blocked-witness = штатное «жду живого ответа пилота» (не сбой); двухтактное закрытие автономной сессии, адресное снятие семафора, переоткрытие слага для пост-коммита; кейс №8 → РП-520
