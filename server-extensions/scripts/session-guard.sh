@@ -6,8 +6,8 @@
 # Mechanical enforcement: git pre-commit hook проверяет наличие активного семафора.
 #
 # Команды:
-#   open --wp WP-N [--task "..."] [--files "a,b"] [--slug "..."] [--agent claude-code|kimi|hermes] [--personality <unassigned|UUID>]
-#   open --housekeeping <reason> [--agent ...]        # фоновая housekeeping-сессия без ORZ
+#   open --wp WP-N [--task "..."] [--files "a,b"] [--slug "..."] [--agent claude-code|kimi|hermes] [--personality <unassigned|UUID>] [--owner-pid PID]
+#   open --housekeeping <reason> [--agent ...] [--owner-pid PID]
 #   close [--wp WP-N] [--slug "..."] [--agent ...]
 #   close ... --force-no-reflection "<причина>"       # закрыть без ответа на рефлексию —
 #                                                      # только если раннер стоит именно на
@@ -289,6 +289,7 @@ SLUG=""
 AGENT="${IWE_AGENT:-}"
 HOUSEKEEPING=""
 PERSONALITY=""
+OWNER_PID=""
 SESSION_ID_ARG=""
 CLEANUP_ORPHANS=0
 FORCE_NO_REFLECTION=""
@@ -302,6 +303,7 @@ while [[ $# -gt 0 ]]; do
     --agent)  AGENT="$2"; shift 2 ;;
     --housekeeping) HOUSEKEEPING="$2"; shift 2 ;;
     --personality) PERSONALITY="$2"; shift 2 ;;
+    --owner-pid) OWNER_PID="$2"; shift 2 ;;
     --session-id) SESSION_ID_ARG="$2"; shift 2 ;;
     --since)  SINCE="$2"; shift 2 ;;
     --cleanup-orphans) CLEANUP_ORPHANS=1; shift ;;
@@ -314,6 +316,13 @@ done
 
 if [ -z "$AGENT" ] && { [ "$CMD" = "open" ] || [ "$CMD" = "close" ]; }; then
   fail "--agent обязателен для open/close (или переменная IWE_AGENT)" 1
+fi
+
+# Owner PID is evidence that the caller, not this short-lived guard process,
+# remains responsible for the session.  Do not infer it from $$: the guard
+# exits immediately after open and would make a live session look orphaned.
+if [ -n "$OWNER_PID" ] && ! [[ "$OWNER_PID" =~ ^[0-9]+$ ]]; then
+  fail "--owner-pid должен быть числовым PID процесса-владельца" 1
 fi
 
 # --- OPEN ---
@@ -358,13 +367,11 @@ if [ "$CMD" = "open" ]; then
       # ambiguous for note-file/close — --slug has nothing to match against.
       echo "slug: $HOUSEKEEPING"
       echo "created_at: $(now_iso)"
-      # $$ here is session-guard.sh's own transient process — already dead by
-      # the time anyone checks it (verified live 08.08: recorded pid was dead
-      # within the same second). $CLAUDE_PID is the actual long-lived Claude
-      # Code process that stays alive for the whole session; other agents keep
-      # today's behavior (transient $$, harmless — dead-pid check just never
-      # fires for them, same as before this fix).
-      echo "pid: ${CLAUDE_PID:-$$}"
+      # A PID belongs only to the long-lived owner supplied by the caller (or
+      # Claude Code's stable runtime PID), never to this transient guard.
+      # Without reliable evidence, omit it so audit keeps the session as
+      # ambiguous instead of falsely quarantining it.
+      [ -n "${OWNER_PID:-${CLAUDE_PID:-}}" ] && echo "pid: ${OWNER_PID:-$CLAUDE_PID}"
       echo "---"
     } > "$HK_FILE"
     echo "Housekeeping OPEN: $HK_FILE (reason: $HOUSEKEEPING)"
@@ -478,13 +485,11 @@ if [ "$CMD" = "open" ]; then
     # recorded a pid at all, so sweep_orphaned_semaphores()'s dead-pid check —
     # the only auto-detection left since age-based quarantine was retired
     # 04.08 — had nothing to grab onto; abandoned semaphores just hung open
-    # forever (48 found live 08.08). $CLAUDE_PID is the long-lived Claude Code
-    # process (stable for the whole session, verified live) — NOT $$, which
-    # is session-guard.sh's own transient subprocess, already dead the moment
-    # this script returns (verified live: recorded pid was dead within the
-    # same second). Other agents get no pid line, same as before this fix —
-    # strictly not worse, dead-pid check simply still can't fire for them.
-    [ -n "${CLAUDE_PID:-}" ] && echo "pid: $CLAUDE_PID"
+    # forever (48 found live 08.08). A caller that knows its long-lived owner
+    # passes --owner-pid; Claude Code keeps its stable $CLAUDE_PID fallback.
+    # Never substitute this script's $$: it dies immediately after open and
+    # would falsely quarantine a still-live session.
+    [ -n "${OWNER_PID:-${CLAUDE_PID:-}}" ] && echo "pid: ${OWNER_PID:-$CLAUDE_PID}"
     echo "---"
     # initial --files CSV → append-log entries (git-root-relative expected from caller)
     if [ -n "${FILES:-}" ]; then
