@@ -29,7 +29,8 @@
 
 | WP | ст | P | Название | next (≤10 слов) |
 |-----|----|----|----------|----------------|
-| 520 | 🔄 | P2 | Новая версия конвейера закрытия сессии | 13.08 веч: 2 пир-сессии с Codex — 8+3 семафора карантинированы, языковой alert спасён из PR#30 (PR#56); PR#30 conflicting/PR#35 не начат/6 копий+71 stash не тронуты — продолжение в новой сессии пилота |
+| 525 | 🔄 | P2 | Конвейер обновления IWE из FPF | 13.08: Ф2 частично — SKILL.md правка задеплоена (полный поиск); Ф4 находка — раннер не коммитит корневой IWE; next Ф1 правило отбора паттернов |
+| 520 | 🔄 | P2 | Новая версия конвейера закрытия сессии | 13.08 веч: +3 семафора карантинированы (11 итого), 20-я находка восстановлена; 6 копий репо/41 отчёт — новая сессия |
 | 523 | 🔄 | P3 | Концепция использования MCP2.0 | вердикт C утверждён 11.08 (DRR); остаток Ф2: клиентская матрица + метрики |
 | 521 | 🔄 | P1 | Конвейер генерации руководств и методических материалов | Ф0 done 11.08 (карта DP.MAP.003, пир Kimi); next спайк Ф1 с пилотом |
 | 522 | 🔄 | P2 | Чек-лист участника экосистемы | Д-к добавлен 12.08: Разметчик подсказывает структуру базы — решается на Ф2 |
@@ -128,6 +129,8 @@
 
 ### Feedback — HOT
 
+- [lessons_quick_close_runner_root_repo_and_pilot_step_input.md](lessons_quick_close_runner_root_repo_and_pilot_step_input.md) — 13.08: commit-push.sh не адресует корневой репо IWE (любое имя переполняет путь); pilot-шаг (blocked-push-failed) теряет --input, переданный тем же вызовом, что его обнаружил — нужен раздельный повторный next
+- [lessons_stale_draft_may_hide_unpublished_content_dont_discard_wholesale.md](lessons_stale_draft_may_hide_unpublished_content_dont_discard_wholesale.md) — 13.08: застывший diff не всегда гонка/зависание — может быть черновик поверх устаревшего среза, origin ушёл вперёд; сверять origin/main, переносить уникальную часть вручную, не отбрасывать и не коммитить целиком
 - [feedback_verify_close_claims_against_ledger.md](feedback_verify_close_claims_against_ledger.md) — 13.08: не доверять тексту WP-карточки о закрытии («снято вручную») — сверять с дневным ledger по session_id, Codex поймал трижды за одну пир-сессию
 - [project_close_gate_cannot_recognize_worktree_delivery.md](project_close_gate_cannot_recognize_worktree_delivery.md) — 13.08: 3 раза за день session-guard close не признал доставку через worktree; force-no-reflection покрывает только witness-гонку, не этот класс — карантинировать напрямую, не тратить циклы на обход
 - [lessons_live_run_requires_clean_account.md](lessons_live_run_requires_clean_account.md) — 12.08: живой прогон проактивности модели невалиден на аккаунте с историей IWE — нужен чистый аккаунт (РП406, прогон Б Ф-Ж)

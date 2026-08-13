@@ -307,7 +307,18 @@ while [[ $# -gt 0 ]]; do
     --session-id) SESSION_ID_ARG="$2"; shift 2 ;;
     --since)  SINCE="$2"; shift 2 ;;
     --cleanup-orphans) CLEANUP_ORPHANS=1; shift ;;
-    --force-no-reflection) FORCE_NO_REFLECTION="$2"; shift 2 ;;
+    --force-no-reflection)
+      # The reason is a required part of this flag's semantics (WP-484,
+      # 08.08 -- FORCE_NO_REFLECTION is used downstream as a documented
+      # bypass reason, not a boolean). Passed last with no value after it
+      # (WP-520 sixteenth live finding), $2 doesn't exist under `set -u` and
+      # the whole script dies mid-close -- fail with a readable message
+      # instead, still requiring the reason (empty string carries no
+      # meaning here either).
+      if [[ $# -lt 2 || -z "$2" ]]; then
+        fail "--force-no-reflection требует непустую причину как значение (например: --force-no-reflection \"work already pushed, commit_needed=false\")" 1
+      fi
+      FORCE_NO_REFLECTION="$2"; shift 2 ;;
     --)       shift; POSITIONAL+=("$@"); break ;;
     -*)       shift ;;
     *)        POSITIONAL+=("$1"); shift ;;
