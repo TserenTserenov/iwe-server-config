@@ -18,6 +18,19 @@
 #   renew [--wp WP-N] [--slug "..."] [--agent ...]    # продлить право на коммит
 #   pre-commit-check
 #   note-file <path> [--agent ...]
+#   freeze-canonical <path> [--force]                 # physical OS-level lock (chflags -R uchg
+#                                                      # on Darwin), prototype for WP-520 ADR —
+#                                                      # refuses if any semaphore for the target
+#                                                      # path is still open, unless --force.
+#                                                      # NOT yet applied to the live canonical
+#                                                      # checkout (~/IWE/DS-my-strategy) — that's
+#                                                      # a separate step, gated on: `list_candidates
+#                                                      # claude-code` (and the kimi/codex/hermes
+#                                                      # equivalents) returning empty for that path,
+#                                                      # i.e. all sessions open against it today
+#                                                      # have closed. Command tested in isolation
+#                                                      # only (peer-session 2026-08-14-09).
+#   unfreeze-canonical <path>                          # remove the physical lock (chflags -R nouchg)
 #   lock-hot-file <path> [--agent ...]    # WP-7 SessionGitRaceIsolation: короткий
 #   unlock-hot-file <path>                # mkdir-замок на файл, который часто
 #                                          # коллизирует между параллельными сессиями
@@ -315,6 +328,7 @@ SESSION_ID_ARG=""
 CLEANUP_ORPHANS=0
 FORCE_NO_REFLECTION=""
 CANONICAL_OWNER=""
+FORCE_FLAG=0
 POSITIONAL=()
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -335,6 +349,7 @@ while [[ $# -gt 0 ]]; do
     --session-id) SESSION_ID_ARG="$2"; shift 2 ;;
     --since)  SINCE="$2"; shift 2 ;;
     --cleanup-orphans) CLEANUP_ORPHANS=1; shift ;;
+    --force)  FORCE_FLAG=1; shift ;;
     --force-no-reflection)
       # The reason is a required part of this flag's semantics (WP-484,
       # 08.08 -- FORCE_NO_REFLECTION is used downstream as a documented
@@ -1183,6 +1198,63 @@ if [ "$CMD" = "unlock-hot-file" ]; then
   LOCK_PATH="$HOT_LOCK_DIR/$(_hot_lock_slug "$HOT_PATH").lockdir"
   rm -rf "$LOCK_PATH"
   echo "Unlocked: $HOT_PATH"
+  exit 0
+fi
+
+# --- FREEZE-CANONICAL (WP-520 ADR prototype) ---
+# Physical OS-level lock, one layer below the `open`-time protocol check
+# (FROZEN_CANONICAL_PATH above): that check only stops writes going through
+# `session-guard.sh open` itself, not a direct `git commit`/`Edit` bypassing
+# it entirely. `chflags uchg` sets the immutable flag on Darwin (this repo's
+# only target platform per environment) -- any write syscall against a
+# locked path fails at the kernel, regardless of which tool issued it.
+# `-R` is required, not cosmetic: `chflags uchg <dir>` alone only locks the
+# directory inode (blocks new files, e.g. `touch`/`git init`) -- existing
+# files inside stay writable, confirmed empirically against this exact
+# script during the WP-520 peer session that wrote it (2026-08-14).
+if [ "$CMD" = "freeze-canonical" ]; then
+  FREEZE_PATH="${POSITIONAL[0]:-}"
+  [ -z "$FREEZE_PATH" ] && fail "freeze-canonical: missing path argument" 1
+  [ -d "$FREEZE_PATH" ] || fail "freeze-canonical: '$FREEZE_PATH' is not a directory" 1
+  # Resolve before locking, not the caller-supplied string: if $FREEZE_PATH is
+  # (or later becomes, via a symlink swap between this check and `chflags`) a
+  # symlink, `chflags -R` on Darwin does NOT follow it into the link target --
+  # confirmed empirically same session -- so locking the literal argument can
+  # silently protect nothing. Refusing on a symlink is a known, accepted gap
+  # for this prototype (peer-session finding, 2026-08-14): it stops the "path
+  # is already a symlink" case, not a same-instant swap mid-syscall (TOCTOU
+  # proper), which chflags's own atomicity is the only real defense against.
+  if [ -L "$FREEZE_PATH" ]; then
+    fail "freeze-canonical: '$FREEZE_PATH' is a symlink -- chflags -R does not follow it into the target on Darwin, so locking it protects nothing; pass the resolved path instead" 1
+  fi
+  if [ "$FORCE_FLAG" != "1" ]; then
+    # TODO(WP-520): known gap, not fixed here (peer-session finding,
+    # 2026-08-14): this enumeration and the `chflags -R` below are two
+    # separate syscalls, not one atomic operation. A semaphore or file
+    # created by another process in that window ends up unprotected --
+    # `chflags -R` only locks what exists at the moment it runs. Acceptable
+    # for a prototype gated on "no open semaphores for the caller"; a
+    # production version would need a verify-pass (re-`find` + confirm every
+    # path carries `uchg`, retry/fail on mismatch) to close it for real.
+    LIVE=$(list_candidates "${AGENT:-${IWE_AGENT:-claude-code}}")
+    if [ -n "$LIVE" ]; then
+      echo "session-guard: freeze-canonical: agent has open semaphore(s) -- close them first or pass --force:" >&2
+      echo "$LIVE" >&2
+      exit 1
+    fi
+  fi
+  chflags -R uchg "$FREEZE_PATH" \
+    || fail "freeze-canonical: chflags -R uchg failed on '$FREEZE_PATH' (needs owner permission, not root, for user-owned paths)" 1
+  echo "Frozen (chflags -R uchg): $FREEZE_PATH"
+  exit 0
+fi
+
+if [ "$CMD" = "unfreeze-canonical" ]; then
+  FREEZE_PATH="${POSITIONAL[0]:-}"
+  [ -z "$FREEZE_PATH" ] && fail "unfreeze-canonical: missing path argument" 1
+  chflags -R nouchg "$FREEZE_PATH" \
+    || fail "unfreeze-canonical: chflags -R nouchg failed on '$FREEZE_PATH'" 1
+  echo "Unfrozen: $FREEZE_PATH"
   exit 0
 fi
 
