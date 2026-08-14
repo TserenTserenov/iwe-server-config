@@ -391,6 +391,39 @@ if [ "$CMD" = "open" ]; then
 
   [ -z "$WP" ] && fail "--wp обязателен для open" 2
 
+  # Warn (never block) when another ACTIVE semaphore for the same WP already
+  # exists in a DIFFERENT checkout of the same upstream repo — the class of
+  # incident that produced 12 worktrees across 3 distinct `.git` dirs for
+  # DS-my-strategy (peer-session 2026-08-14-02-git-worktree-chaos, consensus
+  # with Codex). `git worktree list` only sees worktrees registered against
+  # ONE `.git`; a plain `git clone` (the actually harmful pattern — worktrees
+  # of a worktree, dashboard-clone style) is invisible to it. Reuses
+  # normalize_remote_url() and the same origin-remote comparison gov_repo_dir()
+  # already does above, rather than adding a second identity mechanism.
+  # Scoped across ALL agents (not just $AGENT, unlike the stale-semaphore loop
+  # below) because the incident is inherently cross-agent: Claude, Codex and
+  # Kimi each opening their own checkout of the same WP is exactly the failure
+  # mode this warns about.
+  CURRENT_REPO_DIR="$(gov_repo_dir)"
+  CURRENT_REMOTE="$(git -C "$CURRENT_REPO_DIR" remote get-url origin 2>/dev/null || true)"
+  if [ -n "$CURRENT_REMOTE" ]; then
+    while IFS= read -r OTHER_SEM; do
+      [ -z "$OTHER_SEM" ] && continue
+      [ -f "$OTHER_SEM" ] || continue
+      OTHER_WP=$(grep "^wp: " "$OTHER_SEM" | cut -d' ' -f2- || true)
+      [ "$OTHER_WP" = "$WP" ] || continue
+      OTHER_REPO_DIR=$(grep "^orz_sessions_dir: " "$OTHER_SEM" | cut -d' ' -f2- | sed 's#/sessions$##' || true)
+      [ -n "$OTHER_REPO_DIR" ] || continue
+      [ "$OTHER_REPO_DIR" = "$CURRENT_REPO_DIR" ] && continue  # same checkout, not a duplicate
+      OTHER_REMOTE=$(git -C "$OTHER_REPO_DIR" remote get-url origin 2>/dev/null || true)
+      [ -n "$OTHER_REMOTE" ] || continue
+      if [ "$(normalize_remote_url "$CURRENT_REMOTE")" = "$(normalize_remote_url "$OTHER_REMOTE")" ]; then
+        OTHER_AGENT=$(grep "^agent: " "$OTHER_SEM" | cut -d' ' -f2- || echo "unknown")
+        echo "WARNING: WP $WP уже открыт в ДРУГОЙ копии этого репозитория — $(basename "$OTHER_SEM") (agent: $OTHER_AGENT, checkout: $OTHER_REPO_DIR). Текущий checkout: $CURRENT_REPO_DIR. Переиспользуй существующую копию (git worktree add от канонического чекаута), не плоди новый git clone." >&2
+      fi
+    done < <(find "$SESSION_DIR" -name '*.open' -type f 2>/dev/null)
+  fi
+
   # Report stale semaphores of the same agent — WITHOUT quarantining them.
   #
   # WP-484 Ф49 (04.08): this loop used to `mv` every semaphore older than the
@@ -791,13 +824,36 @@ if [ "$CMD" = "close" ]; then
   # подтверждена картой раннера — живой разбор показал, что вопрос рефлексии
   # часто рендерится ПОСЛЕ команды «закрывай», пилот её физически не видит.
   # Bypass узкий и предметный, не общий «пропусти карту раннера»: требует
-  # ИМЕННО блокировку на этом шаге и подтверждённый push — другой сбой раннера
-  # (упавший push, отменённый до commit-push прогон) этим флагом не спрятать.
+  # ИМЕННО один из перечисленных ниже current_step и подтверждённый push —
+  # любой ДРУГОЙ сбой раннера (упавший push, отменённый до commit-push прогон)
+  # этим флагом по-прежнему не спрятать.
   if [ -z "$RUNNER_OK" ] && [ -n "$FORCE_NO_REFLECTION" ]; then
     for card in $RUNNER_CARD; do
       [ -f "$card" ] || continue
       grep -q '^process_id: quick-close$' "$card" || continue
-      grep -q '^current_step: blocked-witness-unavailable$' "$card" || continue
+      # Два допустимых current_step, оба безопасны оставить открытым семафором
+      # по тому же критерию (содержательная работа уже доставлена, ничего не
+      # потеряно) — список НЕ произвольно расширяемый, каждый пункт — шаг,
+      # идущий строго ПОСЛЕ commit/push в quick-close.yaml, то есть его отказ
+      # физически не может означать несделанный commit/push:
+      #   (а) blocked-witness-unavailable — исходный случай (08.08): рефлексия
+      #       не отрендерилась пилоту.
+      #   (б) wp-archive-run — WP-520 находка 25 (14.08, пир-сессия с Codex):
+      #       архивация — последний шаг конвейера (quick-close.yaml), уже ПОСЛЕ
+      #       gather-session-facts/commit-push-gate/session-ledger-append; её
+      #       отказ (например «WP уже архивирован», см. wp-archive.sh фикс той
+      #       же сессии) не отменяет уже прошедшую доставку. НЕ «любой
+      #       cancelled» — код-ревью поймал регрессию именно на этой попытке
+      #       (тест 2 намеренно проверяет current_step=commit-push как «сбой,
+      #       который флаг прятать не должен»); список шагов сюда добавлять
+      #       только по одному, с тем же обоснованием «после commit/push».
+      if grep -q '^current_step: blocked-witness-unavailable$' "$card"; then
+        :
+      elif grep -q '^current_step: wp-archive-run$' "$card" && grep -q '^status: cancelled$' "$card"; then
+        :
+      else
+        continue
+      fi
       # WP-520 (11.08, peer session with Kimi): a session that committed manually
       # before starting the runner (allowed path, bug-2026-07-17) is routed AROUND
       # commit-push by commit-push-gate, so all_pushed never appears in its card.
@@ -811,7 +867,7 @@ if [ "$CMD" = "close" ]; then
       break
     done
     if [ -z "$RUNNER_OK" ]; then
-      fail "force-no-reflection: не нашёл RUN-quick-close-${SLUG}*.md с current_step=blocked-witness-unavailable и (all_pushed=true или commit_needed=false) — этот флаг обходит только эту конкретную блокировку, не любой сбой раннера." 7
+      fail "force-no-reflection: не нашёл RUN-quick-close-${SLUG}*.md с current_step в {blocked-witness-unavailable, wp-archive-run (cancelled)} и (all_pushed=true или commit_needed=false) — этот флаг обходит только эти конкретные классы отказа, не любой сбой раннера." 7
     fi
     FORCE_EVENT=$(python3 -c '
 import json, sys
