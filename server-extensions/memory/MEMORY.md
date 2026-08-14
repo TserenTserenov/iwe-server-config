@@ -130,6 +130,7 @@
 
 ### Feedback — HOT
 
+- [lessons_ledger_timestamp_not_unique_event_id.md](lessons_ledger_timestamp_not_unique_event_id.md) — 14.08: append-only YAML журнал — timestamp не уникален как идентификатор события (пакетные writer'ы штампуют несколько разных событий одной секундой), сравнение/дедупликация должны идти по полному содержимому с учётом кратности, не по ts
 - [lessons_runner_commit_push_repo_wide_not_path_scoped.md](lessons_runner_commit_push_repo_wide_not_path_scoped.md) — 14.08: commit-push раннера проверяет push-чистоту всей ветки, не путей задачи — ложный отказ, когда чекаут на чужой ветке впереди upstream по несвязанным коммитам; multiline message с тегом [no-registry-touch] искажается при проходе через раннер (живой git-хук принял тот же текст напрямую)
 - [lessons_causal_signal_beats_diff_recompute_for_gate.md](lessons_causal_signal_beats_diff_recompute_for_gate.md) — 14.08: устаревший gate после перестановки шагов → искать простой причинный сигнал (session_file_exists), не пересчитывать сложную diff-логику; не дробить инкапсулированный 382-строчный модуль ради одного нового потребителя
 - [lessons_parallel_classification_stale_before_transfer.md](lessons_parallel_classification_stale_before_transfer.md) — 13.08: параллельная классификация субагентами устаревает к моменту переноса, если main продолжает расти во время их работы (7 из 34 находок протухли за минуты в РП520 Ф11 batch7) — обязательна перепроверка непосредственно перед переносом
