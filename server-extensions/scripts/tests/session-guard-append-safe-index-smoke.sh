@@ -29,6 +29,11 @@ git -C "$REPO" commit -qm init
 export IWE_ROOT="$TEST_ROOT"
 export IWE_GOVERNANCE_REPO="DS-strategy"
 export IWE_AGENT="fixture"
+# This fixture's repo dir happens to share a name with the real canonical
+# checkout the WP-520 freeze defaults to -- opt out explicitly, this test is
+# about append-safe scope gating, not freeze (session-guard-freeze-enforce-smoke.sh
+# owns that).
+export IWE_FROZEN_CANONICAL_PATH=""
 
 bash "$GUARD" open --wp WP-520 --task fixture --slug append-safe-smoke --agent fixture >/dev/null
 

@@ -10,7 +10,10 @@ trap 'rm -rf "$TEST_ROOT"' EXIT
 
 open_session() {
     local id="$1" wp="$2" slug="$3"
-    IWE_ROOT="$TEST_ROOT" IWE_SESSION_ID="$id" bash "$GUARD" open \
+    # This fixture's repo dir defaults to the same name as the real canonical
+    # checkout the WP-520 freeze targets -- opt out explicitly, this test is
+    # about the wp+slug selector, not freeze.
+    IWE_ROOT="$TEST_ROOT" IWE_SESSION_ID="$id" IWE_FROZEN_CANONICAL_PATH="" bash "$GUARD" open \
         --wp "$wp" --task fixture --slug "$slug" --agent fixture >/dev/null
 }
 

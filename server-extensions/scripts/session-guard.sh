@@ -47,12 +47,19 @@ SESSION_DIR="$IWE_ROOT/.iwe-runtime/sessions"
 OPEN_LOG="$IWE_ROOT/$GOV_REPO/inbox/open-sessions.log"
 ORZ_DIR="$IWE_ROOT/$GOV_REPO/sessions"
 AGENT_STATUS_SCRIPT="$IWE_ROOT/scripts/agent-status-report.sh"
-# WP-520 находка 28 (14.08): text-only freeze decision on the canonical
-# DS-my-strategy checkout — new sessions must use an isolated worktree, not
-# write there directly. Empty = no active freeze (default). Set to the
-# absolute canonical path to arm the warning; unset/empty is a silent no-op,
-# same convention as every other IWE_* override in this file.
-FROZEN_CANONICAL_PATH="${IWE_FROZEN_CANONICAL_PATH:-}"
+# WP-520 находка 28+enforcement (14.08): freeze on the canonical DS-my-strategy
+# checkout — new sessions must use an isolated worktree, not open there
+# directly. Default-on: unset means the freeze covers $IWE_ROOT/$GOV_REPO.
+# `${VAR:-default}` can't tell "unset" from "set to empty string" (peer-session
+# 2026-08-14-07-wp520-freeze-enforce, Codex review) — that distinction is the
+# only way to offer an explicit one-command unfreeze later
+# (IWE_FROZEN_CANONICAL_PATH="") without it silently falling back to the
+# default. `${VAR+x}` is the standard bash idiom for "is this var set at all".
+if [ -z "${IWE_FROZEN_CANONICAL_PATH+x}" ]; then
+  FROZEN_CANONICAL_PATH="$IWE_ROOT/$GOV_REPO"
+else
+  FROZEN_CANONICAL_PATH="$IWE_FROZEN_CANONICAL_PATH"
+fi
 mkdir -p "$SESSION_DIR" "$(dirname "$OPEN_LOG")" "$ORZ_DIR"
 
 CMD="${1:-}"
@@ -79,6 +86,14 @@ normalize_remote_url() {
 # same peer-session): `open` always wrote ORZ files into the canonical
 # $IWE_ROOT/$GOV_REPO checkout even when invoked from a different worktree,
 # so a file created there was invisible to that worktree's own `git status`.
+#
+# NOT an end-run around the freeze check below: this resolves WHERE the
+# already-permitted ORZ scaffold write lands, it never decides WHETHER `open`
+# is allowed to run. The freeze block runs after this and independently
+# blocks/passes regardless of which path gov_repo_dir() returned
+# (peer-session 2026-08-14-07-wp520-freeze-enforce, consensus with Codex —
+# called out explicitly so a future edit doesn't mistake this resolver for
+# a freeze bypass).
 # Fail closed onto the canonical path only when identity can't be confirmed,
 # not on every worktree caller -- worktree stays the common case here.
 gov_repo_dir() {
@@ -299,6 +314,7 @@ OWNER_PID=""
 SESSION_ID_ARG=""
 CLEANUP_ORPHANS=0
 FORCE_NO_REFLECTION=""
+CANONICAL_OWNER=""
 POSITIONAL=()
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -308,6 +324,12 @@ while [[ $# -gt 0 ]]; do
     --slug|--topic) SLUG="$2"; shift 2 ;;
     --agent)  AGENT="$2"; shift 2 ;;
     --housekeeping) HOUSEKEEPING="$2"; shift 2 ;;
+    # WP-520 freeze-enforce (peer-session 2026-08-14-07): the only sanctioned
+    # bypass, for launchd/cron runners that own the canonical checkout by
+    # schedule rather than compete for it. Value is diagnostic only (shows up
+    # in `audit`), not checked against a fixed set -- the freeze-block below
+    # only tests non-empty.
+    --canonical-owner) CANONICAL_OWNER="$2"; shift 2 ;;
     --personality) PERSONALITY="$2"; shift 2 ;;
     --owner-pid) OWNER_PID="$2"; shift 2 ;;
     --session-id) SESSION_ID_ARG="$2"; shift 2 ;;
@@ -430,18 +452,54 @@ if [ "$CMD" = "open" ]; then
     done < <(find "$SESSION_DIR" -name '*.open' -type f 2>/dev/null)
   fi
 
-  # Warn (never block) when `open` is running directly against a checkout
-  # under text-only freeze (WP-520 находка 28, 14.08 — pilot decision A1:
-  # canonical DS-my-strategy frozen for direct writes, new sessions must use
-  # an isolated worktree). Compares realpath, not the raw string, so a
-  # symlink or alternate mount to the same physical directory still triggers
-  # the warning (peer-session 2026-08-14-06, Codex review caught this before
-  # the first version shipped).
-  if [ -n "$FROZEN_CANONICAL_PATH" ]; then
+  # Block `open` running directly against a checkout under freeze (WP-520,
+  # peer-session 2026-08-14-07-wp520-freeze-enforce — the found-28 warning
+  # never fired live in three days of use because the arming env var was
+  # never actually exported anywhere; the default-on change above finally
+  # makes this reachable, so the warning becomes a real block here). Compares
+  # realpath, not the raw string, so a symlink or alternate mount to the same
+  # physical directory still triggers it (peer-session 2026-08-14-06, Codex
+  # review caught this before the first version shipped).
+  #
+  # Two carve-outs, both narrowed from an earlier draft by cold-context
+  # review + a follow-up round with Codex in the same peer-session:
+  #
+  # 1. --canonical-owner (unconditional). launchd/cron runners
+  #    (kimi-wp-run-scheduled.sh, wp-run-scheduled-tsekh1.sh) own the
+  #    canonical checkout by schedule, not by contest -- freeze targets NEW
+  #    interactive writers piling onto a contested checkout, not the single
+  #    scheduled job that already has exclusive standing. Not agent-scoped
+  #    (an earlier draft special-cased --agent kimi; rejected because
+  #    interactive Kimi sessions exist too and agent-name is not a stable
+  #    policy key).
+  #
+  # 2. Exact-slug re-entry. NOT "any live semaphore for this WP+agent" (that
+  #    first draft let an unrelated new `open` ride an unrelated agent's live
+  #    lease and open a second semaphore for the same WP -- exactly the
+  #    collision freeze exists to prevent). Re-entry is allowed only when the
+  #    caller's own --slug matches the slug already recorded on a live
+  #    semaphore for this WP+agent: same slug from the same agent is the same
+  #    logical session resuming (e.g. after a crash), not a second writer. No
+  #    --slug given -> no exception, freeze blocks unconditionally.
+  if [ -n "$FROZEN_CANONICAL_PATH" ] && [ -z "$CANONICAL_OWNER" ]; then
     CURRENT_REPO_REAL=$(realpath "$CURRENT_REPO_DIR" 2>/dev/null || echo "$CURRENT_REPO_DIR")
     FROZEN_REAL=$(realpath "$FROZEN_CANONICAL_PATH" 2>/dev/null || echo "$FROZEN_CANONICAL_PATH")
     if [ "$CURRENT_REPO_REAL" = "$FROZEN_REAL" ]; then
-      echo "WARNING: этот checkout ($CURRENT_REPO_DIR) под freeze (WP-520) — прямая запись не разрешена до отдельного решения. Используй изолированный worktree: EnterWorktree или 'git worktree add' от свежего origin/main." >&2
+      REENTRY_OK=false
+      if [ -n "$SLUG" ]; then
+        while IFS= read -r EXISTING_SEM; do
+          [ -z "$EXISTING_SEM" ] && continue
+          [ -f "$EXISTING_SEM" ] || continue
+          [ "$(grep "^wp: " "$EXISTING_SEM" | cut -d' ' -f2-)" = "$WP" ] || continue
+          [ "$(grep "^slug: " "$EXISTING_SEM" | cut -d' ' -f2-)" = "$SLUG" ] || continue
+          lease_valid "$EXISTING_SEM" || continue
+          REENTRY_OK=true
+          break
+        done < <(find "$SESSION_DIR" -name "${AGENT}-*.open" -type f 2>/dev/null)
+      fi
+      if ! $REENTRY_OK; then
+        fail "этот checkout ($CURRENT_REPO_DIR) под freeze (WP-520) — прямая запись не разрешена до отдельного решения. Используй изолированный worktree: EnterWorktree или 'git worktree add' от свежего origin/main. Плановому раннеру: добавь --canonical-owner <reason>." 1
+      fi
     fi
   fi
 
@@ -621,9 +679,18 @@ EOF
 fi
 
 # --- helpers for ORZ validation ---
-validate_orz() {
+validate_orz() { # <orz-path> <agent> [orz-base-dir, default $ORZ_DIR]
   local orz="$1"
   local agent="$2"
+  # WP-520 (14.08, found live closing a worktree session): the git-tracked
+  # check below used to hardcode $ORZ_DIR (canonical) even when the caller's
+  # ORZ file lives in an isolated worktree -- close() already resolves the
+  # correct worktree path into $ORZ_SESSIONS_DIR (open() wrote it into the
+  # semaphore), this function just wasn't told about it, so relpath computed
+  # garbage like "../../other-worktree/sessions/...". The audit() call site
+  # has no worktree concept (scans the whole canonical tree), so it keeps
+  # relying on the default.
+  local orz_base_dir="${3:-$ORZ_DIR}"
   local errors=0
 
   # 1. file exists
@@ -663,15 +730,15 @@ validate_orz() {
 
   # 5. git tracked
   local rel
-  rel="$(python3 -c "import os,sys; print(os.path.relpath(sys.argv[2], sys.argv[3]))" -- "$orz" "$ORZ_DIR")"
-  if ! git -C "$ORZ_DIR" ls-files --error-unmatch "$rel" >/dev/null 2>&1; then
+  rel="$(python3 -c "import os,sys; print(os.path.relpath(sys.argv[2], sys.argv[3]))" -- "$orz" "$orz_base_dir")"
+  if ! git -C "$orz_base_dir" ls-files --error-unmatch "$rel" >/dev/null 2>&1; then
     # WP-520 case 8 (11.08, peer session with Kimi): a session whose commit went
     # to main through an isolated worktree cannot stage the file in the live
     # checkout (busy on a foreign branch) -- session-guard-release inside the
     # runner hit exactly this refusal (release log 17:08Z, WP-523 run). A file
     # present in ANY published remote-tracking ref is a strictly stronger proof
     # than a staged-only file: accept it as the index-equivalent. The ":./"
-    # prefix keeps the path relative to ORZ_DIR, matching how rel was built.
+    # prefix keeps the path relative to orz_base_dir, matching how rel was built.
     local published_ref=""
     local remote_ref
     while IFS= read -r remote_ref; do
@@ -679,12 +746,12 @@ validate_orz() {
       # Content must match too (review-01 Medium): path-only acceptance would
       # let a locally edited copy pass on legacy semaphores that have no
       # registered `file:` line for the scope gate's cmp to catch.
-      if git -C "$ORZ_DIR" cat-file -e "$remote_ref:./$rel" 2>/dev/null &&
-         git -C "$ORZ_DIR" cat-file blob "$remote_ref:./$rel" 2>/dev/null | cmp -s - "$orz"; then
+      if git -C "$orz_base_dir" cat-file -e "$remote_ref:./$rel" 2>/dev/null &&
+         git -C "$orz_base_dir" cat-file blob "$remote_ref:./$rel" 2>/dev/null | cmp -s - "$orz"; then
         published_ref="$remote_ref"
         break
       fi
-    done <<< "$(git -C "$ORZ_DIR" for-each-ref --format='%(refname)' refs/remotes 2>/dev/null)"
+    done <<< "$(git -C "$orz_base_dir" for-each-ref --format='%(refname)' refs/remotes 2>/dev/null)"
     if [ -n "$published_ref" ]; then
       echo "  ✓ ORZ-файл не в git index, но побайтно совпадает с опубликованным blob в '$published_ref' — принят как эквивалент" >&2
     else
@@ -796,7 +863,7 @@ if [ "$CMD" = "close" ]; then
   ORZ_FILE="$ORZ_SESSIONS_DIR/$ORZ_BASENAME"
 
   echo "Session CLOSE: проверяю ORZ $ORZ_FILE ..."
-  if ! validate_orz "$ORZ_FILE" "$AGENT"; then
+  if ! validate_orz "$ORZ_FILE" "$AGENT" "$ORZ_SESSIONS_DIR"; then
     fail "ORZ не прошёл валидацию. Исправь замечания выше и повтори close. Семафор остаётся активным." 5
   fi
 

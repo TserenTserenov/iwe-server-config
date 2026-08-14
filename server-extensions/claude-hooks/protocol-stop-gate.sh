@@ -17,15 +17,6 @@ if [ -n "${CLAUDE_SESSION_ID:-}" ]; then
     rm -f "/tmp/iwe-dry-run-${CLAUDE_SESSION_ID}.flag" 2>/dev/null || true
 fi
 
-# --- WP-482 (25.07.2026): cleanup close-intent sentinel + runner-started marker
-# on session end (написан close-gate-reminder.sh на UserPromptSubmit, оба читает
-# close-runner-gate.sh на PreToolUse; без этой очистки оба каталога растут по
-# файлу на сессию) ---
-if [ -n "${CLAUDE_SESSION_ID:-}" ]; then
-    rm -f "/tmp/iwe-close-intent/${CLAUDE_SESSION_ID}.flag" 2>/dev/null || true
-    rm -f "/tmp/iwe-close-runner-started/${CLAUDE_SESSION_ID}.flag" 2>/dev/null || true
-fi
-
 # --- Infinite loop guard ---
 if [ "${STOP_HOOK_ACTIVE:-}" = "1" ]; then
   echo '{}'
