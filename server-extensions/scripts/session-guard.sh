@@ -47,6 +47,12 @@ SESSION_DIR="$IWE_ROOT/.iwe-runtime/sessions"
 OPEN_LOG="$IWE_ROOT/$GOV_REPO/inbox/open-sessions.log"
 ORZ_DIR="$IWE_ROOT/$GOV_REPO/sessions"
 AGENT_STATUS_SCRIPT="$IWE_ROOT/scripts/agent-status-report.sh"
+# WP-520 находка 28 (14.08): text-only freeze decision on the canonical
+# DS-my-strategy checkout — new sessions must use an isolated worktree, not
+# write there directly. Empty = no active freeze (default). Set to the
+# absolute canonical path to arm the warning; unset/empty is a silent no-op,
+# same convention as every other IWE_* override in this file.
+FROZEN_CANONICAL_PATH="${IWE_FROZEN_CANONICAL_PATH:-}"
 mkdir -p "$SESSION_DIR" "$(dirname "$OPEN_LOG")" "$ORZ_DIR"
 
 CMD="${1:-}"
@@ -422,6 +428,21 @@ if [ "$CMD" = "open" ]; then
         echo "WARNING: WP $WP уже открыт в ДРУГОЙ копии этого репозитория — $(basename "$OTHER_SEM") (agent: $OTHER_AGENT, checkout: $OTHER_REPO_DIR). Текущий checkout: $CURRENT_REPO_DIR. Переиспользуй существующую копию (git worktree add от канонического чекаута), не плоди новый git clone." >&2
       fi
     done < <(find "$SESSION_DIR" -name '*.open' -type f 2>/dev/null)
+  fi
+
+  # Warn (never block) when `open` is running directly against a checkout
+  # under text-only freeze (WP-520 находка 28, 14.08 — pilot decision A1:
+  # canonical DS-my-strategy frozen for direct writes, new sessions must use
+  # an isolated worktree). Compares realpath, not the raw string, so a
+  # symlink or alternate mount to the same physical directory still triggers
+  # the warning (peer-session 2026-08-14-06, Codex review caught this before
+  # the first version shipped).
+  if [ -n "$FROZEN_CANONICAL_PATH" ]; then
+    CURRENT_REPO_REAL=$(realpath "$CURRENT_REPO_DIR" 2>/dev/null || echo "$CURRENT_REPO_DIR")
+    FROZEN_REAL=$(realpath "$FROZEN_CANONICAL_PATH" 2>/dev/null || echo "$FROZEN_CANONICAL_PATH")
+    if [ "$CURRENT_REPO_REAL" = "$FROZEN_REAL" ]; then
+      echo "WARNING: этот checkout ($CURRENT_REPO_DIR) под freeze (WP-520) — прямая запись не разрешена до отдельного решения. Используй изолированный worktree: EnterWorktree или 'git worktree add' от свежего origin/main." >&2
+    fi
   fi
 
   # Report stale semaphores of the same agent — WITHOUT quarantining them.
