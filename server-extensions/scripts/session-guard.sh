@@ -30,7 +30,14 @@
 #                                                      # i.e. all sessions open against it today
 #                                                      # have closed. Command tested in isolation
 #                                                      # only (peer-session 2026-08-14-09).
-#   unfreeze-canonical <path>                          # remove the physical lock (chflags -R nouchg)
+#   unfreeze-canonical <path>                          # fail-closed alias, does NOT run chflags
+#                                                      # (peer-session 2026-08-14-13-wp520-two-layer-
+#                                                      # closing-arch): agent gets only the manual
+#                                                      # command to run in their own terminal. Use
+#                                                      # request-unfreeze-canonical to log the request.
+#   request-unfreeze-canonical <path> --reason "..."   # logs a request with a nonce, never touches
+#                                                      # chflags itself -- unfreezing stays a manual
+#                                                      # pilot action outside any agent CLI.
 #   lock-hot-file <path> [--agent ...]    # WP-7 SessionGitRaceIsolation: короткий
 #   unlock-hot-file <path>                # mkdir-замок на файл, который часто
 #                                          # коллизирует между параллельными сессиями
@@ -140,6 +147,85 @@ semaphore_epoch() {
   [ -n "$timestamp" ] || return 1
   date -u -j -f "%Y-%m-%dT%H:%M:%SZ" "$timestamp" +%s 2>/dev/null \
     || date -u -d "$timestamp" +%s 2>/dev/null
+}
+
+# --- Isolation: open --isolate (WP-520 DRR two-layer-closing-arch, peer-session
+# 2026-08-14-13, consensus after 5 rounds with Codex) ---
+#
+# ArchGate 09.08 rejected worktree-per-session for the DayPlan/hypotheses-log
+# collision class: measured cost (several seconds on this 20000+-file repo,
+# confirmed live again in this same peer-session at 2.47s) was too high for a
+# problem confined to ~4 known files, so `lock-hot-file` (point locks, no new
+# working tree) won instead. This is a DIFFERENT problem: the canonical
+# checkout diverges from origin/main because concurrent sessions write
+# ANYWHERE in the tree, not to a small predictable set — you cannot point-
+# lock a file you don't know will collide. The same 2.5s cost that lost at
+# per-edit frequency (lock-hot-file fires on every edit) is paid once, at
+# `open`, not on every write, which is why the same ArchGate reasoning
+# doesn't rule this out too (Codex, same peer-session, turn 9).
+ISOLATE_LOCK_DIR="$IWE_ROOT/.iwe-runtime/isolate-locks"
+ISOLATE_LOCK_TTL_SEC="${IWE_ISOLATE_LOCK_TTL_SEC:-120}"  # generous over the ~2.5s worktree add itself; a crashed holder shouldn't block re-entry for long
+
+# with_isolate_lock <session_id> <callback...> -- single critical-section
+# primitive (Codex, turn 3: "не копируем новый примитив в команды... единый
+# внутренний with_session_lock, используемый и open, и cleanup"). Reuses the
+# mkdir-is-atomic pattern already proven by lock-hot-file above, scoped per
+# session_id instead of per hot-file path, so two concurrent re-entries for
+# the SAME session_id can't both decide "worktree absent, create one".
+with_isolate_lock() {
+  local session_id="$1"; shift
+  mkdir -p "$ISOLATE_LOCK_DIR"
+  local lock_path="$ISOLATE_LOCK_DIR/${session_id}.lockdir"
+  local attempt=0
+  while ! mkdir "$lock_path" 2>/dev/null; do
+    # cold-context review (2026-08-14, this same session): TTL-only reclaim
+    # here had a real race -- a stale holder's `rm -rf` right before a THIRD
+    # process wins a concurrent `mkdir` in that same window deletes the
+    # third process's freshly-taken lock out from under it, leaving two
+    # processes both convinced they hold the lock for one session_id
+    # (exactly the invariant this primitive exists to prevent). Same fix
+    # already proven for session semaphores (sweep_orphaned_semaphores()
+    # above): PID liveness first, TTL only as fallback when no PID is
+    # recorded -- age alone never triggers a deletion by itself anymore.
+    if [ -f "$lock_path/pid" ]; then
+      local held_pid
+      held_pid=$(cat "$lock_path/pid" 2>/dev/null || echo "")
+      if [[ "$held_pid" =~ ^[0-9]+$ ]] && ! kill -0 "$held_pid" 2>/dev/null; then
+        rm -rf "$lock_path"
+        continue
+      fi
+    elif [ -f "$lock_path/locked_at" ]; then
+      local held_at held_epoch age
+      held_at=$(cat "$lock_path/locked_at" 2>/dev/null || echo "")
+      held_epoch=$(date -u -j -f "%Y-%m-%dT%H:%M:%SZ" "$held_at" +%s 2>/dev/null \
+        || date -u -d "$held_at" +%s 2>/dev/null || echo 0)
+      age=$(( $(date +%s) - held_epoch ))
+      if [ "$age" -gt "$ISOLATE_LOCK_TTL_SEC" ]; then
+        rm -rf "$lock_path"
+        continue
+      fi
+    fi
+    attempt=$((attempt + 1))
+    if [ "$attempt" -gt 30 ]; then
+      fail "with_isolate_lock: сессия '$session_id' заблокирована другим параллельным open --isolate >30с — повтори позже" 1
+    fi
+    sleep 1
+  done
+  now_iso > "$lock_path/locked_at"
+  echo $$ > "$lock_path/pid"
+  "$@"
+  local rc=$?
+  rm -rf "$lock_path"
+  return $rc
+}
+
+# validate_isolate_slug <slug> -- reject before it reaches a path or branch
+# name, not sanitize silently. Codex turn 3: silent substitution can collapse
+# two distinct slugs into the same path; explicit rejection cannot.
+validate_isolate_slug() {
+  local slug="$1"
+  [[ "$slug" =~ ^[a-zA-Z0-9._-]+$ ]] \
+    || fail "--isolate: slug '$slug' содержит недопустимые символы (разрешены: буквы, цифры, точка, подчёркивание, дефис) — не может использоваться в пути worktree или имени ветки" 1
 }
 
 # --- Lease: право семафора разрешать коммит (WP-484 Ф49, 04.08, пир-сессия с Codex) ---
@@ -329,6 +415,8 @@ CLEANUP_ORPHANS=0
 FORCE_NO_REFLECTION=""
 CANONICAL_OWNER=""
 FORCE_FLAG=0
+UNFREEZE_REASON=""
+ISOLATE_FLAG=0
 POSITIONAL=()
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -344,12 +432,23 @@ while [[ $# -gt 0 ]]; do
     # in `audit`), not checked against a fixed set -- the freeze-block below
     # only tests non-empty.
     --canonical-owner) CANONICAL_OWNER="$2"; shift 2 ;;
+    --reason)
+      # Same class of bug as --force-no-reflection below (WP-520 sixteenth
+      # live finding, session-guard.sh:310 at the time): a value-bearing
+      # flag passed last with nothing after it makes `$2` a read past the
+      # argv end under `set -u`, killing the script mid-parse instead of
+      # failing with a readable message.
+      if [[ $# -lt 2 || -z "$2" ]]; then
+        fail "--reason требует непустое значение (причина запроса на разморозку)" 1
+      fi
+      UNFREEZE_REASON="$2"; shift 2 ;;
     --personality) PERSONALITY="$2"; shift 2 ;;
     --owner-pid) OWNER_PID="$2"; shift 2 ;;
     --session-id) SESSION_ID_ARG="$2"; shift 2 ;;
     --since)  SINCE="$2"; shift 2 ;;
     --cleanup-orphans) CLEANUP_ORPHANS=1; shift ;;
     --force)  FORCE_FLAG=1; shift ;;
+    --isolate) ISOLATE_FLAG=1; shift ;;
     --force-no-reflection)
       # The reason is a required part of this flag's semantics (WP-484,
       # 08.08 -- FORCE_NO_REFLECTION is used downstream as a documented
@@ -370,6 +469,15 @@ done
 
 if [ -z "$AGENT" ] && { [ "$CMD" = "open" ] || [ "$CMD" = "close" ]; }; then
   fail "--agent обязателен для open/close (или переменная IWE_AGENT)" 1
+fi
+
+# --isolate and --canonical-owner are two different classes of session
+# (interactive-writer-gets-its-own-copy vs. scheduled-job-owns-the-canonical-
+# checkout-by-schedule) -- combining them silently would leave it ambiguous
+# which one wins. Peer-session 2026-08-14-13-wp520-two-layer-closing-arch,
+# consensus turn 3 (Codex): reject both together explicitly.
+if [ "$ISOLATE_FLAG" = "1" ] && [ -n "$CANONICAL_OWNER" ]; then
+  fail "--isolate и --canonical-owner взаимоисключающие: планировщик владеет каноническим чекаутом по расписанию (--canonical-owner), интерактивная сессия получает свою изолированную копию (--isolate) -- не оба сразу" 1
 fi
 
 # Owner PID is evidence that the caller, not this short-lived guard process,
@@ -476,8 +584,8 @@ if [ "$CMD" = "open" ]; then
   # physical directory still triggers it (peer-session 2026-08-14-06, Codex
   # review caught this before the first version shipped).
   #
-  # Two carve-outs, both narrowed from an earlier draft by cold-context
-  # review + a follow-up round with Codex in the same peer-session:
+  # Three carve-outs, narrowed from an earlier draft by cold-context review +
+  # follow-up rounds with Codex across two peer-sessions:
   #
   # 1. --canonical-owner (unconditional). launchd/cron runners
   #    (kimi-wp-run-scheduled.sh, wp-run-scheduled-tsekh1.sh) own the
@@ -496,7 +604,19 @@ if [ "$CMD" = "open" ]; then
   #    semaphore for this WP+agent: same slug from the same agent is the same
   #    logical session resuming (e.g. after a crash), not a second writer. No
   #    --slug given -> no exception, freeze blocks unconditionally.
-  if [ -n "$FROZEN_CANONICAL_PATH" ] && [ -z "$CANONICAL_OWNER" ]; then
+  #
+  # 3. --isolate (peer-session 2026-08-14-13-wp520-two-layer-closing-arch,
+  #    DRR two-layer-closing-arch). This is the case freeze was ultimately
+  #    FOR, not an exception to weaken it: a session that gets its own
+  #    worktree instead of writing to the canonical checkout directly is
+  #    exactly what the freeze block's own error message already recommends
+  #    ("Используй изолированный worktree... 'git worktree add'"). Without
+  #    this carve-out `--isolate` could never fire against the one checkout
+  #    it exists to protect, which is where it matters most -- a bug found
+  #    live in this same session testing against a sandbox repo before this
+  #    fix (freeze fired first, unconditionally, before the isolate block
+  #    below ever got the chance to run).
+  if [ -n "$FROZEN_CANONICAL_PATH" ] && [ -z "$CANONICAL_OWNER" ] && [ "$ISOLATE_FLAG" != "1" ]; then
     CURRENT_REPO_REAL=$(realpath "$CURRENT_REPO_DIR" 2>/dev/null || echo "$CURRENT_REPO_DIR")
     FROZEN_REAL=$(realpath "$FROZEN_CANONICAL_PATH" 2>/dev/null || echo "$FROZEN_CANONICAL_PATH")
     if [ "$CURRENT_REPO_REAL" = "$FROZEN_REAL" ]; then
@@ -516,6 +636,150 @@ if [ "$CMD" = "open" ]; then
         fail "этот checkout ($CURRENT_REPO_DIR) под freeze (WP-520) — прямая запись не разрешена до отдельного решения. Используй изолированный worktree: EnterWorktree или 'git worktree add' от свежего origin/main. Плановому раннеру: добавь --canonical-owner <reason>." 1
       fi
     fi
+  fi
+
+  # --isolate: session-owned git worktree, created here so the caller never
+  # has to remember `git worktree add` by hand (что происходило вручную
+  # десятки раз 13-14.08 согласно карточке WP-520). Reached both when the
+  # freeze block above didn't fire at all (a non-canonical checkout, or
+  # freeze disarmed) AND via its own carve-out #3 when it did (isolate is
+  # what freeze recommends doing instead of a direct write) -- a session
+  # opening WITHOUT --isolate against the frozen canonical path still hits
+  # that block unchanged, this flag is the only thing that routes around it.
+  ISOLATED_WORKTREE_PATH=""
+  ISOLATED_WORKTREE_BRANCH=""
+  if [ "$ISOLATE_FLAG" = "1" ]; then
+    [ -n "$SLUG" ] && validate_isolate_slug "$SLUG"
+
+    # Codex turn 9: молчаливое исчезновение незакоммиченных/untracked файлов
+    # исходного каталога — риск потери контекста, не защита. `git worktree
+    # add` берёт только tracked HEAD; explicit refuse instead of guessing
+    # whether the caller meant to bring that state along.
+    ISOLATE_BASE_DIR="$(gov_repo_dir)"
+
+    # Peer-session 2026-08-14-13-wp520-two-layer-closing-arch (turns 12-16,
+    # 3 rounds with Codex after 2 live-tested failed attempts). A re-entry of
+    # the SAME session_id sees `open`'s own side effects (ORZ scaffold,
+    # OPEN_LOG append) from the first `open` as "dirty" -- final design
+    # (Codex, turn 15): every dirty path on re-entry must be a `file:` path
+    # ALREADY registered on this session's OWN semaphore, checked EVERY time
+    # (not skipped), not a name-based exemption list that breaks the moment
+    # `open` gains a third side effect. Full five conditions from turn 15:
+    #   1. verify session_id/isolated_worktree/branch against the semaphore
+    #      before granting re-entry (below, before the worktree lock);
+    #   2. an existing worktree with no matching semaphore is a refusal, not
+    #      "treat as first entry" (below, inside the lock);
+    #   3. side-effect paths (OPEN_LOG) are registered under the SAME lock
+    #      the semaphore write itself uses, before their own append can run
+    #      (done above, inside the semaphore heredoc);
+    #   4. exact normalized-path comparison, not prefix matching;
+    #   5. OPEN_LOG is registered explicitly, not assumed "usually there".
+    ISOLATE_SESSION_ID="${IWE_SESSION_ID:-$(date +%s)}"
+    ISOLATE_EXISTING_SEM="$SESSION_DIR/${AGENT}-${ISOLATE_SESSION_ID}.open"
+
+    # cold-context review (2026-08-14, this same session): plain
+    # `--porcelain` (no `-z`) quotes any path with non-ASCII bytes in
+    # C-style octal escapes (\NNN, no leading zero) -- `printf '%b'` decodes
+    # the DIFFERENT \0NNN form, so a naive unquote silently fails on real
+    # git output and never matches. Live-confirmed against this same
+    # checkout, which has actual Cyrillic paths (Lifework/, etc.). `-z`
+    # (NUL-separated) has no C-quoting to get wrong, so both the "is
+    # anything dirty" check and the allowlist compare below read from the
+    # SAME single `-z` invocation instead of two differently-quoted calls
+    # that could disagree on a non-ASCII path.
+    ISOLATE_DIRTY_ENTRIES=()
+    while IFS= read -r -d '' isolate_status_entry; do
+      [ -n "$isolate_status_entry" ] || continue
+      ISOLATE_DIRTY_ENTRIES+=("$isolate_status_entry")
+    done < <(git -C "$ISOLATE_BASE_DIR" status --porcelain -z --untracked-files=all 2>/dev/null)
+    if [ "${#ISOLATE_DIRTY_ENTRIES[@]}" -gt 0 ]; then
+      if [ ! -f "$ISOLATE_EXISTING_SEM" ]; then
+        # No semaphore for this session_id yet -- this IS a first entry, and
+        # a first entry tolerates nothing: every dirty path here is either
+        # foreign work or a stale artifact from an unrelated prior run.
+        fail "--isolate: в текущем каталоге ($ISOLATE_BASE_DIR) есть незакоммиченные или untracked изменения -- новый worktree их не унаследует. Закоммить, застэшь (git stash) или яви явное решение, прежде чем открывать изолированную копию." 1
+      fi
+      # Re-entry: build the exact allowlist from THIS session's own
+      # semaphore, not a hardcoded filename list. Codex turn 15 point 4 --
+      # compare full normalized relative paths, not a substring/prefix grep
+      # (grep -vF on a raw path segment can under- or over-match ambiguous
+      # filenames).
+      ISOLATE_ALLOWLIST=$(grep '^file: ' "$ISOLATE_EXISTING_SEM" | sed 's/^file: //' | sort -u)
+      ISOLATE_UNEXPECTED_DIRTY=""
+      for isolate_status_entry in "${ISOLATE_DIRTY_ENTRIES[@]}"; do
+        isolate_status_code="${isolate_status_entry:0:2}"
+        isolate_status_path="${isolate_status_entry:3}"
+        if ! grep -qxF "$isolate_status_path" <<< "$ISOLATE_ALLOWLIST"; then
+          ISOLATE_UNEXPECTED_DIRTY="$ISOLATE_UNEXPECTED_DIRTY
+$isolate_status_code $isolate_status_path"
+        fi
+      done
+      if [ -n "$ISOLATE_UNEXPECTED_DIRTY" ]; then
+        fail "--isolate: re-entry сессии $ISOLATE_SESSION_ID нашёл грязные пути вне зарегистрированного allowlist этой же сессии -- вероятно чужая работа, не собственный побочный эффект. Закоммить, застэшь или разбери вручную:$ISOLATE_UNEXPECTED_DIRTY" 1
+      fi
+    fi
+
+    # Codex turn 3: явный fetch, не молчаливый устаревший tracking ref.
+    if ! git -C "$ISOLATE_BASE_DIR" fetch origin main --quiet 2>&1; then
+      fail "--isolate: git fetch origin main не прошёл -- не создаю worktree от потенциально устаревшего origin/main. Проверь сеть и повтори." 1
+    fi
+
+    ISOLATE_STORE_DIR="$IWE_ROOT/.iwe-runtime/isolated-worktrees"
+    mkdir -p "$ISOLATE_STORE_DIR"
+    ISOLATE_STORE_DIR_REAL="$(realpath "$ISOLATE_STORE_DIR")"
+    ISOLATED_WORKTREE_PATH="$ISOLATE_STORE_DIR/${AGENT}-${ISOLATE_SESSION_ID}"
+    ISOLATED_WORKTREE_BRANCH="session-isolate/${AGENT}-${ISOLATE_SESSION_ID}"
+
+    [ -f "$ISOLATE_EXISTING_SEM" ] && ISOLATE_SEM_EXISTS=1 || ISOLATE_SEM_EXISTS=0
+    with_isolate_lock "$ISOLATE_SESSION_ID" bash -c '
+      set -euo pipefail
+      base_dir="$1" wt_path="$2" wt_branch="$3" store_real="$4" want_slug="$5" agent="$6" sem_exists="$7"
+
+      # Re-entry: same session_id already has a worktree — reuse it, verify
+      # identity via git worktree list, never blind-create a duplicate.
+      # Codex turn 3: "если путь уже существует, проверяем через
+      # git worktree list --porcelain, что он привязан ровно к ожидаемой
+      # ветке и session-id... не совпадает — fail closed, без удаления и без
+      # нового worktree." Codex turn 15 point 2: a worktree with NO matching
+      # semaphore at all is a refusal, not "treat as first entry" -- the
+      # semaphore having been lost/removed independently of the worktree is
+      # exactly the kind of state this whole design distrusts by default.
+      if [ -d "$wt_path" ]; then
+        if [ "$sem_exists" != "1" ]; then
+          echo "session-guard: --isolate: worktree $wt_path существует, но семафор сессии не найден -- fail closed (это не первый вход, но и не доверенный re-entry)" >&2
+          exit 1
+        fi
+        # realpath both sides before comparing: `git worktree list
+        # --porcelain` resolves symlinks in its own output (e.g. macOS
+        # /var -> /private/var), a byte-for-byte compare against the raw
+        # assembled path silently never matches on this platform -- found
+        # live in this same session testing scenario 1 (clean re-entry).
+        wt_path_real=$(realpath "$wt_path" 2>/dev/null || echo "$wt_path")
+        registered_branch=$(git -C "$base_dir" worktree list --porcelain \
+          | awk -v p="$wt_path_real" '\''$1=="worktree" && $2==p {found=1} found && /^branch / {print $2; exit}'\'')
+        registered_branch="${registered_branch#refs/heads/}"
+        if [ "$registered_branch" != "$wt_branch" ]; then
+          echo "session-guard: --isolate: путь $wt_path существует, но привязан к ветке '\''$registered_branch'\'', ожидалась '\''$wt_branch'\'' -- fail closed, не трогаю чужой worktree" >&2
+          exit 1
+        fi
+        exit 0
+      fi
+
+      git -C "$base_dir" worktree add "$wt_path" -b "$wt_branch" origin/main --quiet
+
+      # realpath after creation, not the assembled string: containment must
+      # hold against what actually landed on disk, including any symlink in
+      # the store directory itself (Codex turn 3, К2a review precedent).
+      if ! { real=$(realpath "$wt_path" 2>/dev/null) && case "$real" in "$store_real"/*) true ;; *) false ;; esac; }; then
+        git -C "$base_dir" worktree remove "$wt_path" --force 2>/dev/null || true
+        echo "session-guard: --isolate: созданный worktree вышел за пределы ожидаемого каталога хранения (containment check failed) -- удалён" >&2
+        exit 1
+      fi
+    ' -- "$ISOLATE_BASE_DIR" "$ISOLATED_WORKTREE_PATH" "$ISOLATED_WORKTREE_BRANCH" "$ISOLATE_STORE_DIR_REAL" "${SLUG:-}" "$AGENT" "$ISOLATE_SEM_EXISTS" \
+      || fail "--isolate: не удалось создать или переиспользовать worktree (см. сообщение выше)" 1
+
+    echo "{\"worktree_path\": \"$ISOLATED_WORKTREE_PATH\", \"branch\": \"$ISOLATED_WORKTREE_BRANCH\", \"session_id\": \"$ISOLATE_SESSION_ID\"}"
+    echo "⚠️  cd \"$ISOLATED_WORKTREE_PATH\" перед следующим действием -- рабочий каталог не переключается автоматически, это отдельный процесс bash." >&2
   fi
 
   # Report stale semaphores of the same agent — WITHOUT quarantining them.
@@ -580,7 +844,11 @@ if [ "$CMD" = "open" ]; then
     fi
   done < <(ls -t "$SESSION_DIR/${AGENT}"-*.open 2>/dev/null || true)
 
-  SESSION_ID="${IWE_SESSION_ID:-$(date +%s)}"
+  # Reuse the same id the isolation block above already computed and used to
+  # name the worktree/branch -- recomputing "${IWE_SESSION_ID:-$(date +%s)}"
+  # here independently could pick a different second and desync the
+  # semaphore's session_id from the worktree path already on disk.
+  SESSION_ID="${ISOLATE_SESSION_ID:-${IWE_SESSION_ID:-$(date +%s)}}"
   SEM_FILE="$SESSION_DIR/${AGENT}-${SESSION_ID}.open"
   # WP-484 (31.07, data-pipeline-audit-2026-07-30.md §3.3): a caller-supplied slug
   # sometimes already carries today's date (Kimi free-text `--slug`, human habit) —
@@ -617,6 +885,11 @@ if [ "$CMD" = "open" ]; then
     echo "opened_at: $(now_iso)"
     echo "created_at: $(now_iso)"
     echo "session_id: $SESSION_ID"
+    # Recorded here so `close` (a separate invocation, possibly a different
+    # process/cwd) can read the resolved worktree back instead of
+    # recomputing it -- same pattern already used for orz_sessions_dir above.
+    [ -n "$ISOLATED_WORKTREE_PATH" ] && echo "isolated_worktree: $ISOLATED_WORKTREE_PATH"
+    [ -n "$ISOLATED_WORKTREE_BRANCH" ] && echo "isolated_branch: $ISOLATED_WORKTREE_BRANCH"
     echo "orz_file: $ORZ_BASENAME"
     echo "orz_sessions_dir: $ORZ_SESSIONS_DIR"
     # WP-484 (08.08, Kimi diagnosis + pilot report): regular sessions never
@@ -647,6 +920,13 @@ if [ "$CMD" = "open" ]; then
     # $ORZ_DIR's PARENT (governance-repo root — sessions/<...>), same convention
     # every other `file:` line already uses.
     echo "file: $(basename "$ORZ_DIR")/$ORZ_BASENAME"
+    # Same class of gap as the ORZ line above (Ф32 п.5), found for --isolate
+    # re-entry (peer-session 2026-08-14-13, turn 15, Codex): OPEN_LOG's own
+    # append below is a real, expected, this-session side effect --
+    # registering it here means the isolate re-entry check (below in this
+    # same script) can trust the `file:` allowlist instead of guessing this
+    # specific filename by name.
+    echo "file: $(basename "$(dirname "$OPEN_LOG")")/$(basename "$OPEN_LOG")"
   } > "$SEM_FILE"
   # Pointer to active semaphore for PostToolUse hooks
   PTR_FILE="$SESSION_DIR/current-${AGENT}.ptr"
@@ -1022,6 +1302,20 @@ print(json.dumps({"wp": sys.argv[1], "slug": sys.argv[2], "agent": sys.argv[3], 
   rm -f "$SESSION_DIR/current-${AGENT}.ptr"
   echo "Session CLOSE: $WP → $ORZ_FILE ✅"
 
+  # Auto-remove the isolated worktree this session's own `open --isolate`
+  # created, now that push is confirmed (we're past the scope-gate/runner
+  # checks above). Best-effort, per consensus: a failed remove warns, it
+  # never blocks close -- the whole point of removing a "did it work" gate
+  # here is not to trade one stuck-session class for another.
+  CLOSING_WORKTREE=$(grep "^isolated_worktree: " "$SEM_FILE.closed" 2>/dev/null | cut -d' ' -f2- || true)
+  if [ -n "$CLOSING_WORKTREE" ]; then
+    if git -C "$CLOSING_WORKTREE" worktree remove "$CLOSING_WORKTREE" 2>/dev/null; then
+      echo "Isolated worktree removed: $CLOSING_WORKTREE"
+    else
+      echo "⚠️  не удалось убрать изолированный worktree $CLOSING_WORKTREE (возможно есть незакоммиченное) -- почисти вручную: git worktree remove $CLOSING_WORKTREE" >&2
+    fi
+  fi
+
   # Warn if local commits are not pushed in repos touched by this session
   _warn_unpushed() {
     local repo="$1"
@@ -1249,12 +1543,56 @@ if [ "$CMD" = "freeze-canonical" ]; then
   exit 0
 fi
 
+# unfreeze-canonical used to run `chflags -R nouchg` itself -- any caller,
+# agent or pilot, with no distinction between them. Peer-session
+# 2026-08-14-13-wp520-two-layer-closing-arch (Codex review) found this was
+# exactly the gap the DRR's second layer exists to close: an agent invoking
+# this file through a CLI tool is indistinguishable from a pilot typing the
+# same command by hand, so the command itself was never actually a barrier.
+# A TTY check ([ -t 0 ]) was proposed and rejected in the same session --
+# Codex: it's an interface heuristic (a process can hold or fake a PTY
+# either way), not a permission boundary. The fix is not a smarter check; it
+# is removing the executing path from agent-facing CLI entirely. This name
+# now only tells the caller how to do it themselves.
 if [ "$CMD" = "unfreeze-canonical" ]; then
   FREEZE_PATH="${POSITIONAL[0]:-}"
   [ -z "$FREEZE_PATH" ] && fail "unfreeze-canonical: missing path argument" 1
-  chflags -R nouchg "$FREEZE_PATH" \
-    || fail "unfreeze-canonical: chflags -R nouchg failed on '$FREEZE_PATH'" 1
-  echo "Unfrozen: $FREEZE_PATH"
+  fail "unfreeze-canonical больше не снимает chflags сама -- эта команда предназначена для пилота, вручную, в его собственном терминале: 'chflags -R nouchg $FREEZE_PATH'. Агент: используй 'request-unfreeze-canonical $FREEZE_PATH --reason \"...\"' чтобы зафиксировать запрос -- сама разморозка остаётся ручным действием пилота вне любого агентского CLI." 1
+fi
+
+# request-unfreeze-canonical: the agent-facing half of the same boundary.
+# Logs a timestamped, append-only request with a nonce and prints the exact
+# manual command for the pilot -- it never touches chflags. The guarantee
+# this buys is explicit, not implied: a physical safeguard against
+# accidental or pipeline writes under one Unix user, not cryptographic
+# authorization. The same UID can always run `chflags nouchg` by hand,
+# bypassing this file completely -- that limit is a known, accepted
+# boundary (Codex, same peer-session), not something a check here could
+# close without a second UID or a privileged external operator, which is
+# out of scope for this layer.
+if [ "$CMD" = "request-unfreeze-canonical" ]; then
+  FREEZE_PATH="${POSITIONAL[0]:-}"
+  [ -z "$FREEZE_PATH" ] && fail "request-unfreeze-canonical: missing path argument" 1
+  [ -z "$UNFREEZE_REASON" ] && fail "request-unfreeze-canonical: --reason обязателен (зачем нужна разморозка)" 1
+  UNFREEZE_LOG="$IWE_ROOT/.iwe-runtime/unfreeze-requests.log"
+  mkdir -p "$(dirname "$UNFREEZE_LOG")"
+  NONCE=$(date +%s%N 2>/dev/null || date +%s)-$$
+  {
+    echo "---"
+    echo "requested_at: $(now_iso)"
+    echo "path: $FREEZE_PATH"
+    echo "reason: $UNFREEZE_REASON"
+    echo "agent: ${AGENT:-${IWE_AGENT:-unknown}}"
+    echo "nonce: $NONCE"
+    echo "---"
+  } >> "$UNFREEZE_LOG"
+  echo "Запрос на разморозку зарегистрирован (nonce: $NONCE)."
+  echo "Причина: $UNFREEZE_REASON"
+  echo ""
+  echo "Разморозка -- только вручную, пилотом, в его собственном терминале:"
+  echo "  chflags -R nouchg $FREEZE_PATH"
+  echo ""
+  echo "Эта команда ничего не разморозила -- только записала запрос в $UNFREEZE_LOG."
   exit 0
 fi
 

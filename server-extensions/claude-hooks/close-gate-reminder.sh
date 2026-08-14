@@ -42,6 +42,15 @@ OBLIGATION_CLI="$IWE_ROOT/${IWE_GOVERNANCE_REPO:-DS-my-strategy}/scripts/close_o
 SENTINEL_DIR="/tmp/iwe-close-intent"
 REASON=$(printf '%s' "$PROMPT" | cut -c1-200)
 
+# WP-520 (тридцать вторая находка, 14.08.2026, пир-сессия с Codex): pending-
+# reflection state. Читается ЗДЕСЬ, до любых arm/record-intent вызовов этого
+# исполнения — иначе pending, поставленный этим же вызовом (см. ниже), тут же
+# проверялся бы и снимался в нём самом (edge case, поймано Codex ход 4).
+PENDING_DIR="/tmp/iwe-close-intent"
+PENDING_FILE="$PENDING_DIR/$SESSION_ID.pending-reflection"
+PENDING_EXISTED_BEFORE_THIS_RUN="false"
+[ -f "$PENDING_FILE" ] && PENDING_EXISTED_BEFORE_THIS_RUN="true"
+
 _obligation_available() {
   [ -x "$(command -v python3)" ] && [ -f "$OBLIGATION_CLI" ]
 }
@@ -132,6 +141,14 @@ _arm_and_sentinel() {
 # точек детекции (внутри intent-записи и standalone-ветки в конце файла).
 SKIP_REFLECTION_RE='(без *рефлекс|не спрашивай.{0,20}рефлекс|пропусти.{0,20}рефлекс|нет *рефлекс|рефлекс[^ ]* *(нет|не нуж|не надо|отсутствует|пропу))'
 
+# WP-520 (тридцать вторая находка, 14.08.2026, пир-сессия с Codex, consensus
+# ход 4): явный маркер начала рефлексии. Без него хвост триггерной фразы —
+# ненадёжный источник (живой инцидент: "заливай и закрывай сессию. рефлексия
+# -- <мысль пилота>" — весь хвост включает случайный текст ДО маркера).
+# raw_text показывается пилоту дословно (см. session-reflection-release.sh) —
+# должен содержать только то, что пилот сам пометил как рефлексию.
+REFLECTION_MARKER_RE='[Рр]ефлекси[яю][[:space:]]*[:—–-]+'
+
 _record_close_intent() {
   if ! _obligation_available; then
     return 0
@@ -149,13 +166,27 @@ _record_close_intent() {
   # so "заливай, рефлексия — X" lost the reflection. Same recorder, per-branch
   # trigger alternation passed as $1 (defaults to the close-trigger set).
   local trigger_re="${1:-[Зз]акрыва[йю]|[Зз]акрой}"
-  local tail
+  # WP-520 (тридцать вторая находка, 14.08.2026): $2=marker_already_matched —
+  # вызов из pending-ветки (trigger_re сам = REFLECTION_MARKER_RE-слово) уже
+  # прошёл проверку маркера СНАРУЖИ; повторный поиск маркера внутри tail ниже
+  # нашёл бы 0 совпадений (маркер уже вырезан этим же извлечением) и ошибочно
+  # решил бы "маркера нет".
+  local marker_already_matched="${2:-false}"
+  local tail before_trigger
   tail=$(printf '%s' "$PROMPT_ORIGINAL_CASE" | awk -v re="$trigger_re" '
     match($0, re) {
       print substr($0, RSTART + RLENGTH)
       exit
     }
   ' | sed -E 's/^[[:space:],.:;-]+//')
+  # WP-520 (consensus ход 5 с Codex): текст ДО первого триггера — источник для
+  # случая "рефлексия: X, закрывай" (маркер стоит раньше триггера в фразе).
+  before_trigger=$(printf '%s' "$PROMPT_ORIGINAL_CASE" | awk -v re="$trigger_re" '
+    match($0, re) {
+      print substr($0, 1, RSTART - 1)
+      exit
+    }
+  ')
 
   local skip_reflection="false"
   # WP-520 (14.08.2026, прямое поручение пилота): любые слова пилота про отказ
@@ -174,7 +205,45 @@ _record_close_intent() {
     return 0
   fi
 
-  python3 "$OBLIGATION_CLI" record-intent --session-id "$SESSION_ID" --raw-text "$tail" --skip-reflection "$skip_reflection" >/dev/null 2>&1 || \
+  # WP-520 (тридцать вторая находка, consensus ход 4 с Codex): raw_text
+  # показывается пилоту дословно — источником может быть только текст после
+  # явного маркера рефлексии, не весь хвост. skip_reflection — отдельная явная
+  # команда пропуска, её обработка не меняется (raw_text там не значим).
+  local raw_text="$tail"
+  local before_has_marker="false"
+  echo "$before_trigger" | grep -qE "$REFLECTION_MARKER_RE" && before_has_marker="true"
+  if [ "$marker_already_matched" = "true" ]; then
+    raw_text="$tail"
+  elif { [ -n "$tail" ] || [ "$before_has_marker" = "true" ]; } && [ "$skip_reflection" = "false" ]; then
+    if echo "$tail" | grep -qE "$REFLECTION_MARKER_RE"; then
+      raw_text=$(printf '%s' "$tail" | awk -v re="$REFLECTION_MARKER_RE" '
+        match($0, re) {
+          print substr($0, RSTART + RLENGTH)
+          exit
+        }
+      ' | sed -E 's/^[[:space:]]+//')
+    elif echo "$before_trigger" | grep -qE "$REFLECTION_MARKER_RE"; then
+      # WP-520 (consensus ход 5 с Codex): маркер стоит ДО триггера в фразе
+      # ("рефлексия: X, закрывай") — брать текст между КОНЦОМ маркера и
+      # НАЧАЛОМ триггера, не "весь текст после маркера" (иначе захватило бы
+      # саму команду закрытия внутрь raw_text).
+      raw_text=$(printf '%s' "$before_trigger" | awk -v re="$REFLECTION_MARKER_RE" '
+        match($0, re) {
+          print substr($0, RSTART + RLENGTH)
+          exit
+        }
+      ' | sed -E 's/^[[:space:]]+//; s/[[:space:],.:;-]+$//')
+    else
+      raw_text=""
+      mkdir -p "$PENDING_DIR" 2>/dev/null
+      printf '{"session_id":"%s","created_at":"%s","reason":"reflection_marker_missing"}' \
+        "$SESSION_ID" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+        > "$PENDING_FILE" 2>/dev/null
+      echo "[close-gate-reminder] session=$SESSION_ID reflection_marker_missing — pending set, tail withheld from raw_text" >&2
+    fi
+  fi
+
+  python3 "$OBLIGATION_CLI" record-intent --session-id "$SESSION_ID" --raw-text "$raw_text" --skip-reflection "$skip_reflection" >/dev/null 2>&1 || \
     echo "[close-gate-reminder] session=$SESSION_ID record-intent failed (non-fatal — render falls back to interactive path)" >&2
 }
 
@@ -206,6 +275,24 @@ fi
 # пустой tail, потому что skip_reflection=true.
 if echo "$PROMPT" | grep -qE "$SKIP_REFLECTION_RE"; then
   _record_close_intent '[Рр]ефлекс'
+fi
+
+# WP-520 (тридцать вторая находка, 14.08.2026, consensus ход 4 с Codex):
+# pending_reflection — рефлексия пришла отдельным следующим сообщением, без
+# триггера закрытия в НЁМ САМОМ (иначе она уже была бы обработана веткой
+# _record_close_intent выше). Смотрит на pending, СУЩЕСТВОВАВШИЙ ДО этого
+# запуска — pending, поставленный веткой закрытия/заливки этого же запуска,
+# не обрабатывается здесь же (self-consuming edge case, Codex ход 4).
+# Детерминированный контракт: маркер есть → перезаписать intent, снять
+# pending; маркера нет → снять pending без записи. Никакой эвристики темы.
+if [ "$PENDING_EXISTED_BEFORE_THIS_RUN" = "true" ]; then
+  if echo "$PROMPT_ORIGINAL_CASE" | grep -qE "$REFLECTION_MARKER_RE"; then
+    _record_close_intent "$REFLECTION_MARKER_RE" "true"
+    echo "[close-gate-reminder] session=$SESSION_ID pending_reflection consumed with marker" >&2
+  else
+    echo "[close-gate-reminder] session=$SESSION_ID pending_reflection dropped — no marker in follow-up prompt" >&2
+  fi
+  rm -f "$PENDING_FILE" 2>/dev/null
 fi
 
 # Пилот перешёл к другой теме → «намерение закрыть» больше не действует для
