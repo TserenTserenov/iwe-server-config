@@ -1261,6 +1261,25 @@ if [ "$CMD" = "close" ]; then
   ORZ_SESSIONS_DIR="${ORZ_SESSIONS_DIR:-$ORZ_DIR}"
   ORZ_FILE="$ORZ_SESSIONS_DIR/$ORZ_BASENAME"
 
+  # WP-484 Ф99 (2026-08-15, peer session with Kimi; live case: РП524, three
+  # semaphores left stuck after the agent removed their worktrees by hand):
+  # ORZ_SESSIONS_DIR is a snapshot of where `open` resolved the worktree at
+  # session start. The runner's own delivery step (session-guard-release)
+  # copies the ORZ file into the canonical repo on push -- by the time close
+  # runs, the worktree that produced it may be long gone, but the file is not
+  # lost, it moved. Falling back to the canonical path only when the snapshot
+  # path is genuinely absent (not a broader "prefer canonical" change) keeps
+  # every other worktree-close path -- including the concurrent-session
+  # blocking that isolate mode exists for -- exactly as it was.
+  if [ ! -f "$ORZ_FILE" ] && [ "$ORZ_SESSIONS_DIR" != "$ORZ_DIR" ]; then
+    CANONICAL_ORZ_FILE="$ORZ_DIR/$ORZ_BASENAME"
+    if [ -f "$CANONICAL_ORZ_FILE" ]; then
+      echo "  ⚠️  ORZ не найден по snapshot-пути ($ORZ_FILE, worktree убран) — использую канонический: $CANONICAL_ORZ_FILE" >&2
+      ORZ_SESSIONS_DIR="$ORZ_DIR"
+      ORZ_FILE="$CANONICAL_ORZ_FILE"
+    fi
+  fi
+
   echo "Session CLOSE: проверяю ORZ $ORZ_FILE ..."
   if ! validate_orz "$ORZ_FILE" "$AGENT" "$ORZ_SESSIONS_DIR"; then
     fail "ORZ не прошёл валидацию. Исправь замечания выше и повтори close. Семафор остаётся активным." 5

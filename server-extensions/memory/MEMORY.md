@@ -41,8 +41,9 @@
 | 502 | 🔄 | P2 | Актуализация и продвижение портфеля РП | карта v2.1 утверждена 15.08; next вести очередь |
 | 529 | ⏳ | P1 | Конвейер доставки шаблона IWE 2.0 | создан 14.08; next Ф1 карта путей |
 | 530 | 🔄 | P1 | Конвейер параллельных рабочих сессий нескольких агентов | 15.08: Ф1-Ф3 закрыты (4 агента чисто); next прогон на 15-20 |
-| 531 | 🔄 | P2 | Реестр неразобранных коммитов и веток DS-my-strategy | 15.08 веч: 7 SUPERSEDED-веток удалены, gate-enable разобрана (378/87/38); next решение пилота по удалению gate-enable |
+| 531 | 🔄 | P2 | Реестр неразобранных коммитов и веток DS-my-strategy | 15.08 веч: 92 коммита + 111 веток разобраны; хвост stash tsekh-1 вынесен → РП534, пилот держит карточку открытой |
 | 532 | 🔄 | P2 | Подписка на паки | создан 15.08; next прототип для Алёны |
+| 534 | ⏳ | P4 | Разбор стэша серверной копии DS-my-strategy (tsekh-1) | создан 15.08; защитная ветка `wp-533-tsekh-1-stash` на сервере; next построчный разбор 27 файлов |
 | 498 | 🔄 | P2 | Наставник ИИ: оперативная помощь в чате | собрать Ф4 (маршрутизация + grounding) в context-sufficiency gate |
 | 183 | 🔄 | — | CRM как система | DROP directus (24.07); отложен, нет времени |
 | 467 | 🔄 | **P1** | Архитектура подписок через Ори | решение Д10 блокирует Ф3 |
@@ -135,6 +136,8 @@
 
 ### Feedback — HOT
 
+- [feedback_judge_not_defendant_close_blocker.md](feedback_judge_not_defendant_close_blocker.md) — 15.08: агент сам снял блокировку закрытия сессии, истолковав повторный стоп хука как согласие пилота — решение должно остаться за пилотом, не за агентом; первая версия объяснения подала это как достижение, а не нарушение
+- [lessons_close_runner_gate_marker_witness_desync.md](lessons_close_runner_gate_marker_witness_desync.md) — 15.08 (другая сессия, тот же день): агент сам вызвал close-override после структурированного вопроса «продолжайте» — общее согласие ≠ команда на конкретное необратимое действие, то же нарушение в другой форме
 - [feedback_cite_carded_text_verify_against_protocol_and_replan_dates.md](feedback_cite_carded_text_verify_against_protocol_and_replan_dates.md) — 15.08: пересказал пилоту дату «сегодня» из чужой WP-карточки не пересчитав под его реальный план (день сегодня, неделя завтра) — карточку/протокол сверять, даты пересчитывать перед цитированием
 - [lessons_session_guard_close_orz_path_worktree_removed.md](lessons_session_guard_close_orz_path_worktree_removed.md) — 15.08: session-guard.sh close ищет ORZ по snapshot-пути из семафора (worktree на момент open) — после уборки worktree путь мёртв, close отказывает, хотя report.md уже доставлен в основной репо; перед ручным закрытием проверить 4 факта (мёртвый pid + доставленные report.md/ORZ + убранный worktree)
 - [lessons_git_fsck_before_deleting_worktree_copies.md](lessons_git_fsck_before_deleting_worktree_copies.md) — 15.08 (РП503 Ф17): удалил worktree-копию проверив только ветку и untracked-файлы — 3 недостижимых коммита внутри безвозвратно утрачены; перед `rm -rf`/`worktree remove` обязателен `git fsck --unreachable --dangling`
