@@ -182,7 +182,7 @@ header_line = next(
 if header_line is None:
     raise SystemExit("WeekPlan: не найдена таблица РП с колонками «РП» и «Статус»")
 
-known_columns = {"🚦", "#", "РП", "h", "Источник", "Статус", "Результат недели"}
+known_columns = {"🚦", "#", "РП", "h", "P", "Источник", "Статус", "Результат недели"}
 headers = [cell.strip() for cell in header_line.strip().strip("|").split("|")]
 unknown_columns = [header for header in headers if header not in known_columns]
 if unknown_columns:
@@ -404,6 +404,7 @@ values = {
     "#": wp_num,
     "РП": "**{}**".format(title),
     "h": "{}h".format(h_val),
+    "P": priority,
     "Источник": week_source,
     "Статус": "pending",
     "Результат недели": week_result,
