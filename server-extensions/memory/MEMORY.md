@@ -37,11 +37,11 @@
 | 524 | 🔄 | P2 | Скилл многоагентных пир-сессий в разных интерфейсах | 14.08: Ф5 расширена — сбор статистики выбора паттерна из sessions/ |
 | 516 | 🔄 | P2 | Контур самоулучшения IWE | Ф2 закрыта 10.08 (6 кандидатов, 0 прошли); next Ф3 — АрхГейт с развилкой из РП481 |
 | 500 | 🔄 | P2 | Аудит IWE: безопасность, токены, SOTA — разбор находок | Ф1-Ф21 не начат — начать с Ф1 |
-| 503 | 🔄 | P1 | Умный конвейер РП | 14.08 пир Codex: repair ledger day-14 done (гонка tsekh-1+Mac, union 97 событий, commit f596b9444); дизайн-пробел ledger-append.sh кандидат ArchGate; токен поллера всё ещё за пилотом |
+| 503 | 🔄 | P1 | Умный конвейер РП | 15.08 АрхГейт Codex (Ф18): fetch-before-write отклонён (TOCTOU); единственный-writer направление найдено, не готово; host-поле в схеме события — блокер sizing; токен поллера всё ещё за пилотом |
 | 502 | 🔄 | P2 | Актуализация и продвижение портфеля РП | этапная карта v2.1 утверждена 15.08, скелет в Strategy.md; next — вести очередь решений |
 | 529 | ⏳ | P1 | Конвейер доставки шаблона IWE 2.0 | создан 14.08 (хвост РП520, H-292); next Ф1 карта критичных путей |
-| 530 | ⏳ | P1 | Конвейер параллельных рабочих сессий нескольких агентов | создан 15.08 (хвост РП520); next Ф1 малый прогон 3-4 сессий |
-| 531 | 🔄 | P2 | Реестр неразобранных коммитов и веток DS-my-strategy | 15.08: 57/92 закрыто (пир+Codex), метод усилен; next batch 3, позиция 31, остаток 35 |
+| 530 | 🔄 | P1 | Конвейер параллельных рабочих сессий нескольких агентов | 15.08: фикс id-коллизии слит в main; живой прогон 4 агентов нашёл новый дефект (ORZ_DIR не isolate-aware); next Ф2 архрешение |
+| 531 | 🔄 | P2 | Реестр неразобранных коммитов и веток DS-my-strategy | 15.08: Ф1+Ф2 закрыты, 94 ветки удалены; next 22.08 удалить 7 запушенных веток |
 | 532 | 🔄 | P2 | Подписка на паки | создан 15.08 (H-293); next прототип каталога+скилла для Алёны |
 | 498 | 🔄 | P2 | Наставник ИИ: оперативная помощь в чате | собрать Ф4 (маршрутизация + grounding) в context-sufficiency gate |
 | 183 | 🔄 | — | CRM как система | DROP БД directus (решение 24.07); стратсессия 10.08 - отложен ещё на 2 недели, нет времени |
@@ -84,8 +84,8 @@
 | 455 | 🔄 | P4 | Неизменяемость аудит-журнала событий | урок про git pull записан, кода не выкатывал |
 | 290 | 🔄 | **P1** | Следователь: каузальная аналитика | Ход 2 отменён 09.08; ждёт RLS-фикса (causal-rls.sql) и решения по новому РП сбора данных |
 | 73 | 🔄 | P3 | Новая архитектура ИТ-платформы Aisystant | Ф5 proposed, дедлайн 25.07 (просрочен); стратсессия 10.08 - отложен на неделю, нет времени |
-| 7 | 🔄 | — | Платформа: техдолг (зонтичный) | 15.08: Ф72 close_obligation armed записан; детали → WP-7.md |
-| 485 | 🔄 | P2 | Сверка дублирующихся скриптов root↔шаблон | Ф7-Ф9 (сторож в ритм) |
+| 7 | 🔄 | — | Платформа: техдолг (зонтичный) | 15.08: F65/F58/IDCOL1 закрыты по факту живой проверки (тесты + боевая база); детали → WP-7.md |
+| 485 | 🔄 | P2 | Сверка дублирующихся скриптов root↔шаблон | 15.08: Ф10-12 закрыты (PR #439+440); осталось Ф7-Ф9 |
 | 472 | 🔄 | P3 | Конвейер личного бренда | 2-й человек за пилотом |
 | 474 | 🔄 | P2 | Скиллы создания Pack по FPF | сверка fpf-sync-check.sh (Ф9 пункт 3) |
 | 476 | 🔄 | **P1** | Модель жизненного цикла данных | прод-краш удаления закрыт, подтверждён; Ф2 ждёт пилота |
@@ -94,7 +94,7 @@
 | 496 | 🔄 | **P1** | Журнал гипотез (LPF-регламент обратной связи) | Ф5 done (fail-closed сверка починена); next Ф6 догоняющая сверка 39 записей |
 | 289 | 🔄 | P3 | Интеграция IWE с личными базами знаний | 11.08: Разметчик (structurer/) явно связан с РП149; SoT-рамка, активного next нет |
 | 483 | 🔄 | P2 | Комплект структурирования данных (guide-kit) | 12.08: Ф6 шаг 4 закрыт (3 паралл. сессии) — Pack DP.ROLE.093/DP.SC.065 + код + H3.6; next живой прогон на реальном topic.yaml |
-| 484 | 🔄 | **P1** | Автогенератор открытия/закрытия дня (зонтичный) | 15.08: Ф95 реализована и доставлена — reap_stale_git_lock + watchdog-проверка зависших сессий, 3 процесса завершены, перенос из заброшенной ветки шаблона |
+| 484 | 🔄 | **P1** | Автогенератор открытия/закрытия дня (зонтичный) | 15.08 веч: принцип «Ты свободен» назван общим для 4 масштабов (protocol-close.md), month-close дополнен шагом 9.5 |
 | 493 | 🔄 | P2 | Лаборатория характеристик | Ф4 ждёт данных (конец августа) |
 | 494 | 🔄 | P2 | Панель рабочих продуктов в VS Code | дашборд готов и подтверждён; доставка в шаблон отложена до 30.08 |
 | 167 | 🔄 | P5 | Публикации (зонтичный) | пост «4 уровня ИИ» готов во всех 3 каналах, ready |
@@ -130,13 +130,18 @@
 - [project_ds_my_strategy_repo_divergence_carryover.md](project_ds_my_strategy_repo_divergence_carryover.md) — 12.08 вечер: DS-my-strategy на чужой ветке, +53/-185 от origin/main, 527 незакоммиченных файлов — пилот явно перенёс разбор в новую сессию, начинать оттуда
 - [project_tsekh1_chronic_git_sync_and_concurrent_agents.md](project_tsekh1_chronic_git_sync_and_concurrent_agents.md) — 08-10.08 РП484 Ф77/Ф79: корневой фикс autostash→git-dirty-guard задеплоен; живой рецидив «cannot cd» найден, не исправлен
 - [project_wp455_ots_upgrade_timeout_no_script_budget.md](project_wp455_ots_upgrade_timeout_no_script_budget.md) — 15.08: сервис упал по 5-мин systemd-таймауту (не узел биткоина) — скрипт лимитирует только отдельные вызовы (60с), общего бюджета нет; повтор → порог для фикса
+- [project_wp7_f65_f58_idcol1_status_divergence_escalated.md](project_wp7_f65_f58_idcol1_status_divergence_escalated.md) — 15.08: ветка-хвост несёт F65/F58/IDCOL1 (прод-миграция) закрытыми 12.08 с результатом, main держит их in_progress — эскалировано пилоту, needs-decision; не переносить старый result без проверки факта
 → старше 13.08 (5 записей) → [MEMORY-warm.md](MEMORY-warm.md) (Demoted 15.08)
 
 ### Feedback — HOT
 
-- [lessons_full_diff_fragment_check_not_first_line_grep.md](lessons_full_diff_fragment_check_not_first_line_grep.md) — 15.08 (РП531): текстовый grep на первую строку диффа спутал доказательство двух соседних коммитов того же файла (Codex поймал) — нужен полный список фрагментов + сверка каждого дословно; +2 категории доказательства (renumbered, self-cancelling revert)
+- [feedback_askuserquestion_russian_not_translit.md](feedback_askuserquestion_russian_not_translit.md) — 15.08: AskUserQuestion текст транслитом вместо кириллицы при спешке (обход блокировки хука) — пилот поймал сразу; проверять язык особенно бдительно именно в спешке
+- [lessons_stop_gate_cards_dir_cwd_mismatch_worktree_close.md](lessons_stop_gate_cards_dir_cwd_mismatch_worktree_close.md) — 15.08: stop-гейт ищет карточку раннера от cwd своего процесса — worktree-закрытие кладёт копию карточки в IWE/inbox/agent/tasks/ ДО уборки worktree; системный кандидат — CARDS_DIR в runner-маркер (класс WP-520 Ф8, 4-й случай)
+- [lessons_git_fsck_before_deleting_worktree_copies.md](lessons_git_fsck_before_deleting_worktree_copies.md) — 15.08 (РП503 Ф17): удалил worktree-копию проверив только ветку и untracked-файлы — 3 недостижимых коммита внутри безвозвратно утрачены (не в одном хранилище, iCloud-архив платформы `.git` не бэкапит); перед `rm -rf`/`worktree remove` обязателен `git fsck --unreachable --dangling`
+- [lessons_full_diff_fragment_check_not_first_line_grep.md](lessons_full_diff_fragment_check_not_first_line_grep.md) — 15.08 (РП531, 2 сессии): grep на первую строку ИЛИ на фразу-заголовок дважды спутал доказательство (Codex поймал оба раза) — нужен exact-line на КАЖДУЮ строку без фильтрации на «содержательные»; +2 категории (renumbered, self-cancelling revert); снимок целевой ветки протухает за часы, fetch заново каждую сессию
 - [lessons_stale_branch_upstream_points_to_unpushable_pr_ref.md](lessons_stale_branch_upstream_points_to_unpushable_pr_ref.md) — 15.08: раннер честно сообщал «неотправленные коммиты» после успешного push — upstream ветки указывал на read-only GitHub PR-ref (origin/pr/385), не на саму ветку; фикс `git branch --set-upstream-to`, не логика гейта
 - [lessons_verify_own_parsing_before_declaring_api_unavailable.md](lessons_verify_own_parsing_before_declaring_api_unavailable.md) — 15.08: WakaTime 401 оказался багом своей команды grep|sed (взяла обрывок строки вместо ключа), не недоступностью API — сверять длину/формат извлечённого секрета перед выводом «недоступно»
+- [lessons_check_own_memory_before_claiming_access_unavailable.md](lessons_check_own_memory_before_claiming_access_unavailable.md) — 15.08: заявил пилоту «доступа к боевой базе нет» не проверив свою же reference-память — там уже был рабочий маршрут (railway ssh), доступ оказался за минуту; проверять память+CLI-авторизацию ДО заявления об ограничении
 - [lessons_stashed_checkout_conflicts_ledger_union_merge.md](lessons_stashed_checkout_conflicts_ledger_union_merge.md) — 15.08 (retro day-close 14.08): stash pop поверх обновлённого main конфликтует с append-only ledger — union по содержанию события, не выбор стороны
 - [lessons_runner_card_vanished_lock_orphaned_mid_close.md](lessons_runner_card_vanished_lock_orphaned_mid_close.md) — 15.08: карточка раннера физически исчезла посреди Quick Close, `.lock` остался жить — cancel не находит run_id, довершать вручную; тот же корень, что Ф72 WP-7
 - [lessons_ledger_timestamp_not_unique_event_id.md](lessons_ledger_timestamp_not_unique_event_id.md) — 14.08: append-only YAML журнал — timestamp не уникален как идентификатор события (пакетные writer'ы штампуют несколько разных событий одной секундой), сравнение/дедупликация должны идти по полному содержимому с учётом кратности, не по ts

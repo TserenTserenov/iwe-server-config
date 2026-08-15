@@ -228,6 +228,32 @@ validate_isolate_slug() {
     || fail "--isolate: slug '$slug' содержит недопустимые символы (разрешены: буквы, цифры, точка, подчёркивание, дефис) — не может использоваться в пути worktree или имени ветки" 1
 }
 
+# isolate_entropy_suffix -- 4 hex chars appended to the `date +%s` second so
+# two ISOLATE_SESSION_IDs generated in the same second don't collide. Not
+# `date +%s%N` (nanosecond resolution): %N is a GNU date extension, not
+# available on every date implementation this script might run under.
+# /dev/urandom first (real entropy, no seed-collision risk between two
+# processes started close together); $RANDOM as fallback for environments
+# where /dev/urandom is unreadable (some sandboxes/containers) -- always
+# available inside a bash process, just weaker (WP-530 peer-session
+# 2026-08-15-10, Kimi turn 2).
+isolate_entropy_suffix() {
+  # `... && return` on a zero-exit-but-empty-output pipe (e.g. xxd installed
+  # but the read returns nothing) would return an EMPTY suffix here -- the
+  # exact collision this function exists to prevent, only silent instead of
+  # loud (cold-context review, WP-530 peer-session 2026-08-15-10). Capture
+  # and check for non-empty output explicitly instead of trusting exit code.
+  local suffix
+  if [ -r /dev/urandom ]; then
+    suffix=$(head -c 2 /dev/urandom 2>/dev/null | xxd -p 2>/dev/null)
+    if [ -n "$suffix" ]; then
+      printf '%s' "$suffix"
+      return
+    fi
+  fi
+  printf '%04x' "$RANDOM"
+}
+
 # --- Lease: право семафора разрешать коммит (WP-484 Ф49, 04.08, пир-сессия с Codex) ---
 #
 # Семафор несёт две РАЗНЫЕ функции, которые до сих пор были склеены в одном
@@ -648,6 +674,7 @@ if [ "$CMD" = "open" ]; then
   # that block unchanged, this flag is the only thing that routes around it.
   ISOLATED_WORKTREE_PATH=""
   ISOLATED_WORKTREE_BRANCH=""
+  ORZ_ISOLATE_OVERRIDE=""
   if [ "$ISOLATE_FLAG" = "1" ]; then
     [ -n "$SLUG" ] && validate_isolate_slug "$SLUG"
 
@@ -674,7 +701,16 @@ if [ "$CMD" = "open" ]; then
     #      (done above, inside the semaphore heredoc);
     #   4. exact normalized-path comparison, not prefix matching;
     #   5. OPEN_LOG is registered explicitly, not assumed "usually there".
-    ISOLATE_SESSION_ID="${IWE_SESSION_ID:-$(date +%s)}"
+    # date +%s alone collides deterministically: two interactive callers
+    # (neither sets IWE_SESSION_ID) landing in the same wall-clock second get
+    # the identical id, which the lock below then serializes into a refusal
+    # for the loser -- correct, but avoidable. Entropy suffix instead of
+    # nanosecond resolution (`date +%s%N`) because %N is a GNU date
+    # extension, unavailable on some non-Linux/non-GNU environments this
+    # script might run under; /dev/urandom -> $RANDOM fallback keeps this
+    # id generator working even where /dev/urandom is unreadable (some
+    # sandboxes/containers) (WP-530 peer-session 2026-08-15-10, Kimi turn 2).
+    ISOLATE_SESSION_ID="${IWE_SESSION_ID:-$(date +%s)-$(isolate_entropy_suffix)}"
     ISOLATE_EXISTING_SEM="$SESSION_DIR/${AGENT}-${ISOLATE_SESSION_ID}.open"
 
     # cold-context review (2026-08-14, this same session): plain
@@ -746,7 +782,21 @@ $isolate_status_code $isolate_status_path"
       # exactly the kind of state this whole design distrusts by default.
       if [ -d "$wt_path" ]; then
         if [ "$sem_exists" != "1" ]; then
-          echo "session-guard: --isolate: worktree $wt_path существует, но семафор сессии не найден -- fail closed (это не первый вход, но и не доверенный re-entry)" >&2
+          # COLLISION_RETRY: this is the branch a losing concurrent `open`
+          # hits when its ISOLATE_SESSION_ID collided with a winner that
+          # already created $wt_path but has not written its semaphore yet
+          # (session-guard.sh open writes the worktree inside the lock,
+          # then the semaphore after -- WP-530 peer-session 2026-08-15-09,
+          # scenario (i)). Retry-safe ONLY because ISOLATE_SESSION_ID now
+          # carries an entropy suffix (isolate_entropy_suffix) -- a caller
+          # that regenerates its id and retries gets a fresh, non-colliding
+          # path. This same branch can also fire for a genuinely foreign,
+          # unrelated worktree at this exact path with no semaphore ever
+          # written for it; the two causes are indistinguishable from here,
+          # so the marker is advisory (blind retry is safe either way: a
+          # fresh id either avoids the real collision or simply lands on an
+          # unused path) (WP-530 peer-session 2026-08-15-10, Kimi turn 2).
+          echo "COLLISION_RETRY: session-guard: --isolate: worktree $wt_path существует, но семафор сессии не найден -- fail closed (это не первый вход, но и не доверенный re-entry); повтори с новым ISOLATE_SESSION_ID" >&2
           exit 1
         fi
         # realpath both sides before comparing: `git worktree list
@@ -777,6 +827,18 @@ $isolate_status_code $isolate_status_path"
       fi
     ' -- "$ISOLATE_BASE_DIR" "$ISOLATED_WORKTREE_PATH" "$ISOLATED_WORKTREE_BRANCH" "$ISOLATE_STORE_DIR_REAL" "${SLUG:-}" "$AGENT" "$ISOLATE_SEM_EXISTS" \
       || fail "--isolate: не удалось создать или переиспользовать worktree (см. сообщение выше)" 1
+
+    # ORZ scaffold и OPEN_LOG must land inside this session's own worktree,
+    # not the shared canonical checkout -- otherwise a foreign untracked ORZ
+    # file blocks every OTHER concurrent `--isolate open` (live-reproduced
+    # 2026-08-15, 4-agent run: agent A's own ORZ scaffold made agents B/C/D's
+    # untracked-check fail with "не унаследует", peer-session
+    # 2026-08-15-14-isolate-aware-orz-dir, consensus with Codex). Only ORZ is
+    # covered here -- OPEN_LOG append can independently dirty the canonical
+    # checkout and block a neighbor the same way; that race is a known,
+    # deliberately deferred gap (pilot decision, same session), tracked in
+    # WP-530 for its own phase, not folded into this fix.
+    ORZ_ISOLATE_OVERRIDE="$ISOLATED_WORKTREE_PATH/sessions"
 
     echo "{\"worktree_path\": \"$ISOLATED_WORKTREE_PATH\", \"branch\": \"$ISOLATED_WORKTREE_BRANCH\", \"session_id\": \"$ISOLATE_SESSION_ID\"}"
     echo "⚠️  cd \"$ISOLATED_WORKTREE_PATH\" перед следующим действием -- рабочий каталог не переключается автоматически, это отдельный процесс bash." >&2
@@ -872,7 +934,15 @@ $isolate_status_code $isolate_status_path"
   # into, and `close` would look for the ORZ file in the wrong place. The
   # semaphore already carries session identity; it's the one place `close`
   # can read back the resolved directory instead of re-deriving it.
-  ORZ_SESSIONS_DIR="$(gov_repo_dir)/sessions"
+  #
+  # ORZ_ISOLATE_OVERRIDE (set above, inside the --isolate block, once
+  # $ISOLATED_WORKTREE_PATH exists on disk): gov_repo_dir() alone can't see
+  # it here, because it resolves the CALLER's cwd, and `--isolate` never cd's
+  # this same process into the worktree it just created (that's the caller's
+  # own next step, printed as the "⚠️ cd ..." hint above) -- empty outside
+  # --isolate, so the fallback below is unchanged for the non-isolate and
+  # canonical-owner paths.
+  ORZ_SESSIONS_DIR="${ORZ_ISOLATE_OVERRIDE:-$(gov_repo_dir)/sessions}"
   ORZ_FILE="$ORZ_SESSIONS_DIR/$ORZ_BASENAME"
   mkdir -p "$(dirname "$ORZ_FILE")"
   {
