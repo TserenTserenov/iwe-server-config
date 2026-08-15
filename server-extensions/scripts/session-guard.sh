@@ -64,7 +64,19 @@ IWE_ROOT="${IWE_ROOT:-$HOME/IWE}"
 # governance repo is named "DS-strategy" (the shipped default — see create-wp.sh).
 GOV_REPO="${IWE_GOVERNANCE_REPO:-DS-strategy}"
 SESSION_DIR="$IWE_ROOT/.iwe-runtime/sessions"
+# OPEN_LOG stays the git-tracked canonical path -- 8+ readers across
+# session-guard.sh's own repo AND two foreign ones (DS-ai-systems/
+# synchronizer, DS-MCP/digital-twin-mcp) still read this exact path; nothing
+# migrates. OPEN_LOG_RUNTIME is the ACTUAL write target for every `open`
+# (including --isolate) from here on -- a plain append to $OPEN_LOG dirtied
+# the canonical checkout on every call, live-reproduced blocking neighboring
+# `--isolate open`s the same way the pre-fix ORZ scaffold did (peer-sessions
+# 2026-08-15-14-isolate-aware-orz-dir smoke test, 2026-08-15-17-open-log-
+# runtime-registry design, Codex+Kimi). open-log-snapshot.sh (separate
+# script) periodically folds OPEN_LOG_RUNTIME's new lines into OPEN_LOG and
+# commits -- readers are unaffected until/unless they choose to migrate.
 OPEN_LOG="$IWE_ROOT/$GOV_REPO/inbox/open-sessions.log"
+OPEN_LOG_RUNTIME="$IWE_ROOT/.iwe-runtime/open-sessions.log"
 ORZ_DIR="$IWE_ROOT/$GOV_REPO/sessions"
 AGENT_STATUS_SCRIPT="$IWE_ROOT/scripts/agent-status-report.sh"
 # WP-520 находка 28+enforcement (14.08): freeze on the canonical DS-my-strategy
@@ -80,7 +92,7 @@ if [ -z "${IWE_FROZEN_CANONICAL_PATH+x}" ]; then
 else
   FROZEN_CANONICAL_PATH="$IWE_FROZEN_CANONICAL_PATH"
 fi
-mkdir -p "$SESSION_DIR" "$(dirname "$OPEN_LOG")" "$ORZ_DIR"
+mkdir -p "$SESSION_DIR" "$(dirname "$OPEN_LOG")" "$(dirname "$OPEN_LOG_RUNTIME")" "$ORZ_DIR"
 
 CMD="${1:-}"
 shift || true
@@ -1032,8 +1044,10 @@ artifacts: []
 EOF
     echo "ORZ scaffold создан: $ORZ_FILE"
   fi
-  # open-sessions.log
-  printf "%s | %s | %s | %s\n" "$(date '+%Y-%m-%d %H:%M')" "$WP" "$AGENT" "${TASK:-standalone}" >> "$OPEN_LOG"
+  # open-sessions.log — runtime target, not the git-tracked $OPEN_LOG (see
+  # OPEN_LOG_RUNTIME declaration above); open-log-snapshot.sh folds this back
+  # into $OPEN_LOG periodically.
+  printf "%s | %s | %s | %s\n" "$(date '+%Y-%m-%d %H:%M')" "$WP" "$AGENT" "${TASK:-standalone}" >> "$OPEN_LOG_RUNTIME"
   # agent status (fail-safe)
   if [ -x "$AGENT_STATUS_SCRIPT" ]; then
     "$AGENT_STATUS_SCRIPT" --session-id "$SESSION_ID" --personality "$PERSONALITY" \
@@ -1184,6 +1198,20 @@ session_scope_dirty_paths() { # <semaphore> — prints only dirty registered pat
       printf '  %s: %s\n' "$registered_path" "$status_line"
     done <<< "$status"
   done < <(grep '^file: ' "$semaphore" | sort -u)
+}
+
+
+audit_runner_cards() {
+  # WP-7 Ф76: a RUN-card may be an untracked, worktree-local queue artifact.
+  # Closing a session must not silently pass after an external remover made a
+  # previously journalled card disappear. The runner owns the audit format, so
+  # this gate delegates both the scan and its fail-closed decision to it.
+  local audit_output
+  if audit_output=$(python3 "$IWE_ROOT/$GOV_REPO/scripts/process-runner.py" audit-cards 2>&1); then
+    return 0
+  fi
+  printf '%s\n' "$audit_output" >&2
+  fail "RUN-карточки не прошли проверку жизненного цикла; close остановлен до снятия семафора." 7
 }
 
 # --- CLOSE ---
@@ -1366,6 +1394,8 @@ print(json.dumps({"wp": sys.argv[1], "slug": sys.argv[2], "agent": sys.argv[3], 
     python3 "$IWE_ROOT/$GOV_REPO/scripts/process-runner.py" cancel-session quick-close "$SESSION_ID" \
       2>&1 || echo "cancel-session (force path) не прошёл — брошенные прогоны, если есть, останутся до планового reap-orphans" >&2
   fi
+
+  audit_runner_cards
 
   # agent status idle
   if [ -x "$AGENT_STATUS_SCRIPT" ]; then
