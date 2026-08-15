@@ -41,7 +41,7 @@
 | 502 | 🔄 | P2 | Актуализация и продвижение портфеля РП | этапная карта v2.1 утверждена 15.08, скелет в Strategy.md; next — вести очередь решений |
 | 529 | ⏳ | P1 | Конвейер доставки шаблона IWE 2.0 | создан 14.08 (хвост РП520, H-292); next Ф1 карта критичных путей |
 | 530 | ⏳ | P1 | Конвейер параллельных рабочих сессий нескольких агентов | создан 15.08 (хвост РП520); next Ф1 малый прогон 3-4 сессий |
-| 531 | ⏳ | P2 | Реестр неразобранных коммитов и веток DS-my-strategy | создан 15.08 (88 коммитов, 100+ веток); метод из архива РП520 |
+| 531 | 🔄 | P2 | Реестр неразобранных коммитов и веток DS-my-strategy | 15.08: 57/92 закрыто (пир+Codex), метод усилен; next batch 3, позиция 31, остаток 35 |
 | 532 | 🔄 | P2 | Подписка на паки | создан 15.08 (H-293); next прототип каталога+скилла для Алёны |
 | 498 | 🔄 | P2 | Наставник ИИ: оперативная помощь в чате | собрать Ф4 (маршрутизация + grounding) в context-sufficiency gate |
 | 183 | 🔄 | — | CRM как система | DROP БД directus (решение 24.07); стратсессия 10.08 - отложен ещё на 2 недели, нет времени |
@@ -94,7 +94,7 @@
 | 496 | 🔄 | **P1** | Журнал гипотез (LPF-регламент обратной связи) | Ф5 done (fail-closed сверка починена); next Ф6 догоняющая сверка 39 записей |
 | 289 | 🔄 | P3 | Интеграция IWE с личными базами знаний | 11.08: Разметчик (structurer/) явно связан с РП149; SoT-рамка, активного next нет |
 | 483 | 🔄 | P2 | Комплект структурирования данных (guide-kit) | 12.08: Ф6 шаг 4 закрыт (3 паралл. сессии) — Pack DP.ROLE.093/DP.SC.065 + код + H3.6; next живой прогон на реальном topic.yaml |
-| 484 | 🔄 | **P1** | Автогенератор открытия/закрытия дня (зонтичный) | 11.08: Ф88 — 3 текстовых false-positive в гейтах закрытия/коммита исправлены |
+| 484 | 🔄 | **P1** | Автогенератор открытия/закрытия дня (зонтичный) | 15.08: Ф95 реализована и доставлена — reap_stale_git_lock + watchdog-проверка зависших сессий, 3 процесса завершены, перенос из заброшенной ветки шаблона |
 | 493 | 🔄 | P2 | Лаборатория характеристик | Ф4 ждёт данных (конец августа) |
 | 494 | 🔄 | P2 | Панель рабочих продуктов в VS Code | дашборд готов и подтверждён; доставка в шаблон отложена до 30.08 |
 | 167 | 🔄 | P5 | Публикации (зонтичный) | пост «4 уровня ИИ» готов во всех 3 каналах, ready |
@@ -125,6 +125,7 @@
 
 ### Project — HOT
 
+- [reference_ds_mcp_not_git_repo.md](reference_ds_mcp_not_git_repo.md) — 15.08: DS-MCP — папка без git (корень игнорирует): правки не версионируются, в облако — только через деплой воркера; не пытаться коммитить
 - [project_ds_my_strategy_divergence_diagnosis_confirmed.md](project_ds_my_strategy_divergence_diagnosis_confirmed.md) — 15.08: разъезд вырос до 124/443, диагностика подтверждена двумя методами (33 дубля / 88 неразобраны — история Ф11 WP-520, уже `archived`); разбор оставлен пилотом, не начинать с нуля
 - [project_ds_my_strategy_repo_divergence_carryover.md](project_ds_my_strategy_repo_divergence_carryover.md) — 12.08 вечер: DS-my-strategy на чужой ветке, +53/-185 от origin/main, 527 незакоммиченных файлов — пилот явно перенёс разбор в новую сессию, начинать оттуда
 - [project_tsekh1_chronic_git_sync_and_concurrent_agents.md](project_tsekh1_chronic_git_sync_and_concurrent_agents.md) — 08-10.08 РП484 Ф77/Ф79: корневой фикс autostash→git-dirty-guard задеплоен; живой рецидив «cannot cd» найден, не исправлен
@@ -133,6 +134,8 @@
 
 ### Feedback — HOT
 
+- [lessons_full_diff_fragment_check_not_first_line_grep.md](lessons_full_diff_fragment_check_not_first_line_grep.md) — 15.08 (РП531): текстовый grep на первую строку диффа спутал доказательство двух соседних коммитов того же файла (Codex поймал) — нужен полный список фрагментов + сверка каждого дословно; +2 категории доказательства (renumbered, self-cancelling revert)
+- [lessons_stale_branch_upstream_points_to_unpushable_pr_ref.md](lessons_stale_branch_upstream_points_to_unpushable_pr_ref.md) — 15.08: раннер честно сообщал «неотправленные коммиты» после успешного push — upstream ветки указывал на read-only GitHub PR-ref (origin/pr/385), не на саму ветку; фикс `git branch --set-upstream-to`, не логика гейта
 - [lessons_verify_own_parsing_before_declaring_api_unavailable.md](lessons_verify_own_parsing_before_declaring_api_unavailable.md) — 15.08: WakaTime 401 оказался багом своей команды grep|sed (взяла обрывок строки вместо ключа), не недоступностью API — сверять длину/формат извлечённого секрета перед выводом «недоступно»
 - [lessons_stashed_checkout_conflicts_ledger_union_merge.md](lessons_stashed_checkout_conflicts_ledger_union_merge.md) — 15.08 (retro day-close 14.08): stash pop поверх обновлённого main конфликтует с append-only ledger — union по содержанию события, не выбор стороны
 - [lessons_runner_card_vanished_lock_orphaned_mid_close.md](lessons_runner_card_vanished_lock_orphaned_mid_close.md) — 15.08: карточка раннера физически исчезла посреди Quick Close, `.lock` остался жить — cancel не находит run_id, довершать вручную; тот же корень, что Ф72 WP-7

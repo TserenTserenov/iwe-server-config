@@ -83,3 +83,8 @@ skills:
     browser: false
     keywords: ["staging", "promote", "author_mode", "extensions gate", "авторское", "шаблон FMT", "L3"]
     description: "Author-only: staging channel (testing → FMT), Extensions Gate, L3 rules."
+
+  - name: pack-subscribe
+    browser: false
+    keywords: ["подключи пак", "какие паки есть", "подписка на пак", "pack subscribe", "чужой пак"]
+    description: "Subscribe to another person's Pack: catalog vitrine, read-only clone, CLAUDE.md marking, search scope. Requires local FS."

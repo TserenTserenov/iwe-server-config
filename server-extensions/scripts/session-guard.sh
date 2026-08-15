@@ -1093,7 +1093,13 @@ session_scope_dirty_paths() { # <semaphore> — prints only dirty registered pat
     registered_path="${registered_path#file: }"
     [ -n "$registered_path" ] || continue
     case " $APPEND_SAFE_PATHS " in *" $registered_path "*) continue ;; esac
-    status=$(git -C "$(dirname "$ORZ_DIR")" status --porcelain --untracked-files=all -- "$registered_path" 2>/dev/null || true)
+    # -c core.quotePath=false (WP-484 Ф96 class-sweep, 15.08): plain --porcelain
+    # C-quotes non-ASCII paths, so ${status_line:3} below fed a quoted form to
+    # _untracked_matches_published which then never matched the published blob --
+    # a worktree-delivered session with Cyrillic filenames (every sessions/*.md
+    # here) falsely blocked at close. Likely the root of the 13.08 "close gate
+    # cannot recognize worktree delivery" recurrences.
+    status=$(git -c core.quotePath=false -C "$(dirname "$ORZ_DIR")" status --porcelain --untracked-files=all -- "$registered_path" 2>/dev/null || true)
     [ -z "$status" ] && continue
     while IFS= read -r status_line; do
       [ -n "$status_line" ] || continue
@@ -1372,9 +1378,21 @@ r = os.path.realpath(sys.argv[3])
 print(os.path.relpath(f, r))
 " -- "$FILE_PATH" "$REPO_ROOT")
   else
-    REL_PATH="$FILE_PATH"
+    # WP-484 Д2а (15.08, peer-session 2026-08-15-05): no git context -> refuse.
+    # The old fallback recorded the raw (often absolute) path verbatim -- the
+    # exact registry poison Ф60's reader has to filter out, and a scoped
+    # pathspec built from such an entry kills the whole git-status call later.
+    fail "note-file: '$FILE_PATH' вне git-контекста (файла нет, и текущий каталог не в репозитории) — запись отклонена, реестр scope принимает только репо-относительные пути. Запусти из корня нужного репозитория или передай существующий путь." 1
   fi
   [ -n "$REL_PATH" ] || fail "note-file: cannot determine relative path for '$FILE_PATH'" 1
+  case "$REL_PATH" in
+    /*|../*|..)
+      # Same Д2а rule for the computed form: an entry escaping the repo root can
+      # never byte-match a `git diff --cached` path -- it only breaks the scoped
+      # pathspec of every later reader.
+      fail "note-file: '$REL_PATH' указывает вне репозитория '$REPO_ROOT' — запись отклонена. Зови note-file из репозитория, которому файл принадлежит." 1
+      ;;
+  esac
   # A noted path only protects a commit if it byte-matches what `git diff --cached`
   # reports later (repo-relative, no repo-name prefix). A repo-name-prefixed path
   # silently recorded here is bug-2026-07-31-runner-commit-push-stale-retry (gate
