@@ -32,7 +32,15 @@
 
 set -uo pipefail
 
-IWE_ROOT="${CLAUDE_PROJECT_DIR:-$HOME/IWE}"
+# Ф42 (peer-session with Codex, 16.08): was "${CLAUDE_PROJECT_DIR:-$HOME/IWE}" --
+# wrong whenever a session's project dir IS the DS-my-strategy checkout itself
+# (a worktree, now the norm since WP-520's freeze), because the two paths built
+# below then double-append DS-my-strategy and point at a directory that doesn't
+# exist. close_obligation.py already rejected this exact class of bug for the
+# same reason (see its own IWE_ROOT comment) and settled on the IWE_ROOT env var
+# with a $HOME/IWE fallback; session-guard.sh uses the same convention. Matching
+# it here instead of inventing a third resolution strategy.
+IWE_ROOT="${IWE_ROOT:-$HOME/IWE}"
 
 INPUT=$(cat)
 [ -z "$INPUT" ] && exit 0
@@ -107,6 +115,9 @@ if echo "$COMMAND" | grep -qE 'process-runner\.py[[:space:]]+start[[:space:]]+qu
     TOOL_USE_ID=$(printf '%s' "$INPUT" | jq -r '.tool_use_id // empty' 2>/dev/null)
     OBLIGATION_CLI="$IWE_ROOT/${IWE_GOVERNANCE_REPO:-DS-my-strategy}/scripts/close_obligation.py"
     NONCE=$(python3 "$OBLIGATION_CLI" issue-ticket --session-id "$SESSION_ID" --slug "$SLUG" --tool-use-id "$TOOL_USE_ID" 2>/dev/null)
+    if [ -z "$NONCE" ]; then
+      echo "[close-runner-gate] session=$SESSION_ID_SAFE issue-ticket returned empty (obligation_cli=$OBLIGATION_CLI) — proceeding ticketless, Stop gate will still enforce" >&2
+    fi
     if [ -n "$NONCE" ]; then
       NEW_COMMAND=$(NONCE="$NONCE" python3 -c '
 import os, re, sys

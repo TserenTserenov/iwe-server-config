@@ -52,11 +52,19 @@ TOOL_NAME=$(printf '%s' "$INPUT" | jq -r '.tool_name // empty' 2>/dev/null)
 
 # No mandatory trailing "/" (round 2: `rm -rf .../pilot-witness` without a
 # trailing slash on the whole directory used to slip through). A separate
-# branch on `cd ... .iwe-runtime` as a whole (without naming a specific
-# subdirectory) catches the relative-cd bypass: `cd .iwe-runtime/pilot-witness
-# && touch x`, where the second half of the command has nothing to match
-# unless `cd` itself is inspected separately.
-PROTECTED_RE='\.iwe-runtime/pilot-witness|\.iwe-runtime/quick-close-harness-session|\.iwe-runtime/autonomous-run\.marker|cd[[:space:]]+[^;&|]*\.iwe-runtime'
+# branch on `cd ... <protected-subdir>` catches the relative-cd bypass:
+# `cd .iwe-runtime/pilot-witness && touch x`, where the second half of the
+# command has nothing to match unless `cd` itself is inspected separately.
+#
+# The `cd` branch names the same three protected subpaths as the rest of
+# PROTECTED_RE, not the whole `.iwe-runtime` tree (bug-2026-08-16-witness-
+# guard-blocks-legitimate-isolated-worktree-cd.md, DS-my-strategy/inbox/bugs):
+# a bare `cd[[:space:]]+[^;&|]*\.iwe-runtime` matched ANY `cd` under
+# `.iwe-runtime`, including legitimate session-guard --isolate worktrees under
+# `.iwe-runtime/isolated-worktrees/` that have nothing to do with witness/
+# harness-session/marker. `autonomous-run.marker` is a file, not a directory
+# — `cd` into it is not a thing bash does, so it's excluded from the cd branch.
+PROTECTED_RE='\.iwe-runtime/pilot-witness|\.iwe-runtime/quick-close-harness-session|\.iwe-runtime/autonomous-run\.marker|cd[[:space:]]+[^;&|]*\.iwe-runtime/(pilot-witness|quick-close-harness-session)'
 
 TARGET=""
 case "$TOOL_NAME" in

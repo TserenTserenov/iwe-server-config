@@ -22,6 +22,8 @@ case "$TOOL_NAME" in
     *) exit 0 ;;
 esac
 
+HARNESS_SESSION_ID=$(echo "$INPUT" | python3 -c 'import sys,json; print(json.loads(sys.stdin.read()).get("session_id",""))' 2>/dev/null)
+
 FILE_PATH=$(echo "$INPUT" | python3 -c '
 import sys,json
 d=json.loads(sys.stdin.read())
@@ -35,16 +37,22 @@ print(t.get("file_path","") or t.get("path",""))
 IWE_ROOT="${IWE_ROOT:-$HOME/IWE}"
 SESSION_DIR="$IWE_ROOT/.iwe-runtime/sessions"
 AGENT="${IWE_AGENT:-claude-code}"
-PTR_FILE="$SESSION_DIR/current-${AGENT}.ptr"
 
-if [ ! -f "$PTR_FILE" ]; then
-  exit 0
-fi
-
-SEM_FILE=$(cat "$PTR_FILE" 2>/dev/null)
-if [ -z "$SEM_FILE" ] || [ ! -f "$SEM_FILE" ]; then
-  exit 0
-fi
+# WP-484 Ф101 Находка 1 (16.08): the old singleton current-<agent>.ptr names one
+# semaphore per agent, not per session -- a second concurrent `open` of the same
+# agent overwrites it, so every parallel session's edits land in whichever
+# semaphore opened last (found live: 8+ concurrent claude-code semaphores,
+# cross-contamination confirmed both directions by reading all eight). Match by
+# the harness session id instead (recorded in the semaphore's frontmatter by
+# `session-guard.sh open` since this fix) -- exactly one semaphore can carry
+# this session's id. No match (old semaphore predates the field, or none open)
+# or more than one (should not happen, but never guess) -- stay silent, same
+# fail-closed contract as the old "no ptr file" case.
+[ -z "$HARNESS_SESSION_ID" ] && exit 0
+SEM_MATCHES=$(grep -lF "harness_session_id: $HARNESS_SESSION_ID" "$SESSION_DIR/${AGENT}"-*.open 2>/dev/null)
+SEM_COUNT=$(printf '%s\n' "$SEM_MATCHES" | grep -c . || true)
+[ "$SEM_COUNT" -ne 1 ] && exit 0
+SEM_FILE="$SEM_MATCHES"
 
 # Normalize to git-root-relative path (resolve symlinks/macOS /tmp vs /private/tmp)
 REPO_ROOT=$(git -C "$(dirname "$FILE_PATH")" rev-parse --show-toplevel 2>/dev/null || true)

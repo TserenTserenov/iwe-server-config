@@ -87,10 +87,26 @@ AGENT_STATUS_SCRIPT="$IWE_ROOT/scripts/agent-status-report.sh"
 # only way to offer an explicit one-command unfreeze later
 # (IWE_FROZEN_CANONICAL_PATH="") without it silently falling back to the
 # default. `${VAR+x}` is the standard bash idiom for "is this var set at all".
+#
+# WP-484 Ф104 (peer-session 2026-08-16-08-wp484-isolate-push-cherry-pick,
+# ArchGate 2026-08-16, DRR-f104-root-freeze-extension.md): the tool THAT
+# ENFORCES this freeze lives in $IWE_ROOT itself, which was outside its own
+# protection -- live incident: two parallel sessions committed to
+# session-guard.sh in the same window, one commit swallowed the other's
+# uncommitted work (mis-attribution). $IWE_ROOT joins $IWE_ROOT/$GOV_REPO as
+# a second frozen path via the SAME check below (git worktree add still
+# reads, never writes, the frozen checkout -- freeze never blocked that,
+# see the --isolate carve-out further down). Array, not a second scalar: a
+# third platform-shared repo can join the same way later without a new
+# check block. IWE_FROZEN_CANONICAL_PATH (singular, existing break-glass)
+# still overrides the WHOLE list with exactly what it's set to -- setting
+# it to "" still fully unfreezes, same as before this change.
 if [ -z "${IWE_FROZEN_CANONICAL_PATH+x}" ]; then
-  FROZEN_CANONICAL_PATH="$IWE_ROOT/$GOV_REPO"
+  FROZEN_CANONICAL_PATHS=("$IWE_ROOT/$GOV_REPO" "$IWE_ROOT")
+elif [ -n "$IWE_FROZEN_CANONICAL_PATH" ]; then
+  FROZEN_CANONICAL_PATHS=("$IWE_FROZEN_CANONICAL_PATH")
 else
-  FROZEN_CANONICAL_PATH="$IWE_FROZEN_CANONICAL_PATH"
+  FROZEN_CANONICAL_PATHS=()
 fi
 mkdir -p "$SESSION_DIR" "$(dirname "$OPEN_LOG")" "$(dirname "$OPEN_LOG_RUNTIME")" "$ORZ_DIR"
 
@@ -654,26 +670,42 @@ if [ "$CMD" = "open" ]; then
   #    live in this same session testing against a sandbox repo before this
   #    fix (freeze fired first, unconditionally, before the isolate block
   #    below ever got the chance to run).
-  if [ -n "$FROZEN_CANONICAL_PATH" ] && [ -z "$CANONICAL_OWNER" ] && [ "$ISOLATE_FLAG" != "1" ]; then
-    CURRENT_REPO_REAL=$(realpath "$CURRENT_REPO_DIR" 2>/dev/null || echo "$CURRENT_REPO_DIR")
-    FROZEN_REAL=$(realpath "$FROZEN_CANONICAL_PATH" 2>/dev/null || echo "$FROZEN_CANONICAL_PATH")
-    if [ "$CURRENT_REPO_REAL" = "$FROZEN_REAL" ]; then
-      REENTRY_OK=false
-      if [ -n "$SLUG" ]; then
-        while IFS= read -r EXISTING_SEM; do
-          [ -z "$EXISTING_SEM" ] && continue
-          [ -f "$EXISTING_SEM" ] || continue
-          [ "$(grep "^wp: " "$EXISTING_SEM" | cut -d' ' -f2-)" = "$WP" ] || continue
-          [ "$(grep "^slug: " "$EXISTING_SEM" | cut -d' ' -f2-)" = "$SLUG" ] || continue
-          lease_valid "$EXISTING_SEM" || continue
-          REENTRY_OK=true
-          break
-        done < <(find "$SESSION_DIR" -name "${AGENT}-*.open" -type f 2>/dev/null)
+  if [ "${#FROZEN_CANONICAL_PATHS[@]}" -gt 0 ] && [ -z "$CANONICAL_OWNER" ] && [ "$ISOLATE_FLAG" != "1" ]; then
+    # WP-484 Ф104 smoke test (2026-08-16) caught this reusing $CURRENT_REPO_DIR
+    # (= gov_repo_dir(), set above for a DIFFERENT question -- "where should
+    # the ORZ scaffold land," which deliberately falls back to the canonical
+    # $GOV_REPO path whenever the caller's cwd doesn't remote/basename-match
+    # $GOV_REPO, per gov_repo_dir()'s own comment). That fallback made a
+    # second frozen path structurally unreachable: any cwd that isn't
+    # $GOV_REPO always resolved to $GOV_REPO here regardless of where it
+    # actually was, so $IWE_ROOT could never be recognized as the caller's
+    # own checkout. Freeze needs "what checkout is the caller actually
+    # sitting in," a different question with its own answer -- the real cwd
+    # of THIS invocation, not the target of a write $open hasn't been cleared
+    # to make yet.
+    ACTUAL_CWD_TOPLEVEL="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
+    CURRENT_CWD_REAL=$(realpath "$ACTUAL_CWD_TOPLEVEL" 2>/dev/null || echo "$ACTUAL_CWD_TOPLEVEL")
+    for FROZEN_PATH in "${FROZEN_CANONICAL_PATHS[@]}"; do
+      FROZEN_REAL=$(realpath "$FROZEN_PATH" 2>/dev/null || echo "$FROZEN_PATH")
+      if [ "$CURRENT_CWD_REAL" = "$FROZEN_REAL" ]; then
+        REENTRY_OK=false
+        if [ -n "$SLUG" ]; then
+          while IFS= read -r EXISTING_SEM; do
+            [ -z "$EXISTING_SEM" ] && continue
+            [ -f "$EXISTING_SEM" ] || continue
+            [ "$(grep "^wp: " "$EXISTING_SEM" | cut -d' ' -f2-)" = "$WP" ] || continue
+            [ "$(grep "^slug: " "$EXISTING_SEM" | cut -d' ' -f2-)" = "$SLUG" ] || continue
+            lease_valid "$EXISTING_SEM" || continue
+            REENTRY_OK=true
+            break
+          done < <(find "$SESSION_DIR" -name "${AGENT}-*.open" -type f 2>/dev/null)
+        fi
+        if ! $REENTRY_OK; then
+          fail "этот checkout ($ACTUAL_CWD_TOPLEVEL) под freeze (WP-520/WP-484 Ф104) — прямая запись не разрешена до отдельного решения. Используй изолированный worktree: EnterWorktree или 'git worktree add' от свежего origin/main. Плановому раннеру: добавь --canonical-owner <reason>." 1
+        fi
+        break
       fi
-      if ! $REENTRY_OK; then
-        fail "этот checkout ($CURRENT_REPO_DIR) под freeze (WP-520) — прямая запись не разрешена до отдельного решения. Используй изолированный worktree: EnterWorktree или 'git worktree add' от свежего origin/main. Плановому раннеру: добавь --canonical-owner <reason>." 1
-      fi
-    fi
+    done
   fi
 
   # --isolate: session-owned git worktree, created here so the caller never
@@ -694,7 +726,19 @@ if [ "$CMD" = "open" ]; then
     # исходного каталога — риск потери контекста, не защита. `git worktree
     # add` берёт только tracked HEAD; explicit refuse instead of guessing
     # whether the caller meant to bring that state along.
-    ISOLATE_BASE_DIR="$(gov_repo_dir)"
+    #
+    # WP-484 Ф104 (2026-08-16, found live while deploying this very phase):
+    # was `gov_repo_dir()` here, same root cause as the freeze bug this phase
+    # already fixed above -- gov_repo_dir() resolves "where should the ORZ
+    # write," which falls back to the canonical $GOV_REPO path whenever cwd
+    # doesn't remote/basename-match it, so `open --isolate` invoked from
+    # $IWE_ROOT itself silently created its worktree from $GOV_REPO instead
+    # (live-caught: an isolate session opened from ~/IWE came back branched
+    # off DS-my-strategy's remote, not iwe-local-config's). The caller's
+    # actual cwd -- what --isolate is supposed to snapshot -- has to be
+    # resolved directly, the same fix as the freeze block, not derived from
+    # a resolver built to answer an unrelated question.
+    ISOLATE_BASE_DIR="$(git rev-parse --show-toplevel 2>/dev/null || gov_repo_dir)"
 
     # Peer-session 2026-08-14-13-wp520-two-layer-closing-arch (turns 12-16,
     # 3 rounds with Codex after 2 live-tested failed attempts). A re-entry of
@@ -1039,6 +1083,13 @@ $isolate_status_code $isolate_status_path"
     echo "opened_at: $(now_iso)"
     echo "created_at: $(now_iso)"
     echo "session_id: $SESSION_ID"
+    # WP-484 Ф101 Находка 1: PostToolUse hooks (post-tool-use-scope-track.sh)
+    # only see this env var, never WP/slug -- those are known only to the
+    # code calling `open`, not to a hook firing on every later Write/Edit.
+    # Recording it here lets the hook match its own semaphore by session
+    # instead of a singleton current-<agent>.ptr that gets clobbered by a
+    # second concurrent `open` of the same agent.
+    [ -n "${CLAUDE_CODE_SESSION_ID:-}" ] && echo "harness_session_id: $CLAUDE_CODE_SESSION_ID"
     # Recorded here so `close` (a separate invocation, possibly a different
     # process/cwd) can read the resolved worktree back instead of
     # recomputing it -- same pattern already used for orz_sessions_dir above.
@@ -1124,6 +1175,18 @@ EOF
   if [ -x "$AGENT_STATUS_SCRIPT" ]; then
     "$AGENT_STATUS_SCRIPT" --session-id "$SESSION_ID" --personality "$PERSONALITY" \
       "$AGENT" working "${WP}: ${TASK:-standalone}" "${FILES:-}" 2>/dev/null || true
+  fi
+  # WP-484 Ф103: audit_runner_cards() at close no longer blocks a session
+  # over a FOREIGN card's lifecycle problem -- it records it durably instead
+  # (card-audit-findings.jsonl) so it doesn't just vanish unseen. This is the
+  # other half of that trade: surface the registry here, non-blocking, so an
+  # agent opening a new session notices it exists (Day/Week Close is where
+  # someone is expected to actually triage it, per peer-session
+  # 2026-08-16-08-wp484-isolate-push-cherry-pick consensus).
+  FINDINGS_REGISTRY="$IWE_ROOT/.iwe-runtime/card-audit-findings.jsonl"
+  if [ -s "$FINDINGS_REGISTRY" ]; then
+    FINDINGS_COUNT=$(wc -l < "$FINDINGS_REGISTRY" | tr -d ' ')
+    echo "ℹ️  $FINDINGS_COUNT запись(ей) в findings registry чужих RUN-карточек ($FINDINGS_REGISTRY) — разбор на Day/Week Close, не блокирует эту сессию" >&2
   fi
   echo "Session OPEN: $SEM_FILE (WP: $WP, agent: $AGENT, slug: ${SLUG:-$WP})"
   exit 0
@@ -1299,12 +1362,24 @@ audit_runner_cards() {
   # Closing a session must not silently pass after an external remover made a
   # previously journalled card disappear. The runner owns the audit format, so
   # this gate delegates both the scan and its fail-closed decision to it.
+  #
+  # WP-484 Ф103 (peer-session 2026-08-16-08-wp484-isolate-push-cherry-pick,
+  # live case: a healthy close blocked by five unrelated stuck cards from
+  # OTHER sessions, 2026-08-16): the scan still covers every card in the
+  # repo, but the fail-closed verdict is scoped to this session's own cards
+  # by SLUG. A foreign session's broken card is a real problem -- it still
+  # gets recorded durably by the runner (card-audit-findings.jsonl) -- but it
+  # is not this session's problem to be blocked by; `open` surfaces the
+  # registry so it doesn't just accumulate unseen.
   local audit_output
-  if audit_output=$(python3 "$IWE_ROOT/$GOV_REPO/scripts/process-runner.py" audit-cards 2>&1); then
+  if audit_output=$(python3 "$IWE_ROOT/$GOV_REPO/scripts/process-runner.py" audit-cards --session-slug "${SLUG:-}" 2>&1); then
+    if printf '%s' "$audit_output" | grep -q '"foreign_findings_recorded": [1-9]'; then
+      echo "⚠️  найдены чужие RUN-карточки, не прошедшие проверку жизненного цикла -- close этой сессии НЕ блокирую, записал в findings registry для разбора" >&2
+    fi
     return 0
   fi
   printf '%s\n' "$audit_output" >&2
-  fail "RUN-карточки не прошли проверку жизненного цикла; close остановлен до снятия семафора." 7
+  fail "RUN-карточки этой сессии не прошли проверку жизненного цикла; close остановлен до снятия семафора." 7
 }
 
 # --- CLOSE ---
@@ -1403,7 +1478,15 @@ if [ "$CMD" = "close" ]; then
     done
   done
   RUNNER_OK=""
-  for card in "${RUNNER_CARDS[@]}"; do
+  # "${RUNNER_CARDS[@]+"${RUNNER_CARDS[@]}"}", not "${RUNNER_CARDS[@]}": a
+  # peer-conversation close (no RUN-quick-close-* card ever written) leaves
+  # RUNNER_CARDS empty, and macOS ships bash 3.2 (GPLv3 freeze) where `for x
+  # in "${ARR[@]}"` on a zero-length array is an unbound-variable error under
+  # `set -u` -- fixed only in bash 4.4+ (2016). Same fix applied to the two
+  # other RUNNER_CARDS loops below (bug-2026-08-16-session-guard-close-
+  # bash32-empty-array-unbound.md, DS-my-strategy/inbox/bugs, live-crashed
+  # 2026-08-16-08-wp521-fragment-provenance-schema).
+  for card in "${RUNNER_CARDS[@]+"${RUNNER_CARDS[@]}"}"; do
     grep -q '^process_id: quick-close$' "$card" || continue
     grep -q '^status: completed$' "$card" || continue
     RUNNER_OK="$card"
@@ -1418,7 +1501,7 @@ if [ "$CMD" = "close" ]; then
   # прошёл верификацию чеклиста (непустой verdict) — любое другое промежуточное
   # состояние по-прежнему отказ.
   if [ -z "$RUNNER_OK" ]; then
-    for card in "${RUNNER_CARDS[@]}"; do
+    for card in "${RUNNER_CARDS[@]+"${RUNNER_CARDS[@]}"}"; do
       grep -q '^process_id: quick-close$' "$card" || continue
       grep -q '^current_step: session-guard-release$' "$card" || continue
       grep -qE '^[[:space:]]*verdict:[[:space:]]*[^[:space:]]' "$card" || continue
@@ -1438,7 +1521,7 @@ if [ "$CMD" = "close" ]; then
   # любой ДРУГОЙ сбой раннера (упавший push, отменённый до commit-push прогон)
   # этим флагом по-прежнему не спрятать.
   if [ -z "$RUNNER_OK" ] && [ -n "$FORCE_NO_REFLECTION" ]; then
-    for card in "${RUNNER_CARDS[@]}"; do
+    for card in "${RUNNER_CARDS[@]+"${RUNNER_CARDS[@]}"}"; do
       grep -q '^process_id: quick-close$' "$card" || continue
       # Два допустимых current_step, оба безопасны оставить открытым семафором
       # по тому же критерию (содержательная работа уже доставлена, ничего не
