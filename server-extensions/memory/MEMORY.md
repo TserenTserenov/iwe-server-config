@@ -138,6 +138,7 @@
 
 ### Feedback — HOT
 
+- [feedback_schedulewakeup_prompt_triggers_close_gate.md](feedback_schedulewakeup_prompt_triggers_close_gate.md) — 16.08: ScheduleWakeup-промпт со словом «закрой worktree» ложно сработал как реальная фраза пилота о закрытии сессии (armed obligation, Stop-блок) — избегать «закрой/закрывай» в тексте prompt применительно не к самой сессии; при срабатывании спросить пилота, не отменять самовольно
 - [feedback_verify_code_before_peer_session_design.md](feedback_verify_code_before_peer_session_design.md) — 16.08: пир-сессия с Кодексом (РП535) переоткрыла уже написанный код (барьер + reconcile), т.к. не сверился с репозиторием ДО обсуждения — grep кода перед проектированием в пир-сессии
 - [feedback_wp_creation_needs_pilot_gate.md](feedback_wp_creation_needs_pilot_gate.md) — 16.08: в пир-сессии с Кодексом зарегистрировал новый РП (WP-535) по консенсусу с напарником, без паузы на вопрос пилоту — консенсус агентов не заменяет WP Gate; побочная находка внутри чужой сессии требует явного согласования, не автосоздания
 - [lessons_high_parallelism_stale_clean_claim.md](lessons_high_parallelism_stale_clean_claim.md) — 16.08: дважды подряд заявил раннеру «репозиторий чист» по устаревшей на минуты проверке — раннер честно отклонил (ahead=1 оба раза); проверять git-состояние прямо перед каждым шагом, не по снимку из разговора
