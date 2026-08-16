@@ -15,10 +15,16 @@ TEST_ROOT2=""
 trap 'rm -rf "$TEST_ROOT" "$TEST_ROOT2"' EXIT
 
 REPO="$TEST_ROOT/DS-strategy"
-mkdir -p "$REPO/sessions" "$REPO/inbox/agent/tasks"
+ISOLATED="$TEST_ROOT/isolated-worktree"
+mkdir -p "$REPO/sessions" "$REPO/inbox/agent/tasks" "$REPO/scripts"
 git -C "$REPO" init -q
 git -C "$REPO" config user.email test@example.com
 git -C "$REPO" config user.name "Test"
+cat > "$REPO/scripts/process-runner.py" <<'EOF'
+#!/usr/bin/env python3
+print("{}")
+EOF
+chmod +x "$REPO/scripts/process-runner.py"
 
 cat > "$REPO/sessions/00-index.md" <<'EOF'
 | Date | Session ID | Задача | Агенты | Ходы | Эскал | Статус | Отчёт |
@@ -36,6 +42,12 @@ export IWE_AGENT="fixture"
 export IWE_FROZEN_CANONICAL_PATH=""
 
 bash "$GUARD" open --wp WP-520 --task fixture --slug append-safe-smoke --agent fixture >/dev/null
+SEM=$(find "$TEST_ROOT/.iwe-runtime/sessions" -name 'fixture-*.open' -type f | head -1)
+ORZ_BASENAME=$(grep '^orz_file: ' "$SEM" | cut -d' ' -f2-)
+git -C "$REPO" worktree add -qb isolated-session "$ISOLATED"
+mkdir -p "$ISOLATED/inbox/agent/tasks"
+perl -0pi -e 's#^orz_sessions_dir: .*$#orz_sessions_dir: '"$ISOLATED"'/sessions#m' "$SEM"
+rm -f "$REPO/sessions/$ORZ_BASENAME"
 
 # Register scope: session's own file (will be committed) + the shared index
 # (will stay dirty, standing in for a concurrent writer's own row).
@@ -47,6 +59,15 @@ bash "$GUARD" note-file sessions/00-index.md --agent fixture >/dev/null
 git -C "$REPO" add own-file.md
 git -C "$REPO" commit -qm "own file"
 
+# A real isolated-session artifact is clean and committed in its own worktree,
+# while the canonical checkout has an unrelated untracked file at the same
+# path.  Close must inspect the ORZ worktree, not misattribute canonical dirt.
+echo "isolated artifact" > "$ISOLATED/isolate-owned.md"
+git -C "$ISOLATED" add isolate-owned.md
+git -C "$ISOLATED" commit -qm "isolated artifact"
+echo "file: isolate-owned.md" >> "$SEM"
+echo "canonical foreign dirt" > "$REPO/isolate-owned.md"
+
 # Simulate a concurrent session's uncommitted row in the shared index --
 # not this session's own edit, but still registered in its scope because
 # note-file fell back to the single open semaphore (WP-520 case 10).
@@ -55,7 +76,7 @@ cat >> "$REPO/sessions/00-index.md" <<'EOF'
 EOF
 
 # ORZ required by validate_orz.
-ORZ="$REPO/sessions/2026-08/2026-08-12-append-safe-smoke.md"
+ORZ="$ISOLATED/sessions/$ORZ_BASENAME"
 mkdir -p "$(dirname "$ORZ")"
 cat > "$ORZ" <<'EOF'
 ---
@@ -81,19 +102,20 @@ fixture
 ## Ключевые решения
 fixture
 EOF
-git -C "$REPO" add "sessions/2026-08/2026-08-12-append-safe-smoke.md"
-git -C "$REPO" commit -qm "orz"
+git -C "$ISOLATED" add "sessions/$ORZ_BASENAME"
+git -C "$ISOLATED" commit -qm "orz"
 
 # Terminal runner card required by close's Ф4 gate.
-cat > "$REPO/inbox/agent/tasks/RUN-quick-close-append-safe-smoke.md" <<'EOF'
+cat > "$ISOLATED/inbox/agent/tasks/RUN-quick-close-append-safe-smoke.md" <<'EOF'
 ---
 process_id: quick-close
 status: completed
 ---
 EOF
+echo "file: inbox/agent/tasks/RUN-quick-close-append-safe-smoke.md" >> "$SEM"
 
 if bash "$GUARD" close --wp WP-520 --slug append-safe-smoke --agent fixture; then
-    echo "PASS: close succeeds with a concurrent, uncommitted row in the append-safe index"
+    echo "PASS: close uses isolate scope and accepts its terminal runner card"
 else
     echo "FAIL: close blocked on sessions/00-index.md despite the append-safe exclusion (WP-520 Ф8)" >&2
     exit 1

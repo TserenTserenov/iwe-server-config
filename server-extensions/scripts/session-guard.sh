@@ -742,28 +742,100 @@ if [ "$CMD" = "open" ]; then
     done < <(git -C "$ISOLATE_BASE_DIR" status --porcelain -z --untracked-files=all 2>/dev/null)
     if [ "${#ISOLATE_DIRTY_ENTRIES[@]}" -gt 0 ]; then
       if [ ! -f "$ISOLATE_EXISTING_SEM" ]; then
-        # No semaphore for this session_id yet -- this IS a first entry, and
-        # a first entry tolerates nothing: every dirty path here is either
-        # foreign work or a stale artifact from an unrelated prior run.
-        fail "--isolate: в текущем каталоге ($ISOLATE_BASE_DIR) есть незакоммиченные или untracked изменения -- новый worktree их не унаследует. Закоммить, застэшь (git stash) или яви явное решение, прежде чем открывать изолированную копию." 1
-      fi
-      # Re-entry: build the exact allowlist from THIS session's own
-      # semaphore, not a hardcoded filename list. Codex turn 15 point 4 --
-      # compare full normalized relative paths, not a substring/prefix grep
-      # (grep -vF on a raw path segment can under- or over-match ambiguous
-      # filenames).
-      ISOLATE_ALLOWLIST=$(grep '^file: ' "$ISOLATE_EXISTING_SEM" | sed 's/^file: //' | sort -u)
-      ISOLATE_UNEXPECTED_DIRTY=""
-      for isolate_status_entry in "${ISOLATE_DIRTY_ENTRIES[@]}"; do
-        isolate_status_code="${isolate_status_entry:0:2}"
-        isolate_status_path="${isolate_status_entry:3}"
-        if ! grep -qxF "$isolate_status_path" <<< "$ISOLATE_ALLOWLIST"; then
-          ISOLATE_UNEXPECTED_DIRTY="$ISOLATE_UNEXPECTED_DIRTY
-$isolate_status_code $isolate_status_path"
+        # No semaphore for this session_id yet -- first entry. Under the
+        # WP-520 freeze (every new session goes through --isolate), the
+        # canonical checkout is near-guaranteed to carry SOMEONE ELSE's
+        # legitimate in-flight work at any given moment -- a hard fail here
+        # doesn't protect that work (git worktree add never touches it,
+        # tracked-HEAD only), it just makes --isolate itself unusable at the
+        # concurrency freeze exists to support (live-reproduced WP-530
+        # peer-session 2026-08-16-01, writer's own session opening tripped
+        # this exact fail against WP-524/WP-389/WP-532/WP-167's dirt).
+        #
+        # Bypass only on the canonical path itself, not an already-isolated
+        # worktree calling --isolate again (that dirt is far more likely to
+        # be the caller's own forgotten edit, not a peer's -- still refuse
+        # there, same as before). Codex turn 3 (2026-08-16-01): the risk
+        # isn't losing the foreign work (it stays on disk, untouched, HEAD
+        # only) -- it's two agents making the bypass decision blind to each
+        # other and later reconciling a canonical checkout neither fully
+        # understood. Mitigation: a fingerprinted marker that the NEXT
+        # bypasser hitting the SAME dirty state reads back, so it's told who
+        # already decided it rather than deciding blind.
+        #
+        # Two simultaneous bypassers BOTH proceeding is the correct outcome
+        # here -- each wants its own worktree, neither touches the other's
+        # files -- so this is a notification problem, not a mutual-exclusion
+        # one, and doesn't need a lock. Codex turn 5 (2026-08-16-01): a
+        # shared log file with "read it, then append if no match" is its own
+        # race (two agents can both read "no match" and both append,
+        # correctly, but neither learns about the other) -- advisory-only
+        # is an honest label for that, but a strictly better fix costs the
+        # same: one `mkdir` per fingerprint, the same atomic-directory idiom
+        # already proven twice in this file (with_isolate_lock above,
+        # lock-hot-file elsewhere). Whoever's `mkdir` wins recorded first;
+        # every later bypasser for the identical fingerprint gets a real,
+        # not best-effort, "already seen" answer -- no window where two
+        # first-recorders both think they're first.
+        ISOLATE_CANONICAL_PATH="$(realpath "$IWE_ROOT/$GOV_REPO" 2>/dev/null || echo "$IWE_ROOT/$GOV_REPO")"
+        ISOLATE_BASE_REAL="$(realpath "$ISOLATE_BASE_DIR" 2>/dev/null || echo "$ISOLATE_BASE_DIR")"
+        if [ "$ISOLATE_BASE_REAL" != "$ISOLATE_CANONICAL_PATH" ]; then
+          fail "--isolate: в текущем каталоге ($ISOLATE_BASE_DIR) есть незакоммиченные или untracked изменения -- новый worktree их не унаследует. Это уже изолированная копия, не общий канонический чекаут, так что эта грязь с большей вероятностью твоя собственная. Закоммить, застэшь (git stash) или яви явное решение, прежде чем открывать вложенную изолированную копию." 1
         fi
-      done
-      if [ -n "$ISOLATE_UNEXPECTED_DIRTY" ]; then
-        fail "--isolate: re-entry сессии $ISOLATE_SESSION_ID нашёл грязные пути вне зарегистрированного allowlist этой же сессии -- вероятно чужая работа, не собственный побочный эффект. Закоммить, застэшь или разбери вручную:$ISOLATE_UNEXPECTED_DIRTY" 1
+        # `|| true` on BOTH the pipeline and the assignment: under `set -o
+        # pipefail` a missing `shasum` (a perl script -- absent in minimal
+        # containers, present here) makes the whole assignment exit 127, and
+        # `set -e` then kills the script BEFORE any fallback line can run --
+        # a silent death with no worktree and no message. Cold review of
+        # this patch caught it empirically (WP-530 peer-session
+        # 2026-08-16-01); the fingerprint is a diagnostic, never a reason to
+        # refuse to open.
+        ISOLATE_DIRTY_HASH=$(printf '%s\0' "${ISOLATE_DIRTY_ENTRIES[@]}" \
+          | { shasum -a 256 2>/dev/null || sha256sum 2>/dev/null || true; } \
+          | cut -d' ' -f1 || true)
+        [ -n "$ISOLATE_DIRTY_HASH" ] || ISOLATE_DIRTY_HASH="unavailable"
+        ISOLATE_BYPASS_DIR="$IWE_ROOT/.iwe-runtime/canonical-dirty-bypass"
+        ISOLATE_BYPASS_LOG="$ISOLATE_BYPASS_DIR/history.log"
+        mkdir -p "$ISOLATE_BYPASS_DIR" 2>/dev/null || true
+        # Full history for humans (best-effort, append-only -- never the
+        # correctness path). "already seen" for the NEXT bypasser is the
+        # mkdir below, not a read of this file.
+        printf '%s agent=%s session_id=%s base_dir=%s dirty_hash=%s dirty_count=%s\n' \
+          "$(now_iso)" "$AGENT" "$ISOLATE_SESSION_ID" "$ISOLATE_BASE_DIR" \
+          "$ISOLATE_DIRTY_HASH" "${#ISOLATE_DIRTY_ENTRIES[@]}" >> "$ISOLATE_BYPASS_LOG" 2>/dev/null || true
+        ISOLATE_PRIOR_BYPASS=""
+        if [ "$ISOLATE_DIRTY_HASH" != "unavailable" ]; then
+          ISOLATE_BYPASS_MARKER="$ISOLATE_BYPASS_DIR/$ISOLATE_DIRTY_HASH"
+          if mkdir "$ISOLATE_BYPASS_MARKER" 2>/dev/null; then
+            printf 'agent=%s\nsession_id=%s\nbase_dir=%s\nat=%s\n' \
+              "$AGENT" "$ISOLATE_SESSION_ID" "$ISOLATE_BASE_DIR" "$(now_iso)" \
+              > "$ISOLATE_BYPASS_MARKER/first" 2>/dev/null || true
+          else
+            ISOLATE_PRIOR_BYPASS=$(tr '\n' ' ' < "$ISOLATE_BYPASS_MARKER/first" 2>/dev/null || true)
+          fi
+        fi
+        echo "⚠️  --isolate: канонический чекаут ($ISOLATE_BASE_DIR) грязный от чужой работы (${#ISOLATE_DIRTY_ENTRIES[@]} путей, fingerprint $ISOLATE_DIRTY_HASH) -- new worktree её не унаследует (ожидаемо, HEAD-only), она остаётся на диске нетронутой. История в $ISOLATE_BYPASS_LOG." >&2
+        [ -n "$ISOLATE_PRIOR_BYPASS" ] \
+          && echo "   ↳ ту же грязь уже обошёл: $ISOLATE_PRIOR_BYPASS" >&2 || true
+      else
+        # Re-entry: build the exact allowlist from THIS session's own
+        # semaphore, not a hardcoded filename list. Codex turn 15 point 4 --
+        # compare full normalized relative paths, not a substring/prefix grep
+        # (grep -vF on a raw path segment can under- or over-match ambiguous
+        # filenames).
+        ISOLATE_ALLOWLIST=$(grep '^file: ' "$ISOLATE_EXISTING_SEM" | sed 's/^file: //' | sort -u)
+        ISOLATE_UNEXPECTED_DIRTY=""
+        for isolate_status_entry in "${ISOLATE_DIRTY_ENTRIES[@]}"; do
+          isolate_status_code="${isolate_status_entry:0:2}"
+          isolate_status_path="${isolate_status_entry:3}"
+          if ! grep -qxF "$isolate_status_path" <<< "$ISOLATE_ALLOWLIST"; then
+            ISOLATE_UNEXPECTED_DIRTY="$ISOLATE_UNEXPECTED_DIRTY
+$isolate_status_code $isolate_status_path"
+          fi
+        done
+        if [ -n "$ISOLATE_UNEXPECTED_DIRTY" ]; then
+          fail "--isolate: re-entry сессии $ISOLATE_SESSION_ID нашёл грязные пути вне зарегистрированного allowlist этой же сессии -- вероятно чужая работа, не собственный побочный эффект. Закоммить, застэшь или разбери вручную:$ISOLATE_UNEXPECTED_DIRTY" 1
+        fi
       fi
     fi
 
@@ -1172,18 +1244,39 @@ _untracked_matches_published() { # <repo> <root-relative path> — 0 if an ident
 APPEND_SAFE_PATHS="$(basename "$ORZ_DIR")/00-index.md"
 
 session_scope_dirty_paths() { # <semaphore> — prints only dirty registered paths
-  local semaphore="$1" registered_path status
+  local semaphore="$1" registered_path status scope_repo_dir runner_card
+  # The ORZ snapshot names the worktree that owns this session.  Checking the
+  # canonical checkout here makes unrelated current work look like this
+  # session's dirt and permanently blocks a clean isolated close.
+  scope_repo_dir="$(dirname "$ORZ_SESSIONS_DIR")"
+  if [ ! -d "$scope_repo_dir/.git" ] && [ ! -f "$scope_repo_dir/.git" ]; then
+    scope_repo_dir="$(dirname "$ORZ_DIR")"
+  fi
   while IFS= read -r registered_path; do
     registered_path="${registered_path#file: }"
     [ -n "$registered_path" ] || continue
     case " $APPEND_SAFE_PATHS " in *" $registered_path "*) continue ;; esac
+    # The runner writes its terminal state after the last commit/push.  That
+    # self-update is the proof close reads below, so treating the completed
+    # card as ordinary dirty work creates a release deadlock.  Non-terminal
+    # cards remain in the strict path and still block the session.
+    case "$registered_path" in
+      inbox/agent/tasks/RUN-quick-close-*.md)
+        runner_card="$scope_repo_dir/$registered_path"
+        if [ -f "$runner_card" ] \
+           && grep -q '^process_id: quick-close$' "$runner_card" \
+           && grep -q '^status: completed$' "$runner_card"; then
+          continue
+        fi
+        ;;
+    esac
     # -c core.quotePath=false (WP-484 Ф96 class-sweep, 15.08): plain --porcelain
     # C-quotes non-ASCII paths, so ${status_line:3} below fed a quoted form to
     # _untracked_matches_published which then never matched the published blob --
     # a worktree-delivered session with Cyrillic filenames (every sessions/*.md
     # here) falsely blocked at close. Likely the root of the 13.08 "close gate
     # cannot recognize worktree delivery" recurrences.
-    status=$(git -c core.quotePath=false -C "$(dirname "$ORZ_DIR")" status --porcelain --untracked-files=all -- "$registered_path" 2>/dev/null || true)
+    status=$(git -c core.quotePath=false -C "$scope_repo_dir" status --porcelain --untracked-files=all -- "$registered_path" 2>/dev/null || true)
     [ -z "$status" ] && continue
     while IFS= read -r status_line; do
       [ -n "$status_line" ] || continue
@@ -1192,7 +1285,7 @@ session_scope_dirty_paths() { # <semaphore> — prints only dirty registered pat
         # '??' for the same reason: a shared checkout parked on another agent's
         # branch legitimately carries main's newer version of shared scripts.
         "?? "*|" M "*)
-          _untracked_matches_published "$(dirname "$ORZ_DIR")" "${status_line:3}" && continue
+          _untracked_matches_published "$scope_repo_dir" "${status_line:3}" && continue
           ;;
       esac
       printf '  %s: %s\n' "$registered_path" "$status_line"
@@ -1294,11 +1387,23 @@ if [ "$CMD" = "close" ]; then
 
   # Quick Close — не текстовая декларация: именно терминальная карточка раннера
   # доказывает, что эта сессия прошла обязательный процесс. Сопоставление по slug
-  # не даёт чужой параллельной карточке закрыть текущую сессию.
-  RUNNER_CARD="$IWE_ROOT/$GOV_REPO/inbox/agent/tasks/RUN-quick-close-${SLUG}"'*.md'
+  # не даёт чужой параллельной карточке закрыть текущую сессию. Для isolate-сессии
+  # карточка создаётся в том же worktree, что и ORZ: канонический checkout не
+  # обязан содержать её untracked-копию. Список ограничен snapshot-путём из
+  # выбранного семафора, а не поиском по произвольным worktree.
+  RUNNER_CARD_DIRS=("$IWE_ROOT/$GOV_REPO/inbox/agent/tasks")
+  ISOLATED_REPO_DIR=$(dirname "$ORZ_SESSIONS_DIR")
+  if [ "$ISOLATED_REPO_DIR" != "$IWE_ROOT/$GOV_REPO" ]; then
+    RUNNER_CARD_DIRS+=("$ISOLATED_REPO_DIR/inbox/agent/tasks")
+  fi
+  RUNNER_CARDS=()
+  for runner_dir in "${RUNNER_CARD_DIRS[@]}"; do
+    for card in "$runner_dir"/RUN-quick-close-"${SLUG}"*.md; do
+      [ -f "$card" ] && RUNNER_CARDS+=("$card")
+    done
+  done
   RUNNER_OK=""
-  for card in $RUNNER_CARD; do
-    [ -f "$card" ] || continue
+  for card in "${RUNNER_CARDS[@]}"; do
     grep -q '^process_id: quick-close$' "$card" || continue
     grep -q '^status: completed$' "$card" || continue
     RUNNER_OK="$card"
@@ -1313,8 +1418,7 @@ if [ "$CMD" = "close" ]; then
   # прошёл верификацию чеклиста (непустой verdict) — любое другое промежуточное
   # состояние по-прежнему отказ.
   if [ -z "$RUNNER_OK" ]; then
-    for card in $RUNNER_CARD; do
-      [ -f "$card" ] || continue
+    for card in "${RUNNER_CARDS[@]}"; do
       grep -q '^process_id: quick-close$' "$card" || continue
       grep -q '^current_step: session-guard-release$' "$card" || continue
       grep -qE '^[[:space:]]*verdict:[[:space:]]*[^[:space:]]' "$card" || continue
@@ -1334,8 +1438,7 @@ if [ "$CMD" = "close" ]; then
   # любой ДРУГОЙ сбой раннера (упавший push, отменённый до commit-push прогон)
   # этим флагом по-прежнему не спрятать.
   if [ -z "$RUNNER_OK" ] && [ -n "$FORCE_NO_REFLECTION" ]; then
-    for card in $RUNNER_CARD; do
-      [ -f "$card" ] || continue
+    for card in "${RUNNER_CARDS[@]}"; do
       grep -q '^process_id: quick-close$' "$card" || continue
       # Два допустимых current_step, оба безопасны оставить открытым семафором
       # по тому же критерию (содержательная работа уже доставлена, ничего не
@@ -1427,12 +1530,36 @@ print(json.dumps({"wp": sys.argv[1], "slug": sys.argv[2], "agent": sys.argv[3], 
   rm -f "$SESSION_DIR/current-${AGENT}.ptr"
   echo "Session CLOSE: $WP → $ORZ_FILE ✅"
 
-  # Auto-remove the isolated worktree this session's own `open --isolate`
-  # created, now that push is confirmed (we're past the scope-gate/runner
-  # checks above). Best-effort, per consensus: a failed remove warns, it
-  # never blocks close -- the whole point of removing a "did it work" gate
-  # here is not to trade one stuck-session class for another.
+  # Push this session's own commits to origin/main, then remove the isolated
+  # worktree `open --isolate` created — in that order. Until WP-484 Ф102 this
+  # comment claimed "now that push is confirmed" while no push step existed
+  # anywhere: a clean (no uncommitted changes) worktree was removed on trust
+  # alone, silently discarding any commits that never made it to origin.
+  # `isolate-push.sh` closes that gap via cherry-pick, not merge/rebase — see
+  # its header and DRR-f102-isolated-push-cherry-pick.md (DS-my-strategy) for
+  # why. Design consensus: peer-session
+  # 2026-08-16-08-wp484-isolate-push-cherry-pick (Claude + Codex).
   CLOSING_WORKTREE=$(grep "^isolated_worktree: " "$SEM_FILE.closed" 2>/dev/null | cut -d' ' -f2- || true)
+  if [ -n "$CLOSING_WORKTREE" ]; then
+    ISOLATE_PUSH_SCRIPT="$IWE_ROOT/$GOV_REPO/scripts/isolate-push.sh"
+    if [ -x "$ISOLATE_PUSH_SCRIPT" ]; then
+      if "$ISOLATE_PUSH_SCRIPT" "$CLOSING_WORKTREE" main; then
+        echo "Isolated worktree pushed to origin/main: $CLOSING_WORKTREE"
+      else
+        PUSH_STATUS=$?
+        if [ "$PUSH_STATUS" = "3" ]; then
+          echo "⚠️  cherry-pick конфликт при push $CLOSING_WORKTREE — worktree НЕ удаляю, разбор оставлен в выводе isolate-push.sh выше" >&2
+          CLOSING_WORKTREE=""
+        else
+          echo "⚠️  isolate-push.sh не смог запушить $CLOSING_WORKTREE (exit $PUSH_STATUS) — worktree НЕ удаляю, почисти/допуши вручную" >&2
+          CLOSING_WORKTREE=""
+        fi
+      fi
+    else
+      echo "⚠️  isolate-push.sh не найден по пути $ISOLATE_PUSH_SCRIPT — worktree НЕ удаляю, чтобы не потерять непушнутую работу: git -C $CLOSING_WORKTREE push" >&2
+      CLOSING_WORKTREE=""
+    fi
+  fi
   if [ -n "$CLOSING_WORKTREE" ]; then
     if git -C "$CLOSING_WORKTREE" worktree remove "$CLOSING_WORKTREE" 2>/dev/null; then
       echo "Isolated worktree removed: $CLOSING_WORKTREE"
