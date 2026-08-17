@@ -471,6 +471,7 @@ CANONICAL_OWNER=""
 FORCE_FLAG=0
 UNFREEZE_REASON=""
 ISOLATE_FLAG=0
+EXPECTED_HASH=""
 POSITIONAL=()
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -499,6 +500,11 @@ while [[ $# -gt 0 ]]; do
     --personality) PERSONALITY="$2"; shift 2 ;;
     --owner-pid) OWNER_PID="$2"; shift 2 ;;
     --session-id) SESSION_ID_ARG="$2"; shift 2 ;;
+    --expected-hash)
+      if [[ $# -lt 2 || -z "$2" ]]; then
+        fail "--expected-hash требует непустое значение (sha256 файла, который читал вызывающий)" 1
+      fi
+      EXPECTED_HASH="$2"; shift 2 ;;
     --since)  SINCE="$2"; shift 2 ;;
     --cleanup-orphans) CLEANUP_ORPHANS=1; shift ;;
     --force)  FORCE_FLAG=1; shift ;;
@@ -1840,6 +1846,70 @@ if [ "$CMD" = "unlock-hot-file" ]; then
   rm -rf "$LOCK_PATH"
   echo "Unlocked: $HOT_PATH"
   exit 0
+fi
+
+# --- WP-CONTEXT GUARDED EDIT (WP-530 Ф5 п.1, 17.08 peer-session с Kimi) ---
+#
+# lock-hot-file above only serialises writers -- it never checks whether the
+# file changed between the caller reading it and the caller actually writing.
+# An LLM agent that sees its edit go through a lock reads that as "protected"
+# and stops re-reading before writing -- the exact false confidence that lost
+# the WP-530 card's own Ф2 section between sessions on 2026-08-15. This
+# command adds the missing check on top of the existing lock, without
+# touching lock-hot-file itself (kept a pure filesystem primitive per Kimi's
+# single-responsibility argument, turn 1 of this session -- content hashing
+# belongs to the caller's semantics, not the lock).
+#
+# `--expected-hash` has no `auto` fallback on purpose (Kimi's turn-2
+# objection, accepted): the hash MUST come from the moment the caller actually
+# read the file, which for an LLM agent is tokens -- sometimes minutes --
+# before this command runs. Computing it here instead would just narrow the
+# race window, not close it, while looking closed.
+#
+# Scope of the guarantee (Kimi's turn-8 objection, accepted verbatim): guarded
+# edit ensures serialization between callers that go through this primitive.
+# It does not protect against concurrent modification by external processes
+# not using lock-hot-file (e.g. editors with autosave). All write points to
+# hot files must go through this primitive; integrating external tools is out
+# of scope for WP-530.
+if [ "$CMD" = "wp-context-guarded-edit" ]; then
+  GUARD_PATH="${POSITIONAL[0]:-}"
+  [ -z "$GUARD_PATH" ] && fail "wp-context-guarded-edit: missing path argument" 1
+  [ -z "$EXPECTED_HASH" ] && fail "wp-context-guarded-edit: --expected-hash обязателен (hash файла, который читал вызывающий, ДО этого вызова)" 1
+  GUARD_CMD=("${POSITIONAL[@]:1}")
+  [ "${#GUARD_CMD[@]}" -eq 0 ] && fail "wp-context-guarded-edit: команда после '--' обязательна" 1
+
+  bash "$0" lock-hot-file "$GUARD_PATH" ${AGENT:+--agent "$AGENT"} >/dev/null
+
+  # `set -e` (top of file) means a failing GUARD_CMD below would otherwise
+  # jump straight past unlock-hot-file, leaving the lockdir on disk until its
+  # TTL expires -- caught by cold-context review: the error path (a caller
+  # like day-close-5g-apply.sh legitimately exiting 1 for LINE_NOT_FOUND) is
+  # the COMMON case here, not an edge case, so this isn't optional hardening.
+  # A trap fires on any exit from this subshell, not just a plain failing
+  # command -- unlike guarding just the one line with `set +e`.
+  trap 'bash "$0" unlock-hot-file "$GUARD_PATH" >/dev/null 2>&1' EXIT
+
+  ACTUAL_HASH=""
+  if [ -f "$GUARD_PATH" ]; then
+    ACTUAL_HASH=$({ shasum -a 256 "$GUARD_PATH" 2>/dev/null || sha256sum "$GUARD_PATH" 2>/dev/null; } | cut -d' ' -f1)
+  fi
+
+  if [ "$ACTUAL_HASH" != "$EXPECTED_HASH" ]; then
+    {
+      echo "CONFLICT"
+      echo "expected_hash: $EXPECTED_HASH"
+      echo "actual_hash: ${ACTUAL_HASH:-missing}"
+      echo "file: $GUARD_PATH"
+    } >&2
+    exit 1
+  fi
+
+  set +e
+  "${GUARD_CMD[@]}"
+  GUARD_STATUS=$?
+  set -e
+  exit "$GUARD_STATUS"
 fi
 
 # --- FREEZE-CANONICAL (WP-520 ADR prototype) ---

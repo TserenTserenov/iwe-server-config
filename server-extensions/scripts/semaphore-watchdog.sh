@@ -42,9 +42,10 @@
 set -euo pipefail
 
 IWE_ROOT="${IWE_ROOT:-$HOME/IWE}"
-GOV_REPO="${IWE_GOVERNANCE_REPO:-DS-my-strategy}"
+# shellcheck source=DS-my-strategy/scripts/lib/governance-repo-path.sh
+. "$IWE_ROOT/DS-my-strategy/scripts/lib/governance-repo-path.sh"
 SESSION_DIR="$IWE_ROOT/.iwe-runtime/sessions"
-PEER_SESSIONS_DIR="$IWE_ROOT/$GOV_REPO/sessions"
+PEER_SESSIONS_DIR="$(resolve_canonical_checkout)/sessions"
 LOG_FILE="$IWE_ROOT/.iwe-runtime/logs/semaphore-watchdog.log"
 
 # Правило А: предварительное число (peer-session ход 4), требует одного цикла

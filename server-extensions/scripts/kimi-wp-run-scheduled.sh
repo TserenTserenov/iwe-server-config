@@ -23,6 +23,9 @@ IWE_ROOT="${IWE_ROOT:-$HOME/IWE}"
 # shellcheck source=/dev/null
 source "$IWE_ROOT/.claude/lib/iwe-env-bootstrap.sh" || exit 1
 export PATH="/opt/homebrew/bin:/usr/local/bin:$HOME/.local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+# shellcheck source=DS-my-strategy/scripts/lib/governance-repo-path.sh
+. "$IWE_ROOT/DS-my-strategy/scripts/lib/governance-repo-path.sh"
+GOV_REPO_DIR="$(resolve_canonical_checkout)"
 QUEUE_DIR="$IWE_ROOT/.iwe-runtime/wp-queue"
 QUEUE_FILE="$QUEUE_DIR/queue.tsv"
 LOG_DIR="$IWE_ROOT/.iwe-runtime/logs/wp-queue"
@@ -39,7 +42,7 @@ log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*" | tee -a "$LOG"; }
 # Sanity check: session-guard.sh writes sessions/open-sessions.log under this
 # repo blind — a wrong IWE_GOVERNANCE_REPO would misfile every session record
 # with no error. Refuse to proceed into a repo that doesn't look real instead.
-if [ ! -f "$IWE_ROOT/$IWE_GOVERNANCE_REPO/docs/WP-REGISTRY.md" ]; then
+if [ ! -f "$GOV_REPO_DIR/docs/WP-REGISTRY.md" ]; then
   log "ERROR: IWE_GOVERNANCE_REPO='$IWE_GOVERNANCE_REPO' does not look like a real governance repo (no docs/WP-REGISTRY.md) — check IWE_GOVERNANCE_REPO in .exocortex.env"
   exit 1
 fi
@@ -237,7 +240,7 @@ case "$AGENT" in
     RC=$?
     ;;
   codex)
-    WP502_SCRIPT="$IWE_ROOT/$IWE_GOVERNANCE_REPO/scripts/wp502-codex-peer-pass.sh"
+    WP502_SCRIPT="$GOV_REPO_DIR/scripts/wp502-codex-peer-pass.sh"
     if [ ! -x "$WP502_SCRIPT" ]; then
       log "ERROR: wp502-codex-peer-pass.sh not found/executable: $WP502_SCRIPT"
       set_status failed; report_line failed "wp502 script missing"
@@ -278,7 +281,6 @@ log "finished: $STATUS (exit $RC)"
 # explicit push and log the outcome either way, so a silent push failure shows
 # up in the SAME log this runner already writes instead of surfacing days
 # later as a "why isn't this on GitHub" investigation.
-GOV_REPO_DIR="$IWE_ROOT/$IWE_GOVERNANCE_REPO"
 if [ "$IS_TASK" != "1" ] && [ -d "$GOV_REPO_DIR/.git" ]; then
   AHEAD=$(git -C "$GOV_REPO_DIR" rev-list "@{u}.." --count 2>/dev/null || echo "")
   if [ -n "$AHEAD" ] && [ "$AHEAD" -gt 0 ]; then

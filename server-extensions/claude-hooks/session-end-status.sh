@@ -21,7 +21,11 @@ STATUS_SCRIPT="$IWE_ROOT/scripts/agent-status-report.sh"
 # session — rejected in the same peer-session as unsafe without that
 # attribution first (see report.md §2 тема 1). Semaphore close stays the
 # agent's own Quick Close responsibility, unchanged.
-INPUT="$(cat 2>/dev/null || true)"
+# Headless Claude may invoke SessionEnd without closing stdin. `cat` then waits
+# forever and the CLI cancels the very hook that must be fail-open. Hook payloads
+# are single-line JSON, so a bounded read is sufficient for marker cleanup.
+INPUT=""
+IFS= read -r -t 1 INPUT 2>/dev/null || true
 SESSION_ID="$(printf '%s' "$INPUT" | jq -r '.session_id // empty' 2>/dev/null || true)"
 [ -n "$SESSION_ID" ] && rm -f "$IWE_ROOT/.iwe-runtime/session-markers/claude-code-${SESSION_ID}.yaml" 2>/dev/null
 

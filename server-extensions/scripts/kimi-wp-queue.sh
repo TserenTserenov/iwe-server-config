@@ -18,6 +18,8 @@
 set -euo pipefail
 
 IWE_ROOT="${IWE_ROOT:-$HOME/IWE}"
+# shellcheck source=DS-my-strategy/scripts/lib/governance-repo-path.sh
+. "$IWE_ROOT/DS-my-strategy/scripts/lib/governance-repo-path.sh"
 QUEUE_DIR="$IWE_ROOT/.iwe-runtime/wp-queue"
 QUEUE_FILE="$QUEUE_DIR/queue.tsv"
 LOG_DIR="$IWE_ROOT/.iwe-runtime/logs/wp-queue"
@@ -52,7 +54,7 @@ cmd_add() {
   if [[ "$wp" =~ ^TASK- ]]; then
     [ -n "$prompt" ] || fail "TASK-<slug> requires --prompt (no WP context to read)"
   else
-    [ -f "$IWE_ROOT/DS-my-strategy/inbox/$wp/$wp.md" ] || echo "WARN: context file DS-my-strategy/inbox/$wp/$wp.md not found — runner will stop at WP Gate." >&2
+    [ -f "$(resolve_canonical_checkout)/inbox/$wp/$wp.md" ] || echo "WARN: context file DS-my-strategy/inbox/$wp/$wp.md not found — runner will stop at WP Gate." >&2
   fi
 
   # Нормализация времени → epoch + компоненты

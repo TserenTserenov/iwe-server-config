@@ -58,6 +58,12 @@ fi
 
 FILENAME=$(basename "$WP_FILE")
 
+# Hash взят сразу после определения WP_FILE — до check-wp-transfer-completeness.sh
+# и любого другого чтения ниже, чтобы conflict-проверка ловила и правки,
+# внесённые параллельной сессией между стартом этого скрипта и записью
+# frontmatter (WP-530 Ф5 п.1, 17.08 peer-session с Kimi).
+WP_FILE_HASH_BEFORE=$({ shasum -a 256 "$WP_FILE" 2>/dev/null || sha256sum "$WP_FILE" 2>/dev/null; } | cut -d' ' -f1)
+
 if [[ "$MODE" == "folder" ]]; then
   ARCHIVE_TARGET="$ARCHIVE/WP-${WP_NUM}"
   MOVE_SRC="inbox/WP-${WP_NUM}"
@@ -137,7 +143,24 @@ if ! grep -q "^status: done" "$TMP" 2>/dev/null; then
   echo "⚠️  frontmatter status уже done или не найден — продолжаю"
 fi
 
-cp "$TMP" "$WP_FILE"
+# Guarded write (WP-530 Ф5 п.1): конфликт → безусловная эскалация, никакого
+# автоповтора — это move-операция (git mv ниже), автоматически повторять
+# статус-правку файла, который кто-то ещё правит прямо сейчас, рискованнее,
+# чем просто остановиться и показать причину.
+SESSION_GUARD="$SCRIPT_DIR/session-guard.sh"
+if [[ -x "$SESSION_GUARD" ]] && [[ -n "$WP_FILE_HASH_BEFORE" ]]; then
+  if ! bash "$SESSION_GUARD" wp-context-guarded-edit "$WP_FILE" --expected-hash "$WP_FILE_HASH_BEFORE" -- cp "$TMP" "$WP_FILE"; then
+    echo "❌ WP-${WP_NUM}: $WP_FILE изменился с момента чтения — архивация прервана, ничего не тронуто." >&2
+    echo "   Перечитайте файл и запустите архивацию заново." >&2
+    rm -f "$TMP"
+    exit 1
+  fi
+else
+  # Нет session-guard.sh рядом (напр. урезанная копия шаблона) или hash не
+  # посчитался — не блокируем архивацию тем, чего нет, но и не притворяемся,
+  # что conflict-проверка сработала.
+  cp "$TMP" "$WP_FILE"
+fi
 rm -f "$TMP"
 
 # 2. git mv (из STRATEGY_REPO); -f — см. guard-комментарий выше (issue #224)
