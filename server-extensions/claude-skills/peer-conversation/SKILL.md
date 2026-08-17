@@ -266,9 +266,11 @@ swap_history: []     # [{turn, from, to, reason}] — журнал SWAP_WRITER �
 
 Запись в `meta.yaml.ad_hoc_roles` идёт независимо от выбора (для back-up на уровне 2 — Week Close audit). Если пилот выбрал А — после сессии писатель открывает отдельный РП и делает формализацию.
 
-**1.3 Добавить строку в `sessions/00-index.md`** сверху таблицы (первая строка таблицы после `|---|`). Колонка «Агенты» — при `PEER_COUNT>=2` напарники соединяются через `+`:
-```
-| <TODAY> | <SESSION_ID> | <задача ≤50 симв> | claude-code / <PEER_VENDOR1>[+<PEER_VENDOR2>...] | 0 | 0 | started | — |
+**1.3 Записать открывающую запись в индекс-черновик** (WP-537 Ф4: `sessions/00-index.md` больше не пишется напрямую — session-index-snapshot.sh единственный писатель git-tracked файла, все остальные пишут в свой runtime-черновик, см. `scripts/lib/session-index-draft.sh`). Колонка «Агенты» — при `PEER_COUNT>=2` напарники соединяются через `+`:
+```bash
+. "$HOME/IWE/${IWE_GOVERNANCE_REPO:-DS-strategy}/scripts/lib/session-index-draft.sh"
+session_index_draft_write "$SESSION_ID" "$TODAY" "<задача ≤50 симв>" \
+  "claude-code / <PEER_VENDOR1>[+<PEER_VENDOR2>...]" "0" "0" "started" "—"
 ```
 
 ---
@@ -1050,13 +1052,15 @@ Omit если `implementation_pipeline: false` в meta.yaml.
 Не прошёл → записать заглушку из fallback вместо него. В обоих случаях пишет
 писатель, не субагент.
 
-### 4.3 Обновить sessions/00-index.md
+### 4.3 Обновить индекс-черновик
 
-Найти строку с `<SESSION_ID>` и заменить целиком (колонка «Агенты» — та же `+`-склейка при PEER_COUNT>=2, что в Шаге 1.3):
+Тот же черновик, что Шаг 1.3 открыл — `opened_at` сохраняется, остальные поля заменяются целиком (колонка «Агенты» — та же `+`-склейка при PEER_COUNT>=2):
+```bash
+. "$HOME/IWE/${IWE_GOVERNANCE_REPO:-DS-strategy}/scripts/lib/session-index-draft.sh"
+session_index_draft_write "$SESSION_ID" "$TODAY" "<задача ≤50>" \
+  "claude-code / <PEER_VENDOR1>[+<PEER_VENDOR2>...]" "<TURNS/ROUNDS>" "<ESCALATIONS>" \
+  "completed" "[report.md](<MONTH>/<DAY>/<SESSION_ID>/report.md)"
 ```
-| <TODAY> | <SESSION_ID> | <задача ≤50> | claude-code / <PEER_VENDOR1>[+<PEER_VENDOR2>...] | <TURNS/ROUNDS> | <ESCALATIONS> | completed | [report.md](<MONTH>/<DAY>/<SESSION_ID>/report.md) |
-```
-(Bash awk — безопасен для строк с `|`.)
 
 ### 4.4 Закрытие (ОРЗ — сессионный файл рядом с папкой сессии)
 
@@ -1123,7 +1127,11 @@ cd "$HOME/IWE/${IWE_GOVERNANCE_REPO:-DS-strategy}"
 # pre-staged из общего индекса (mis-attribution, см. 2026-06-20-39).
 # $GUARD_ORZ (Шаг 4.5.0) — тот же путь, что "$TODAY-$SESSION_SLUG.md" (Шаг 4.4),
 # одна запись вместо двух хардкодов одного и того же файла.
-PATHS=("sessions/$MONTH/$DAY/$SESSION_ID/" "sessions/00-index.md" "$GUARD_ORZ")
+# sessions/00-index.md больше НЕ входит сюда (WP-537 Ф4): эта сессия пишет
+# только в свой runtime-черновик (Шаги 1.3/4.3), не в git-tracked файл —
+# коммитить его отсюда означало бы подхватывать чужие параллельные правки
+# того же общего файла, ровно тот класс бага, который черновик закрывает.
+PATHS=("sessions/$MONTH/$DAY/$SESSION_ID/" "$GUARD_ORZ")
 git add "${PATHS[@]}"
 git commit -m "feat(peer): $SESSION_ID — <задача кратко>" -- "${PATHS[@]}"
 git push
@@ -1158,8 +1166,8 @@ IWE_AGENT=claude-code bash "${IWE_SCRIPTS:-$HOME/IWE/scripts}/session-guard.sh" 
 
 1. Извлечь месяц и день из id: `MONTH=$(echo "$session_id" | cut -c1-7)`, `DAY=$(echo "$session_id" | cut -c9-10)` → найти `sessions/$MONTH/$DAY/$session_id/meta.yaml`.
 2. Обновить (Bash sed): `status: interrupted`, `end_time: <now>`, `turns_count: <число файлов>`.
-3. Найти строку с `<session_id>` в `sessions/00-index.md` и заменить: статус → `interrupted`, report → `—`.
-4. Commit + push.
+3. Обновить индекс-черновик (WP-537 Ф4, `session_index_draft_write`, см. Шаг 4.3): статус → `interrupted`, report → `—`.
+4. Commit + push (без `sessions/00-index.md` — см. Шаг 4.5.1).
 
 ---
 
@@ -1171,8 +1179,8 @@ IWE_AGENT=claude-code bash "${IWE_SCRIPTS:-$HOME/IWE/scripts}/session-guard.sh" 
 2. Прочитать `meta.yaml` — взять `task_description`, `start_time`, `escalations_count`.
 3. Выполнить **Шаг 4.2** (синтез report.md через Agent tool) с теми же инвариантами и fallback.
 4. Обновить `meta.yaml` (Bash sed): `status: completed`, `end_time: <now>`, `turns_count: <число файлов>`.
-5. Обновить строку в `sessions/00-index.md`: статус → `completed`, report → ссылка.
-6. Commit + push.
+5. Обновить индекс-черновик (WP-537 Ф4, `session_index_draft_write`, см. Шаг 4.3): статус → `completed`, report → ссылка.
+6. Commit + push (без `sessions/00-index.md` — см. Шаг 4.5.1).
 
 Используется для восстановления прерванных сессий без перезапуска turn-loop.
 

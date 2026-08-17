@@ -225,9 +225,11 @@ swap_history: []     # [{turn, from, to, reason}] — журнал SWAP_WRITER �
 
 Запись в `meta.yaml.ad_hoc_roles` идёт независимо от выбора (для back-up уровня 2). При выборе А — после сессии писатель открывает отдельный РП.
 
-**1.3 Добавить строку в `sessions/00-index.md`** сверху таблицы (первая строка таблицы после `|---|`):
-```
-| <TODAY> | <SESSION_ID> | <задача ≤50 симв> | kimi / <PEER_AGENT_ID> | 0 | 0 | started | — |
+**1.3 Записать открывающую запись в индекс-черновик** (WP-537 Ф4: `sessions/00-index.md` больше не пишется напрямую — session-index-snapshot.sh единственный писатель git-tracked файла, все остальные пишут в свой runtime-черновик, см. `scripts/lib/session-index-draft.sh`):
+```bash
+. "$HOME/IWE/${IWE_GOVERNANCE_REPO:-DS-strategy}/scripts/lib/session-index-draft.sh"
+session_index_draft_write "$SESSION_ID" "$TODAY" "<задача ≤50 симв>" \
+  "kimi / <PEER_AGENT_ID>" "0" "0" "started" "—"
 ```
 
 ---
@@ -893,13 +895,15 @@ extensions:
 - Создавать supplement-директории — `sessions/YYYY-MM/DD/<id>/` = единое пространство.
 - Продолжать писать `-writer.md`/`-peer.md` при `status: completed` — статус меняется только после Close-сигнала.
 
-### 4.3 Обновить sessions/00-index.md
+### 4.3 Обновить индекс-черновик
 
-Найти строку с `<SESSION_ID>` и заменить целиком:
+Тот же черновик, что Шаг 1.3 открыл — `opened_at` сохраняется, остальные поля заменяются целиком:
+```bash
+. "$HOME/IWE/${IWE_GOVERNANCE_REPO:-DS-strategy}/scripts/lib/session-index-draft.sh"
+session_index_draft_write "$SESSION_ID" "$TODAY" "<задача ≤50>" \
+  "kimi / <PEER_AGENT_ID>" "<TURNS>" "<ESCALATIONS>" \
+  "completed" "[report.md](<MONTH>/<DAY>/<SESSION_ID>/report.md)"
 ```
-| <TODAY> | <SESSION_ID> | <задача ≤50> | kimi / <PEER_AGENT_ID> | <TURNS> | <ESCALATIONS> | completed | [report.md](<MONTH>/<DAY>/<SESSION_ID>/report.md) |
-```
-(Bash awk — безопасен для строк с `|`.)
 
 ### 4.4 Закрытие (ОРЗ — сессионный файл рядом с папкой сессии)
 
@@ -936,13 +940,18 @@ test -f "$SESSION_DIR/report.md" \
 CLOSE_FILE="sessions/$MONTH/${TODAY}-${SESSION_SLUG}.md"
 test -f "$CLOSE_FILE" \
   || { echo "FAIL: close-файл $CLOSE_FILE отсутствует"; exit 1; }
-INDEX_COUNT=$(grep -cF "| $SESSION_ID |" "sessions/00-index.md" || echo 0)
-test "$INDEX_COUNT" -eq 1 \
-  || { echo "FAIL: 00-index.md: ожидается 1 запись для $SESSION_ID, найдено $INDEX_COUNT"; exit 1; }
+# WP-537 Ф4: индекс-черновик, не sessions/00-index.md — эта сессия больше не
+# пишет git-tracked файл напрямую (session-index-snapshot.sh единственный писатель).
+DRAFT_FILE="$HOME/IWE/.iwe-runtime/session-index-drafts/${SESSION_ID}.yaml"
+test -f "$DRAFT_FILE" \
+  || { echo "FAIL: индекс-черновик $DRAFT_FILE отсутствует — Шаг 4.3 не выполнен"; exit 1; }
+grep -qF "status: completed" "$DRAFT_FILE" \
+  || { echo "FAIL: $DRAFT_FILE: status != completed"; exit 1; }
 
 # pathspec после `--`: commit ТОЛЬКО файлы сессии (mis-attribution, 2026-06-20-39)
 # PR flow (WP-436 Ф2): push to feature branch + auto-merge PR → branch protection on main.
-PATHS=("sessions/$MONTH/$DAY/$SESSION_ID/" "sessions/00-index.md" "sessions/$MONTH/${TODAY}-${SESSION_SLUG}.md")
+# sessions/00-index.md больше НЕ входит сюда (WP-537 Ф4) — см. комментарий выше.
+PATHS=("sessions/$MONTH/$DAY/$SESSION_ID/" "sessions/$MONTH/${TODAY}-${SESSION_SLUG}.md")
 BRANCH="peer/$SESSION_ID"
 git checkout -b "$BRANCH" 2>/dev/null || git checkout "$BRANCH"
 git add "${PATHS[@]}"
@@ -964,8 +973,8 @@ gh pr create --title "feat(peer): $SESSION_ID" \
 
 1. Извлечь месяц и день из id: `MONTH=$(echo "$session_id" | cut -c1-7)`, `DAY=$(echo "$session_id" | cut -c9-10)` → найти `sessions/$MONTH/$DAY/$session_id/meta.yaml`.
 2. Обновить (Bash sed): `status: interrupted`, `end_time: <now>`, `turns_count: <число файлов>`.
-3. Найти строку с `<session_id>` в `sessions/00-index.md` и заменить: статус → `interrupted`, report → `—`.
-4. Commit + push.
+3. Обновить индекс-черновик (WP-537 Ф4, `session_index_draft_write`, см. Шаг 4.3): статус → `interrupted`, report → `—`.
+4. Commit + push (без `sessions/00-index.md` — см. Шаг 4.5).
 
 ---
 
@@ -977,8 +986,8 @@ gh pr create --title "feat(peer): $SESSION_ID" \
 2. Прочитать `meta.yaml` — взять `task_description`, `start_time`, `escalations_count`.
 3. Выполнить **Шаг 4.2** (синтез report-draft.md через адаптер сессии: `scripts/<peer_cmd>.sh`, где `peer_cmd` читается из `meta.yaml` этой сессии — аргумента `--peer` при `--finalize` нет, Шаг 0а.2 не выполняется заново) с теми же инвариантами и fallback.
 4. Обновить `meta.yaml` (Bash sed): `status: completed`, `end_time: <now>`, `turns_count: <число файлов>`.
-5. Обновить строку в `sessions/00-index.md`: статус → `completed`, report → ссылка.
-6. Commit + push.
+5. Обновить индекс-черновик (WP-537 Ф4, `session_index_draft_write`, см. Шаг 4.3): статус → `completed`, report → ссылка.
+6. Commit + push (без `sessions/00-index.md` — см. Шаг 4.5).
 
 Используется для восстановления прерванных сессий без перезапуска turn-loop.
 
