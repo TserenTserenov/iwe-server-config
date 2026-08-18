@@ -599,6 +599,7 @@ FORCE_FLAG=0
 UNFREEZE_REASON=""
 ISOLATE_FLAG=0
 EXPECTED_HASH=""
+BASE_SHA=""
 POSITIONAL=()
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -632,6 +633,19 @@ while [[ $# -gt 0 ]]; do
         fail "--expected-hash требует непустое значение (sha256 файла, который читал вызывающий)" 1
       fi
       EXPECTED_HASH="$2"; shift 2 ;;
+    --base-sha)
+      # WP-503 Ф12 (пир-сессия 2026-08-18): позволяет вызывающему зафиксировать
+      # SHA ДО вызова open --isolate (например, под capacity-lock, чтобы
+      # закрыть окно между "увидел базу" и "создал от неё worktree" — см.
+      # nightly-worktree-isolation.sh:pin_base_sha) и создать worktree именно
+      # от этого коммита, а не от origin/main в момент вызова этой функции
+      # (который может успеть уйти вперёд между двумя независимыми fetch).
+      # Применяется ТОЛЬКО с --isolate — без него флаг не имеет смысла
+      # (canonical-owner режим не создаёт worktree вовсе).
+      if [[ $# -lt 2 || -z "$2" ]]; then
+        fail "--base-sha требует непустое значение (SHA, зафиксированный вызывающим до open)" 1
+      fi
+      BASE_SHA="$2"; shift 2 ;;
     --since)  SINCE="$2"; shift 2 ;;
     --cleanup-orphans) CLEANUP_ORPHANS=1; shift ;;
     --force)  FORCE_FLAG=1; shift ;;
@@ -665,6 +679,15 @@ fi
 # consensus turn 3 (Codex): reject both together explicitly.
 if [ "$ISOLATE_FLAG" = "1" ] && [ -n "$CANONICAL_OWNER" ]; then
   fail "--isolate и --canonical-owner взаимоисключающие: планировщик владеет каноническим чекаутом по расписанию (--canonical-owner), интерактивная сессия получает свою изолированную копию (--isolate) -- не оба сразу" 1
+fi
+
+# --base-sha без --isolate не имеет смысла (canonical-owner режим не создаёт
+# worktree вовсе, обычный open тоже) -- явный отказ вместо молчаливого игнора
+# значения (WP-503 Ф12, тот же принцип, что уже применён к межвендорским
+# флагам peer-адаптеров: молчаливый игнор создаёт ложное ощущение применённого
+# режима).
+if [ -n "$BASE_SHA" ] && [ "$ISOLATE_FLAG" != "1" ]; then
+  fail "--base-sha требует --isolate (SHA-pin имеет смысл только для изолированного worktree)" 1
 fi
 
 # Owner PID is evidence that the caller, not this short-lived guard process,
@@ -1034,8 +1057,16 @@ $isolate_status_code $isolate_status_path"
     fi
 
     # Codex turn 3: явный fetch, не молчаливый устаревший tracking ref.
-    if ! git -C "$ISOLATE_BASE_DIR" fetch origin main --quiet 2>&1; then
-      fail "--isolate: git fetch origin main не прошёл -- не создаю worktree от потенциально устаревшего origin/main. Проверь сеть и повтори." 1
+    # WP-503 Ф12: пропускается, если вызывающий уже передал --base-sha --
+    # тот SHA был зафиксирован ЕГО СОБСТВЕННЫМ fetch до входа сюда (например,
+    # под capacity-lock в nightly-worktree-isolation.sh); повторный fetch
+    # здесь не укрепляет консистентность, а создаёт ровно то окно гонки
+    # (fetch #1 -> [push может влезть] -> fetch #2), которое --base-sha
+    # существует, чтобы закрыть.
+    if [ -z "$BASE_SHA" ]; then
+      if ! git -C "$ISOLATE_BASE_DIR" fetch origin main --quiet 2>&1; then
+        fail "--isolate: git fetch origin main не прошёл -- не создаю worktree от потенциально устаревшего origin/main. Проверь сеть и повтори." 1
+      fi
     fi
 
     ISOLATE_STORE_DIR="$IWE_ROOT/.iwe-runtime/isolated-worktrees"
@@ -1047,7 +1078,7 @@ $isolate_status_code $isolate_status_path"
     [ -f "$ISOLATE_EXISTING_SEM" ] && ISOLATE_SEM_EXISTS=1 || ISOLATE_SEM_EXISTS=0
     with_isolate_lock "$ISOLATE_SESSION_ID" bash -c '
       set -euo pipefail
-      base_dir="$1" wt_path="$2" wt_branch="$3" store_real="$4" want_slug="$5" agent="$6" sem_exists="$7"
+      base_dir="$1" wt_path="$2" wt_branch="$3" store_real="$4" want_slug="$5" agent="$6" sem_exists="$7" base_sha="$8"
 
       # Re-entry: same session_id already has a worktree — reuse it, verify
       # identity via git worktree list, never blind-create a duplicate.
@@ -1093,7 +1124,17 @@ $isolate_status_code $isolate_status_path"
         exit 0
       fi
 
-      git -C "$base_dir" worktree add "$wt_path" -b "$wt_branch" origin/main --quiet
+      # WP-503 Ф12: пустой base_sha -- прежнее поведение (символическая ссылка
+      # origin/main в момент этого вызова). Непустой -- worktree строится
+      # ровно от зафиксированного коммита, не от того, что origin/main успел
+      # стать к этому моменту (окно между внешним fetch вызывающего и этой
+      # точкой уже могло сдвинуть ветку -- pinning существует именно для
+      # этого случая).
+      if [ -n "$base_sha" ]; then
+        git -C "$base_dir" worktree add "$wt_path" -b "$wt_branch" "$base_sha" --quiet
+      else
+        git -C "$base_dir" worktree add "$wt_path" -b "$wt_branch" origin/main --quiet
+      fi
 
       # realpath after creation, not the assembled string: containment must
       # hold against what actually landed on disk, including any symlink in
@@ -1103,7 +1144,7 @@ $isolate_status_code $isolate_status_path"
         echo "session-guard: --isolate: созданный worktree вышел за пределы ожидаемого каталога хранения (containment check failed) -- удалён" >&2
         exit 1
       fi
-    ' -- "$ISOLATE_BASE_DIR" "$ISOLATED_WORKTREE_PATH" "$ISOLATED_WORKTREE_BRANCH" "$ISOLATE_STORE_DIR_REAL" "${SLUG:-}" "$AGENT" "$ISOLATE_SEM_EXISTS" \
+    ' -- "$ISOLATE_BASE_DIR" "$ISOLATED_WORKTREE_PATH" "$ISOLATED_WORKTREE_BRANCH" "$ISOLATE_STORE_DIR_REAL" "${SLUG:-}" "$AGENT" "$ISOLATE_SEM_EXISTS" "$BASE_SHA" \
       || fail "--isolate: не удалось создать или переиспользовать worktree (см. сообщение выше)" 1
 
     # ORZ scaffold и OPEN_LOG must land inside this session's own worktree,
@@ -1719,8 +1760,40 @@ print(json.dumps({"wp": sys.argv[1], "slug": sys.argv[2], "agent": sys.argv[3], 
     echo "force-no-reflection: закрываю без рефлексии ($FORCED_CARD) — причина записана в ledger" >&2
   fi
 
+  # WP-537 (18.08, пир-сессия с Codex, находка 3 от 16.08/17.08, живьём трижды):
+  # close_obligation.py cancel --action cancel-close — явная, аудируемая отмена
+  # пилота, записанная событием close_obligation в ledger. Это отдельный трекер
+  # терминального состояния от RUN-quick-close-*.md выше и оперирует другим
+  # session_id (harness-овый, записан здесь при open как `harness_session_id:`,
+  # не epoch-based $SESSION_ID этого семафора) — до сих пор close не знал о нём
+  # вообще, поэтому явная отмена пилота не снимала семафор, только TTL-очистка.
+  # Узкий, предметный признак (как force-no-reflection выше): требует ИМЕННО
+  # ledger-событие close_obligation с action cancel-close/close-override для
+  # harness_session_id ЭТОЙ сессии — не отсутствие обязательства вообще
+  # (cmd_cancel_status различает эти случаи, см. close_obligation.py).
   if [ -z "$RUNNER_OK" ]; then
-    fail "Quick Close не завершён для slug '$SLUG': нет terminal RUN-quick-close-${SLUG}*.md. Сначала запусти process-runner.py start quick-close с тем же --slug." 7
+    HARNESS_SESSION_ID=$(grep "^harness_session_id: " "$SEM_FILE" | cut -d' ' -f2- || true)
+    OBLIGATION_CLI="$IWE_ROOT/$GOV_REPO/scripts/close_obligation.py"
+    if [ -n "$HARNESS_SESSION_ID" ] && [ -f "$OBLIGATION_CLI" ]; then
+      CANCEL_STATUS=$(python3 "$OBLIGATION_CLI" cancel-status --session-id "$HARNESS_SESSION_ID" 2>/dev/null) || CANCEL_STATUS=""
+      if [ -n "$CANCEL_STATUS" ] && [ "$(printf '%s' "$CANCEL_STATUS" | jq -r '.cancelled // false' 2>/dev/null)" = "true" ]; then
+        RUNNER_OK="cancel-obligation:$HARNESS_SESSION_ID"
+        # Нет реальной карточки раннера -- пусть downstream-очистка (ниже, по
+        # тому же признаку, что force-no-reflection) пойдёт по generic-пути
+        # cancel-session без --exclude, не пытаясь grep run_id из синтетического
+        # RUNNER_OK. FORCED_CARD гарантированно пуст здесь: этот блок выполняется
+        # только когда RUNNER_OK ещё пуст, а force-no-reflection выше уже вышел бы
+        # с непустым RUNNER_OK, если бы сам его установил.
+        FORCED_CARD="cancel-obligation:$HARNESS_SESSION_ID"
+        CANCEL_ACTION=$(printf '%s' "$CANCEL_STATUS" | jq -r '.action // "unknown"' 2>/dev/null)
+        CANCEL_ACTOR=$(printf '%s' "$CANCEL_STATUS" | jq -r '.actor // "unknown"' 2>/dev/null)
+        echo "Session CLOSE: раннер не завершён, но close-обязательство явно отменено пилотом ($CANCEL_ACTION, actor=$CANCEL_ACTOR) — признаю терминальным (WP-537)." >&2
+      fi
+    fi
+  fi
+
+  if [ -z "$RUNNER_OK" ]; then
+    fail "Quick Close не завершён для slug '$SLUG': нет terminal RUN-quick-close-${SLUG}*.md и нет отмены close-обязательства (close_obligation.py cancel --action cancel-close) для этой сессии. Сначала запусти process-runner.py start quick-close с тем же --slug, либо попроси пилота об явной отмене." 7
   fi
 
   # WP-484 Ф87 (пир-сессия с Codex, 11.08): подчистить чужие незавершённые
@@ -1741,7 +1814,11 @@ print(json.dumps({"wp": sys.argv[1], "slug": sys.argv[2], "agent": sys.argv[3], 
     # foreign `start quick-close` or manual cleanup. The accepted card's run_id
     # is known right here: cancel it by address first, keep cancel-session as
     # the sweep for runs that do carry a real owner_session_id.
-    FORCED_RUN_ID=$(grep "^run_id: " "$FORCED_CARD" | head -1 | cut -d' ' -f2- || true)
+    # WP-537: FORCED_CARD не всегда файл карточки -- cancel-obligation-путь выше
+    # кладёт сюда синтетический sentinel ("cancel-obligation:<id>"), для которого
+    # нет реальной карточки и grep корректно ничего не найдёт; 2>/dev/null глушит
+    # "No such file or directory" на этом штатном случае, не только на реальном.
+    FORCED_RUN_ID=$(grep "^run_id: " "$FORCED_CARD" 2>/dev/null | head -1 | cut -d' ' -f2- || true)
     if [ -n "$FORCED_RUN_ID" ]; then
       python3 "$IWE_ROOT/$GOV_REPO/scripts/process-runner.py" cancel "$FORCED_RUN_ID" \
         2>&1 || echo "адресный cancel принятой карточки ($FORCED_RUN_ID) не прошёл — причина в строке ERROR выше (уже терминальная карточка при повторном close — штатно)" >&2
