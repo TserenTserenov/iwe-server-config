@@ -204,16 +204,28 @@ let
         fi
         echo "RECOVERED: $repo (был транзиентный dirty, продолжаю pull)"
       fi
-      # -c pull.rebase=false: defense-in-depth, независимо от глобального
-      # ~/.gitconfig пользователя (pull.rebase=true на tsekh-1 маршрутизирует
-      # --ff-only через rebase-backend, из-за чего гонка на FETCH_HEAD даёт
-      # hard "Cannot rebase onto multiple branches" вместо более безобидного
-      # merge-конфликта).
-      if ${pkgs.coreutils}/bin/timeout 60s ${pkgs.git}/bin/git -c pull.rebase=false pull --ff-only 2>&1; then
+      # WP-484 Ф108/Ф111 (17.08, peer-session with Codex,
+      # DS-my-strategy/sessions/2026-08/17/2026-08-17-14-ds-publish-migration-tails/):
+      # fetch --prune, not pull --ff-only. This sentinel is a WATCHER
+      # (checks divergence, alerts, never expected to change the working
+      # tree by design — the comment on its own docstring calls it that
+      # explicitly), so it never needed to touch the checkout's files at
+      # all. `pull --ff-only` did so anyway, which is exactly the class of
+      # unrelated write this whole migration exists to remove from a
+      # checkout shared with 9+ concurrent agent sessions: a fast-forward
+      # pull still mutates the working tree, still can collide with a
+      # session's own uncommitted edit mid-flight, and the old
+      # `-c pull.rebase=false` defense-in-depth comment above (FETCH_HEAD
+      # race routing --ff-only through the rebase backend) is now moot --
+      # `fetch` never invokes any merge/rebase backend, so that race can't
+      # occur in the first place. `--prune` keeps the one useful side
+      # effect (stale remote-tracking branches removed) without touching a
+      # single tracked or untracked file on disk.
+      if ${pkgs.coreutils}/bin/timeout 60s ${pkgs.git}/bin/git fetch --prune 2>&1; then
         echo "OK: $repo"
       else
         echo "FAIL: $repo"
-        failed+=("$repo (pull failed)")
+        failed+=("$repo (fetch failed)")
       fi
     done
 
