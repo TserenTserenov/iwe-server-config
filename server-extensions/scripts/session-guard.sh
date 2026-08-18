@@ -64,17 +64,23 @@ IWE_ROOT="${IWE_ROOT:-$HOME/IWE}"
 # governance repo is named "DS-strategy" (the shipped default — see create-wp.sh).
 GOV_REPO="${IWE_GOVERNANCE_REPO:-DS-strategy}"
 SESSION_DIR="$IWE_ROOT/.iwe-runtime/sessions"
-# OPEN_LOG stays the git-tracked canonical path -- 8+ readers across
-# session-guard.sh's own repo AND two foreign ones (DS-ai-systems/
-# synchronizer, DS-MCP/digital-twin-mcp) still read this exact path; nothing
-# migrates. OPEN_LOG_RUNTIME is the ACTUAL write target for every `open`
-# (including --isolate) from here on -- a plain append to $OPEN_LOG dirtied
-# the canonical checkout on every call, live-reproduced blocking neighboring
-# `--isolate open`s the same way the pre-fix ORZ scaffold did (peer-sessions
-# 2026-08-15-14-isolate-aware-orz-dir smoke test, 2026-08-15-17-open-log-
-# runtime-registry design, Codex+Kimi). open-log-snapshot.sh (separate
-# script) periodically folds OPEN_LOG_RUNTIME's new lines into OPEN_LOG and
-# commits -- readers are unaffected until/unless they choose to migrate.
+# OPEN_LOG stays a stable local path -- 8+ readers across session-guard.sh's
+# own repo AND two foreign ones (DS-ai-systems/synchronizer, DS-MCP/
+# digital-twin-mcp) still read this exact path; nothing migrates. It is an
+# ignored, replaceable projection (inbox/open-sessions.log has been in
+# .gitignore since 04.05.2026, commit 01ff6fae3a -- predating this file by
+# ~2.5 months; found live 2026-08-18 preparing a since-abandoned migration
+# marker, WP-484 peer-session with Codex), not a git-tracked archive with its
+# own history to preserve. OPEN_LOG_RUNTIME is the ACTUAL write target and
+# sole SSOT for every `open` (including --isolate) from here on -- a plain
+# append to $OPEN_LOG dirtied the canonical checkout on every call,
+# live-reproduced blocking neighboring `--isolate open`s the same way the
+# pre-fix ORZ scaffold did (peer-sessions 2026-08-15-14-isolate-aware-orz-dir
+# smoke test, 2026-08-15-17-open-log-runtime-registry design, Codex+Kimi).
+# open-log-snapshot.sh (separate script) periodically rebuilds OPEN_LOG as a
+# full, atomically-renamed materialization of OPEN_LOG_RUNTIME -- no commit,
+# no push, no semaphore; readers are unaffected until/unless they choose to
+# migrate off the path.
 OPEN_LOG="$IWE_ROOT/$GOV_REPO/inbox/open-sessions.log"
 OPEN_LOG_RUNTIME="$IWE_ROOT/.iwe-runtime/open-sessions.log"
 ORZ_DIR="$IWE_ROOT/$GOV_REPO/sessions"
@@ -121,7 +127,7 @@ fail() { echo "session-guard: $1" >&2; exit "${2:-1}"; }
 
 # normalize_remote_url <url> -- same normalization as commit-push.sh
 # (2026-08-12, peer-session close-pipeline-consolidation) so
-# "git@github.com:org/repo.git" and "https://x:tok@github.com/org/repo.git"
+# SSH form ("git@host:org/repo.git") and HTTPS-with-inline-credentials form
 # compare equal regardless of which protocol either checkout was cloned with.
 normalize_remote_url() {
   sed -E 's#^[a-zA-Z][a-zA-Z0-9+.-]*://##; s#^[^@/]*@##; s#:#/#; s#\.git$##' <<<"$1"
@@ -330,12 +336,107 @@ lease_valid() {
   [ "$(date +%s)" -lt "$deadline" ]
 }
 
+# WP-484 (2026-08-18-02-wp484-witness-implementation, ArchGate + peer-session
+# with Codex): zombie-semaphore registry, separate from card-audit-findings.jsonl
+# -- those are externally-actionable findings on FOREIGN cards requiring a
+# pilot decision (accept/reject/defer); these are automatic internal state
+# transitions of session-guard's own semaphores, with no such decision to make.
+ZOMBIE_REGISTRY="$IWE_ROOT/.iwe-runtime/zombie-semaphores.jsonl"
+IWE_ZOMBIE_ESCALATE_SEC="${IWE_ZOMBIE_ESCALATE_SEC:-14400}"
+IWE_ZOMBIE_CLEANUP_SEC="${IWE_ZOMBIE_CLEANUP_SEC:-86400}"
+
+zombie_registry_has_action() {
+  # Idempotency key is the semaphore PATH, not a session identity within it.
+  # Safe because the path already embeds session_id, which is
+  # epoch-timestamp + entropy suffix (isolate_entropy_suffix) -- practically
+  # never reused, so a stale entry from a torn-down old session being
+  # reattributed to a brand-new one at the same path is not a realistic
+  # collision here (raised in code review, not fixed: the existing
+  # anti-collision guarantee already covers this).
+  local semaphore="$1" action="$2"
+  [[ -f "$ZOMBIE_REGISTRY" ]] || return 1
+
+  python3 - "$ZOMBIE_REGISTRY" "$semaphore" "$action" <<'PY'
+import json, sys
+path, semaphore, action = sys.argv[1:]
+try:
+    with open(path, encoding="utf-8") as stream:
+        for line_number, line in enumerate(stream, start=1):
+            try:
+                event = json.loads(line)
+            except json.JSONDecodeError:
+                # Not silently skipped (P4): a corrupt line here is a symptom
+                # worth surfacing, but this function's only job is "has this
+                # one (semaphore, action) pair been recorded" -- one bad line
+                # (e.g. a write torn by a crash) shouldn't make every OTHER
+                # semaphore's sweep decision fail closed over it.
+                print(
+                    f"WARNING: zombie registry line {line_number} is not "
+                    "valid JSON, skipping: "
+                    f"{path}",
+                    file=sys.stderr,
+                )
+                continue
+            if event.get("semaphore") == semaphore and event.get("action") == action:
+                raise SystemExit(0)
+except FileNotFoundError:
+    pass
+raise SystemExit(1)
+PY
+}
+
+append_zombie_event() {
+  local reason="$1" semaphore="$2" opened_epoch="$3" age_seconds="$4" action="$5"
+  mkdir -p "$(dirname "$ZOMBIE_REGISTRY")"
+
+  # The enclosing orphan-sweep lock makes check-then-append idempotent.
+  python3 - "$ZOMBIE_REGISTRY" "$reason" "$semaphore" \
+    "$opened_epoch" "$age_seconds" "$action" <<'PY'
+import datetime as dt
+import json
+import sys
+
+path, reason, semaphore, opened_epoch, age_seconds, action = sys.argv[1:]
+event = {
+    "recorded_at": dt.datetime.now(dt.timezone.utc).isoformat().replace("+00:00", "Z"),
+    "reason": reason,
+    "source": "session-guard.sh audit --cleanup-orphans",
+    "semaphore": semaphore,
+    "opened_epoch": int(opened_epoch),
+    "age_seconds": int(age_seconds),
+    "action": action,
+}
+with open(path, "a", encoding="utf-8") as stream:
+    stream.write(json.dumps(event, ensure_ascii=False, separators=(",", ":")) + "\n")
+PY
+}
+
+notify_zombie_escalation() {
+  local semaphore="$1" age_seconds="$2"
+  local msg="IWE zombie semaphore: ${semaphore}; owner PID missing/invalid; age=${age_seconds}s"
+
+  # Same fallback pattern as check-wp353-trigger.sh: never let a missing/failing
+  # notifier block the quarantine decision itself.
+  if command -v iwe-tg >/dev/null 2>&1; then
+    iwe-tg "$msg" || echo "WARN: iwe-tg failed, zombie alert only in log: $semaphore" >&2
+  else
+    echo "INFO: iwe-tg unavailable, zombie alert only in log: $semaphore" >&2
+  fi
+}
+
 sweep_orphaned_semaphores() {
-  local semaphore pid age epoch quarantined=0 ambiguous=0
+  local semaphore pid epoch quarantined=0 ambiguous=0
+  local zombies_escalated=0 zombies_quarantined=0
   while IFS= read -r semaphore; do
     [ -f "$semaphore" ] || continue
     pid=$(grep '^pid: ' "$semaphore" | head -1 | cut -d' ' -f2- || true)
-    if [[ "$pid" =~ ^[0-9]+$ ]]; then
+    # WP-484 code review (2026-08-18, Codex): `pid: 0` matches ^[0-9]+$, and
+    # `kill -0 0` sends signal 0 to this shell's own process GROUP, which
+    # always succeeds -- a stray "0" in the semaphore (e.g. an unset
+    # variable that got written as the literal string) would read as "owner
+    # alive" forever and never quarantine. PID 0 is not a valid process ID
+    # to check liveness against; require a leading nonzero digit.
+    if [[ "$pid" =~ ^[1-9][0-9]*$ ]]; then
       if ! kill -0 "$pid" 2>/dev/null; then
         mv "$semaphore" "${semaphore}.orphaned-dead-pid"
         echo "WARNING: orphaned semaphore $(basename "$semaphore") quarantined: pid $pid is dead" >&2
@@ -344,6 +445,9 @@ sweep_orphaned_semaphores() {
       continue
     fi
 
+    # Missing/invalid PID (all Kimi headless semaphores, by construction) is a
+    # zombie candidate, never an immediate delete: unlike a dead numeric PID,
+    # there is no proof of death here, only absence of proof of life.
     epoch=$(semaphore_epoch "$semaphore" || true)
     [ -n "$epoch" ] || {
       echo "WARNING: semaphore $(basename "$semaphore") has no live pid or parseable timestamp; manual review required" >&2
@@ -351,12 +455,35 @@ sweep_orphaned_semaphores() {
       continue
     }
     age=$(( $(date +%s) - epoch ))
+
+    if [ "$age" -ge "$IWE_ZOMBIE_CLEANUP_SEC" ]; then
+      if ! zombie_registry_has_action "$semaphore" "quarantined"; then
+        append_zombie_event "missing_or_invalid_owner_pid" "$semaphore" \
+          "$epoch" "$age" "quarantined"
+      fi
+      mv "$semaphore" "${semaphore}.orphaned-zombie-no-pid"
+      echo "WARNING: quarantined zombie semaphore (missing/invalid owner PID): $(basename "$semaphore")" >&2
+      zombies_quarantined=$((zombies_quarantined + 1))
+      continue
+    fi
+
+    if [ "$age" -ge "$IWE_ZOMBIE_ESCALATE_SEC" ] \
+       && ! zombie_registry_has_action "$semaphore" "escalated"; then
+      append_zombie_event "missing_or_invalid_owner_pid" "$semaphore" \
+        "$epoch" "$age" "escalated"
+      notify_zombie_escalation "$semaphore" "$age"
+      zombies_escalated=$((zombies_escalated + 1))
+    fi
+
     if [ "$age" -gt 1800 ]; then
       echo "WARNING: semaphore $(basename "$semaphore") is ${age}s old without pid proof; kept for manual review" >&2
       ambiguous=$((ambiguous + 1))
     fi
   done < <(find "$SESSION_DIR" -name '*.open' -type f 2>/dev/null)
-  echo "Semaphore sweep: quarantined=$quarantined ambiguous=$ambiguous"
+  echo "Semaphore sweep: quarantined=$quarantined ambiguous=$ambiguous zombies_escalated=$zombies_escalated zombies_quarantined=$zombies_quarantined"
+  # Automatic 24h cleanup requires a periodic external invocation of
+  # `session-guard.sh audit --cleanup-orphans`; scheduler configuration is
+  # intentionally outside this file.
 }
 orz_agent_name() {
   case "$1" in
@@ -827,9 +954,26 @@ if [ "$CMD" = "open" ]; then
         # every later bypasser for the identical fingerprint gets a real,
         # not best-effort, "already seen" answer -- no window where two
         # first-recorders both think they're first.
-        ISOLATE_CANONICAL_PATH="$(realpath "$IWE_ROOT/$GOV_REPO" 2>/dev/null || echo "$IWE_ROOT/$GOV_REPO")"
+        # WP-484 (2026-08-18-02-wp484-witness-implementation): bypass used to
+        # compare against $IWE_ROOT/$GOV_REPO alone -- correct before Ф104
+        # extended the freeze to $IWE_ROOT itself (FROZEN_CANONICAL_PATHS,
+        # line 105), stale after. A single-path check left every OTHER frozen
+        # path (currently just $IWE_ROOT) with no bypass at all: --isolate
+        # from $IWE_ROOT hit the "already-isolated worktree" hard-fail branch
+        # unconditionally, even right after a clean `git stash` -- live-caught
+        # trying to fix session-guard.sh itself, this file's own frozen path.
+        # Loop over the whole frozen-paths list instead of one scalar so any
+        # future addition to that array (the comment above it already expects
+        # one) gets bypass coverage automatically, not another one-off patch.
         ISOLATE_BASE_REAL="$(realpath "$ISOLATE_BASE_DIR" 2>/dev/null || echo "$ISOLATE_BASE_DIR")"
-        if [ "$ISOLATE_BASE_REAL" != "$ISOLATE_CANONICAL_PATH" ]; then
+        ISOLATE_ON_FROZEN_PATH=0
+        for isolate_frozen_path in "${FROZEN_CANONICAL_PATHS[@]}"; do
+          if [ "$ISOLATE_BASE_REAL" = "$(realpath "$isolate_frozen_path" 2>/dev/null || echo "$isolate_frozen_path")" ]; then
+            ISOLATE_ON_FROZEN_PATH=1
+            break
+          fi
+        done
+        if [ "$ISOLATE_ON_FROZEN_PATH" -eq 0 ]; then
           fail "--isolate: в текущем каталоге ($ISOLATE_BASE_DIR) есть незакоммиченные или untracked изменения -- новый worktree их не унаследует. Это уже изолированная копия, не общий канонический чекаут, так что эта грязь с большей вероятностью твоя собственная. Закоммить, застэшь (git stash) или яви явное решение, прежде чем открывать вложенную изолированную копию." 1
         fi
         # `|| true` on BOTH the pipeline and the assignment: under `set -o
