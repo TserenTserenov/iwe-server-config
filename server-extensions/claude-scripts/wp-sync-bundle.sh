@@ -123,8 +123,7 @@ find_wp_file() {
       found=$(grep -rl "^wp: ${num}$" "$ARCHIVE_DIR" 2>/dev/null | head -1 || true)
     fi
     if [[ -z "$found" ]]; then
-      # A numeric prefix is not an ID match: WP-46 must not resolve WP-469.
-      found=$(find "$ARCHIVE_DIR" -maxdepth 1 \( -name "WP-${num}.md" -o -name "WP-${num}-*.md" \) 2>/dev/null | head -1 || true)
+      found=$(find "$ARCHIVE_DIR" -maxdepth 1 -name "WP-${num}*.md" 2>/dev/null | head -1 || true)
     fi
   fi
 
