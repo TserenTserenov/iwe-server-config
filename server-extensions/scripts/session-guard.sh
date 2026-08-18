@@ -2390,6 +2390,74 @@ if [ "$CMD" = "pre-commit-check" ]; then
   ACTIVE="${ACTIVE%$'\n'}"
   EXPIRED="${EXPIRED%$'\n'}"
 
+  # Check 6a (WP-539, peer-session 2026-08-18-08-wp539-tsekh1-sync): an active
+  # session can register an isolated worktree via `orz_sessions_dir` and still
+  # have its git commands run out of the canonical checkout by inertia (an
+  # absolute path in a script, or cwd lost between separate Bash tool calls) --
+  # `open` recording the worktree was never enough on its own, nothing checked
+  # that later git operations actually executed there. Live-confirmed via git
+  # reflog: two unpushed commits (WP-537, WP-484 sessions) landed straight in
+  # the canonical checkout despite both semaphores naming a worktree.
+  # Scope: only fires when at least one ACTIVE semaphore names a worktree
+  # (`orz_sessions_dir` under `.claude/worktrees/` or
+  # `.iwe-runtime/isolated-worktrees/`, not the canonical checkout itself) and
+  # the current commit's toplevel matches none of them -- a session with no
+  # worktree registered is unaffected, same as before this check existed.
+  # Warn-only by pilot decision (ArchGate WP-539, 2026-08-18): a hard block
+  # here would change how agents work with git before they've had a chance to
+  # see it fire on real traffic -- about a week of log-only observation first,
+  # hard block is a separate, later change, not bundled into this commit.
+  if [ -n "$ACTIVE" ]; then
+    CURRENT_TOPLEVEL=$(git rev-parse --show-toplevel 2>/dev/null || echo "")
+    REGISTERED_WORKTREES=""
+    MATCHED_TOPLEVEL=0
+    for sem in $ACTIVE; do
+      # `|| true` on the read, not just the pipeline: under `set -euo pipefail`
+      # a semaphore removed by a concurrent session between the `find` above
+      # and this loop (routine under parallel agents -- the exact class of
+      # race this whole check exists to warn about) would otherwise abort the
+      # entire pre-commit-check with a hard exit, turning a warn-only check
+      # into an accidental block -- the one outcome the pilot's ArchGate
+      # decision explicitly ruled out for this observation week.
+      sem_dir=$(sed -n 's/^orz_sessions_dir: //p' "$sem" 2>/dev/null | head -1) || sem_dir=""
+      [ -z "$sem_dir" ] && continue
+      sem_toplevel="${sem_dir%/sessions}"
+      case "$sem_toplevel" in
+        */.claude/worktrees/*|*/.iwe-runtime/isolated-worktrees/*)
+          REGISTERED_WORKTREES="${REGISTERED_WORKTREES}${sem_toplevel} ($(basename "$sem"))"$'\n'
+          [ "$sem_toplevel" = "$CURRENT_TOPLEVEL" ] && MATCHED_TOPLEVEL=1
+          ;;
+      esac
+    done
+    if [ -n "$REGISTERED_WORKTREES" ] && [ "$MATCHED_TOPLEVEL" -eq 0 ]; then
+      echo "⚠️  SESSION-GUARD (warn-only, WP-539 observation week): зарегистрированная worktree не совпадает с местом выполнения git — коммит НЕ заблокирован." >&2
+      echo "" >&2
+      echo "Активная сессия зарегистрировала изолированную копию, но эта git-команда выполняется в:" >&2
+      echo "  $CURRENT_TOPLEVEL" >&2
+      echo "" >&2
+      echo "Зарегистрированные worktree активных сессий:" >&2
+      while IFS= read -r wt_line; do
+        [ -z "$wt_line" ] && continue
+        echo "  · $wt_line" >&2
+      done <<< "$REGISTERED_WORKTREES"
+      # CLAUDE_CODE_SESSION_ID, not CLAUDE_SESSION_ID -- the latter is never
+      # set (confirmed bug-2026-08-05-trace-satisfaction-default-session-
+      # bucket.md for the same wrong name elsewhere in this file); using it
+      # here would collapse every session's warns into one shared `default`
+      # bucket, defeating the per-session attribution this log exists for.
+      _WARN_LOG="$HOME/.claude/state/session-${CLAUDE_CODE_SESSION_ID:-default}-warns.jsonl"
+      mkdir -p "$(dirname "$_WARN_LOG")" 2>/dev/null || true
+      python3 -c "
+import json, sys
+print(json.dumps({
+    'ts': sys.argv[1], 'event': 'pre-commit', 'rule': 'WP-539-check6a',
+    'verdict': 'warn', 'reason': 'registered worktree does not match git toplevel',
+    'current_toplevel': sys.argv[2],
+}))
+" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$CURRENT_TOPLEVEL" >> "$_WARN_LOG" 2>/dev/null || true
+    fi
+  fi
+
   if [ -z "$ACTIVE" ]; then
     if [ -n "$EXPIRED" ]; then
       echo "🚫 SESSION-GUARD: коммит заблокирован — у открытых сессий истёк срок полномочий." >&2
