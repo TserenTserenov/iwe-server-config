@@ -108,6 +108,7 @@
 | 266 | 🔄 | P3 | Реферальные приглашения «Инженерии интеллекта» | P0-баг исправлен; ждёт live-E2E |
 | 284 | 🔄 | P2 | Регулярные интервью с пользователями (зонтичный) | W33: Ф6+Ф7, связан с РП511 |
 | 519 | ⏳ | P2 | Инфраструктура непрерывной проверки кода | создан; next Ф1 контракт качества |
+| 526 | 🔄 | P2 | Новая структура IWE | Ф5: 5 семей PD-/MC-; миграция 24.08 |
 | 527 | 🔄 | P2 | Скилл создания репозитория IWE | открыт; детали → WP-527.md |
 | 528 | 🔄 | P2 | Секция рекомендаций в персональном руководстве | открыт; детали → WP-528.md |
 
@@ -141,6 +142,8 @@
 
 ### Feedback — HOT
 
+- [project_wp520_dashboard_clone_unpushed_fmt_duplicate.md](project_wp520_dashboard_clone_unpushed_fmt_duplicate.md) — 18.08 (повтор 12.08): `DS-my-strategy-dashboard` — дублирующий чекаут того же remote, что и `DS-my-strategy`, копит незалитую работу неделями, конфликтует по содержанию при синхронизации — обычный `git status` per-repo этого не видит, сверять `git remote -v` между путями
+- [lessons_canonical_freeze_uchg_eperm.md](lessons_canonical_freeze_uchg_eperm.md) — 18.08: EPERM в DS-my-strategy = штатная заморозка канона (uchg, freeze-enforce WP-520) — диагностика `ls -lO`, флаг не снимать, писать в окна разморозки; iwe-safe-pull требует абсолютный путь
 - [lessons_git_stash_wide_capture_multi_agent_tree.md](lessons_git_stash_wide_capture_multi_agent_tree.md) — 18.08: `git stash` без прицельных путей в мультиагентном дереве захватил чужие незакоммиченные файлы нескольких сессий, дал merge-конфликт на чужом append-only файле — тот же класс риска, что `git add -A`/`-u`, лечится `git stash push -- <path>`
 - [lessons_neon_grant_per_database_and_freeze_checkout_staging.md](lessons_neon_grant_per_database_and_freeze_checkout_staging.md) — 18.08: GRANT на Neon-проект нужен per-database не per-project; psql -d конфликтует с полным URI; freeze-checkout DS-my-strategy без изолированного worktree смешивает staged-состояние параллельных сессий — чуть не закоммитил 19 чужих staged-удалений под своим именем
 - [feedback_schedulewakeup_prompt_triggers_close_gate.md](feedback_schedulewakeup_prompt_triggers_close_gate.md) — 16.08: ScheduleWakeup-промпт со словом «закрой worktree» ложно сработал как реальная фраза пилота о закрытии сессии (armed obligation, Stop-блок) — избегать «закрой/закрывай» в тексте prompt применительно не к самой сессии; при срабатывании спросить пилота, не отменять самовольно
@@ -150,9 +153,7 @@
 - [feedback_judge_not_defendant_close_blocker.md](feedback_judge_not_defendant_close_blocker.md) — 15.08: агент сам снял блокировку закрытия сессии, истолковав повторный стоп хука как согласие пилота — решение должно остаться за пилотом, не за агентом; первая версия объяснения подала это как достижение, а не нарушение
 - [lessons_close_runner_gate_marker_witness_desync.md](lessons_close_runner_gate_marker_witness_desync.md) — 15.08 (другая сессия, тот же день): агент сам вызвал close-override после структурированного вопроса «продолжайте» — общее согласие ≠ команда на конкретное необратимое действие, то же нарушение в другой форме
 - [feedback_cite_carded_text_verify_against_protocol_and_replan_dates.md](feedback_cite_carded_text_verify_against_protocol_and_replan_dates.md) — 15.08: пересказал пилоту дату «сегодня» из чужой WP-карточки не пересчитав под его реальный план (день сегодня, неделя завтра) — карточку/протокол сверять, даты пересчитывать перед цитированием
-- [lessons_session_guard_close_orz_path_worktree_removed.md](lessons_session_guard_close_orz_path_worktree_removed.md) — 15.08: session-guard.sh close ищет ORZ по snapshot-пути из семафора (worktree на момент open) — после уборки worktree путь мёртв, close отказывает, хотя report.md уже доставлен в основной репо; перед ручным закрытием проверить 4 факта (мёртвый pid + доставленные report.md/ORZ + убранный worktree)
-- [lessons_secret_rotation_verify_every_consumer_live.md](lessons_secret_rotation_verify_every_consumer_live.md) — 16.08 (инцидент 4, ~13ч простоя): ротация `PROXY_SHARED_SECRET` на Railway не докатилась до `~/.config/aist/env` на tsekh-1 — переменной не было вовсе, не только устарела; при ротации сверять и локальные env-файлы серверов, не только Railway-сервисы, писать актуальное (`NEXT`) значение
-→ 13-16.08 (17 записей, включая demoted git_fsck) → [MEMORY-warm.md](MEMORY-warm.md) (Demoted 16.08)
+→ 13-16.08 (19 записей) → [MEMORY-warm.md](MEMORY-warm.md) (Demoted 18.08)
 - [routing-vocab.md](routing-vocab.md) — фраза → путь, читать ПЕРЕД Write
 - [feedback_response_clarity_for_pilot.md](feedback_response_clarity_for_pilot.md) — A1-A11 правила ответа
 - [user_tseren_personal_life.md](user_tseren_personal_life.md) — Tseren (НЕ Дмитрий), Кипр
