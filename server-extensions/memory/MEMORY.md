@@ -141,6 +141,7 @@
 
 ### Feedback — HOT
 
+- [lessons_git_stash_wide_capture_multi_agent_tree.md](lessons_git_stash_wide_capture_multi_agent_tree.md) — 18.08: `git stash` без прицельных путей в мультиагентном дереве захватил чужие незакоммиченные файлы нескольких сессий, дал merge-конфликт на чужом append-only файле — тот же класс риска, что `git add -A`/`-u`, лечится `git stash push -- <path>`
 - [lessons_neon_grant_per_database_and_freeze_checkout_staging.md](lessons_neon_grant_per_database_and_freeze_checkout_staging.md) — 18.08: GRANT на Neon-проект нужен per-database не per-project; psql -d конфликтует с полным URI; freeze-checkout DS-my-strategy без изолированного worktree смешивает staged-состояние параллельных сессий — чуть не закоммитил 19 чужих staged-удалений под своим именем
 - [feedback_schedulewakeup_prompt_triggers_close_gate.md](feedback_schedulewakeup_prompt_triggers_close_gate.md) — 16.08: ScheduleWakeup-промпт со словом «закрой worktree» ложно сработал как реальная фраза пилота о закрытии сессии (armed obligation, Stop-блок) — избегать «закрой/закрывай» в тексте prompt применительно не к самой сессии; при срабатывании спросить пилота, не отменять самовольно
 - [feedback_verify_code_before_peer_session_design.md](feedback_verify_code_before_peer_session_design.md) — 16.08: пир-сессия с Кодексом (РП535) переоткрыла уже написанный код (барьер + reconcile), т.к. не сверился с репозиторием ДО обсуждения — grep кода перед проектированием в пир-сессии

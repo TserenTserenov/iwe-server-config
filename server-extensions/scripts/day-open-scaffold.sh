@@ -659,7 +659,9 @@ render_iwe_status() {
       last_log_file="$last_watchdog_log"
     fi
     if [ -n "$last_log_file" ]; then
-      last_log_age_days=$(( ( $(date +%s) - $(stat -f %m "$last_log_file" 2>/dev/null || stat -c %Y "$last_log_file" 2>/dev/null || echo 0) ) / 86400 ))
+      # WP-537: GNU stat -f leaks garbage on Linux (filesystem-status mode, not
+      # a format flag) -- GNU form first so it short-circuits before BSD form runs.
+      last_log_age_days=$(( ( $(date +%s) - $(stat -c %Y "$last_log_file" 2>/dev/null || stat -f %m "$last_log_file" 2>/dev/null || echo 0) ) / 86400 ))
     fi
     if [ "$last_log_age_days" -le 1 ] || [ "$last_log_age_days" -eq -1 ]; then
       echo "| Scheduler/триаж | 🟢 | Mode B: feedback-triage зарегистрирован, последний лог присутствует (нет жалоб = тишина) |"
@@ -670,9 +672,10 @@ render_iwe_status() {
     # Mode A: cron не запущен (нет юнита в launchctl) + нет свежих логов
     local last_log_age_days="∞"
     if [ -n "$last_feedback_triage_log" ]; then
-      last_log_age_days=$(( ( $(date +%s) - $(stat -f %m "$last_feedback_triage_log" 2>/dev/null || stat -c %Y "$last_feedback_triage_log" 2>/dev/null || echo 0) ) / 86400 ))
+      # WP-537: GNU stat -f leaks garbage on Linux -- GNU form first.
+      last_log_age_days=$(( ( $(date +%s) - $(stat -c %Y "$last_feedback_triage_log" 2>/dev/null || stat -f %m "$last_feedback_triage_log" 2>/dev/null || echo 0) ) / 86400 ))
     elif [ -n "$last_watchdog_log" ]; then
-      last_log_age_days=$(( ( $(date +%s) - $(stat -f %m "$last_watchdog_log" 2>/dev/null || stat -c %Y "$last_watchdog_log" 2>/dev/null || echo 0) ) / 86400 ))
+      last_log_age_days=$(( ( $(date +%s) - $(stat -c %Y "$last_watchdog_log" 2>/dev/null || stat -f %m "$last_watchdog_log" 2>/dev/null || echo 0) ) / 86400 ))
     fi
     echo "| Scheduler/триаж | 🔴 | **Mode A** (cron не отработал): юнит feedback-triage не зарегистрирован в launchctl, последний лог ${last_log_age_days}д назад |"
 

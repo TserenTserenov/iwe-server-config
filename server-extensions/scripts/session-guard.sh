@@ -1490,6 +1490,25 @@ _untracked_matches_published() { # <repo> <root-relative path> — 0 if an ident
   return 1
 }
 
+# ArchGate 2026-08-18 (WP-484 "case Б-1"): both refs/remotes readers above
+# compare against whatever was cached at the LAST fetch, which can predate a
+# push made seconds ago -- a false "not yet published" block. review_date:
+# 2026-11-18 (revisit whether this is still the right tradeoff once close
+# frequency or origin latency changes materially).
+# timeout, not fail-closed like open --isolate's fetch (line ~1067): close
+# already runs many times a day across parallel agents on one origin, so a
+# slow/offline network must degrade to today's cache-only behaviour, not
+# block every close on it.
+REMOTE_REFS_REFRESHED_FOR_CLOSE=0
+_refresh_remote_refs_for_close() { # <repo> — best-effort fetch, once per close, before any refs/remotes read
+  local repo="$1"
+  [ "$REMOTE_REFS_REFRESHED_FOR_CLOSE" = "1" ] && return 0
+  REMOTE_REFS_REFRESHED_FOR_CLOSE=1
+  if ! timeout 3 git -C "$repo" fetch origin --quiet 2>/dev/null; then
+    echo "  ⚠️  git fetch перед сверкой с опубликованным не удался/не уложился в 3с -- сверяю по кэшу refs/remotes (может быть устаревшим)" >&2
+  fi
+}
+
 # WP-520 Ф8: session-index.md is append-only (each session adds one row above
 # the table), so concurrent writers resolve as a plain git add/add merge --
 # unlike the exclusive files a single session owns. Scoped to this one file,
@@ -1638,6 +1657,8 @@ if [ "$CMD" = "close" ]; then
       ORZ_FILE="$CANONICAL_ORZ_FILE"
     fi
   fi
+
+  _refresh_remote_refs_for_close "$ORZ_SESSIONS_DIR"
 
   echo "Session CLOSE: проверяю ORZ $ORZ_FILE ..."
   if ! validate_orz "$ORZ_FILE" "$AGENT" "$ORZ_SESSIONS_DIR"; then

@@ -27,7 +27,13 @@ SESSION_ID_SAFE=$(printf '%s' "$SESSION_ID" | tr -cd 'A-Za-z0-9._-')
 PROMPT=$(printf '%s' "$INPUT" | jq -r '.prompt // empty' 2>/dev/null)
 [ -n "$PROMPT" ] || exit 0
 
-IWE_ROOT="${CLAUDE_PROJECT_DIR:-$HOME/IWE}"
+# WP-537 (18.08, пир-сессия с Codex): было ${CLAUDE_PROJECT_DIR:-$HOME/IWE} --
+# единственное оставшееся место в этой связке hook/handler-скриптов с этим
+# паттерном (close_obligation.py, session-guard.sh, close-runner-gate.sh уже
+# используют IWE_ROOT env var + $HOME/IWE фолбэк с 16.08, Ф42 -- CLAUDE_PROJECT_DIR
+# ненадёжна для worktree-изолированных сессий). Пропущено при рассылке Ф42,
+# закрываю тем же паттерном.
+IWE_ROOT="${IWE_ROOT:-$HOME/IWE}"
 WITNESS_DIR="$IWE_ROOT/.iwe-runtime/pilot-witness"
 mkdir -p "$WITNESS_DIR" 2>/dev/null || exit 0
 chmod 700 "$WITNESS_DIR" 2>/dev/null || true
@@ -38,5 +44,11 @@ TS=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 jq -cn --arg ts "$TS" --arg session_id "$SESSION_ID" --arg text "$PROMPT" \
   '{ts: $ts, session_id: $session_id, text: $text}' >> "$WITNESS_FILE" 2>/dev/null
 chmod 600 "$WITNESS_FILE" 2>/dev/null || true
+
+# WP-537 (18.08): временная диагностика (не сам witness -- отдельный,
+# не защищённый witness-write-guard.sh лог) на период проверки фикса выше.
+# Убрать после нескольких подтверждённых живых closes без witness_unavailable.
+DIAG_LOG="$IWE_ROOT/.iwe-runtime/pilot-witness-recorder.diag.log"
+printf '%s session_id=%s iwe_root=%s witness_file=%s\n' "$TS" "$SESSION_ID_SAFE" "$IWE_ROOT" "$WITNESS_FILE" >> "$DIAG_LOG" 2>/dev/null || true
 
 exit 0

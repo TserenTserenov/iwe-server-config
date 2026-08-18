@@ -111,7 +111,9 @@ if [ "$IS_TASK" != "1" ]; then
     [ -f "$f" ] || continue
     OTHER_WP=$(grep "^wp: " "$f" | head -1 | cut -d' ' -f2-)
     [ "$OTHER_WP" = "$WP" ] || continue
-    F_MTIME=$(stat -f %m "$f" 2>/dev/null || stat -c %Y "$f" 2>/dev/null || echo 0)
+    # WP-537: GNU stat -f leaks garbage on Linux (filesystem-status mode, not
+    # a format flag) -- GNU form first so it short-circuits before BSD form runs.
+    F_MTIME=$(stat -c %Y "$f" 2>/dev/null || stat -f %m "$f" 2>/dev/null || echo 0)
     F_AGE=$(( $(date +%s) - F_MTIME ))
     [ "$F_AGE" -gt 1800 ] && continue  # older than session-guard's own orphan TTL — stale, ignore
     log "SKIP: $WP already has an active session ($(basename "$f"), age ${F_AGE}s) — avoiding collision"

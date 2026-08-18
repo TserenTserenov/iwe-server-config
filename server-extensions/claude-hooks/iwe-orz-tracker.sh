@@ -190,8 +190,13 @@ LAST_TS=$(jq -r '.timestamp // empty' "$TRANSCRIPT_PATH" 2>/dev/null | tail -1)
 
 DURATION_MIN=0
 if [ -n "$FIRST_TS" ] && [ -n "$LAST_TS" ]; then
-  FIRST_EPOCH=$(date -j -f "%Y-%m-%dT%H:%M:%S" "${FIRST_TS%%.*}" "+%s" 2>/dev/null || echo "0")
-  LAST_EPOCH=$(date -j -f "%Y-%m-%dT%H:%M:%S" "${LAST_TS%%.*}" "+%s" 2>/dev/null || echo "0")
+  # 18.08 (found alongside WP-537): `date -j -f` is BSD/macOS-only (same class
+  # as GNU `stat -f` breaking on Linux elsewhere today) -- on Linux `date`
+  # doesn't recognize `-j` at all, both epochs silently stayed "0" forever,
+  # so DURATION_MIN never reached the >=5min threshold below and iwe_session
+  # never fired on this host. GNU form (`date -d`) first, BSD form fallback.
+  FIRST_EPOCH=$(date -d "${FIRST_TS%%.*}" "+%s" 2>/dev/null || date -j -f "%Y-%m-%dT%H:%M:%S" "${FIRST_TS%%.*}" "+%s" 2>/dev/null || echo "0")
+  LAST_EPOCH=$(date -d "${LAST_TS%%.*}" "+%s" 2>/dev/null || date -j -f "%Y-%m-%dT%H:%M:%S" "${LAST_TS%%.*}" "+%s" 2>/dev/null || echo "0")
   if [ "$LAST_EPOCH" -gt "$FIRST_EPOCH" ] 2>/dev/null; then
     DURATION_MIN=$(( (LAST_EPOCH - FIRST_EPOCH) / 60 ))
   fi
