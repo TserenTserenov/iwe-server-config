@@ -42,6 +42,21 @@ OBLIGATION_CLI="$IWE_ROOT/${IWE_GOVERNANCE_REPO:-DS-my-strategy}/scripts/close_o
 SENTINEL_DIR="/tmp/iwe-close-intent"
 REASON=$(printf '%s' "$PROMPT" | cut -c1-200)
 
+# WP-484 Ф118 (19.08, пир-сессия с Codex): сессия, открытая с "session-guard
+# open --close-path peer-session", закрывается по DP.SC.154 Шаг 3.8/4.5, не
+# через /run-protocol close — у этого протокола свой Close-Trigger Gate внутри
+# самого диалога. Инструкция ниже "вызови /run-protocol close" для такой
+# сессии не просто бесполезна, а прямо вредна: заставляет писателя прервать
+# пир-протокол и вызвать чужой скилл. Обязательство (armed) тоже не взводим —
+# Stop-гейт ждал бы RUN-quick-close карточку, которую пир-протокол никогда не
+# создаёт (тот самый живой симптом, из-за которого писалась эта фаза: закрытие
+# пир-сессии каждый раз требовало cancel-close + --no-verify).
+CLOSE_PATH_MATCH=$(grep -l "harness_session_id: $SESSION_ID" \
+  "$IWE_ROOT"/.iwe-runtime/sessions/*.open 2>/dev/null | head -1)
+if [ -n "$CLOSE_PATH_MATCH" ] && grep -q '^close_path: peer-session$' "$CLOSE_PATH_MATCH" 2>/dev/null; then
+  echo '{"additionalContext": "Сессия объявлена как пир-сессия (close_path=peer-session) — закрытие идёт по её собственному протоколу (DP.SC.154 Шаг 3.8/4.5), не через /run-protocol close. Этот гейт не вмешивается."}'
+  exit 0
+fi
 # WP-520 (тридцать вторая находка, 14.08.2026, пир-сессия с Codex): pending-
 # reflection state. Читается ЗДЕСЬ, до любых arm/record-intent вызовов этого
 # исполнения — иначе pending, поставленный этим же вызовом (см. ниже), тут же

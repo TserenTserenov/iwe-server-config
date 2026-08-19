@@ -590,6 +590,12 @@ SLUG=""
 AGENT="${IWE_AGENT:-}"
 HOUSEKEEPING=""
 PERSONALITY=""
+# WP-484 Ф118 (19.08, пир-сессия с Codex): declared close protocol for this
+# session — quick-close|day-close|peer-session|pipeline|none. Written into the
+# semaphore so close-runner-gate.sh/close-gate-reminder.sh can stop guessing
+# which closing procedure applies from session_id shape alone. Empty stays
+# "unknown" (legacy callers that don't pass it), which keeps today's behavior.
+CLOSE_PATH=""
 OWNER_PID=""
 SESSION_ID_ARG=""
 CLEANUP_ORPHANS=0
@@ -608,6 +614,7 @@ while [[ $# -gt 0 ]]; do
     --files)  FILES="$2"; shift 2 ;;
     --slug|--topic) SLUG="$2"; shift 2 ;;
     --agent)  AGENT="$2"; shift 2 ;;
+    --close-path) CLOSE_PATH="$2"; shift 2 ;;
     --housekeeping) HOUSEKEEPING="$2"; shift 2 ;;
     # WP-520 freeze-enforce (peer-session 2026-08-14-07): the only sanctioned
     # bypass, for launchd/cron runners that own the canonical checkout by
@@ -1281,6 +1288,9 @@ $isolate_status_code $isolate_status_path"
     # instead of a singleton current-<agent>.ptr that gets clobbered by a
     # second concurrent `open` of the same agent.
     [ -n "${CLAUDE_CODE_SESSION_ID:-}" ] && echo "harness_session_id: $CLAUDE_CODE_SESSION_ID"
+    # WP-484 Ф118: read by close-runner-gate.sh/close-gate-reminder.sh to pick
+    # the enforcement path instead of assuming quick-close for every session.
+    echo "close_path: ${CLOSE_PATH:-unknown}"
     # Recorded here so `close` (a separate invocation, possibly a different
     # process/cwd) can read the resolved worktree back instead of
     # recomputing it -- same pattern already used for orz_sessions_dir above.

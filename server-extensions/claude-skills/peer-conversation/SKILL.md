@@ -188,11 +188,11 @@ Slug = первые 4 латинских слова из задачи строч
 `SESSION_ID="${TODAY}-${NUM}-${SLUG}"`
 `SESSION_DIR="${DAY_DIR}/${SESSION_ID}"`
 
-**1.0 Session-guard open (WP-398, обязательно, ДО любых Write/Edit в сессии).** Синхронизирует пир-сессию с `session-guard.sh` Scope gate — без этого коммит на Шаге 4.5 будет заблокирован pre-commit хуком (mtime файлов сессии старше семафора). WP берётся из Шага 0б (найденный или «day-close»/«unknown», если РП не назначен):
+**1.0 Session-guard open (WP-398, обязательно, ДО любых Write/Edit в сессии).** Синхронизирует пир-сессию с `session-guard.sh` Scope gate — без этого коммит на Шаге 4.5 будет заблокирован pre-commit хуком (mtime файлов сессии старше семафора). WP берётся из Шага 0б (найденный или «day-close»/«unknown», если РП не назначен). `--close-path peer-session` (WP-484 Ф118, 19.08) объявляет протокол закрытия заранее — без него `close-runner-gate.sh`/`close-gate-reminder.sh` требуют раннер закрытия дня для прямого коммита Шага 4.5.1, хотя это другой протокол (живой симптом, воспроизводившийся каждую сессию до этой фазы):
 
 ```bash
 IWE_AGENT=claude-code bash "${IWE_SCRIPTS:-$HOME/IWE/scripts}/session-guard.sh" open \
-  --wp "<WP-NNN из Шага 0б>" --agent claude-code \
+  --wp "<WP-NNN из Шага 0б>" --agent claude-code --close-path peer-session \
   --task "<задача одной строкой>" --slug "$SESSION_ID"
 ```
 
