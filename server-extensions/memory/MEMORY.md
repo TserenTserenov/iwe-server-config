@@ -129,6 +129,7 @@
 
 ### Feedback — HOT
 
+- [feedback_replies_written_as_pilot.md](feedback_replies_written_as_pilot.md) — 19.08: черновик ответа внешнему человеку (Евгению) писать от лица пилота ("мы закрыли"), не от лица агента ("я нашёл") — пилот отправляет от своего имени, агент не подписант переписки
 - [project_wp520_dashboard_clone_unpushed_fmt_duplicate.md](project_wp520_dashboard_clone_unpushed_fmt_duplicate.md) — 18.08 (повтор 12.08): `DS-my-strategy-dashboard` — дублирующий чекаут того же remote, что и `DS-my-strategy`, копит незалитую работу неделями, конфликтует по содержанию при синхронизации — обычный `git status` per-repo этого не видит, сверять `git remote -v` между путями
 - [lessons_canonical_freeze_uchg_eperm.md](lessons_canonical_freeze_uchg_eperm.md) — 18.08: EPERM в DS-my-strategy = штатная заморозка канона (uchg, freeze-enforce WP-520) — диагностика `ls -lO`, флаг не снимать, писать в окна разморозки; iwe-safe-pull требует абсолютный путь
 - [lessons_git_stash_wide_capture_multi_agent_tree.md](lessons_git_stash_wide_capture_multi_agent_tree.md) — 18.08: `git stash` без прицельных путей в мультиагентном дереве захватил чужие незакоммиченные файлы нескольких сессий, дал merge-конфликт на чужом append-only файле — тот же класс риска, что `git add -A`/`-u`, лечится `git stash push -- <path>`
