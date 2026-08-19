@@ -56,26 +56,6 @@ SESSION_ID=$(printf '%s' "$INPUT" | jq -r '.session_id // empty' 2>/dev/null)
 SESSION_ID_SAFE=$(printf '%s' "$SESSION_ID" | tr -cd 'A-Za-z0-9._-')
 [ -n "$SESSION_ID_SAFE" ] || exit 0
 
-# WP-484 Ф118 (19.08, пир-сессия с Codex, живой рецидив: пир-сессия закрывалась
-# через "close_obligation.py cancel --action close-override" + "git commit
-# --no-verify" КАЖДЫЙ раз — этот гейт требовал process-runner.py, который не
-# имеет отношения к протоколу закрытия пир-сессии, DP.SC.154 Шаг 4.5.1 годами
-# закрывает прямым git commit). Сессия, открытая с "session-guard open
-# --close-path peer-session", объявила протокол закрытия заранее — этому гейту
-# больше нечего проверять для неё: раннер здесь структурно не применим, не
-# забытое действие. Молчаливый пропуск, не warn (peer-session — штатный путь,
-# не подозрительное отклонение).
-# Matched by content, not by filename prefix -- the acting agent (claude-code/
-# kimi/codex/hermes) is not known here, and this hook only ever runs under
-# claude-code's own PreToolUse anyway (harness_session_id is unique per host
-# session regardless of which semaphore file it ended up in).
-CLOSE_PATH_MATCH=$(grep -l "harness_session_id: $SESSION_ID" \
-  "$IWE_ROOT"/.iwe-runtime/sessions/*.open 2>/dev/null | head -1)
-if [ -n "$CLOSE_PATH_MATCH" ] && grep -q '^close_path: peer-session$' "$CLOSE_PATH_MATCH" 2>/dev/null; then
-  echo "[close-runner-gate] session=$SESSION_ID_SAFE close_path=peer-session — раннер не требуется, гейт пропускает" >&2
-  exit 0
-fi
-
 RUNNER_MARKER_DIR="/tmp/iwe-close-runner-started"
 RUNNER_MARKER="$RUNNER_MARKER_DIR/$SESSION_ID_SAFE.flag"
 

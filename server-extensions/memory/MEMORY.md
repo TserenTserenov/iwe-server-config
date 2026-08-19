@@ -30,7 +30,6 @@
 | WP | ст | P | Название | next (≤10 слов) |
 |-----|----|----|----------|----------------|
 | 525 | 🔄 | P2 | Конвейер обновления IWE из FPF | Ф2 частично; next Ф1 правило отбора |
-| ~~520~~ | ✅ | — | ~~Новая версия конвейера закрытия сессии~~ | done 15.08: частично, хвосты → 3 карточки-преемника |
 | 523 | 🔄 | P3 | Концепция использования MCP2.0 | вердикт C утверждён; остаток Ф2 клиентская матрица |
 | 521 | 🔄 | P1 | Конвейер генерации руководств и методических материалов | Ф1 типизация draft; next спайк с пилотом |
 | 522 | 🔄 | P2 | Чек-лист участника экосистемы | Д-к добавлен; структура базы решается на Ф2 |
@@ -40,13 +39,11 @@
 | 500 | 🔄 | P2 | Аудит IWE: безопасность, токены, SOTA — разбор находок | Ф1-Ф21 не начат — начать с Ф1 |
 | 503 | 🔄 | P1 | Умный конвейер РП | 17.08: прогон на 9 РП портфеля; очередь решений пилоту готова |
 | 502 | 🔄 | P2 | Актуализация и продвижение портфеля РП | карта v2.1 утверждена 15.08; next вести очередь |
-| 529 | ⏳ | P1 | Конвейер доставки шаблона IWE 2.0 | создан 14.08; next Ф1 карта путей |
+| 529 | 🔄 | P1 | Конвейер доставки шаблона IWE 2.0 | 19.08: Ф6 (находки Евгения) в PR #478; next мердж → Ф4/Ф7 |
 | 530 | 🔄 | P1 | Конвейер параллельных рабочих сессий нескольких агентов | 15.08: Ф1-Ф3 закрыты (4 агента чисто); next прогон на 15-20 |
-| ~~531~~ | ✅ | — | ~~Реестр неразобранных коммитов и веток DS-my-strategy~~ | ~~закрыт 17.08: 92 коммита+111 веток (15.08) + stash→WP534 (16.08) + 4 доп. брошенные ветки найдены и удалены финальной проверкой~~ |
 | 532 | 🔄 | P2 | Подписка на паки | создан 15.08; next прототип для Алёны |
-| ~~534~~ | ✅ | — | ~~Разбор стэша серверной копии DS-my-strategy (tsekh-1)~~ | ~~закрыт 16.08: 27 файлов разобраны, 6 ledger-записей восстановлены reconciliation~~ |
-| 535 | 🔄 | P3 | Гонка параллельной записи в дневной ledger tsekh-1 | 17.08: +Ф-DuplicateOriginDataLoss (потеря 2 orphan-коммитов, разбор Week Close) |
-| 537 | 🔄 | P2 | Изоляция раннера закрытия сессий от канонической копии | 19.08: ночной разбор канона, 12 восстановлений; next Ф2 РП539 |
+| 535 | 🔄 | P3 | Гонка параллельной записи в дневной ledger tsekh-1 | 19.08: правила слияния day-18 согласованы (Ш3 после Ш2) |
+| 537 | 🔄 | P2 | Изоляция раннера закрытия сессий от канонической копии | 19.08: Ф12 план восстановления согласован; ждут Ш2/ночь/S-33 (тж РП539) |
 | 498 | 🔄 | P2 | Наставник ИИ: оперативная помощь в чате | собрать Ф4 (маршрутизация + grounding) в context-sufficiency gate |
 | 183 | 🔄 | — | CRM как система | DROP directus (24.07); отложен, нет времени |
 | 467 | 🔄 | **P1** | Архитектура подписок через Ори | решение Д10 блокирует Ф3 |
@@ -114,12 +111,7 @@
 
 ## Бот: деплой
 
-| Бот | Ветка | Railway | Env |
-|-----|-------|---------|-----|
-| @aist_me_bot (прод) | `new-architecture` | `aist_me_bot` (id e840eab0) | Neon |
-| @aist_pilot_bot (пилот) | `pilot` | `aist_pilot_bot` (id 5b3adb5c) | Railway Postgres |
-
-> **Pilot-First:** только `pilot`, никогда `new-architecture` первым. Backport = долетело и до `pilot`.
+> Прод @aist_me_bot: ветка `new-architecture`, Railway `aist_me_bot` (e840eab0), Neon · Пилот @aist_pilot_bot: ветка `pilot`, Railway `aist_pilot_bot` (5b3adb5c), Railway Postgres. **Pilot-First:** только `pilot`, никогда `new-architecture` первым; backport = долетело и до `pilot`.
 > **Railway MCP:** `peaceful-vision`; `lavish-delight` не трогать. Автодеплой на push. БД/LLM-прокси: [reference-prod-bot-db-access.md](reference-prod-bot-db-access.md), [reference_llm_proxy_railway_project.md](reference_llm_proxy_railway_project.md)
 > ⛔ **Read-only репо:** DS-IT-systems/SystemsSchool_bot, DS-IT-systems/aisystant.
 
@@ -131,14 +123,9 @@
 
 ### Project — HOT
 
-- [project_wp503_pool_phase_missing_write_grant.md](project_wp503_pool_phase_missing_write_grant.md) — 16.08: pool_phase-прогон (WP-284 Ф6/Ф7) без write-гранта на целевой репо — диспетчер выдал Read/Bash, не Write
 - [reference_ds_mcp_not_git_repo.md](reference_ds_mcp_not_git_repo.md) — DS-MCP без git, правки не версионируются, не коммитить
-- [project_ds_my_strategy_divergence_diagnosis_confirmed.md](project_ds_my_strategy_divergence_diagnosis_confirmed.md) — 15.08: разъезд 124/443 подтверждён двумя методами; разбор оставлен пилотом
-- [project_ds_my_strategy_repo_divergence_carryover.md](project_ds_my_strategy_repo_divergence_carryover.md) — 12.08: чужая ветка, 527 незакоммиченных файлов — перенесено пилотом на новую сессию
-- [project_tsekh1_chronic_git_sync_and_concurrent_agents.md](project_tsekh1_chronic_git_sync_and_concurrent_agents.md) — корневой фикс задеплоен; рецидив «cannot cd» найден, не исправлен
-- [project_wp455_ots_upgrade_timeout_no_script_budget.md](project_wp455_ots_upgrade_timeout_no_script_budget.md) — сервис упал по systemd-таймауту, общего бюджета скрипта нет
-- [project_wp7_f65_f58_idcol1_status_divergence_escalated.md](project_wp7_f65_f58_idcol1_status_divergence_escalated.md) — F65/F58/IDCOL1 закрыты, подтверждены живой проверкой
-→ старше 13.08 (5 записей) → [MEMORY-warm.md](MEMORY-warm.md) (Demoted 15.08)
+- Разъезд DS-my-strategy Mac↔tsekh-1↔origin: актуальный контекст → `DS-my-strategy/inbox/WP-537/WP-537.md` Ф12 (19.08), не в memory
+→ демотировано 11 записей (12-16.08) → [MEMORY-warm.md](MEMORY-warm.md) (Demoted 15.08, 19.08)
 
 ### Feedback — HOT
 
@@ -146,15 +133,7 @@
 - [lessons_canonical_freeze_uchg_eperm.md](lessons_canonical_freeze_uchg_eperm.md) — 18.08: EPERM в DS-my-strategy = штатная заморозка канона (uchg, freeze-enforce WP-520) — диагностика `ls -lO`, флаг не снимать, писать в окна разморозки; iwe-safe-pull требует абсолютный путь
 - [lessons_git_stash_wide_capture_multi_agent_tree.md](lessons_git_stash_wide_capture_multi_agent_tree.md) — 18.08: `git stash` без прицельных путей в мультиагентном дереве захватил чужие незакоммиченные файлы нескольких сессий, дал merge-конфликт на чужом append-only файле — тот же класс риска, что `git add -A`/`-u`, лечится `git stash push -- <path>`
 - [lessons_neon_grant_per_database_and_freeze_checkout_staging.md](lessons_neon_grant_per_database_and_freeze_checkout_staging.md) — 18.08: GRANT на Neon-проект нужен per-database не per-project; psql -d конфликтует с полным URI; freeze-checkout DS-my-strategy без изолированного worktree смешивает staged-состояние параллельных сессий — чуть не закоммитил 19 чужих staged-удалений под своим именем
-- [feedback_schedulewakeup_prompt_triggers_close_gate.md](feedback_schedulewakeup_prompt_triggers_close_gate.md) — 16.08: ScheduleWakeup-промпт со словом «закрой worktree» ложно сработал как реальная фраза пилота о закрытии сессии (armed obligation, Stop-блок) — избегать «закрой/закрывай» в тексте prompt применительно не к самой сессии; при срабатывании спросить пилота, не отменять самовольно
-- [feedback_verify_code_before_peer_session_design.md](feedback_verify_code_before_peer_session_design.md) — 16.08: пир-сессия с Кодексом (РП535) переоткрыла уже написанный код (барьер + reconcile), т.к. не сверился с репозиторием ДО обсуждения — grep кода перед проектированием в пир-сессии
-- [feedback_wp_creation_needs_pilot_gate.md](feedback_wp_creation_needs_pilot_gate.md) — 16.08: в пир-сессии с Кодексом зарегистрировал новый РП (WP-535) по консенсусу с напарником, без паузы на вопрос пилоту — консенсус агентов не заменяет WP Gate; побочная находка внутри чужой сессии требует явного согласования, не автосоздания
-- [lessons_high_parallelism_stale_clean_claim.md](lessons_high_parallelism_stale_clean_claim.md) — 16.08: дважды подряд заявил раннеру «репозиторий чист» по устаревшей на минуты проверке — раннер честно отклонил (ahead=1 оба раза); проверять git-состояние прямо перед каждым шагом, не по снимку из разговора
-- [feedback_judge_not_defendant_close_blocker.md](feedback_judge_not_defendant_close_blocker.md) — 15.08: агент сам снял блокировку закрытия сессии, истолковав повторный стоп хука как согласие пилота — решение должно остаться за пилотом, не за агентом; первая версия объяснения подала это как достижение, а не нарушение
-- [lessons_close_runner_gate_marker_witness_desync.md](lessons_close_runner_gate_marker_witness_desync.md) — 15.08 (другая сессия, тот же день): агент сам вызвал close-override после структурированного вопроса «продолжайте» — общее согласие ≠ команда на конкретное необратимое действие, то же нарушение в другой форме
-- [feedback_cite_carded_text_verify_against_protocol_and_replan_dates.md](feedback_cite_carded_text_verify_against_protocol_and_replan_dates.md) — 15.08: пересказал пилоту дату «сегодня» из чужой WP-карточки не пересчитав под его реальный план (день сегодня, неделя завтра) — карточку/протокол сверять, даты пересчитывать перед цитированием
-→ 13-16.08 (19 записей) → [MEMORY-warm.md](MEMORY-warm.md) (Demoted 18.08)
+→ архив: 26 записей 13-16.08 + 94 старых урока/hub → [MEMORY-warm.md](MEMORY-warm.md) (демоции 28.07-19.08)
 - [routing-vocab.md](routing-vocab.md) — фраза → путь, читать ПЕРЕД Write
 - [feedback_response_clarity_for_pilot.md](feedback_response_clarity_for_pilot.md) — A1-A11 правила ответа
 - [user_tseren_personal_life.md](user_tseren_personal_life.md) — Tseren (НЕ Дмитрий), Кипр
-- Остальные уроки/hubs (94 шт., demoted 28.07+30.07+04.08+09.08+11.08) → [MEMORY-warm.md](MEMORY-warm.md)
