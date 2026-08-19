@@ -1700,28 +1700,6 @@ if [ "$CMD" = "close" ]; then
     done
   done
   RUNNER_OK=""
-
-  # WP-484 Ф118 (19.08, пир-сессия с Codex): сессия, открытая с "open
-  # --close-path peer-session", по определению никогда не создаёт
-  # RUN-quick-close-*.md — её протокол закрытия (DP.SC.154 Шаг 4.5.1/4.5.2)
-  # прямой git commit, не раннер. Коммит ce0ab8ed того же дня легализовал
-  # это в close-runner-gate.sh/close-gate-reminder.sh, но не здесь — живой
-  # рецидив на параллельной сессии (macOS, WP-484 сама же тема) поймал
-  # именно этот пробел: раннер-требование ниже применялось безусловно.
-  # Синтетический sentinel по образцу cancel-obligation-ветки (WP-537, ниже)
-  # — не файл карточки, downstream-очистка это уже умеет различать. Ключ —
-  # $SLUG, не harness_session_id: последний пишется в семафор, только если
-  # $CLAUDE_CODE_SESSION_ID был уже установлен на момент open (независимо
-  # задокументированная гонка — см. пилотский разбор той же сессии), и
-  # опора на него здесь сделала бы этот bypass ненадёжным именно в сценарии,
-  # где он нужнее всего. close_path сам по себе — достаточное свидетельство.
-  # Должен идти ПОСЛЕ "RUNNER_OK=\"\"" выше — иначе сброс стирает значение.
-  if grep -q '^close_path: peer-session$' "$SEM_FILE" 2>/dev/null; then
-    RUNNER_OK="declared-peer-session:$SLUG"
-    FORCED_CARD="declared-peer-session:$SLUG"
-    echo "Session CLOSE: close_path=peer-session объявлен при open — раннер не требуется (WP-484 Ф118)." >&2
-  fi
-
   # "${RUNNER_CARDS[@]+"${RUNNER_CARDS[@]}"}", not "${RUNNER_CARDS[@]}": a
   # peer-conversation close (no RUN-quick-close-* card ever written) leaves
   # RUNNER_CARDS empty, and macOS ships bash 3.2 (GPLv3 freeze) where `for x
@@ -2119,30 +2097,6 @@ if [ "$CMD" = "unlock-hot-file" ]; then
   LOCK_PATH="$HOT_LOCK_DIR/$(_hot_lock_slug "$HOT_PATH").lockdir"
   rm -rf "$LOCK_PATH"
   echo "Unlocked: $HOT_PATH"
-  exit 0
-fi
-
-# --- GC-BYPASS-MARKERS (WP-530 "Осталось после Ф9", 19.08 peer-session с Kimi) ---
-#
-# canonical-dirty-bypass/<hash>/ markers (created around line ~1032 above,
-# Ф5) never expire on their own -- each one just records "some agent already
-# saw and reported this exact dirty fingerprint", not an incident that needs
-# investigation. history.log next to them is the append-only human record
-# and is intentionally never touched here; only the per-fingerprint marker
-# directories are garbage-collected, by mtime of their `first` file (a marker
-# has no owner process to check liveness against, unlike lock-hot-file/
-# with_isolate_lock -- age is the only signal available, so this is age-only
-# by design, not the PID-first pattern used elsewhere in this file).
-if [ "$CMD" = "gc-bypass-markers" ]; then
-  GC_TTL_DAYS="${IWE_BYPASS_MARKER_TTL_DAYS:-14}"
-  GC_DIR="$IWE_ROOT/.iwe-runtime/canonical-dirty-bypass"
-  [ -d "$GC_DIR" ] || { echo "gc-bypass-markers: $GC_DIR отсутствует, нечего чистить"; exit 0; }
-  GC_REMOVED=0
-  while IFS= read -r -d '' gc_marker; do
-    rm -rf "$gc_marker"
-    GC_REMOVED=$((GC_REMOVED + 1))
-  done < <(find "$GC_DIR" -mindepth 1 -maxdepth 1 -type d -mtime "+$GC_TTL_DAYS" -print0 2>/dev/null)
-  echo "gc-bypass-markers: удалено $GC_REMOVED маркеров старше ${GC_TTL_DAYS}д (history.log не тронут)"
   exit 0
 fi
 
