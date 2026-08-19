@@ -182,7 +182,11 @@ bash ~/IWE/DS-my-strategy/scripts/ledger-append.sh day "$(date +%F)" conversatio
 `bash ~/IWE/scripts/day-close-step-log.sh start 3`
 
 - **DayPlan сегодняшнего дня** → `git mv current/DayPlan $(date +%Y-%m-%d).md archive/day-plans/`. Если есть DayPlan'ы прошлых дней в `current/` (накопленный мусор) — заархивировать их тоже одной командой.
-- Done WP context files → `mv inbox/WP-{N}-*.md → archive/wp-contexts/`
+- **Done WP context files (WP-530 "Осталось после Ф9", 19.08 peer-session с Codex).** Голый `mv` обходил `wp-context-guarded-edit` (защиту от гонки, поставленную 17.08) — параллельная сессия, тронувшая тот же файл между чтением статуса и переносом, теряла свою правку молча. Для каждой реально существующей папки `inbox/WP-{N}/WP-{N}.md`, у которой `status: done` находится именно в первом YAML frontmatter-блоке файла (не в тексте карточки — иначе ложные совпадения на цитаты статуса), вызвать:
+  ```bash
+  bash scripts/archive-done-wp.sh {N}
+  ```
+  `archive-done-wp.sh` сам находит `inbox/WP-{N}/WP-{N}.md`, обновляет frontmatter, делает `git mv` через `wp-context-guarded-edit`. Уже заархивированные РП автоматически не подхватятся повторно — их папки физически отсутствуют в `inbox/` после переноса.
 - Done РП → удалить строку из MEMORY.md (они уже в WP-REGISTRY и WeekPlan)
 
 > MEMORY.md хранит ТОЛЬКО активные РП (in_progress + pending). Done = удалить.

@@ -805,12 +805,32 @@ git commit -m "<type>(<scope>): <короткое описание>
 Refs: peer-session <SESSION_ID>
 Review iters: <REVIEW_ITER>
 Verify: PASS" -- <те же specific files>
-git push
 ```
+
+**Публикация — через общий шлюз координации, не голым `git push`** (WP-530 Ф9, 19.08, пир-сессия с Codex: голый push здесь обходил тот же `ds-publish.sh`, которым уже пользуются quick-close/day-close/week-close/month-close/day-open — живой тест 18.08 дал 7 из 8 конфликтов при параллельной интерактивной записи без него). `REPO_ROOT` — обязательно через `git rev-parse --show-toplevel` вызывающего репо, не сырой путь (caller может стоять в поддиректории):
+
+```bash
+REPO_ROOT=$(git -C "<repo path>" rev-parse --show-toplevel)
+# shellcheck source=../../../../DS-my-strategy/scripts/lib/publish-gate.sh
+. "$HOME/IWE/DS-my-strategy/scripts/lib/publish-gate.sh"
+SHA=$(git -C "$REPO_ROOT" rev-parse HEAD)
+# normal по умолчанию; high — ТОЛЬКО если пилот на Decision Gate (Шаг 3.5)
+# явно пометил реализацию как срочную (никакого отдельного CLI-флага —
+# приоритет уже единственная ручка).
+PRIORITY="normal"
+if is_ds_repo_by_origin "$REPO_ROOT"; then
+    publish_commit "$REPO_ROOT" "$SHA" "$PRIORITY" "peer-session <SESSION_ID> deploy" \
+        || { echo "publish_commit не удался — см. stderr/Telegram-алерт ds-publish.sh" >&2; exit 1; }
+else
+    push_branch "$REPO_ROOT"
+fi
+```
+
+> **Код возврата обязателен, не только текст в stderr** (найдено холодным ревью Ф9): `|| echo ...` без `exit 1` делает последней командой ветки `echo`, который сам всегда успешен — компаунд `if/else` тогда выглядит завершившимся успешно даже когда `publish_commit` реально упал (ровно тот сбой, ради обработки которого существует шлюз). `exit 1` в конце `||`-блока — обязательная часть паттерна, не опция.
 
 Записать commit SHA для каждого репо в переменную `DEPLOY_SHAS` (map: repo → sha).
 
-**Если push fail** (pre-commit hook отказал, конфликт с remote):
+**Если commit/publish fail** (pre-commit hook отказал, конфликт с remote, `ds-publish.sh`/`publish_commit` вернул non-zero):
 - НЕ обходить хуки (`--no-verify` запрещён правилом 6).
 - Зафиксировать в logs, показать пилоту, ESCALATE_TO_USER.
 
@@ -1134,8 +1154,24 @@ cd "$HOME/IWE/${IWE_GOVERNANCE_REPO:-DS-strategy}"
 PATHS=("sessions/$MONTH/$DAY/$SESSION_ID/" "$GUARD_ORZ")
 git add "${PATHS[@]}"
 git commit -m "feat(peer): $SESSION_ID — <задача кратко>" -- "${PATHS[@]}"
-git push
 ```
+
+**Публикация — через общий шлюз координации, не голым `git push`** (WP-530 Ф9, 19.08, пир-сессия с Codex — тот же класс дыры, что в Шаге 3.6.5: голый push здесь обходил `ds-publish.sh`, которым уже пользуются quick-close/day-close/... — приоритет `high`, а не `normal` как в 3.6.5: пилот реально ждёт закрытие сессии сейчас, это не фоновый деплой):
+
+```bash
+REPO_ROOT=$(git rev-parse --show-toplevel)
+# shellcheck source=../../../../DS-my-strategy/scripts/lib/publish-gate.sh
+. "$HOME/IWE/DS-my-strategy/scripts/lib/publish-gate.sh"
+SHA=$(git -C "$REPO_ROOT" rev-parse HEAD)
+if is_ds_repo_by_origin "$REPO_ROOT"; then
+    publish_commit "$REPO_ROOT" "$SHA" high "peer-session $SESSION_ID close" \
+        || { echo "publish_commit не удался — см. stderr/Telegram-алерт ds-publish.sh" >&2; exit 1; }
+else
+    push_branch "$REPO_ROOT"
+fi
+```
+
+**Если publish/push fail** (найдено холодным ревью Ф9: `exit 1` в блоке выше — обязательная часть паттерна, не текст-предупреждение; без него неудачная публикация выглядела бы завершившейся успешно): НЕ переходить к Шагу 4.5.2 — семафор session-guard не закрыт, коммит существует только локально. Показать пилоту вывод `publish_commit`/`git push`, ESCALATE_TO_USER. НЕ обходить хуки (`--no-verify` запрещён правилом 6).
 
 **4.5.2 Session-guard close** (best-effort, ПОСЛЕ успешного push — закрывать семафор раньше нельзя, иначе Scope gate на 4.5.1 не найдёт активного семафора):
 

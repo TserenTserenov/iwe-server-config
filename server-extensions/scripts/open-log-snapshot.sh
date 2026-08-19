@@ -26,6 +26,10 @@ GOV_REPO="${IWE_GOVERNANCE_REPO:-DS-strategy}"
 OPEN_LOG="$IWE_ROOT/$GOV_REPO/inbox/open-sessions.log"
 OPEN_LOG_RUNTIME="$IWE_ROOT/.iwe-runtime/open-sessions.log"
 LOCK_DIR="$IWE_ROOT/.iwe-runtime/isolate-locks/_snapshotter-open-log-snapshot.lockdir"
+# WP-530 "Осталось после Ф9" (19.08). Same generous margin as
+# ISOLATE_LOCK_TTL_SEC in session-guard.sh (120s vs the sub-second cp+mv this
+# script actually does) -- a crashed holder shouldn't block re-entry for long.
+OPEN_LOG_SNAPSHOT_LOCK_TTL_SEC="${IWE_OPEN_LOG_SNAPSHOT_LOCK_TTL_SEC:-120}"
 
 [ -f "$OPEN_LOG_RUNTIME" ] || { echo "open-log-snapshot: $OPEN_LOG_RUNTIME отсутствует, нечего снапшоттить"; exit 0; }
 
@@ -46,6 +50,14 @@ TMP_PROJECTION=""
 cleanup_tmp() { rm -f "$TMP_PROJECTION"; }
 trap cleanup_tmp EXIT INT TERM
 
+# WP-530 "Осталось после Ф9" (19.08, peer-session с Kimi): PID-liveness-ветка
+# ниже раньше была без TTL-fallback (elif на locked_at) — тот же примитив
+# в with_isolate_lock() (session-guard.sh) существует ровно потому, что
+# PID-liveness одна не покрывает окно, где процесс упал ДО того, как успел
+# записать свой pid (mkdir выиграл, но echo $$ > pid ещё не выполнился) --
+# такой lockdir никогда не освобождается сам, только вручную. Тот же
+# fallback-порядок, что у with_isolate_lock: PID liveness первым, TTL только
+# когда pid-файла нет вообще.
 mkdir -p "$(dirname "$LOCK_DIR")" "$(dirname "$OPEN_LOG")"
 attempt=0
 while ! mkdir "$LOCK_DIR" 2>/dev/null; do
@@ -55,11 +67,21 @@ while ! mkdir "$LOCK_DIR" 2>/dev/null; do
       rm -rf "$LOCK_DIR"
       continue
     fi
+  elif [ -f "$LOCK_DIR/locked_at" ]; then
+    held_at=$(cat "$LOCK_DIR/locked_at" 2>/dev/null || echo "")
+    held_epoch=$(date -u -j -f "%Y-%m-%dT%H:%M:%SZ" "$held_at" +%s 2>/dev/null \
+      || date -u -d "$held_at" +%s 2>/dev/null || echo 0)
+    age=$(( $(date +%s) - held_epoch ))
+    if [ "$age" -gt "$OPEN_LOG_SNAPSHOT_LOCK_TTL_SEC" ]; then
+      rm -rf "$LOCK_DIR"
+      continue
+    fi
   fi
   attempt=$((attempt + 1))
   [ "$attempt" -gt 30 ] && { echo "open-log-snapshot: заблокирован другим параллельным снапшоттером >30с" >&2; exit 1; }
   sleep 1
 done
+date -u +%Y-%m-%dT%H:%M:%SZ > "$LOCK_DIR/locked_at"
 echo $$ > "$LOCK_DIR/pid"
 cleanup_lock_and_tmp() {
   rm -rf "$LOCK_DIR"

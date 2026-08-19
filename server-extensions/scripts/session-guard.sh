@@ -582,6 +582,43 @@ select_semaphore() {
   return 2
 }
 
+# WP-537 (19.08, пир-сессия с Codex + /verify code, находка P2): общая точка
+# резолва семафора по --session-id для close/note-file -- то же имя файла,
+# что уже резолвит `renew` напрямую (${agent}-${session_id}.open), но с
+# добавленной конфликт-проверкой против явно переданных --wp/--slug. Третье
+# почти идентичное вхождение этой логики (после renew и первой версии close/
+# note-file) -- вынесено сюда, а не повторено ещё раз. Печатает путь семафора
+# в stdout и возвращает 0 при успехе; при отказе печатает причину в stderr
+# (та же конвенция, что select_semaphore выше) и возвращает 1 -- caller сам
+# решает, каким fail()/exit-кодом это обернуть, здесь exit не вызывается,
+# чтобы вызов через "$(...)" не терял код возврата в подshell'е.
+resolve_semaphore_by_session_id() {  # <agent> <session-id> [wp] [slug]
+  local agent="$1" sid="$2" want_wp="${3:-}" want_slug="${4:-}"
+  local sem="$SESSION_DIR/${agent}-${sid}.open"
+  if [ ! -f "$sem" ]; then
+    echo "нет открытой сессии ${agent}-${sid}" >&2
+    return 1
+  fi
+  if [ -n "$want_wp" ]; then
+    local sem_wp
+    sem_wp=$(grep "^wp: " "$sem" | cut -d' ' -f2- || true)
+    if [ "$sem_wp" != "$want_wp" ]; then
+      echo "--session-id $sid указывает на wp='$sem_wp', а передан --wp='$want_wp' -- конфликт селекторов" >&2
+      return 1
+    fi
+  fi
+  if [ -n "$want_slug" ]; then
+    local sem_slug
+    sem_slug=$(grep "^slug: " "$sem" | cut -d' ' -f2- || true)
+    if [ "$sem_slug" != "$want_slug" ]; then
+      echo "--session-id $sid указывает на slug='$sem_slug', а передан --slug='$want_slug' -- конфликт селекторов" >&2
+      return 1
+    fi
+  fi
+  echo "$sem"
+  return 0
+}
+
 # --- parse args ---
 WP=""
 TASK=""
@@ -1615,10 +1652,23 @@ if [ "$CMD" = "close" ]; then
     exit 0
   fi
 
-  SEM_FILE=$(select_semaphore "$AGENT" "${WP:-}" "${SLUG:-}") && SG_RC=0 || SG_RC=$?
-  [ "$SG_RC" -eq 2 ] && exit 3
-  if [ "$SG_RC" -ne 0 ] || [ -z "$SEM_FILE" ] || [ ! -f "$SEM_FILE" ]; then
-    fail "close без open: семафор не найден для $AGENT. Сначала session-guard.sh open --wp WP-N" 3
+  # WP-537 (19.08, пир-сессия с Codex): --session-id обходит select_semaphore()
+  # напрямую, по тому же формату имени файла, что уже использует `renew`
+  # (см. resolve_semaphore_by_session_id выше, найдено /verify как P2) --
+  # при двух открытых сессиях одного РП это единственный селектор,
+  # гарантированно указывающий на одну карточку. Конфликт с явно переданными
+  # --wp/--slug -- отказ, не молчаливый игнор (тот же принцип, что уже
+  # применён к паре --wp+--slug внутри select_semaphore, комментарий WP-484
+  # Ф49): совпало неоднозначно -- откажи, не угадывай.
+  if [ -n "$SESSION_ID_ARG" ]; then
+    SEM_FILE=$(resolve_semaphore_by_session_id "$AGENT" "$SESSION_ID_ARG" "${WP:-}" "${SLUG:-}") \
+      || fail "close: --session-id $SESSION_ID_ARG не резолвится (см. диагностику выше)" 3
+  else
+    SEM_FILE=$(select_semaphore "$AGENT" "${WP:-}" "${SLUG:-}") && SG_RC=0 || SG_RC=$?
+    [ "$SG_RC" -eq 2 ] && exit 3
+    if [ "$SG_RC" -ne 0 ] || [ -z "$SEM_FILE" ] || [ ! -f "$SEM_FILE" ]; then
+      fail "close без open: семафор не найден для $AGENT. Сначала session-guard.sh open --wp WP-N" 3
+    fi
   fi
   WP_FROM_SEM=$(grep "^wp: " "$SEM_FILE" | cut -d' ' -f2- || true)
   WP="${WP:-$WP_FROM_SEM}"
@@ -1700,6 +1750,28 @@ if [ "$CMD" = "close" ]; then
     done
   done
   RUNNER_OK=""
+
+  # WP-484 Ф118 (19.08, пир-сессия с Codex): сессия, открытая с "open
+  # --close-path peer-session", по определению никогда не создаёт
+  # RUN-quick-close-*.md — её протокол закрытия (DP.SC.154 Шаг 4.5.1/4.5.2)
+  # прямой git commit, не раннер. Коммит ce0ab8ed того же дня легализовал
+  # это в close-runner-gate.sh/close-gate-reminder.sh, но не здесь — живой
+  # рецидив на параллельной сессии (macOS, WP-484 сама же тема) поймал
+  # именно этот пробел: раннер-требование ниже применялось безусловно.
+  # Синтетический sentinel по образцу cancel-obligation-ветки (WP-537, ниже)
+  # — не файл карточки, downstream-очистка это уже умеет различать. Ключ —
+  # $SLUG, не harness_session_id: последний пишется в семафор, только если
+  # $CLAUDE_CODE_SESSION_ID был уже установлен на момент open (независимо
+  # задокументированная гонка — см. пилотский разбор той же сессии), и
+  # опора на него здесь сделала бы этот bypass ненадёжным именно в сценарии,
+  # где он нужнее всего. close_path сам по себе — достаточное свидетельство.
+  # Должен идти ПОСЛЕ "RUNNER_OK=\"\"" выше — иначе сброс стирает значение.
+  if grep -q '^close_path: peer-session$' "$SEM_FILE" 2>/dev/null; then
+    RUNNER_OK="declared-peer-session:$SLUG"
+    FORCED_CARD="declared-peer-session:$SLUG"
+    echo "Session CLOSE: close_path=peer-session объявлен при open — раннер не требуется (WP-484 Ф118)." >&2
+  fi
+
   # "${RUNNER_CARDS[@]+"${RUNNER_CARDS[@]}"}", not "${RUNNER_CARDS[@]}": a
   # peer-conversation close (no RUN-quick-close-* card ever written) leaves
   # RUNNER_CARDS empty, and macOS ships bash 3.2 (GPLv3 freeze) where `for x
@@ -1734,40 +1806,74 @@ if [ "$CMD" = "close" ]; then
     done
   fi
 
+  # WP-537 (19.08, пир-сессия с Codex): карточка, отменённая ИМЕННО на шаге
+  # архивации (wp-archive-run), признаётся терминальной без ручного флага --
+  # но ledger-событие пишется всегда, тем же путём, что раньше был доступен
+  # только через --force-no-reflection (та ветка ниже теперь принимает только
+  # blocked-witness-unavailable -- ревью нашло, что не слитые ветки на одной
+  # и той же форме карточки молча теряли явно переданную пилотом причину).
+  # К этому шагу конвейер уже обязан был пройти commit-push-check -- в
+  # quick-close.yaml единственный путь дальше commit-push лежит через
+  # reflection-gate, а туда пускает либо all_pushed:true (commit-push-check),
+  # либо commit_needed:false (commit-push-gate-fallback) -- push-инвариант
+  # ниже не перестраховка, а чтение уже доказанного конвейером факта. Живая
+  # инвентаризация 207 cancelled-карточек (пир-сессия 2026-08-19-13-wp537-
+  # session-guard-close) показала: самый частый случай (blocked-witness-
+  # unavailable, 52/207) сюда сознательно НЕ включён -- на этом шаге ещё не
+  # сделаны session-reflection-append/release, session-ledger-append,
+  # wp-archive, ke-routing, memory-update, verify-r23 (почти весь хвост
+  # конвейера), и это симптом отдельного нерасследованного бага витнес-канала
+  # (WP-537, живая находка не по этой фазе) -- автозакрытие спрятало бы баг
+  # и создало бы дыры в учёте, а не починило бы проблему.
+  if [ -z "$RUNNER_OK" ]; then
+    for card in "${RUNNER_CARDS[@]+"${RUNNER_CARDS[@]}"}"; do
+      grep -q '^process_id: quick-close$' "$card" || continue
+      grep -q '^current_step: wp-archive-run$' "$card" || continue
+      grep -q '^status: cancelled$' "$card" || continue
+      grep -qE '^[[:space:]]*(all_pushed: true|commit_needed: false)$' "$card" || continue
+      RUNNER_OK="$card"
+      FORCED_CARD="$card"
+      break
+    done
+    if [ -n "$RUNNER_OK" ]; then
+      # Причина явного --force-no-reflection (если пилот его передал) идёт в
+      # тот же ledger-эвент, что раньше писала только флаговая ветка -- иначе
+      # причина молча терялась бы для этой же формы карточки (ревью, Critical).
+      ARCHIVE_REASON="${FORCE_NO_REFLECTION:-auto: wp-archive-run cancelled with proven push (WP-537)}"
+      ARCHIVE_EVENT=$(python3 -c '
+import json, sys
+print(json.dumps({"wp": sys.argv[1], "slug": sys.argv[2], "agent": sys.argv[3], "card": sys.argv[4], "reason": sys.argv[5]}))
+' "$WP" "$SLUG" "$AGENT" "$FORCED_CARD" "$ARCHIVE_REASON")
+      bash "$IWE_ROOT/$GOV_REPO/scripts/ledger-append.sh" day "$(now_date)" session_closed_no_reflection "$ARCHIVE_EVENT" session-guard
+      echo "wp-archive-run отменён, push подтверждён -- закрываю автоматически ($FORCED_CARD), причина записана в ledger (WP-537)" >&2
+    fi
+  fi
+
   # --force-no-reflection (WP-484, 08.08, пилот): рефлексия про настроение дня
   # блокирует close, даже когда содержательная работа (commit+push) уже
   # подтверждена картой раннера — живой разбор показал, что вопрос рефлексии
   # часто рендерится ПОСЛЕ команды «закрывай», пилот её физически не видит.
   # Bypass узкий и предметный, не общий «пропусти карту раннера»: требует
-  # ИМЕННО один из перечисленных ниже current_step и подтверждённый push —
+  # ИМЕННО current_step: blocked-witness-unavailable и подтверждённый push —
   # любой ДРУГОЙ сбой раннера (упавший push, отменённый до commit-push прогон)
   # этим флагом по-прежнему не спрятать.
   if [ -z "$RUNNER_OK" ] && [ -n "$FORCE_NO_REFLECTION" ]; then
     for card in "${RUNNER_CARDS[@]+"${RUNNER_CARDS[@]}"}"; do
       grep -q '^process_id: quick-close$' "$card" || continue
-      # Два допустимых current_step, оба безопасны оставить открытым семафором
-      # по тому же критерию (содержательная работа уже доставлена, ничего не
-      # потеряно) — список НЕ произвольно расширяемый, каждый пункт — шаг,
-      # идущий строго ПОСЛЕ commit/push в quick-close.yaml, то есть его отказ
-      # физически не может означать несделанный commit/push:
-      #   (а) blocked-witness-unavailable — исходный случай (08.08): рефлексия
-      #       не отрендерилась пилоту.
-      #   (б) wp-archive-run — WP-520 находка 25 (14.08, пир-сессия с Codex):
-      #       архивация — последний шаг конвейера (quick-close.yaml), уже ПОСЛЕ
-      #       gather-session-facts/commit-push-gate/session-ledger-append; её
-      #       отказ (например «WP уже архивирован», см. wp-archive.sh фикс той
-      #       же сессии) не отменяет уже прошедшую доставку. НЕ «любой
-      #       cancelled» — код-ревью поймал регрессию именно на этой попытке
-      #       (тест 2 намеренно проверяет current_step=commit-push как «сбой,
-      #       который флаг прятать не должен»); список шагов сюда добавлять
-      #       только по одному, с тем же обоснованием «после commit/push».
-      if grep -q '^current_step: blocked-witness-unavailable$' "$card"; then
-        :
-      elif grep -q '^current_step: wp-archive-run$' "$card" && grep -q '^status: cancelled$' "$card"; then
-        :
-      else
-        continue
-      fi
+      # WP-537 (19.08): current_step=wp-archive-run+cancelled переехал в
+      # безусловную ветку выше -- она сама пишет ledger-событие с этим же
+      # FORCE_NO_REFLECTION-текстом, если он передан, так что тот случай
+      # сюда больше не попадает (RUNNER_OK уже не пуст). Единственный
+      # оставшийся случай, всё ещё требующий явного человеческого флага —
+      # содержательная работа уже доставлена, но это не читается из самого
+      # конвейера так же однозначно, как wp-archive-run:
+      #   blocked-witness-unavailable — исходный случай (08.08): рефлексия
+      #   не отрендерилась пилоту. НЕ «любой cancelled» — код-ревью поймал
+      #   регрессию именно на этой попытке (тест 2 намеренно проверяет
+      #   current_step=commit-push как «сбой, который флаг прятать не
+      #   должен»); список шагов сюда добавлять только по одному, с тем же
+      #   обоснованием «после commit/push».
+      grep -q '^current_step: blocked-witness-unavailable$' "$card" || continue
       # WP-520 (11.08, peer session with Kimi): a session that committed manually
       # before starting the runner (allowed path, bug-2026-07-17) is routed AROUND
       # commit-push by commit-push-gate, so all_pushed never appears in its card.
@@ -1781,7 +1887,7 @@ if [ "$CMD" = "close" ]; then
       break
     done
     if [ -z "$RUNNER_OK" ]; then
-      fail "force-no-reflection: не нашёл RUN-quick-close-${SLUG}*.md с current_step в {blocked-witness-unavailable, wp-archive-run (cancelled)} и (all_pushed=true или commit_needed=false) — этот флаг обходит только эти конкретные классы отказа, не любой сбой раннера." 7
+      fail "force-no-reflection: не нашёл RUN-quick-close-${SLUG}*.md с current_step blocked-witness-unavailable и (all_pushed=true или commit_needed=false) — этот флаг обходит только этот класс отказа (wp-archive-run+cancelled теперь принимается автоматически без флага, см. выше), не любой сбой раннера." 7
     fi
     FORCE_EVENT=$(python3 -c '
 import json, sys
@@ -1824,6 +1930,41 @@ print(json.dumps({"wp": sys.argv[1], "slug": sys.argv[2], "agent": sys.argv[3], 
   fi
 
   if [ -z "$RUNNER_OK" ]; then
+    # WP-537 (19.08, пир-сессия с Codex): различить в тексте отказа «карточка
+    # отменена, но не на автоматически безопасном шаге» от «карточки вообще
+    # нет» -- иначе оператор читает один и тот же текст и для «раннер не
+    # запускался», и для «запускался, отменён, но это осознанный policy-guard,
+    # не поломка» (см. блок current_step: wp-archive-run выше).
+    # /verify code (19.08) нашёл: одиночный проход брал ПЕРВУЮ попавшуюся
+    # cancelled-карточку — при 2+ карточках одного slug (обычно после
+    # повторных попыток раннера) текст мог назвать не тот шаг. Два прохода:
+    # сперва целенаправленно ищем wp-archive-run (самое конкретное и
+    # действенное сообщение из трёх), и только если такой карточки нет —
+    # берём первую любую cancelled для общего сообщения.
+    CANCELLED_STEP=""
+    for card in "${RUNNER_CARDS[@]+"${RUNNER_CARDS[@]}"}"; do
+      grep -q '^process_id: quick-close$' "$card" || continue
+      grep -q '^status: cancelled$' "$card" || continue
+      grep -q '^current_step: wp-archive-run$' "$card" || continue
+      CANCELLED_STEP="wp-archive-run"
+      break
+    done
+    if [ -z "$CANCELLED_STEP" ]; then
+      for card in "${RUNNER_CARDS[@]+"${RUNNER_CARDS[@]}"}"; do
+        grep -q '^process_id: quick-close$' "$card" || continue
+        grep -q '^status: cancelled$' "$card" || continue
+        CANCELLED_STEP=$(grep '^current_step: ' "$card" | head -1 | cut -d' ' -f2- || true)
+        break
+      done
+    fi
+    if [ "$CANCELLED_STEP" = "wp-archive-run" ]; then
+      # Шаг правильный, но не прошёл push-инвариант выше -- отдельное
+      # сообщение, иначе текст ниже звучит противоречиво («не безопасный
+      # шаг», хотя шаг ровно тот, что признаётся безопасным).
+      fail "Quick Close не завершён для slug '$SLUG': карточка отменена на шаге wp-archive-run, но push не подтверждён (нет all_pushed:true и commit_needed:false) -- WP-537 признаёт этот шаг терминальным только с доказанным push. Проверь commit-push вручную или попроси пилота об явной отмене (close_obligation.py cancel --action cancel-close)." 7
+    elif [ -n "$CANCELLED_STEP" ]; then
+      fail "Quick Close не завершён для slug '$SLUG': карточка отменена на шаге '$CANCELLED_STEP' -- это не автоматически безопасный терминальный шаг (только wp-archive-run с доказанным push признаётся без ручного вмешательства, WP-537) и нет отмены close-обязательства. Попроси пилота об явной отмене (close_obligation.py cancel --action cancel-close) или доведи раннер до wp-archive-run/completed." 7
+    fi
     fail "Quick Close не завершён для slug '$SLUG': нет terminal RUN-quick-close-${SLUG}*.md и нет отмены close-обязательства (close_obligation.py cancel --action cancel-close) для этой сессии. Сначала запусти process-runner.py start quick-close с тем же --slug, либо попроси пилота об явной отмене." 7
   fi
 
@@ -1946,10 +2087,19 @@ if [ "$CMD" = "note-file" ]; then
   # WP-464: resolve via select_semaphore, not the singleton current-<agent>.ptr —
   # the ptr gets clobbered by a second concurrent `open` of the same agent
   # (bug-2026-07-04-ptr-collision), silently writing scope into the wrong session.
-  SEM_FILE=$(select_semaphore "$NOTE_AGENT" "${WP:-}" "${SLUG:-}") && SG_RC=0 || SG_RC=$?
-  [ "$SG_RC" -eq 2 ] && exit 1
-  if [ "$SG_RC" -ne 0 ] || [ -z "$SEM_FILE" ] || [ ! -f "$SEM_FILE" ]; then
-    fail "note-file: нет открытой сессии для агента '$NOTE_AGENT'. Для разовой операции открой housekeeping-сессию:\n  session-guard.sh open --housekeeping note-file --agent $NOTE_AGENT\n  session-guard.sh note-file <path> --agent $NOTE_AGENT\n  git commit ...   # <-- закоммить ДО close: close снимает семафор и коммит перестанет проходить scope gate\n  session-guard.sh close --housekeeping note-file --agent $NOTE_AGENT" 1
+  # WP-537 (19.08, пир-сессия с Codex): --session-id — тот же short-circuit, что
+  # уже применён к `close` выше (resolve_semaphore_by_session_id, найдено
+  # /verify как P2), той же причины ради (две открытые сессии одного РП,
+  # --slug не всегда под рукой у вызывающего скрипта/раннера).
+  if [ -n "$SESSION_ID_ARG" ]; then
+    SEM_FILE=$(resolve_semaphore_by_session_id "$NOTE_AGENT" "$SESSION_ID_ARG" "${WP:-}" "${SLUG:-}") \
+      || fail "note-file: --session-id $SESSION_ID_ARG не резолвится (см. диагностику выше)" 1
+  else
+    SEM_FILE=$(select_semaphore "$NOTE_AGENT" "${WP:-}" "${SLUG:-}") && SG_RC=0 || SG_RC=$?
+    [ "$SG_RC" -eq 2 ] && exit 1
+    if [ "$SG_RC" -ne 0 ] || [ -z "$SEM_FILE" ] || [ ! -f "$SEM_FILE" ]; then
+      fail "note-file: нет открытой сессии для агента '$NOTE_AGENT'. Для разовой операции открой housekeeping-сессию:\n  session-guard.sh open --housekeeping note-file --agent $NOTE_AGENT\n  session-guard.sh note-file <path> --agent $NOTE_AGENT\n  git commit ...   # <-- закоммить ДО close: close снимает семафор и коммит перестанет проходить scope gate\n  session-guard.sh close --housekeeping note-file --agent $NOTE_AGENT" 1
+    fi
   fi
   # Normalize to git-root-relative (resolve symlinks/macOS /tmp vs /private/tmp)
   if [ -f "$FILE_PATH" ] || [ -d "$FILE_PATH" ]; then
@@ -2097,6 +2247,30 @@ if [ "$CMD" = "unlock-hot-file" ]; then
   LOCK_PATH="$HOT_LOCK_DIR/$(_hot_lock_slug "$HOT_PATH").lockdir"
   rm -rf "$LOCK_PATH"
   echo "Unlocked: $HOT_PATH"
+  exit 0
+fi
+
+# --- GC-BYPASS-MARKERS (WP-530 "Осталось после Ф9", 19.08 peer-session с Kimi) ---
+#
+# canonical-dirty-bypass/<hash>/ markers (created around line ~1032 above,
+# Ф5) never expire on their own -- each one just records "some agent already
+# saw and reported this exact dirty fingerprint", not an incident that needs
+# investigation. history.log next to them is the append-only human record
+# and is intentionally never touched here; only the per-fingerprint marker
+# directories are garbage-collected, by mtime of their `first` file (a marker
+# has no owner process to check liveness against, unlike lock-hot-file/
+# with_isolate_lock -- age is the only signal available, so this is age-only
+# by design, not the PID-first pattern used elsewhere in this file).
+if [ "$CMD" = "gc-bypass-markers" ]; then
+  GC_TTL_DAYS="${IWE_BYPASS_MARKER_TTL_DAYS:-14}"
+  GC_DIR="$IWE_ROOT/.iwe-runtime/canonical-dirty-bypass"
+  [ -d "$GC_DIR" ] || { echo "gc-bypass-markers: $GC_DIR отсутствует, нечего чистить"; exit 0; }
+  GC_REMOVED=0
+  while IFS= read -r -d '' gc_marker; do
+    rm -rf "$gc_marker"
+    GC_REMOVED=$((GC_REMOVED + 1))
+  done < <(find "$GC_DIR" -mindepth 1 -maxdepth 1 -type d -mtime "+$GC_TTL_DAYS" -print0 2>/dev/null)
+  echo "gc-bypass-markers: удалено $GC_REMOVED маркеров старше ${GC_TTL_DAYS}д (history.log не тронут)"
   exit 0
 fi
 
