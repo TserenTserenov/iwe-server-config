@@ -642,6 +642,7 @@ FORCE_FLAG=0
 UNFREEZE_REASON=""
 ISOLATE_FLAG=0
 EXPECTED_HASH=""
+EXPECTED_ABSENT=0
 BASE_SHA=""
 POSITIONAL=()
 while [[ $# -gt 0 ]]; do
@@ -677,6 +678,12 @@ while [[ $# -gt 0 ]]; do
         fail "--expected-hash требует непустое значение (sha256 файла, который читал вызывающий)" 1
       fi
       EXPECTED_HASH="$2"; shift 2 ;;
+    # WP-530 (2026-08-20, peer-session с Codex): --expected-hash не покрывает
+    # "файла ещё не было" -- sha256 пустых байтов смешал бы "нет файла" с
+    # "файл есть, но пустой", два разных состояния. Флаг без значения, не
+    # альтернативный --expected-hash со спецзначением: caller должен явно
+    # выбрать одну из двух семантик, а не угадывать по строке-заглушке.
+    --expected-absent) EXPECTED_ABSENT=1; shift ;;
     --base-sha)
       # WP-503 Ф12 (пир-сессия 2026-08-18): позволяет вызывающему зафиксировать
       # SHA ДО вызова open --isolate (например, под capacity-lock, чтобы
@@ -2301,7 +2308,16 @@ fi
 if [ "$CMD" = "wp-context-guarded-edit" ]; then
   GUARD_PATH="${POSITIONAL[0]:-}"
   [ -z "$GUARD_PATH" ] && fail "wp-context-guarded-edit: missing path argument" 1
-  [ -z "$EXPECTED_HASH" ] && fail "wp-context-guarded-edit: --expected-hash обязателен (hash файла, который читал вызывающий, ДО этого вызова)" 1
+  # Ровно одна из двух семантик обязательна -- ни одной (случайный вызов без
+  # проверки версии вообще) и обе сразу (противоречивое намерение: "файла
+  # нет" и "вот хэш файла, который я читал" не могут быть верны одновременно)
+  # запрещены явно, не оставлены на волю "--expected-hash побеждает".
+  if [ -z "$EXPECTED_HASH" ] && [ "$EXPECTED_ABSENT" != "1" ]; then
+    fail "wp-context-guarded-edit: нужен --expected-hash (файл читался) или --expected-absent (файла не было)" 1
+  fi
+  if [ -n "$EXPECTED_HASH" ] && [ "$EXPECTED_ABSENT" = "1" ]; then
+    fail "wp-context-guarded-edit: --expected-hash и --expected-absent взаимоисключающие -- выбери одно" 1
+  fi
   GUARD_CMD=("${POSITIONAL[@]:1}")
   [ "${#GUARD_CMD[@]}" -eq 0 ] && fail "wp-context-guarded-edit: команда после '--' обязательна" 1
 
@@ -2316,19 +2332,31 @@ if [ "$CMD" = "wp-context-guarded-edit" ]; then
   # command -- unlike guarding just the one line with `set +e`.
   trap 'bash "$0" unlock-hot-file "$GUARD_PATH" >/dev/null 2>&1' EXIT
 
-  ACTUAL_HASH=""
-  if [ -f "$GUARD_PATH" ]; then
-    ACTUAL_HASH=$({ shasum -a 256 "$GUARD_PATH" 2>/dev/null || sha256sum "$GUARD_PATH" 2>/dev/null; } | cut -d' ' -f1)
-  fi
+  if [ "$EXPECTED_ABSENT" = "1" ]; then
+    if [ -f "$GUARD_PATH" ]; then
+      {
+        echo "CONFLICT"
+        echo "expected: absent"
+        echo "actual: exists"
+        echo "file: $GUARD_PATH"
+      } >&2
+      exit 1
+    fi
+  else
+    ACTUAL_HASH=""
+    if [ -f "$GUARD_PATH" ]; then
+      ACTUAL_HASH=$({ shasum -a 256 "$GUARD_PATH" 2>/dev/null || sha256sum "$GUARD_PATH" 2>/dev/null; } | cut -d' ' -f1)
+    fi
 
-  if [ "$ACTUAL_HASH" != "$EXPECTED_HASH" ]; then
-    {
-      echo "CONFLICT"
-      echo "expected_hash: $EXPECTED_HASH"
-      echo "actual_hash: ${ACTUAL_HASH:-missing}"
-      echo "file: $GUARD_PATH"
-    } >&2
-    exit 1
+    if [ "$ACTUAL_HASH" != "$EXPECTED_HASH" ]; then
+      {
+        echo "CONFLICT"
+        echo "expected_hash: $EXPECTED_HASH"
+        echo "actual_hash: ${ACTUAL_HASH:-missing}"
+        echo "file: $GUARD_PATH"
+      } >&2
+      exit 1
+    fi
   fi
 
   set +e

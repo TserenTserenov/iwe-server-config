@@ -300,20 +300,39 @@ WEEKPLAN=$(find "$STRATEGY/current" -maxdepth 1 -name "WeekPlan*.md" 2>/dev/null
 WEEKPLAN_SNAPSHOT="$SNAPSHOT_DIR/weekplan.snapshot"
 [[ -n "$WEEKPLAN" ]] && cp "$WEEKPLAN" "$WEEKPLAN_SNAPSHOT"
 
+# WP-530 (2026-08-20, живой прогон 5 параллельных create-wp.sh + cold-context
+# review нашёл вторую ошибку в первой версии этого фикса): "откатить весь файл
+# к снимку" в принципе не работает для файла, который сама эта сессия уже
+# успешно дописала на предыдущем шаге -- обновлённый ПОСЛЕ успеха снимок
+# СОВПАДАЕТ с текущим содержимым (это же содержимое), и cp снимка в файл
+# просто переписывает файл в себя же, не убирая мою собственную строку.
+# Юнит-тестом в изоляции подтверждено: "откат к снимку = снимок = текущее"
+# оставляет строку на месте вместо удаления.
+#
+# Правильная операция -- не "восстановить состояние файла", а "убрать именно
+# мою вставленную строку, не трогая ничего, что появилось вокруг неё". Строка
+# идентифицируется тем же уникальным паттерном (номер WP), что уже использует
+# post-write verification (issue #256) чуть выше по файлу -- один и тот же
+# grep-якорь для поиска и для удаления, не два независимых определения
+# "моя строка".
+_rollback_remove_my_row() {  # _rollback_remove_my_row <target> <wp-num>
+  local target="$1" wp_num="$2"
+  [[ -f "$target" ]] || return 0
+  local pattern="\\| \\*?\\*?(WP-)?${wp_num}\\*?\\*? \\|"
+  grep -qE "$pattern" "$target" || return 0
+  local tmp
+  tmp=$(mktemp)
+  grep -vE "$pattern" "$target" > "$tmp"
+  cp "$tmp" "$target"
+  rm -f "$tmp"
+}
+
 rollback_wp_creation() {
   echo "↩️  Откат: WP-${WP_ID} не создан целиком, отменяю частичные записи" >&2
   rm -rf "$WP_DIR"
-  if [[ -f "$REGISTRY_SNAPSHOT" ]]; then
-    cp "$REGISTRY_SNAPSHOT" "$REGISTRY"
-  else
-    rm -f "$REGISTRY"
-  fi
+  _rollback_remove_my_row "$REGISTRY" "$WP_NUM"
   if [[ -n "$WEEKPLAN" ]]; then
-    if [[ -f "$WEEKPLAN_SNAPSHOT" ]]; then
-      cp "$WEEKPLAN_SNAPSHOT" "$WEEKPLAN"
-    else
-      rm -f "$WEEKPLAN"
-    fi
+    _rollback_remove_my_row "$WEEKPLAN" "$WP_NUM"
   fi
 }
 
@@ -346,7 +365,21 @@ fi
 FM_STAKE="${FM_STAKE}hypothesis: \"${HYPOTHESIS:-—}\"
 hypothesis_relation: \"${HYPOTHESIS_RELATION}\""
 
-if ! cat > "$WP_FILE" <<WPEOF
+# WP-530 (2026-08-20, peer-session с Codex): два параллельных create-wp.sh
+# могут прочитать один и тот же REGISTRY до того, как первый допишет свою
+# строку -- оба получат один WP_NUM, оба создали бы файл, второй молча
+# перезаписал бы результат первого без единого сигнала. Пишем в temp сначала,
+# затем финальную запись пропускаем через wp-context-guarded-edit
+# --expected-absent -- та же CAS-семантика, что уже подключена в
+# archive-done-wp.sh (--expected-hash) для другого класса гонки. Graceful
+# degradation при отсутствии session-guard.sh (урезанная копия шаблона) --
+# та же логика, что в archive-done-wp.sh: не блокируем создание тем, чего
+# нет, но и не притворяемся, что conflict-проверка сработала.
+# В $SNAPSHOT_DIR, не в системный /tmp напрямую: тот каталог уже покрыт
+# существующим trap ... EXIT (строка выше) -- переиспользуем готовую очистку
+# вместо дублирования её для ещё трёх temp-файлов (WP-530 review, Medium).
+WP_FILE_TMP="$SNAPSHOT_DIR/wp-file.tmp"
+if ! cat > "$WP_FILE_TMP" <<WPEOF
 ---
 wp: ${WP_NUM}
 title: "${TITLE}"
@@ -398,9 +431,34 @@ ${RELATED_ROWS}
 WPEOF
 then
   echo "❌ Не удалось записать context file: $WP_FILE" >&2
+  rm -f "$WP_FILE_TMP"
   rollback_wp_creation
   exit 1
 fi
+
+SESSION_GUARD="${IWE_SCRIPTS:-$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)}/session-guard.sh"
+if [[ -x "$SESSION_GUARD" ]]; then
+  if ! bash "$SESSION_GUARD" wp-context-guarded-edit "$WP_FILE" --expected-absent -- cp "$WP_FILE_TMP" "$WP_FILE"; then
+    echo "❌ WP-${WP_ID}: $WP_FILE уже создан параллельной сессией — эта карточка не записана, номер не занят." >&2
+    echo "   Запусти create-wp.sh заново — получишь следующий свободный номер." >&2
+    rm -f "$WP_FILE_TMP"
+    # Обычный rollback_wp_creation() здесь НЕЛЬЗЯ: guard только что подтвердил,
+    # что $WP_DIR содержит УСПЕШНО записанный файл ЧУЖОЙ параллельной сессии
+    # (не мой недописанный черновик) -- rm -rf стёр бы чужой результат (живая
+    # находка WP-530 2026-08-20: без этой ветки прогон 5 параллельных
+    # create-wp.sh на одном номере физически удалял карточку победителя).
+    # REGISTRY/WeekPlan на этом шаге ещё не тронуты этим процессом вообще --
+    # откатывать нечего, только выйти без победного REGISTRY-шага ниже.
+    echo "↩️  WP-${WP_ID}: карточка не моя, откатывать нечего -- REGISTRY/WeekPlan не тронуты" >&2
+    exit 1
+  fi
+else
+  # Нет session-guard.sh рядом (напр. урезанная копия шаблона) -- не
+  # блокируем создание тем, чего нет, но и не притворяемся, что
+  # conflict-проверка сработала.
+  cp "$WP_FILE_TMP" "$WP_FILE"
+fi
+rm -f "$WP_FILE_TMP"
 
 echo "   ✅ $WP_FILE"
 if [[ "$HYPOTHESIS_RELATION" == "unclassified" ]]; then
@@ -410,7 +468,24 @@ fi
 # --- Шаг 2: WP-REGISTRY.md ---
 echo "2/5 WP-REGISTRY.md..."
 
-if ! python3 - "$REGISTRY" "$WP_NUM" "$PRIORITY" "$TITLE" "$REPO" "$BUDGET" "$GOV_REPO" "$STAKE_CELL" "$WP_ID" <<'PYEOF'
+# WP-530 (2026-08-20, peer-session с Codex, п.7 живой находки): защита
+# WP_FILE одна не закрывает гонку -- REGISTRY_SNAPSHOT снимается ДО этой
+# точки в скрипте (строка ~297) каждым параллельным create-wp.sh независимо,
+# а rollback_wp_creation() безусловно перезаписывает REGISTRY из СВОЕГО
+# снимка при откате. Живым прогоном 5 параллельных create-wp.sh на одном
+# REGISTRY подтверждено: без этой защиты откат проигравших стирает строку
+# уже успевшего победителя, хотя тот победитель отчитался об успехе. Тот же
+# {sha256, absent}-паттерн, что уже закрыл WP_FILE: снимаем хэш перед
+# python-записью, python пишет в temp вместо прямой перезаписи, финальный
+# cp идёт под wp-context-guarded-edit.
+REGISTRY_HASH_BEFORE=""
+if [[ -f "$REGISTRY" ]]; then
+  REGISTRY_HASH_BEFORE=$({ shasum -a 256 "$REGISTRY" 2>/dev/null || sha256sum "$REGISTRY" 2>/dev/null; } | cut -d' ' -f1)
+fi
+REGISTRY_TMP="$SNAPSHOT_DIR/registry.tmp"
+cp "$REGISTRY" "$REGISTRY_TMP"
+
+if ! python3 - "$REGISTRY_TMP" "$WP_NUM" "$PRIORITY" "$TITLE" "$REPO" "$BUDGET" "$GOV_REPO" "$STAKE_CELL" "$WP_ID" <<'PYEOF'
 import sys
 registry_path, wp_num, priority, title, repo, budget, gov_repo, stake, wp_id = sys.argv[1:10]
 
@@ -516,9 +591,24 @@ with open(registry_path, "w", encoding="utf-8") as f:
 print("   ✅ REGISTRY: строка {} добавлена".format(wp_num))
 PYEOF
 then
+  rm -f "$REGISTRY_TMP"
   rollback_wp_creation
   exit 1
 fi
+
+SESSION_GUARD="${IWE_SCRIPTS:-$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)}/session-guard.sh"
+if [[ -x "$SESSION_GUARD" ]] && [[ -n "$REGISTRY_HASH_BEFORE" ]]; then
+  if ! bash "$SESSION_GUARD" wp-context-guarded-edit "$REGISTRY" --expected-hash "$REGISTRY_HASH_BEFORE" -- cp "$REGISTRY_TMP" "$REGISTRY"; then
+    echo "❌ REGISTRY изменился с момента чтения — параллельная сессия дописала свою строку первой." >&2
+    echo "   WP-${WP_ID} не занял номер в REGISTRY; запусти create-wp.sh заново." >&2
+    rm -f "$REGISTRY_TMP"
+    rollback_wp_creation
+    exit 1
+  fi
+else
+  cp "$REGISTRY_TMP" "$REGISTRY"
+fi
+rm -f "$REGISTRY_TMP"
 
 # Post-write verification (issue #256): create-wp.sh once reported success here
 # without the row actually landing in REGISTRY — the writer above has no retry/lock,
@@ -531,13 +621,37 @@ if ! grep -qE "\| \*?\*?(WP-)?${WP_NUM}\*?\*? \|" "$REGISTRY"; then
   exit 1
 fi
 
+# WP-530 (2026-08-20, cold-context review нашёл Critical): _rollback_file_if_unchanged
+# сравнивает текущий REGISTRY с REGISTRY_SNAPSHOT, взятым ДО этой записи -- после
+# успешной записи хэш ЗАКОНОМЕРНО отличается от снимка (мы сами его изменили), и
+# без этого обновления откат на следующем шаге (WeekPlan) читал бы "хэш не совпадает"
+# как "чужая сессия дописала" и НЕ откатывал бы уже мою собственную запись --
+# оставляя REGISTRY-строку без файла карточки, ровно тот класс частично-созданного
+# WP, который весь фикс должен был устранить. Снимок после успеха = моя собственная
+# граница "досюда точно моё", не чужая.
+cp "$REGISTRY" "$REGISTRY_SNAPSHOT"
+
 # --- Шаг 3: WeekPlan ---
 echo "3/5 WeekPlan..."
 
 # WEEKPLAN уже найден выше (снимок для отката, issue WP-507 про формат имени файла
 # применён там же) — здесь используется тот же путь, не ищем повторно.
+#
+# WP-530 (2026-08-20, cold-context review нашёл High): та же уязвимость, что
+# была у REGISTRY до фикса этой же сессии -- python писал напрямую в
+# $WEEKPLAN без CAS-проверки, второй параллельный процесс с ДРУГИМ WP_NUM
+# (гонка на номер уже разрешена guarded-edit на шаге 2 REGISTRY) мог дойти
+# до этого шага одновременно, оба читают один WeekPlan, оба пишут -- второй
+# write() тихо стирает строку первого. Тот же temp+guarded-cp паттерн, что
+# уже применён к WP_FILE и REGISTRY выше в этом же файле.
 if [[ -n "$WEEKPLAN" ]]; then
-  if ! python3 - "$WEEKPLAN" "$WP_NUM" "$TITLE" "$PRIORITY" "$BUDGET" <<'PYEOF'
+  WEEKPLAN_HASH_BEFORE=""
+  if [[ -f "$WEEKPLAN" ]]; then
+    WEEKPLAN_HASH_BEFORE=$({ shasum -a 256 "$WEEKPLAN" 2>/dev/null || sha256sum "$WEEKPLAN" 2>/dev/null; } | cut -d' ' -f1)
+  fi
+  WEEKPLAN_TMP="$SNAPSHOT_DIR/weekplan.tmp"
+  cp "$WEEKPLAN" "$WEEKPLAN_TMP"
+  if ! python3 - "$WEEKPLAN_TMP" "$WP_NUM" "$TITLE" "$PRIORITY" "$BUDGET" <<'PYEOF'
 import sys, re
 weekplan_path, wp_num, title, priority, budget = sys.argv[1:6]
 
@@ -588,10 +702,27 @@ else:
     print("   ✅ WeekPlan: строка WP-{} добавлена".format(wp_num))
 PYEOF
   then
+    rm -f "$WEEKPLAN_TMP"
     echo "❌ WeekPlan write FAILED — WP-${WP_NUM} не создан" >&2
     rollback_wp_creation
     exit 1
   fi
+
+  if [[ -x "$SESSION_GUARD" ]] && [[ -n "$WEEKPLAN_HASH_BEFORE" ]]; then
+    if ! bash "$SESSION_GUARD" wp-context-guarded-edit "$WEEKPLAN" --expected-hash "$WEEKPLAN_HASH_BEFORE" -- cp "$WEEKPLAN_TMP" "$WEEKPLAN"; then
+      echo "❌ WeekPlan изменился с момента чтения — параллельная сессия дописала свою строку первой." >&2
+      echo "   WP-${WP_ID} не попал в WeekPlan; добавь строку вручную." >&2
+      rm -f "$WEEKPLAN_TMP"
+      rollback_wp_creation
+      exit 1
+    fi
+  else
+    cp "$WEEKPLAN_TMP" "$WEEKPLAN"
+  fi
+  rm -f "$WEEKPLAN_TMP"
+  # Тот же приём, что для REGISTRY выше: снимок ПОСЛЕ успеха -- моя собственная
+  # запись, не чужая, откат на следующем шаге (Strategy.md) должен уметь её убрать.
+  cp "$WEEKPLAN" "$WEEKPLAN_SNAPSHOT"
 else
   echo "   ⚠️  WeekPlan не найден в current/ — добавить вручную" >&2
 fi
