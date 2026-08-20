@@ -424,7 +424,60 @@ notify_zombie_escalation() {
   fi
 }
 
+# WP-484 (session-close-hygiene peer-session, 2026-08-20, consensus Claude+
+# Codex+Kimi): a semaphore's own quarantine (below) already proves its owner
+# is gone -- but the `isolated_worktree:` path it recorded at open time was
+# never checked afterward. `close` (see the CLOSING_WORKTREE block further
+# down) only removes an isolated worktree after `isolate-push.sh` confirms
+# the push -- if that never runs at all (process died, terminal killed, no
+# close), the copy sits on disk forever with no second chance. Live-confirmed
+# same session: a worktree from a 2-day-old dead-pid-quarantined semaphore
+# was still present on disk, unpushed status unknown. This reuses the exact
+# same isolate-push.sh path `close` already trusts, not a new deletion
+# criterion -- a push failure here leaves the worktree untouched, same as in
+# `close`.
+_reap_orphaned_worktree() {
+  local quarantined_semaphore="$1"
+  local worktree_path
+  worktree_path=$(grep '^isolated_worktree: ' "$quarantined_semaphore" 2>/dev/null | head -1 | cut -d' ' -f2- || true)
+  [ -n "$worktree_path" ] || return 0
+  [ -d "$worktree_path" ] || return 0
+
+  local isolate_push_script="$IWE_ROOT/$GOV_REPO/scripts/isolate-push.sh"
+  if [ ! -x "$isolate_push_script" ]; then
+    echo "WARNING: orphaned worktree $worktree_path — isolate-push.sh not found at $isolate_push_script, left on disk" >&2
+    return 0
+  fi
+  if "$isolate_push_script" "$worktree_path" main; then
+    if git -C "$worktree_path" worktree remove "$worktree_path" 2>/dev/null; then
+      echo "WARNING: orphaned worktree $worktree_path pushed and removed (owner semaphore quarantined)" >&2
+    else
+      echo "WARNING: orphaned worktree $worktree_path pushed but removal failed (uncommitted state?) — manual: git worktree remove $worktree_path" >&2
+    fi
+  else
+    echo "WARNING: orphaned worktree $worktree_path push failed (exit $?) — left on disk, same as a live close would" >&2
+  fi
+}
+
+# Verify sub-agent (2026-08-20, post-implementation): the sibling
+# sweep_stale_open_log_entries() got with_isolate_lock against concurrent
+# `audit --cleanup-orphans` runs (real trigger: kimi-wp-run-scheduled.sh:86,
+# unconditional, no collision guard) -- this function, which reaps orphaned
+# isolated worktrees via the same trigger, didn't. Confirmed by live test
+# (not just code reading): two concurrent isolate-push.sh calls on the same
+# worktree don't corrupt data (its own retry logic self-heals: attempt 2
+# correctly sees "nothing to push" once attempt 1's push already landed),
+# but the SEPARATE `git worktree remove` step right after it does not --
+# once one call removes the worktree, the other's retry loop tries to fetch
+# from a directory that no longer exists and dies with an ugly
+# "Unable to read current working directory" instead of the clean
+# "nothing to push" exit. No data loss in either case, but an avoidable
+# crash exactly where the sibling function already proved the fix pattern.
 sweep_orphaned_semaphores() {
+  with_isolate_lock "orphan-semaphore-sweep" _sweep_orphaned_semaphores_body
+}
+
+_sweep_orphaned_semaphores_body() {
   local semaphore pid epoch quarantined=0 ambiguous=0
   local zombies_escalated=0 zombies_quarantined=0
   while IFS= read -r semaphore; do
@@ -440,6 +493,7 @@ sweep_orphaned_semaphores() {
       if ! kill -0 "$pid" 2>/dev/null; then
         mv "$semaphore" "${semaphore}.orphaned-dead-pid"
         echo "WARNING: orphaned semaphore $(basename "$semaphore") quarantined: pid $pid is dead" >&2
+        _reap_orphaned_worktree "${semaphore}.orphaned-dead-pid"
         quarantined=$((quarantined + 1))
       fi
       continue
@@ -463,6 +517,7 @@ sweep_orphaned_semaphores() {
       fi
       mv "$semaphore" "${semaphore}.orphaned-zombie-no-pid"
       echo "WARNING: quarantined zombie semaphore (missing/invalid owner PID): $(basename "$semaphore")" >&2
+      _reap_orphaned_worktree "${semaphore}.orphaned-zombie-no-pid"
       zombies_quarantined=$((zombies_quarantined + 1))
       continue
     fi
@@ -484,6 +539,88 @@ sweep_orphaned_semaphores() {
   # Automatic 24h cleanup requires a periodic external invocation of
   # `session-guard.sh audit --cleanup-orphans`; scheduler configuration is
   # intentionally outside this file.
+}
+
+# WP-484 (session-close-hygiene peer-session, 2026-08-20): every `open`
+# appends one line to OPEN_LOG_RUNTIME (above), nothing ever removes one --
+# `close` never touches this file at all. Unlike a semaphore, a log line
+# carries no session_id (format is "date | WP | agent | task", see the
+# `open` append site) -- no reliable key exists to delete a SPECIFIC line at
+# close time without risking a wrong match against another line sharing the
+# same date/WP/agent. Same "zombie candidate, never proven dead" situation
+# sweep_orphaned_semaphores() already handles for PID-less semaphores above,
+# so this reuses that TTL rather than inventing a second one: age alone
+# (IWE_ZOMBIE_CLEANUP_SEC) decides what is dropped when this rebuild runs.
+# Code review (2026-08-20) + live tests, two rounds. Round 1: the first
+# version wrapped the body below in with_isolate_lock, believing that closed
+# the TOCTOU window where `open` appends a line between this function's
+# `while read` finishing and its `mv -f`. It didn't -- `open`'s own append
+# site (above) never takes that lock, so serializing sweep against ITSELF
+# does nothing against a concurrent, unlocked appender. Reproduced live
+# (signal-file synced harness): a line appended in the exact read-done ->
+# mv window was silently dropped even with the lock in place. Fixed by
+# offset-capture instead (below): record the file's byte size before
+# reading, tail-append anything the ORIGINAL file grew past that offset
+# onto the filtered result before the atomic replace -- needs no lock, works
+# whether or not the appender takes one. Round 2: offset-capture alone still
+# leaves sweep racing ITSELF -- two concurrent `audit --cleanup-orphans`
+# calls (real trigger: kimi-wp-run-scheduled.sh:86 fires this unconditionally
+# on every queued WP start, no collision guard around it) can both finish
+# their read+filter pass, and whichever's `mv` lands second unconditionally
+# overwrites the first's result, silently reviving lines the first sweep
+# correctly dropped and losing anything the first sweep's own offset-capture
+# had appended. with_isolate_lock IS the right tool for this -- sweep vs
+# sweep is exactly the same-operation serialization it exists for; round 1
+# only misapplied it to the wrong race (sweep vs append).
+sweep_stale_open_log_entries() {
+  with_isolate_lock "open-log-sweep" _sweep_stale_open_log_entries_body
+}
+
+_sweep_stale_open_log_entries_body() {
+  [ -f "$OPEN_LOG_RUNTIME" ] || return 0
+  local now_epoch dropped=0 kept=0 orig_size_before orig_size_after
+  now_epoch=$(date +%s)
+  orig_size_before=$(wc -c < "$OPEN_LOG_RUNTIME" | tr -d ' ')
+  local tmp_log
+  tmp_log=$(mktemp "${OPEN_LOG_RUNTIME}.tmp.XXXXXX")
+  while IFS= read -r line; do
+    [ -n "$line" ] || continue
+    local entry_date entry_epoch age
+    entry_date=$(echo "$line" | cut -d'|' -f1 | xargs)
+    # Live-caught bug (2026-08-20, own multi-process race test): the append
+    # site (`date '+%Y-%m-%d %H:%M'`, no -u) writes LOCAL time. Parsing that
+    # same string with `-u` here read it as UTC instead -- on a machine
+    # ahead of UTC this makes every entry look OLDER than it is (wrong
+    # direction: risks dropping fresh sessions), on one behind it makes
+    # everything look YOUNGER (risks never cleaning up). No -u here, to
+    # match the writer.
+    entry_epoch=$(date -j -f "%Y-%m-%d %H:%M" "$entry_date" +%s 2>/dev/null \
+      || date -d "$entry_date" +%s 2>/dev/null || echo "")
+    if [ -z "$entry_epoch" ]; then
+      # Unparseable date: keep, same fail-closed choice as semaphore sweep's
+      # "no proof of death" branch -- an unreadable entry is not a proven zombie.
+      echo "$line" >> "$tmp_log"
+      kept=$((kept + 1))
+      continue
+    fi
+    age=$(( now_epoch - entry_epoch ))
+    if [ "$age" -ge "$IWE_ZOMBIE_CLEANUP_SEC" ]; then
+      dropped=$((dropped + 1))
+    else
+      echo "$line" >> "$tmp_log"
+      kept=$((kept + 1))
+    fi
+  done < "$OPEN_LOG_RUNTIME"
+  # This is the actual race fix (see the comment above the function) --
+  # capture whatever a concurrent, unlocked `open` appended to the ORIGINAL
+  # file past the byte offset recorded before we started reading, and
+  # reattach it verbatim before the atomic replace.
+  orig_size_after=$(wc -c < "$OPEN_LOG_RUNTIME" | tr -d ' ')
+  if [ "$orig_size_after" -gt "$orig_size_before" ]; then
+    tail -c "+$((orig_size_before + 1))" "$OPEN_LOG_RUNTIME" >> "$tmp_log"
+  fi
+  mv -f "$tmp_log" "$OPEN_LOG_RUNTIME"
+  echo "open-sessions.log sweep: kept=$kept dropped=$dropped (age >= ${IWE_ZOMBIE_CLEANUP_SEC}s)"
 }
 orz_agent_name() {
   case "$1" in
@@ -633,6 +770,15 @@ PERSONALITY=""
 # which closing procedure applies from session_id shape alone. Empty stays
 # "unknown" (legacy callers that don't pass it), which keeps today's behavior.
 CLOSE_PATH=""
+# WP-484 (session-close-hygiene peer-session, 2026-08-20, Ф118 backlog item):
+# same pattern as CLOSE_PATH above — optional, written into the semaphore,
+# defaults to "не указано" so callers that don't pass it keep today's
+# behavior. Lets the NEXT `open` for this WP read back what actually
+# happened (Background Gate in protocol-open.md already reads session_closed
+# ledger records for this; RESULT_ARG/DEFER_ARG give it a second, direct
+# source straight from the semaphore itself, not only the ledger).
+RESULT_ARG=""
+DEFER_ARG=""
 OWNER_PID=""
 SESSION_ID_ARG=""
 CLEANUP_ORPHANS=0
@@ -653,6 +799,8 @@ while [[ $# -gt 0 ]]; do
     --slug|--topic) SLUG="$2"; shift 2 ;;
     --agent)  AGENT="$2"; shift 2 ;;
     --close-path) CLOSE_PATH="$2"; shift 2 ;;
+    --result) RESULT_ARG="$2"; shift 2 ;;
+    --defer)  DEFER_ARG="$2"; shift 2 ;;
     --housekeeping) HOUSEKEEPING="$2"; shift 2 ;;
     # WP-520 freeze-enforce (peer-session 2026-08-14-07): the only sanctioned
     # bypass, for launchd/cron runners that own the canonical checkout by
@@ -2049,11 +2197,18 @@ print(json.dumps({"wp": sys.argv[1], "slug": sys.argv[2], "agent": sys.argv[3], 
       CLOSING_WORKTREE=""
     fi
   fi
+  # Code review (2026-08-20, session-close-hygiene): CLOSING_WORKTREE means
+  # "push succeeded", not "worktree is gone" -- a failed `worktree remove`
+  # right below (uncommitted stray file, etc.) used to leave it non-empty,
+  # so the checklist publish-state computed further down read a physically
+  # orphaned worktree as "clean". Separate variable for what it actually is.
+  WORKTREE_REMOVED=1
   if [ -n "$CLOSING_WORKTREE" ]; then
     if git -C "$CLOSING_WORKTREE" worktree remove "$CLOSING_WORKTREE" 2>/dev/null; then
       echo "Isolated worktree removed: $CLOSING_WORKTREE"
     else
       echo "⚠️  не удалось убрать изолированный worktree $CLOSING_WORKTREE (возможно есть незакоммиченное) -- почисти вручную: git worktree remove $CLOSING_WORKTREE" >&2
+      WORKTREE_REMOVED=0
     fi
   fi
 
@@ -2083,6 +2238,35 @@ print(json.dumps({"wp": sys.argv[1], "slug": sys.argv[2], "agent": sys.argv[3], 
 $_repo"
     _warn_unpushed "$_repo"
   done < <(cat "$_sem_read" 2>/dev/null || true)
+
+  # WP-484 Ф118 backlog (session-close-hygiene peer-session, 2026-08-20):
+  # "session-close checklist as the NEXT open's gate" — the gate itself lives
+  # in protocol-open.md (Background Gate reads the day ledger), this only
+  # gives it a second, direct source: 4 fields recorded straight into the
+  # semaphore this close just produced, not just the ledger. publish_state is
+  # computed here, not passed by the caller — the caller has no way to know
+  # it before this point in the function (it depends on the push attempts
+  # just above). result/carry_over stay caller-supplied (--result/--defer):
+  # session-guard.sh has no access to what the pilot decided was actually
+  # accomplished, only git/process state.
+  # Code review (2026-08-20): CLOSING_WORKTREE alone proved push, not
+  # cleanup — WORKTREE_REMOVED (set right above, at the actual `worktree
+  # remove` call) is the second half needed to tell "no isolation used",
+  # "pushed and gone", and "pushed but physically still on disk" apart.
+  _publish_state="clean"
+  if grep -q '^isolated_worktree: ' "$_sem_read" 2>/dev/null; then
+    if [ -z "$CLOSING_WORKTREE" ]; then
+      _publish_state="worktree-push-failed"
+    elif [ "$WORKTREE_REMOVED" -eq 0 ]; then
+      _publish_state="worktree-pushed-not-removed"
+    fi
+  fi
+  {
+    echo "checklist_status: closed"
+    echo "checklist_result: ${RESULT_ARG:-не указано}"
+    echo "checklist_carry_over: ${DEFER_ARG:-нет}"
+    echo "checklist_publish_state: $_publish_state"
+  } >> "$_sem_read"
   exit 0
 fi
 
@@ -2522,6 +2706,8 @@ if [ "$CMD" = "audit" ]; then
   # with the pilot).
   if [ "$CLEANUP_ORPHANS" -eq 1 ]; then
     sweep_orphaned_semaphores
+    echo
+    sweep_stale_open_log_entries
     echo
   fi
   SINCE="${SINCE:-$(date -v-7d +%Y-%m-%d 2>/dev/null || date -d '7 days ago' +%Y-%m-%d)}"
