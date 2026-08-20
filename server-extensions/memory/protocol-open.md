@@ -9,6 +9,7 @@ owner: user
 schema_version: 1
 name: "Протокол: open"
 description: "Протокол ОРЗ — пошаговые инструкции для ритуала"
+modified: 2026-08-20T16:51:43.511Z
 ---
 # Протокол Open (ОРЗ-фрактал)
 
@@ -78,6 +79,8 @@ python3 "${IWE_SCRIPTS:-$HOME/IWE/scripts}/artifactor.py" "$REQUEST"
 
    **Шаг 3d — Очистка:** `rm -f /tmp/wp-sync-bundle-$$.md`, `touch .claude/state/wp-sync-<N>.done`.
 
+3.5. **Мини-ритуал переоткрытия (РП-541 Ф5, S-59, 20.08.2026).** `last_session` = ISO-дата YYYY-MM-DD из frontmatter карточки (поле обязано начинаться с даты; при хвостовом тексте брать первые 10 символов); `today` = текущая календарная дата. Сравнивать даты, не локальное время агента (защита от timezone drift). Если `today − last_session` > 3 календарных дней → после Sync Gate показать пилоту короткую сводку и дождаться согласования ДО начала работы: (а) что изменилось вокруг РП со времени последней сессии (из bundle: связанные РП, drift-сигналы; bundle недоступен — race-guard пропустил 3a или файл уже удалён 3d → запустить `wp-sync-bundle.sh WP-N` заново только для сводки), (б) открытые фазы, (в) предложение «что делаю в этой сессии». Полный Ритуал не требуется — только сводка + «да» пилота. Пауза ≤3 дней → пропустить молча. [[gate]]
+
 4. → Ритуал.
 
 #### Не совпадает — СТОП
@@ -130,7 +133,7 @@ python3 "${IWE_SCRIPTS:-$HOME/IWE/scripts}/artifactor.py" "$REQUEST"
 
 **Шаг 2.** Дождаться согласования. [[gate:AR.001]]
 
-**Шаг 3.** Определить файлы/репо. Context file (`<governance-repo>/inbox/WP-{N}/WP-{N}.md`, например DS-my-strategy) — прочитать. Иерархия доверия: код → документы → WP context. [[narrative]]
+**Шаг 3.** Определить файлы/репо. Context file (`<governance-repo>/inbox/WP-{N}/WP-{N}.md`, например DS-my-strategy) — прочитать. Если в frontmatter есть `archive:` — архивный файл `WP-N-archive.md` по умолчанию НЕ читать, поднимать только по явному слову пилота (РП-541 Ф5; обобщение `agent_scope: open-only`). Иерархия доверия: код → документы → WP context. [[narrative]]
 
 **Шаг 4.** Регистрация в `<governance-repo>/inbox/open-sessions.log` (например DS-my-strategy): `YYYY-MM-DD HH:MM | WP-N | модель | описание`. Исключения — не регистрировать. [[gate]]
 
@@ -138,7 +141,7 @@ python3 "${IWE_SCRIPTS:-$HOME/IWE/scripts}/artifactor.py" "$REQUEST"
 
 **EXTENSION POINT (protocol-open after):** `bash .claude/scripts/load-extensions.sh protocol-open after` — exit 0 → `Read` каждый файл из вывода (alphabetic) → выполнить. Exit 1 → пропустить. Поддерживает `extensions/protocol-open.after.md` И `extensions/protocol-open.after.<suffix>.md`. [[narrative]]
 
-> Продолжение работы над тем же РП — повторный Ритуал не нужен.
+> Продолжение работы над тем же РП — повторный Ритуал не нужен (пауза ≤3 календарных дней). Пауза >3 дней → мини-ритуал переоткрытия (шаг 3.5): сводка изменений + открытые фазы + предложение на сессию → согласование пилота, без полного Ритуала.
 
 ## Зонтичные РП
 
