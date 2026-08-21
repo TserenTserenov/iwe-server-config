@@ -24,6 +24,7 @@ import getpass
 import hashlib
 import sys
 from pathlib import Path
+from typing import Optional
 
 import yaml
 
@@ -43,7 +44,7 @@ REQUIRED_DELIVERY = "managed"
 REQUIRED_AUTHORITY = "root-repository"
 
 
-def read_frontmatter(path: Path) -> dict | None:
+def read_frontmatter(path: Path) -> Optional[dict]:
     """Parses the leading `---\\n...\\n---` YAML block. None if absent/invalid."""
     try:
         text = path.read_text(encoding="utf-8")
