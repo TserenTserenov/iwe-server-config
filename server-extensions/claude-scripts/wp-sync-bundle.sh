@@ -205,7 +205,7 @@ registry_status() {
     return
   fi
   local line
-  line=$(grep -E "WP-${num}[^0-9]" "$REGISTRY_FILE" 2>/dev/null | head -1 || true)
+  line=$(grep -E "^\| ~{0,2}${num}~{0,2} \|" "$REGISTRY_FILE" 2>/dev/null | head -1 || true)
   if [[ -z "$line" ]]; then
     echo "_не в реестре_"
     return

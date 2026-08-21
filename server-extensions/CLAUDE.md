@@ -163,6 +163,7 @@ Respond in Russian unless the user writes in English.
 > Правила на обкатке (STAGING.md) → работают → переносятся в шаблон (L1). Новое поведение в §9 → ОДНОВРЕМЕННО строка в STAGING.md (`status: testing`). Промоция на Week Close (`validated`→`promoted`, `rejected` остаётся в §9 — не удалять) → скилл `/author-mode` и `.claude/rules-lazy/blocking-rules-full.md`.
 
 **Активная запись:** S-45 Agent Inbox (WP-324) — `inbox/agent/` + `iwe-agent-dispatcher.py`, промотировано в FMT `extensions/agent-inbox/`. Status: testing.
+**S-59 Гигиена карточек РП (WP-541 Ф5):** Close — секция «Осталось» единственная, переписывается (слой → строка `## Журнал`); Open — мини-ритуал переоткрытия при паузе >3 дней; архив карточки по триггеру (>14 дней И >400 строк, semi-auto) → `WP-N-archive.md`, читать только по слову пилота. Полные правила → `memory/protocol-{open,close}.md`. Status: testing.
 
 ---
 
