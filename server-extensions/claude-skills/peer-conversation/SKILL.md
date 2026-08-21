@@ -1154,6 +1154,15 @@ cd "$HOME/IWE/${IWE_GOVERNANCE_REPO:-DS-strategy}"
 PATHS=("sessions/$MONTH/$DAY/$SESSION_ID/" "$GUARD_ORZ")
 git add "${PATHS[@]}"
 git commit -m "feat(peer): $SESSION_ID — <задача кратко>" -- "${PATHS[@]}"
+
+# F1 (пир-сессия 2026-08-21-02-day-close-anomaly-classes): attest-манифест
+# сессии — ПОСЛЕ payload-коммита с отчётом, ДО публикации. Без манифеста
+# догоняющий quick-close уже запушенной сессии не доказывает «всё на remote»
+# и падает в ручной обход. Отказ (грязное дерево и т.п.) не блокирует
+# закрытие — WARN и legacy-путь confirmed_clean_repos. При доставке из
+# изолированного worktree (freeze) — та же строка перед isolate-push.
+bash "$HOME/IWE/${IWE_GOVERNANCE_REPO:-DS-strategy}/scripts/session-manifest-write.sh" "$(git rev-parse --show-toplevel)" "$SESSION_ID" \
+  || echo "WARN: attest-манифест не создан — догоняющее закрытие пойдёт legacy-путём"
 ```
 
 **Публикация — через общий шлюз координации, не голым `git push`** (WP-530 Ф9, 19.08, пир-сессия с Codex — тот же класс дыры, что в Шаге 3.6.5: голый push здесь обходил `ds-publish.sh`, которым уже пользуются quick-close/day-close/... — приоритет `high`, а не `normal` как в 3.6.5: пилот реально ждёт закрытие сессии сейчас, это не фоновый деплой):

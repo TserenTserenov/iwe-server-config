@@ -126,7 +126,7 @@ fi
 # --- session-guard open -----------------------------------------------------
 if [ "$IS_TASK" = "1" ] || [ "$AGENT" = "codex" ]; then
   # задача без РП или Codex peer pass: housekeeping-сессия (без ORZ, без WP Gate)
-  if ! bash "$IWE_ROOT/scripts/session-guard.sh" open --housekeeping "sched-$ID" --agent "$AGENT" --owner-pid "$$" --canonical-owner "launchd-scheduled" >>"$LOG" 2>&1; then
+  if ! bash "$IWE_ROOT/scripts/session-guard.sh" open --housekeeping "sched-$ID" --agent "$AGENT" --owner-pid "$$" --canonical-owner "launchd-scheduled" --standalone-launch >>"$LOG" 2>&1; then
     log "ERROR: session-guard open (housekeeping) failed"
     set_status failed; report_line failed "session-guard open failed"; cleanup; exit 1
   fi

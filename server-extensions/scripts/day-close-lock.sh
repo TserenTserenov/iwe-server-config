@@ -118,12 +118,165 @@ discard_local_marker() {
   fi
 }
 
+# F3 (пир-сессия 2026-08-21-02-day-close-anomaly-classes): собственный
+# OID-маркированный стэш вместо встроенного --autostash. Встроенный при
+# конфликтном pop оставляет безымянные записи (6 накопилось за сутки 20.08),
+# а один из pop'ов вернул старую версию DayPlan поверх закоммиченной. Здесь:
+# создание, захват OID, apply и drop сериализованы одним flock на весь
+# acquire; запись помечена run_id; drop — только после подтверждённо чистого
+# apply и только именно этой записи; чужие стэши не трогаются никогда.
+# Untracked в стэш не входят: rebase, падающий на untracked-overwrite, — это
+# FAIL с явным списком, решение о таких файлах за оператором, не за скриптом.
+STASH_OID=""
+
+own_stash_lock() {
+  local git_dir
+  # review-04: любая неудача разрешения пути/открытия fd — fail closed, не
+  # «продолжить без блокировки».
+  git_dir=$(git rev-parse --git-common-dir 2>/dev/null) || { log "git-common-dir не резолвится — отказ (fail closed)"; exit 2; }
+  case "$git_dir" in
+    /*) : ;;
+    *) git_dir="$(git rev-parse --show-toplevel)/$git_dir" ;;
+  esac
+  exec 9>"$git_dir/day-close-lock.stash.lock" || { log "не удалось открыть lock-файл — отказ (fail closed)"; exit 2; }
+  if command -v flock >/dev/null 2>&1; then
+    flock 9 || { log "flock на stash-lock не взят — отказ (fail closed)"; exit 2; }
+  elif command -v shlock >/dev/null 2>&1; then
+    shlock -f "$git_dir/day-close-lock.stash.lock.pid" -p $$ || { log "shlock на stash-lock не взят — отказ (fail closed)"; exit 2; }
+    # review-04: путь разворачиваем сейчас — локальная переменная к моменту
+    # EXIT уже не существует; trap у этого скрипта один, замена безопасна.
+    trap "rm -f '$git_dir/day-close-lock.stash.lock.pid'" EXIT
+  elif mkdir "$git_dir/day-close-lock.stash.lock.d" 2>/dev/null; then
+    trap "rm -rf '$git_dir/day-close-lock.stash.lock.d'" EXIT
+  else
+    log "ни flock, ни shlock, ни mkdir-lock недоступны — отказ (fail closed)"
+    exit 2
+  fi
+}
+
+own_stash_push() {
+  local before after run_id out
+  run_id="$(date +%s)-$$"
+  before=$(git rev-parse -q --verify refs/stash 2>/dev/null || echo "")
+  out=$(git stash push -m "day-close-lock-$run_id" 2>&1) || { log "git stash push failed: $out"; return 1; }
+  after=$(git rev-parse -q --verify refs/stash 2>/dev/null || echo "")
+  if [ -n "$after" ] && [ "$after" != "$before" ]; then
+    STASH_OID="$after"
+  else
+    # «No local changes to save» — чистое дерево, стэш не нужен.
+    STASH_OID=""
+  fi
+  return 0
+}
+
+own_stash_apply() {
+  [ -z "$STASH_OID" ] && return 0
+  # review-03: apply один раз и сразу с --index — восстанавливаем и staged-
+  # состояние, не только worktree.
+  if ! git stash apply --index "$STASH_OID" >/dev/null 2>&1; then
+    log "КОНФЛИКТ при возврате стэша day-close-lock (OID $STASH_OID) — запись СОХРАНЕНА в stash, разберите вручную: git stash show -p $STASH_OID; git checkout --theirs/--ours по месту; затем git stash drop"
+    return 1
+  fi
+  # review-01 High-5 + review-02/03/04 High: успешный exit apply не доказывает
+  # восстановление. Полная сверка (python, NUL-парсинг): M/A — блоб и режим
+  # worktree-файла равны записанным в стэше, D — файл отсутствует и в worktree,
+  # и в индексе; staged-блоб сверяется с index-коммитом стэша (^2); пустой или
+  # неполный список = проверка не состоялась = не удалять. --no-renames: rename
+  # для нас — пара delete+add, сверяется по тем же правилам честно.
+  if ! python3 - "$STASH_OID" <<'VERIFY_EOF'
+import subprocess, sys, os, stat
+oid = sys.argv[1]
+def git(*args, check=True, **kw):
+    r = subprocess.run(["git"]+list(args), capture_output=True, **kw)
+    if check and r.returncode != 0:
+        raise SystemExit(2)
+    return r
+raw = git("stash", "show", "--name-status", "--no-renames", "-z", oid).stdout
+if not raw:
+    print("пустой список файлов стэша — сверка невозможна", file=sys.stderr)
+    raise SystemExit(1)
+parts = raw.decode("utf-8", "surrogateescape").split("\0")
+entries = []
+i = 0
+while i < len(parts) - 1:
+    entries.append((parts[i], parts[i+1]))
+    i += 2
+fail = None
+for st, f in entries:
+    st = st.strip()
+    if not f:
+        continue
+    if st == "D":
+        # review-05: unstaged-удаление — файла нет в worktree, но он ОБЯЗАН
+        # сохраниться в индексе (как в ^2); staged-удаление — нет ни там, ни там.
+        if os.path.lexists(f):
+            fail = f"{f}: удалён в стэше, но существует в worktree"; break
+        stash_idx = git("rev-parse", f"{oid}^2:{f}", check=False)
+        stash_idx_blob = stash_idx.stdout.decode().strip() if stash_idx.returncode == 0 else ""
+        staged = git("ls-files", "-s", "--", f).stdout.decode().split()
+        idx_blob = staged[1] if staged else ""
+        if stash_idx_blob:
+            if idx_blob != stash_idx_blob:
+                fail = f"{f}: unstaged-удаление — индекс обязан держать блоб {stash_idx_blob[:8]} из стэша"; break
+        elif idx_blob:
+            fail = f"{f}: staged-удаление — файл остался в индексе"; break
+        continue
+    if not os.path.lexists(f):
+        fail = f"{f}: нет в worktree после apply"; break
+    wblob = git("hash-object", "--", f).stdout.decode().strip()
+    sblob = git("rev-parse", f"{oid}:{f}").stdout.decode().strip()
+    if wblob != sblob:
+        fail = f"{f}: блоб worktree != блоб стэша"; break
+    st_mode = git("ls-tree", oid, "--", f).stdout.decode().split()[0]
+    if os.path.islink(f):
+        w_mode = "120000"
+    elif os.stat(f).st_mode & stat.S_IXUSR:
+        w_mode = "100755"
+    else:
+        w_mode = "100644"
+    if st_mode != w_mode:
+        fail = f"{f}: режим {w_mode} != {st_mode} в стэше"; break
+    staged = git("ls-files", "-s", "--", f).stdout.decode().split()
+    idx_blob = staged[1] if staged else ""
+    stash_idx = git("rev-parse", f"{oid}^2:{f}", check=False)
+    stash_idx_blob = stash_idx.stdout.decode().strip() if stash_idx.returncode == 0 else ""
+    if stash_idx_blob and idx_blob != stash_idx_blob:
+        fail = f"{f}: staged-блоб != index-коммит стэша"; break
+if fail:
+    print(fail, file=sys.stderr)
+    raise SystemExit(1)
+VERIFY_EOF
+  then
+    log "stash apply прошёл, но полная сверка содержимого не подтвердилась (OID $STASH_OID) — запись СОХРАНЕНА, проверьте вручную: git stash show -p $STASH_OID"
+    return 1
+  fi
+  # apply чист и проверен — удаляем именно нашу запись: индекс ищем по OID
+  # внутри той же критической секции, конкурентный stash снаружи сдвинуть его
+  # не может.
+  local selector
+  selector=$(git stash list --format='%H %gd' | awk -v oid="$STASH_OID" '$1==oid {print $2; exit}')
+  if [ -n "$selector" ]; then
+    git stash drop "$selector" >/dev/null 2>&1 || log "stash drop $selector не удался — запись $STASH_OID осталась, удалите вручную"
+  else
+    log "запись $STASH_OID не найдена в stash list после apply — уже удалена? проверить git stash list"
+  fi
+  STASH_OID=""
+  return 0
+}
+
 acquire() {
   cd "$REPO_DIR" || { log "не удалось перейти в $REPO_DIR — окружение не настроено, эскалирую"; exit 2; }
 
   local_barrier
 
-  git pull --rebase --autostash || { log "git pull failed — не рискуем работать на устаревшей истории"; exit 2; }
+  own_stash_lock
+  own_stash_push || { log "не удалось спрятать локальные изменения — эскалирую"; exit 2; }
+  if ! git pull --rebase; then
+    log "git pull failed — не рискуем работать на устаревшей истории"
+    [ -n "$STASH_OID" ] && log "локальные изменения остались в stash (OID $STASH_OID): git stash show -p $STASH_OID"
+    exit 2
+  fi
+  own_stash_apply || exit 2
 
   local state
   state=$(check_today_history)
@@ -164,8 +317,13 @@ acquire() {
   fi
 
   # На origin нет конкурента — reject был вызван чем-то посторонним. Безопасно перебазировать
-  # свой маркер поверх актуального origin и повторить push.
-  git rebase --autostash "origin/$branch" || abort_after_marker 2 "rebase после fetch не удался — эскалирую"
+  # свой маркер поверх актуального origin и повторить push. Стэш-цикл — под тем же
+  # flock (fd 9 открыт в acquire): push/pull/apply сериализованы от начала до конца.
+  own_stash_push || abort_after_marker 2 "не удалось спрятать локальные изменения перед rebase — эскалирую"
+  if ! git rebase "origin/$branch"; then
+    abort_after_marker 2 "rebase после fetch не удался — эскалирую (стэш ${STASH_OID:-нет} сохранён)"
+  fi
+  own_stash_apply || abort_after_marker 2 "конфликт возврата стэша после rebase — запись сохранена, см. лог выше"
   git push || abort_after_marker 2 "Повторный push не удался — эскалирую"
   log "Lock acquired на втором заходе: day-close-start: ${today} by ${who}"
 }

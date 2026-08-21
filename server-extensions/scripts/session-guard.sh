@@ -802,6 +802,13 @@ while [[ $# -gt 0 ]]; do
     --result) RESULT_ARG="$2"; shift 2 ;;
     --defer)  DEFER_ARG="$2"; shift 2 ;;
     --housekeeping) HOUSEKEEPING="$2"; shift 2 ;;
+    # WP-484 Ф72 доводка (review r7, Codex): маркер standalone-доверия для
+    # witness-скипа quick-close пишется ТОЛЬКО по явному флагу лаунчера
+    # (launchd/scheduler-скрипты, запускающие Kimi headless). Без флага open
+    # маркер не пишет никогда: имя агента не доказывает headless-запуск —
+    # интерактивная Kimi-сессия с пилотом в чате иначе получала бы право
+    # молча пропустить рефлексию.
+    --standalone-launch) STANDALONE_LAUNCH=1; shift ;;
     # WP-520 freeze-enforce (peer-session 2026-08-14-07): the only sanctioned
     # bypass, for launchd/cron runners that own the canonical checkout by
     # schedule rather than compete for it. Value is diagnostic only (shows up
@@ -943,8 +950,18 @@ if [ "$CMD" = "open" ]; then
       # Without reliable evidence, omit it so audit keeps the session as
       # ambiguous instead of falsely quarantining it.
       [ -n "${OWNER_PID:-${CLAUDE_PID:-}}" ] && echo "pid: ${OWNER_PID:-$CLAUDE_PID}"
+      # WP-484 Ф72 доводка (review r7): session_id внутри frontmatter, не в
+      # хвосте — весь читающий код ищет поля семафора в шапке.
+      if [ "${STANDALONE_LAUNCH:-0}" = "1" ] && [ "$AGENT" = "kimi" ]; then
+        HK_SID="$(date +%s)-hk"
+        echo "session_id: $HK_SID"
+      fi
       echo "---"
     } > "$HK_FILE"
+    # Маркер standalone-доверия — по тому же id, что попал в семафор.
+    if [ -n "${HK_SID:-}" ]; then
+      : > "$IWE_ROOT/.iwe-runtime/kimi-standalone-${HK_SID}.marker" 2>/dev/null || true
+    fi
     echo "Housekeeping OPEN: $HK_FILE (reason: $HOUSEKEEPING)"
     exit 0
   fi
@@ -1525,6 +1542,12 @@ $isolate_status_code $isolate_status_path"
     # same script) can trust the `file:` allowlist instead of guessing this
     # specific filename by name.
     echo "file: $(basename "$(dirname "$OPEN_LOG")")/$(basename "$OPEN_LOG")"
+  # WP-484 Ф72 доводка (живой кейс 21.08, сессия 2026-08-21-02; review r7):
+  # маркер пишется ДО публикации семафора — маркер без семафора инертен
+  # (resolver требует оба), обратный порядок оставлял бы семафор без маркера.
+  if [ "${STANDALONE_LAUNCH:-0}" = "1" ] && [ "$AGENT" = "kimi" ] && [ -n "$SESSION_ID" ]; then
+    : > "$IWE_ROOT/.iwe-runtime/kimi-standalone-${SESSION_ID}.marker" 2>/dev/null || true
+  fi
   } > "$SEM_FILE"
   # Pointer to active semaphore for PostToolUse hooks
   PTR_FILE="$SESSION_DIR/current-${AGENT}.ptr"
@@ -1783,8 +1806,15 @@ audit_runner_cards() {
   # gets recorded durably by the runner (card-audit-findings.jsonl) -- but it
   # is not this session's problem to be blocked by; `open` surfaces the
   # registry so it doesn't just accumulate unseen.
+  # WP-484 Ф119/Ф125 (2026-08-21): process-runner.py now resolves its ROOT via
+  # `git rev-parse --show-toplevel` from cwd (fail-loud on mismatch), not from
+  # its own file location -- every call site here that invoked it without a
+  # cd into $GOV_REPO first (this one and the three below) relied on the old
+  # resolver's cwd-independence, silently. Live-caught closing THIS session's
+  # own semaphore, run from $IWE_ROOT (the documented cwd for session-guard.sh
+  # itself, protocol-close.md).
   local audit_output
-  if audit_output=$(python3 "$IWE_ROOT/$GOV_REPO/scripts/process-runner.py" audit-cards --session-slug "${SLUG:-}" 2>&1); then
+  if audit_output=$(cd "$IWE_ROOT/$GOV_REPO" && python3 "$IWE_ROOT/$GOV_REPO/scripts/process-runner.py" audit-cards --session-slug "${SLUG:-}" 2>&1); then
     if printf '%s' "$audit_output" | grep -q '"foreign_findings_recorded": [1-9]'; then
       echo "⚠️  найдены чужие RUN-карточки, не прошедшие проверку жизненного цикла -- close этой сессии НЕ блокирую, записал в findings registry для разбора" >&2
     fi
@@ -2131,8 +2161,9 @@ print(json.dumps({"wp": sys.argv[1], "slug": sys.argv[2], "agent": sys.argv[3], 
   # completed.
   if [ -z "${FORCED_CARD:-}" ]; then
     EXCLUDE_RUN_ID=$(grep "^run_id: " "$RUNNER_OK" | head -1 | cut -d' ' -f2- || true)
-    python3 "$IWE_ROOT/$GOV_REPO/scripts/process-runner.py" cancel-session quick-close "$SESSION_ID" \
-      --exclude "$EXCLUDE_RUN_ID" 2>&1 || echo "cancel-session (happy path) не прошёл — брошенные прогоны, если есть, останутся до планового reap-orphans" >&2
+    # WP-484 Ф119/Ф125: see the cd rationale on audit_runner_cards() above.
+    (cd "$IWE_ROOT/$GOV_REPO" && python3 "$IWE_ROOT/$GOV_REPO/scripts/process-runner.py" cancel-session quick-close "$SESSION_ID" \
+      --exclude "$EXCLUDE_RUN_ID") 2>&1 || echo "cancel-session (happy path) не прошёл — брошенные прогоны, если есть, останутся до планового reap-orphans" >&2
   else
     # WP-520 (11.08, peer session with Kimi, stuck-dashboard-cards case):
     # cancel-session matches by owner_session_id, which is null for cards
@@ -2146,11 +2177,12 @@ print(json.dumps({"wp": sys.argv[1], "slug": sys.argv[2], "agent": sys.argv[3], 
     # нет реальной карточки и grep корректно ничего не найдёт; 2>/dev/null глушит
     # "No such file or directory" на этом штатном случае, не только на реальном.
     FORCED_RUN_ID=$(grep "^run_id: " "$FORCED_CARD" 2>/dev/null | head -1 | cut -d' ' -f2- || true)
+    # WP-484 Ф119/Ф125: see the cd rationale on audit_runner_cards() above.
     if [ -n "$FORCED_RUN_ID" ]; then
-      python3 "$IWE_ROOT/$GOV_REPO/scripts/process-runner.py" cancel "$FORCED_RUN_ID" \
+      (cd "$IWE_ROOT/$GOV_REPO" && python3 "$IWE_ROOT/$GOV_REPO/scripts/process-runner.py" cancel "$FORCED_RUN_ID") \
         2>&1 || echo "адресный cancel принятой карточки ($FORCED_RUN_ID) не прошёл — причина в строке ERROR выше (уже терминальная карточка при повторном close — штатно)" >&2
     fi
-    python3 "$IWE_ROOT/$GOV_REPO/scripts/process-runner.py" cancel-session quick-close "$SESSION_ID" \
+    (cd "$IWE_ROOT/$GOV_REPO" && python3 "$IWE_ROOT/$GOV_REPO/scripts/process-runner.py" cancel-session quick-close "$SESSION_ID") \
       2>&1 || echo "cancel-session (force path) не прошёл — брошенные прогоны, если есть, останутся до планового reap-orphans" >&2
   fi
 

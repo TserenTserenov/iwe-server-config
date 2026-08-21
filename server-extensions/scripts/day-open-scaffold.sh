@@ -1142,21 +1142,60 @@ SELF_DEV_BLOCK=$(render_self_dev)
 # section was removed as a duplicate of current/priorities.yaml + current/active-wp.md.
 # SWEEP_WP_LIST: WP-NNN IDs for the "План на сегодня" PENDING instructions (line ~973) —
 # tells the LLM which open WPs beyond priorities.yaml to consider for today's plan.
-SWEEP_WP_FULL=$(bash "$IWE/scripts/active-wp-sweep.sh" "$IWE/${IWE_GOVERNANCE_REPO:-DS-strategy}/inbox" "$IWE" 2>/dev/null \
-  || echo "<!-- active-wp-sweep: ошибка запуска -->")
+#
+# WP-544 Ф2 Д9 (21.08, пир-сессия с Codex): пять тяжёлых блоков ниже раньше
+# считались строго последовательно (~165с, доминирует render_repo_issues — до
+# 88 серийных `gh issue list` по репо). Распараллелены через background jobs +
+# явный сбор PID-статусов вместо голого `wait` (нужно знать, какой конкретно
+# блок упал, не просто "что-то упало"). render_repo_issues/render_repo_activity
+# раньше вызывались inline в heredoc ниже — вынесены в переменные, как три
+# остальных, иначе их нельзя запустить в фоне до heredoc. Проверено (grep):
+# active-wp-sweep.sh читает $INBOX только через паттерны `WP-*.md`/`WP-*/`, не
+# видит incident-файл, который создаёт render_iwe_status — happens-before
+# между sweep и render_iwe_status не требуется, все пять блоков независимы.
+TMPDIR_D9=$(mktemp -d)
+cleanup_d9() { rm -rf -- "$TMPDIR_D9"; }
+trap cleanup_d9 EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+trap 'exit 129' HUP
+
+bash "$IWE/scripts/active-wp-sweep.sh" "$IWE/${IWE_GOVERNANCE_REPO:-DS-strategy}/inbox" "$IWE" \
+  > "$TMPDIR_D9/sweep" 2>/dev/null &
+PID_SWEEP=$!
+render_iwe_status > "$TMPDIR_D9/status" &
+PID_STATUS=$!
+render_world > "$TMPDIR_D9/world" &
+PID_WORLD=$!
+render_repo_issues > "$TMPDIR_D9/issues" &
+PID_ISSUES=$!
+render_repo_activity > "$TMPDIR_D9/activity" &
+PID_ACTIVITY=$!
+
+# Собрать статусы всех детей явно, не полагаться на порядок wait-вызовов.
+# Каждый блок пишет свой собственный fallback-маркер при сбое процесса —
+# без этого падение самого background job (killed/OOM, не путать с внутренними
+# defensive-проверками функций) тихо оставляло бы файл пустым без диагностики
+# (найдено code review, WP-544 Ф2 Д9 21.08 — асимметрия: раньше только sweep
+# имел маркер, остальные четыре молча глотали ошибку через `|| true`).
+wait "$PID_SWEEP" || { echo "<!-- active-wp-sweep: ошибка запуска -->" > "$TMPDIR_D9/sweep"; }
+wait "$PID_STATUS" || { echo "<!-- render_iwe_status: ошибка запуска -->" > "$TMPDIR_D9/status"; }
+wait "$PID_WORLD" || { echo "<!-- render_world: ошибка запуска -->" > "$TMPDIR_D9/world"; }
+wait "$PID_ISSUES" || { echo "<!-- render_repo_issues: ошибка запуска -->" > "$TMPDIR_D9/issues"; }
+wait "$PID_ACTIVITY" || { echo "<!-- render_repo_activity: ошибка запуска -->" > "$TMPDIR_D9/activity"; }
+
+SWEEP_WP_FULL=$(cat "$TMPDIR_D9/sweep")
 SWEEP_WP_LIST=$(echo "$SWEEP_WP_FULL" \
   | grep -oE '\*\*WP-[0-9]+\*\*' | tr -d '*' | tr '\n' ' ' | sed 's/  */ /g' || true)
+IWE_STATUS_TABLE=$(cat "$TMPDIR_D9/status")
+WORLD_SECTION=$(cat "$TMPDIR_D9/world")
+REPO_ISSUES_SECTION=$(cat "$TMPDIR_D9/issues")
+REPO_ACTIVITY_SECTION=$(cat "$TMPDIR_D9/activity")
 
 # --- Deterministic context injection (WP-7 DAP) ---
 DAY_CLOSE_CARRY_OVER=$(extract_day_close_carry_over "$YDAY" | sed 's/^/  /')
 STRATEGY_CONTEXT=$(extract_strategy_context "$WEEK_NUM" | sed 's/^/  /')
 MORNING_PRIORITIES=$(read_morning_priorities | sed 's/^/  /')
-
-# Captured once (not inlined via $(...) in the heredoc below) so render_attention()
-# can read the same rendered text later without re-running server-news.sh a second
-# time and without needing render_iwe_status's internal checks duplicated.
-IWE_STATUS_TABLE=$(render_iwe_status)
-WORLD_SECTION=$(render_world)
 
 # --- Output ---
 cat <<EOF
@@ -1270,11 +1309,11 @@ $IWE_STATUS_TABLE
 
 **Новые задачи в репозиториях (за 2 дня):**
 
-$(render_repo_issues)
+$REPO_ISSUES_SECTION
 
 **Активность по репозиториям (за 2 дня, включая Шаблон IWE):**
 
-$(render_repo_activity)
+$REPO_ACTIVITY_SECTION
 
 </details>
 

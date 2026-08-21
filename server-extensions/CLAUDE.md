@@ -132,6 +132,8 @@ Discrepancy found (file ≠ plan, stale content): **report to pilot, do not sile
 
 Umbrella-РП с `agent_scope: open-only` (WP-5, WP-7) — читать **только** фазы `pending`/`in_progress`/`blocked`; архивные — не читать без явного запроса пользователя.
 
+Любой wp-context с `archive:` в frontmatter (WP-541 Ф5, S-59): не читать `WP-N-archive.md` без явного запроса пилота — сама карточка держит все открытые фазы и текущую секцию «Осталось».
+
 ## Calendar Events — CRITICAL
 
 **All agent-created reminders and calendar events must be scheduled BEFORE 09:00 AM** (позже — только с явного одобрения пилота). Создано после 09:00 по ошибке → удалить + пересоздать до 09:00 + сообщить пилоту (шаги → `memory/reference/agent-core.md`).

@@ -427,6 +427,7 @@ python3 $HOME/IWE/.claude/scripts/rule-classifier.py
 - [ ] open-sessions.log: строки закрытых сессий удалены
 - [ ] Captures за день применены (все Quick Close → KE пройден)
 - [ ] Синхронизация downstream: `update.sh` выполнен
+- [ ] **Трёхточечная синхронизация (поручение пилота 21.08):** Мак ↔ цех (tsekh-1) ↔ GitHub синхронизированы, за исключением работающих сейчас сессий. Проверка: `git -C ~/IWE/DS-my-strategy status -sb` (без ahead/behind) + `DS-my-strategy/scripts/tsekh1-git-sync.sh --status`. «Deferred из-за живого семафора» — норма, если семафор свежий и сессия реально работает; протухший семафор при запушенном отчёте (отчёт есть, close не вызван) — аномалия: закрыть семафор до завершения Day Close. Молчащий сторож (machine/state/supervisor-*.json старше суток) — тоже аномалия, записать в «Требует внимания».
 - [ ] Linear sync: статусы соответствуют git. Пост-sync чек: кол-во active РП в REGISTRY = кол-во active issues в Linear
 - [ ] Repo CLAUDE.md: feat-коммиты → новые правила?
 - [ ] DayPlan сегодня → `archive/day-plans/` (старые DayPlan'ы в `current/` тоже)

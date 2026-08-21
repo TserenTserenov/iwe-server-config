@@ -975,6 +975,17 @@ BRANCH="peer/$SESSION_ID"
 git checkout -b "$BRANCH" 2>/dev/null || git checkout "$BRANCH"
 git add "${PATHS[@]}"
 git commit -m "feat(peer): $SESSION_ID (kimi-writer) — <задача кратко>" -- "${PATHS[@]}"
+
+# F1 (пир-сессия 2026-08-21-02-day-close-anomaly-classes): attest-манифест
+# сессии — ПОСЛЕ payload-коммита с отчётом, ДО публикации. Без манифеста
+# догоняющий quick-close уже запушенной сессии не может доказать «всё на
+# remote» и падает в ручной обход. Отказ манифеста (грязное дерево канона и
+# т.п.) не блокирует закрытие — WARN и дальше без него (legacy-путь
+# confirmed_clean_repos остаётся). При доставке из изолированного worktree
+# (freeze) — та же строка перед isolate-push, аргумент — путь worktree.
+bash "$HOME/IWE/${IWE_GOVERNANCE_REPO:-DS-strategy}/scripts/session-manifest-write.sh" "$(git rev-parse --show-toplevel)" "$SESSION_ID" \
+  || echo "WARN: attest-манифест не создан — догоняющее закрытие этой сессии пойдёт legacy-путём"
+
 git push origin "$BRANCH"
 gh pr create --title "feat(peer): $SESSION_ID" \
   --body "Peer-сессия DP.SC.154. Kimi (writer) + <PEER_VENDOR> (peer)." \
