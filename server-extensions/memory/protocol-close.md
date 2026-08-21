@@ -12,7 +12,7 @@ domains: [protocol]
 status: active
 owner: user
 schema_version: 1
-modified: 2026-08-21T02:38:51.828Z
+modified: 2026-08-21T07:59:48.696Z
 ---
 # Протокол Close (ОРЗ-фрактал)
 
@@ -218,6 +218,7 @@ cd DS-my-strategy && python3 scripts/process-runner.py start quick-close --slug 
 6. **iwe-rules-review** — какие правила обходились? (S) [[narrative]]
 7. **R-вопросник** (3 вопроса, `memory/r-questionnaire.md`, шаг 3 Части А `week-close/SKILL.md`, WP-484 30.07 — переставлен к началу) → ответы в Week Report [[gate]]
 8. **Архивация done-WP** → `archive/wp-contexts/` (T) [[gate]]
+8b. **Каденция архивации карточек** (WP-545 Ф3, 21.08) — проактивный сторож (`archive-cadence-sweep.py`, шаг `archive-cadence-sweep` в `week-close.yaml`, между `platform-checks` и `week-report-write`) сканирует весь `inbox/` безусловно каждую неделю: тот же критерий, что шаг 8 (created >14 дней И >400 строк, нет `WP-N-archive.md`), но без ожидания, что агент случайно тронет конкретную карточку (прецедент WP-7 — 2 месяца без архивации). Список кандидатов — в Week Report, решение по каждой карточке остаётся за реактивным механизмом (не автоматизировано). [[gate]]
 9. **Обновить WeekPlan** — пометить итоги, создать carry-over секцию [[gate]]
 10. **Ретро недели свободным текстом** (WP-484, 30.07) — вопрос-рефлексия задан пилоту, ответ записан в ledger через `pilot_answer/preclose_retro` (шаг 1 Части А `week-close/SKILL.md`, переставлен к началу 30.07 вечер) [[gate]]
 

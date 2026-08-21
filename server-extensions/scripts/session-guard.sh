@@ -1605,6 +1605,13 @@ EOF
     echo "ℹ️  $FINDINGS_COUNT запись(ей) в findings registry чужих RUN-карточек ($FINDINGS_REGISTRY) — разбор на Day/Week Close, не блокирует эту сессию" >&2
   fi
   echo "Session OPEN: $SEM_FILE (WP: $WP, agent: $AGENT, slug: ${SLUG:-$WP})"
+  # version-handshake (WP-484 Ф124/Ф125 план Этапа 0, линия 1, wiring 3а):
+  # best-effort, never blocks open -- iwe-version.sh itself degrades to
+  # "unknown" on a Mac host (no iwe-release.json there by design, see its
+  # own header comment), this is just surfacing that line where an agent
+  # will actually see it.
+  IWE_VERSION_SCRIPT="$IWE_ROOT/scripts/iwe-version.sh"
+  [ -x "$IWE_VERSION_SCRIPT" ] && "$IWE_VERSION_SCRIPT" 2>/dev/null || true
   exit 0
 fi
 
@@ -2198,6 +2205,10 @@ print(json.dumps({"wp": sys.argv[1], "slug": sys.argv[2], "agent": sys.argv[3], 
   # Remove agent pointer
   rm -f "$SESSION_DIR/current-${AGENT}.ptr"
   echo "Session CLOSE: $WP → $ORZ_FILE ✅"
+  # version-handshake (WP-484 Ф124/Ф125 план Этапа 0, линия 1, wiring 3а) --
+  # same best-effort surfacing as the open-side call above.
+  IWE_VERSION_SCRIPT="$IWE_ROOT/scripts/iwe-version.sh"
+  [ -x "$IWE_VERSION_SCRIPT" ] && "$IWE_VERSION_SCRIPT" 2>/dev/null || true
 
   # Push this session's own commits to origin/main, then remove the isolated
   # worktree `open --isolate` created — in that order. Until WP-484 Ф102 this
