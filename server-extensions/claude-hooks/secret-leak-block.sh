@@ -75,14 +75,22 @@ if [ -n "${CC_ALLOW_SECRETS_INPUT:-}" ]; then
   exit 0
 fi
 
-# Patterns (в синтаксисе grep -E)
+# Patterns (в синтаксисе grep -E). Список синхронизирован с secret-leak-redact.sh
+# (WP-544 Д5, 21.08): redact маскировал в выводе 4 класса, которые здесь на входе
+# не проверялись (OpenAI/YooKassa/Google/JWT) — команда с таким секретом-литералом
+# проходила на выполнение, и только её вывод потом маскировался постфактум.
 declare -a patterns=(
   "napi_[A-Za-z0-9]{30,}|Neon API key"
   "postgresql(ql)?://[^:[:space:]]+:[^@[:space:]]{6,}@|DATABASE_URL с user:pass"
   "sk-ant-api[0-9]{2}-[A-Za-z0-9_-]{30,}|Anthropic API key"
+  "sk-[A-Za-z0-9]{20,}|OpenAI API key"
+  "live_[A-Za-z0-9_-]{30,}|YooKassa API key (live)"
+  "test_[A-Za-z0-9_-]{30,}|YooKassa API key (test)"
   "gh[poshru]_[A-Za-z0-9]{30,}|GitHub token"
   "AKIA[0-9A-Z]{16}|AWS access key"
+  "AIza[0-9A-Za-z_-]{35}|Google API key"
   "ust_[A-Za-z0-9]{20,}|Better Stack token"
+  "eyJ[A-Za-z0-9_-]+\\.eyJ[A-Za-z0-9_-]+\\.[A-Za-z0-9_-]+|JWT"
   "[0-9]{8,10}:[A-Za-z0-9_-]{35}|Telegram bot token"
 )
 
