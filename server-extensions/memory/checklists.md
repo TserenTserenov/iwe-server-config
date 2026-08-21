@@ -1,6 +1,8 @@
 ---
 valid_from: 2026-03-17
 originSessionId: 9a0e726a-951e-4408-9e02-94d7eeffbf74
+delivery: managed
+delivery_authority: root-repository
 
 type: protocol
 horizon: warm
@@ -11,6 +13,7 @@ schema_version: 1
 
 name: "checklists"
 description: "Операционный файл памяти IWE"
+modified: 2026-08-21T02:39:08.189Z
 ---
 # Чеклисты
 

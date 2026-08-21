@@ -1,6 +1,8 @@
 ---
 name: protocol-close
 description: Slim-ядро протокола Close — триггеры, маршрутизация, Quick Close inline
+delivery: managed
+delivery_authority: root-repository
 type: reference
 valid_from: 2026-04-13
 originSessionId: b5655b53-7d87-478a-aad9-437479e81691
@@ -10,7 +12,7 @@ domains: [protocol]
 status: active
 owner: user
 schema_version: 1
-modified: 2026-08-20T16:50:59.491Z
+modified: 2026-08-21T02:38:51.828Z
 ---
 # Протокол Close (ОРЗ-фрактал)
 

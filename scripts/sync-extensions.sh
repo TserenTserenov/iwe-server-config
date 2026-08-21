@@ -12,7 +12,8 @@
 #   ~/IWE/.claude/skills/                                     → server-extensions/claude-skills/        (все скиллы)
 #   ~/IWE/.claude/hooks/                                      → server-extensions/claude-hooks/
 #   ~/IWE/.claude/scripts/                                    → server-extensions/claude-scripts/
-#   ~/.claude/projects/-Users-$USER-IWE/memory/{7 файлов}     → server-extensions/memory/
+#   memory/*.md с explicit delivery: managed + delivery_authority: root-repository
+#                                                              → server-extensions/memory/ (см. classify-memory.py)
 #
 # После push → CD деплоит → activation script на сервере распаковывает в правильные пути.
 
@@ -20,8 +21,6 @@ set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 DST="$REPO_ROOT/server-extensions"
-USER_NAME="$(whoami)"
-MAC_MEMORY="$HOME/.claude/projects/-Users-$USER_NAME-IWE/memory"
 
 if [ ! -d "$HOME/IWE/scripts" ]; then
     echo "ERROR: $HOME/IWE/scripts не найден — это запускается на Mac, не на сервере" >&2
@@ -31,6 +30,12 @@ fi
 echo "Синхронизация в $DST/..."
 
 mkdir -p "$DST"/{scripts,extensions,claude-skills,claude-scripts,claude-hooks,memory}
+
+# ROOT_COMMIT_SHA — читается iwe-extensions-sync.nix activation script для
+# iwe-release.json (version-handshake, WP-484). Пишется здесь, не в Nix,
+# потому что git доступен на Mac в момент staging, не на сервере в момент
+# сборки (nix build sandbox не имеет сетевого доступа к .git).
+git -C "$HOME/IWE" rev-parse HEAD > "$DST/ROOT_COMMIT_SHA"
 
 # Root-level CLAUDE.md (slim-ядро инструкций, нужен агенту на сервере)
 if [ -f "$HOME/IWE/CLAUDE.md" ]; then
@@ -45,13 +50,11 @@ rsync -a --delete "$HOME/IWE/.claude/skills/"             "$DST/claude-skills/"
 rsync -a --delete "$HOME/IWE/.claude/hooks/"              "$DST/claude-hooks/"
 rsync -a --delete "$HOME/IWE/.claude/scripts/"            "$DST/claude-scripts/"
 
-# Memory: только эти файлы (остальное — личные feedback/project, не нужны на сервере)
-# t-checklist и r-questionnaire добавлены 2026-05-06: нужны Day/Week/Month Close на сервере
-for f in templates-dayplan protocol-open protocol-close protocol-work MEMORY lessons_day_rituals checklists t-checklist r-questionnaire; do
-    if [ -f "$MAC_MEMORY/$f.md" ]; then
-        cp "$MAC_MEMORY/$f.md" "$DST/memory/"
-    fi
-done
+# Memory: classify-memory.py решает, что managed (см. модуль для критерия
+# и обоснования — hardcoded-список из 9 имён был тем же классом дыры, что
+# 03.08 нашла для root<->FMT-шаблона: файл появился в memory/, никто не
+# вспомнил добавить его в список, дальше он просто не доставлялся).
+python3 "$REPO_ROOT/scripts/classify-memory.py"
 
 echo ""
 echo "Изменения:"

@@ -1,6 +1,8 @@
 ---
 valid_from: 2026-04-10
 originSessionId: 9a0e726a-951e-4408-9e02-94d7eeffbf74
+delivery: managed
+delivery_authority: root-repository
 
 type: protocol
 horizon: warm
@@ -11,6 +13,7 @@ schema_version: 1
 
 name: "Протокол: work"
 description: "Протокол ОРЗ — пошаговые инструкции для ритуала"
+modified: 2026-08-21T02:38:56.261Z
 ---
 # Протокол Работы (ОРЗ-фрактал)
 

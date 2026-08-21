@@ -1,6 +1,8 @@
 ---
 name: templates-dayplan
 description: Шаблоны DayPlan и WeekPlan — единый источник для day-open и day-close
+delivery: managed
+delivery_authority: root-repository
 type: reference
 valid_from: 2026-04-13
 originSessionId: ae6f0122-1618-49c4-a209-0040178b6810
@@ -10,6 +12,7 @@ domains: [reference]
 status: active
 owner: user
 schema_version: 1
+modified: 2026-08-21T02:38:41.672Z
 ---
 # Шаблоны DayPlan и WeekPlan
 

@@ -4,6 +4,8 @@ wp: 217
 promoted: 2026-04-10
 valid_from: 2026-04-12
 originSessionId: 9a0e726a-951e-4408-9e02-94d7eeffbf74
+delivery: managed
+delivery_authority: root-repository
 
 horizon: warm
 domains: [reference]
@@ -13,6 +15,7 @@ schema_version: 1
 
 name: "r-questionnaire"
 description: "Операционный файл памяти IWE"
+modified: 2026-08-21T02:39:19.741Z
 ---
 # R-вопросник
 
