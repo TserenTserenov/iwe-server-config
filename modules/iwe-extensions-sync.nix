@@ -18,6 +18,15 @@
 let
   cfg = config.tsekh.extensions;
   src = ../server-extensions;
+  # `or "unknown"` only fires when the attribute is ABSENT — this build's
+  # flake evaluates configurationRevision to an explicit `null`, which `or`
+  # doesn't catch (Nix coerces null to a string and fails at eval time, not
+  # a runtime default). Found by nixos-rebuild eval failing outright before
+  # any deploy happened (peer-session 2026-08-21-01-delivery-version-handshake).
+  configRevision =
+    if (config.system.configurationRevision or null) != null
+    then config.system.configurationRevision
+    else "unknown";
 in
 {
   options.tsekh.extensions = {
@@ -207,7 +216,7 @@ in
         ${pkgs.coreutils}/bin/cat > "$TMP_RELEASE" <<EOF
         {
           "root_commit": "$(${pkgs.coreutils}/bin/cat ${src}/ROOT_COMMIT_SHA 2>/dev/null || echo unknown)",
-          "config_revision": "${config.system.configurationRevision or "unknown"}",
+          "config_revision": "${configRevision}",
           "deployed_at": "$(${pkgs.coreutils}/bin/date -u +%Y-%m-%dT%H:%M:%SZ)",
           "runtime_scripts_sha": "$(${pkgs.findutils}/bin/find /home/${cfg.user}/IWE/scripts -type f -exec ${pkgs.coreutils}/bin/sha256sum {} \; 2>/dev/null | ${pkgs.coreutils}/bin/sort | ${pkgs.coreutils}/bin/sha256sum | cut -d' ' -f1)",
           "managed_manifest_sha": "$([ -f ${src}/memory/manifest.sha256 ] && ${pkgs.coreutils}/bin/cut -d' ' -f1 ${src}/memory/manifest.sha256 || echo unknown)",
