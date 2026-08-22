@@ -1343,7 +1343,7 @@ in
     };
 
     systemd.services."payment-registry-sync-contract" = {
-      description = "Payment Registry — contract sync + health-check + heartbeat (15 мин)";
+      description = "Payment Registry — contract sync + health-check + heartbeat (1 ч)";
       unitConfig  = commonUnitConfig;
       serviceConfig = commonServiceConfig // {
         ExecStart  = "${contractSyncWrapper}";
@@ -1352,8 +1352,9 @@ in
       path = commonPath;
       # BetterStack heartbeat contract-sync (monitor id 463852, session
       # 2026-06-09-07-contract-sync-heartbeat) — найден 16.07.2026 (WP-244).
-      # period=30min grace=15min: таймер тикает раз в 15 мин, окно 45 мин
-      # до алерта переживает единичный неудачный тик без ложной тревоги.
+      # period=1h grace=30min (с 22.08.2026, синхронно с временным 1h-тиком):
+      # окно 1.5 ч до алерта переживает единичный неудачный тик без ложной
+      # тревоги. При возврате тика на 15min вернуть period=30min grace=15min.
       environment = commonEnv // {
         HEARTBEAT_URL = "https://uptime.betterstack.com/api/v1/heartbeat/q4B73eNRTJp13T8RvGHeaqB4";
       };
@@ -1361,10 +1362,14 @@ in
 
     systemd.timers."payment-registry-sync-contract" = {
       wantedBy    = [ "timers.target" ];
-      description = "Payment Registry contract sync — каждые 15 мин";
+      # 1h ВРЕМЕННО (было 15min): миграция схем Neon 21.08.2026 ещё катится,
+      # search_path пула нестабилен — реже тик, меньше флап-алертов. Вернуть
+      # 15min после подтверждения окончания миграции (контур Андрея).
+      # BetterStack-монитор 463852 переведён на period=3600 grace=1800 синхронно.
+      description = "Payment Registry contract sync — каждый 1 ч (временно, до конца миграции)";
       timerConfig = {
         OnBootSec       = "4min";
-        OnUnitActiveSec = "15min";
+        OnUnitActiveSec = "1h";
         Persistent      = true;
       };
     };
