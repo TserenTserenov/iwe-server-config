@@ -588,7 +588,7 @@ in
         ExecStart = "${pkgs.bash}/bin/bash ${iwe}/DS-my-strategy/scripts/tsekh1-git-sync.sh";
         TimeoutStartSec = 120;
       };
-      path = commonPath;
+      path = commonPath ++ [ pkgs.util-linux ];
       environment = commonEnv;
     };
 
