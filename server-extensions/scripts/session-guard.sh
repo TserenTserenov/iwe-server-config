@@ -459,6 +459,53 @@ _reap_orphaned_worktree() {
   fi
 }
 
+# A missing PID plus age proves only that the semaphore is stale enough to
+# quarantine.  It does not prove that the session finished its delivery
+# protocol.  In particular, isolate-push.sh transfers every clean commit in the
+# worktree and the caller removes that worktree on success; doing either after an
+# age-only decision can publish a partial session and destroy its only local
+# recovery copy.  Reuse the same narrow terminal Quick Close outcomes accepted
+# by close() below.  An explicit close-obligation cancellation is intentionally
+# not enough: it authorizes ending the obligation, not publishing or deleting
+# whatever happens to be in the abandoned worktree.
+_orphaned_worktree_terminal_outcome_proven() {
+  local quarantined_semaphore="$1"
+  local worktree_path slug harness_session_id card_dir card card_owner
+  worktree_path=$(grep '^isolated_worktree: ' "$quarantined_semaphore" 2>/dev/null | head -1 | cut -d' ' -f2- || true)
+  slug=$(grep '^slug: ' "$quarantined_semaphore" 2>/dev/null | head -1 | cut -d' ' -f2- || true)
+  harness_session_id=$(grep '^harness_session_id: ' "$quarantined_semaphore" 2>/dev/null | head -1 | cut -d' ' -f2- || true)
+  [ -n "$worktree_path" ] && [ -d "$worktree_path" ] || return 1
+  [[ "$slug" =~ ^[a-zA-Z0-9._-]+$ ]] || return 1
+
+  for card_dir in \
+    "$worktree_path/inbox/agent/tasks" \
+    "$IWE_ROOT/$GOV_REPO/inbox/agent/tasks"; do
+    [ -d "$card_dir" ] || continue
+    for card in "$card_dir"/RUN-quick-close-"$slug"*.md; do
+      [ -f "$card" ] || continue
+      grep -q '^process_id: quick-close$' "$card" || continue
+      if [ -n "$harness_session_id" ]; then
+        card_owner=$(grep '^owner_session_id: ' "$card" 2>/dev/null | head -1 | cut -d' ' -f2- || true)
+        [ "$card_owner" = "$harness_session_id" ] || continue
+      elif [ "$card_dir" != "$worktree_path/inbox/agent/tasks" ]; then
+        # Without a cross-file session id, a same-slug card from the canonical
+        # checkout could belong to a later run.  Only the abandoned worktree's
+        # own card is admissible in that legacy/no-owner case.
+        continue
+      fi
+      if grep -q '^status: completed$' "$card"; then
+        return 0
+      fi
+      if grep -q '^status: cancelled$' "$card" \
+         && grep -q '^current_step: wp-archive-run$' "$card" \
+         && grep -qE '^[[:space:]]*(all_pushed: true|commit_needed: false)$' "$card"; then
+        return 0
+      fi
+    done
+  done
+  return 1
+}
+
 # Verify sub-agent (2026-08-20, post-implementation): the sibling
 # sweep_stale_open_log_entries() got with_isolate_lock against concurrent
 # `audit --cleanup-orphans` runs (real trigger: kimi-wp-run-scheduled.sh:86,
@@ -517,7 +564,11 @@ _sweep_orphaned_semaphores_body() {
       fi
       mv "$semaphore" "${semaphore}.orphaned-zombie-no-pid"
       echo "WARNING: quarantined zombie semaphore (missing/invalid owner PID): $(basename "$semaphore")" >&2
-      _reap_orphaned_worktree "${semaphore}.orphaned-zombie-no-pid"
+      if _orphaned_worktree_terminal_outcome_proven "${semaphore}.orphaned-zombie-no-pid"; then
+        _reap_orphaned_worktree "${semaphore}.orphaned-zombie-no-pid"
+      else
+        echo "WARNING: age-only no-PID quarantine has no proven terminal outcome; isolated worktree left on disk for recover-orphaned/manual review: $(grep '^isolated_worktree: ' "${semaphore}.orphaned-zombie-no-pid" 2>/dev/null | head -1 | cut -d' ' -f2- || echo unknown)" >&2
+      fi
       zombies_quarantined=$((zombies_quarantined + 1))
       continue
     fi
