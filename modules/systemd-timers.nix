@@ -361,8 +361,10 @@ let
     attempt=1
     abe=""
     while [ "$attempt" -le 3 ]; do
+      # public.contract явно: после миграции схем 21.08.2026 search_path у части
+      # коннектов пула нестабилен (pg_catalog-only), unqualified имя не резолвится.
       abe=$(${pkgs.postgresql}/bin/psql "$NEON_SUBSCRIPTION_URL" -tAc \
-        "SELECT count(*) FROM contract WHERE status='active' AND valid_to <= now();" 2>/dev/null | tr -d '[:space:]')
+        "SELECT count(*) FROM public.contract WHERE status='active' AND valid_to <= now();" 2>/dev/null | tr -d '[:space:]')
       if [ -n "$abe" ] && echo "$abe" | ${pkgs.gnugrep}/bin/grep -Eq '^[0-9]+$'; then
         break
       fi
