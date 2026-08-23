@@ -20,10 +20,10 @@
 
 > **SoT (WP-272 Ф1):** `PACK-agent-rules/rules/AR.NNN.md` (реестр `.claude/rules-registry.yaml`); полные тексты выжимки → `.claude/rules-lazy/blocking-rules-full.md`. **Приоритет = нумерация:** структурное (1-5) перевешивает поведенческое (6-10).
 
-1. **WP Gate:** ЛЮБОЕ задание → `memory/protocol-open.md` ДО начала работы. Новый РП → Ритуал согласования → явное «да»/«делаем»/«открывай»; без этого не регистрировать.
-2. **Push:** «заливай»/«запуши»/«закрывай» → commit + push без вопросов, ДО отчёта Закрытия. Любой Close: `git status --short` по всем репо → незафиксированное commit + push ДО следующего шага.
+1. **WP Gate:** обязательные hot-маршрутизатор, критерий полного Ритуала и fail-closed реакция → Agent Core ниже.
+2. **Push:** «заливай»/«запуши»/«закрывай» → commit + push без вопросов, ДО отчёта Закрытия. Любой Close: проверить все репо; зафиксировать и отправить только относящиеся к сессии изменения, чужие/внесессионные не стейджить и сообщить о них.
 3. **Close:** Триггер Закрытия → протокол Закрытия → выполнить.
-4. **Pull-on-Touch:** `scripts/iwe-safe-pull.sh <repo>` при первом обращении к репо за сессию (все `~/IWE/*`), не raw `git pull --rebase --autostash`. Guard отказал → pull пропущен, дерево не тронуто, пометка potentially-stale → `memory/reference/agent-core.md`.
+4. **Pull-on-Touch:** обязательное hot-правило → Agent Core ниже; полный порядок → `memory/reference/agent-core.md`.
 5. **Чеклист-верификация:** Quick/Day Close — sub-agent Haiku R23 сверяет с чеклистом. Исключения: ≤15 мин или без изменений файлов.
 6. **Hooks/Scripts Bypass Gate (S-33):** без явного разрешения не менять `.claude/hooks|scripts/`, `.iwe-runtime/`, `FMT-exocortex-template/`, не обходить хуки; блок хука → bug-файл + пилоту + ждать. → `.claude/rules-lazy/hooks-bypass-gate.md`.
 7. **Автономность:** не спрашивать подтверждения — выполни → отчитайся. Исключения: необратимо-разрушительное; WP Gate Ритуал; choice-question. → `memory/feedback_behaviour.md` П.1.
@@ -40,7 +40,7 @@
 > Полные формулировки → `.claude/rules-lazy/blocking-rules-full.md`.
 
 - Начало работы → какие сервисы (MAP.002) затронуты?
-- Нетривиальное действие/РП → **State-Transition Gate (WP-457):** `{тип состояния, из→в}`, только `gate_ready: true` → Agent Core ниже.
+- Нетривиальное действие/РП → **State-Transition Gate (WP-457):** обязательное hot-правило → Agent Core ниже.
 - Пользовательский сценарий → **SC Gate:** какое обещание (08-service-clauses/) затронуто?
 - Создание/размещение артефакта → **Routing Gate:** карта DP.KR.001 §5; «по аналогии с соседним» запрещено.
 - Первое содержательное действие в репо → **Repo-Touch Gate:** прочитать `<repo>/CLAUDE.md`; блок «обязательно загружай» → загрузить ДО ответа.
@@ -88,7 +88,7 @@ Hot-каркас ≤20K токенов (M1), строгая цель ≤12K (M2)
 
 ## WP Gate — CRITICAL
 
-**ЛЮБОЕ задание → протокол Открытия → ДО начала работы.** При создании нового РП: объявить роль, работу, РП, ставку (H-NNN), класс верификации, метод, оценку, модель. Дождаться согласования пилота.
+**Каждое задание → короткий маршрутизатор `memory/protocol-open.md` ДО работы.** Полный Ритуал обязателен, если работа >15 мин ИЛИ создаётся артефакт/контекст РП; исключения: тривиальный вопрос, исправление ≤15 мин, аварийная правка. Неоднозначность → полный Ритуал. При создании нового РП объявить роль, работу, РП, ставку (H-NNN), класс верификации, метод, оценку, модель и дождаться согласования пилота.
 
 ## Pull-on-Touch — CRITICAL
 
@@ -96,7 +96,11 @@ Hot-каркас ≤20K токенов (M1), строгая цель ≤12K (M2)
 
 ## State-Transition Gate — CRITICAL
 
-**Перед любым нетривиальным действием или РП назвать целевой переход состояния пользователя** `{тип состояния, из→в}` (WP-457). Типы — только `DS-my-strategy/docs/state-axes-registry.yaml`, допустимы только `gate_ready: true`; ссылка на declared FSM-owner обязательна, свободный текст не принимается. Нет ссылки или тип не `gate_ready` → действие = inventory → СТОП/отложить. Модель осей → `archive/wp-contexts/WP-457/CONCEPT-user-states.md §5`; cross-axis → `agent-core.md`.
+**Перед любым нетривиальным действием или РП назвать целевой переход состояния пользователя** `{тип состояния, из→в}` (WP-457). Типы — только `DS-my-strategy/docs/state-axes-registry.yaml`, допустимы только `gate_ready: true`; ссылка на declared FSM-owner обязательна, свободный текст не принимается. Нет ссылки или тип не `gate_ready` → действие = inventory → СТОП/отложить. Модель осей → `DS-my-strategy/archive/wp-contexts/WP-457/CONCEPT-user-states.md §5`; cross-axis → `memory/reference/agent-core.md`.
+
+## Protective Procedure Fallback — CRITICAL
+
+**Защитная процедура недоступна → блокировать только затронутое действие.** До восстановления не выполнять внешнее/необратимое, не раскрывать/записывать секреты/PII и не делать опасный Git; разрешены чтение, inventory и обратимые локальные проверки.
 
 ## Git Staging — CRITICAL
 
@@ -116,7 +120,7 @@ Discrepancy found (file ≠ plan, stale content): **report to pilot, do not sile
 
 ## Status Reporting — Agent Status Registry (РП-395)
 
-**Primary (обязательно):** в начале задачи `agent_status_update(agent=<claude-code|kimi|codex|hermes>, status=working, task=<кратко>, files=[...])`; по завершении — `status=idle`. Статусы: `idle|working|peer-session|blocked`; пилот видит всех через `agent_status_list`. Командный режим (`repo=`) и fail-safe скрипт → `memory/reference/agent-core.md`.
+**Обязательно:** в начале/конце задачи обновить статус инструментом текущего рантайма по его фактической схеме: что делает агент, зачем, ждёт ли решения; состояние/файлы — если поддерживаются. Нет status-tool → `scripts/agent-status-report.sh` (fail-safe).
 
 ## Long Operation Protocol — 180 s Silence Threshold
 
@@ -162,31 +166,21 @@ Respond in Russian unless the user writes in English.
 
 ## 8. Staging (обкатка → шаблон)
 
-> Правила на обкатке (STAGING.md) → работают → переносятся в шаблон (L1). Новое поведение в §9 → ОДНОВРЕМЕННО строка в STAGING.md (`status: testing`). Промоция на Week Close (`validated`→`promoted`, `rejected` остаётся в §9 — не удалять) → скилл `/author-mode` и `.claude/rules-lazy/blocking-rules-full.md`.
-
-**Активная запись:** S-45 Agent Inbox (WP-324) — `inbox/agent/` + `iwe-agent-dispatcher.py`, промотировано в FMT `extensions/agent-inbox/`. Status: testing.
-**S-59 Гигиена карточек РП (WP-541 Ф5):** Close — секция «Осталось» единственная, переписывается (слой → строка `## Журнал`); Open — мини-ритуал переоткрытия при паузе >3 дней; архив карточки по триггеру (>14 дней И >400 строк, semi-auto) → `WP-N-archive.md`, читать только по слову пилота. Полные правила → `memory/protocol-{open,close}.md`. Status: testing.
+> Новое авторское поведение → запись `status: testing` в `STAGING.md`; там же активные/отклонённые записи и доказательства. Промоция на Week Close → `/author-mode`; алгоритм → `.claude/rules-lazy/blocking-rules-full.md §8`.
 
 ---
 
 ## 9. Авторское (только мой IWE)
 
-> Элаборации всех пунктов → `memory/reference/agent-core.md`.
+> Только ключевые сигналы; полные процедуры и примеры → `memory/reference/agent-core.md`.
 
-- **Без Obsidian (DS-my-strategy):** просмотр через VS Code.
-- **Комментарии кода — только EN (решение Андрея, 14.06.2026):** весь `~/IWE/**`; исключение — user-facing строки по языку интерфейса.
-- **Различения (авторские):** `.claude/rules/distinctions.md` (секция «Авторские») + `memory/distinctions-warm.md` (в т.ч. «Бот = интерфейс, не место агентов»).
-- **Именование:** `DS-my-strategy` (не `DS-strategy`); рабочая директория `/Users/tserentserenov/IWE/`.
-- **Read-only репо:** ⛔ **DS-IT-systems/SystemsSchool_bot**, **DS-IT-systems/aisystant**.
-- **Extensions Gate (БЛОКИРУЮЩЕЕ):** пользователи кастомизируют ТОЛЬКО `extensions/*.md` + `params.yaml` (правка `.claude/skills/` или `memory/protocol-*.md` = ошибка); автор (`author_mode: true`) редактирует L1 напрямую — авторский IWE = SoT, доставка в FMT через `DS-ai-systems/setup/scripts/template-sync.sh`.
-- **README.md (FMT-exocortex-template):** изменение структуры — по согласованию с владельцем.
-- **WP Entry Filter (S-47, БЛОКИРУЮЩЕЕ):** новый РП — только при явной связи с R1-R6 месяца или внешнем заказчике; иначе → `inbox/backlog-with-triggers.md`. Исключения: spin-off закрытого РП; прямое поручение пилота. 🧠 когнитивный (легенда issue #310/#323, `.claude/rules-lazy/blocking-rules-full.md`): чистый текст, никакой хук не проверяет связь нового РП с R1-R6 — ничто не мешает завести РП мимо фильтра (WP-7 GateEnforcement-Audit, 09.08.2026, находка 4 из 5).
-- **Именование РП:** существительное-артефакт, только русский (Pack-ID допустим); реестр ≤80 символов → SYNC-CORE; переименование — синхронно REGISTRY+MEMORY.md+WeekPlan+DayPlan+WP-context.
-- **Память (S-35):** новые `memory/*.md` — обязательный frontmatter; шаблон и горизонты → `memory/memory-lifecycle-spec.md` (единственный источник).
-- **Security Audit Cadence (WP-212, S-36):** per-ArchGate (§Б B7.1 + STRIDE) · Week Close (`security-posture.md §3`) · Daily (tsekh-1) · Month Close (VR.R.002).
-- **WeekPlan/WeekReport split (WP-297):** WeekPlan = только интенты, WeekReport = только факты; при создании WeekPlan итоги уезжают в WeekReport.
-- **Режим «на пальцах» (S-37):** триггеры «объясни», «на пальцах», «что сделали», «простыми словами» → Response Style + `memory/feedback_response_clarity_for_pilot.md`.
-- **Календарный конвейер (WP-357):** SoT — `DS-my-strategy/calendar/process-catalog.yaml` (+ derived `date-ledger.yaml`, не редактировать); новый процесс = каталог + plist; спецификация → `docs/calendar-pipeline.md`.
+- **Локальный контекст:** `DS-my-strategy` (не `DS-strategy`), без Obsidian; корень `/Users/tserentserenov/IWE/`; `DS-IT-systems/{SystemsSchool_bot,aisystant}` — read-only.
+- **Код:** комментарии только EN, пользовательские строки — на языке интерфейса; авторские различения → `.claude/rules/distinctions.md` + `memory/distinctions-warm.md`.
+- **Extensions Gate (БЛОКИРУЮЩЕЕ):** пользователь меняет только `extensions/*.md` и `params.yaml`; автор (`author_mode: true`) может менять L1 и доставляет его через `DS-ai-systems/setup/scripts/template-sync.sh`. Структура `FMT-exocortex-template/README.md` — только по согласованию с владельцем.
+- **WP Entry Filter (S-47, БЛОКИРУЮЩЕЕ):** новый РП только при связи с R1-R6 месяца или внешнем заказчике; иначе → `DS-my-strategy/inbox/backlog-with-triggers.md`. Исключения: spin-off закрытого РП и прямое поручение пилота.
+- **Именование РП:** русское существительное-артефакт (Pack-ID допустим), в реестре ≤80 символов; переименование синхронизировать по перечню в Agent Core.
+- **Память и планы:** новый `memory/*.md` требует frontmatter → `memory/memory-lifecycle-spec.md`; WeekPlan хранит интенты, WeekReport — факты.
+- **Аудиты и календарь:** каденция Security Audit → Agent Core; календарный SoT → `DS-my-strategy/calendar/process-catalog.yaml`, `date-ledger.yaml` не редактировать, новый процесс = каталог + plist.
 
 ---
 
