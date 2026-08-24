@@ -6,7 +6,8 @@
 # НЕ покрывает: Claude-generated text без tool-use, Read файла с секретами.
 #
 # Bypass:
-#   - env CC_ALLOW_SECRETS_INPUT=1 (только из реального шелла пилота — хук
+#   - env CC_ALLOW_SECRETS_INPUT=1 + CC_ALLOW_SECRETS_INPUT_UNTIL=<unix-time>
+#     (короткое разрешение максимум на 15 минут из реального шелла пилота — хук
 #     читает свой процессный env, не текст ещё не выполненной команды,
 #     поэтому агент не может подставить это через саму Bash-команду)
 #
@@ -26,7 +27,16 @@
 # Лог решений: ~/IWE/.claude/logs/secret-leak-block.jsonl
 
 set -uo pipefail
+umask 077
 export PATH="/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin:${PATH:-}"
+
+HOOK_DIR=$(CDPATH='' cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+if [ -r "$HOOK_DIR/secret-bypass-lib.sh" ]; then
+  # shellcheck source=secret-bypass-lib.sh
+  # Resolved next to this hook at runtime.
+  # shellcheck disable=SC1091
+  . "$HOOK_DIR/secret-bypass-lib.sh"
+fi
 
 IWE_ROOT="${IWE_ROOT:-$HOME/IWE}"
 LOG_FILE="$IWE_ROOT/.claude/logs/secret-leak-block.jsonl"
@@ -34,16 +44,20 @@ mkdir -p "$(dirname "$LOG_FILE")" 2>/dev/null || true
 
 log_decision() {
   local decision="$1" pattern="$2" cmd_head="$3"
-  local ts
+  local ts record
   ts=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
-  jq -nc \
+  record=$(jq -nc \
     --arg ts "$ts" \
     --arg sid "${CLAUDE_SESSION_ID:-}" \
     --arg dec "$decision" \
     --arg pat "$pattern" \
     --arg cmd "$cmd_head" \
-    '{ts:$ts, hook:"secret-leak-block", session_id:$sid, decision:$dec, pattern:$pat, cmd_head:$cmd}' \
-    >> "$LOG_FILE" 2>/dev/null || true
+    '{ts:$ts, hook:"secret-leak-block", session_id:$sid, decision:$dec, pattern:$pat, cmd_head:$cmd}') || return 1
+  if command -v secret_bypass_audit_append >/dev/null 2>&1; then
+    secret_bypass_audit_append "$LOG_FILE" "$record"
+  else
+    printf '%s\n' "$record" >> "$LOG_FILE" 2>/dev/null
+  fi
 }
 
 # Read JSON input
@@ -69,10 +83,25 @@ cmd_head=$(printf '%s' "$command" | head -c 200 | sed -E \
   -e 's/ust_[A-Za-z0-9]{20,}/[REDACTED-BS]/g' \
   -e 's/[0-9]{8,10}:[A-Za-z0-9_-]{35}/[REDACTED-TG]/g')
 
-# Bypass: env var (см. I9 note выше — единственный оставшийся путь)
-if [ -n "${CC_ALLOW_SECRETS_INPUT:-}" ]; then
-  log_decision "bypass-env" "" "$cmd_head"
-  exit 0
+# Bypass: only an exact, short-lived pair validated by the shared library.
+if command -v secret_bypass_check >/dev/null 2>&1; then
+  if secret_bypass_check INPUT; then
+    if command -v secret_bypass_authorize >/dev/null 2>&1 \
+      && secret_bypass_authorize INPUT log_decision "bypass-env-temporary" "${SECRET_BYPASS_REMAINING}s" "$cmd_head"; then
+      exit 0
+    fi
+    if [ "$SECRET_BYPASS_STATE" != "rejected" ]; then
+      SECRET_BYPASS_STATE="rejected"
+      SECRET_BYPASS_REASON="authorization helper unavailable"
+    fi
+    BYPASS_NOTICE=$(secret_bypass_rejected_message INPUT)
+  elif [ "$SECRET_BYPASS_STATE" = "rejected" ]; then
+    log_decision "bypass-env-rejected" "$SECRET_BYPASS_REASON" "$cmd_head"
+    BYPASS_NOTICE=$(secret_bypass_rejected_message INPUT)
+  fi
+elif [ -n "${CC_ALLOW_SECRETS_INPUT:-}${CC_ALLOW_SECRETS_INPUT_UNTIL:-}" ]; then
+  log_decision "bypass-env-rejected" "validator unavailable" "$cmd_head"
+  BYPASS_NOTICE="Requested secret INPUT bypass was rejected: validator unavailable. Protection remains active."
 fi
 
 # Patterns (в синтаксисе grep -E). Список синхронизирован с secret-leak-redact.sh
@@ -98,11 +127,13 @@ for entry in "${patterns[@]}"; do
   p="${entry%%|*}"
   label="${entry##*|}"
   if echo "$command" | grep -qE "$p"; then
-    reason="Возможный секрет в Bash-команде (паттерн: $label). Если намеренно (тест/grep) — попроси пилота запустить с CC_ALLOW_SECRETS_INPUT=1 (агент сам этот bypass выставить не может; вывод команды всё равно останется замаскирован, пока пилот отдельно не разрешит CC_ALLOW_SECRETS_OUTPUT=1). Если реальный секрет — НЕ передавай через arg, используй \$VAR из env / wrapper из ~/IWE/.secrets/."
+    reason="Возможный секрет в Bash-команде (паттерн: $label). Если намеренно (тест/grep) — попроси пилота выставить CC_ALLOW_SECRETS_INPUT=1 вместе с CC_ALLOW_SECRETS_INPUT_UNTIL=<unix-time> максимум на 15 минут (вывод всё равно останется замаскирован, пока отдельно не разрешены CC_ALLOW_SECRETS_OUTPUT=1 и CC_ALLOW_SECRETS_OUTPUT_UNTIL). Если реальный секрет — НЕ передавай через arg, используй \$VAR из env / wrapper из ~/IWE/.secrets/."
     log_decision "deny" "$label" "$cmd_head"
     jq -n \
       --arg reason "$reason" \
-      '{hookSpecificOutput: {hookEventName: "PreToolUse", permissionDecision: "deny", permissionDecisionReason: $reason}}'
+      --arg message "${BYPASS_NOTICE:-}" \
+      '{hookSpecificOutput: {hookEventName: "PreToolUse", permissionDecision: "deny", permissionDecisionReason: $reason}}
+       + (if $message == "" then {} else {systemMessage:$message} end)'
     exit 0
   fi
 done
@@ -134,10 +165,11 @@ _b='(^|[^A-Za-z0-9._-])'
 sens_path="${_b}\\.secrets/|${_b}\\.railway/|${_b}\\.env([^A-Za-z0-9]|\$)|${_b}\\.env\\.|${_b}\\.pem([^A-Za-z0-9]|\$)|${_b}\\.p12|${_b}\\.pfx|${_b}/id_rsa|${_b}/id_ed25519|${_b}\\.token([^A-Za-z0-9]|\$)|-secret\\.(yaml|yml|json|env|txt|ini|conf)|${_b}/secrets\\.|${_b}secrets/[^[:space:]]*\\.(yaml|yml|json)|${_b}/credentials\\.|${_b}\\.netrc|${_b}wrangler\\.toml"
 deny_read() {
   local why="$1"
-  local reason="Чтение секрет-файла через Bash заблокировано (B7.7c, $why). Цепочка рвётся ДО попадания значения в контекст. Используй значение через \$VAR/env, не читай файл. Разовый легитимный дебаг — CC_ALLOW_SECRETS_INPUT=1, выставленный пилотом в реальном шелле."
+  local reason="Чтение секрет-файла через Bash заблокировано (B7.7c, $why). Цепочка рвётся ДО попадания значения в контекст. Используй значение через \$VAR/env, не читай файл. Разовый легитимный дебаг — CC_ALLOW_SECRETS_INPUT=1 вместе с CC_ALLOW_SECRETS_INPUT_UNTIL=<unix-time> максимум на 15 минут, выставленные пилотом в реальном шелле."
   log_decision "deny-bash-read" "$why" "$cmd_head"
-  jq -n --arg reason "$reason" \
-    '{hookSpecificOutput: {hookEventName: "PreToolUse", permissionDecision: "deny", permissionDecisionReason: $reason}}'
+  jq -n --arg reason "$reason" --arg message "${BYPASS_NOTICE:-}" \
+    '{hookSpecificOutput: {hookEventName: "PreToolUse", permissionDecision: "deny", permissionDecisionReason: $reason}}
+     + (if $message == "" then {} else {systemMessage:$message} end)'
   exit 0
 }
 # read-инструмент + sensitive-path (|$ — инструмент в конце строки: `xargs cat`, cold-review H2)
@@ -157,4 +189,5 @@ fi
 # Claude Code (разрешать только explicit tool_use), вне платформы. Покрыто слоями redact + value-patterns.
 
 log_decision "allow" "" "$cmd_head"
+[ -n "${BYPASS_NOTICE:-}" ] && jq -n --arg message "$BYPASS_NOTICE" '{systemMessage:$message}'
 exit 0
