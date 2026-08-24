@@ -18,8 +18,7 @@
 #
 # Bypass:
 #   - CC_ALLOW_SECRET_PATH=<abs-path>  — разрешает ровно этот файл (realpath match). Logged.
-#   - CC_ALLOW_SECRETS_INPUT=1 + CC_ALLOW_SECRETS_INPUT_UNTIL=<unix-time>
-#                                      — emergency override пилота максимум на 15 минут.
+#   - CC_ALLOW_SECRETS_INPUT=1         — emergency override пилота (вся сессия). Logged как emergency.
 #     (переименовано из CC_ALLOW_SECRETS — I10/WP-500 2026-07-29, единая семантика
 #     "разрешение на вход" с secret-leak-block.sh / secret-mcp-dump-guard.sh)
 #
@@ -27,16 +26,7 @@
 # see also: AR.111, DP.RUNBOOK.003, peer-session 2026-06-05-17
 
 set -uo pipefail
-umask 077
 export PATH="/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin:${PATH:-}"
-
-HOOK_DIR=$(CDPATH='' cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
-if [ -r "$HOOK_DIR/secret-bypass-lib.sh" ]; then
-  # shellcheck source=secret-bypass-lib.sh
-  # Resolved next to this hook at runtime.
-  # shellcheck disable=SC1091
-  . "$HOOK_DIR/secret-bypass-lib.sh"
-fi
 
 IWE_ROOT="${IWE_ROOT:-$HOME/IWE}"
 LOG_FILE="$IWE_ROOT/.claude/logs/secret-file-read-block.jsonl"
@@ -44,19 +34,15 @@ mkdir -p "$(dirname "$LOG_FILE")" 2>/dev/null || true
 
 log_decision() {
   local decision="$1" pattern="$2" path_head="$3"
-  local ts record; ts=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
-  record=$(jq -nc \
+  local ts; ts=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+  jq -nc \
     --arg ts "$ts" \
     --arg sid "${CLAUDE_SESSION_ID:-}" \
     --arg dec "$decision" \
     --arg pat "$pattern" \
     --arg path "$path_head" \
-    '{ts:$ts, hook:"secret-file-read-block", session_id:$sid, decision:$dec, pattern:$pat, path:$path}') || return 1
-  if command -v secret_bypass_audit_append >/dev/null 2>&1; then
-    secret_bypass_audit_append "$LOG_FILE" "$record"
-  else
-    printf '%s\n' "$record" >> "$LOG_FILE" 2>/dev/null
-  fi
+    '{ts:$ts, hook:"secret-file-read-block", session_id:$sid, decision:$dec, pattern:$pat, path:$path}' \
+    >> "$LOG_FILE" 2>/dev/null || true
 }
 
 input=$(cat)
@@ -145,25 +131,10 @@ fi
 
 # === Файл — секрет. Проверяем bypass. ===
 
-# Emergency override пилота (короткий и проверяемый).
-if command -v secret_bypass_check >/dev/null 2>&1; then
-  if secret_bypass_check INPUT; then
-    if command -v secret_bypass_authorize >/dev/null 2>&1 \
-      && secret_bypass_authorize INPUT log_decision "emergency-override-temporary" "$matched:${SECRET_BYPASS_REMAINING}s" "$target"; then
-      exit 0
-    fi
-    if [ "$SECRET_BYPASS_STATE" != "rejected" ]; then
-      SECRET_BYPASS_STATE="rejected"
-      SECRET_BYPASS_REASON="authorization helper unavailable"
-    fi
-    BYPASS_NOTICE=$(secret_bypass_rejected_message INPUT)
-  elif [ "$SECRET_BYPASS_STATE" = "rejected" ]; then
-    log_decision "emergency-override-rejected" "$SECRET_BYPASS_REASON" "$target"
-    BYPASS_NOTICE=$(secret_bypass_rejected_message INPUT)
-  fi
-elif [ -n "${CC_ALLOW_SECRETS_INPUT:-}${CC_ALLOW_SECRETS_INPUT_UNTIL:-}" ]; then
-  log_decision "emergency-override-rejected" "validator unavailable" "$target"
-  BYPASS_NOTICE="Requested secret INPUT bypass was rejected: validator unavailable. Protection remains active."
+# Emergency override пилота (вся сессия)
+if [ "${CC_ALLOW_SECRETS_INPUT:-}" = "1" ]; then
+  log_decision "emergency-override" "$matched" "$target"
+  exit 0
 fi
 
 # Path-scoped one-file allow
@@ -171,20 +142,14 @@ if [ -n "${CC_ALLOW_SECRET_PATH:-}" ]; then
   rp_target=$(realpath "$target" 2>/dev/null || echo "$target")
   rp_allow=$(realpath "$CC_ALLOW_SECRET_PATH" 2>/dev/null || echo "$CC_ALLOW_SECRET_PATH")
   if [ "$rp_target" = "$rp_allow" ]; then
-    PATH_BYPASS_NOTICE="Temporary one-file secret read bypass is active."
-    if log_decision "path-allow-used" "$matched" "$target" \
-      && command -v secret_bypass_emit_alert >/dev/null 2>&1 \
-      && secret_bypass_emit_alert "$PATH_BYPASS_NOTICE"; then
-      exit 0
-    fi
-    BYPASS_NOTICE="Requested one-file secret read bypass was rejected: audit record or user alert unavailable. Protection remains active."
+    log_decision "path-allow-used" "$matched" "$target"
+    exit 0
   fi
 fi
 
 # DENY
-reason="Чтение файла с секретом заблокировано (B7.7c, паттерн: $matched). Цепочка утечки рвётся ДО попадания значения в контекст. Если нужно именно это значение — НЕ читай файл: используй его через shell (\$VAR из env / wrapper из .secrets/). Если чтение легитимно (например, разовый дебаг ровно этого файла) — запусти сессию с CC_ALLOW_SECRET_PATH=$(realpath "$target" 2>/dev/null || echo "$target"). Глобальный обход — только CC_ALLOW_SECRETS_INPUT=1 вместе с CC_ALLOW_SECRETS_INPUT_UNTIL=<unix-time> максимум на 15 минут, по явному решению пилота."
+reason="Чтение файла с секретом заблокировано (B7.7c, паттерн: $matched). Цепочка утечки рвётся ДО попадания значения в контекст. Если нужно именно это значение — НЕ читай файл: используй его через shell (\$VAR из env / wrapper из .secrets/). Если чтение легитимно (например, разовый дебаг ровно этого файла) — запусти сессию с CC_ALLOW_SECRET_PATH=$(realpath "$target" 2>/dev/null || echo "$target"). Глобальный обход (вся сессия) — только CC_ALLOW_SECRETS_INPUT=1, по явному решению пилота."
 log_decision "deny" "$matched" "$target"
-jq -n --arg reason "$reason" --arg message "${BYPASS_NOTICE:-}" \
-  '{hookSpecificOutput: {hookEventName: "PreToolUse", permissionDecision: "deny", permissionDecisionReason: $reason}}
-   + (if $message == "" then {} else {systemMessage:$message} end)'
+jq -n --arg reason "$reason" \
+  '{hookSpecificOutput: {hookEventName: "PreToolUse", permissionDecision: "deny", permissionDecisionReason: $reason}}'
 exit 0

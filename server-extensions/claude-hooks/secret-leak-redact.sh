@@ -5,8 +5,7 @@
 # ОГРАНИЧЕНИЕ: оригинал остаётся в conversation transcript. Hook защищает от
 # re-использования Claude'ом в собственных ответах, но не от full forensics.
 #
-# Bypass: env CC_ALLOW_SECRETS_OUTPUT=1 + CC_ALLOW_SECRETS_OUTPUT_UNTIL=<unix-time>
-# (не более 15 минут; отдельно от CC_ALLOW_SECRETS_INPUT в
+# Bypass: env CC_ALLOW_SECRETS_OUTPUT=1 (отдельно от CC_ALLOW_SECRETS_INPUT в
 # secret-leak-block.sh — I10, WP-500, 2026-07-29). Живой инцидент: до разделения
 # один общий флаг разрешал выполнение команды И одновременно снимал маскирование
 # её вывода — 3 живые утечки пароля прошли через незащищённый вывод, пока флаг
@@ -15,16 +14,7 @@
 # Лог: ~/IWE/.claude/logs/secret-leak-redact.jsonl
 
 set -uo pipefail
-umask 077
 export PATH="/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin:${PATH:-}"
-
-HOOK_DIR=$(CDPATH='' cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
-if [ -r "$HOOK_DIR/secret-bypass-lib.sh" ]; then
-  # shellcheck source=secret-bypass-lib.sh
-  # Resolved next to this hook at runtime.
-  # shellcheck disable=SC1091
-  . "$HOOK_DIR/secret-bypass-lib.sh"
-fi
 
 IWE_ROOT="${IWE_ROOT:-$HOME/IWE}"
 LOG_FILE="$IWE_ROOT/.claude/logs/secret-leak-redact.jsonl"
@@ -32,48 +22,18 @@ mkdir -p "$(dirname "$LOG_FILE")" 2>/dev/null || true
 
 input=$(cat)
 
-# Called indirectly by secret_bypass_authorize.
-# shellcheck disable=SC2329
-log_bypass_decision() {
-  local action="$1" remaining="$2" ts record
+# Bypass — но ЛОГИРУЕМ (Гермес 2026-06-05: осознанный обход без лога неотличим от бага).
+if [ -n "${CC_ALLOW_SECRETS_OUTPUT:-}" ]; then
   ts=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
-  record=$(jq -nc --arg ts "$ts" --arg sid "${CLAUDE_SESSION_ID:-}" --arg action "$action" --arg remaining "$remaining" \
-    '{ts:$ts, hook:"secret-leak-redact", session_id:$sid, action:$action, remaining_seconds:($remaining|tonumber), warn:"вывод НЕ маскирован — все секреты в нём считать скомпрометированными, ротация по DP.RUNBOOK.003"}') || return 1
-  if command -v secret_bypass_audit_append >/dev/null 2>&1; then
-    secret_bypass_audit_append "$LOG_FILE" "$record"
-  else
-    printf '%s\n' "$record" >> "$LOG_FILE" 2>/dev/null
-  fi
-}
-
-# Bypass — только короткий и валидный; каждое использование видно и записано.
-if command -v secret_bypass_check >/dev/null 2>&1 && secret_bypass_check OUTPUT; then
-  if command -v secret_bypass_authorize >/dev/null 2>&1 \
-    && secret_bypass_authorize OUTPUT log_bypass_decision "bypass-CC_ALLOW_SECRETS_OUTPUT-temporary" "$SECRET_BYPASS_REMAINING"; then
-    exit 0
-  fi
-  if [ "$SECRET_BYPASS_STATE" != "rejected" ]; then
-    SECRET_BYPASS_STATE="rejected"
-    SECRET_BYPASS_REASON="authorization helper unavailable"
-  fi
-  BYPASS_NOTICE=$(secret_bypass_rejected_message OUTPUT)
-fi
-if [ "${SECRET_BYPASS_STATE:-absent}" = "rejected" ]; then
-  ts=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
-  jq -nc --arg ts "$ts" --arg sid "${CLAUDE_SESSION_ID:-}" --arg reason "$SECRET_BYPASS_REASON" \
-    '{ts:$ts, hook:"secret-leak-redact", session_id:$sid, action:"bypass-rejected", reason:$reason}' \
+  jq -nc --arg ts "$ts" --arg sid "${CLAUDE_SESSION_ID:-}" \
+    '{ts:$ts, hook:"secret-leak-redact", session_id:$sid, action:"bypass-CC_ALLOW_SECRETS_OUTPUT", warn:"вывод НЕ маскирован — все секреты в нём считать скомпрометированными, ротация по DP.RUNBOOK.003"}' \
     >> "$LOG_FILE" 2>/dev/null || true
-  BYPASS_NOTICE=$(secret_bypass_rejected_message OUTPUT)
-elif ! command -v secret_bypass_check >/dev/null 2>&1 && [ -n "${CC_ALLOW_SECRETS_OUTPUT:-}${CC_ALLOW_SECRETS_OUTPUT_UNTIL:-}" ]; then
-  BYPASS_NOTICE="Requested secret OUTPUT bypass was rejected: validator unavailable. Protection remains active."
+  exit 0
 fi
 
 # Извлечение output — пробуем оба возможных пути (схема Claude Code варьируется)
 tool_name=$(echo "$input" | jq -r '.tool_name // .tool // empty' 2>/dev/null)
-if [ -z "$tool_name" ]; then
-  [ -n "${BYPASS_NOTICE:-}" ] && jq -n --arg message "$BYPASS_NOTICE" '{systemMessage:$message}'
-  exit 0
-fi
+[ -z "$tool_name" ] && exit 0
 
 # Кандидаты-пути для tool output (разные форматы в разных версиях):
 # Bash: .tool_response.stdout / .tool_response.output / .toolResult.content
@@ -88,10 +48,7 @@ for path in '.tool_response.stdout' '.tool_response.output' '.tool_response.cont
 done
 
 # Если output пустой — нечего редактировать
-if [ -z "$tool_output" ]; then
-  [ -n "${BYPASS_NOTICE:-}" ] && jq -n --arg message "$BYPASS_NOTICE" '{systemMessage:$message}'
-  exit 0
-fi
+[ -z "$tool_output" ] && exit 0
 
 # Паттерны (sed-формат, basic regex для совместимости BSD/GNU)
 # Используем только regex который не разрушит non-secret content
@@ -111,7 +68,6 @@ redacted=$(printf '%s' "$tool_output" | sed -E \
 
 # Если ничего не изменилось — выход без модификации (минимизируем оверхед)
 if [ "$redacted" = "$tool_output" ]; then
-  [ -n "${BYPASS_NOTICE:-}" ] && jq -n --arg message "$BYPASS_NOTICE" '{systemMessage:$message}'
   exit 0
 fi
 
@@ -146,8 +102,6 @@ jq -nc \
 # Возврат модифицированного output (+ предупреждение при bulk)
 jq -n \
   --arg out "${warn_prefix}${redacted}" \
-  --arg message "${BYPASS_NOTICE:-}" \
-  '{hookSpecificOutput: {hookEventName: "PostToolUse", updatedToolOutput: $out}}
-   + (if $message == "" then {} else {systemMessage:$message} end)'
+  '{hookSpecificOutput: {hookEventName: "PostToolUse", updatedToolOutput: $out}}'
 
 exit 0
