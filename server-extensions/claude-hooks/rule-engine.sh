@@ -17,6 +17,8 @@ set -uo pipefail
 umask 077
 
 REGISTRY="${RULE_REGISTRY:-$HOME/IWE/.claude/rules-registry.yaml}"
+HOOK_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)
+SECRET_PATTERN_LIB="$HOOK_DIR/secret-bypass-lib.sh"
 JOURNAL_DIR="${RULE_JOURNAL_DIR:-$HOME/logs/rule-engine}"
 mkdir -p "$JOURNAL_DIR"
 JOURNAL_FILE="$JOURNAL_DIR/$(date +%Y-%m-%d).jsonl"
@@ -33,9 +35,53 @@ log_journal() {
     local rule_id="$1" verdict="$2" reason="$3"
     local ctx="${RULE_CONTEXT:-{\}}"
     [ -z "$ctx" ] && ctx='{}'
+    # Security events can carry the very material they block. Keep only
+    # non-content evidence; never create a second raw copy in the journal.
+    if [ "${RULE_EVENT:-}" = "secret_in_chat_detected" ] || \
+       [ "${RULE_EVENT:-}" = "secret_request_attempt" ]; then
+        ctx=$(printf '%s' "$ctx" | python3 -c '
+import json
+import sys
+
+try:
+    raw = json.load(sys.stdin)
+    user_message = raw.get("user_message", "")
+    tool_input = raw.get("tool_input", "")
+    secret_request = raw.get("secret_request", False)
+    if not isinstance(user_message, str) or not isinstance(tool_input, str):
+        raise ValueError("invalid secret event context")
+    print(json.dumps({
+        "user_message_length": len(user_message),
+        "tool_input_length": len(tool_input),
+        "secret_request": secret_request is True or secret_request == "true",
+        "content_redacted": True,
+    }))
+except (TypeError, ValueError):
+    print(json.dumps({"content_redacted": True, "context_parse_error": True}))
+' 2>/dev/null) || ctx='{"content_redacted":true,"context_parse_error":true}'
+    elif [ "${RULE_EVENT:-}" = "pii_touch_attempt" ] || \
+         [ "${RULE_EVENT:-}" = "payment_credentials_touch" ] || \
+         [ "${RULE_EVENT:-}" = "secret_handling_attempt" ]; then
+        ctx=$(printf '%s' "$ctx" | python3 -c '
+import json
+import sys
+
+try:
+    raw = json.load(sys.stdin)
+    file_path = raw.get("file_path", "")
+    content = raw.get("content_snippet", "")
+    if not isinstance(file_path, str) or not isinstance(content, str):
+        raise ValueError("invalid PII event context")
+    print(json.dumps({
+        "file_path_length": len(file_path),
+        "content_snippet_length": len(content),
+        "content_redacted": True,
+    }))
+except (TypeError, ValueError):
+    print(json.dumps({"content_redacted": True, "context_parse_error": True}))
+' 2>/dev/null) || ctx='{"content_redacted":true,"context_parse_error":true}'
     # SQL files may contain real user data or credentials in data migrations.
-    # Keep only non-content evidence; never create a second raw copy in logs.
-    if [ "${RULE_EVENT:-}" = "sql_file_write" ]; then
+    elif [ "${RULE_EVENT:-}" = "sql_file_write" ]; then
         ctx=$(printf '%s' "$ctx" | python3 -c '
 import hashlib
 import json
@@ -84,6 +130,62 @@ emit_verdict() {
         "$verdict" \
         "$rule_id" \
         "$(printf '%s' "$reason" | python3 -c 'import sys,json; print(json.dumps(sys.stdin.read(), ensure_ascii=False))')"
+}
+
+secret_pattern_match_count() {
+    # The canonical helper emits only pattern identifiers/counts. The matched
+    # text stays on stdin and is never returned by this function or journaled.
+    local text="$1" analysis count
+    [ -r "$SECRET_PATTERN_LIB" ] || return 2
+    # shellcheck source=/dev/null
+    if ! source "$SECRET_PATTERN_LIB" >/dev/null 2>&1; then
+        return 2
+    fi
+    declare -F secret_pattern_process >/dev/null 2>&1 || return 2
+    analysis=$(printf '%s' "$text" | secret_pattern_process detect-text 2>/dev/null) || return 2
+    count=$(printf '%s' "$analysis" | python3 -c '
+import json
+import re
+import sys
+
+try:
+    result = json.load(sys.stdin)
+    if not isinstance(result, dict) or set(result) != {"pattern_ids", "match_count", "patterns"}:
+        raise ValueError("invalid result shape")
+    count = result.get("match_count")
+    pattern_ids = result.get("pattern_ids")
+    patterns = result.get("patterns")
+    if type(count) is not int or count < 0:
+        raise ValueError("invalid count")
+    if not isinstance(pattern_ids, list) or not all(
+        isinstance(item, str) and re.fullmatch(r"[a-z0-9-]{1,64}", item)
+        for item in pattern_ids
+    ):
+        raise ValueError("invalid pattern ids")
+    if not isinstance(patterns, list):
+        raise ValueError("invalid pattern details")
+    detail_ids = []
+    detail_count = 0
+    for detail in patterns:
+        if not isinstance(detail, dict) or set(detail) != {"pattern_id", "count", "lines"}:
+            raise ValueError("invalid pattern detail")
+        if detail["pattern_id"] not in pattern_ids:
+            raise ValueError("unknown pattern detail")
+        if type(detail["count"]) is not int or detail["count"] <= 0:
+            raise ValueError("invalid pattern detail count")
+        if not isinstance(detail["lines"], list) or not all(
+            type(line) is int and line > 0 for line in detail["lines"]
+        ):
+            raise ValueError("invalid pattern detail lines")
+        detail_ids.append(detail["pattern_id"])
+        detail_count += detail["count"]
+    if detail_ids != pattern_ids or detail_count != count:
+        raise ValueError("inconsistent pattern details")
+    print(count)
+except (TypeError, ValueError):
+    raise SystemExit(1)
+' 2>/dev/null) || return 2
+    printf '%s\n' "$count"
 }
 
 # === Загрузка реестра ===
@@ -627,9 +729,26 @@ check_security_gate() {
     local ctx="${RULE_CONTEXT:-}"
     [ -z "$ctx" ] && ctx='{}'
 
-    local file_path content
-    file_path=$(echo "$ctx" | python3 -c 'import sys,json; d=json.loads(sys.stdin.read() or "{}"); print(d.get("file_path",""))' 2>/dev/null)
-    content=$(echo "$ctx" | python3 -c 'import sys,json; d=json.loads(sys.stdin.read() or "{}"); print(d.get("content_snippet",""))' 2>/dev/null)
+    local parsed file_path content secret_count
+    if ! parsed=$(printf '%s' "$ctx" | python3 -c '
+import json
+import sys
+
+try:
+    data = json.loads(sys.stdin.read() or "{}")
+    file_path = data.get("file_path", "")
+    content = data.get("content_snippet", "")
+    if not isinstance(file_path, str) or not isinstance(content, str):
+        raise ValueError("invalid context types")
+    print(json.dumps({"file_path": file_path, "content": content}))
+except (TypeError, ValueError):
+    raise SystemExit(1)
+' 2>/dev/null); then
+        emit_verdict "block" "AR.011" "Security Gate context is invalid — canonical secret scan could not run"
+        return
+    fi
+    file_path=$(printf '%s' "$parsed" | python3 -c 'import json,sys; print(json.load(sys.stdin)["file_path"])' 2>/dev/null)
+    content=$(printf '%s' "$parsed" | python3 -c 'import json,sys; print(json.load(sys.stdin)["content"])' 2>/dev/null)
 
     # Проверяем только если есть контент для анализа
     if [ -z "$content" ] && [ -n "$file_path" ] && [ -f "$file_path" ]; then
@@ -653,9 +772,14 @@ check_security_gate() {
         return
     fi
 
-    # Secrets в git-tracked файлах (не в .env)
-    if echo "$file_path" | grep -qvE '\.(env|gitignore|example)$'; then
-        if echo "$content" | grep -qiE '(sk_live_|pk_live_|napi_[a-zA-Z0-9]{30}|Authorization.*Bearer [a-zA-Z0-9+/]{20})'; then
+    # Secrets в git-tracked файлах (не в .env): один canonical corpus для
+    # rule-engine, hook guards, pre-commit и route quarantine.
+    if [[ ! "$file_path" =~ \.(env|gitignore|example)$ ]]; then
+        if ! secret_count=$(secret_pattern_match_count "$content"); then
+            emit_verdict "block" "AR.011" "Canonical secret detector is unavailable — Security Gate fails closed"
+            return
+        fi
+        if [ "$secret_count" -gt 0 ]; then
             emit_verdict "block" "AR.011" "secret в tracked-файле: API ключ обнаружен вне .env/.gitignore — перенести в env vars"
             return
         fi
@@ -1024,14 +1148,36 @@ check_secret_in_chat() {
     local ctx="${RULE_CONTEXT:-}"
     [ -z "$ctx" ] && ctx='{}'
 
-    local chat_content
-    chat_content=$(echo "$ctx" | python3 -c 'import sys,json; d=json.loads(sys.stdin.read() or "{}"); print(d.get("user_message","") + " " + d.get("tool_input",""))' 2>/dev/null)
+    local parsed chat_content secret_request secret_count
+    if ! parsed=$(printf '%s' "$ctx" | python3 -c '
+import json
+import sys
 
-    local secret_request
-    secret_request=$(echo "$ctx" | python3 -c 'import sys,json; d=json.loads(sys.stdin.read() or "{}"); print(str(d.get("secret_request","false")).lower())' 2>/dev/null)
+try:
+    data = json.loads(sys.stdin.read() or "{}")
+    user_message = data.get("user_message", "")
+    tool_input = data.get("tool_input", "")
+    secret_request = data.get("secret_request", False)
+    if not isinstance(user_message, str) or not isinstance(tool_input, str):
+        raise ValueError("invalid context types")
+    print(json.dumps({
+        "content": user_message + " " + tool_input,
+        "secret_request": secret_request is True or secret_request == "true",
+    }))
+except (TypeError, ValueError):
+    raise SystemExit(1)
+' 2>/dev/null); then
+        emit_verdict "block" "AR.111" "Secret-in-chat context is invalid — canonical secret scan could not run"
+        return
+    fi
+    chat_content=$(printf '%s' "$parsed" | python3 -c 'import json,sys; print(json.load(sys.stdin)["content"])' 2>/dev/null)
+    secret_request=$(printf '%s' "$parsed" | python3 -c 'import json,sys; print(str(json.load(sys.stdin)["secret_request"]).lower())' 2>/dev/null)
+    if ! secret_count=$(secret_pattern_match_count "$chat_content"); then
+        emit_verdict "block" "AR.111" "Canonical secret detector is unavailable — secret-in-chat gate fails closed"
+        return
+    fi
 
-    # Активный паттерн секрета в тексте (postgres:// и postgresql://, пароль ≥4 символа)
-    if echo "$chat_content" | grep -qE '(napi_[A-Za-z0-9]{20,}|sk-[A-Za-z0-9]{20,}|ghp_[A-Za-z0-9]{20,}|postgre(s|sql)://[^@:]+:[^@]{4,}@|-----BEGIN (PRIVATE|RSA) KEY-----|Bearer eyJ[A-Za-z0-9._-]{50,})'; then
+    if [ "$secret_count" -gt 0 ]; then
         emit_verdict "block" "AR.111" "Секрет в чате — считать скомпрометированным: revoke → новый → cascade rotation по всем точкам использования"
         return
     fi
@@ -1797,6 +1943,93 @@ for r in reg.get('rules', []):
         run_test 30 "обычное сообщение → ok (no secret)" "ok" \
             RULE_EVENT="secret_in_chat_detected" \
             RULE_CONTEXT='{"user_message":"запусти psql и покажи таблицы","tool_input":""}'
+        run_test D6.C7a "OpenAI project token uses canonical corpus → block" "block" \
+            RULE_EVENT="secret_in_chat_detected" \
+            RULE_CONTEXT='{"user_message":"sk-proj-PPPPPPPPPPPPPPPPPPPPPPPPPPPP","tool_input":""}'
+        run_test D6.C7b "GitHub fine-grained token uses canonical corpus → block" "block" \
+            RULE_EVENT="secret_in_chat_detected" \
+            RULE_CONTEXT='{"user_message":"github_pat_FFFFFFFFFFFFFFFFFFFFFFFFFFFFFF","tool_input":""}'
+        run_test D6.C7c "GitHub stateless installation token uses canonical corpus → block" "block" \
+            RULE_EVENT="secret_in_chat_detected" \
+            RULE_CONTEXT='{"user_message":"ghs_12345_eyJAAAAAAAAAAAA.BBBBBBBBBBBB.CCCCCCCCCCCC","tool_input":""}'
+        run_test D6.C7d "AR.011 reuses canonical corpus for tracked content → block" "block" \
+            RULE_EVENT="pii_touch_attempt" \
+            RULE_CONTEXT='{"file_path":"/tmp/config.py","content_snippet":"github_pat_QQQQQQQQQQQQQQQQQQQQQQQQQQQQQQ"}'
+        run_test D6.C7e "AR.011 scans secret content even when file_path is absent → block" "block" \
+            RULE_EVENT="secret_handling_attempt" \
+            RULE_CONTEXT='{"content_snippet":"sk-proj-MMMMMMMMMMMMMMMMMMMMMMMMMMMM"}'
+        run_test D6.C7f "malformed secret context fails closed → block" "block" \
+            RULE_EVENT="secret_in_chat_detected" \
+            RULE_CONTEXT='{broken'
+
+        T_C7_TOKEN='sk-proj-ZZZZZZZZZZZZZZZZZZZZZZZZZZZZ'
+        T_C7_LOG=$(mktemp -d "${TMPDIR:-/tmp}/rule-engine-c7-log.XXXXXX")
+        T_C7_CHAT=$(env RULE_JOURNAL_DIR="$T_C7_LOG" \
+            RULE_EVENT="secret_in_chat_detected" \
+            RULE_CONTEXT="{\"user_message\":\"$T_C7_TOKEN\",\"tool_input\":\"\"}" \
+            bash "$0" dispatch 2>/dev/null)
+        T_C7_FILE=$(env RULE_JOURNAL_DIR="$T_C7_LOG" \
+            RULE_EVENT="pii_touch_attempt" \
+            RULE_CONTEXT="{\"file_path\":\"/tmp/config.py\",\"content_snippet\":\"$T_C7_TOKEN\"}" \
+            bash "$0" dispatch 2>/dev/null)
+        T_C7_REQUEST=$(env RULE_JOURNAL_DIR="$T_C7_LOG" \
+            RULE_EVENT="secret_request_attempt" \
+            RULE_CONTEXT="{\"user_message\":\"$T_C7_TOKEN\",\"tool_input\":\"\"}" \
+            bash "$0" dispatch 2>/dev/null)
+        T_C7_HANDLING=$(env RULE_JOURNAL_DIR="$T_C7_LOG" \
+            RULE_EVENT="secret_handling_attempt" \
+            RULE_CONTEXT="{\"file_path\":\"/tmp/config.py\",\"content_snippet\":\"$T_C7_TOKEN\"}" \
+            bash "$0" dispatch 2>/dev/null)
+        T_C7_CHAT_V=$(printf '%s' "$T_C7_CHAT" | python3 -c 'import json,sys; print(json.load(sys.stdin)["verdict"])' 2>/dev/null)
+        T_C7_FILE_V=$(printf '%s' "$T_C7_FILE" | python3 -c 'import json,sys; print(json.load(sys.stdin)["verdict"])' 2>/dev/null)
+        T_C7_REQUEST_V=$(printf '%s' "$T_C7_REQUEST" | python3 -c 'import json,sys; print(json.load(sys.stdin)["verdict"])' 2>/dev/null)
+        T_C7_HANDLING_V=$(printf '%s' "$T_C7_HANDLING" | python3 -c 'import json,sys; print(json.load(sys.stdin)["verdict"])' 2>/dev/null)
+        if [ "$T_C7_CHAT_V" = "block" ] && [ "$T_C7_FILE_V" = "block" ] && \
+           [ "$T_C7_REQUEST_V" = "block" ] && [ "$T_C7_HANDLING_V" = "block" ] && \
+           ! grep -R -F -q -- "$T_C7_TOKEN" "$T_C7_LOG"; then
+            echo "PASS Test D6.C7g: all AR.011/AR.111 event journals contain metadata only"
+            PASS=$((PASS+1))
+        else
+            echo "FAIL Test D6.C7g: expected blocks and no secret material in journal"
+            FAIL=$((FAIL+1))
+        fi
+        rm -rf -- "$T_C7_LOG"
+
+        T_C7_NOHELP=$(mktemp -d "${TMPDIR:-/tmp}/rule-engine-c7-nohelper.XXXXXX")
+        cp "$0" "$T_C7_NOHELP/rule-engine.sh"
+        chmod 700 "$T_C7_NOHELP/rule-engine.sh"
+        T_C7_NOHELP_RESULT=$(env RULE_REGISTRY="$REGISTRY" \
+            RULE_JOURNAL_DIR="$T_C7_NOHELP/log" \
+            RULE_EVENT="secret_in_chat_detected" \
+            RULE_CONTEXT='{"user_message":"ordinary text","tool_input":""}' \
+            bash "$T_C7_NOHELP/rule-engine.sh" dispatch 2>/dev/null)
+        T_C7_NOHELP_V=$(printf '%s' "$T_C7_NOHELP_RESULT" | python3 -c 'import json,sys; print(json.load(sys.stdin)["verdict"])' 2>/dev/null)
+        if [ "$T_C7_NOHELP_V" = "block" ]; then
+            echo "PASS Test D6.C7h: unavailable canonical helper fails closed"
+            PASS=$((PASS+1))
+        else
+            echo "FAIL Test D6.C7h: expected block without canonical helper, got $T_C7_NOHELP_RESULT"
+            FAIL=$((FAIL+1))
+        fi
+        printf '%s\n' \
+            'secret_pattern_process() {' \
+            '  printf '\''%s\n'\'' '\''{"pattern_ids":[],"match_count":0,"patterns":[],"matched_text":"must-not-be-trusted"}'\''' \
+            '}' \
+            > "$T_C7_NOHELP/secret-bypass-lib.sh"
+        T_C7_BAD_RESULT=$(env RULE_REGISTRY="$REGISTRY" \
+            RULE_JOURNAL_DIR="$T_C7_NOHELP/log" \
+            RULE_EVENT="secret_in_chat_detected" \
+            RULE_CONTEXT='{"user_message":"ordinary text","tool_input":""}' \
+            bash "$T_C7_NOHELP/rule-engine.sh" dispatch 2>/dev/null)
+        T_C7_BAD_V=$(printf '%s' "$T_C7_BAD_RESULT" | python3 -c 'import json,sys; print(json.load(sys.stdin)["verdict"])' 2>/dev/null)
+        if [ "$T_C7_BAD_V" = "block" ]; then
+            echo "PASS Test D6.C7i: unsafe canonical helper output fails closed"
+            PASS=$((PASS+1))
+        else
+            echo "FAIL Test D6.C7i: expected block on unsafe helper output, got $T_C7_BAD_RESULT"
+            FAIL=$((FAIL+1))
+        fi
+        rm -rf -- "$T_C7_NOHELP"
 
         # AR.112/AR.113 statement-aware SQL security (WP-544 D6.1-D6.2)
         run_test D6.2a "WHERE in another statement does not scope PII query → warn" "warn" \

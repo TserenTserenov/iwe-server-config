@@ -1,96 +1,130 @@
 #!/bin/bash
-# Secret MCP Dump Guard (B7.7d, WP-212)
+# Secret MCP Dump Guard (B7.7d, WP-212; WP-544 D6.4/D6.8).
 # Event: PreToolUse (matcher: mcp__.*)
-# Блокирует MCP-инструменты, вываливающие ВЕСЬ набор переменных/секретов разом.
 #
-# Зачем: повторяющаяся утечка — агент вызывает «покажи все переменные» (Railway
-# list_variables), чтобы взять 2 строки, и в контекст падает весь живой набор
-# ключей (YooKassa live, Anthropic, GitHub, пароли БД…). Затирание (B7.7b) маскирует
-# известные форматы, но (а) срабатывает PostToolUse — оригинал уже в transcript,
-# (б) не ловит неизвестные форматы. Правильный фикс — НЕ тянуть весь список.
-#
-# Поведение: DENY известных bulk-secret инструментов. Bypass — CC_ALLOW_SECRETS_INPUT=1
-# вместе с CC_ALLOW_SECRETS_INPUT_UNTIL=<unix-time> максимум на 15 минут
-# (осознанное решение, когда список действительно нужен; переименовано из
-# CC_ALLOW_SECRETS I10/WP-500 2026-07-29 — единая семантика с secret-leak-block.sh:
-# этот флаг разрешает ВЫЗОВ инструмента, вывод отдельно маскирует secret-leak-redact.sh
-# под CC_ALLOW_SECRETS_OUTPUT). Лог.
-#
-# Лог: ~/IWE/.claude/logs/secret-mcp-dump-guard.jsonl
-# see: WP-212 B7.7d, AR.111, peer-session 2026-06-05-17
+# Scans every string leaf in MCP input and denies literal secrets, sensitive
+# paths and known bulk-secret tools before execution. Audit records contain
+# only safe pattern classes, lengths and the session identifier. Unknown or
+# renamed bulk tools remain a documented boundary: MCP servers must also apply
+# least-privilege response scopes.
 
 set -uo pipefail
 umask 077
 export PATH="/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin:${PATH:-}"
 
+fail_closed() {
+  printf 'Secret MCP guard blocked the call because its safety envelope could not be validated.\n' >&2
+  exit 2
+}
+
 HOOK_DIR=$(CDPATH='' cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
-if [ -r "$HOOK_DIR/secret-bypass-lib.sh" ]; then
-  # shellcheck source=secret-bypass-lib.sh
-  # Resolved next to this hook at runtime.
-  # shellcheck disable=SC1091
-  . "$HOOK_DIR/secret-bypass-lib.sh"
+SECRET_LIB="$HOOK_DIR/secret-bypass-lib.sh"
+[ -r "$SECRET_LIB" ] || fail_closed
+# shellcheck source=secret-bypass-lib.sh
+# shellcheck disable=SC1091
+. "$SECRET_LIB"
+if ! command -v secret_bypass_check >/dev/null 2>&1 \
+  || ! command -v secret_bypass_authorize >/dev/null 2>&1 \
+  || ! command -v secret_bypass_audit_append >/dev/null 2>&1 \
+  || [ ! -x "$SECRET_BYPASS_JQ" ] \
+  || [ ! -x "$SECRET_BYPASS_PYTHON" ]; then
+  fail_closed
 fi
+
+if ! input=$(cat); then
+  fail_closed
+fi
+if ! analysis=$(printf '%s' "$input" | secret_pattern_process analyze-mcp 2>/dev/null); then
+  fail_closed
+fi
+printf '%s' "$analysis" | "$SECRET_BYPASS_JQ" -e '
+  type == "object"
+  and (.applicable | type == "boolean")
+  and (.session_id | type == "string" and length > 0)
+  and (.tool_name | type == "string" and length > 0)
+  and ((.applicable == false) or (
+    (.input_length | type == "number")
+    and (.pattern_ids | type == "array")
+    and (.match_count | type == "number")
+    and (.sensitive_path | type == "boolean")
+  ))' >/dev/null 2>&1 || fail_closed
+
+applicable=$(printf '%s' "$analysis" | "$SECRET_BYPASS_JQ" -r '.applicable') || fail_closed
+[ "$applicable" = "true" ] || exit 0
+SESSION_ID=$(printf '%s' "$analysis" | "$SECRET_BYPASS_JQ" -r '.session_id') || fail_closed
+tool_name=$(printf '%s' "$analysis" | "$SECRET_BYPASS_JQ" -r '.tool_name') || fail_closed
+INPUT_LENGTH=$(printf '%s' "$analysis" | "$SECRET_BYPASS_JQ" -r '.input_length') || fail_closed
+pattern_ids=$(printf '%s' "$analysis" | "$SECRET_BYPASS_JQ" -r '.pattern_ids | join(",")') || fail_closed
+sensitive_path=$(printf '%s' "$analysis" | "$SECRET_BYPASS_JQ" -r '.sensitive_path') || fail_closed
+
+bulk_tool=false
+tool_name_lower=$(printf '%s' "$tool_name" | tr '[:upper:]' '[:lower:]')
+case "$tool_name_lower" in
+  *list_variables*|*list_secrets*|*get_variables*|*get_secrets*|*list_env*|*dump_env*|*list_vars*|*get_env*)
+    bulk_tool=true
+    ;;
+  *service_config*|*environment_status*|*service_metrics*|*get_config*)
+    ;;
+esac
+
+violation_pattern="$pattern_ids"
+if [ "$sensitive_path" = "true" ]; then
+  violation_pattern="${violation_pattern:+${violation_pattern},}sensitive-path"
+fi
+if [ "$bulk_tool" = "true" ]; then
+  violation_pattern="${violation_pattern:+${violation_pattern},}bulk-secret-tool"
+fi
+[ -n "$violation_pattern" ] || exit 0
 
 IWE_ROOT="${IWE_ROOT:-$HOME/IWE}"
 LOG_FILE="$IWE_ROOT/.claude/logs/secret-mcp-dump-guard.jsonl"
-mkdir -p "$(dirname "$LOG_FILE")" 2>/dev/null || true
+mkdir -p "$(dirname -- "$LOG_FILE")" 2>/dev/null || true
 
 log_decision() {
-  local decision="$1" tool="$2"
-  local ts record json_cmd; ts=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
-  json_cmd="${SECRET_BYPASS_JQ:-jq}"
+  # Never persist MCP arguments or exact tool names.
+  local decision="$1" pattern="$2" ts time_bucket record
+  ts=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+  time_bucket=$(date -u +"%Y-%m-%dT%H:00:00Z")
   # The jq program references jq variables.
   # shellcheck disable=SC2016
-  record=$("$json_cmd" -nc --arg ts "$ts" --arg sid "${CLAUDE_SESSION_ID:-}" --arg dec "$decision" --arg tool "$tool" \
-    '{ts:$ts, hook:"secret-mcp-dump-guard", session_id:$sid, decision:$dec, tool:$tool}') || return 1
-  if command -v secret_bypass_audit_append >/dev/null 2>&1; then
-    secret_bypass_audit_append "$LOG_FILE" "$record"
-  else
-    printf '%s\n' "$record" >> "$LOG_FILE" 2>/dev/null
-  fi
+  record=$("$SECRET_BYPASS_JQ" -nc \
+    --arg ts "$ts" \
+    --arg bucket "$time_bucket" \
+    --arg sid "$SESSION_ID" \
+    --arg decision "$decision" \
+    --arg pattern "$pattern" \
+    --argjson input_length "$INPUT_LENGTH" \
+    '{ts:$ts,time_bucket:$bucket,hook:"secret-mcp-dump-guard",
+      session_id:$sid,decision:$decision,pattern:$pattern,
+      input_length:$input_length}') || return 1
+  secret_bypass_audit_append "$LOG_FILE" "$record"
 }
 
-input=$(cat)
-tool_name=$(echo "$input" | jq -r '.tool_name // empty' 2>/dev/null)
-
-# Только MCP-инструменты
-case "$tool_name" in mcp__*) ;; *) exit 0 ;; esac
-
-# Денилист bulk-secret инструментов (регистронезависимо).
-# Ловим: list_variables / list_secrets / get_variables / get_secrets / list_env / dump_env.
-tn=$(printf '%s' "$tool_name" | tr 'A-Z' 'a-z')
-case "$tn" in
-  *list_variables*|*list_secrets*|*get_variables*|*get_secrets*|*list_env*|*dump_env*|*list_vars*|*get_env*)
-    ;;
-  *service_config*|*environment_status*|*service_metrics*|*get_config*)  # конфиг-дамперы возвращают секреты (cold-review H5)
-    ;;
-  *) exit 0 ;;  # не bulk-secret инструмент — пропускаем
-esac
-
-# Bypass: осознанный короткий override пилота.
-if command -v secret_bypass_check >/dev/null 2>&1; then
-  if secret_bypass_check INPUT; then
-    if command -v secret_bypass_authorize >/dev/null 2>&1 \
-      && secret_bypass_authorize INPUT log_decision "bypass-env-temporary:${SECRET_BYPASS_REMAINING}s" "$tool_name"; then
-      exit 0
-    fi
-    if [ "$SECRET_BYPASS_STATE" != "rejected" ]; then
-      SECRET_BYPASS_STATE="rejected"
-      SECRET_BYPASS_REASON="authorization helper unavailable"
-    fi
-    BYPASS_NOTICE=$(secret_bypass_rejected_message INPUT)
-  elif [ "$SECRET_BYPASS_STATE" = "rejected" ]; then
-    log_decision "bypass-env-rejected:$SECRET_BYPASS_REASON" "$tool_name"
-    BYPASS_NOTICE=$(secret_bypass_rejected_message INPUT)
+BYPASS_NOTICE=""
+if secret_bypass_check INPUT; then
+  if authorization_output=$(secret_bypass_authorize INPUT \
+      log_decision "bypass-env-temporary:${SECRET_BYPASS_REMAINING}s" "$violation_pattern"); then
+    printf '%s\n' "$authorization_output"
+    exit 0
   fi
-elif [ -n "${CC_ALLOW_SECRETS_INPUT:-}${CC_ALLOW_SECRETS_INPUT_UNTIL:-}" ]; then
-  log_decision "bypass-env-rejected:validator-unavailable" "$tool_name"
-  BYPASS_NOTICE="Requested secret INPUT bypass was rejected: validator unavailable. Protection remains active."
+  SECRET_BYPASS_STATE="rejected"
+  SECRET_BYPASS_REASON="audited authorization unavailable"
+  BYPASS_NOTICE=$(secret_bypass_rejected_message INPUT)
+elif [ "$SECRET_BYPASS_STATE" = "rejected" ]; then
+  log_decision "bypass-env-rejected:$SECRET_BYPASS_REASON" "$violation_pattern" || true
+  BYPASS_NOTICE=$(secret_bypass_rejected_message INPUT)
 fi
 
-reason="Инструмент ${tool_name} возвращает ВЕСЬ набор переменных/секретов разом — живые ключи (платёжный, Anthropic, токены, пароли БД) попадут в контекст и в transcript Anthropic. Затирание это не гарантирует (срабатывает поздно + не ловит неизвестные форматы). Возьми нужное значение точечно (по имени конкретной переменной) или используй его через окружение сервиса, не вытягивая список. Если список действительно нужен целиком — запусти с CC_ALLOW_SECRETS_INPUT=1 вместе с CC_ALLOW_SECRETS_INPUT_UNTIL=<unix-time> максимум на 15 минут (осознанно)."
-log_decision "deny" "$tool_name"
-jq -n --arg reason "$reason" --arg message "${BYPASS_NOTICE:-}" \
-  '{hookSpecificOutput: {hookEventName: "PreToolUse", permissionDecision: "deny", permissionDecisionReason: $reason}}
-   + (if $message == "" then {} else {systemMessage:$message} end)'
+reason="MCP-вызов заблокирован до выполнения: вход содержит возможный секрет, чувствительный путь либо инструмент запрашивает набор секретов (классы: ${violation_pattern}). Передавай ссылку на конкретное безопасное значение или используй его внутри сервиса. Временное исключение требует CC_ALLOW_SECRETS_INPUT=1 и CC_ALLOW_SECRETS_INPUT_UNTIL=<unix-time> не более чем на 15 минут."
+log_decision "deny" "$violation_pattern" || true
+# The jq program references jq variables.
+# shellcheck disable=SC2016
+if ! "$SECRET_BYPASS_JQ" -n \
+    --arg reason "$reason" \
+    --arg message "$BYPASS_NOTICE" \
+    '{hookSpecificOutput:{hookEventName:"PreToolUse",
+      permissionDecision:"deny",permissionDecisionReason:$reason}}
+      + (if $message == "" then {} else {systemMessage:$message} end)'; then
+  fail_closed
+fi
 exit 0

@@ -1,27 +1,116 @@
-"""Detector-core перенесён из guide-kit/structurer/quarantine.py (peer-session
-2026-07-15-04, РП449 Ф4.2). Переносится только сам детектор (regex под форматы
-вендоров + labeled high-entropy assignment + Luhn/IBAN) — без forced-flag/PII/
-frontmatter-политики guide-kit, которой /route не пользуется (нет бизнес-политики
-WP-483 в переносимой части). Синхронизация с оригиналом проверяется тестом
-tests/test_quarantine_parity.py.
+"""Route quarantine detectors.
+
+Vendor-token formats come from the canonical hook helper shared with runtime
+guards. This module keeps only route-specific contextual/entropy heuristics and
+payment checks. The helper returns identifiers and counts, never matched text;
+an unavailable or malformed helper fails closed into quarantine.
 """
 from __future__ import annotations
 
+import json
 import re
+import subprocess
+from pathlib import Path
 
-# Known vendor token formats — zero ambiguity, the shape alone is the signal.
-VENDOR_SECRET_PATTERNS = [
-    re.compile(r"AKIA[0-9A-Z]{16}"),                          # AWS access key
-    re.compile(r"sk-ant-api\d{2}-[A-Za-z0-9_-]{30,}"),        # Anthropic
-    re.compile(r"gh[poshru]_[A-Za-z0-9]{30,}"),               # GitHub
-    re.compile(r"xox[baprs]-[A-Za-z0-9-]{10,}"),              # Slack
-    re.compile(r"AIza[0-9A-Za-z_-]{35}"),                     # Google API key
-    re.compile(r"-----BEGIN (?:RSA |EC |OPENSSH |DSA |)?PRIVATE KEY-----"),
-]
+_CLAUDE_LAYOUT_ROOT = Path(__file__).resolve().parents[2]
+_CANONICAL_SECRET_HELPER_CANDIDATES = (
+    _CLAUDE_LAYOUT_ROOT / "hooks" / "secret-bypass-lib.sh",
+    _CLAUDE_LAYOUT_ROOT / "claude-hooks" / "secret-bypass-lib.sh",
+)
+_CANONICAL_SECRET_HELPER = next(
+    (
+        candidate
+        for candidate in _CANONICAL_SECRET_HELPER_CANDIDATES
+        if candidate.is_file()
+    ),
+    _CANONICAL_SECRET_HELPER_CANDIDATES[0],
+)
+_BASH = Path("/bin/bash")
+_CANONICAL_DETECTOR_UNAVAILABLE = "canonical-detector-unavailable"
+_CANONICAL_DETECTED = "known-vendor-format"
+_SAFE_PATTERN_ID_RE = re.compile(r"[a-z0-9-]{1,64}")
 
-# Labeled high-entropy assignment — catches arbitrary third-party keys the vendor
-# list above doesn't know about. The label anchors intent (this is a "secret",
-# not just any long string); the length floor keeps placeholders like
+
+def _canonical_secret_match(text: str) -> bool | None:
+    """Return match state without returning or logging matched source text."""
+    if not isinstance(text, str):
+        return None
+    if not _BASH.is_file() or not _CANONICAL_SECRET_HELPER.is_file():
+        return None
+    try:
+        completed = subprocess.run(
+            [
+                str(_BASH),
+                "--noprofile",
+                "--norc",
+                "-c",
+                'source "$1" >/dev/null 2>&1 && '
+                "declare -F secret_pattern_process >/dev/null && "
+                "secret_pattern_process detect-text",
+                "route-quarantine",
+                str(_CANONICAL_SECRET_HELPER),
+            ],
+            input=text,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            text=True,
+            encoding="utf-8",
+            errors="strict",
+            timeout=5,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError, UnicodeError):
+        return None
+    if completed.returncode != 0 or len(completed.stdout) > 1_000_000:
+        return None
+    try:
+        result = json.loads(completed.stdout)
+        if not isinstance(result, dict) or set(result) != {
+            "pattern_ids",
+            "match_count",
+            "patterns",
+        }:
+            return None
+        match_count = result["match_count"]
+        pattern_ids = result["pattern_ids"]
+        patterns = result["patterns"]
+        if type(match_count) is not int or match_count < 0:
+            return None
+        if not isinstance(pattern_ids, list) or not all(
+            isinstance(pattern_id, str) and _SAFE_PATTERN_ID_RE.fullmatch(pattern_id)
+            for pattern_id in pattern_ids
+        ):
+            return None
+        if not isinstance(patterns, list):
+            return None
+        detail_ids = []
+        detail_count = 0
+        for detail in patterns:
+            if not isinstance(detail, dict) or set(detail) != {
+                "pattern_id",
+                "count",
+                "lines",
+            }:
+                return None
+            if detail["pattern_id"] not in pattern_ids:
+                return None
+            if type(detail["count"]) is not int or detail["count"] <= 0:
+                return None
+            if not isinstance(detail["lines"], list) or not all(
+                type(line) is int and line > 0 for line in detail["lines"]
+            ):
+                return None
+            detail_ids.append(detail["pattern_id"])
+            detail_count += detail["count"]
+        if detail_ids != pattern_ids or detail_count != match_count:
+            return None
+    except (TypeError, ValueError):
+        return None
+    return match_count > 0
+
+# Labeled high-entropy assignment — catches arbitrary third-party keys the
+# canonical corpus doesn't know about. The label anchors intent (this is a
+# "secret", not just any long string); the length floor keeps placeholders like
 # "password: changeme" out.
 LABELED_SECRET_RE = re.compile(
     r"\b(?:api[_-]?key|secret|token|access[_-]?key)\b\s*[:=]\s*['\"]?([A-Za-z0-9_\-/+=]{20,})['\"]?",
@@ -66,9 +155,11 @@ def _iban_valid(candidate: str) -> bool:
 
 
 def detect_secret(text: str) -> str | None:
-    for pattern in VENDOR_SECRET_PATTERNS:
-        if pattern.search(text):
-            return "known-vendor-format"
+    canonical_match = _canonical_secret_match(text)
+    if canonical_match is None:
+        return _CANONICAL_DETECTOR_UNAVAILABLE
+    if canonical_match:
+        return _CANONICAL_DETECTED
     for match in LABELED_SECRET_RE.finditer(text):
         value = match.group(1)
         if value.lower() not in PLACEHOLDER_VALUES and _looks_like_secret_value(value):

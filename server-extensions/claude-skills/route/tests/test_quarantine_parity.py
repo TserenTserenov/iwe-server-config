@@ -1,8 +1,7 @@
-"""Поведенческий parity-тест против guide-kit/structurer/quarantine.py
-(peer-session 2026-07-15-04, РП449 Ф4.2). Test-time-only importlib-загрузка —
-без runtime cross-repo зависимости у /route. Если оригинал недалеко (другая
-машина, guide-kit ещё не клонирован) — тест скипается с предупреждением, а не
-падает CI.
+"""Route quarantine regression and guide-kit parity tests.
+
+The guide-kit comparison remains optional. Canonical-corpus and fail-closed
+tests always run because /route now shares vendor patterns with hook guards.
 """
 import importlib.util
 import os
@@ -14,7 +13,10 @@ import pytest
 _ROUTE_DIR = str(Path(__file__).parent.parent)
 if _ROUTE_DIR not in sys.path:
     sys.path.insert(0, _ROUTE_DIR)
-from quarantine_detectors import detect_payment, detect_secret  # noqa: E402
+import quarantine_detectors as detectors  # noqa: E402
+
+detect_payment = detectors.detect_payment
+detect_secret = detectors.detect_secret
 
 GUIDE_KIT_STRUCTURER = Path(
     os.environ.get("IWE_GUIDE_KIT_PATH", os.path.expanduser("~/IWE/guide-kit"))
@@ -37,7 +39,7 @@ def _load_guide_kit_quarantine():
 
 guide_kit_quarantine = _load_guide_kit_quarantine()
 
-pytestmark = pytest.mark.skipif(
+PARITY_SKIP = pytest.mark.skipif(
     guide_kit_quarantine is None,
     reason=f"guide-kit не найден по пути {GUIDE_KIT_STRUCTURER} — parity-проверка пропущена",
 )
@@ -65,8 +67,25 @@ PAYMENT_CORPUS = [
     ("ref code AB12CDEFGHIJKLMNOP", None),
 ]
 
+CANONICAL_SECRET_CORPUS = [
+    ("openai: sk-proj-" + "P" * 28, "known-vendor-format"),
+    ("github: github_pat_" + "F" * 30, "known-vendor-format"),
+    (
+        "installation: ghs_12345_eyJ"
+        + "A" * 12
+        + "."
+        + "B" * 12
+        + "."
+        + "C" * 12,
+        "known-vendor-format",
+    ),
+    ("sk-proj-short", None),
+    ("github_pat_example", None),
+]
+
 
 @pytest.mark.parametrize("text, expected_detected_by", SECRET_CORPUS)
+@PARITY_SKIP
 def test_secret_detector_parity(text, expected_detected_by):
     ours = detect_secret(text)
     theirs_result = guide_kit_quarantine._detect_secret(text)
@@ -75,8 +94,48 @@ def test_secret_detector_parity(text, expected_detected_by):
 
 
 @pytest.mark.parametrize("text, expected_detected_by", PAYMENT_CORPUS)
+@PARITY_SKIP
 def test_payment_detector_parity(text, expected_detected_by):
     ours = detect_payment(text)
     theirs_result = guide_kit_quarantine._detect_payment(text)
     assert ours == expected_detected_by
     assert ours == theirs_result
+
+
+@pytest.mark.parametrize("text, expected_detected_by", CANONICAL_SECRET_CORPUS)
+def test_canonical_secret_corpus(text, expected_detected_by):
+    assert detect_secret(text) == expected_detected_by
+
+
+def test_secret_detector_fails_closed_when_helper_is_missing(monkeypatch, tmp_path):
+    monkeypatch.setattr(
+        detectors,
+        "_CANONICAL_SECRET_HELPER",
+        tmp_path / "missing-secret-helper.sh",
+    )
+
+    assert detect_secret("ordinary text") == "canonical-detector-unavailable"
+
+
+def test_secret_detector_fails_closed_on_unsafe_helper_output(monkeypatch, tmp_path):
+    helper = tmp_path / "unsafe-secret-helper.sh"
+    helper.write_text(
+        "secret_pattern_process() { "
+        "printf '%s\\n' "
+        "'{\"pattern_ids\":[],\"match_count\":0,\"patterns\":[],"
+        "\"matched_text\":\"must-not-be-trusted\"}'; "
+        "}\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(detectors, "_CANONICAL_SECRET_HELPER", helper)
+
+    assert detect_secret("ordinary text") == "canonical-detector-unavailable"
+
+
+def test_secret_detector_does_not_echo_input(capsys):
+    synthetic = "sk-proj-" + "N" * 28
+
+    assert detect_secret(synthetic) == "known-vendor-format"
+    captured = capsys.readouterr()
+    assert synthetic not in captured.out
+    assert synthetic not in captured.err
