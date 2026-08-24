@@ -12,18 +12,20 @@ SECRET_BYPASS_REMAINING=0
 SECRET_BYPASS_JQ=""
 SECRET_BYPASS_PYTHON=""
 
-for secret_bypass_candidate in /opt/homebrew/bin/jq /usr/local/bin/jq /usr/bin/jq /bin/jq; do
+for secret_bypass_candidate in /opt/homebrew/bin/jq /usr/local/bin/jq /usr/bin/jq /bin/jq /run/current-system/sw/bin/jq; do
   if [ -x "$secret_bypass_candidate" ]; then
     SECRET_BYPASS_JQ="$secret_bypass_candidate"
     break
   fi
 done
-for secret_bypass_candidate in /usr/bin/python3 /usr/local/bin/python3 /opt/homebrew/bin/python3; do
+[ -n "$SECRET_BYPASS_JQ" ] || SECRET_BYPASS_JQ=$(command -v jq 2>/dev/null)
+for secret_bypass_candidate in /usr/bin/python3 /usr/local/bin/python3 /opt/homebrew/bin/python3 /run/current-system/sw/bin/python3; do
   if [ -x "$secret_bypass_candidate" ]; then
     SECRET_BYPASS_PYTHON="$secret_bypass_candidate"
     break
   fi
 done
+[ -n "$SECRET_BYPASS_PYTHON" ] || SECRET_BYPASS_PYTHON=$(command -v python3 2>/dev/null)
 unset secret_bypass_candidate
 
 secret_pattern_process() {
@@ -1209,7 +1211,7 @@ def redact_envelope(raw):
         }
         if (
             not isinstance(response, dict)
-            or set(response) != set(required)
+            or not set(required).issubset(response)
             or any(not isinstance(response[key], value_type) for key, value_type in required.items())
         ):
             fail("invalid Bash tool response shape")
@@ -1979,8 +1981,16 @@ secret_bypass_self_test() {
   audit_file="$audit_tmp/audit.jsonl"
   audit_link="$audit_tmp/audit-link.jsonl"
   audit_truncated="$audit_tmp/audit-truncated.jsonl"
-  if secret_bypass_audit_append "$audit_file" '{"hook":"self-test","decision":"test"}' \
-    && [ "$(stat -f '%Lp' "$audit_file" 2>/dev/null)" = "600" ] \
+  if secret_bypass_audit_append "$audit_file" '{"hook":"self-test","decision":"test"}'; then
+    if audit_stat_bsd=$(stat -f '%Lp' "$audit_file" 2>/dev/null); then
+      audit_mode="$audit_stat_bsd"
+    else
+      audit_mode=$(stat -c '%a' "$audit_file" 2>/dev/null)
+    fi
+  else
+    audit_mode=""
+  fi
+  if [ "$audit_mode" = "600" ] \
     && grep -q '"decision":"test"' "$audit_file"; then
     printf 'PASS durable_private_audit\n'
   else
