@@ -191,14 +191,29 @@ Slug = первые 4 латинских слова из задачи строч
 **1.0 Session-guard open (WP-398, обязательно, ДО любых Write/Edit в сессии).** Синхронизирует пир-сессию с `session-guard.sh` Scope gate — без этого коммит на Шаге 4.5 будет заблокирован pre-commit хуком (mtime файлов сессии старше семафора). WP берётся из Шага 0б (найденный или «day-close»/«unknown», если РП не назначен). `--close-path peer-session` (WP-484 Ф118, 19.08) объявляет протокол закрытия заранее — без него `close-runner-gate.sh`/`close-gate-reminder.sh` требуют раннер закрытия дня для прямого коммита Шага 4.5.1, хотя это другой протокол (живой симптом, воспроизводившийся каждую сессию до этой фазы):
 
 ```bash
-IWE_AGENT=claude-code bash "${IWE_SCRIPTS:-$HOME/IWE/scripts}/session-guard.sh" open \
+GOV_REPO_ROOT="$HOME/IWE/${IWE_GOVERNANCE_REPO:-DS-strategy}"
+OPEN_OUTPUT=$(IWE_AGENT=claude-code bash "${IWE_SCRIPTS:-$HOME/IWE/scripts}/session-guard.sh" open \
   --wp "<WP-NNN из Шага 0б>" --agent claude-code --close-path peer-session \
-  --task "<задача одной строкой>" --slug "$SESSION_ID"
+  --task "<задача одной строкой>" --slug "$SESSION_ID" 2>&1)
+OPEN_STATUS=$?
+printf '%s\n' "$OPEN_OUTPUT"
 ```
 
 > **Не хардкодить `~/IWE/scripts/session-guard.sh`.** Пир-сессия 2026-07-31-16-wp484-new-order-cutover сначала внесла такой хардкод по образцу `day-close/SKILL.md`, но холодный ревью нашёл: у обычного пользователя шаблона `setup.sh` НЕ копирует корневую `scripts/` — существует только каталог скриптов внутри шаблона, и `${IWE_SCRIPTS:-...}` резолвится именно туда намеренно (issue #266, commit `835d5ea` — тот же хардкод уже один раз чинили этим фоллбэком). Хардкод в `day-close/SKILL.md` — недокументированный долг, ждущий той же поломки при промоции, не образец для копирования. Для author-mode расхождение реальное (FMT-копия `session-guard.sh` отстаёт от корневой на фиксы WP-484 Нить1) — но лечится синком `template-sync.sh` (с отдельного разрешения пилота, S-33) или личной правкой `~/.iwe-paths`, не хардкодом в файле, который промотируется всем пользователям шаблона.
 
-Если команда упала (exit ≠ 0) — не блокировать сессию: сообщить пилоту одной строкой «session-guard open не сработал (<причина>), продолжаю без семафора — на Шаге 4.5 возможна ручная разблокировка через touch/note-file» и идти дальше. Semaphore-файл session-guard создаёт СВОЙ ORZ-скаффолд-заготовку по пути `sessions/<MONTH>/<TODAY>-<CLEAN_SLUG>.md` — тот же путь, что закрывающий файл пир-сессии из Шага 4.4/4.5.0 (до 2026-08-03 эти два места ошибочно считали разные пути, см. пометку на Шаге 4.4); Шаг 4.5.0 дописывает в этот же файл финальное содержимое, а не создаёт новый.
+**Freeze-fallback (WP-484 Ф133, 24.08 — живой инцидент Ф132 п.3: freeze-гейт блокировал интерактивную пир-сессию без штатного пути закрыться).** `open` без `--isolate` — быстрый путь, достаточный вне freeze (большинство сессий). Если `OPEN_STATUS != 0` И `$OPEN_OUTPUT` содержит `под freeze` (`grep -q 'под freeze' <<<"$OPEN_OUTPUT"`) — canonical checkout заморожен (WP-520/WP-484 Ф104), сам гейт рекомендует `--isolate`, он для этого и существует (найдено этой же фазой — Класс 2, `--isolate` уже решает проблему, просто не был подключён здесь). Повторить с флагом:
+```bash
+ISOLATE_OUTPUT=$(IWE_AGENT=claude-code bash "${IWE_SCRIPTS:-$HOME/IWE/scripts}/session-guard.sh" open \
+  --wp "<WP-NNN из Шага 0б>" --agent claude-code --close-path peer-session \
+  --task "<задача одной строкой>" --slug "$SESSION_ID" --isolate)
+```
+Успех → `$ISOLATE_OUTPUT` содержит строку JSON `{"worktree_path": "...", "branch": "...", "session_id": "..."}`. Извлечь `worktree_path` (`python3 -c 'import json,sys; print(json.loads(sys.argv[1])["worktree_path"])' "$(grep -o '{.*}' <<<"$ISOLATE_OUTPUT")"`) и переопределить корень репозитория на оставшуюся часть скилла:
+```bash
+GOV_REPO_ROOT="<извлечённый worktree_path>"
+```
+Сообщить пилоту одной строкой: «Канон под заморозкой — сессия работает в изолированной копии (`$GOV_REPO_ROOT`), коммит на Шаге 4.5.1 уйдёт оттуда через штатный `isolate-push.sh`». Любой другой exit ≠ 0 (не freeze, и isolate-попытка тоже не помогла) → не блокировать сессию как раньше: сообщить пилоту одной строкой «session-guard open не сработал (<причина>), продолжаю без семафора — на Шаге 4.5 возможна ручная разблокировка через touch/note-file», `GOV_REPO_ROOT` остаётся канонический путь, идти дальше.
+
+Semaphore-файл session-guard создаёт СВОЙ ORZ-скаффолд-заготовку по пути `sessions/<MONTH>/<TODAY>-<CLEAN_SLUG>.md` — тот же путь, что закрывающий файл пир-сессии из Шага 4.4/4.5.0 (до 2026-08-03 эти два места ошибочно считали разные пути, см. пометку на Шаге 4.4); Шаг 4.5.0 дописывает в этот же файл финальное содержимое, а не создаёт новый. Все остальные шаги ниже, где раньше стоял хардкод `$HOME/IWE/${IWE_GOVERNANCE_REPO:-DS-strategy}`, используют `$GOV_REPO_ROOT` — при неизолированном open это то же самое значение, что и раньше (обратная совместимость), при isolate-fallback это путь изолированного worktree.
 
 **1.1 Создать папку:**
 ```bash
@@ -268,7 +283,7 @@ swap_history: []     # [{turn, from, to, reason}] — журнал SWAP_WRITER �
 
 **1.3 Записать открывающую запись в индекс-черновик** (WP-537 Ф4: `sessions/00-index.md` больше не пишется напрямую — session-index-snapshot.sh единственный писатель git-tracked файла, все остальные пишут в свой runtime-черновик, см. `scripts/lib/session-index-draft.sh`). Колонка «Агенты» — при `PEER_COUNT>=2` напарники соединяются через `+`:
 ```bash
-. "$HOME/IWE/${IWE_GOVERNANCE_REPO:-DS-strategy}/scripts/lib/session-index-draft.sh"
+. "$GOV_REPO_ROOT/scripts/lib/session-index-draft.sh"
 session_index_draft_write "$SESSION_ID" "$TODAY" "<задача ≤50 симв>" \
   "claude-code / <PEER_VENDOR1>[+<PEER_VENDOR2>...]" "0" "0" "started" "—"
 ```
@@ -882,7 +897,7 @@ DURATION_MIN=$(( (NOW_EPOCH - START_EPOCH) / 60 ))
 2. Спросить: «Что в этой сессии стоит запомнить на будущее — не про саму задачу, а про то, как шла работа?» (дословно вопрос Ф18, `CONCEPT-night-cycle.md §18`).
 3. Записать ответ в дневной ledger:
    ```bash
-   bash "$HOME/IWE/${IWE_GOVERNANCE_REPO:-DS-strategy}/scripts/ledger-append.sh" day "$(date +%F)" session_reflection "{\"wp\": \"<WP-NNN>\", \"answer\": <экранированный ответ>}" peer-conversation
+   bash "$GOV_REPO_ROOT/scripts/ledger-append.sh" day "$(date +%F)" session_reflection "{\"wp\": \"<WP-NNN>\", \"answer\": <экранированный ответ>}" peer-conversation
    ```
 4. Перейти к **Шагу 3.8 (Close-Trigger Gate)** — рефлексия НЕ равна разрешению закрывать, это отдельная проверка.
 
@@ -1076,7 +1091,7 @@ Omit если `implementation_pipeline: false` в meta.yaml.
 
 Тот же черновик, что Шаг 1.3 открыл — `opened_at` сохраняется, остальные поля заменяются целиком (колонка «Агенты» — та же `+`-склейка при PEER_COUNT>=2):
 ```bash
-. "$HOME/IWE/${IWE_GOVERNANCE_REPO:-DS-strategy}/scripts/lib/session-index-draft.sh"
+. "$GOV_REPO_ROOT/scripts/lib/session-index-draft.sh"
 session_index_draft_write "$SESSION_ID" "$TODAY" "<задача ≤50>" \
   "claude-code / <PEER_VENDOR1>[+<PEER_VENDOR2>...]" "<TURNS/ROUNDS>" "<ESCALATIONS>" \
   "completed" "[report.md](<MONTH>/<DAY>/<SESSION_ID>/report.md)"
@@ -1103,7 +1118,7 @@ Slug-часть (без даты, с номером — та же формула
 # `agent:` — обязательный ключ по списку session-guard.sh:474 (validate_orz);
 # без него Шаг 4.5.2 (close) падает "в frontmatter отсутствует ключ 'agent:'".
 # `writer:` держим тоже — для согласованности с meta.yaml.writer_agent.
-GUARD_ORZ="$HOME/IWE/${IWE_GOVERNANCE_REPO:-DS-strategy}/sessions/$MONTH/${TODAY}-${SESSION_SLUG}.md"
+GUARD_ORZ="$GOV_REPO_ROOT/sessions/$MONTH/${TODAY}-${SESSION_SLUG}.md"
 cat > "$GUARD_ORZ" <<EOF
 ---
 date: $TODAY
@@ -1142,7 +1157,7 @@ EOF
 **4.5.1 Commit + push:**
 
 ```bash
-cd "$HOME/IWE/${IWE_GOVERNANCE_REPO:-DS-strategy}"
+cd "$GOV_REPO_ROOT"
 # pathspec после `--`: commit ТОЛЬКО файлы сессии, не подметаем чужое
 # pre-staged из общего индекса (mis-attribution, см. 2026-06-20-39).
 # $GUARD_ORZ (Шаг 4.5.0) — тот же путь, что "$TODAY-$SESSION_SLUG.md" (Шаг 4.4),
@@ -1161,7 +1176,7 @@ git commit -m "feat(peer): $SESSION_ID — <задача кратко>" -- "${PA
 # и падает в ручной обход. Отказ (грязное дерево и т.п.) не блокирует
 # закрытие — WARN и legacy-путь confirmed_clean_repos. При доставке из
 # изолированного worktree (freeze) — та же строка перед isolate-push.
-bash "$HOME/IWE/${IWE_GOVERNANCE_REPO:-DS-strategy}/scripts/session-manifest-write.sh" "$(git rev-parse --show-toplevel)" "$SESSION_ID" \
+bash "$GOV_REPO_ROOT/scripts/session-manifest-write.sh" "$(git rev-parse --show-toplevel)" "$SESSION_ID" \
   || echo "WARN: attest-манифест не создан — догоняющее закрытие пойдёт legacy-путём"
 ```
 

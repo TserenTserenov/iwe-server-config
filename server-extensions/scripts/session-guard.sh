@@ -2361,6 +2361,27 @@ $_repo"
     echo "checklist_carry_over: ${DEFER_ARG:-нет}"
     echo "checklist_publish_state: $_publish_state"
   } >> "$_sem_read"
+
+  # Best-effort атрибуция ТОЛЬКО для закрытий, обошедших process-runner.py
+  # (FORCED_CARD непустой на каждом из 4 bypass-путей выше: peer-session,
+  # auto-archive-cancelled, force-no-reflection, cancel-obligation) --
+  # r23_verdict их не видит, R23-серия покрывала лишь ~7% реальных закрытий
+  # (WP-484 Ф128/Ф131). Условие обязательно: без него событие писалось бы и
+  # для нормального завершённого раннера, задваивая r23_verdict тем же
+  # смыслом под другим именем (найдено cold-review Ф133, High). Никогда не
+  # проваливает close.
+  if [ -n "$FORCED_CARD" ] && [ -f "$IWE_ROOT/$GOV_REPO/scripts/ledger-append.sh" ]; then
+    _cp_from_sem=$(grep "^close_path: " "$_sem_read" 2>/dev/null | cut -d' ' -f2- || echo "unknown")
+    _direct_event=$(python3 -c '
+import json, sys
+print(json.dumps({"wp": sys.argv[1], "slug": sys.argv[2], "agent": sys.argv[3], "close_path": sys.argv[4]}))
+' "$WP" "$SLUG" "$AGENT" "$_cp_from_sem" 2>/dev/null) || _direct_event=""
+    if [ -n "$_direct_event" ]; then
+      bash "$IWE_ROOT/$GOV_REPO/scripts/ledger-append.sh" day "$(now_date)" session_closed_direct "$_direct_event" session-guard \
+        >/dev/null 2>&1 || echo "  ⚠️  ledger session_closed_direct не записан (best-effort, не блокирует close)" >&2
+    fi
+  fi
+
   exit 0
 fi
 
