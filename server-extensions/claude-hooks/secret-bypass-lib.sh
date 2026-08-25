@@ -35,6 +35,8 @@ secret_pattern_process() {
   # The single-quoted argument is an embedded Python program.
   # shellcheck disable=SC2016
   "$SECRET_BYPASS_PYTHON" -c '
+import contextlib
+import io
 import json
 import os
 import re
@@ -315,6 +317,190 @@ def normalize_dollar_quotes(command):
         output.append(character)
         index += 1
     return "".join(output)
+
+
+def read_heredoc_word(command, index):
+    single_quote = "'"
+    delimiter = []
+    consumed = False
+    quote = None
+
+    while index < len(command) and command[index] in " \t\r":
+        index += 1
+    word_start = index
+
+    while index < len(command):
+        character = command[index]
+        if quote == single_quote:
+            consumed = True
+            if character == single_quote:
+                quote = None
+            else:
+                delimiter.append(character)
+            index += 1
+            continue
+        if quote == "\"":
+            consumed = True
+            if character == "\"":
+                quote = None
+                index += 1
+                continue
+            if character == "\\" and index + 1 < len(command):
+                escaped = command[index + 1]
+                if escaped in "\\\"$`\n":
+                    if escaped != "\n":
+                        delimiter.append(escaped)
+                    index += 2
+                    continue
+            delimiter.append(character)
+            index += 1
+            continue
+        if character in (single_quote, "\""):
+            consumed = True
+            quote = character
+            index += 1
+            continue
+        if character == "\\":
+            consumed = True
+            if index + 1 >= len(command):
+                fail("unterminated escape in heredoc delimiter")
+            escaped = command[index + 1]
+            if escaped != "\n":
+                delimiter.append(escaped)
+            index += 2
+            continue
+        if character.isspace() or character in "();<>|&":
+            break
+        consumed = True
+        delimiter.append(character)
+        index += 1
+
+    if quote is not None:
+        fail("unterminated quote in heredoc delimiter")
+    if not consumed:
+        fail("missing heredoc delimiter")
+    return word_start, index, "".join(delimiter)
+
+
+def parse_heredoc_header(command, start):
+    declarations = []
+    single_quote = "'"
+    quote = None
+    index = start
+
+    while index < len(command):
+        character = command[index]
+        if quote == single_quote:
+            if character == single_quote:
+                quote = None
+            index += 1
+            continue
+        if quote == "\"":
+            if character == "\\" and index + 1 < len(command):
+                index += 2
+                continue
+            if character == "\"":
+                quote = None
+            index += 1
+            continue
+        if character == "\\" and index + 1 < len(command):
+            index += 2
+            continue
+        if character in (single_quote, "\""):
+            quote = character
+            index += 1
+            continue
+        if character == "#" and (
+            index == start
+            or command[index - 1].isspace()
+            or command[index - 1] in ";|&()"
+        ):
+            newline = command.find("\n", index)
+            return (
+                len(command) if newline < 0 else newline + 1,
+                declarations,
+            )
+        if character == "\n":
+            return index + 1, declarations
+        if (
+            command.startswith("<<", index)
+            and not command.startswith("<<<", index)
+        ):
+            operator_start = index
+            index += 2
+            strip_tabs = index < len(command) and command[index] == "-"
+            if strip_tabs:
+                index += 1
+            _word_start, word_end, delimiter = read_heredoc_word(
+                command, index
+            )
+            declarations.append(
+                (operator_start, word_end, delimiter, strip_tabs)
+            )
+            index = word_end
+            continue
+        index += 1
+    return len(command), declarations
+
+
+def extract_heredocs(command):
+    # shell_command_variants()/shell_tokens() parse the *shell scaffold* of a
+    # command, not language-aware — a heredoc body handed to python3/bash -c
+    # is free-form text (Python `if`, quotes, `{...}`) that looks like broken
+    # shell syntax to that parser and made it fail-closed on ordinary Bash
+    # calls (WP544 D6.8 regression, 785e7ed25d). Replace each heredoc body
+    # with a neutral placeholder before shell analysis, and scan the bodies
+    # separately as literal text so secret detection still covers them.
+    shell_parts = []
+    bodies = []
+    position = 0
+
+    while position < len(command):
+        header_end, declarations = parse_heredoc_header(command, position)
+        if not declarations:
+            shell_parts.append(command[position:header_end])
+            position = header_end
+            continue
+
+        cursor = position
+        for operator_start, word_end, _delimiter, _strip_tabs in declarations:
+            shell_parts.append(command[cursor:operator_start])
+            shell_parts.append(
+                "<< __CLAUDE_HEREDOC_BODY_"
+                + str(len(bodies))
+                + "__"
+            )
+            cursor = word_end
+        shell_parts.append(command[cursor:header_end])
+        position = header_end
+
+        for _operator_start, _word_end, delimiter, strip_tabs in declarations:
+            body_lines = []
+            while True:
+                if position >= len(command):
+                    fail(
+                        "unterminated heredoc: expected delimiter "
+                        + repr(delimiter)
+                    )
+                newline = command.find("\n", position)
+                line_end = len(command) if newline < 0 else newline + 1
+                raw_line = command[position:line_end]
+                comparison = raw_line
+                if comparison.endswith("\n"):
+                    comparison = comparison[:-1]
+                if comparison.endswith("\r"):
+                    comparison = comparison[:-1]
+                if strip_tabs:
+                    comparison = comparison.lstrip("\t")
+                position = line_end
+                if comparison == delimiter:
+                    break
+                body_lines.append(
+                    raw_line.lstrip("\t") if strip_tabs else raw_line
+                )
+            bodies.append("".join(body_lines))
+
+    return "".join(shell_parts), bodies
 
 
 def expand_brace_range(content):
@@ -1207,10 +1393,20 @@ def redact_envelope(raw):
             "interrupted": bool,
             "isImage": bool,
         }
+        # noOutputExpected showed up in every real Bash tool_response observed
+        # 2026-08-25 (peer-session 2026-08-25-01-wp484-secret-guards-outage,
+        # 6/6 samples) but predates neither `required` above nor the hook
+        # exact-match check, which made redaction silently no-op on every
+        # single Bash call. Named allowlist, not an open subset check, so an
+        # unrecognized future field still fails closed instead of passing
+        # through unnoticed.
+        optional = {"noOutputExpected": bool}
         if (
             not isinstance(response, dict)
-            or set(response) != set(required)
+            or not set(required).issubset(response)
+            or not set(response).issubset(set(required) | set(optional))
             or any(not isinstance(response[key], value_type) for key, value_type in required.items())
+            or any(key in response and not isinstance(response[key], value_type) for key, value_type in optional.items())
         ):
             fail("invalid Bash tool response shape")
     elif tool_name == "Read":

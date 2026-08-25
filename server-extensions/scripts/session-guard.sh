@@ -2478,6 +2478,33 @@ print(os.path.relpath(f, r))
   if [ "$LAST" != "file: $REL_PATH" ]; then
     echo "file: $REL_PATH" >> "$SEM_FILE"
   fi
+
+  # WP-484 Ф133 (24.08, пир-сессия с Codex): авто-продление аренды при
+  # реальной активности. Живой инцидент Ф132 п.5 -- многораундовая пир-сессия
+  # легко превышает 4-часовую аренду (LEASE_SEC), и `pre-commit-check` не
+  # различает "мой семафор просрочен" от "чужой" (сверяет ВСЕ .open файлы в
+  # системе разом) -- явный `renew` не был вызван никем, потому что никто не
+  # заметил приближение дедлайна до самого коммита. `note-file` -- каждый файл
+  # сессии, который реально дописывается -- лучший доступный сигнал активности
+  # без нового отдельного вызова. Best-effort: неудача не блокирует note-file
+  # (та же атомарная запись, что renew -- temp-файл + mv, проверка что семафор
+  # ещё жив на случай гонки с параллельным close).
+  _LEASE_TMP="${SEM_FILE}.lease.tmp.$$"
+  {
+    echo "renewed_at: $(now_iso)"
+    echo "session_id: $(grep "^session_id: " "$SEM_FILE" | cut -d' ' -f2- || echo unknown)"
+  } > "$_LEASE_TMP" 2>/dev/null
+  # Проверка [ -f "$SEM_FILE" ] вплотную к mv (не раньше) -- сужает, но не
+  # закрывает TOCTOU-окно с параллельным close (cold-review Ф133, High): mv
+  # переименовывает .lease по имени независимо от текущего состояния
+  # $SEM_FILE, тот же класс окна, что и в renew выше, только без его fail.
+  if [ -s "$_LEASE_TMP" ] && [ -f "$SEM_FILE" ]; then
+    mv "$_LEASE_TMP" "${SEM_FILE}.lease" 2>/dev/null || rm -f "$_LEASE_TMP"
+  else
+    echo "note-file: lease renewal skipped (сессия могла закрыться параллельно)" >&2
+    rm -f "$_LEASE_TMP"
+  fi
+
   echo "Noted in scope: $REL_PATH"
   exit 0
 fi
