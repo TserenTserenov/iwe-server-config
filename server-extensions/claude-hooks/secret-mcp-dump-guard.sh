@@ -31,6 +31,82 @@ if ! command -v secret_bypass_check >/dev/null 2>&1 \
   fail_closed
 fi
 
+make_mcp_payload() {
+  python3 - "$1" "${2:-}" <<'PYEOF'
+import json
+import sys
+
+print(json.dumps({
+    "hook_event_name": "PreToolUse",
+    "session_id": "self-test-session",
+    "tool_name": sys.argv[1],
+    "tool_input": ({"value": sys.argv[2]} if sys.argv[2] else {}),
+}))
+PYEOF
+}
+
+self_test() {
+  local failures=0
+  # A live CC_ALLOW_SECRETS_INPUT bypass window (up to 15 min, see the file
+  # header) would make every deny-case below resolve to allow via
+  # secret_bypass_authorize — self_test must not depend on the invoking
+  # shell's environment.
+  unset CC_ALLOW_SECRETS_INPUT CC_ALLOW_SECRETS_INPUT_UNTIL
+
+  run_case() {
+    local name tool_name payload_value expect_decision out rc decision
+    name="$1"; expect_decision="$2"; tool_name="$3"; payload_value="${4:-}"
+    out=$(make_mcp_payload "$tool_name" "$payload_value" | "$0" 2>/dev/null)
+    rc=$?
+    if [ "$rc" -ne 0 ]; then
+      decision="error(rc=$rc)"
+    elif [ -z "$out" ]; then
+      decision="allow"
+    else
+      decision=$(printf '%s' "$out" | "$SECRET_BYPASS_JQ" -r '.hookSpecificOutput.permissionDecision // "allow"' 2>/dev/null)
+    fi
+    if [ "$decision" = "$expect_decision" ]; then
+      printf 'PASS %s\n' "$name"
+    else
+      printf 'FAIL %s: tool=%s expected=%s got=%s\n' "$name" "$tool_name" "$expect_decision" "$decision" >&2
+      failures=$((failures + 1))
+    fi
+  }
+
+  # First case group (list_variables/list_secrets/...) — bulk_tool set on the
+  # original code path, kept as a regression guard.
+  run_case list_variables_denied deny "mcp__railway__list_variables"
+  # Second case group — WP544 D6.8 (785e7ed25d) dropped bulk_tool=true here
+  # while restructuring the original single-branch deny into a bulk_tool
+  # flag composed with pattern/path violations; the tools matched fell
+  # through to allow instead. Regression test for that fix.
+  run_case get_config_denied deny "mcp__example__get_config"
+  run_case service_config_denied deny "mcp__example__service_config"
+  run_case environment_status_denied deny "mcp__example__environment_status"
+  run_case service_metrics_denied deny "mcp__example__service_metrics"
+  run_case safe_tool_allowed allow "mcp__example__lookup_widget"
+  # tool_name_lower normalization must not regress alongside the case fix.
+  run_case case_insensitive_denied deny "mcp__example__GET_Config"
+  # An empty tool_name fails MCP_TOOL_NAME.fullmatch() in analyze_mcp() ->
+  # secret_pattern_process exits non-zero -> fail_closed() (exit 2). Must
+  # stay fail-closed, not silently allow.
+  run_case empty_tool_name_fails_closed "error(rc=2)" ""
+  # A name matching both case groups at once must still resolve to a single
+  # deny, not double-count or short-circuit to allow.
+  run_case dual_pattern_match_denied deny "mcp__example__get_secrets_config"
+  # The bulk_tool branches only cover the tool NAME. The other half of this
+  # guard's purpose — a literal secret inside tool_input regardless of which
+  # tool carries it — had no regression coverage at all before this case.
+  run_case secret_in_payload_denied deny "mcp__example__lookup_widget" "sk-proj-$(printf 'V%.0s' $(seq 1 28))"
+
+  [ "$failures" -eq 0 ]
+}
+
+if [ "${1:-}" = "--self-test" ]; then
+  self_test
+  exit $?
+fi
+
 if ! input=$(cat); then
   fail_closed
 fi
@@ -64,6 +140,7 @@ case "$tool_name_lower" in
     bulk_tool=true
     ;;
   *service_config*|*environment_status*|*service_metrics*|*get_config*)
+    bulk_tool=true
     ;;
 esac
 

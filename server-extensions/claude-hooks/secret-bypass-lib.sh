@@ -320,7 +320,7 @@ def normalize_dollar_quotes(command):
 
 
 def read_heredoc_word(command, index):
-    single_quote = "'"
+    single_quote = "\u0027"
     delimiter = []
     consumed = False
     quote = None
@@ -384,7 +384,7 @@ def read_heredoc_word(command, index):
 
 def parse_heredoc_header(command, start):
     declarations = []
-    single_quote = "'"
+    single_quote = "\u0027"
     quote = None
     index = start
 
@@ -1323,13 +1323,18 @@ def analyze_bash(raw):
     command = tool_input.get("command")
     if not isinstance(command, str) or not command.strip():
         fail("invalid Bash hook envelope")
+    shell_scaffold, heredoc_bodies = extract_heredocs(command)
     pattern_ids = []
     match_count = 0
-    for variant in shell_command_variants(command):
+    for variant in shell_command_variants(shell_scaffold):
         variant_ids, variant_count, _details = scan(" ".join(shell_tokens(variant)))
         pattern_ids.extend(variant_ids)
         match_count += variant_count
-    direct_read, direct_upload = analyze_shell_paths(command)
+    for body in heredoc_bodies:
+        body_ids, body_count, _details = scan(body)
+        pattern_ids.extend(body_ids)
+        match_count += body_count
+    direct_read, direct_upload = analyze_shell_paths(shell_scaffold)
     return {
         "applicable": True,
         "session_id": session_id,
@@ -1393,20 +1398,23 @@ def redact_envelope(raw):
             "interrupted": bool,
             "isImage": bool,
         }
-        # noOutputExpected showed up in every real Bash tool_response observed
-        # 2026-08-25 (peer-session 2026-08-25-01-wp484-secret-guards-outage,
-        # 6/6 samples) but predates neither `required` above nor the hook
-        # exact-match check, which made redaction silently no-op on every
-        # single Bash call. Named allowlist, not an open subset check, so an
-        # unrecognized future field still fails closed instead of passing
-        # through unnoticed.
-        optional = {"noOutputExpected": bool}
+        # 2026-08-25: an exact-match check on this response dict key set (the code
+        # that used to be here) failed closed on every single Bash call,
+        # because the runtime always adds fields this hook did not know
+        # about - noOutputExpected first, then gitOperation (added only for
+        # git commands) found live minutes later while committing this very
+        # fix, both in peer-session 2026-08-25-01-wp484-secret-guards-outage.
+        # A named allowlist for each new field is whack-a-mole against a
+        # runtime that keeps adding fields. redact_value() below is a fully
+        # generic recursive walk keyed on VALUE TYPE, not field NAME, so an
+        # unrecognized extra key is scanned and redacted exactly like every
+        # known one - accepting it here does not skip redaction on it. Only
+        # the four fields the rest of this function actually reads need to
+        # be required and type-checked; anything else can pass through.
         if (
             not isinstance(response, dict)
             or not set(required).issubset(response)
-            or not set(response).issubset(set(required) | set(optional))
             or any(not isinstance(response[key], value_type) for key, value_type in required.items())
-            or any(key in response and not isinstance(response[key], value_type) for key, value_type in optional.items())
         ):
             fail("invalid Bash tool response shape")
     elif tool_name == "Read":
