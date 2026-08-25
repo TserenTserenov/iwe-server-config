@@ -337,12 +337,23 @@ fi
 
 **Шаг 1.** Запустить decay (убрать dormant записи без повтора >30д):
 ```bash
-python3 ~/IWE/DS-my-strategy/scripts/iwe_checklist_memory.py decay
+IWE_ROOT="${IWE_WORKSPACE:-${WORKSPACE_DIR:-$HOME/IWE}}"
+IWE_PLATFORM_SCRIPTS="${IWE_SCRIPTS:-${IWE_TEMPLATE:-$IWE_ROOT/FMT-exocortex-template}/scripts}"
+python3 "$IWE_PLATFORM_SCRIPTS/agent-fault/iwe_checklist_memory.py" decay
 ```
 
 **Шаг 2.** Проверить кандидатов для эскалации (occurrences ≥ 3):
 ```bash
-python3 ~/IWE/DS-my-strategy/scripts/iwe_checklist_memory.py escalation-check --threshold 3
+IWE_ROOT="${IWE_WORKSPACE:-${WORKSPACE_DIR:-$HOME/IWE}}"
+IWE_PLATFORM_SCRIPTS="${IWE_SCRIPTS:-${IWE_TEMPLATE:-$IWE_ROOT/FMT-exocortex-template}/scripts}"
+if [ -n "${IWE_FAULT_SUBJECT_KIND:-}" ] && [ -n "${IWE_FAULT_SUBJECT_ID:-}" ]; then
+  python3 "$IWE_PLATFORM_SCRIPTS/agent-fault/iwe_checklist_memory.py" escalation-check \
+    --threshold 3 \
+    --subject-kind "$IWE_FAULT_SUBJECT_KIND" \
+    --subject-id "$IWE_FAULT_SUBJECT_ID"
+else
+  echo "⚠️ IWE_FAULT_SUBJECT_KIND/ID не заданы — приватная эскалация пропущена"
+fi
 ```
 
 **Правила эскалации:**
@@ -356,7 +367,10 @@ python3 ~/IWE/DS-my-strategy/scripts/iwe_checklist_memory.py escalation-check --
 
 **Dry-run scan старых feedback_*.md (необязательно, для метрики):**
 ```bash
-python3 ~/IWE/DS-my-strategy/scripts/sync_feedback_to_memory.py 2>&1 | tail -1
+IWE_ROOT="${IWE_WORKSPACE:-${WORKSPACE_DIR:-$HOME/IWE}}"
+IWE_PLATFORM_SCRIPTS="${IWE_SCRIPTS:-${IWE_TEMPLATE:-$IWE_ROOT/FMT-exocortex-template}/scripts}"
+python3 "$IWE_PLATFORM_SCRIPTS/agent-fault/iwe_checklist_memory.py" import-feedback \
+  --subject-kind system --subject-id feedback-import 2>&1 | tail -1
 ```
 
 **Чеклист:**
@@ -376,7 +390,14 @@ python3 ~/IWE/DS-my-strategy/scripts/sync_feedback_to_memory.py 2>&1 | tail -1
 **Выполнить:**
 
 ```bash
-python3 ~/IWE/DS-my-strategy/scripts/verify-distinctions-compression.py --window-days 14 --threshold 3
+if [ -n "${IWE_FAULT_SUBJECT_KIND:-}" ] && [ -n "${IWE_FAULT_SUBJECT_ID:-}" ]; then
+  python3 ~/IWE/DS-my-strategy/scripts/verify-distinctions-compression.py \
+    --window-days 14 --threshold 3 \
+    --subject-kind "$IWE_FAULT_SUBJECT_KIND" \
+    --subject-id "$IWE_FAULT_SUBJECT_ID"
+else
+  echo "⚠️ IWE_FAULT_SUBJECT_KIND/ID не заданы — детектор различений пропущен"
+fi
 ```
 
 **Verdict:**
@@ -391,21 +412,12 @@ python3 ~/IWE/DS-my-strategy/scripts/verify-distinctions-compression.py --window
 
 ---
 
-### Session Memory Injector: тренд-отчёт фолтов (WP-316 Ф12, pattern-report)
+### Недельный обзор профиля ошибок (WP-316)
 
-> **Цель:** один раз в неделю агент получает тренд-анализ своих паттернов косяков — не просто топ-3, а динамику: что растёт, что снижается, что новое.
-> Исполнитель: Claude Sonnet ($0.50, ~30s). Fallback: пропустить молча если DB недоступна.
+Отдельный LLM-инжектор, читающий всех субъектов напрямую из SQLite, отключён.
+Недельный обзор строится из результата subject-scoped `escalation-check` выше.
 
-```bash
-# Pattern-report: тренд-анализ фолтов за неделю (Sonnet, WP-316 Ф12)
-bash ~/IWE/DS-autonomous-agents/scripts/session-memory-inject.sh week-close
-```
-
-**Если вывод содержит 🔴 паттерны с occurrences ≥ 3** → вынести в WeekReport отдельным пунктом «Паттерны косяков недели».
-
-**Если DB недоступна** → пропустить молча (не блокирует Week Close).
-
-- [ ] **Pattern-report получен** (или DB недоступна — задокументировать)
+- [ ] **Кандидаты текущего субъекта разобраны** (или профиль пуст — задокументировать)
 
 ---
 
@@ -763,4 +775,3 @@ bash "$HOME/IWE/scripts/reflection-gap-check.sh" 7
 ```
 
 - [ ] **Если 🟡 с пробелами** — показать пилоту список дат, спросить: закрыть один-два дня сейчас (Q3/Q5 по каждому, тот же формат, что и в дневном шаге) или оставить как есть. Не настаивать — это диагностика, не блокер.
-

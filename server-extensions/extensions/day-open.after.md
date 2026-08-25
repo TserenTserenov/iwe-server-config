@@ -19,37 +19,26 @@ fi
 
 ---
 
-### 5a. Session Memory Injector: инжекция паттернов косяков (WP-316 Ф12, L2-hook)
+### 5a. Приватное напоминание о паттернах косяков (WP-316)
 
-> **Запускать ПЕРЕД остальными шагами Day Open.** Замыкает петлю обратной связи: агент видит свои паттерны ДО начала дня.
-> Роль: TBD → WP-350. Выбирает 2-3 напоминания контекстно (session_type + текущий WP), не просто топ-3 по trust.
-> Исполнитель по умолчанию: Claude Haiku. В будущем: любой LLM-агент (Hermes model, OpenClaw и др.)
+Day Open читает только записи явно названного субъекта через единый интерфейс.
+Прямой SQL и внешний инжектор всех субъектов здесь запрещены.
 
 ```bash
-# Session Memory Inject: контекстные напоминания (Haiku, ≤45s, $0.25)
-# Fallback автоматический: если claude CLI недоступен → agent_fault_remind.py
-bash ~/IWE/DS-autonomous-agents/scripts/session-memory-inject.sh day-open
-```
-
-**Вчерашние повторы (intra-session guard):**
-```bash
-YESTERDAY=$(date -v-1d +%Y-%m-%d 2>/dev/null || date -d "yesterday" +%Y-%m-%d)
-DB="$HOME/IWE/DS-my-strategy/exocortex/agent-fault-profile/iwe_memory.db"
-if [ -f "$DB" ]; then
-  sqlite3 "$DB" "
-    SELECT '🔴 [' || UPPER(COALESCE(severity,'major')) || '] ' || SUBSTR(content,1,80)
-    FROM facts
-    WHERE fact_type='agent_fault' AND record_date='$YESTERDAY'
-    ORDER BY trust_score DESC LIMIT 5
-  " 2>/dev/null | while read row; do echo "  $row"; done
+IWE_ROOT="${IWE_WORKSPACE:-${WORKSPACE_DIR:-$HOME/IWE}}"
+IWE_PLATFORM_SCRIPTS="${IWE_SCRIPTS:-${IWE_TEMPLATE:-$IWE_ROOT/FMT-exocortex-template}/scripts}"
+if [ -n "${IWE_FAULT_SUBJECT_KIND:-}" ] && [ -n "${IWE_FAULT_SUBJECT_ID:-}" ]; then
+  python3 "$IWE_PLATFORM_SCRIPTS/agent-fault/iwe_checklist_memory.py" remind \
+    --protocol open --limit 5 \
+    --subject-kind "$IWE_FAULT_SUBJECT_KIND" \
+    --subject-id "$IWE_FAULT_SUBJECT_ID"
+else
+  echo "⚠️ IWE_FAULT_SUBJECT_KIND/ID не заданы — приватное напоминание пропущено"
 fi
 ```
 
-**Если есть вчерашние повторы** → добавить секцию в DayPlan «🔴 Вчерашние повторы (держать в уме)».
-**Если нет** → пропустить молча.
-
-> Fault decay запускается раз в неделю (Week Close). Запись нового косяка:
-> `python3 ~/IWE/DS-my-strategy/scripts/iwe_checklist_memory.py record --fault "..." --severity major`
+> Fault decay запускается раз в неделю (Week Close). Новый косяк записывается
+> через canonical `record` только с явными `--subject-kind` и `--subject-id`.
 
 ---
 

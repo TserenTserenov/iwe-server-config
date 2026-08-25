@@ -3,13 +3,24 @@
 Запустить перед проверками — чтобы не пропустить шаги с историей пропусков:
 
 ```bash
-python3 /Users/tserentserenov/IWE/DS-my-strategy/scripts/agent_fault_remind.py --protocol close
+IWE_ROOT="${IWE_WORKSPACE:-${WORKSPACE_DIR:-$HOME/IWE}}"
+IWE_PLATFORM_SCRIPTS="${IWE_SCRIPTS:-${IWE_TEMPLATE:-$IWE_ROOT/FMT-exocortex-template}/scripts}"
+python3 "$IWE_PLATFORM_SCRIPTS/agent-fault/iwe_checklist_memory.py" remind \
+  --protocol close \
+  --subject-kind "$IWE_FAULT_SUBJECT_KIND" \
+  --subject-id "$IWE_FAULT_SUBJECT_ID"
 ```
 
 🔴-пункты = часто пропускаемые именно при Close. Применить немедленно к оставшимся шагам.
 
-> Если в этой сессии обнаружен новый косяк — записать напрямую в SQLite (L1 primary path):
+> Если в этой сессии обнаружен новый косяк — передать его единому интерфейсу:
 > ```bash
-> python3 ~/IWE/DS-my-strategy/scripts/iwe_checklist_memory.py record --fault "описание" --severity major
+> IWE_ROOT="${IWE_WORKSPACE:-${WORKSPACE_DIR:-$HOME/IWE}}"
+> IWE_PLATFORM_SCRIPTS="${IWE_SCRIPTS:-${IWE_TEMPLATE:-$IWE_ROOT/FMT-exocortex-template}/scripts}"
+> python3 "$IWE_PLATFORM_SCRIPTS/agent-fault/iwe_checklist_memory.py" record \
+>   --fault "описание" --severity major \
+>   --subject-kind "$IWE_FAULT_SUBJECT_KIND" \
+>   --subject-id "$IWE_FAULT_SUBJECT_ID"
 > ```
-> `sync_feedback_to_memory.py` — только для миграции legacy feedback_*.md (Ф11, WP-316).
+> Legacy feedback импортируется только явной командой `import-feedback` с субъектом
+> `system:feedback-import`.

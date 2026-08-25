@@ -8,7 +8,17 @@
 > Выводит 2-3 горячих напоминания из SQLite базы косяков агента. Выполнять ДО scaffold — пока контекст чистый.
 
 ```bash
-python3 ~/IWE/DS-my-strategy/scripts/agent_fault_remind.py --protocol open 2>/dev/null || echo "⚠️ agent_fault_remind.py недоступен — пропуск (non-blocking)"
+IWE_ROOT="${IWE_WORKSPACE:-${WORKSPACE_DIR:-$HOME/IWE}}"
+IWE_PLATFORM_SCRIPTS="${IWE_SCRIPTS:-${IWE_TEMPLATE:-$IWE_ROOT/FMT-exocortex-template}/scripts}"
+if [ -n "${IWE_FAULT_SUBJECT_KIND:-}" ] && [ -n "${IWE_FAULT_SUBJECT_ID:-}" ]; then
+  python3 "$IWE_PLATFORM_SCRIPTS/agent-fault/iwe_checklist_memory.py" remind \
+    --protocol open --limit 3 \
+    --subject-kind "$IWE_FAULT_SUBJECT_KIND" \
+    --subject-id "$IWE_FAULT_SUBJECT_ID" 2>/dev/null \
+    || echo "⚠️ единый agent-fault interface недоступен — пропуск (non-blocking)"
+else
+  echo "⚠️ IWE_FAULT_SUBJECT_KIND/ID не заданы — приватное напоминание пропущено"
+fi
 ```
 
 **Что делать с выводом:** прочитать 2-3 🔴-напоминания → удержать в голове при формировании DayPlan. Если напоминание релевантно сегодняшней задаче — применить немедленно (не «учту позже»).
