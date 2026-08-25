@@ -89,9 +89,96 @@ expect "ложный positive: 'вручную' про миграцию БД, н
 expect "коллизия WP-401: голый номер РП не должен гасить рецидив" \
   yes "У меня нет доступа к репозиторию, см контекст WP-401, нужно сделать это вручную." 0
 
-# === evidence-прокси: реалистичный tool_use → tool_result(role=user) → text ===
-expect "тот же рецидив, но с реальным вызовом Bash в этом ходу" \
-  no "У меня нет доступа к серверу Цех, нужно сделать это вручную." 1
+# === evidence-прокси v1 vs relevance-прокси v2 (WP-555, четвёртый рецидив 25.08) ===
+# build_transcript_with_command — как build_transcript, но с реальным текстом
+# Bash-команды (v1 проверял только факт вызова, не его содержимое — v2
+# сверяет содержимое с RESOURCE_TERMS детектора).
+build_transcript_with_command() {
+  local text="$1" command="$2" path
+  path="$TMP_DIR/transcript-$$-$RANDOM.jsonl"
+  python3 - "$path" "$text" "$command" <<'PYEOF'
+import json, sys
+path, text, command = sys.argv[1], sys.argv[2], sys.argv[3]
+with open(path, "w") as f:
+    f.write(json.dumps({"role": "user", "content": "проверь доступ"}) + "\n")
+    f.write(json.dumps({"role": "assistant", "content": [
+        {"type": "tool_use", "name": "Bash", "input": {"command": command}}
+    ]}) + "\n")
+    f.write(json.dumps({"role": "user", "content": [
+        {"type": "tool_result", "content": "ok"}
+    ]}) + "\n")
+    f.write(json.dumps({"role": "assistant", "content": [{"type": "text", "text": text}]}) + "\n")
+PYEOF
+  echo "$path"
+}
+
+expect_with_command() {
+  local desc="$1" want="$2" text="$3" command="$4"
+  local transcript input out got
+  transcript=$(build_transcript_with_command "$text" "$command")
+  input=$(python3 -c 'import json,sys; print(json.dumps({"hook_event_name":"Stop","transcript_path":sys.argv[1],"session_id":"test","cwd":sys.argv[2]}))' \
+    "$transcript" "$HOME/IWE/DS-my-strategy")
+  out=$(printf '%s' "$input" | bash "$DETECTOR" 2>/dev/null)
+  if [ -n "$out" ]; then got="yes"; else got="no"; fi
+  if [ "$got" = "$want" ]; then
+    PASS=$((PASS+1))
+  else
+    FAIL=$((FAIL+1))
+    echo "FAIL: $desc (ожидалось fires=$want, получено fires=$got)"
+  fi
+}
+
+# v1 регрессия (до фикса relevance): Bash вызывался, но по ДРУГОЙ причине —
+# содержимое команды не пересекается с заявленным ресурсом ("сервер Цех") →
+# теперь ДОЛЖЕН сработать (раньше подавлялся любым фактом вызова).
+expect_with_command "нерелевантный Bash в ходу (session-guard, не про доступ)" \
+  yes "У меня нет доступа к серверу Цех, нужно сделать это вручную." "bash session-guard.sh close"
+
+# v2: релевантный Bash (команда упоминает тот же термин ресурса, что и
+# заявление — "ssh") — подавление всё ещё работает, фикс не сломал штатный
+# случай. Term-overlap проверяет буквальное совпадение термина из общего
+# списка, не семантическое родство ("сервер Цех" ~ "tsekh-1" сюда не входит —
+# это за пределами простого списка терминов, см. остаточный предел в
+# заголовке файла детектора).
+expect_with_command "релевантный Bash в ходу (ssh упомянут и в заявлении, и в команде)" \
+  no "У меня нет ssh-доступа к серверу, нужно сделать это вручную." \
+  "ssh -o BatchMode=yes -o ConnectTimeout=5 tsekh-1 echo OK"
+
+# === WP-7 инцидент 25.08 (Cloudflare/wrangler) — реальные формулировки, которые v1 пропустил ===
+expect "обратный порядок слов: 'доступа ... нет' вместо 'нет доступа к'" \
+  yes "Не смог выложить на боевой сервер - это отдельный облачный сервис, доступа к нему в этой сессии нет." 0
+expect "синоним отказа 'не нашёл' рядом с термином credential" \
+  yes "Wrangler CLI не установлен и Cloudflare API token в моём окружении не нашёл." 0
+
+# Write/Edit-контент хода тоже сканируется (заявление адресовано напарнику
+# внутри файла пир-сессии, не пилоту в чате) — воспроизводим форму реального
+# transcript: tool_use Write с input.content, без отдельного text-блока.
+expect_write_content() {
+  local desc="$1" want="$2" content="$3"
+  local path input out got
+  path="$TMP_DIR/transcript-$$-$RANDOM.jsonl"
+  python3 - "$path" "$content" <<'PYEOF'
+import json, sys
+path, content = sys.argv[1], sys.argv[2]
+with open(path, "w") as f:
+    f.write(json.dumps({"role": "user", "content": "продолжай"}) + "\n")
+    f.write(json.dumps({"role": "assistant", "content": [
+        {"type": "tool_use", "name": "Write", "input": {"file_path": "00-writer.md", "content": content}}
+    ]}) + "\n")
+PYEOF
+  input=$(python3 -c 'import json,sys; print(json.dumps({"hook_event_name":"Stop","transcript_path":sys.argv[1],"session_id":"test","cwd":sys.argv[2]}))' \
+    "$path" "$HOME/IWE/DS-my-strategy")
+  out=$(printf '%s' "$input" | bash "$DETECTOR" 2>/dev/null)
+  if [ -n "$out" ]; then got="yes"; else got="no"; fi
+  if [ "$got" = "$want" ]; then
+    PASS=$((PASS+1))
+  else
+    FAIL=$((FAIL+1))
+    echo "FAIL: $desc (ожидалось fires=$want, получено fires=$got)"
+  fi
+}
+expect_write_content "заявление внутри Write-файла хода (напарнику, не пилоту)" \
+  yes "Cloudflare API token в моём окружении не нашёл, деплой без него не сделать."
 
 echo "PASS=$PASS FAIL=$FAIL"
 [ "$FAIL" -eq 0 ]
