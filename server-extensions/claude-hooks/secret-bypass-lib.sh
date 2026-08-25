@@ -18,12 +18,23 @@ for secret_bypass_candidate in /opt/homebrew/bin/jq /usr/local/bin/jq /usr/bin/j
     break
   fi
 done
+# 2026-08-25: none of the hardcoded FHS paths above exist on NixOS hosts
+# (tsekh-1) - jq and python3 live under /run/current-system/sw/bin there,
+# not under /usr or /opt/homebrew. The hardcoded loop stayed as the fast
+# common-case path; this PATH-based fallback covers NixOS and any other
+# layout without hardcoding one more absolute path per host.
+if [ -z "$SECRET_BYPASS_JQ" ]; then
+  SECRET_BYPASS_JQ="$(command -v jq 2>/dev/null || true)"
+fi
 for secret_bypass_candidate in /usr/bin/python3 /usr/local/bin/python3 /opt/homebrew/bin/python3; do
   if [ -x "$secret_bypass_candidate" ]; then
     SECRET_BYPASS_PYTHON="$secret_bypass_candidate"
     break
   fi
 done
+if [ -z "$SECRET_BYPASS_PYTHON" ]; then
+  SECRET_BYPASS_PYTHON="$(command -v python3 2>/dev/null || true)"
+fi
 unset secret_bypass_candidate
 
 secret_pattern_process() {
