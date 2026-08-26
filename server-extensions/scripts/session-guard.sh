@@ -920,7 +920,8 @@ while [[ $# -gt 0 ]]; do
       fi
       FORCE_NO_REFLECTION="$2"; shift 2 ;;
     --)       shift; POSITIONAL+=("$@"); break ;;
-    -*)       shift ;;
+    # WP-7 Ф83: was a silent `shift` -- unrecognized flags vanished with no diagnostic.
+    -*)       fail "неизвестный флаг: $1" 1 ;;
     *)        POSITIONAL+=("$1"); shift ;;
   esac
 done

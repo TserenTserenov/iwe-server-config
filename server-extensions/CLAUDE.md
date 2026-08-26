@@ -130,6 +130,8 @@ Discrepancy found (file ≠ plan, stale content): **report to pilot, do not sile
 
 **Колонка «Название» в WP-REGISTRY содержит ТОЛЬКО имя артефакта ≤80 символов** — без дат, ссылок на сессии, метрик, SHA и прочих служебных данных.
 
+**Колонка «Прогресс» (8-я, легализована 26.08)** — краткая запись, не полная история. Границы → `memory/reference/agent-core.md`.
+
 **Куда писать остальное:** итог закрытия → `## Закрытие` в `archive/wp-contexts/`; фазы/прогресс → frontmatter `inbox/WP-NNN/WP-NNN.md` (всегда папка — WP-434), при смене статуса фаз обновлять frontmatter, НЕ имя реестра. Полный текст и примеры ✅/❌ → `memory/reference/agent-core.md`.
 
 ## WP Context Scope — Umbrella РП
