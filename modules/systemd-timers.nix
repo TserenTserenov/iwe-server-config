@@ -321,15 +321,26 @@ let
   # Скрипт TG-алерта.
   # TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID — из EnvironmentFile /etc/iwe/env (личный чат).
   # TELEGRAM_TEAM_CHAT_ID — опционально; если задан, алерт дублируется в командный канал.
-  # Вызывается как: iwe-alert <unit-name>  (без суффикса .service)
+  # Вызывается как: iwe-alert <unit-name> (С суффиксом .service -- %i внутри
+  # iwe-failure-alert@ template это полный %n упавшего юнита, стале-комментарий
+  # "без суффикса" исправлен 26.08, journalctl -u работает с суффиксом так же).
   alertScript = pkgs.writeShellScript "iwe-alert" ''
     set -euo pipefail
     unit="$1"
     host="tsekh-1"
     ts=$(${pkgs.coreutils}/bin/date -Iseconds)
+    # Человекочитаемое имя (WP-545, 26.08, находка из РП538 сессии 12): голое
+    # имя юнита ("iwe-day-close-pipeline-watchdog.service") нечитаемо без
+    # агента. Лёгкий фикс (решение пилота: не заводить базу описаний на 34
+    # сервиса с прод-деплоем NixOS ради неё) -- срезать iwe-/.service и
+    # дефисы на пробелы, полное служебное имя остаётся в сообщении отдельной
+    # строкой для journalctl.
+    human_name="''${unit%.service}"
+    human_name="''${human_name#iwe-}"
+    human_name="''${human_name//-/ }"
     msg=$(${pkgs.coreutils}/bin/printf \
-      "Сбой IWE на %s\nСервис: %s\nВремя: %s\nЛог: journalctl -u %s --since -1h" \
-      "$host" "$unit" "$ts" "$unit")
+      "🚨 Не выполнилась запланированная задача IWE: %s\nСервер: %s\nВремя: %s\nЖурнал: journalctl -u %s --since -1h\nСлужебное имя: %s" \
+      "$human_name" "$host" "$ts" "$unit" "$unit")
     send_tg() {
       ${pkgs.curl}/bin/curl -s --max-time 10 -X POST \
         "https://api.telegram.org/bot''${TELEGRAM_BOT_TOKEN}/sendMessage" \
