@@ -35,7 +35,7 @@ cat > "$TEST_ROOT/DS-strategy/scripts/process-runner.py" <<'PYEOF'
 import os
 import sys
 
-assert sys.argv[1:] == ["audit-cards"], sys.argv
+assert sys.argv[1:3] == ["audit-cards", "--session-slug"], sys.argv
 if os.environ["AUDIT_MODE"] == "clean":
     print('{"clean": true}')
     raise SystemExit(0)

@@ -27,7 +27,7 @@ if OUT_1=$(open_frozen --wp WP-900 --task fixture --slug attempt-one --agent fix
     echo "FAIL: unconditioned open on a frozen checkout must fail, got exit 0: $OUT_1" >&2
     exit 1
 fi
-if ! grep -q 'под freeze (WP-520)' <<<"$OUT_1"; then
+if ! grep -q 'под freeze (WP-520/WP-484 Ф104)' <<<"$OUT_1"; then
     echo "FAIL: expected freeze message, got: $OUT_1" >&2
     exit 1
 fi
@@ -85,7 +85,7 @@ if OUT_5=$(open_frozen --wp WP-902 --task fixture --slug different-slug --agent 
     echo "FAIL: a different slug must NOT ride the planted semaphore's lease, got exit 0: $OUT_5" >&2
     exit 1
 fi
-if ! grep -q 'под freeze (WP-520)' <<<"$OUT_5"; then
+if ! grep -q 'под freeze (WP-520/WP-484 Ф104)' <<<"$OUT_5"; then
     echo "FAIL: expected freeze message for mismatched slug, got: $OUT_5" >&2
     exit 1
 fi

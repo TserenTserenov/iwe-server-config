@@ -2371,7 +2371,7 @@ $_repo"
   # для нормального завершённого раннера, задваивая r23_verdict тем же
   # смыслом под другим именем (найдено cold-review Ф133, High). Никогда не
   # проваливает close.
-  if [ -n "$FORCED_CARD" ] && [ -f "$IWE_ROOT/$GOV_REPO/scripts/ledger-append.sh" ]; then
+  if [ -n "${FORCED_CARD:-}" ] && [ -f "$IWE_ROOT/$GOV_REPO/scripts/ledger-append.sh" ]; then
     _cp_from_sem=$(grep "^close_path: " "$_sem_read" 2>/dev/null | cut -d' ' -f2- || echo "unknown")
     _direct_event=$(python3 -c '
 import json, sys
