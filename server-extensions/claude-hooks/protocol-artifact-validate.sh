@@ -31,11 +31,99 @@ if ! echo "$TOOL_INPUT" | grep -qE '(^|[;&|(]) *(([A-Za-z_][A-Za-z0-9_]*=[^ ]+ *
   exit 0
 fi
 
-# Governance-репо: из env $IWE_GOVERNANCE_REPO (по умолчанию DS-strategy).
-# Workspace: $IWE_WORKSPACE или $IWE_ROOT (синонимы), default ~/IWE.
-GOV_REPO="${IWE_GOVERNANCE_REPO:-DS-strategy}"
+# Repo-scope fix (bug-2026-08-26/27, hardened in peer-session
+# 2026-08-27-11-wp452-external-developer-access turns 3-6 with Codex):
+# resolve the repo(s) the intercepted command's `git ... commit` invocation(s)
+# actually run in, instead of always checking the hardcoded governance path.
+# Without this, a commit staged in any OTHER repo gets blocked whenever some
+# unrelated agent happens to have a DayPlan/WeekPlan staged in the governance
+# repo at the same time (live incident, twice).
+CWD=$(echo "$INPUT" | jq -r '.cwd // empty')
+
+# Same anchoring principle as close-runner-gate.sh (WP-484 Ф74а): normalize
+# newlines to `;` first (a multi-line command is command-separator-joined,
+# same as `;`), then require any global flag between the `git` token and the
+# `commit` it belongs to — not a bare substring search across the whole
+# command, which would grab `-C` from an unrelated `git ... rev-parse` call
+# earlier in the same command, or from inside a commit message like
+# `-m "... -C ..."` (both found live in cold-context review of the first
+# draft of this fix).
+NORMALIZED_COMMAND=$(printf '%s' "$TOOL_INPUT" | tr '\n' ';' | tr -s '[:space:]' ' ')
+# Unquoted flag values exclude shell separators too (`[^[:space:];&|]+`, not
+# just `[^ ]+`) — `git -C /foreign&&git commit` has no space around `&&`, so
+# a value class that only excludes spaces would swallow `&&git` into the
+# path and merge two distinct invocations into one (found in peer review).
+GIT_GLOBAL_FLAGS_RE='(-C ("[^"]*"|'"'"'[^'"'"']*'"'"'|[^[:space:];&|]+)|-c [^[:space:];&|]+|--(git-dir|work-tree|namespace|exec-path)(=[^[:space:];&|]+| [^[:space:];&|]+)|--(literal-pathspecs|glob-pathspecs|noglob-pathspecs|icase-pathspecs|no-optional-locks|no-lazy-fetch|no-replace-objects|no-pager|paginate|bare)|-P)'
+
+# `--git-dir=`/`--work-tree=` are matched (so they don't break the anchor
+# for OTHER flags in the same invocation) but not parsed into a target
+# path — no real call site in this codebase uses them for `commit`, and
+# resolving a bare `--git-dir` back to a worktree adds complexity for a
+# case that doesn't occur.
+
+# Governance-репо: из env $IWE_GOVERNANCE_REPO (по умолчанию DS-my-strategy —
+# fallback был "DS-strategy", репо переименовано, см. bug-2026-07-11).
+# Workspace: $IWE_WORKSPACE или $IWE_ROOT (синонимы), default ~/IWE. Computed
+# once — it's an invariant of this hook run, not per candidate invocation.
+GOV_REPO="${IWE_GOVERNANCE_REPO:-DS-my-strategy}"
 WORKSPACE="${IWE_WORKSPACE:-${IWE_ROOT:-$HOME/IWE}}"
-GOV_PATH="$WORKSPACE/$GOV_REPO"
+GOV_CANONICAL_PATH="$WORKSPACE/$GOV_REPO"
+# Worktree-aware match: compare the shared git dir, not the working-tree
+# path — an isolated worktree of the governance repo (freeze fallback) has
+# a different toplevel path but the same git-common-dir as the canonical
+# checkout.
+GOV_COMMON_DIR=$(git -C "$GOV_CANONICAL_PATH" rev-parse --path-format=absolute --git-common-dir 2>/dev/null)
+if [ -z "$GOV_COMMON_DIR" ]; then
+  # Governance repo itself doesn't resolve — a real misconfiguration
+  # (IWE_WORKSPACE/IWE_GOVERNANCE_REPO or the checkout itself), not "this
+  # commit is unrelated". Surface it instead of silently skipping forever
+  # (the same silent-regression shape as the bug this fix addresses).
+  jq -n --arg reason "⚠️ protocol-artifact-validate: governance-репозиторий ($GOV_CANONICAL_PATH) не резолвится — DayPlan/WeekPlan не проверены. Проверь IWE_WORKSPACE/IWE_GOVERNANCE_REPO." \
+    '{"additionalContext": $reason}'
+  exit 0
+fi
+
+RESOLVE_FROM=""
+# Walk every `git <flags>* commit` invocation in the (possibly compound)
+# command — a single Bash call can chain commits to more than one repo, and
+# the one that matters may not be the first (found in peer review).
+while IFS= read -r invocation; do
+  [ -n "$invocation" ] || continue
+  candidate="$CWD"
+  c_arg=$(printf '%s' "$invocation" | grep -oE -- '-C ("[^"]*"|'"'"'[^'"'"']*'"'"'|[^[:space:];&|]+)' | head -1 | sed -E 's/^-C //; s/^"(.*)"$/\1/; s/^'"'"'(.*)'"'"'$/\1/')
+  case "$c_arg" in
+    *'$'*)
+      # A literal shell expansion we cannot resolve from text alone (e.g.
+      # `-C "$REPO_ROOT"`) — fall back to .cwd for THIS invocation rather
+      # than giving up entirely. This hook is a formatting/hygiene gate, not
+      # a security boundary: treating "can't resolve -C" as "assume it's the
+      # governance repo, block" would recreate the exact false-positive bug
+      # this fix removes, just one level deeper.
+      ;;
+    "") ;;
+    *)
+      resolved=$(cd "${CWD:-.}" 2>/dev/null && cd "$c_arg" 2>/dev/null && pwd)
+      [ -n "$resolved" ] && candidate="$resolved"
+      ;;
+  esac
+  [ -n "$candidate" ] || continue
+  candidate_repo=$(git -C "$candidate" rev-parse --show-toplevel 2>/dev/null)
+  [ -n "$candidate_repo" ] || continue
+  candidate_common_dir=$(git -C "$candidate_repo" rev-parse --path-format=absolute --git-common-dir 2>/dev/null)
+  [ -n "$candidate_common_dir" ] || continue
+  if [ "$candidate_common_dir" = "$GOV_COMMON_DIR" ]; then
+    RESOLVE_FROM="$candidate_repo"
+    break
+  fi
+done <<EOF
+$(printf '%s\n' "$NORMALIZED_COMMAND" | grep -oE "git( $GIT_GLOBAL_FLAGS_RE)* commit")
+EOF
+
+if [ -z "$RESOLVE_FROM" ]; then
+  echo '{}'
+  exit 0
+fi
+GOV_PATH="$RESOLVE_FROM"
 
 # R4.5 fix (WP-273): trigger ТОЛЬКО по staged files, НЕ по тексту команды.
 # Старая логика грепала TOOL_INPUT на «DayPlan|day-close» — false positive
@@ -94,8 +182,11 @@ if grep -q "Наработки Scout" "$DAYPLAN" 2>/dev/null; then
 fi
 
 # --- Ф3 Check 3: формат мультипликатора ---
-if ! grep -qE "~[0-9]+\.?[0-9]*x" "$DAYPLAN"; then
-  ERRORS+=("Мультипликатор не найден — нужен формат '~N.Nx' в строке бюджета")
+# Пилот 27.08: середина дня — множитель объективно ещё не посчитан (считается
+# на Day Close), явная формулировка-заглушка "мультипликатор считается на
+# закрытии дня" тоже валидна, не только готовое число.
+if ! grep -qE "~[0-9]+\.?[0-9]*x|мультипликатор считается на закрытии дня" "$DAYPLAN"; then
+  ERRORS+=("Мультипликатор не найден — нужен формат '~N.Nx' в строке бюджета или явная заглушка 'мультипликатор считается на закрытии дня'")
 fi
 
 # --- Ф3 Check 4 (legacy): mandatory check и бюджет ---
