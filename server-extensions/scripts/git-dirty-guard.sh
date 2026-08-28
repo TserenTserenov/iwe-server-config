@@ -24,8 +24,10 @@
 # Usage: git-dirty-guard.sh <repo-path> [branch]
 # Set GIT_DIRTY_GUARD_TG_ALERTS=false when the caller owns throttled alerting.
 # Exit codes: 0 = repo clean, or safely self-healed — caller may proceed with pull.
-#             1 = real uncommitted work present, or repo mid-rebase/merge — caller must
-#                 NOT pull/rebase this round.
+#             1 = real uncommitted work present, repo mid-rebase/merge, or self-heal
+#                 deferred because commit-push.sh holds the commit lock — caller must
+#                 NOT pull/rebase this round (WP-484 Ф141, 2026-08-28: this third case
+#                 defers rather than races a concurrent commit; retry next cycle).
 #             2 = usage/repo error.
 
 set -uo pipefail
@@ -154,6 +156,65 @@ for f in "${TRACKED_DIRTY[@]}"; do
     DIFFERING+=("$f")
   fi
 done
+
+# WP-484 Ф141 (2026-08-28, peer-session with Kimi+Codex; cold-review found 2
+# Critical in the first pass, both fixed here): commit-push.sh's own lock
+# (DS_COMMIT_LOCK_FILE) guards its commit phase but this guard's ancestry
+# check below has no way to see it — a commit landing between the ancestry
+# check and the reset raced straight through and got rolled back (live
+# incident 2026-08-25, recovered by hand via cherry-pick). Reusing
+# commit-push.sh's own lock file (same default resolution: IWE_ROOT falls back
+# to $HOME/IWE exactly like commit-push.sh does) closes that window instead of
+# adding a second, uncoordinated lock.
+#
+# Fixed FD (8), not `exec {VAR}>...`: this repo's callers invoke this guard
+# via bare `bash "$GUARD" ...` (iwe-safe-pull.sh, day-open-pipeline.sh,
+# week-open-day-section-patch.sh), so the interpreter is whatever `bash`
+# resolves to in the CALLER's PATH — on this machine most launchd jobs still
+# resolve to macOS's bundled bash 3.2, and the `{fd}>` dynamic-fd form is a
+# bash 4.1+ feature. Under 3.2 it's not a soft failure caught by `if`, it's a
+# parse-time abort of the whole script (same bash-3.2-on-macOS class already
+# called out in session-guard.sh's own comments) — the exact self-heal path
+# this file exists for would go dark on every scheduled run.
+#
+# `command -v flock` checked explicitly: without it, a missing `flock` binary
+# (already a recurring failure mode elsewhere in this codebase — see
+# ledger-append.sh's own guard for the same binary) returns 127, which
+# `! flock ...` cannot tell apart from "lock genuinely held" — self-heal would
+# silently and permanently disable itself instead of degrading loudly.
+#
+# Busy lock -> exit 1, not 0: the file's own contract above says 0 means
+# "clean, or safely self-healed" — a skipped cycle leaves the tree exactly as
+# dirty as it started, so callers (iwe-safe-pull.sh etc.) must see the same
+# "do not pull this round" signal as the real-uncommitted-work case, not a
+# false "proceed".
+#
+# Gated on is_ds_repo_by_origin (round-2 cold-review, WP-484 Ф141): this guard
+# runs against ANY repo (iwe-safe-pull.sh's Pull-on-Touch calls it for
+# whatever repo a session first touches), but DS_COMMIT_LOCK_FILE is only ever
+# taken by commit-push.sh for DS-my-strategy itself
+# (commit-push.sh:_acquire_commit_lock, same is_ds_repo_by_origin gate) —
+# without this check, a commit landing in DS-my-strategy would make an
+# unrelated repo's self-heal falsely defer with a misleading "commit-push
+# держит блокировку" message. Missing publish-gate.sh (non-DS-my-strategy
+# checkout of this repo, or a template install without it) -> skip the whole
+# lock dance, same as before this phase.
+DS_COMMIT_LOCK_FILE="${DS_COMMIT_LOCK_FILE:-${IWE_ROOT:-$HOME/IWE}/.claude/state/ds-commit.lock}"
+PUBLISH_GATE_LIB="${IWE_ROOT:-$HOME/IWE}/DS-my-strategy/scripts/lib/publish-gate.sh"
+if [ -f "$PUBLISH_GATE_LIB" ] && . "$PUBLISH_GATE_LIB" && is_ds_repo_by_origin "$REPO"; then
+  if ! command -v flock >/dev/null 2>&1; then
+    echo "git-dirty-guard: flock недоступен — продолжаю без блокировки коммит-скрипта" >&2
+  elif [ ! -d "$(dirname "$DS_COMMIT_LOCK_FILE")" ]; then
+    echo "git-dirty-guard: каталог для $DS_COMMIT_LOCK_FILE не существует — продолжаю без блокировки" >&2
+  elif exec 8>"$DS_COMMIT_LOCK_FILE" 2>/dev/null; then
+    if ! flock -n 8; then
+      echo "git-dirty-guard: commit-push держит блокировку записи — self-heal отложен до следующего цикла, дерево остаётся как есть" >&2
+      exit 1
+    fi
+  else
+    echo "git-dirty-guard: lock-файл $DS_COMMIT_LOCK_FILE недоступен — продолжаю без блокировки" >&2
+  fi
+fi
 
 # Cold-review finding (2026-07-19), confirmed live: dirty-file content matching origin is
 # NOT sufficient to make `git reset --hard` safe. Reset also moves the branch ref itself,

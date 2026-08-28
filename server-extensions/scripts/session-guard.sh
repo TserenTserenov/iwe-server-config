@@ -1164,6 +1164,27 @@ if [ "$CMD" = "open" ]; then
     # a resolver built to answer an unrelated question.
     ISOLATE_BASE_DIR="$(git rev-parse --show-toplevel 2>/dev/null || gov_repo_dir)"
 
+    # WP-484 Ф140 (2026-08-28, peer-session with Kimi+Codex): print the resolved
+    # repo BEFORE any dirty-check/worktree work, not just at the very end inside
+    # the worktree_path JSON -- a silent wrong resolution here was undetectable
+    # until the session already lost its files (2026-08-25, session-guard.sh
+    # isolated iwe-local-config instead of DS-my-strategy). Strip userinfo from
+    # the origin URL (Codex, this session) -- an HTTPS remote can embed a token
+    # and this line goes straight to stderr/session logs.
+    ISOLATE_BASE_ORIGIN="$(git -C "$ISOLATE_BASE_DIR" remote get-url origin 2>/dev/null || printf '%s\n' "no-origin")"
+    case "$ISOLATE_BASE_ORIGIN" in
+      *://*@*)
+        ISOLATE_ORIGIN_SCHEME="${ISOLATE_BASE_ORIGIN%%://*}"
+        ISOLATE_ORIGIN_REST="${ISOLATE_BASE_ORIGIN#*://}"
+        # ##*@ (greedy), not #*@ (shortest match): a literal `@` inside the
+        # userinfo/password itself (round-2 cold-review, WP-484 Ф140) would
+        # otherwise leave a secret fragment after the first `@` in the log.
+        ISOLATE_BASE_ORIGIN="${ISOLATE_ORIGIN_SCHEME}://${ISOLATE_ORIGIN_REST##*@}"
+        ;;
+    esac
+    printf 'session-guard: --isolate: изолирую %q (origin: %q)\n' \
+      "$ISOLATE_BASE_DIR" "$ISOLATE_BASE_ORIGIN" >&2
+
     # Peer-session 2026-08-14-13-wp520-two-layer-closing-arch (turns 12-16,
     # 3 rounds with Codex after 2 live-tested failed attempts). A re-entry of
     # the SAME session_id sees `open`'s own side effects (ORZ scaffold,
