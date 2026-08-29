@@ -1550,7 +1550,14 @@ $isolate_status_code $isolate_status_path"
   # own next step, printed as the "⚠️ cd ..." hint above) -- empty outside
   # --isolate, so the fallback below is unchanged for the non-isolate and
   # canonical-owner paths.
-  ORZ_SESSIONS_DIR="${ORZ_ISOLATE_OVERRIDE:-$(gov_repo_dir)/sessions}"
+  # IWE_SESSIONS_ROOT (WP-526 Ф1, migration prep): unset by every caller
+  # today, so this resolves exactly as before. Only covers the non-isolate
+  # fallback -- ORZ_ISOLATE_OVERRIDE (set above) still wins unconditionally
+  # and ignores this variable, so a future physical move of sessions/
+  # content still needs a second edit here for the --isolate path (that
+  # override computes "$ISOLATED_WORKTREE_PATH/sessions" independently,
+  # cold-review WP-526 code review, this session).
+  ORZ_SESSIONS_DIR="${ORZ_ISOLATE_OVERRIDE:-${IWE_SESSIONS_ROOT:-$(gov_repo_dir)/sessions}}"
   ORZ_FILE="$ORZ_SESSIONS_DIR/$ORZ_BASENAME"
   mkdir -p "$(dirname "$ORZ_FILE")"
   {

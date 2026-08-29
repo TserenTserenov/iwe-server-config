@@ -174,7 +174,7 @@ if verification_class in ("open-loop", "problem-framing"):
 ## Шаг 1. Инициализация
 
 ```bash
-SESSIONS_DIR="$HOME/IWE/${IWE_GOVERNANCE_REPO:-DS-strategy}/sessions"
+SESSIONS_DIR="${IWE_SESSIONS_ROOT:-$HOME/IWE/${IWE_GOVERNANCE_REPO:-DS-strategy}/sessions}"
 TODAY=$(date +%Y-%m-%d)
 MONTH=$(date +%Y-%m)
 DAY=$(date +%d)
