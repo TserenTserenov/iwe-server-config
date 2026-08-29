@@ -121,7 +121,14 @@ elif [ -n "$IWE_FROZEN_CANONICAL_PATH" ]; then
 else
   FROZEN_CANONICAL_PATHS=()
 fi
-mkdir -p "$SESSION_DIR" "$(dirname "$OPEN_LOG")" "$(dirname "$OPEN_LOG_RUNTIME")" "$ORZ_DIR"
+# $ORZ_DIR deliberately NOT created here (found 29.08: an unconditional
+# `mkdir -p "$ORZ_DIR"` at this point ran before any subcommand-specific
+# check could see whether MC-sessions actually existed -- "never existed"
+# and "just auto-created empty by this line" became indistinguishable, so
+# the fail-closed check inside `open` never actually fired). Creating it
+# is now `resolve_orz_sessions_dir`'s job, at the point a subcommand
+# actually needs it, over the real pre-existing state.
+mkdir -p "$SESSION_DIR" "$(dirname "$OPEN_LOG")" "$(dirname "$OPEN_LOG_RUNTIME")"
 
 CMD="${1:-}"
 shift || true
@@ -131,6 +138,46 @@ now_iso() { date -u +"%Y-%m-%dT%H:%M:%SZ"; }
 now_date() { date +"%Y-%m-%d"; }
 now_month() { date +"%Y-%m"; }
 fail() { echo "session-guard: $1" >&2; exit "${2:-1}"; }
+
+# resolve_orz_sessions_dir -- three-way resolver for the sessions-content
+# root (WP-526 Ф2 fix, 29.08). Prints the resolved path on success.
+#   1. IWE_SESSIONS_ROOT set explicitly -- always fail-closed if broken,
+#      never falls back: an explicit override is a deliberate choice, a
+#      silent bypass of it would hide a real misconfiguration.
+#   2. Default path ($IWE_ROOT/MC-sessions) exists and is a valid git repo
+#      -- the normal case for an already-migrated checkout.
+#   3. Default path exists but ISN'T a valid git repo -- looks like a
+#      broken migration, not a fresh install. Fail-closed: falling back
+#      here would create a second, undetected source of truth for an
+#      already-migrated user.
+#   4. Default path doesn't exist at all -- genuinely unmigrated (a fresh
+#      template install; MC-sessions is created "on demand" per the
+#      pilot's 18.08 decision, not at setup time). Legacy fallback to
+#      "$GOV_REPO/sessions" with a visible WARN, same behaviour as before
+#      WP-526 Ф2 existed.
+resolve_orz_sessions_dir() {
+  if [ -n "${IWE_SESSIONS_ROOT:-}" ]; then
+    if [ -d "$IWE_SESSIONS_ROOT" ] && git -C "$IWE_SESSIONS_ROOT" rev-parse --git-dir >/dev/null 2>&1; then
+      echo "$IWE_SESSIONS_ROOT"
+      return 0
+    fi
+    fail "IWE_SESSIONS_ROOT=$IWE_SESSIONS_ROOT задан явно, но недоступен или не git-репозиторий"
+  fi
+
+  local default_mc="$IWE_ROOT/MC-sessions"
+  if [ -d "$default_mc" ]; then
+    if git -C "$default_mc" rev-parse --git-dir >/dev/null 2>&1; then
+      echo "$default_mc"
+      return 0
+    fi
+    fail "MC-sessions существует ($default_mc), но не похож на git-репозиторий -- похоже на сломанную мигрированную установку, не откатываюсь на legacy-путь молча"
+  fi
+
+  echo "WARN: MC-sessions не найден ($default_mc) -- использую legacy-путь \$GOV_REPO/sessions (обычное поведение немигрированной установки шаблона)" >&2
+  local legacy="$IWE_ROOT/$GOV_REPO/sessions"
+  mkdir -p "$legacy"
+  echo "$legacy"
+}
 
 # normalize_remote_url <url> -- same normalization as commit-push.sh
 # (2026-08-12, peer-session close-pipeline-consolidation) so
@@ -1549,11 +1596,13 @@ $isolate_status_code $isolate_status_path"
   # its own repo (MC-sessions) -- one shared location regardless of
   # isolate/non-isolate, so ORZ_ISOLATE_OVERRIDE's old per-worktree copy
   # (removed above, was "$ISOLATED_WORKTREE_PATH/sessions") no longer
-  # applies; both paths resolve identically here. Fails closed (no
-  # fallback to a DS-my-strategy path) if MC-sessions isn't cloned --
-  # that fallback is exactly the split-brain this move exists to close.
-  ORZ_SESSIONS_DIR="${IWE_SESSIONS_ROOT:-$IWE_ROOT/MC-sessions}"
-  [ -d "$ORZ_SESSIONS_DIR" ] || fail "MC-sessions не найден по пути $ORZ_SESSIONS_DIR (WP-526 Ф2: сессии больше не пишутся в DS-my-strategy) -- склонируй MC-sessions или задай IWE_SESSIONS_ROOT" 1
+  # applies; both paths resolve identically here. `resolve_orz_sessions_dir`
+  # fails closed for an already-migrated checkout (MC-sessions exists but is
+  # broken, or IWE_SESSIONS_ROOT is set but broken) -- that fallback is
+  # exactly the split-brain this move exists to close. A template install
+  # that never migrated (MC-sessions was never cloned) gets the pre-Ф2
+  # legacy path instead, not an error -- see the function's docstring.
+  ORZ_SESSIONS_DIR="$(resolve_orz_sessions_dir)"
   ORZ_FILE="$ORZ_SESSIONS_DIR/$ORZ_BASENAME"
   mkdir -p "$(dirname "$ORZ_FILE")"
   {
