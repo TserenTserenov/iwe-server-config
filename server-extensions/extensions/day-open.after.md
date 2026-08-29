@@ -191,7 +191,8 @@ done
 > Если есть — вывести в «Требует внимания» (WARN, не BLOCK). Молча пропустить если N=0.
 
 ```bash
-CONV_DIR="$HOME/IWE/DS-my-strategy/sessions/conversations"
+# WP-526 Ф2: sessions/ moved out of DS-my-strategy into its own repo.
+CONV_DIR="${IWE_SESSIONS_ROOT:-$HOME/IWE/MC-sessions}/conversations"
 SIX_HOURS_AGO=$(date -u -v-6H +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u -d '-6 hours' +%Y-%m-%dT%H:%M:%SZ 2>/dev/null)
 STALE=()
 for meta in "$CONV_DIR"/*/meta.yaml; do

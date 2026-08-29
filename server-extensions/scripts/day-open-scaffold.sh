@@ -154,7 +154,7 @@ fi
 # --- Deterministic context extractors (WP-7 DAP: strategy + day-close) ---
 extract_day_close_carry_over() {
   local yday="$1"
-  local sessions_dir="$IWE/${IWE_GOVERNANCE_REPO:-DS-strategy}/sessions"
+  local sessions_dir="${IWE_SESSIONS_ROOT:-$IWE/MC-sessions}"  # WP-526 Ф2
   local month="${yday:0:7}"
   local carry_over=""
 
@@ -197,7 +197,7 @@ extract_day_close_carry_over() {
 
 extract_strategy_context() {
   local week_num="$1"
-  local sessions_dir="$IWE/${IWE_GOVERNANCE_REPO:-DS-strategy}/sessions"
+  local sessions_dir="${IWE_SESSIONS_ROOT:-$IWE/MC-sessions}"  # WP-526 Ф2
   local strategy_file=""
 
   # 1. Strategy session markdown. Search current AND previous month: the session for a
@@ -1022,7 +1022,7 @@ render_yesterday() {
     grep "^| " "$day_report_file" | grep -v "^| РП\|^| Время\|^|---" | sed 's/^/- /'
   else
     # 00-index.md is the one place that covers every session-record layout (flat .md files and nested peer-turn folders).
-    local sessions_dir="$IWE/${IWE_GOVERNANCE_REPO:-DS-strategy}/sessions"
+    local sessions_dir="${IWE_SESSIONS_ROOT:-$IWE/MC-sessions}"  # WP-526 Ф2
     local yday_rows
     yday_rows=$(grep -F "| $YDAY |" "$sessions_dir/00-index.md" 2>/dev/null \
       | awk -F'|' '{gsub(/^[ \t]+|[ \t]+$/,"",$4); print $4}')

@@ -44,7 +44,7 @@ gates_rationale: "операционный скилл; WP Gate применим 
 
 Определить режим из `$ARGUMENTS`:
 
-- `--list` → прочитать `${IWE_GOVERNANCE_REPO:-DS-strategy}/sessions/00-index.md`, вывести таблицу. Стоп.
+- `--list` → прочитать `${IWE_SESSIONS_ROOT:-$HOME/IWE/MC-sessions}/00-index.md` (WP-526 Ф2), вывести таблицу. Стоп.
 - `--interrupt <id>` → перейти к **Шагу 5 (interrupt-режим)**. Стоп после.
 - `--finalize <id>` → перейти к **Шагу 6 (finalize-режим)**. Стоп после.
 - Иначе → новая сессия, продолжать к Шагу 0в.
@@ -174,7 +174,7 @@ if verification_class in ("open-loop", "problem-framing"):
 ## Шаг 1. Инициализация
 
 ```bash
-SESSIONS_DIR="${IWE_SESSIONS_ROOT:-$HOME/IWE/${IWE_GOVERNANCE_REPO:-DS-strategy}/sessions}"
+SESSIONS_DIR="${IWE_SESSIONS_ROOT:-$HOME/IWE/MC-sessions}"
 TODAY=$(date +%Y-%m-%d)
 MONTH=$(date +%Y-%m)
 DAY=$(date +%d)
@@ -213,7 +213,7 @@ GOV_REPO_ROOT="<извлечённый worktree_path>"
 ```
 Сообщить пилоту одной строкой: «Канон под заморозкой — сессия работает в изолированной копии (`$GOV_REPO_ROOT`), коммит на Шаге 4.5.1 уйдёт оттуда через штатный `isolate-push.sh`». Любой другой exit ≠ 0 (не freeze, и isolate-попытка тоже не помогла) → не блокировать сессию как раньше: сообщить пилоту одной строкой «session-guard open не сработал (<причина>), продолжаю без семафора — на Шаге 4.5 возможна ручная разблокировка через touch/note-file», `GOV_REPO_ROOT` остаётся канонический путь, идти дальше.
 
-Semaphore-файл session-guard создаёт СВОЙ ORZ-скаффолд-заготовку по пути `sessions/<MONTH>/<TODAY>-<CLEAN_SLUG>.md` — тот же путь, что закрывающий файл пир-сессии из Шага 4.4/4.5.0 (до 2026-08-03 эти два места ошибочно считали разные пути, см. пометку на Шаге 4.4); Шаг 4.5.0 дописывает в этот же файл финальное содержимое, а не создаёт новый. Все остальные шаги ниже, где раньше стоял хардкод `$HOME/IWE/${IWE_GOVERNANCE_REPO:-DS-strategy}`, используют `$GOV_REPO_ROOT` — при неизолированном open это то же самое значение, что и раньше (обратная совместимость), при isolate-fallback это путь изолированного worktree.
+Semaphore-файл session-guard создаёт СВОЙ ORZ-скаффолд-заготовку по пути `$SESSIONS_DIR/<MONTH>/<TODAY>-<CLEAN_SLUG>.md` — тот же путь, что закрывающий файл пир-сессии из Шага 4.4/4.5.0 (до 2026-08-03 эти два места ошибочно считали разные пути, см. пометку на Шаге 4.4); Шаг 4.5.0 дописывает в этот же файл финальное содержимое, а не создаёт новый. **WP-526 Ф2:** ORZ-скаффолд идёт в `MC-sessions` (`$SESSIONS_DIR`) безусловно, isolate или нет, — `session-guard.sh` больше не привязывает его к `$GOV_REPO_ROOT`. `GOV_REPO_ROOT` (переопределённый на isolate-fallback выше) по-прежнему нужен для остальных шагов скилла, которые читают/пишут файлы в самом governance-репо (не сессионные), — эти два пути больше не связаны между собой.
 
 **1.1 Создать папку:**
 ```bash
@@ -281,7 +281,7 @@ swap_history: []     # [{turn, from, to, reason}] — журнал SWAP_WRITER �
 
 Запись в `meta.yaml.ad_hoc_roles` идёт независимо от выбора (для back-up на уровне 2 — Week Close audit). Если пилот выбрал А — после сессии писатель открывает отдельный РП и делает формализацию.
 
-**1.3 Записать открывающую запись в индекс-черновик** (WP-537 Ф4: `sessions/00-index.md` больше не пишется напрямую — session-index-snapshot.sh единственный писатель git-tracked файла, все остальные пишут в свой runtime-черновик, см. `scripts/lib/session-index-draft.sh`). Колонка «Агенты» — при `PEER_COUNT>=2` напарники соединяются через `+`:
+**1.3 Записать открывающую запись в индекс-черновик** (WP-537 Ф4: `00-index.md` в MC-sessions (WP-526 Ф2) больше не пишется напрямую — session-index-snapshot.sh единственный писатель git-tracked файла, все остальные пишут в свой runtime-черновик, см. `scripts/lib/session-index-draft.sh`). Колонка «Агенты» — при `PEER_COUNT>=2` напарники соединяются через `+`:
 ```bash
 . "$GOV_REPO_ROOT/scripts/lib/session-index-draft.sh"
 session_index_draft_write "$SESSION_ID" "$TODAY" "<задача ≤50 симв>" \
@@ -983,7 +983,7 @@ extensions:
 
 **Запрещено:**
 - Создавать `report-v1.md`, `report-v2.md` — одна сессия = один отчёт.
-- Создавать supplement-директории — `sessions/YYYY-MM/DD/<id>/` = единое пространство.
+- Создавать supplement-директории — `$SESSIONS_DIR/YYYY-MM/DD/<id>/` (MC-sessions) = единое пространство.
 - Продолжать писать `-writer.md`/`-peer.md` при `status: completed` — статус меняется только после Close-сигнала.
 
 ### 4.2b Стиль report.md (DP.SC.050)
@@ -1103,7 +1103,7 @@ session_index_draft_write "$SESSION_ID" "$TODAY" "<задача ≤50>" \
 
 Slug-часть (без даты, с номером — та же формула, что `session-guard.sh` использует для своего ORZ-скаффолда, `session-guard.sh:241-243`): `SESSION_SLUG="${SESSION_ID#"$TODAY"-}"`
 
-Целевой путь (используется здесь и на Шаге 4.5.0): `${IWE_GOVERNANCE_REPO:-DS-strategy}/sessions/<MONTH>/<TODAY>-<SESSION_SLUG>.md` — плоский Quick Close файл под месячной папкой, без DD/ (DD/ — только для peer-session-папок). Тот же путь, что `session-guard.sh` уже создал (или создаст) как свой ORZ-скаффолд на Шаге 1.0 — содержимое пишется один раз, на Шаге 4.5.0.
+Целевой путь (используется здесь и на Шаге 4.5.0, WP-526 Ф2): `<MC-sessions>/<MONTH>/<TODAY>-<SESSION_SLUG>.md` — плоский Quick Close файл под месячной папкой внутри `$SESSIONS_DIR` (Шаг 1), без DD/ (DD/ — только для peer-session-папок). Тот же путь, что `session-guard.sh` уже создал (или создаст) как свой ORZ-скаффолд на Шаге 1.0 — содержимое пишется один раз, на Шаге 4.5.0.
 
 ### 4.5 Commit + push
 
@@ -1118,7 +1118,9 @@ Slug-часть (без даты, с номером — та же формула
 # `agent:` — обязательный ключ по списку session-guard.sh:474 (validate_orz);
 # без него Шаг 4.5.2 (close) падает "в frontmatter отсутствует ключ 'agent:'".
 # `writer:` держим тоже — для согласованности с meta.yaml.writer_agent.
-GUARD_ORZ="$GOV_REPO_ROOT/sessions/$MONTH/${TODAY}-${SESSION_SLUG}.md"
+# WP-526 Ф2: GUARD_ORZ и все относительные пути внутри файла — теперь
+# относительно $SESSIONS_DIR (MC-sessions), не $GOV_REPO_ROOT/sessions.
+GUARD_ORZ="$SESSIONS_DIR/$MONTH/${TODAY}-${SESSION_SLUG}.md"
 cat > "$GUARD_ORZ" <<EOF
 ---
 date: $TODAY
@@ -1128,7 +1130,7 @@ agent: claude-code
 writer: claude-code
 peer: [<PEER_AGENT_ID>, ...]      # список; при PEER_COUNT==1 — один элемент
 duration_h: <(end_time - start_time) в часах, 1 знак>
-artifacts: [sessions/$MONTH/$DAY/$SESSION_ID/report.md]
+artifacts: [$MONTH/$DAY/$SESSION_ID/report.md]
 session_id: $SESSION_ID
 ---
 
@@ -1138,13 +1140,13 @@ session_id: $SESSION_ID
 
 ## Контекст
 
-Пир-сессия $SESSION_ID — полная стенограмма и синтез в sessions/$MONTH/$DAY/$SESSION_ID/.
+Пир-сессия $SESSION_ID — полная стенограмма и синтез в MC-sessions:$MONTH/$DAY/$SESSION_ID/.
 
 ## Достигнуто
 
 | Артефакт | Описание |
 |----------|----------|
-| sessions/$MONTH/$DAY/$SESSION_ID/report.md | Итоговый отчёт пир-сессии |
+| $MONTH/$DAY/$SESSION_ID/report.md | Итоговый отчёт пир-сессии |
 
 ## Ключевые решения
 
@@ -1157,16 +1159,19 @@ EOF
 **4.5.1 Commit + push:**
 
 ```bash
-cd "$GOV_REPO_ROOT"
+# WP-526 Ф2: коммит и push сессии идут в MC-sessions, не в $GOV_REPO_ROOT —
+# session-manifest-write.sh живёт в DS-my-strategy (обычный скрипт), но
+# работает НАД репозиторием MC-sessions (первый аргумент — $WORKTREE).
+cd "$SESSIONS_DIR"
 # pathspec после `--`: commit ТОЛЬКО файлы сессии, не подметаем чужое
 # pre-staged из общего индекса (mis-attribution, см. 2026-06-20-39).
 # $GUARD_ORZ (Шаг 4.5.0) — тот же путь, что "$TODAY-$SESSION_SLUG.md" (Шаг 4.4),
 # одна запись вместо двух хардкодов одного и того же файла.
-# sessions/00-index.md больше НЕ входит сюда (WP-537 Ф4): эта сессия пишет
+# 00-index.md больше НЕ входит сюда (WP-537 Ф4): эта сессия пишет
 # только в свой runtime-черновик (Шаги 1.3/4.3), не в git-tracked файл —
 # коммитить его отсюда означало бы подхватывать чужие параллельные правки
 # того же общего файла, ровно тот класс бага, который черновик закрывает.
-PATHS=("sessions/$MONTH/$DAY/$SESSION_ID/" "$GUARD_ORZ")
+PATHS=("$MONTH/$DAY/$SESSION_ID/" "$GUARD_ORZ")
 git add "${PATHS[@]}"
 git commit -m "feat(peer): $SESSION_ID — <задача кратко>" -- "${PATHS[@]}"
 
@@ -1174,9 +1179,8 @@ git commit -m "feat(peer): $SESSION_ID — <задача кратко>" -- "${PA
 # сессии — ПОСЛЕ payload-коммита с отчётом, ДО публикации. Без манифеста
 # догоняющий quick-close уже запушенной сессии не доказывает «всё на remote»
 # и падает в ручной обход. Отказ (грязное дерево и т.п.) не блокирует
-# закрытие — WARN и legacy-путь confirmed_clean_repos. При доставке из
-# изолированного worktree (freeze) — та же строка перед isolate-push.
-bash "$GOV_REPO_ROOT/scripts/session-manifest-write.sh" "$(git rev-parse --show-toplevel)" "$SESSION_ID" \
+# закрытие — WARN и legacy-путь confirmed_clean_repos.
+bash "$HOME/IWE/${IWE_GOVERNANCE_REPO:-DS-strategy}/scripts/session-manifest-write.sh" "$(git rev-parse --show-toplevel)" "$SESSION_ID" \
   || echo "WARN: attest-манифест не создан — догоняющее закрытие пойдёт legacy-путём"
 ```
 
@@ -1213,7 +1217,7 @@ IWE_AGENT=claude-code bash "${IWE_SCRIPTS:-$HOME/IWE/scripts}/session-guard.sh" 
 
 Решение: <первый пункт §4 из report.md — одна строка на пальцах, без технических кодов>
 
-Подробный отчёт: sessions/<MONTH>/<DAY>/<SESSION_ID>/report.md
+Подробный отчёт: MC-sessions:<MONTH>/<DAY>/<SESSION_ID>/report.md
 ```
 
 Если report.md пустой или субагент-синтезатор не создал его — показать только ссылку без §4.
@@ -1224,10 +1228,10 @@ IWE_AGENT=claude-code bash "${IWE_SCRIPTS:-$HOME/IWE/scripts}/session-guard.sh" 
 
 При `--interrupt <session_id>`:
 
-1. Извлечь месяц и день из id: `MONTH=$(echo "$session_id" | cut -c1-7)`, `DAY=$(echo "$session_id" | cut -c9-10)` → найти `sessions/$MONTH/$DAY/$session_id/meta.yaml`.
+1. Извлечь месяц и день из id: `MONTH=$(echo "$session_id" | cut -c1-7)`, `DAY=$(echo "$session_id" | cut -c9-10)` → найти `$SESSIONS_DIR/$MONTH/$DAY/$session_id/meta.yaml` (Шаг 1, WP-526 Ф2 — MC-sessions, не `sessions/` внутри governance-репо).
 2. Обновить (Bash sed): `status: interrupted`, `end_time: <now>`, `turns_count: <число файлов>`.
 3. Обновить индекс-черновик (WP-537 Ф4, `session_index_draft_write`, см. Шаг 4.3): статус → `interrupted`, report → `—`.
-4. Commit + push (без `sessions/00-index.md` — см. Шаг 4.5.1).
+4. Commit + push внутри `$SESSIONS_DIR` (без `00-index.md` — см. Шаг 4.5.1).
 
 ---
 
@@ -1235,12 +1239,12 @@ IWE_AGENT=claude-code bash "${IWE_SCRIPTS:-$HOME/IWE/scripts}/session-guard.sh" 
 
 При `--finalize <session_id>`:
 
-1. Извлечь месяц и день: `MONTH=$(echo "$session_id" | cut -c1-7)`, `DAY=$(echo "$session_id" | cut -c9-10)`. Проверить что папка `sessions/$MONTH/$DAY/$session_id` существует и содержит хотя бы `00-writer.md`.
+1. Извлечь месяц и день: `MONTH=$(echo "$session_id" | cut -c1-7)`, `DAY=$(echo "$session_id" | cut -c9-10)`. Проверить что папка `$SESSIONS_DIR/$MONTH/$DAY/$session_id` (MC-sessions, WP-526 Ф2) существует и содержит хотя бы `00-writer.md`.
 2. Прочитать `meta.yaml` — взять `task_description`, `start_time`, `escalations_count`.
 3. Выполнить **Шаг 4.2** (синтез report.md через Agent tool) с теми же инвариантами и fallback.
 4. Обновить `meta.yaml` (Bash sed): `status: completed`, `end_time: <now>`, `turns_count: <число файлов>`.
 5. Обновить индекс-черновик (WP-537 Ф4, `session_index_draft_write`, см. Шаг 4.3): статус → `completed`, report → ссылка.
-6. Commit + push (без `sessions/00-index.md` — см. Шаг 4.5.1).
+6. Commit + push внутри `$SESSIONS_DIR` (без `00-index.md` — см. Шаг 4.5.1).
 
 Используется для восстановления прерванных сессий без перезапуска turn-loop.
 

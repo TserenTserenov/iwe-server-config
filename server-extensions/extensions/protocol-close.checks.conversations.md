@@ -9,7 +9,8 @@
 set -eu
 
 IWE_WORKSPACE="${IWE_WORKSPACE:-${WORKSPACE_DIR:-$HOME/IWE}}"
-CONV_DIR="$IWE_WORKSPACE/DS-my-strategy/sessions/conversations"
+# WP-526 Ф2: sessions/ moved out of DS-my-strategy into its own repo.
+CONV_DIR="${IWE_SESSIONS_ROOT:-$IWE_WORKSPACE/MC-sessions}/conversations"
 SCRIPTS_DIR="$IWE_WORKSPACE/DS-my-strategy/scripts"
 
 [ -d "$CONV_DIR" ] || exit 0

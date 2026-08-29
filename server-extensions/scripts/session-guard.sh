@@ -83,7 +83,14 @@ SESSION_DIR="$IWE_ROOT/.iwe-runtime/sessions"
 # migrate off the path.
 OPEN_LOG="$IWE_ROOT/$GOV_REPO/inbox/open-sessions.log"
 OPEN_LOG_RUNTIME="$IWE_ROOT/.iwe-runtime/open-sessions.log"
-ORZ_DIR="$IWE_ROOT/$GOV_REPO/sessions"
+# WP-526 Ф2: session content lives in MC-sessions now, not "$GOV_REPO/sessions"
+# (cold-review finding, this session -- the original one-liner fix at `open`
+# only updated the local variable there, missed this global used by close/
+# audit/list further down). Same default as iwe_sessions_root() in
+# governance-repo-path.sh (DS-my-strategy) -- not sourced from there to avoid
+# a cross-repo dependency in this file (P2 exemption already accepted for
+# this exact split, cold-review WP-526 Ф1).
+ORZ_DIR="${IWE_SESSIONS_ROOT:-$IWE_ROOT/MC-sessions}"
 AGENT_STATUS_SCRIPT="$IWE_ROOT/scripts/agent-status-report.sh"
 # WP-520 находка 28+enforcement (14.08): freeze on the canonical DS-my-strategy
 # checkout — new sessions must use an isolated worktree, not open there
@@ -1142,7 +1149,6 @@ if [ "$CMD" = "open" ]; then
   # that block unchanged, this flag is the only thing that routes around it.
   ISOLATED_WORKTREE_PATH=""
   ISOLATED_WORKTREE_BRANCH=""
-  ORZ_ISOLATE_OVERRIDE=""
   if [ "$ISOLATE_FLAG" = "1" ]; then
     [ -n "$SLUG" ] && validate_isolate_slug "$SLUG"
 
@@ -1436,17 +1442,13 @@ $isolate_status_code $isolate_status_path"
     ' -- "$ISOLATE_BASE_DIR" "$ISOLATED_WORKTREE_PATH" "$ISOLATED_WORKTREE_BRANCH" "$ISOLATE_STORE_DIR_REAL" "${SLUG:-}" "$AGENT" "$ISOLATE_SEM_EXISTS" "$BASE_SHA" \
       || fail "--isolate: не удалось создать или переиспользовать worktree (см. сообщение выше)" 1
 
-    # ORZ scaffold и OPEN_LOG must land inside this session's own worktree,
-    # not the shared canonical checkout -- otherwise a foreign untracked ORZ
-    # file blocks every OTHER concurrent `--isolate open` (live-reproduced
-    # 2026-08-15, 4-agent run: agent A's own ORZ scaffold made agents B/C/D's
-    # untracked-check fail with "не унаследует", peer-session
-    # 2026-08-15-14-isolate-aware-orz-dir, consensus with Codex). Only ORZ is
-    # covered here -- OPEN_LOG append can independently dirty the canonical
-    # checkout and block a neighbor the same way; that race is a known,
-    # deliberately deferred gap (pilot decision, same session), tracked in
-    # WP-530 for its own phase, not folded into this fix.
-    ORZ_ISOLATE_OVERRIDE="$ISOLATED_WORKTREE_PATH/sessions"
+    # WP-526 Ф2: no more per-worktree ORZ_ISOLATE_OVERRIDE assignment here
+    # (was "$ISOLATED_WORKTREE_PATH/sessions"). The untracked-ORZ-blocks-a-
+    # neighbor bug this used to work around (live-reproduced 2026-08-15,
+    # 4-agent run, peer-session 2026-08-15-14-isolate-aware-orz-dir) is
+    # moot now: ORZ scaffold lands in MC-sessions (see the unconditional
+    # resolution below), never inside DS-my-strategy's canonical checkout,
+    # isolate or not -- there's nothing left to dirty there.
 
     echo "{\"worktree_path\": \"$ISOLATED_WORKTREE_PATH\", \"branch\": \"$ISOLATED_WORKTREE_BRANCH\", \"session_id\": \"$ISOLATE_SESSION_ID\"}"
     echo "⚠️  cd \"$ISOLATED_WORKTREE_PATH\" перед следующим действием -- рабочий каталог не переключается автоматически, это отдельный процесс bash." >&2
@@ -1543,21 +1545,15 @@ $isolate_status_code $isolate_status_path"
   # semaphore already carries session identity; it's the one place `close`
   # can read back the resolved directory instead of re-deriving it.
   #
-  # ORZ_ISOLATE_OVERRIDE (set above, inside the --isolate block, once
-  # $ISOLATED_WORKTREE_PATH exists on disk): gov_repo_dir() alone can't see
-  # it here, because it resolves the CALLER's cwd, and `--isolate` never cd's
-  # this same process into the worktree it just created (that's the caller's
-  # own next step, printed as the "⚠️ cd ..." hint above) -- empty outside
-  # --isolate, so the fallback below is unchanged for the non-isolate and
-  # canonical-owner paths.
-  # IWE_SESSIONS_ROOT (WP-526 Ф1, migration prep): unset by every caller
-  # today, so this resolves exactly as before. Only covers the non-isolate
-  # fallback -- ORZ_ISOLATE_OVERRIDE (set above) still wins unconditionally
-  # and ignores this variable, so a future physical move of sessions/
-  # content still needs a second edit here for the --isolate path (that
-  # override computes "$ISOLATED_WORKTREE_PATH/sessions" independently,
-  # cold-review WP-526 code review, this session).
-  ORZ_SESSIONS_DIR="${ORZ_ISOLATE_OVERRIDE:-${IWE_SESSIONS_ROOT:-$(gov_repo_dir)/sessions}}"
+  # WP-526 Ф2: session content moved out of DS-my-strategy entirely, into
+  # its own repo (MC-sessions) -- one shared location regardless of
+  # isolate/non-isolate, so ORZ_ISOLATE_OVERRIDE's old per-worktree copy
+  # (removed above, was "$ISOLATED_WORKTREE_PATH/sessions") no longer
+  # applies; both paths resolve identically here. Fails closed (no
+  # fallback to a DS-my-strategy path) if MC-sessions isn't cloned --
+  # that fallback is exactly the split-brain this move exists to close.
+  ORZ_SESSIONS_DIR="${IWE_SESSIONS_ROOT:-$IWE_ROOT/MC-sessions}"
+  [ -d "$ORZ_SESSIONS_DIR" ] || fail "MC-sessions не найден по пути $ORZ_SESSIONS_DIR (WP-526 Ф2: сессии больше не пишутся в DS-my-strategy) -- склонируй MC-sessions или задай IWE_SESSIONS_ROOT" 1
   ORZ_FILE="$ORZ_SESSIONS_DIR/$ORZ_BASENAME"
   mkdir -p "$(dirname "$ORZ_FILE")"
   {
@@ -1611,10 +1607,12 @@ $isolate_status_code $isolate_status_path"
     # separate `note-file` call just to survive the gate it forgot about — live-
     # reproduced (mktemp sandbox: open → edit ORZ → git add → pre-commit-check
     # → BLOCK) and matches orphaned untracked ORZ files found sitting in this
-    # session's own `git status` from a prior, unrelated WP. Path is relative to
-    # $ORZ_DIR's PARENT (governance-repo root — sessions/<...>), same convention
-    # every other `file:` line already uses.
-    echo "file: $(basename "$ORZ_DIR")/$ORZ_BASENAME"
+    # session's own `git status` from a prior, unrelated WP. WP-526 Ф2 (cold-
+    # review finding, this session): path used to be relative to $ORZ_DIR's
+    # PARENT because ORZ_DIR was a "sessions" subfolder of the governance repo
+    # -- now ORZ_DIR IS the MC-sessions repo root, so $ORZ_BASENAME alone is
+    # already the correct repo-relative path (no parent prefix to add).
+    echo "file: $ORZ_BASENAME"
     # Same class of gap as the ORZ line above (Ф32 п.5), found for --isolate
     # re-entry (peer-session 2026-08-14-13, turn 15, Codex): OPEN_LOG's own
     # append below is a real, expected, this-session side effect --
@@ -1826,17 +1824,32 @@ _refresh_remote_refs_for_close() { # <repo> — best-effort fetch, once per clos
 # unlike the exclusive files a single session owns. Scoped to this one file,
 # not every shared file: umbrella WP-N.md takes point-edits to a phase, not a
 # pure append, so it keeps the strict check.
-APPEND_SAFE_PATHS="$(basename "$ORZ_DIR")/00-index.md"
+# WP-526 Ф2: 00-index.md is registered bare (no "sessions/" prefix) now --
+# it lives at the MC-sessions repo root, not a subfolder of ORZ_DIR's parent.
+APPEND_SAFE_PATHS="00-index.md"
 
 session_scope_dirty_paths() { # <semaphore> — prints only dirty registered paths
-  local semaphore="$1" registered_path status scope_repo_dir runner_card
-  # The ORZ snapshot names the worktree that owns this session.  Checking the
-  # canonical checkout here makes unrelated current work look like this
-  # session's dirt and permanently blocks a clean isolated close.
-  scope_repo_dir="$(dirname "$ORZ_SESSIONS_DIR")"
-  if [ ! -d "$scope_repo_dir/.git" ] && [ ! -f "$scope_repo_dir/.git" ]; then
-    scope_repo_dir="$(dirname "$ORZ_DIR")"
+  local semaphore="$1" registered_path status scope_repo_dir sessions_repo_dir runner_card checked_dir
+  # The ORZ snapshot names the worktree that owns this session's GOVERNANCE
+  # work (WP cards, code). Checking the canonical checkout here makes
+  # unrelated current work look like this session's dirt and permanently
+  # blocks a clean isolated close.
+  scope_repo_dir=$(grep '^isolated_worktree: ' "$semaphore" 2>/dev/null | head -1 | cut -d' ' -f2- || true)
+  if [ -z "$scope_repo_dir" ] || { [ ! -d "$scope_repo_dir/.git" ] && [ ! -f "$scope_repo_dir/.git" ]; }; then
+    scope_repo_dir="$IWE_ROOT/$GOV_REPO"
   fi
+  # WP-526 Ф2 (cold-review finding + live-reproduced bypass, this session):
+  # a session's registered files can now legitimately live in TWO different
+  # repos -- governance work in $scope_repo_dir above, session content
+  # (peer-conversation transcripts) in MC-sessions. The single-repo check
+  # this function had before silently found "clean" for every session-
+  # content path once $ORZ_SESSIONS_DIR stopped being a subfolder of the
+  # governance repo -- close could ship real uncommitted MC-sessions content
+  # with no warning. $ORZ_SESSIONS_DIR (read from the semaphore, same field
+  # `open` recorded) is MC-sessions itself now, so use it directly as the
+  # second candidate, no dirname().
+  sessions_repo_dir=$(grep '^orz_sessions_dir: ' "$semaphore" 2>/dev/null | head -1 | cut -d' ' -f2- || true)
+  [ -n "$sessions_repo_dir" ] || sessions_repo_dir="$ORZ_DIR"
   while IFS= read -r registered_path; do
     registered_path="${registered_path#file: }"
     [ -n "$registered_path" ] || continue
@@ -1861,7 +1874,13 @@ session_scope_dirty_paths() { # <semaphore> — prints only dirty registered pat
     # a worktree-delivered session with Cyrillic filenames (every sessions/*.md
     # here) falsely blocked at close. Likely the root of the 13.08 "close gate
     # cannot recognize worktree delivery" recurrences.
+    checked_dir="$scope_repo_dir"
     status=$(git -c core.quotePath=false -C "$scope_repo_dir" status --porcelain --untracked-files=all -- "$registered_path" 2>/dev/null || true)
+    if [ -z "$status" ] && [ "$sessions_repo_dir" != "$scope_repo_dir" ] \
+       && { [ -d "$sessions_repo_dir/.git" ] || [ -f "$sessions_repo_dir/.git" ]; }; then
+      checked_dir="$sessions_repo_dir"
+      status=$(git -c core.quotePath=false -C "$sessions_repo_dir" status --porcelain --untracked-files=all -- "$registered_path" 2>/dev/null || true)
+    fi
     [ -z "$status" ] && continue
     while IFS= read -r status_line; do
       [ -n "$status_line" ] || continue
@@ -1870,7 +1889,7 @@ session_scope_dirty_paths() { # <semaphore> — prints only dirty registered pat
         # '??' for the same reason: a shared checkout parked on another agent's
         # branch legitimately carries main's newer version of shared scripts.
         "?? "*|" M "*)
-          _untracked_matches_published "$scope_repo_dir" "${status_line:3}" && continue
+          _untracked_matches_published "$checked_dir" "${status_line:3}" && continue
           ;;
       esac
       printf '  %s: %s\n' "$registered_path" "$status_line"

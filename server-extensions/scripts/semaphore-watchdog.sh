@@ -45,7 +45,9 @@ IWE_ROOT="${IWE_ROOT:-$HOME/IWE}"
 # shellcheck source=DS-my-strategy/scripts/lib/governance-repo-path.sh
 . "$IWE_ROOT/DS-my-strategy/scripts/lib/governance-repo-path.sh"
 SESSION_DIR="$IWE_ROOT/.iwe-runtime/sessions"
-PEER_SESSIONS_DIR="$(resolve_canonical_checkout)/sessions"
+# WP-526 Ф2: peer-session content lives in MC-sessions now, not under the
+# governance repo's sessions/.
+PEER_SESSIONS_DIR="$(iwe_sessions_root)"
 LOG_FILE="$IWE_ROOT/.iwe-runtime/logs/semaphore-watchdog.log"
 
 # Правило А: предварительное число (peer-session ход 4), требует одного цикла

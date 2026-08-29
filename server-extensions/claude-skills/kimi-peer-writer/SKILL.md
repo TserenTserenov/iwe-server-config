@@ -77,7 +77,7 @@ Peer-сессия DP.SC.154 где Kimi = писатель, напарник —
 
 Определить режим из `$ARGUMENTS`:
 
-- `--list` → прочитать `${IWE_GOVERNANCE_REPO:-DS-strategy}/sessions/00-index.md`, вывести таблицу. Стоп.
+- `--list` → прочитать `${IWE_SESSIONS_ROOT:-$HOME/IWE/MC-sessions}/00-index.md` (WP-526 Ф2), вывести таблицу. Стоп.
 - `--interrupt <id>` → перейти к **Шагу 5 (interrupt-режим)**. Стоп после.
 - `--finalize <id>` → перейти к **Шагу 6 (finalize-режим)**. Стоп после.
 - Иначе → новая сессия, продолжать к Шагу 0б.
@@ -162,7 +162,7 @@ python3 ~/IWE/DS-my-strategy/scripts/resolve-personality-by-host.py \
 ## Шаг 1. Инициализация
 
 ```bash
-SESSIONS_DIR="${IWE_SESSIONS_ROOT:-$HOME/IWE/${IWE_GOVERNANCE_REPO:-DS-strategy}/sessions}"
+SESSIONS_DIR="${IWE_SESSIONS_ROOT:-$HOME/IWE/MC-sessions}"
 TODAY=$(date +%Y-%m-%d)
 MONTH=$(date +%Y-%m)
 DAY=$(date +%d)
@@ -225,7 +225,7 @@ swap_history: []     # [{turn, from, to, reason}] — журнал SWAP_WRITER �
 
 Запись в `meta.yaml.ad_hoc_roles` идёт независимо от выбора (для back-up уровня 2). При выборе А — после сессии писатель открывает отдельный РП.
 
-**1.3 Записать открывающую запись в индекс-черновик** (WP-537 Ф4: `sessions/00-index.md` больше не пишется напрямую — session-index-snapshot.sh единственный писатель git-tracked файла, все остальные пишут в свой runtime-черновик, см. `scripts/lib/session-index-draft.sh`):
+**1.3 Записать открывающую запись в индекс-черновик** (WP-537 Ф4: `00-index.md` в MC-sessions (WP-526 Ф2) больше не пишется напрямую — session-index-snapshot.sh единственный писатель git-tracked файла, все остальные пишут в свой runtime-черновик, см. `scripts/lib/session-index-draft.sh`):
 ```bash
 . "$HOME/IWE/${IWE_GOVERNANCE_REPO:-DS-strategy}/scripts/lib/session-index-draft.sh"
 session_index_draft_write "$SESSION_ID" "$TODAY" "<задача ≤50 симв>" \
@@ -911,7 +911,7 @@ extensions:
 
 **Запрещено:**
 - Создавать `report-v1.md`, `report-v2.md` — одна сессия = один отчёт.
-- Создавать supplement-директории — `sessions/YYYY-MM/DD/<id>/` = единое пространство.
+- Создавать supplement-директории — `$SESSIONS_DIR/YYYY-MM/DD/<id>/` (MC-sessions) = единое пространство.
 - Продолжать писать `-writer.md`/`-peer.md` при `status: completed` — статус меняется только после Close-сигнала.
 
 ### 4.3 Обновить индекс-черновик
@@ -928,7 +928,7 @@ session_index_draft_write "$SESSION_ID" "$TODAY" "<задача ≤50>" \
 
 Slug-часть (без даты и номера): `SESSION_SLUG=$(echo "$SESSION_ID" | sed -E 's/^[0-9]{4}-[0-9]{2}-[0-9]{2}-[0-9]{2}-//')`
 
-Записать `${IWE_GOVERNANCE_REPO:-DS-strategy}/sessions/<MONTH>/<TODAY>-<SESSION_SLUG>.md` (Write) — Quick Close файл плоский под месячной папкой, без DD/ (симметрично session-guard.sh; DD/ — только для peer-session-папок):
+Записать `$SESSIONS_DIR/<MONTH>/<TODAY>-<SESSION_SLUG>.md` (Write, WP-526 Ф2 — MC-sessions, не governance-репо) — Quick Close файл плоский под месячной папкой, без DD/ (симметрично session-guard.sh; DD/ — только для peer-session-папок):
 ```markdown
 ---
 date: <TODAY>
@@ -936,7 +936,7 @@ type: peer-session
 writer: kimi-headless
 peer: <PEER_AGENT_ID>
 duration_h: <(end_time - start_time) в часах, 1 знак>
-artifacts: sessions/<MONTH>/<DAY>/<SESSION_ID>/report.md
+artifacts: <MONTH>/<DAY>/<SESSION_ID>/report.md
 session_id: <SESSION_ID>
 wp: <WP-NNN или unknown>
 ---
@@ -949,17 +949,20 @@ wp: <WP-NNN или unknown>
 ### 4.5 Commit + push
 
 ```bash
-cd "$HOME/IWE/${IWE_GOVERNANCE_REPO:-DS-strategy}"
+# WP-526 Ф2: коммит и push сессии идут в MC-sessions ($SESSIONS_DIR), не
+# в governance-репо. session-manifest-write.sh живёт в DS-my-strategy
+# (обычный скрипт), но работает НАД MC-sessions ($WORKTREE = первый аргумент).
+cd "$SESSIONS_DIR"
 
 # Pre-commit guard
 test ! -f "$SESSION_DIR/report-draft.md" \
   || { echo "FAIL: report-draft.md существует — mv к report.md не выполнен"; exit 1; }
 test -f "$SESSION_DIR/report.md" \
   || { echo "FAIL: report.md отсутствует"; exit 1; }
-CLOSE_FILE="sessions/$MONTH/${TODAY}-${SESSION_SLUG}.md"
+CLOSE_FILE="$SESSIONS_DIR/$MONTH/${TODAY}-${SESSION_SLUG}.md"
 test -f "$CLOSE_FILE" \
   || { echo "FAIL: close-файл $CLOSE_FILE отсутствует"; exit 1; }
-# WP-537 Ф4: индекс-черновик, не sessions/00-index.md — эта сессия больше не
+# WP-537 Ф4: индекс-черновик, не 00-index.md — эта сессия больше не
 # пишет git-tracked файл напрямую (session-index-snapshot.sh единственный писатель).
 DRAFT_FILE="$HOME/IWE/.iwe-runtime/session-index-drafts/${SESSION_ID}.yaml"
 test -f "$DRAFT_FILE" \
@@ -969,8 +972,8 @@ grep -qF "status: completed" "$DRAFT_FILE" \
 
 # pathspec после `--`: commit ТОЛЬКО файлы сессии (mis-attribution, 2026-06-20-39)
 # PR flow (WP-436 Ф2): push to feature branch + auto-merge PR → branch protection on main.
-# sessions/00-index.md больше НЕ входит сюда (WP-537 Ф4) — см. комментарий выше.
-PATHS=("sessions/$MONTH/$DAY/$SESSION_ID/" "sessions/$MONTH/${TODAY}-${SESSION_SLUG}.md")
+# 00-index.md больше НЕ входит сюда (WP-537 Ф4) — см. комментарий выше.
+PATHS=("$MONTH/$DAY/$SESSION_ID/" "$MONTH/${TODAY}-${SESSION_SLUG}.md")
 BRANCH="peer/$SESSION_ID"
 git checkout -b "$BRANCH" 2>/dev/null || git checkout "$BRANCH"
 git add "${PATHS[@]}"
@@ -981,8 +984,7 @@ git commit -m "feat(peer): $SESSION_ID (kimi-writer) — <задача крат�
 # догоняющий quick-close уже запушенной сессии не может доказать «всё на
 # remote» и падает в ручной обход. Отказ манифеста (грязное дерево канона и
 # т.п.) не блокирует закрытие — WARN и дальше без него (legacy-путь
-# confirmed_clean_repos остаётся). При доставке из изолированного worktree
-# (freeze) — та же строка перед isolate-push, аргумент — путь worktree.
+# confirmed_clean_repos остаётся).
 bash "$HOME/IWE/${IWE_GOVERNANCE_REPO:-DS-strategy}/scripts/session-manifest-write.sh" "$(git rev-parse --show-toplevel)" "$SESSION_ID" \
   || echo "WARN: attest-манифест не создан — догоняющее закрытие этой сессии пойдёт legacy-путём"
 
@@ -993,7 +995,7 @@ gh pr create --title "feat(peer): $SESSION_ID" \
   || echo "WARN: gh pr create failed — merge manually or check gh auth"
 ```
 
-Показать пилоту: «Сессия завершена. Отчёт: `sessions/$MONTH/$DAY/$SESSION_ID/report.md`»
+Показать пилоту: «Сессия завершена. Отчёт: `MC-sessions:$MONTH/$DAY/$SESSION_ID/report.md`»
 
 ---
 
@@ -1001,10 +1003,10 @@ gh pr create --title "feat(peer): $SESSION_ID" \
 
 При `--interrupt <session_id>`:
 
-1. Извлечь месяц и день из id: `MONTH=$(echo "$session_id" | cut -c1-7)`, `DAY=$(echo "$session_id" | cut -c9-10)` → найти `sessions/$MONTH/$DAY/$session_id/meta.yaml`.
+1. Извлечь месяц и день из id: `MONTH=$(echo "$session_id" | cut -c1-7)`, `DAY=$(echo "$session_id" | cut -c9-10)` → найти `$SESSIONS_DIR/$MONTH/$DAY/$session_id/meta.yaml` (MC-sessions, WP-526 Ф2).
 2. Обновить (Bash sed): `status: interrupted`, `end_time: <now>`, `turns_count: <число файлов>`.
 3. Обновить индекс-черновик (WP-537 Ф4, `session_index_draft_write`, см. Шаг 4.3): статус → `interrupted`, report → `—`.
-4. Commit + push (без `sessions/00-index.md` — см. Шаг 4.5).
+4. Commit + push внутри `$SESSIONS_DIR` (без `00-index.md` — см. Шаг 4.5).
 
 ---
 
@@ -1012,12 +1014,12 @@ gh pr create --title "feat(peer): $SESSION_ID" \
 
 При `--finalize <session_id>`:
 
-1. Извлечь месяц и день: `MONTH=$(echo "$session_id" | cut -c1-7)`, `DAY=$(echo "$session_id" | cut -c9-10)`. Проверить что папка `sessions/$MONTH/$DAY/$session_id` существует и содержит хотя бы `00-writer.md`.
+1. Извлечь месяц и день: `MONTH=$(echo "$session_id" | cut -c1-7)`, `DAY=$(echo "$session_id" | cut -c9-10)`. Проверить что папка `$SESSIONS_DIR/$MONTH/$DAY/$session_id` (MC-sessions, WP-526 Ф2) существует и содержит хотя бы `00-writer.md`.
 2. Прочитать `meta.yaml` — взять `task_description`, `start_time`, `escalations_count`.
 3. Выполнить **Шаг 4.2** (синтез report-draft.md через адаптер сессии: `scripts/<peer_cmd>.sh`, где `peer_cmd` читается из `meta.yaml` этой сессии — аргумента `--peer` при `--finalize` нет, Шаг 0а.2 не выполняется заново) с теми же инвариантами и fallback.
 4. Обновить `meta.yaml` (Bash sed): `status: completed`, `end_time: <now>`, `turns_count: <число файлов>`.
 5. Обновить индекс-черновик (WP-537 Ф4, `session_index_draft_write`, см. Шаг 4.3): статус → `completed`, report → ссылка.
-6. Commit + push (без `sessions/00-index.md` — см. Шаг 4.5).
+6. Commit + push внутри `$SESSIONS_DIR` (без `00-index.md` — см. Шаг 4.5).
 
 Используется для восстановления прерванных сессий без перезапуска turn-loop.
 
