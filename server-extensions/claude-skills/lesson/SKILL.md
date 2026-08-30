@@ -25,7 +25,7 @@ gates_rationale: "операционный скилл; WP Gate применим 
 
 > ⚡ **Алгоритм, не диалог.** Шаги 1-6 последовательно. Диалог только в шагах 4-5 (Урок→Вопрос→Задание). Без вопросов — не начинать.
 
-> **Канал доставки SC.020 v2 (VS Code):** альтернатива Telegram-боту. Пилот открывает `personal-guide` репо в VS Code → видит сегодняшний `daily/YYYY-MM-DD.md` → запускает Claude Code → `/lesson` → проходит занятие → `/lesson-close` → коммит в `workbook/`. Push webhook → Activity Hub → ЦД → Портной корректирует.
+> **Канал доставки SC.020 v2 (VS Code):** альтернатива Telegram-боту. Пилот открывает `DS-personal-guide` репо в VS Code → видит сегодняшний `daily/YYYY-MM-DD.md` → запускает Claude Code → `/lesson` → проходит занятие → `/lesson-close` → коммит в `workbook/`. Push webhook → Activity Hub → ЦД → Портной корректирует.
 
 ## When to use
 
@@ -33,7 +33,7 @@ gates_rationale: "операционный скилл; WP Gate применим 
 
 ## Контракт скилла
 
-- **Вход:** репо `personal-guide` (плоское имя, под аккаунтом пилота) с файлом дневного задания. Портной (через `/personal-guide-render` или ИИ-агент-носитель WP-149 Block D) пишет в **`daily/YYYY-MM-DD.md`** (primary). Старая локация — `assignments/YYYY-MM-DD.md` — оставлена как fallback для обратной совместимости.
+- **Вход:** репо `DS-personal-guide` (плоское имя, под аккаунтом пилота) с файлом дневного задания. Портной (через `/personal-guide-render` или ИИ-агент-носитель WP-149 Block D) пишет в **`daily/YYYY-MM-DD.md`** (primary). Старая локация — `assignments/YYYY-MM-DD.md` — оставлена как fallback для обратной совместимости.
 - **Выход:** проведённое занятие — три экрана в чате (Урок → Вопрос → Задание) + созданный/обновлённый `workbook/YYYY-MM-DD.md` со скелетом ответов. Сам коммит — в `/lesson-close`.
 - **Время:** 15-30 мин (зависит от глубины задания).
 - **Не делает:** не оценивает ответы (Оценщик R12 — отдельный РП), не пишет в ЦД (Activity Hub после webhook), не запускает по расписанию.
@@ -47,7 +47,7 @@ gates_rationale: "операционный скилл; WP Gate применим 
    - **(a)** `daily/YYYY-MM-DD.md` — основная локация (что пишет `/personal-guide-render`)
    - **(b)** `assignments/YYYY-MM-DD.md` — fallback (legacy nomenclature по SC.020 v2 spec)
 3. Если файл не найден ни там, ни там:
-   - Проверь репо: `git remote -v` содержит `personal-guide`? Если нет — сообщи пилоту: «Я не вижу репо personal-guide. Открой его в VS Code или выполни `/personal-guide-start`.»
+   - Проверь репо: `git remote -v` содержит `personal-guide`? (матчит и канон `DS-personal-guide`, и legacy `personal-guide` — подстрока общая для обоих) Если нет — сообщи пилоту: «Я не вижу репо личного руководства (DS-personal-guide или personal-guide). Открой его в VS Code или выполни `/personal-guide-start`.»
    - Проверь вчерашний `daily/<вчера>.md`. Если есть — предложи: «На сегодня дневное задание ещё не сгенерировано. Портной не отработал утренний рендер. Откроем вчерашнее?»
    - Если и вчерашнего нет — предложи: «В репо нет ни одного `daily/*.md`. Запусти `/personal-guide-render` — Портной сгенерирует свежее под твой текущий профиль.»
 3. Прочитай файл целиком (`Read`). Ожидаемая структура:

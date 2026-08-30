@@ -1,6 +1,6 @@
 ---
 name: personal-guide-start
-description: Bootstrap-обёртка — создаёт пустой репо `personal-guide` под аккаунтом пилота (плоское имя, без логина в названии; если ещё нет), затем вызывает /personal-guide-render для наполнения 6 файлами. Используй когда пилот в первый раз просит «создай мне персональное руководство», «хочу начать программу личного развития», «собери мне стартовый план».
+description: Bootstrap-обёртка — создаёт пустой репо `DS-personal-guide` под аккаунтом пилота (плоское имя, без логина в названии; если ещё нет), затем вызывает /personal-guide-render для наполнения 6 файлами. Используй когда пилот в первый раз просит «создай мне персональное руководство», «хочу начать программу личного развития», «собери мне стартовый план».
 argument-hint: "[необязательно: override домена — knowledge-worker / generic]"
 experimental: true
 sunset: "после DONE WP-222 (Портной, ~июнь 2026) и WP-149 Ф6 (книга ЛР v3)"
@@ -33,12 +33,12 @@ gates_rationale: "операционный скилл; WP Gate применим 
 
 ## When to use
 
-Bootstrap-обёртка — создаёт пустой репо `personal-guide` под аккаунтом пилота (плоское имя, без логина в названии; если ещё нет), затем вызывает /personal-guide-render для наполнения 6 файлами. Используй когда пилот в первый раз просит «создай мне персональное руководство», «хочу начать программу личного развития», «собери мне стартовый план».
+Bootstrap-обёртка — создаёт пустой репо `DS-personal-guide` под аккаунтом пилота (плоское имя, без логина в названии; если ещё нет), затем вызывает /personal-guide-render для наполнения 6 файлами. Используй когда пилот в первый раз просит «создай мне персональное руководство», «хочу начать программу личного развития», «собери мне стартовый план».
 
 ## Контракт скилла
 
 - **Вход:** активная подписка «Инженерия интеллекта» (ранее «Бесконечное развитие») (DP.SC.112). Доступ к `create_repository`, `github_status`. (Память.Derived и `personal_write` нужны на втором шаге — там их проверит `/personal-guide-render`.)
-- **Выход:** репо `personal-guide` под аккаунтом пилота существует на GitHub + 6 файлов записаны (через делегирование render-скиллу). Имя репо — константа для всех пилотов: один личный GitHub-аккаунт = один репо ЛР, ФИО/login в названии не нужен.
+- **Выход:** репо `DS-personal-guide` под аккаунтом пилота существует на GitHub + 6 файлов записаны (через делегирование render-скиллу). Имя репо — константа для всех пилотов: один личный GitHub-аккаунт = один репо ЛР, ФИО/login в названии не нужен.
 - **Время:** ≤60 мин с момента вызова до открытого в VS Code репо (критерий MVP из WP-188 Ф4.5).
 - **Идемпотентность:** повторный вызов на существующем репо безопасен — Шаг 1 reuse, Шаг 2 пересобирает контент.
 
@@ -46,9 +46,9 @@ Bootstrap-обёртка — создаёт пустой репо `personal-guid
 
 ## Шаг 1. Создать (или переиспользовать) репо
 
-Вызови `create_repository(name: "personal-guide", template_type: "notes", private: false, description: "Персональное руководство пилота программы ЛР (IWE)")`.
+Вызови `create_repository(name: "DS-personal-guide", template_type: "notes", private: false, description: "Персональное руководство пилота программы ЛР (IWE)")`.
 
-Имя репо — **константа** для всех пилотов (не подставлять GitHub-логин). У каждого пилота один личный аккаунт = один репо `personal-guide`. Это упрощает скиллы (имя источника детерминированное, не нужно вычислять `<github-login>` через `github_status`), убирает риск коллизий имён и делает миграцию в Портного (WP-222) однозначной.
+Имя репо — **константа** для всех пилотов (не подставлять GitHub-логин). У каждого пилота один личный аккаунт = один репо `DS-personal-guide`. Это упрощает скиллы (имя источника детерминированное, не нужно вычислять `<github-login>` через `github_status`), убирает риск коллизий имён и делает миграцию в Портного (WP-222) однозначной.
 
 После OAuth Gateway создаст репо с базовой notes-структурой (inbox/, docs/, README.md). Эта структура будет переопределена render-скиллом на Шаге 2 (плюс render удалит `inbox/.gitkeep` — артефакт notes-template, не нужный для ЛР).
 
@@ -78,7 +78,7 @@ SKILLS_TO_DISTRIBUTE = [
 for skill_path in SKILLS_TO_DISTRIBUTE:
     content = Read(f"~/IWE/.claude/skills/{skill_path}")
     personal_write(
-        source="personal-guide",
+        source="DS-personal-guide",
         path=f".claude/skills/{skill_path}",
         content=content,
     )
@@ -88,12 +88,12 @@ for skill_path in SKILLS_TO_DISTRIBUTE:
 
 ### Reflection-template (идемпотентно)
 
-Через `personal_search(source: "personal-guide", path: "history/reflection-template.md")` проверь наличие. Если нет — записать:
+Через `personal_search(source: "DS-personal-guide", path: "history/reflection-template.md")` проверь наличие. Если нет — записать:
 
 ```python
 template_content = Read("~/IWE/.claude/skills/personal-guide-render/templates/reflection-template.md")
 personal_write(
-    source="personal-guide",
+    source="DS-personal-guide",
     path="history/reflection-template.md",
     content=template_content,
 )
@@ -113,7 +113,7 @@ Render-скилл вызовет gateway → guide/<date>.md + panel/<date>.md �
 
 ```
 Чтобы работать с руководством локально — клонируй репо в свой IWE:
-  git clone https://github.com/<github-login>/personal-guide.git ~/IWE/personal-guide
+  git clone https://github.com/<github-login>/DS-personal-guide.git ~/IWE/DS-personal-guide
 
 (подставь свой GitHub-login в URL — `gh auth status` покажет, кто ты сейчас.)
 
@@ -131,8 +131,8 @@ Render-скилл вызовет gateway → guide/<date>.md + panel/<date>.md �
 
 Bootstrap создаёт внешний ресурс (GitHub-репо) — перед сообщением об успехе проверь контрактный выход (Контракт §Выход), не считай «вызвал create_repository» за «репо готово»:
 
-1. **Репо существует.** Вызови `github_status` — источник `personal-guide` присутствует. Нет → bootstrap не состоялся (вероятно 401 / GitHub не подключён), вернись к Шагу 1, не выдавай подсказку про `git clone`.
-2. **Скиллы установлены.** `personal_search(source: "personal-guide", path: ".claude/skills/personal-guide-start/SKILL.md")` — нашёл. Не нашёл → Шаг 1.5 не завершился, перезапусти Шаг 1.5.
+1. **Репо существует.** Вызови `github_status` — источник `DS-personal-guide` присутствует. Нет → bootstrap не состоялся (вероятно 401 / GitHub не подключён), вернись к Шагу 1, не выдавай подсказку про `git clone`.
+2. **Скиллы установлены.** `personal_search(source: "DS-personal-guide", path: ".claude/skills/personal-guide-start/SKILL.md")` — нашёл. Не нашёл → Шаг 1.5 не завершился, перезапусти Шаг 1.5.
 3. **Руководство собрано.** Render-скилл (Шаг 2) завершился без ошибки — `guide/<date>.md` готов. Ошибка → перезапусти Шаг 2.
 
 Только при обоих PASS переходи к подсказке `git clone` (Шаг 3). Иначе — сообщи пилоту, какой из двух пунктов не выполнен, и что делать.

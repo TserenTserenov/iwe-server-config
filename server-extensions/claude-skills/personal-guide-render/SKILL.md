@@ -31,8 +31,8 @@ gates_rationale: "операционный скилл; WP Gate применим 
 
 ## Контракт скилла
 
-- **Вход:** дата (аргумент или сегодня). Репо `personal-guide` под аккаунтом пилота должно существовать (создаётся через `/personal-guide-start`).
-- **Выход:** файлы `guide/<date>.md` и `panel/<date>.md` обновлены в репо `personal-guide`.
+- **Вход:** дата (аргумент или сегодня). Репо `DS-personal-guide` под аккаунтом пилота должно существовать (создаётся через `/personal-guide-start`).
+- **Выход:** файлы `guide/<date>.md` и `panel/<date>.md` обновлены в репо `DS-personal-guide`.
 - **Время:** ≤3 мин (включая LLM-генерацию на сервере).
 - **Не делает:** не читает Память.Derived, не выбирает заготовки, не пишет profile.md/worldview.md/methods.md — всё это делает render-pilot-guides.py на сервере.
 
@@ -40,9 +40,9 @@ gates_rationale: "операционный скилл; WP Gate применим 
 
 ## Шаг 0. Проверить предусловие (setup завершён)
 
-Вызови `personal_search(source: "personal-guide", path: ".claude/skills/personal-guide-start/SKILL.md")`.
+Вызови `personal_search(source: "DS-personal-guide", path: ".claude/skills/personal-guide-start/SKILL.md")`. Не нашёл (0 результатов) → повтори с `source: "personal-guide"` (legacy-пользователи, не мигрировавшие на канон, WP-559 Ф3).
 
-Если файл **не найден** → сообщить пилоту:
+Если файл **не найден** ни под одним из имён → сообщить пилоту:
 ```
 Скиллы не установлены или установка не завершена.
 Запусти /personal-guide-start для первичной настройки.
@@ -82,4 +82,4 @@ panel/<date>.md — табло (форма, статистика, повестк
 | Шаг 0: файл не найден | /personal-guide-start не запускался | Запустить /personal-guide-start |
 | render_not_configured | PILOT_GITHUB_OWNER не задан в env шлюза | Проверить env iwe-local-gateway |
 | Таймаут >3 мин | LLM не отвечает на сервере | Проверить логи tsekh-1 + повторить |
-| guide/<date>.md не появился | Ошибка git push в render-pilot-guides.py | Запустить --user вручную + git pull personal-guide |
+| guide/<date>.md не появился | Ошибка git push в render-pilot-guides.py | Запустить --user вручную + git pull DS-personal-guide |

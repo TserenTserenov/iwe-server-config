@@ -1,6 +1,6 @@
 ---
 name: connect-guide
-description: Подключить персональное руководство пилота — установить GitHub App «Aisystant Personal Guide» на репо personal-guide. Открывает install-flow в браузере, проверяет успех через github_status MCP. Используй когда пилот говорит «подключи руководство», «установи app», «настрой репо», «connect personal guide» — или для ступени 3-4 (VS Code-primary канал).
+description: Подключить персональное руководство пилота — установить GitHub App «Aisystant Personal Guide» на репо DS-personal-guide. Открывает install-flow в браузере, проверяет успех через github_status MCP. Используй когда пилот говорит «подключи руководство», «установи app», «настрой репо», «connect personal guide» — или для ступени 3-4 (VS Code-primary канал).
 argument-hint: "[необязательно: --telegram-id=N или --github-username=X — если skill не может автоопределить identity]"
 experimental: true
 sunset: "после WP-303 (вынос OAuth Gateway в standalone сервис с прямой Ory-аутентификацией; W21+)"
@@ -31,14 +31,14 @@ gates_rationale: "операционный скилл; WP Gate применим 
 
 ## When to use
 
-Подключить персональное руководство пилота — установить GitHub App «Aisystant Personal Guide» на репо personal-guide. Открывает install-flow в браузере, проверяет успех через github_status MCP. Используй когда пилот говорит «подключи руководство», «установи app», «настрой репо», «connect personal guide» — или для ступени 3-4 (VS Code-primary канал).
+Подключить персональное руководство пилота — установить GitHub App «Aisystant Personal Guide» на репо DS-personal-guide. Открывает install-flow в браузере, проверяет успех через github_status MCP. Используй когда пилот говорит «подключи руководство», «установи app», «настрой репо», «connect personal guide» — или для ступени 3-4 (VS Code-primary канал).
 
 ## Контракт скилла
 
 - **Вход:** аккаунт Aisystant с активной подпиской БР; пилот уже прошёл онбординг в Telegram-боте (хотя бы /start, чтобы создалась запись в dt_tokens). Доступ к `mcp__claude_ai_IWE__github_status`.
-- **Выход:** GitHub App установлен на репо `<user>/personal-guide`, mapping (chat_id, installation_id, repo) в Neon secrets DB. Пилот может запускать `/lesson` и `/lesson-close`.
+- **Выход:** GitHub App установлен на репо `<user>/DS-personal-guide`, mapping (chat_id, installation_id, repo) в Neon secrets DB. Пилот может запускать `/lesson` и `/lesson-close`.
 - **Время:** 3-5 мин (включая выбор репо в GitHub UI).
-- **Не делает:** не создаёт репо `personal-guide` (это `/personal-guide-start`); не делает первый рендер (это `/personal-guide-render`); не запускает first lesson (это `/lesson`).
+- **Не делает:** не создаёт репо `DS-personal-guide` (это `/personal-guide-start`); не делает первый рендер (это `/personal-guide-render`); не запускает first lesson (это `/lesson`).
 
 ## Algorithm
 
@@ -56,13 +56,15 @@ gates_rationale: "операционный скилл; WP Gate применим 
 
 Через Bash:
 ```bash
-# проверить что репо personal-guide локально склонирован
+# проверить что репо личного руководства локально склонирован — канон DS-personal-guide,
+# либо legacy personal-guide (пользователи, мигрировавшие до WP-559, не переименовываются)
+test -d ~/DS-personal-guide || test -d ~/IWE/DS-personal-guide || \
 test -d ~/personal-guide || test -d ~/IWE/personal-guide && echo "repo OK" || echo "no local clone"
 ```
 
 Если репо нет локально:
-- Запусти `/personal-guide-start` сначала (создаст репо)
-- Если репо уже создан на GitHub, но не локально — `git clone https://github.com/<github_username>/personal-guide.git ~/personal-guide`
+- Запусти `/personal-guide-start` сначала (создаст репо `DS-personal-guide`)
+- Если репо уже создан на GitHub, но не локально — сначала проверь через `github_status`/`personal_list_sources` фактическое имя (может быть legacy `personal-guide`), потом клонируй под этим именем: `git clone https://github.com/<github_username>/<фактическое-имя>.git ~/<фактическое-имя>`
 
 Не блокируй на этом — пилот может склонить позже. Просто проинформируй.
 
@@ -85,7 +87,7 @@ open "${SETUP_URL}"  # macOS
 🌐 Открыт GitHub install page.
 
 Что делать:
-1. Выбери репо `personal-guide` (если в списке нет — нажми «All repositories» или «Only select repositories» → найди personal-guide)
+1. Выбери свой репо личного руководства — `DS-personal-guide` для новых пользователей, `personal-guide` если у тебя старое имя (если в списке нет — нажми «All repositories» или «Only select repositories» → найди его)
 2. Нажми «Install»
 3. GitHub отправит тебя на страницу «✅ App установлен»
 4. Вернись сюда и скажи «готово»
@@ -127,7 +129,7 @@ open "${SETUP_URL}"  # macOS
 | `mcp__claude_ai_IWE__github_status` вернул `not connected` | Identity-mapping ещё не создан. Сначала `/github` в боте (OAuth) → потом /connect-guide |
 | Браузер не открылся (нет графической среды, headless) | Скажи URL пилоту, попроси открыть вручную |
 | После Install у пилота не пришло TG-сообщение | Возможные причины: (a) telegram_user_id неправильный, (b) пилот не запускал бот, (c) callback не сработал. Предложи проверить логи Railway или повторить установку с правильным ID |
-| Пилот пытается запустить /connect-guide ДО создания репо personal-guide | Скажи: сначала `/personal-guide-start` (он создаст репо), потом /connect-guide |
+| Пилот пытается запустить /connect-guide ДО создания репо DS-personal-guide | Скажи: сначала `/personal-guide-start` (он создаст репо), потом /connect-guide |
 | Уже установлен (повторный вызов) | После redirect на callback GitHub покажет «App already installed» — это нормально, mapping обновится |
 
 ## Связь с другими механизмами
@@ -149,6 +151,6 @@ open "${SETUP_URL}"  # macOS
 ## Антипаттерны
 
 - ❌ Не запускать `/connect-guide` без telegram_user_id — Setup endpoint вернёт 400
-- ❌ Не пытаться установить App на чужой репо — App должен ставиться пилотом на его собственный personal-guide
+- ❌ Не пытаться установить App на чужой репо — App должен ставиться пилотом на его собственный DS-personal-guide
 - ❌ Не обходить TG-уведомление как primary signal of success — это самый надёжный путь подтверждения
 - ❌ Не делать polling БД из скилла — антипаттерн (skill ≠ persistent worker)

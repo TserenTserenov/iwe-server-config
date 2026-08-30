@@ -10,12 +10,12 @@
 #   reflection-gap-check.sh <days>   # days = размер окна (7 для недели, 30 для месяца)
 #
 # Env:
-#   REFLECTION_REPO   — owner/repo (default: TserenTserenov/personal-guide)
+#   REFLECTION_REPO   — owner/repo (default: TserenTserenov/DS-personal-guide)
 
 set -euo pipefail
 
 DAYS="${1:?usage: reflection-gap-check.sh <days>}"
-REPO="${REFLECTION_REPO:-TserenTserenov/personal-guide}"
+REPO="${REFLECTION_REPO:-TserenTserenov/DS-personal-guide}"
 
 MISSING=()
 for ((i = 0; i < DAYS; i++)); do
