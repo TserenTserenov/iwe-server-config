@@ -1103,6 +1103,11 @@ in
     # верификатор не переносится: его последняя попытка не зависит от нового
     # ожидания triage, которое относится только к дневному конвейеру.
 
+    # XDG_RUNTIME_DIR: verify-скрипт после успешной записи в ledger дёргает
+    # `systemctl --user start ledger-publish.service` (ledger-publish-kick.sh);
+    # из системного unit'а user-шина недоступна без этого пути → каждый прогон
+    # завершался exit 1 при фактически выполненной проверке (найдено 30.08,
+    # peer-сессия с Codex). Linger для tseren включён, шина живёт постоянно.
     systemd.services."iwe-night-cycle-verify-day" = {
       description = "IWE — внешний верификатор ночного цикла (день)";
       unitConfig   = commonUnitConfig;
@@ -1111,7 +1116,7 @@ in
         TimeoutSec = 300;
       };
       path = commonPath;
-      environment = commonEnv;
+      environment = commonEnv // { XDG_RUNTIME_DIR = "/run/user/1000"; };
     };
 
     systemd.timers."iwe-night-cycle-verify-day" = {
@@ -1131,7 +1136,8 @@ in
         TimeoutSec = 300;
       };
       path = commonPath;
-      environment = commonEnv;
+      # same ledger-publish-kick reason as verify-day above
+      environment = commonEnv // { XDG_RUNTIME_DIR = "/run/user/1000"; };
     };
 
     systemd.timers."iwe-night-cycle-verify-week" = {
