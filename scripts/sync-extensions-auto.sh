@@ -73,6 +73,20 @@ if ! git pull --ff-only --quiet 2>&1; then
   exit 1
 fi
 
+# Свежесть источника (инцидент 30.08): sync-extensions.sh читает рабочее дерево
+# ~/IWE (iwe-local-config). Если оно отстаёт от origin (фикс запушен с другого
+# хоста), тик увёз бы на сервер устаревшие проверки и откатил починку. Обновляем
+# через защищённый pull; если источник всё ещё позади — громкий пропуск тика
+# вместо тихой доставки отката (контракт скрипта: никогда тихий пропуск на
+# реальном событии).
+bash "$HOME/IWE/scripts/iwe-safe-pull.sh" "$HOME/IWE" >/dev/null 2>&1 || true
+git -C "$HOME/IWE" fetch --quiet origin 2>/dev/null || true
+SRC_BEHIND=$(git -C "$HOME/IWE" rev-list --count HEAD..origin/main 2>/dev/null || echo 0)
+if [ "${SRC_BEHIND:-0}" -gt 0 ]; then
+  alert "🚨 sync-extensions-auto: источник ~/IWE отстаёт от origin на ${SRC_BEHIND} коммит(ов), safe-pull не смог обновить (вероятно, локальные правки) — тик пропущен, чтобы не увезти на сервер устаревшие проверки"
+  exit 1
+fi
+
 SYNC_LOG="$(mktemp)"
 if ! bash "$REPO_ROOT/scripts/sync-extensions.sh" > "$SYNC_LOG" 2>&1; then
   alert "🚨 sync-extensions-auto: sync-extensions.sh упал с ошибкой: $(tail -3 "$SYNC_LOG" | tr '\n' ' ')"
