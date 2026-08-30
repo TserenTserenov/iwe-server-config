@@ -14,7 +14,7 @@
 ### BLOCKING: Саморазвитие (шаг 3)
 
 ```bash
-FILE="${FILE:-$(ls ~/IWE/DS-my-strategy/current/DayPlan\ *.md 2>/dev/null | sort | tail -1)}"
+FILE="$(ls ~/IWE/DS-my-strategy/current/DayPlan\ *.md 2>/dev/null | sort | tail -1)"
 # Проверка 1: секция Саморазвитие есть в файле
 if ! grep -q "Саморазвитие" "$FILE"; then
   echo "  ❌ КРИТИЧЕСКИЙ: секция Саморазвитие (шаг 3) НЕ НАЙДЕНА в DayPlan — COMMIT БЛОКИРОВАН"
@@ -57,7 +57,7 @@ echo "  ✅ Саморазвитие: D-NNN/C-NNN присутствует, PEND
 > patch-скрипт упал/не нашёл секцию — предупреждает, но НИКОГДА не блокирует commit.
 
 ```bash
-FILE="${FILE:-$(ls ~/IWE/DS-my-strategy/current/DayPlan\ *.md 2>/dev/null | sort | tail -1)}"
+FILE="$(ls ~/IWE/DS-my-strategy/current/DayPlan\ *.md 2>/dev/null | sort | tail -1)"
 PRIO="$HOME/IWE/DS-my-strategy/current/priorities.yaml"
 echo "=== Проверка: все РП из priorities.yaml присутствуют в DayPlan ==="
 if [ -f "$PRIO" ]; then
@@ -105,7 +105,7 @@ fi
 
 <!-- GATE-B: always-on -->
 ```bash
-FILE="${FILE:-$(ls ~/IWE/DS-my-strategy/current/DayPlan\ *.md 2>/dev/null | sort | tail -1)}"
+FILE="$(ls ~/IWE/DS-my-strategy/current/DayPlan\ *.md 2>/dev/null | sort | tail -1)"
 echo "=== Проверка: баланс <details>/<summary> ==="
 # grep -c печатает "0" (не пусто) даже без совпадений, но выходит с кодом 1;
 # под set -e (см. day-open-checks-runner.sh) голое присваивание с таким кодом
@@ -127,7 +127,7 @@ fi
 ### Секции DayPlan (полнота по шаблону)
 
 ```bash
-FILE="${FILE:-$(ls ~/IWE/DS-my-strategy/current/DayPlan\ *.md 2>/dev/null | sort | tail -1)}"
+FILE="$(ls ~/IWE/DS-my-strategy/current/DayPlan\ *.md 2>/dev/null | sort | tail -1)"
 echo "=== Проверка секций ==="
 # BUGFIX (2026-07-03): голый `grep -q "$section"` даёт ложный ✅, если слово встречается
 # где угодно в файле (напр. «Мир» совпадал со строкой из «Требует внимания», не с реальным
@@ -157,7 +157,7 @@ if grep -qE "<summary><b>Наработки агентов" "$FILE"; then echo "
 > исчезновение прячет все 9 сразу, а не один локальный факт, как для остальных 8 секций.
 
 ```bash
-FILE="${FILE:-$(ls ~/IWE/DS-my-strategy/current/DayPlan\ *.md 2>/dev/null | sort | tail -1)}"
+FILE="$(ls ~/IWE/DS-my-strategy/current/DayPlan\ *.md 2>/dev/null | sort | tail -1)"
 echo "=== Проверка: «Требует внимания» присутствует ==="
 if grep -qE "<summary><b>Требует внимания" "$FILE"; then
   echo "  ✅ Требует внимания: секция присутствует"
@@ -191,7 +191,7 @@ fi
 ### 🔴 БЛОКИРУЮЩАЯ ПРОВЕРКА: Разбор заметок — markdown-ссылки на источники
 
 ```bash
-FILE="${FILE:-$(ls ~/IWE/DS-my-strategy/current/DayPlan\ *.md 2>/dev/null | sort | tail -1)}"
+FILE="$(ls ~/IWE/DS-my-strategy/current/DayPlan\ *.md 2>/dev/null | sort | tail -1)"
 echo "=== Проверка: Разбор заметок — markdown-ссылки ==="
 if grep -q "Разбор заметок" "$FILE"; then
   notes_section=$(sed -n '/Разбор заметок/,/<\/details>/p' "$FILE")
@@ -230,7 +230,7 @@ fi
 ### 🔴 БЛОКИРУЮЩАЯ ПРОВЕРКА: Контент-план — Стратегия заполнена (bug-2026-05-22)
 
 ```bash
-FILE="${FILE:-$(ls ~/IWE/DS-my-strategy/current/DayPlan\ *.md 2>/dev/null | sort | tail -1)}"
+FILE="$(ls ~/IWE/DS-my-strategy/current/DayPlan\ *.md 2>/dev/null | sort | tail -1)"
 echo "=== Проверка: Контент-план — Стратегия и TTL заполнены ==="
 VIOLATIONS=0
 
@@ -270,7 +270,7 @@ fi
 **Шаг 6 SKILL.md:** «Ссылки на источники обязательны (URL)». Это касается ВСЕХ открытий (авто + ручной).
 
 ```bash
-FILE="${FILE:-$(ls ~/IWE/DS-my-strategy/current/DayPlan\ *.md 2>/dev/null | sort | tail -1)}"
+FILE="$(ls ~/IWE/DS-my-strategy/current/DayPlan\ *.md 2>/dev/null | sort | tail -1)"
 echo "=== Проверка: Мир должен содержать минимум одну ссылку ==="
 
 # Извлечь секцию Мир
@@ -294,7 +294,7 @@ fi
 > **Триггер:** фразы «отложено», «отложена», «пропущено», «пропустим», «жёсткий ТОС», «не успел», «не запускался» в секциях Мир/Scout/Календарь/Видео БЕЗ соответствующего `enabled: false` в конфиге = НАРУШЕНИЕ.
 
 ```bash
-FILE="${FILE:-$(ls ~/IWE/DS-my-strategy/current/DayPlan\ *.md 2>/dev/null | sort | tail -1)}"
+FILE="$(ls ~/IWE/DS-my-strategy/current/DayPlan\ *.md 2>/dev/null | sort | tail -1)"
 CFG="$HOME/IWE/memory/day-rhythm-config.yaml"
 echo "=== Проверка: запрещён тихий пропуск секций с enabled:true ==="
 
@@ -326,7 +326,7 @@ check_section "Видео" "video"
 > **Источник:** 3 дня подряд (15-17 мая) пропускался шаг 5e extensions/day-open.after.md. При N>0 pending-review extraction-reports секция `📚 KE-кандидаты` ОБЯЗАНА присутствовать в DayPlan.
 
 ```bash
-FILE="${FILE:-$(ls ~/IWE/DS-my-strategy/current/DayPlan\ *.md 2>/dev/null | sort | tail -1)}"
+FILE="$(ls ~/IWE/DS-my-strategy/current/DayPlan\ *.md 2>/dev/null | sort | tail -1)"
 REPORTS_DIR="$HOME/IWE/DS-my-strategy/inbox/extraction-reports"
 # `|| true`: под pipefail (наследуется от day-open-checks-runner.sh) статус пайпа —
 # статус самой правой упавшей команды. При 0 pending-report'ов (штатный случай)
@@ -403,7 +403,7 @@ fi
 ### 🟡 ПРОВЕРКА: Календарь — данные или явный PENDING (bug-2026-05-19)
 
 ```bash
-FILE="${FILE:-$(ls ~/IWE/DS-my-strategy/current/DayPlan\ *.md 2>/dev/null | sort | tail -1)}"
+FILE="$(ls ~/IWE/DS-my-strategy/current/DayPlan\ *.md 2>/dev/null | sort | tail -1)"
 echo "=== Проверка: календарь — данные или явный PENDING ==="
 if grep -q "проверить вручную" "$FILE" && ! grep -qE '\| [0-9]{2}:[0-9]{2} \|' "$FILE"; then
   echo "  🟡 Календарь: содержит fallback без реальных данных — требует внимания"
@@ -419,7 +419,7 @@ fi
 > **Источник косяка:** 24 мая Day Open пропустил 4 LLM/external-шага (Горлышко недели, News Lens вывод, smoke-тесты бота, URL для «Мир»). Эти шаги невидимы bash-скаффолду — проверка только по grep содержимого, не по названию секции.
 
 ```bash
-FILE="${FILE:-$(ls ~/IWE/DS-my-strategy/current/DayPlan\ *.md 2>/dev/null | sort | tail -1)}"
+FILE="$(ls ~/IWE/DS-my-strategy/current/DayPlan\ *.md 2>/dev/null | sort | tail -1)"
 CFG="$HOME/IWE/memory/day-rhythm-config.yaml"
 echo "=== Проверка: LLM-шаги Day Open ==="
 VIOLATIONS=0
@@ -526,7 +526,7 @@ fi
 > **Markеr:** генератор `bottleneck-section-from-yaml.sh` вставляет `<!-- BY-SCRIPT: bottleneck-section-from-yaml.sh -->` в начало выжимки. Ручная запись маркера не имеет.
 
 ```bash
-FILE="${FILE:-$(ls ~/IWE/DS-my-strategy/current/DayPlan\ *.md 2>/dev/null | sort | tail -1)}"
+FILE="$(ls ~/IWE/DS-my-strategy/current/DayPlan\ *.md 2>/dev/null | sort | tail -1)"
 TODAY="${DAY_OPEN_EXPECTED_DATE:-$(date +%Y-%m-%d)}"
 # Same DAY_OPEN_EXPECTED_DATE override as the stale-DayPlan check above -- DOW/weekday
 # name must track the target date too, not the system clock, or a non-Monday strategy_day
@@ -637,7 +637,7 @@ exit 0
 > ловил — баг нашёлся только потому, что пилот прямо спросил про полноту открытия дня.
 
 ```bash
-FILE="${FILE:-$(ls ~/IWE/DS-my-strategy/current/DayPlan\ *.md 2>/dev/null | sort | tail -1)}"
+FILE="$(ls ~/IWE/DS-my-strategy/current/DayPlan\ *.md 2>/dev/null | sort | tail -1)"
 PLAN_TABLE=$(awk '/<summary><b>План на сегодня<\/b><\/summary>/{f=1} f&&/^\|/{print} f&&/<\/details>/{exit}' "$FILE")
 echo "=== Проверка: таблица плана без шаблонных заглушек (Block DOF) ==="
 if printf '%s\n' "$PLAN_TABLE" | grep -qE '\| *NNN *\||<!-- PENDING -->|\| *X *\|'; then
@@ -664,7 +664,7 @@ fi
 > внимания» ДО этой проверки. Эта проверка — диагностическая сверка, не блокирует.
 
 ```bash
-FILE="${FILE:-$(ls ~/IWE/DS-my-strategy/current/DayPlan\ *.md 2>/dev/null | sort | tail -1)}"
+FILE="$(ls ~/IWE/DS-my-strategy/current/DayPlan\ *.md 2>/dev/null | sort | tail -1)"
 PRIO="$HOME/IWE/DS-my-strategy/current/priorities.yaml"
 echo "=== Проверка: «физ» в бюджете дня — не fallback-заглушка ==="
 PHYS_ISSUE=0
@@ -700,7 +700,7 @@ fi
 > и наличию локального файла-среза.
 
 ```bash
-FILE="${FILE:-$(ls ~/IWE/DS-my-strategy/current/DayPlan\ *.md 2>/dev/null | sort | tail -1)}"
+FILE="$(ls ~/IWE/DS-my-strategy/current/DayPlan\ *.md 2>/dev/null | sort | tail -1)"
 echo "=== Проверка: health-значения в DayPlan запрещены (WP-469) ==="
 if [ -z "$FILE" ] || [ ! -f "$FILE" ]; then
   echo "  ⚠️ DayPlan-файл не найден — проверка резидентности пропущена (не блокирует)"

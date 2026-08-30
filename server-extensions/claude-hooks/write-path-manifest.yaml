@@ -1,0 +1,43 @@
+# write-path-manifest.yaml — policy-манифест классов защищённых путей (WP-530,
+# пир-сессия 2026-08-30-01, консенсус Claude+Kimi+Codex).
+#
+# Потребитель: write-path-lease-guard.sh (PreToolUse-хук на Edit/Write).
+# Это НЕ ручной реестр call sites (отвергнут в пир-сессии как вечно отстающий),
+# а классы РЕСУРСОВ: что защищаем, а не кто пишет. Раннеры/скрипты сюда не
+# смотрят — их защищает CAS-контракт wp-context-guarded-edit; хук закрывает
+# оставшийся путь «интерактивный агент правит общий файл напрямую».
+#
+# mode:
+#   enforce   — Edit/Write без активной аренды замка шлюза блокируется
+#               (fail-closed и при недоступном шлюзе — консенсус, shared/hot).
+#   telemetry — не блокировать, но писать write_path_bypass в дневной ledger.
+#               Перевод класса в enforce — по данным, не по календарю (Kimi,
+#               раунд 3): после 7 дней с <1 bypass/день ИЛИ после разбора
+#               пилотом всех bypass-событий периода (grep write_path_bypass
+#               по machine/ledger/day/). Ноль событий за период — сигнал
+#               проверить, была ли нагрузка вообще, а не повод для enforce.
+#
+# {{GOV_REPO}} подставляется хуком из $IWE_GOVERNANCE_REPO (default DS-strategy).
+# Известная щель v1 (зафиксирована в пир-сессии, не скрыта): две параллельные
+# сессии одного агента разделяют identity держателя (claude-code) — межвендорную
+# гонку хук закрывает, внутривендорную пока нет; закрытие = IWE_AGENT_ID с
+# session-суффиксом, отдельная фаза.
+
+classes:
+  - id: wp-context-cards
+    mode: enforce
+    patterns:
+      - "*/{{GOV_REPO}}/inbox/WP-*/WP-*.md"
+  - id: wp-registry
+    mode: enforce
+    patterns:
+      - "*/{{GOV_REPO}}/docs/WP-REGISTRY.md"
+  - id: shared-append-logs
+    mode: telemetry
+    patterns:
+      - "*/{{GOV_REPO}}/inbox/open-sessions.log"
+  - id: pilot-plans
+    mode: telemetry
+    patterns:
+      - "*/{{GOV_REPO}}/current/WeekPlan*.md"
+      - "*/{{GOV_REPO}}/current/DayPlan*.md"

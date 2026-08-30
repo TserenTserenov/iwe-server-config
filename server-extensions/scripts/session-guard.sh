@@ -2731,6 +2731,28 @@ fi
 if [ "$CMD" = "wp-context-guarded-edit" ]; then
   GUARD_PATH="${POSITIONAL[0]:-}"
   [ -z "$GUARD_PATH" ] && fail "wp-context-guarded-edit: missing path argument" 1
+
+  # WP-530 (пир-сессия 2026-08-30-01): CAS-конфликт раньше жил только в stderr
+  # вызывающего и терялся -- о гонках узнавали из пересказа пилота. Теперь
+  # каждый конфликт оставляет машинный след в дневном ledger. Best-effort:
+  # телеметрия не меняет exit-семантику конфликта и молчит, если
+  # ledger-append.sh недоступен (немигрированная установка шаблона).
+  # TELEMETRY_LOST (Kimi, раунд 3): молчаливая потеря следа неотличима от
+  # «следа нет, потому что конфликта нет» -- при недоступном ledger пилот
+  # должен видеть в stderr, что конфликт остался без машинной записи.
+  emit_write_conflict() {  # $1=expected $2=actual
+    local ledger_append="$IWE_ROOT/$GOV_REPO/scripts/ledger-append.sh"
+    local payload
+    payload=$(python3 -c 'import json,sys; print(json.dumps({
+        "file": sys.argv[1], "expected": sys.argv[2], "actual": sys.argv[3],
+        "agent": sys.argv[4]}))' \
+      "$GUARD_PATH" "$1" "$2" "${AGENT:-${IWE_AGENT:-unknown}}" 2>/dev/null)
+    if [ -z "$payload" ] || [ ! -x "$ledger_append" ] \
+       || ! bash "$ledger_append" day "$(date +%F)" wp_context_write_conflict \
+            "$payload" session-guard >/dev/null 2>&1; then
+      echo "TELEMETRY_LOST: wp_context_write_conflict не записан в ledger ($GUARD_PATH)" >&2
+    fi
+  }
   # Ровно одна из двух семантик обязательна -- ни одной (случайный вызов без
   # проверки версии вообще) и обе сразу (противоречивое намерение: "файла
   # нет" и "вот хэш файла, который я читал" не могут быть верны одновременно)
@@ -2757,6 +2779,7 @@ if [ "$CMD" = "wp-context-guarded-edit" ]; then
 
   if [ "$EXPECTED_ABSENT" = "1" ]; then
     if [ -f "$GUARD_PATH" ]; then
+      emit_write_conflict "absent" "exists"
       {
         echo "CONFLICT"
         echo "expected: absent"
@@ -2772,6 +2795,7 @@ if [ "$CMD" = "wp-context-guarded-edit" ]; then
     fi
 
     if [ "$ACTUAL_HASH" != "$EXPECTED_HASH" ]; then
+      emit_write_conflict "$EXPECTED_HASH" "${ACTUAL_HASH:-missing}"
       {
         echo "CONFLICT"
         echo "expected_hash: $EXPECTED_HASH"
