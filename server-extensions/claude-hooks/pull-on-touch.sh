@@ -9,15 +9,15 @@
 #   Триггер: первое за сессию касание пути под ~/IWE/<repo> любым из инструментов
 #            Read | Write | Edit | MultiEdit | NotebookEdit | Bash.
 #   Вход:    stdin JSON {tool_name, tool_input, session_id}.
-#   Действие: git -C <repo> pull --rebase — один раз на репо на сессию.
-#   Отказы:  НИКОГДА не блокирует (exit 0 всегда). Грязное дерево / сетевой сбой / конфликт rebase
-#            → pull пропущен, в additionalContext пометка "данные potentially stale".
-#   Состояние: ~/.claude/state/repo-pulled-<session>.txt (одно имя репо на строку).
+#   Действие: scripts/iwe-safe-pull.sh <repo> — одна завершённая проверка на репо за сессию.
+#   Отказы:  НИКОГДА не блокирует (exit 0 всегда). Грязное дерево / сеть / отставание
+#            → safe-pull ничего не меняет, в additionalContext пометка potentially stale.
+#   Состояние: ~/.claude/state/repo-pulled-<session>.txt (завершённые попытки).
 
 set -uo pipefail
 
 [[ "${1:-}" == "--help" ]] && {
-    echo "pull-on-touch.sh — lazy 'git pull --rebase' on first repo touch per session (CLAUDE.md §2 п.5)"
+    echo "pull-on-touch.sh — lazy safe pull on first repo touch per session (CLAUDE.md §2 п.5)"
     exit 0
 }
 
@@ -50,50 +50,72 @@ for name in re.findall(r"IWE/([A-Za-z0-9._-]+)", blob):
     if name in seen:
         continue
     seen.add(name)
-    if os.path.isdir(os.path.join(root, name, ".git")):
+    marker = os.path.join(root, name, ".git")
+    if os.path.isdir(marker) or os.path.isfile(marker):
         out.append(name)
 print("\n".join(out))
 ' 2>/dev/null)
 
 [ -z "$REPOS" ] && exit 0
 
-TO=""
-command -v timeout >/dev/null 2>&1 && TO="timeout 20"
+SAFE_PULL="$IWE_ROOT/scripts/iwe-safe-pull.sh"
+
+run_safe_pull() {
+    local repo_dir="$1"
+    [ -f "$SAFE_PULL" ] || {
+        echo "pull-on-touch: safe-pull not found: $SAFE_PULL" >&2
+        return 1
+    }
+
+    IWE_ROOT="$IWE_ROOT" bash "$SAFE_PULL" "$repo_dir"
+}
 
 warns=""
-pulled=""
+fresh=""
+completed=""
 while IFS= read -r repo; do
     [ -z "$repo" ] && continue
     grep -qxF "$repo" "$STATE_FILE" && continue   # уже трогали этот репо в сессии
-    echo "$repo" >> "$STATE_FILE"                  # пометить ДО pull (lazy: одна попытка на сессию)
 
     dir="$IWE_ROOT/$repo"
 
-    # autostash тянет даже на грязном дереве (прячет правки → rebase → возвращает),
-    # поэтому пропуска-на-грязном нет. Считаем стэши до/после, чтобы поймать
-    # незавершённый возврат при конфликте и НЕ потерять локальную работу молча.
-    stash_before=$(git -C "$dir" stash list 2>/dev/null | wc -l | tr -d ' ')
+    # Safe-pull не имеет права менять stash. Снимок OID ловит рост, уменьшение
+    # и same-count replacement; конкурентное изменение не приписываем хуку.
+    stash_before_ok=true
+    stash_before=$(git -C "$dir" stash list --format=%H 2>/dev/null) || stash_before_ok=false
 
-    if out=$($TO git -C "$dir" pull --rebase --autostash --quiet 2>&1); then
-        [ -n "$out" ] && pulled="${pulled}${repo} "
+    if run_safe_pull "$dir" >/dev/null 2>&1; then
+        fresh="${fresh}${repo} "
     else
-        git -C "$dir" rebase --abort >/dev/null 2>&1 || true   # вернуть репо в исходное состояние
-        warns="${warns}${repo}: подтяжка не удалась (сеть/конфликт), данные potentially stale. "
+        # Shared checkout не меняется автоматически: safe-pull отказывается без cleanup.
+        warns="${warns}${repo}: проверка свежести не пройдена, данные potentially stale. "
     fi
 
-    stash_after=$(git -C "$dir" stash list 2>/dev/null | wc -l | tr -d ' ')
-    if [ "${stash_after:-0}" -gt "${stash_before:-0}" ]; then
-        warns="${warns}${repo}: локальные правки не вернулись автоматически (конфликт), лежат в git stash — верни вручную (git -C $dir stash pop). "
+    stash_after_ok=true
+    stash_after=$(git -C "$dir" stash list --format=%H 2>/dev/null) || stash_after_ok=false
+    if [ "$stash_before_ok" != "true" ] || [ "$stash_after_ok" != "true" ]; then
+        warns="${warns}${repo}: не удалось проверить инвариант stash, нужен ручной просмотр. "
+    elif [ "$stash_after" != "$stash_before" ]; then
+        warns="${warns}${repo}: инвариант safe-pull нарушен или stash изменён конкурентно — ничего не применяй автоматически, нужен поштучный разбор. "
     fi
+    completed="${completed}${repo}"$'\n'
 done <<< "$REPOS"
 
 # Сообщить агенту только если есть что сказать (свежие данные или пометка stale).
 msg=""
-[ -n "$pulled" ] && msg="🔄 Подтянул свежее: ${pulled}"
+[ -n "$fresh" ] && msg="🔄 Проверил свежее: ${fresh}"
 [ -n "$warns" ] && msg="${msg}⚠️ ${warns}"
 
 if [ -n "$msg" ]; then
-    printf '%s' "$msg" | python3 -c 'import sys,json; print(json.dumps({"additionalContext": sys.stdin.read()}))'
+    if ! printf '%s' "$msg" | python3 -c 'import sys,json; print(json.dumps({"additionalContext": sys.stdin.read()}))'; then
+        # No visible result means no completed attempt. Fail open for the tool call,
+        # but leave state unmarked so the next touch can retry and report honestly.
+        exit 0
+    fi
 fi
+
+# State is the final side effect. If host kills hook/safe-pull before a complete
+# result is emitted, the next operation retries instead of silently skipping.
+[ -z "$completed" ] || printf '%s' "$completed" >> "$STATE_FILE"
 
 exit 0
