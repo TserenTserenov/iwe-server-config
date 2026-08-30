@@ -304,7 +304,7 @@ check_section() {
   local enabled
   enabled=$(awk -v k="$yaml_key" 'tolower($0) ~ "^"k":" {flag=1; next} flag && /enabled:/ {print $2; exit}' "$CFG")
   if [ "$enabled" = "true" ]; then
-    if awk "/<summary><b>$section/,/<\/details>/" "$FILE" | grep -qiE "отложен|пропущен|пропустим|жёстк[иой] ТОС|не запускался|server-mode.*пропуск"; then
+    if awk "/<summary><b>$section/,/<\/details>/" "$FILE" | grep -qiE "^> .*(отложен|пропущен|пропустим|жёстк[иой] ТОС|не запускался|server-mode.*пропуск)"; then
       echo "  ❌ $section: тихий пропуск при enabled=true (config: $yaml_key) — COMMIT БЛОКИРОВАН"
       VIOLATIONS=$((VIOLATIONS+1))
     else
