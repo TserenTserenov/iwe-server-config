@@ -41,3 +41,8 @@ classes:
     patterns:
       - "*/{{GOV_REPO}}/current/WeekPlan*.md"
       - "*/{{GOV_REPO}}/current/DayPlan*.md"
+  - id: template-release-files
+    mode: telemetry
+    patterns:
+      - "*/FMT-exocortex-template/CHANGELOG.md"
+      - "*/FMT-exocortex-template/update-manifest.json"
