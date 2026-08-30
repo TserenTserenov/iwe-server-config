@@ -884,8 +884,14 @@ render_content_cleanup() {
     echo "> Реестр сигналов очистки базы знаний не настроен."
     return
   fi
+  # Only CC-entries before the first "## Архив"/"## Разобрано" heading are open --
+  # resolved entries move under those headings but their <summary> line itself never
+  # gets a ✅ marker (only a prose note in "## Метрики"), so filtering on ✅ alone
+  # kept surfacing months-old closed signals as "N на разбор" (found 2026-07-28: CC-103,
+  # closed 2026-06-14, still showed up because its heading had no ✅).
   local open
-  open=$(grep -E '<summary><strong>CC-[0-9]' "$file" | grep -v '✅' || true)
+  open=$(awk '/^## (Архив|Разобрано)/{exit} {print}' "$file" \
+    | grep -E '<summary><strong>CC-[0-9]' || true)
   if [ -z "$open" ]; then
     echo "> Разобрано — открытых сигналов нет."
     return
@@ -1221,7 +1227,7 @@ generated_by: day-open-scaffold.sh (WP-264 Ф2)
 <details>
 <summary><b>Саморазвитие</b></summary>
 
-- **Изучи персональное руководство:** [personal-guide](https://github.com/TserenTserenov/personal-guide)
+- **Изучи персональное руководство:** [DS-personal-guide](https://github.com/TserenTserenov/DS-personal-guide)
 
 $SELF_DEV_BLOCK
 

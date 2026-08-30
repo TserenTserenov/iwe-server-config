@@ -151,7 +151,7 @@ fi
 
 ### Рефлексия дня — прямой опрос (WP-484, второй канал получения рядом с ботовым `/reflect`)
 
-> **Источник:** пилот 28.07 уточнил, что закрытие дня должно само предлагать написать рефлексию, не только напоминать про `/reflect` в боте постфактум (см. п. «Задача 1» хендоффа РП149 28.07 вечер — 1.12 `reflection_status: absent` держит жёлтый вердикт чек-листа персонального руководства). Оба канала пишут в один и тот же файл (`history/{месяц}/{дата}-reflection.md` в персональном репозитории `personal-guide`), который читает ночной рендер (`get_pilot_reflections`, `DS-autonomous-agents/scripts/render-pilot-guides.py`) — выбор канала не важен, важно что файл за сегодня появился.
+> **Источник:** пилот 28.07 уточнил, что закрытие дня должно само предлагать написать рефлексию, не только напоминать про `/reflect` в боте постфактум (см. п. «Задача 1» хендоффа РП149 28.07 вечер — 1.12 `reflection_status: absent` держит жёлтый вердикт чек-листа персонального руководства). Оба канала пишут в один и тот же файл (`history/{месяц}/{дата}-reflection.md` в персональном репозитории `DS-personal-guide`), который читает ночной рендер (`get_pilot_reflections`, `DS-autonomous-agents/scripts/render-pilot-guides.py`) — выбор канала не важен, важно что файл за сегодня появился.
 >
 > **Согласие на обработку данных (consent) — сознательно не проверяется здесь (29.07).** `/reflect` в боте проверяет `learning.tracking_consent` перед записью, потому что это автоматическая система, действующая без пилота в моменте. Этот шаг — прямой разговор с пилотом в реальном времени: сам факт ответа на вопрос внутри диалога закрытия дня — уже согласие по действию, отдельная формальная проверка избыточна. `get_pilot_reflections` (sovereign-путь, читает файлы репозитория напрямую) вообще не завязан на `tracking_consent` — эта таблица участвует только в managed-пути (`_get_pilot_reflections_platform`, через события). Если этот шаг когда-нибудь распространится за пределы sovereign-пилота — вернуться к вопросу явно, не копировать вывод молча.
 
@@ -159,7 +159,7 @@ fi
 TODAY=$(date +%Y-%m-%d)
 MONTH="${TODAY:0:7}"
 REFLECTION_PATH="history/$MONTH/$TODAY-reflection.md"
-if gh api "repos/TserenTserenov/personal-guide/contents/$REFLECTION_PATH" >/dev/null 2>&1; then
+if gh api "repos/TserenTserenov/DS-personal-guide/contents/$REFLECTION_PATH" >/dev/null 2>&1; then
   echo "✅ Рефлексия за $TODAY уже есть ($REFLECTION_PATH) — не спрашивать повторно"
 else
   echo "🟡 Рефлексии за $TODAY нет — спросить пилота прямо сейчас (см. пункт ниже)"
@@ -178,10 +178,10 @@ fi
 
   <ответ пилота на Q5>
   EOF
-  EXISTING_SHA=$(gh api "repos/TserenTserenov/personal-guide/contents/$REFLECTION_PATH" --jq '.sha' 2>/dev/null || true)
+  EXISTING_SHA=$(gh api "repos/TserenTserenov/DS-personal-guide/contents/$REFLECTION_PATH" --jq '.sha' 2>/dev/null || true)
   SHA_ARGS=()
   [ -n "$EXISTING_SHA" ] && SHA_ARGS=(-f "sha=$EXISTING_SHA")
-  if gh api --method PUT "repos/TserenTserenov/personal-guide/contents/$REFLECTION_PATH" \
+  if gh api --method PUT "repos/TserenTserenov/DS-personal-guide/contents/$REFLECTION_PATH" \
     -f message="reflect: $TODAY (day-close)" \
     -f content="$(base64 < /tmp/reflection-$TODAY.md)" \
     -f branch="main" \

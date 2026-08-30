@@ -49,6 +49,7 @@ def test_every_keyword_produces_valid_schema_v2(kw, expected):
     assert result["resolution_path"] == "keyword"
     assert result["artifact"] == artifact
     assert result["artifact"]
+    assert result["hypothesis_relation"] == "unclassified"
     if kind_id is None:
         assert result["expected_result_kind"] is None
         assert result["result_kind_resolution"] == af.SPECIAL_RESOLUTION[task_type]
