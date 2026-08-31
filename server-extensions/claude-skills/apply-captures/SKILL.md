@@ -150,6 +150,15 @@ grep -r "^id: <ID>" ~/IWE/PACK-* | head -5
 
 Если совпадение найдено → вернуть R15 на reject: паттерн `«ID уже занят: <путь>»`.
 
+Reject записан → факт М9 (WP-522 §М, пир-сессия 2026-08-31-30, код-ревью: этот
+early-exit пишет в feedback-log напрямую, минуя формальный Шаг 5в — хук нужен здесь
+же, не только там):
+```bash
+python3 "${IWE_SCRIPTS:-$HOME/IWE/DS-my-strategy/scripts}/post-culture-fact.py" \
+  --element M9 --mode record --evidence "<id> из <filename>" \
+  >/dev/null 2>>"${IWE_RUNTIME:-$HOME/IWE/.iwe-runtime}/culture-fact-errors.log" || true
+```
+
 ### 4в-0. Фасетный классификатор (WP-429 Ф6.4)
 
 > **Когда применяется:** до Шага 4в, для кандидатов, у которых `target_path` не задан R2 однозначно (домен/полка неочевидны) — либо всегда как проверка предложенного R2 пути. Пропустить, если R2 уже дал `target_path`, совпадающий с производной полкой Шага 4в ниже.
@@ -184,7 +193,8 @@ grep -A3 "^  <KIND>:" ~/IWE/<PACK-repo>/pack/<domain>/routing.yaml
 
 **Результат валидации:**
 - `valid` → переходить к Шагу 4г
-- `invalid` + причина → reject этого кандидата, записать в feedback-log, продолжить следующий кандидат
+- `invalid` + причина → reject этого кандидата, записать в feedback-log, продолжить
+  следующий кандидат. Запись успешна → факт М9 (тот же вызов, что в Шаге 4б).
 
 ### 4г. Семантическая проверка (содержательная непротиворечивость)
 
@@ -214,7 +224,8 @@ grep -ri "<ключевое_слово>" ~/IWE/<PACK-repo>/pack/ --include="*.md
 
 **Результат 4г:**
 - `clear` → переходить к Шагу 4д
-- `overlap` → reject; паттерн + ссылка на существующий ID в feedback-log
+- `overlap` → reject; паттерн + ссылка на существующий ID в feedback-log. Запись
+  успешна → факт М9 (тот же вызов, что в Шаге 4б).
 - `contradiction` → выявить новейший; при accept добавить `supersedes:`
 - `refinement` → accept + `see_also:` в frontmatter кандидата
 - `intra-batch duplicate` (Шаг 0) → решение R15 по паре; выживший кандидат продолжает с Шага 1
@@ -316,8 +327,8 @@ Pack-реестры обычно в:
 **Паттерн (для R2):** <pattern>
 ```
 
-Запись успешна → факт М9 (WP-522 §М, пир-сессия 2026-08-31-30): вызвать писателя,
-best-effort:
+Запись успешна → факт М9 (WP-522 §М, пир-сессия 2026-08-31-30), per-кандидат (не
+один раз на весь отчёт): вызвать писателя, best-effort:
 ```bash
 python3 "${IWE_SCRIPTS:-$HOME/IWE/DS-my-strategy/scripts}/post-culture-fact.py" \
   --element M9 --mode record --evidence "<id> из <filename>" \

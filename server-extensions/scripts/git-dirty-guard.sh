@@ -287,14 +287,18 @@ fi
 
 if [ "$UNPUSHED" = "true" ]; then
   echo "git-dirty-guard: HEAD has commit(s) origin/$BRANCH doesn't have — self-heal would orphan them, not touching" >&2
-  # Signature = merge-base + ahead-count, not HEAD SHA (Codex, ход 5): amend/
-  # rebase changes HEAD's SHA without changing the underlying problem (branch
-  # still unpushed past the same base) — a raw-SHA signature would treat every
-  # amend as a brand-new alert. Falls back to HEAD if merge-base can't resolve
-  # (e.g. shallow clone with no common ancestor yet).
+  # Signature = merge-base alone, not HEAD SHA and not ahead-count (found
+  # 31.08: including ahead-count re-fired the alert on every new local commit,
+  # spamming Telegram on an actively-worked repo — the count grows innocently
+  # while it's still the SAME unpushed situation). Merge-base changes only
+  # when origin/$BRANCH actually advances or the branch gets rebased onto a
+  # different base — both are real "the situation changed" events, worth a
+  # fresh alert. Amend/rebase-in-place (Codex, ход 5) still doesn't change
+  # merge-base, so those stay deduped as originally intended. Falls back to
+  # HEAD if merge-base can't resolve (e.g. shallow clone with no common
+  # ancestor yet).
   MERGE_BASE=$(git merge-base HEAD "origin/$BRANCH" 2>/dev/null) || MERGE_BASE="$(git rev-parse HEAD)"
-  AHEAD_COUNT=$(git rev-list --count "origin/$BRANCH..HEAD" 2>/dev/null || echo '?')
-  alert_dedup_send unpushed "${MERGE_BASE}|${AHEAD_COUNT}" \
+  alert_dedup_send unpushed "$MERGE_BASE" \
     "🚨 git-dirty-guard: $REPO — есть незапушенные коммиты, self-heal пропущен (не тронул). Нужен pull/push вручную." \
     "Есть незапушенные коммиты — зайди и выполни: git -C $REPO push (или pull --rebase, если push отклонён)"
   exit 1

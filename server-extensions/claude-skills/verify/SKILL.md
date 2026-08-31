@@ -360,8 +360,12 @@ Sub-agent возвращает verdict:
 ## Шаг 4. Показать пользователю
 
 Verdict ∈ {PASS, FAIL, CONDITIONAL} (НЕ NOT_VERIFIABLE — это «проверка не
-операционализирована», не факт независимой проверки) → факт М13 (WP-522 §М,
-пир-сессия 2026-08-31-30): вызвать писателя, best-effort, ДО вывода пользователю:
+операционализирована», не факт независимой проверки) И маршрут — sub-agent (Шаг 1-3
+классический ИЛИ Шаг 0б с `handler_type: rubric|skill`) → факт М13 (WP-522 §М,
+пир-сессия 2026-08-31-30, код-ревью: `handler_type: deterministic`, напр.
+`rule-engine.sh`, — механическая проверка правилом, не «один агент проверяет
+другого», критерию М13 не соответствует, хук туда не относится): вызвать писателя,
+best-effort, ДО вывода пользователю:
 ```bash
 python3 "${IWE_SCRIPTS:-$HOME/IWE/DS-my-strategy/scripts}/post-culture-fact.py" \
   --element M13 --mode record --evidence "verdict: <PASS|FAIL|CONDITIONAL> — <артефакт>" \
