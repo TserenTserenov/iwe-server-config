@@ -27,7 +27,7 @@ fi
 DATE="${1:-$(date +%Y-%m-%d)}"
 IWE="${IWE_ROOT:-$HOME/IWE}"
 GOV_REPO="${IWE_GOVERNANCE_REPO:-DS-strategy}"
-CONFIG="${2:-$IWE/$GOV_REPO/exocortex/day-rhythm-config.yaml}"
+CONFIG="${2:-$IWE/.iwe-runtime/day-rhythm-config.yaml}"
 
 # --- Calendar: server-calendar.sh ---
 CALENDAR_STATUS="unknown"

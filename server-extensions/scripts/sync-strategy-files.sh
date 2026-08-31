@@ -69,11 +69,13 @@ if echo "$ALL_FILES" | grep -qx "MEMORY.md"; then
   FILES_TO_SYNC+=("MEMORY.md")
 fi
 
-# exocortex/day-rhythm-config.yaml — day-rhythm config (news/calendar) for server-mode Day Open.
-# exocortex/ is excluded from auto-pull, so this is the only delivery path to the server.
-if echo "$ALL_FILES" | grep -qx "exocortex/day-rhythm-config.yaml"; then
-  FILES_TO_SYNC+=("exocortex/day-rhythm-config.yaml")
-fi
+# day-rhythm-config.yaml (news/calendar, server-mode Day Open): the branch that
+# used to sync exocortex/day-rhythm-config.yaml here was dead code — that path
+# was never tracked in git, so `git ls-tree` could never match it and the file
+# never actually reached the server this way (WP-526, found 2026-08-31). The
+# config now lives in .iwe-runtime/ (also outside git) on both Mac and the
+# server; cross-machine delivery for it is an open gap, not solved by this
+# script — see WP-526 "Осталось".
 
 if [ "${#FILES_TO_SYNC[@]}" -eq 0 ]; then
   echo "$TS [sync-strategy-files] no files matched"

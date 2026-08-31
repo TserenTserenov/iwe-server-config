@@ -101,8 +101,13 @@ do_backup() {
 
   # Merge day-rhythm-config.yaml: use auto-memory as base, preserve non-empty user values in dst.
   # User-configurable keys protected: day_open.calendar_ids
+  # WP-526 (peer-session 2026-08-31-09): destination moved out of exocortex/
+  # (git-ignored but per-worktree) into .iwe-runtime/ (git-ignored, but a single
+  # root shared by the canonical checkout and every isolated worktree on this
+  # machine) so isolated-worktree day-open runs can actually see it.
   local rhythm_src="$MEMORY_SRC/day-rhythm-config.yaml"
-  local rhythm_dst="$EXOCORTEX_DST/day-rhythm-config.yaml"
+  local rhythm_dst="$IWE_ROOT/.iwe-runtime/day-rhythm-config.yaml"
+  mkdir -p "$IWE_ROOT/.iwe-runtime"
   if [ -f "$rhythm_src" ]; then
     if [ ! -f "$rhythm_dst" ]; then
       cp "$rhythm_src" "$rhythm_dst"

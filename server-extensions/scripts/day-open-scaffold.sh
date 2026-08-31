@@ -40,7 +40,7 @@ IWE_ROOT="${IWE_ROOT:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 IWE="${IWE:-$IWE_ROOT}"
 export IWE_ROOT IWE
 DATE="${1:-$(date +%Y-%m-%d)}"
-CONFIG="$IWE/${IWE_GOVERNANCE_REPO:-DS-strategy}/exocortex/day-rhythm-config.yaml"
+CONFIG="$IWE/.iwe-runtime/day-rhythm-config.yaml"
 SERVER_MODE="${IWE_SERVER_MODE:-0}"  # WP-283: 1 = Linux server, Mac-only MCP недоступен
 
 # --- Pre-flight healthcheck (WP-7 ФDay-Open-Hardening) ---

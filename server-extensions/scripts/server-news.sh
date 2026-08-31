@@ -12,13 +12,13 @@
 #
 # Использование:
 #   bash server-news.sh [CONFIG_PATH]
-#   bash server-news.sh ~/IWE/DS-strategy/exocortex/day-rhythm-config.yaml
+#   bash server-news.sh ~/IWE/.iwe-runtime/day-rhythm-config.yaml
 
 set -uo pipefail
 
 IWE="${IWE_ROOT:-$HOME/IWE}"
 GOV_REPO="${IWE_GOVERNANCE_REPO:-DS-strategy}"
-CONFIG="${1:-$IWE/$GOV_REPO/exocortex/day-rhythm-config.yaml}"
+CONFIG="${1:-$IWE/.iwe-runtime/day-rhythm-config.yaml}"
 MAX_ITEMS_PER_TOPIC=3
 MAX_AGE_DAYS=2
 
