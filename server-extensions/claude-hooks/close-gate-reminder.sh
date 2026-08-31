@@ -32,10 +32,25 @@ INPUT=$(cat)
 SANITIZED=$(printf '%s' "$INPUT" | LC_ALL=C tr '\n\r\t' '   ')
 PROMPT_ORIGINAL_CASE=$(printf '%s' "$SANITIZED" | jq -r '.prompt // empty')
 PROMPT=$(printf '%s' "$PROMPT_ORIGINAL_CASE" | tr '[:upper:]' '[:lower:]')
-SESSION_ID=$(printf '%s' "$INPUT" | jq -r '.session_id // "unknown"' 2>/dev/null)
+SESSION_ID=$(printf '%s' "$INPUT" | jq -r '.session_id // empty' 2>/dev/null)
+# Fallback + exact-reject (WP-484 Ф148, cold-context review 31.08, peer-session
+# 2026-08-31-40-close-runner-gate-session): this hook (UserPromptSubmit) writes
+# the sentinel that close-runner-gate.sh (PreToolUse) reads at
+# "$SENTINEL_DIR/$SESSION_ID.flag" -- the two MUST resolve session_id the same
+# way, or the writer files under one id while the reader looks under another
+# and the whole gate silently no-ops (fail-open, not fail-closed). Mirrors the
+# resolution now used there: env fallback before giving up, then a strict
+# charset check instead of `tr -cd` silently stripping bad characters into a
+# different (colliding) value. "unknown" stays the last-resort bucket here
+# (unlike the PreToolUse gate, this hook can't just exit -- it always has to
+# emit an additionalContext JSON), not for lookups that must not misfire.
+if [ -z "$SESSION_ID" ] && [ -n "${CLAUDE_CODE_SESSION_ID:-}" ]; then
+  SESSION_ID="$CLAUDE_CODE_SESSION_ID"
+fi
 [ -n "$SESSION_ID" ] || SESSION_ID="unknown"
-SESSION_ID=$(printf '%s' "$SESSION_ID" | tr -cd 'A-Za-z0-9._-')
-[ -n "$SESSION_ID" ] || SESSION_ID="unknown"
+case "$SESSION_ID" in
+  *[!A-Za-z0-9._-]*) SESSION_ID="unknown" ;;
+esac
 
 IWE_ROOT="${CLAUDE_PROJECT_DIR:-$HOME/IWE}"
 OBLIGATION_CLI="$IWE_ROOT/${IWE_GOVERNANCE_REPO:-DS-my-strategy}/scripts/close_obligation.py"
@@ -124,6 +139,29 @@ fi
 _arm_and_sentinel() {
   local mode="$1"
   local broad="$2"
+  # WP-484 (peer-session 2026-08-31-43-close-obligation-orphan-recovery,
+  # consensus with Codex): SESSION_ID falls into the "unknown" bucket
+  # (resolution block above) only when BOTH the payload and
+  # CLAUDE_CODE_SESSION_ID are empty, or the resolved value fails the
+  # charset check. Arming an obligation under "unknown" and telling the
+  # agent "Обязательство закрытия зафиксировано" was a LIE in the one case
+  # that matters: protocol-stop-gate.sh resolves its own SESSION_ID
+  # independently (protocol-stop-gate.sh:34+43) and, with both sources
+  # empty there too, skips the ENTIRE obligation check silently (fail-open)
+  # -- the "unknown" obligation this hook just armed can never be found and
+  # verified on Stop. Fail loud instead of a false "зафиксировано" (P1/P4,
+  # engineering code style: no silent success on an unverifiable claim).
+  # This is fail-VISIBLE, not fail-closed: UserPromptSubmit hooks in this
+  # repo never use exit 2 to block the prompt itself (that pattern is
+  # PreToolUse-only here, see close-runner-gate.sh/wp-gate-check.sh/etc.) --
+  # refusing to arm/sentinel plus a loud additionalContext is the maximum
+  # degradation available at this hook's event type (cold-context review,
+  # session 2026-08-31-40, High finding; closed here, not silently deferred
+  # again).
+  if [ "$SESSION_ID" = "unknown" ]; then
+    echo '{"additionalContext": "❌ session_id не определён (payload и CLAUDE_CODE_SESSION_ID оба пусты, либо в найденном значении недопустимые символы) — обязательство НЕ создано, sentinel НЕ записан. Stop-гейт не сможет подтвердить выполнение Close для этой сессии. Не заявляй, что закрытие отслежено — проведи Close вручную с повышенным вниманием."}'
+    exit 0
+  fi
   if _obligation_available; then
     OUT=$(_run_obligation arm --session-id "$SESSION_ID" --mode "$mode")
     RC=$?

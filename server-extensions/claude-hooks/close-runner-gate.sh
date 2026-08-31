@@ -52,9 +52,26 @@ COMMAND=$(printf '%s' "$INPUT" | jq -r '.tool_input.command // empty' 2>/dev/nul
 [ -n "$COMMAND" ] || exit 0
 
 SESSION_ID=$(printf '%s' "$INPUT" | jq -r '.session_id // empty' 2>/dev/null)
+# Fallback (bug-2026-08-31-close-runner-gate-empty-session-id-breaks-witness-mapping,
+# peer-session with Codex+Kimi 31.08): PreToolUse payload .session_id came back
+# empty twice in a row in the same conversation, even though CLAUDE_CODE_SESSION_ID
+# was present and matched payload on every other call in that same conversation
+# (confirmed live: temporary probe logged both values across 3 real hook
+# invocations, always identical). Same env var is already the trusted harness-id
+# source elsewhere in this repo (session-guard.sh:1630,
+# session-reflection-append.sh) -- reusing an existing pattern, not inventing one.
+if [ -z "$SESSION_ID" ] && [ -n "${CLAUDE_CODE_SESSION_ID:-}" ]; then
+  SESSION_ID="$CLAUDE_CODE_SESSION_ID"
+fi
 [ -n "$SESSION_ID" ] || exit 0
-SESSION_ID_SAFE=$(printf '%s' "$SESSION_ID" | tr -cd 'A-Za-z0-9._-')
-[ -n "$SESSION_ID_SAFE" ] || exit 0
+# Reject on disallowed characters instead of silently stripping them (WP-484
+# Ф148, Codex review 31.08): the old `tr -cd | [-n ...]` pair let two distinct
+# session_id values collide onto the same sanitized string. `case` gives the
+# identical allowed-charset check without an intermediate lossy value.
+case "$SESSION_ID" in
+  *[!A-Za-z0-9._-]*) exit 0 ;;
+esac
+SESSION_ID_SAFE="$SESSION_ID"
 
 # WP-484 Ф118 (19.08, пир-сессия с Codex, живой рецидив: пир-сессия закрывалась
 # через "close_obligation.py cancel --action close-override" + "git commit

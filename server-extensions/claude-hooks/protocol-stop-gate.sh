@@ -32,6 +32,15 @@ fi
 
 TRANSCRIPT_PATH=$(echo "$INPUT" | jq -r '.transcript_path // empty')
 SESSION_ID=$(echo "$INPUT" | jq -r '.session_id // empty')
+# Fallback (WP-484 Ф148, same defect class as close-runner-gate.sh/
+# close-gate-reminder.sh, bug-2026-08-31-close-runner-gate-empty-session-id-
+# breaks-witness-mapping): an empty Stop-event .session_id used to skip the
+# ENTIRE close-obligation check below (`[ -n "$SESSION_ID" ]` at the guard just
+# past this block) -- silently letting a session end while an obligation is
+# still armed, which is the exact failure this Ф74б chain exists to prevent.
+# close_obligation.py's own _validated_name() still rejects a malformed value
+# downstream (cmd_stop_check), so no extra charset check is duplicated here.
+[ -z "$SESSION_ID" ] && [ -n "${CLAUDE_CODE_SESSION_ID:-}" ] && SESSION_ID="$CLAUDE_CODE_SESSION_ID"
 
 # Нет транскрипта — пропустить
 if [ -z "$TRANSCRIPT_PATH" ] || [ ! -f "$TRANSCRIPT_PATH" ]; then

@@ -136,6 +136,31 @@ PYEOF
     fi
   fi
 
+  # Cross-machine delivery to tsekh-1 (WP-526 "Осталось" 31.08): .iwe-runtime/ вне git
+  # по дизайну (см. комментарий выше), поэтому git-доставка невозможна — пушим
+  # файл напрямую по SSH. Best-effort и атомарно: недоступность tsekh-1 или обрыв
+  # связи не роняет Day Close и не оставляет там частично записанный файл.
+  # Направление всегда Мак -> tsekh-1 (hostname-гвард не даёт tsekh-1 пушить самому
+  # себе, если Day Close когда-нибудь выполнится там же).
+  if [ -f "$rhythm_dst" ] && [ "$(hostname -s)" != "tsekh-1" ]; then
+    if python3 -c "import sys, yaml; yaml.safe_load(open(sys.argv[1]))" "$rhythm_dst" 2>/dev/null; then
+      local ssh_opts=(-o BatchMode=yes -o ConnectTimeout=5 -o ServerAliveInterval=5 -o ServerAliveCountMax=2)
+      local this_host
+      this_host="$(hostname -s)"
+      local remote_tmp=".iwe-runtime/.day-rhythm-config.yaml.tmp.${this_host}.$$"
+      if ssh "${ssh_opts[@]}" tsekh-1 "mkdir -p ~/IWE/.iwe-runtime" >/dev/null 2>&1 \
+        && scp -q "${ssh_opts[@]}" "$rhythm_dst" "tsekh-1:~/IWE/$remote_tmp" 2>/dev/null \
+        && ssh "${ssh_opts[@]}" tsekh-1 "test -s ~/IWE/$remote_tmp && mv -f ~/IWE/$remote_tmp ~/IWE/.iwe-runtime/day-rhythm-config.yaml"; then
+        log "  day-rhythm-config.yaml доставлен на tsekh-1"
+      else
+        warn "  доставка day-rhythm-config.yaml на tsekh-1 не удалась (не блокирует Day Close)"
+        ssh "${ssh_opts[@]}" tsekh-1 "rm -f ~/IWE/$remote_tmp" >/dev/null 2>&1 || true
+      fi
+    else
+      warn "  day-rhythm-config.yaml не прошёл YAML-валидацию — доставка на tsekh-1 пропущена"
+    fi
+  fi
+
   # issue #217: обратная подстановка $HOME -> {{HOME_DIR}} делает бэкап ОС-агностичным
   # (симметрично прямой подстановке в setup.sh и restore-from-exocortex.sh).
   if [ -f "$WORKSPACE_DIR/CLAUDE.md" ]; then

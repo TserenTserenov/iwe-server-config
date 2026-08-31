@@ -1761,6 +1761,7 @@ validate_orz() { # <orz-path> <agent> [orz-base-dir, default $ORZ_DIR] [tracked-
   # has no worktree concept (scans the whole canonical tree), so it keeps
   # relying on the default.
   local orz_base_dir="${3:-$ORZ_DIR}"
+  orz_base_dir="${orz_base_dir%/}"
   local tracked_set_file="${4:-}"
   local errors=0
 
@@ -1770,19 +1771,50 @@ validate_orz() { # <orz-path> <agent> [orz-base-dir, default $ORZ_DIR] [tracked-
     return 1
   fi
 
+  # Checks 2-4 read the file once into a bash variable and use builtin
+  # pattern matching instead of ~13 `grep`/`sed`/`head` subprocesses per
+  # call (6 key checks + 1 agent-value pipeline + 4 section checks, plus a
+  # duplicate agent-value pipeline the audit() call site used to run before
+  # calling in here at all). Measured live 31.08 (peer-session with
+  # Kimi+Codex, WP-484 line AC): with ~3771 files in MC-sessions this was
+  # the dominant cost keeping `audit` from finishing inside a 5-minute
+  # timeout even after the git-tracked check (below) was batched.
+  # `$'\n'` is prepended so "key at the very start of the file" and "key
+  # after a newline" are the same substring match, matching what the old
+  # `grep -qE "^key:"` anchor covered without needing multiline `^`.
+  local nl=$'\n'
+  local content
+  content="$(<"$orz")" 2>/dev/null || content=""
+  local content_nl="${nl}${content}"
+
   # 2. frontmatter keys
   local keys=("date:" "type:" "wp:" "duration_h:" "artifacts:" "agent:")
   for key in "${keys[@]}"; do
-    if ! grep -qE "^${key}" "$orz"; then
-      echo "  ❌ в frontmatter отсутствует ключ '$key'" >&2
-      errors=$((errors + 1))
-    fi
+    case "$content_nl" in
+      *"${nl}${key}"*) : ;;
+      *)
+        echo "  ❌ в frontmatter отсутствует ключ '$key'" >&2
+        errors=$((errors + 1))
+        ;;
+    esac
   done
 
   # 3. agent value
-  local orz_agent
-  orz_agent=$(grep -E "^agent:" "$orz" | sed 's/^agent: *//' | head -1 || true)
-  if [ -n "$orz_agent" ]; then
+  # `[ -n "$agent" ]` guard added WP-484 line AC (31.08): the audit() call
+  # site used to pre-extract the file's own agent: value with a redundant
+  # grep|sed|head pipeline and feed it straight back in here as `$agent`,
+  # which made this comparison a self-match that could never fail -- proven
+  # by re-running before/after this fix's benchmark and diffing every
+  # reported defect. Passing "" from that call site (agent identity isn't
+  # meaningful for an archival scan) reproduces the same always-skip outcome
+  # without redoing the extraction. close()'s real caller always has a
+  # non-empty --agent (validated earlier in this script), so this guard
+  # changes nothing there.
+  local orz_agent="" agent_re="${nl}agent:[[:space:]]*([^${nl}]*)"
+  if [[ "$content_nl" =~ $agent_re ]]; then
+    orz_agent="${BASH_REMATCH[1]}"
+  fi
+  if [ -n "$agent" ] && [ -n "$orz_agent" ]; then
     if [ "$orz_agent" != "$agent" ] && \
        ! { [ "$agent" = "kimi" ] && [ "$orz_agent" = "kimi-headless" ]; }; then
       echo "  ❌ agent в ORZ ('$orz_agent') не совпадает с агентом сессии ('$agent')" >&2
@@ -1793,10 +1825,13 @@ validate_orz() { # <orz-path> <agent> [orz-base-dir, default $ORZ_DIR] [tracked-
   # 4. required sections
   local sections=("## Главный инсайт" "## Контекст" "## Достигнуто" "## Ключевые решения")
   for sec in "${sections[@]}"; do
-    if ! grep -qF "$sec" "$orz"; then
-      echo "  ❌ отсутствует секция '$sec'" >&2
-      errors=$((errors + 1))
-    fi
+    case "$content" in
+      *"$sec"*) : ;;
+      *)
+        echo "  ❌ отсутствует секция '$sec'" >&2
+        errors=$((errors + 1))
+        ;;
+    esac
   done
 
   # 5. git tracked
@@ -3041,12 +3076,31 @@ if [ "$CMD" = "audit" ]; then
   # WP-484 line AC (31.08, peer-session with Kimi+Codex): one `git ls-files`
   # for the whole tree instead of one per file inside validate_orz -- see the
   # comment at its "git tracked" check for the measured cost this replaces.
+  # Trade-off, found by diffing a live before/after benchmark rather than by
+  # inspection: this is a single snapshot taken before the scan starts, not
+  # a live per-file index query. A file committed by a concurrent session
+  # during the ~2min scan can show as untracked against this snapshot even
+  # though it is tracked by the time its line prints. That is not a false
+  # defect -- it just routes that file through the (unchanged) remote-refs
+  # fallback below instead of the fast path, which still finds it and logs
+  # the existing "✓ ...accepted as equivalent" note instead of an error.
   AUDIT_TRACKED_SET=$(mktemp)
   git -C "$ORZ_DIR" ls-files > "$AUDIT_TRACKED_SET" 2>/dev/null
   find "$ORZ_DIR" -maxdepth 2 -mindepth 2 -name '*.md' -type f ! -name '00-index.md' -newermt "$SINCE" 2>/dev/null | while read -r orz; do
     tmp_errors=$(mktemp)
-    orz_agent=$(grep -E "^agent:" "$orz" | sed 's/^agent: *//' | head -1 || true)
-    if ! validate_orz "$orz" "${orz_agent:-unknown}" "$ORZ_DIR" "$AUDIT_TRACKED_SET" >"$tmp_errors" 2>&1 && [ -s "$tmp_errors" ]; then
+    # No `agent` extraction here (WP-484 line AC, 31.08): validate_orz's own
+    # "agent value" check (§3 inside the function) always re-derives the
+    # value from this same file and compared it against whatever the caller
+    # passed -- at this call site that was always the file's own value fed
+    # back in, so the comparison could never fail. Passing "" trips
+    # validate_orz's `[ -n "$agent" ]` guard and skips the comparison
+    # outright, reproducing that same always-pass outcome without redoing
+    # the `grep|sed|head` extraction per file. A first attempt here passed
+    # the literal "unknown" instead, which broke the no-op and started
+    # flagging every file with a real agent: value as a false mismatch --
+    # caught by diffing this session's before/after benchmark output
+    # file-by-file, not by inspection.
+    if ! validate_orz "$orz" "" "$ORZ_DIR" "$AUDIT_TRACKED_SET" >"$tmp_errors" 2>&1 && [ -s "$tmp_errors" ]; then
       echo "  $(basename "$orz"):"
       sed 's/^/    /' "$tmp_errors"
     fi
