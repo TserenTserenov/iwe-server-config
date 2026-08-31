@@ -35,7 +35,16 @@
     # Покрывает кейс «SSH полностью разнесло» (без него ручной Hetzner Rescue).
     deploy-rs = {
       url = "github:serokell/deploy-rs";
-      inputs.nixpkgs.follows = "nixpkgs";
+      # follows nixpkgs-unstable, не nixpkgs: deploy-rs собирает себя через
+      # rustPlatform.buildRustPackage/fetchCargoVendor, у которого на нашем
+      # стабильном пине (02.01.2026) сломан User-Agent при скачивании crates.io
+      # — сайт отвечает 403 всем python-requests/* запросам (известный баг
+      # nixpkgs, чинили в fetch-cargo-vendor-util.py; наш nixpkgs-unstable,
+      # пин 14.07.2026, фикс уже содержит). Апстрим deploy-rs сам по
+      # умолчанию собирается на nixpkgs-unstable — это возврат к их
+      # умолчанию, не новая комбинация. Система в целом (nixosConfigurations)
+      # остаётся полностью на стабильном nixpkgs, не тронута.
+      inputs.nixpkgs.follows = "nixpkgs-unstable";
     };
   };
 
