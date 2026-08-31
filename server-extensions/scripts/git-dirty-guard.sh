@@ -1,207 +1,49 @@
 #!/usr/bin/env bash
 # routing: utility  deterministic=true
 # see DP.SC.159, DP.ROLE.059
-# git-dirty-guard.sh — non-mutating dirty-tree gate for pull callers.
+# git-dirty-guard.sh — protects a repo's periodic pull from a dirty working tree.
 #
-# A previous version tried to self-heal a stale mirror with `git reset --hard`.
-# That is unsafe in a shared checkout: a staged layer or a tracked write arriving
-# after classification can be erased, and no reset mode protects every case. The
-# guard now diagnoses every tracked-dirty state and returns 1 without changing the
-# branch, index, worktree or stash. Cleanup requires an exclusive worktree or manual
-# owner action.
+# WP-484 (2026-07-19). Root cause of the recurring tsekh-1 cleanup: sync-strategy-files.sh
+# (and the fleeting-notes sync) write files straight from origin's blobs without ever
+# committing, so DS-my-strategy's working tree on the server accumulates "dirty" entries
+# whose content is byte-identical to origin — not real work, just a stale local HEAD.
+# `git pull --rebase` refuses to run on a dirty tree, so local HEAD never catches up, and
+# any guard relying on local git log (e.g. day-open-pipeline.sh step 1.1) goes blind to
+# commits origin already has — the day this was written, the server was found 33 commits
+# behind with 21 dirty tracked files, all 21 byte-identical to origin (verified live).
+#
+# This script tells the two cases apart before a caller attempts pull/rebase:
+#   - every dirty TRACKED file byte-identical to origin/<branch>  → stale mirror, safe to
+#     `git reset --hard origin/<branch>` (untracked files are never touched — reset --hard
+#     doesn't remove them, and they're exactly the shape of real new work found live on
+#     2026-07-18/19: WP-406 Ф22, WP-455 Ф11, WP-493 Ф7, none yet on origin).
+#   - any dirty tracked file DIFFERS from origin/<branch>          → real uncommitted work,
+#     never touched automatically — loud Telegram alert instead, caller must skip pull
+#     this round rather than attempt a doomed rebase.
 #
 # Usage: git-dirty-guard.sh <repo-path> [branch]
-# Environment:
-#   GIT_DIRTY_GUARD_REQUIRE_FETCH=true  fail closed when the remote query fails.
-#   GIT_DIRTY_GUARD_FETCH_TIMEOUT=N     portable query deadline in seconds (0=none).
-#   GIT_DIRTY_GUARD_REMOTE_OID_OUTPUT=true  print only the remote OID on success.
-#   GIT_DIRTY_GUARD_FETCH_DEST_REF      retired; any nonempty value is refused.
-#   GIT_DIRTY_GUARD_TG_ALERTS=false     suppress direct Telegram delivery.
-# Exit codes: 0 = tracked tree is clean (untracked-only is allowed).
-#             1 = dirty, mid-operation, lock-busy, query-refused, or unstable.
-#             2 = usage/repository error.
+# Set GIT_DIRTY_GUARD_TG_ALERTS=false when the caller owns throttled alerting.
+# Exit codes: 0 = repo clean, or safely self-healed — caller may proceed with pull.
+#             1 = real uncommitted work present, repo mid-rebase/merge, or self-heal
+#                 deferred because commit-push.sh holds the commit lock — caller must
+#                 NOT pull/rebase this round (WP-484 Ф141, 2026-08-28: this third case
+#                 defers rather than races a concurrent commit; retry next cycle).
+#             2 = usage/repo error.
+
 set -uo pipefail
 
 REPO="${1:?usage: git-dirty-guard.sh <repo-path> [branch]}"
 BRANCH="${2:-}"
-GIT_DIRTY_GUARD_TG_ALERTS="${GIT_DIRTY_GUARD_TG_ALERTS:-true}"
-GIT_DIRTY_GUARD_REQUIRE_FETCH="${GIT_DIRTY_GUARD_REQUIRE_FETCH:-false}"
-GIT_DIRTY_GUARD_FETCH_TIMEOUT="${GIT_DIRTY_GUARD_FETCH_TIMEOUT:-0}"
-GIT_DIRTY_GUARD_REMOTE_OID_OUTPUT="${GIT_DIRTY_GUARD_REMOTE_OID_OUTPUT:-false}"
-GIT_DIRTY_GUARD_FETCH_DEST_REF="${GIT_DIRTY_GUARD_FETCH_DEST_REF:-}"
+
 AIST_ENV="$HOME/.config/aist/env"
+[ -f "$AIST_ENV" ] && { set -a; source "$AIST_ENV"; set +a; }
 
-# Load only the two notification credentials as data. The AIST file is shell-shaped,
-# but executing it would let unrelated readonly assignments, `exit`, PATH, functions,
-# or Git environment variables change this guard's control plane.
-load_aist_credentials() {
-  local line key value loaded_token="" loaded_chat_id=""
-  [ -f "$AIST_ENV" ] || return 0
-  while IFS= read -r line || [ -n "$line" ]; do
-    line="${line%$'\r'}"
-    case "$line" in
-      'export TELEGRAM_BOT_TOKEN='*)
-        key="TELEGRAM_BOT_TOKEN"
-        value="${line#export TELEGRAM_BOT_TOKEN=}"
-        ;;
-      'TELEGRAM_BOT_TOKEN='*)
-        key="TELEGRAM_BOT_TOKEN"
-        value="${line#TELEGRAM_BOT_TOKEN=}"
-        ;;
-      'export TELEGRAM_CHAT_ID='*)
-        key="TELEGRAM_CHAT_ID"
-        value="${line#export TELEGRAM_CHAT_ID=}"
-        ;;
-      'TELEGRAM_CHAT_ID='*)
-        key="TELEGRAM_CHAT_ID"
-        value="${line#TELEGRAM_CHAT_ID=}"
-        ;;
-      *) continue ;;
-    esac
-    case "$value" in
-      ''|*[!A-Za-z0-9:_-]*) continue ;;
-    esac
-    if [ "$key" = "TELEGRAM_BOT_TOKEN" ]; then
-      loaded_token="$value"
-    else
-      loaded_chat_id="$value"
-    fi
-  done < "$AIST_ENV"
-  [ -n "${TELEGRAM_BOT_TOKEN:-}" ] || TELEGRAM_BOT_TOKEN="$loaded_token"
-  [ -n "${TELEGRAM_CHAT_ID:-}" ] || TELEGRAM_CHAT_ID="$loaded_chat_id"
-}
-load_aist_credentials
-
-# `git status` normally refreshes index stat data. This guard is observational.
-export GIT_OPTIONAL_LOCKS=0
-# Partial clones may fetch promised objects from ostensibly read-only commands such
-# as rev-parse or diff. Keep every inspection inside the explicit query boundary.
-export GIT_NO_LAZY_FETCH=1
-# Classify the real commit graph, independent of local replacement refs or the
-# deprecated info/grafts overlay in a shared repository.
-export GIT_NO_REPLACE_OBJECTS=1
-export GIT_GRAFT_FILE=/dev/null/iwe-no-grafts
-COMPARE_REF=""
-REMOTE_OID=""
-REMOTE_STATE_AVAILABLE=true
-
-is_true() {
-  case "$1" in
-    1|true|yes|on) return 0 ;;
-  esac
-  return 1
-}
-
-git_supports_no_lazy_fetch() {
-  git --no-lazy-fetch --version >/dev/null 2>&1
-}
-
-run_with_timeout() {
-  local seconds="$1"
-  shift
-  case "$seconds" in
-    0|'') "$@" ;;
-    *[!0-9]*)
-      echo "git-dirty-guard: invalid remote-query timeout: $seconds" >&2
-      return 1
-      ;;
-    *)
-      command -v python3 >/dev/null 2>&1 || {
-        echo "git-dirty-guard: remote-query timeout requested but python3 is unavailable" >&2
-        return 1
-      }
-      # A process group plus TERM→KILL escalation makes this a hard deadline even
-      # when git, ssh, or a credential helper ignores TERM.
-      python3 -c '
-import os
-import signal
-import subprocess
-import sys
-
-seconds = int(sys.argv[1])
-process = subprocess.Popen(sys.argv[2:], start_new_session=True)
-handled_signals = (signal.SIGTERM, signal.SIGINT, signal.SIGHUP)
-
-def stop_process_group():
-    try:
-        os.killpg(process.pid, signal.SIGTERM)
-    except OSError:
-        pass
-    try:
-        process.wait(timeout=1)
-    except subprocess.TimeoutExpired:
-        try:
-            os.killpg(process.pid, signal.SIGKILL)
-        except OSError:
-            pass
-        process.wait()
-
-def forward_signal(signum, _frame):
-    for handled in handled_signals:
-        signal.signal(handled, signal.SIG_IGN)
-    stop_process_group()
-    raise SystemExit(128 + signum)
-
-for handled in handled_signals:
-    signal.signal(handled, forward_signal)
-
-try:
-    returncode = process.wait(timeout=seconds)
-except subprocess.TimeoutExpired:
-    stop_process_group()
-    raise SystemExit(124)
-
-raise SystemExit(returncode if returncode >= 0 else 128 - returncode)
-' "$seconds" "$@"
-      ;;
-  esac
-}
-
-query_origin() {
-  local source_ref="refs/heads/$BRANCH"
-  local remote_output parsed_oid query_status parse_status
-
-  if [ -n "$GIT_DIRTY_GUARD_FETCH_DEST_REF" ]; then
-    echo "git-dirty-guard: fetch destinations are unsupported; refusing ref mutation" >&2
-    return 1
-  fi
-
-  remote_output=$(run_with_timeout "$GIT_DIRTY_GUARD_FETCH_TIMEOUT" \
-    git ls-remote --exit-code --refs origin "$source_ref" 2>/dev/null)
-  query_status=$?
-  [ "$query_status" -eq 0 ] || return "$query_status"
-
-  parsed_oid=$(printf '%s\n' "$remote_output" | awk -v expected="$source_ref" '
-    NF != 2 || $2 != expected { exit 1 }
-    { count += 1; oid = $1 }
-    END {
-      if (count != 1) exit 1
-      print oid
-    }
-  ')
-  parse_status=$?
-  if [ "$parse_status" -ne 0 ]; then
-    echo "git-dirty-guard: malformed remote response for $source_ref" >&2
-    return 1
-  fi
-
-  case "$parsed_oid" in
-    ''|*[!0-9a-fA-F]*)
-      echo "git-dirty-guard: invalid remote object id for $source_ref" >&2
-      return 1
-      ;;
-  esac
-  case "${#parsed_oid}" in
-    40|64) ;;
-    *)
-      echo "git-dirty-guard: invalid remote object-id length for $source_ref" >&2
-      return 1
-      ;;
-  esac
-
-  REMOTE_OID="$parsed_oid"
-  COMPARE_REF="$REMOTE_OID"
-}
+# Interactive callers need an immediate warning, while periodic supervisors need
+# to aggregate repeated failures before notifying. Without this switch the
+# supervisor's throttled alert is preceded by one direct alert on every tick.
+# The default stays fail-safe for every existing caller; only an explicit false
+# value suppresses Telegram delivery. Diagnostics and exit codes are unchanged.
+GIT_DIRTY_GUARD_TG_ALERTS="${GIT_DIRTY_GUARD_TG_ALERTS:-true}"
 
 tg_alert() {
   local msg="$1"
@@ -210,50 +52,94 @@ tg_alert() {
   esac
   [ -n "${TELEGRAM_BOT_TOKEN:-}" ] && [ -n "${TELEGRAM_CHAT_ID:-}" ] || return 0
   curl -s --max-time 10 -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
-    -d "chat_id=${TELEGRAM_CHAT_ID}" --data-urlencode "text=$msg" >/dev/null || true
+    -d "chat_id=${TELEGRAM_CHAT_ID}" --data-urlencode "text=$msg" > /dev/null || true
 }
 
-repo_has_operation() {
-  [ -d "$GIT_DIR/rebase-merge" ] || [ -d "$GIT_DIR/rebase-apply" ] \
-    || [ -f "$GIT_DIR/MERGE_HEAD" ] || [ -f "$GIT_DIR/CHERRY_PICK_HEAD" ] \
-    || [ -f "$GIT_DIR/REVERT_HEAD" ]
+# --- Alert dedup (WP-538, 18.08, пир-сессия с Codex): без этого один и тот же
+# непочиненный факт (то же расхождение с origin) шлёт идентичный 🚨 при каждом
+# периодическом прогоне — пилот получил один и тот же алерт про один и тот же
+# файл 4 раза за час. Первое обнаружение — полный алерт; повтор той же
+# сигнатуры внутри TTL — тишина в Telegram (stderr не глушится, вызывающий
+# всё ещё видит); повтор после TTL — компактная эскалация с CTA.
+GIT_DIRTY_GUARD_ALERT_TTL_MIN="${GIT_DIRTY_GUARD_ALERT_TTL_MIN:-60}"
+case "$GIT_DIRTY_GUARD_ALERT_TTL_MIN" in
+  ''|*[!0-9]*|0) GIT_DIRTY_GUARD_ALERT_TTL_MIN=60 ;;
+esac
+
+alert_state_clear() {
+  rm -f "$GIT_DIR/dirty-guard-alert-state" 2>/dev/null || true
+}
+
+# alert_dedup_send <type> <signature> <full_msg> <cta> — единственная точка
+# входа для обоих alert-путей ниже (unpushed/differ).
+alert_dedup_send() {
+  local type="$1" signature="$2" full_msg="$3" cta="$4"
+  local state_file="$GIT_DIR/dirty-guard-alert-state" now
+  now=$(date +%s)
+
+  local prev_type="" prev_sig="" prev_first="" prev_last=""
+  if [ -f "$state_file" ]; then
+    prev_type=$(awk -F= '$1=="type"{print $2}' "$state_file" 2>/dev/null)
+    prev_sig=$(awk -F= '$1=="signature"{print $2}' "$state_file" 2>/dev/null)
+    prev_first=$(awk -F= '$1=="first_alerted_at"{print $2}' "$state_file" 2>/dev/null)
+    prev_last=$(awk -F= '$1=="last_alerted_at"{print $2}' "$state_file" 2>/dev/null)
+  fi
+
+  if [ "$prev_type" != "$type" ] || [ "$prev_sig" != "$signature" ] || [ -z "$prev_first" ]; then
+    echo "git-dirty-guard: новая проблема ($type) — полный алерт" >&2
+    tg_alert "$full_msg"
+    printf 'version=1\ntype=%s\nsignature=%s\nfirst_alerted_at=%s\nlast_alerted_at=%s\n' \
+      "$type" "$signature" "$now" "$now" > "$state_file"
+    return 0
+  fi
+
+  local age_min=$(( (now - prev_last) / 60 ))
+  if [ "$age_min" -lt "$GIT_DIRTY_GUARD_ALERT_TTL_MIN" ]; then
+    echo "git-dirty-guard: та же проблема ($type), последний алерт ${age_min} мин назад (порог ${GIT_DIRTY_GUARD_ALERT_TTL_MIN} мин) — Telegram пропущен" >&2
+    return 0
+  fi
+
+  local total_h=$(( (now - prev_first) / 3600 ))
+  echo "git-dirty-guard: та же проблема ($type), эскалация после ${GIT_DIRTY_GUARD_ALERT_TTL_MIN} мин тишины" >&2
+  tg_alert "🚨 $REPO: всё ещё не исправлено (${total_h}ч с первого предупреждения). $cta"
+  printf 'version=1\ntype=%s\nsignature=%s\nfirst_alerted_at=%s\nlast_alerted_at=%s\n' \
+    "$type" "$signature" "$prev_first" "$now" > "$state_file"
 }
 
 cd "$REPO" 2>/dev/null || { echo "git-dirty-guard: cannot cd to $REPO" >&2; exit 2; }
-REPO="$(pwd)"
-if ! git_supports_no_lazy_fetch; then
-  echo "git-dirty-guard: Git 2.45+ is required to prevent implicit object downloads; refusing" >&2
+git rev-parse --is-inside-work-tree >/dev/null 2>&1 || { echo "git-dirty-guard: $REPO is not a git repo" >&2; exit 2; }
+
+GIT_DIR=$(git rev-parse --git-dir)
+
+# A repo mid-rebase/merge is a different, more serious class of problem (see
+# lessons_stale_rebase_merge_recovery.md) — resetting through it would compound the
+# mess, not clean it up. Bail out loudly and leave it for manual recovery.
+if [ -d "$GIT_DIR/rebase-merge" ] || [ -d "$GIT_DIR/rebase-apply" ] || [ -f "$GIT_DIR/MERGE_HEAD" ]; then
+  echo "git-dirty-guard: $REPO is mid-rebase/merge — refusing to touch, needs manual recovery" >&2
+  tg_alert "🚨 git-dirty-guard: $REPO застрял в rebase/merge — не тронул, нужно ручное восстановление."
   exit 1
 fi
-git rev-parse --is-inside-work-tree >/dev/null 2>&1 || {
-  echo "git-dirty-guard: $REPO is not a git repo" >&2
-  exit 2
-}
 
-[ -n "$BRANCH" ] || BRANCH=$(git symbolic-ref --quiet --short HEAD 2>/dev/null)
-if [ -z "$BRANCH" ] || ! git check-ref-format "refs/heads/$BRANCH" >/dev/null 2>&1; then
-  echo "git-dirty-guard: invalid or detached branch in $REPO, refusing" >&2
-  exit 2
-fi
-
-CURRENT_BRANCH=$(git symbolic-ref --quiet --short HEAD 2>/dev/null) || {
+[ -n "$BRANCH" ] || BRANCH=$(git rev-parse --abbrev-ref HEAD 2>/dev/null)
+if [ -z "$BRANCH" ] || [ "$BRANCH" = "HEAD" ]; then
   echo "git-dirty-guard: detached HEAD in $REPO, refusing" >&2
   exit 2
-}
-if [ "$CURRENT_BRANCH" != "$BRANCH" ]; then
-  echo "git-dirty-guard: checked-out branch is $CURRENT_BRANCH (expected $BRANCH), refusing" >&2
-  exit 1
 fi
 
-GIT_DIR=$(git rev-parse --absolute-git-dir)
-if repo_has_operation; then
-  echo "git-dirty-guard: $REPO is mid-operation -- refusing to touch" >&2
-  tg_alert "🚨 git-dirty-guard: $REPO застрял в git-операции — не тронул, нужно ручное восстановление."
-  exit 1
-fi
-
-# Serialize guard snapshots. This lock does not authorize mutation: ordinary editors
-# do not honor it, which is why automatic reset/self-heal is deliberately absent.
+# Serialize against a concurrent guard run on the same repo. DS-my-strategy is
+# deliberately excluded from the shared .iwe-git-ops.lock (see systemd-timers.nix
+# pullScript comment) so this gets its own lock, scoped to .git/. mkdir is used
+# instead of flock — atomic on POSIX and, unlike flock, available on macOS out of
+# the box (this guard runs on both the Mac and the Linux server).
+#
+# Stale-lock recovery (WP-484 Ф70): a killed caller (e.g. systemd's
+# TimeoutStartSec on a hung `git fetch`) cannot run the EXIT trap, so `mkdir`
+# alone left the lock permanently held -- every later call then hit the "busy"
+# branch and returned exit 0, which every caller reads as "clean, proceed",
+# turning the guard into an unconditional rubber stamp with no alert anywhere.
+# Same PID+hostname liveness check already used by ledger-append.sh's
+# mkdir-fallback lock: only reclaim a lock proven dead on THIS host; a live
+# owner, another host, or metadata not yet written is only waited out.
 LOCK_DIR="$GIT_DIR/dirty-guard.lock"
 LOCK_META="$LOCK_DIR/owner"
 HOSTNAME_NOW="${HOSTNAME:-$(hostname 2>/dev/null || echo unknown)}"
@@ -261,216 +147,168 @@ if ! mkdir "$LOCK_DIR" 2>/dev/null; then
   if [ -f "$LOCK_META" ]; then
     OTHER_HOST=$(awk -F= '$1=="host"{print $2}' "$LOCK_META" 2>/dev/null)
     OTHER_PID=$(awk -F= '$1=="pid"{print $2}' "$LOCK_META" 2>/dev/null)
-    if [ "$OTHER_HOST" = "$HOSTNAME_NOW" ] && [ -n "$OTHER_PID" ] \
-      && ! kill -0 "$OTHER_PID" 2>/dev/null; then
-      echo "git-dirty-guard: reclaiming stale lock (pid=$OTHER_PID on $OTHER_HOST)" >&2
+    if [ "$OTHER_HOST" = "$HOSTNAME_NOW" ] && [ -n "$OTHER_PID" ] && ! kill -0 "$OTHER_PID" 2>/dev/null; then
+      echo "git-dirty-guard: reclaiming stale lock (pid=$OTHER_PID on $OTHER_HOST no longer running)" >&2
       rm -rf "$LOCK_DIR" 2>/dev/null
     fi
   fi
   if ! mkdir "$LOCK_DIR" 2>/dev/null; then
-    echo "git-dirty-guard: lock busy (live owner or unproven), refusing" >&2
+    echo "git-dirty-guard: lock busy (live owner or unproven), skipping" >&2
+    # A caller that proceeds after this result can rebase while another guard
+    # is still deciding whether the worktree is safe. Lock contention is a
+    # fail-closed condition, not a clean result.
     exit 1
   fi
 fi
 echo "host=$HOSTNAME_NOW" > "$LOCK_META"
 echo "pid=$$" >> "$LOCK_META"
-STATUS_FILE=""
-# shellcheck disable=SC2329  # invoked by the EXIT trap
-release_guard_lock() {
-  local owner_host owner_pid
-  owner_host=$(awk -F= '$1=="host"{print $2}' "$LOCK_META" 2>/dev/null)
-  owner_pid=$(awk -F= '$1=="pid"{print $2}' "$LOCK_META" 2>/dev/null)
-  if [ "$owner_host" = "$HOSTNAME_NOW" ] && [ "$owner_pid" = "$$" ]; then
-    rm -rf "$LOCK_DIR" 2>/dev/null
-  fi
-}
-# shellcheck disable=SC2329  # invoked by the EXIT trap
-cleanup_guard() {
-  [ -z "$STATUS_FILE" ] || rm -f "$STATUS_FILE" 2>/dev/null
-  release_guard_lock
-}
-trap cleanup_guard EXIT
+trap 'rm -rf "$LOCK_DIR" 2>/dev/null' EXIT
 
-if ! query_origin; then
-  echo "git-dirty-guard: remote query failed or timed out -- remote state unavailable" >&2
-  if is_true "$GIT_DIRTY_GUARD_REQUIRE_FETCH" \
-    || is_true "$GIT_DIRTY_GUARD_REMOTE_OID_OUTPUT" \
-    || [ -n "$GIT_DIRTY_GUARD_FETCH_DEST_REF" ]; then
-    exit 1
-  fi
-  REMOTE_STATE_AVAILABLE=false
+if ! git fetch origin "$BRANCH" --quiet 2>/dev/null; then
+  echo "git-dirty-guard: fetch failed (offline?) — nothing to check"
+  exit 0
 fi
 
-SNAPSHOT_HEAD=$(git rev-parse HEAD 2>/dev/null) || exit 1
-if [ "$(git symbolic-ref --quiet --short HEAD 2>/dev/null)" != "$BRANCH" ] \
-  || repo_has_operation; then
-  echo "git-dirty-guard: repo changed during remote query -- refusing" >&2
-  exit 1
+if ! git show-ref --verify --quiet "refs/remotes/origin/$BRANCH"; then
+  echo "git-dirty-guard: no origin/$BRANCH — nothing to check"
+  exit 0
 fi
 
-# Collect tracked dirty paths (staged or unstaged). Untracked files are allowed:
-# the guard never removes them, and they can be legitimate new work.
+# Collect tracked dirty paths (staged or unstaged). Untracked (`??`) is skipped on
+# purpose — reset --hard never removes it, and treating it as dirty-to-heal would risk
+# discarding genuinely new work.
 TRACKED_DIRTY=()
-STATUS_FILE=$(mktemp "${TMPDIR:-/tmp}/git-dirty-guard-status.XXXXXX") || {
-  echo "git-dirty-guard: cannot allocate status snapshot" >&2
-  exit 1
-}
-if ! git status --porcelain=v2 --branch -z --untracked-files=no > "$STATUS_FILE"; then
-  echo "git-dirty-guard: git status failed -- refusing" >&2
-  exit 1
-fi
-STATUS_OID=""
-STATUS_BRANCH=""
-STATUS_PARSE_OK=true
 while IFS= read -r -d '' entry; do
-  case "$entry" in
-    "# branch.oid "*)
-      if [ -n "$STATUS_OID" ]; then
-        STATUS_PARSE_OK=false
-        break
-      fi
-      STATUS_OID="${entry#\# branch.oid }"
-      ;;
-    "# branch.head "*)
-      if [ -n "$STATUS_BRANCH" ]; then
-        STATUS_PARSE_OK=false
-        break
-      fi
-      STATUS_BRANCH="${entry#\# branch.head }"
-      ;;
-    "# "*) ;;
-    "1 "*|"2 "*|"u "*)
-      rest="$entry"
-      case "$entry" in
-        "1 "*) field_count=8 ;;
-        "2 "*) field_count=9 ;;
-        *) field_count=10 ;;
-      esac
-      while [ "$field_count" -gt 0 ]; do
-        case "$rest" in
-          *' '*) rest="${rest#* }" ;;
-          *) STATUS_PARSE_OK=false; break ;;
-        esac
-        field_count=$((field_count - 1))
-      done
-      [ "$STATUS_PARSE_OK" = true ] || break
-      if [[ "$entry" == "2 "* ]]; then
-        if ! IFS= read -r -d '' _origpath; then
-          STATUS_PARSE_OK=false
-          break
-        fi
-      fi
+  status="${entry:0:2}"
+  rest="${entry:3}"
+  case "$status" in
+    "??") continue ;;
+    R*|C*)
+      # -z emits "new\0old\0" for renames/copies — `rest` is already the current
+      # (destination) path, the one worth diffing against origin. Consume and
+      # discard the second field (the pre-rename source path).
+      IFS= read -r -d '' _origpath
       TRACKED_DIRTY+=("$rest")
       ;;
-    "? "*|"! "*) ;;
     *)
-      STATUS_PARSE_OK=false
-      break
+      TRACKED_DIRTY+=("$rest")
       ;;
   esac
-done < "$STATUS_FILE"
-rm -f "$STATUS_FILE"
-STATUS_FILE=""
-
-if [ "$STATUS_PARSE_OK" != true ] \
-  || [ "$STATUS_OID" != "$SNAPSHOT_HEAD" ] \
-  || [ "$STATUS_BRANCH" != "$BRANCH" ] \
-  || [ "$(git symbolic-ref --quiet --short HEAD 2>/dev/null)" != "$BRANCH" ] \
-  || [ "$(git rev-parse HEAD 2>/dev/null)" != "$SNAPSHOT_HEAD" ] \
-  || repo_has_operation; then
-  echo "git-dirty-guard: repo changed during inspection -- refusing" >&2
-  exit 1
-fi
-
-clean_snapshot_is_stable() {
-  local entry snapshot_oid="" snapshot_branch=""
-  local seen_oid=0 seen_branch=0 snapshot_clean=true
-  ! repo_has_operation || return 1
-  STATUS_FILE=$(mktemp "${TMPDIR:-/tmp}/git-dirty-guard-clean-status.XXXXXX") || return 1
-  if ! git status --porcelain=v2 --branch -z --untracked-files=no > "$STATUS_FILE"; then
-    rm -f "$STATUS_FILE"
-    STATUS_FILE=""
-    return 1
-  fi
-  ! repo_has_operation || return 1
-  while IFS= read -r -d '' entry || [ -n "$entry" ]; do
-    case "$entry" in
-      "# branch.oid "*)
-        if [ "$seen_oid" -ne 0 ]; then
-          snapshot_clean=false
-          break
-        fi
-        snapshot_oid="${entry#\# branch.oid }"
-        seen_oid=1
-        ;;
-      "# branch.head "*)
-        if [ "$seen_branch" -ne 0 ]; then
-          snapshot_clean=false
-          break
-        fi
-        snapshot_branch="${entry#\# branch.head }"
-        seen_branch=1
-        ;;
-      "# "*) ;;
-      "? "*|"! "*) ;;
-      *)
-        snapshot_clean=false
-        break
-        ;;
-    esac
-  done < "$STATUS_FILE"
-  rm -f "$STATUS_FILE"
-  STATUS_FILE=""
-  [ "$snapshot_clean" = true ] \
-    && [ "$seen_oid" -eq 1 ] \
-    && [ "$seen_branch" -eq 1 ] \
-    && [ "$snapshot_oid" = "$SNAPSHOT_HEAD" ] \
-    && [ "$snapshot_branch" = "$BRANCH" ] \
-    && git diff --cached --quiet "$SNAPSHOT_HEAD" -- \
-    && [ "$(git symbolic-ref --quiet --short HEAD 2>/dev/null)" = "$BRANCH" ] \
-    && [ "$(git rev-parse HEAD 2>/dev/null)" = "$SNAPSHOT_HEAD" ] \
-    && ! repo_has_operation
-}
+done < <(git status --porcelain -z)
 
 if [ "${#TRACKED_DIRTY[@]}" -eq 0 ]; then
-  # A second full status observation catches a worktree edit that lands after
-  # the path-collecting snapshot. The explicit cached comparison independently
-  # rejects a clean status assembled across a HEAD/index ABA transition.
-  if ! clean_snapshot_is_stable; then
-    echo "git-dirty-guard: tracked state changed during inspection -- refusing" >&2
-    exit 1
-  fi
-  if is_true "$GIT_DIRTY_GUARD_REMOTE_OID_OUTPUT"; then
-    printf '%s\n' "$REMOTE_OID"
-  else
-    echo "git-dirty-guard: clean (or untracked-only) -- safe to inspect"
-  fi
+  echo "git-dirty-guard: clean (or untracked-only) — nothing to heal"
+  alert_state_clear
   exit 0
 fi
 
 DIFFERING=()
 for f in "${TRACKED_DIRTY[@]}"; do
-  if [ "$REMOTE_STATE_AVAILABLE" != "true" ]; then
-    DIFFERING+=("$f")
-    continue
-  fi
-  # Both layers must match the queried tree when that object exists locally.
-  # Compare index→remote and worktree→index without an optional index refresh/write.
-  if ! git diff --cached --quiet "$COMPARE_REF" -- "$f" 2>/dev/null \
-    || ! git diff-files --quiet -- "$f" 2>/dev/null; then
+  if ! git diff --quiet "origin/$BRANCH" -- "$f" 2>/dev/null; then
     DIFFERING+=("$f")
   fi
 done
 
-if [ "${#DIFFERING[@]}" -eq 0 ]; then
-  echo "git-dirty-guard: ${#TRACKED_DIRTY[@]} tracked file(s) match origin/$BRANCH, but automatic self-heal is disabled to protect concurrent work" >&2
-  tg_alert "🚨 git-dirty-guard: $REPO — найден устаревший зеркальный слой; автоматический reset отключён, нужна эксклюзивная ручная очистка."
+# WP-484 Ф141 (2026-08-28, peer-session with Kimi+Codex; cold-review found 2
+# Critical in the first pass, both fixed here): commit-push.sh's own lock
+# (DS_COMMIT_LOCK_FILE) guards its commit phase but this guard's ancestry
+# check below has no way to see it — a commit landing between the ancestry
+# check and the reset raced straight through and got rolled back (live
+# incident 2026-08-25, recovered by hand via cherry-pick). Reusing
+# commit-push.sh's own lock file (same default resolution: IWE_ROOT falls back
+# to $HOME/IWE exactly like commit-push.sh does) closes that window instead of
+# adding a second, uncoordinated lock.
+#
+# Fixed FD (8), not `exec {VAR}>...`: this repo's callers invoke this guard
+# via bare `bash "$GUARD" ...` (iwe-safe-pull.sh, day-open-pipeline.sh,
+# week-open-day-section-patch.sh), so the interpreter is whatever `bash`
+# resolves to in the CALLER's PATH — on this machine most launchd jobs still
+# resolve to macOS's bundled bash 3.2, and the `{fd}>` dynamic-fd form is a
+# bash 4.1+ feature. Under 3.2 it's not a soft failure caught by `if`, it's a
+# parse-time abort of the whole script (same bash-3.2-on-macOS class already
+# called out in session-guard.sh's own comments) — the exact self-heal path
+# this file exists for would go dark on every scheduled run.
+#
+# `command -v flock` checked explicitly: without it, a missing `flock` binary
+# (already a recurring failure mode elsewhere in this codebase — see
+# ledger-append.sh's own guard for the same binary) returns 127, which
+# `! flock ...` cannot tell apart from "lock genuinely held" — self-heal would
+# silently and permanently disable itself instead of degrading loudly.
+#
+# Busy lock -> exit 1, not 0: the file's own contract above says 0 means
+# "clean, or safely self-healed" — a skipped cycle leaves the tree exactly as
+# dirty as it started, so callers (iwe-safe-pull.sh etc.) must see the same
+# "do not pull this round" signal as the real-uncommitted-work case, not a
+# false "proceed".
+#
+# Gated on is_ds_repo_by_origin (round-2 cold-review, WP-484 Ф141): this guard
+# runs against ANY repo (iwe-safe-pull.sh's Pull-on-Touch calls it for
+# whatever repo a session first touches), but DS_COMMIT_LOCK_FILE is only ever
+# taken by commit-push.sh for DS-my-strategy itself
+# (commit-push.sh:_acquire_commit_lock, same is_ds_repo_by_origin gate) —
+# without this check, a commit landing in DS-my-strategy would make an
+# unrelated repo's self-heal falsely defer with a misleading "commit-push
+# держит блокировку" message. Missing publish-gate.sh (non-DS-my-strategy
+# checkout of this repo, or a template install without it) -> skip the whole
+# lock dance, same as before this phase.
+DS_COMMIT_LOCK_FILE="${DS_COMMIT_LOCK_FILE:-${IWE_ROOT:-$HOME/IWE}/.claude/state/ds-commit.lock}"
+PUBLISH_GATE_LIB="${IWE_ROOT:-$HOME/IWE}/DS-my-strategy/scripts/lib/publish-gate.sh"
+if [ -f "$PUBLISH_GATE_LIB" ] && . "$PUBLISH_GATE_LIB" && is_ds_repo_by_origin "$REPO"; then
+  if ! command -v flock >/dev/null 2>&1; then
+    echo "git-dirty-guard: flock недоступен — продолжаю без блокировки коммит-скрипта" >&2
+  elif [ ! -d "$(dirname "$DS_COMMIT_LOCK_FILE")" ]; then
+    echo "git-dirty-guard: каталог для $DS_COMMIT_LOCK_FILE не существует — продолжаю без блокировки" >&2
+  elif exec 8>"$DS_COMMIT_LOCK_FILE" 2>/dev/null; then
+    if ! flock -n 8; then
+      echo "git-dirty-guard: commit-push держит блокировку записи — self-heal отложен до следующего цикла, дерево остаётся как есть" >&2
+      exit 1
+    fi
+  else
+    echo "git-dirty-guard: lock-файл $DS_COMMIT_LOCK_FILE недоступен — продолжаю без блокировки" >&2
+  fi
+fi
+
+# Cold-review finding (2026-07-19), confirmed live: dirty-file content matching origin is
+# NOT sufficient to make `git reset --hard` safe. Reset also moves the branch ref itself,
+# so an unpushed local commit — the exact call pattern strategist.sh routes through this
+# guard for — gets silently orphaned (and any file unique to it deleted) even though every
+# currently-dirty file happened to be a harmless stale mirror. Ancestry, not dirty-file
+# content, is the real safety condition for a hard reset.
+UNPUSHED=false
+git merge-base --is-ancestor HEAD "origin/$BRANCH" 2>/dev/null || UNPUSHED=true
+
+if [ "${#DIFFERING[@]}" -eq 0 ] && [ "$UNPUSHED" = "false" ]; then
+  echo "git-dirty-guard: ${#TRACKED_DIRTY[@]} dirty file(s), all byte-identical to origin/$BRANCH — stale mirror, self-healing"
+  git reset --hard "origin/$BRANCH" >/dev/null
+  tg_alert "🩹 git-dirty-guard: $REPO самовосстановился (${#TRACKED_DIRTY[@]} устаревших файлов сброшено на origin/$BRANCH, содержимое не менялось)."
+  alert_state_clear
+  exit 0
+fi
+
+if [ "$UNPUSHED" = "true" ]; then
+  echo "git-dirty-guard: HEAD has commit(s) origin/$BRANCH doesn't have — self-heal would orphan them, not touching" >&2
+  # Signature = merge-base + ahead-count, not HEAD SHA (Codex, ход 5): amend/
+  # rebase changes HEAD's SHA without changing the underlying problem (branch
+  # still unpushed past the same base) — a raw-SHA signature would treat every
+  # amend as a brand-new alert. Falls back to HEAD if merge-base can't resolve
+  # (e.g. shallow clone with no common ancestor yet).
+  MERGE_BASE=$(git merge-base HEAD "origin/$BRANCH" 2>/dev/null) || MERGE_BASE="$(git rev-parse HEAD)"
+  AHEAD_COUNT=$(git rev-list --count "origin/$BRANCH..HEAD" 2>/dev/null || echo '?')
+  alert_dedup_send unpushed "${MERGE_BASE}|${AHEAD_COUNT}" \
+    "🚨 git-dirty-guard: $REPO — есть незапушенные коммиты, self-heal пропущен (не тронул). Нужен pull/push вручную." \
+    "Есть незапушенные коммиты — зайди и выполни: git -C $REPO push (или pull --rebase, если push отклонён)"
   exit 1
 fi
 
-echo "git-dirty-guard: ${#DIFFERING[@]} tracked file(s) differ from origin/$BRANCH -- not touching:" >&2
+echo "git-dirty-guard: ${#DIFFERING[@]} file(s) genuinely differ from origin/$BRANCH — NOT touching, real work present:" >&2
 printf '  %s\n' "${DIFFERING[@]}" >&2
 LIST=$(printf '%s, ' "${DIFFERING[@]:0:5}")
 LIST="${LIST%, }"
-tg_alert "🚨 git-dirty-guard: $REPO — ${#DIFFERING[@]} файл(ов) с несохранёнными правками (не тронул): $LIST."
+# Signature = status+path per file (Codex, ход 5), not path alone — a file that
+# changes shape (e.g. modified → modified-and-staged) while staying in
+# DIFFERING is still worth a fresh look, not silent dedup against the old shape.
+DIFFERING_SIG=$(git status --porcelain -- "${DIFFERING[@]}" 2>/dev/null | sort | tr '\n' ';')
+alert_dedup_send differ "$DIFFERING_SIG" \
+  "🚨 git-dirty-guard: $REPO — ${#DIFFERING[@]} файл(ов) с реальными несохранёнными правками (не тронул): $LIST. Pull пропущен, нужна ручная проверка." \
+  "Реальные несохранённые правки — зайди и посмотри: git -C $REPO status; закоммить или отложить (git stash)"
 exit 1
