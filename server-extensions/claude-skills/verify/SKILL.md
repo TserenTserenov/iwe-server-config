@@ -359,6 +359,15 @@ Sub-agent возвращает verdict:
 
 ## Шаг 4. Показать пользователю
 
+Verdict ∈ {PASS, FAIL, CONDITIONAL} (НЕ NOT_VERIFIABLE — это «проверка не
+операционализирована», не факт независимой проверки) → факт М13 (WP-522 §М,
+пир-сессия 2026-08-31-30): вызвать писателя, best-effort, ДО вывода пользователю:
+```bash
+python3 "${IWE_SCRIPTS:-$HOME/IWE/DS-my-strategy/scripts}/post-culture-fact.py" \
+  --element M13 --mode record --evidence "verdict: <PASS|FAIL|CONDITIONAL> — <артефакт>" \
+  >/dev/null 2>>"${IWE_RUNTIME:-$HOME/IWE/.iwe-runtime}/culture-fact-errors.log" || true
+```
+
 Вывести verdict. Пользователь решает:
 - **Принять** → продолжить работу
 - **Исправить** → внести изменения по рекомендациям

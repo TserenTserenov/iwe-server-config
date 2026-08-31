@@ -316,6 +316,14 @@ Pack-реестры обычно в:
 **Паттерн (для R2):** <pattern>
 ```
 
+Запись успешна → факт М9 (WP-522 §М, пир-сессия 2026-08-31-30): вызвать писателя,
+best-effort:
+```bash
+python3 "${IWE_SCRIPTS:-$HOME/IWE/DS-my-strategy/scripts}/post-culture-fact.py" \
+  --element M9 --mode record --evidence "<id> из <filename>" \
+  >/dev/null 2>>"${IWE_RUNTIME:-$HOME/IWE/.iwe-runtime}/culture-fact-errors.log" || true
+```
+
 ### 5г. Коммит
 
 ```bash
@@ -323,6 +331,11 @@ git add <target_path> [MAP если был] && git commit -m "feat(KE apply): <i
 ```
 
 Репо для коммита: то же, что `target_path` (PACK-digital-platform, PACK-personal и т.д.)
+
+Коммит успешен → факт М9 (тот же вызов, что 5в — per-кандидат, не один раз на весь
+отчёт; `--evidence "<id> из <filename>"`). Только для accept и reject с
+`decision_source: pilot` — не для defer (WP-522 §М, критерий «решение в базу / не в
+базу», defer — ни то ни другое).
 
 ### Шаг 6. Обновить status отчёта
 
