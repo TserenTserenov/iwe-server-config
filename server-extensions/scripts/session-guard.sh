@@ -1749,7 +1749,7 @@ EOF
 fi
 
 # --- helpers for ORZ validation ---
-validate_orz() { # <orz-path> <agent> [orz-base-dir, default $ORZ_DIR]
+validate_orz() { # <orz-path> <agent> [orz-base-dir, default $ORZ_DIR] [tracked-set-file, optional]
   local orz="$1"
   local agent="$2"
   # WP-520 (14.08, found live closing a worktree session): the git-tracked
@@ -1761,6 +1761,7 @@ validate_orz() { # <orz-path> <agent> [orz-base-dir, default $ORZ_DIR]
   # has no worktree concept (scans the whole canonical tree), so it keeps
   # relying on the default.
   local orz_base_dir="${3:-$ORZ_DIR}"
+  local tracked_set_file="${4:-}"
   local errors=0
 
   # 1. file exists
@@ -1800,8 +1801,25 @@ validate_orz() { # <orz-path> <agent> [orz-base-dir, default $ORZ_DIR]
 
   # 5. git tracked
   local rel
-  rel="$(python3 -c "import os,sys; print(os.path.relpath(sys.argv[2], sys.argv[3]))" -- "$orz" "$orz_base_dir")"
-  if ! git -C "$orz_base_dir" ls-files --error-unmatch "$rel" >/dev/null 2>&1; then
+  local is_tracked=1
+  if [ -n "$tracked_set_file" ] && [ -s "$tracked_set_file" ]; then
+    # Batch path (audit section 3, WP-484 line AC): one `git ls-files` call up
+    # front instead of one `git ls-files --error-unmatch` per file, AND skip
+    # the python3 relpath subprocess too -- measured live 31.08 (peer-session
+    # with Kimi+Codex) that with the git call removed, python3 startup
+    # (~30-40ms) was the larger remaining per-file cost against ~3771 files
+    # in MC-sessions, not the grep lookup itself. Safe to inline here because
+    # this call site's `orz` always comes from `find "$ORZ_DIR" ...`, so it is
+    # always a literal `$orz_base_dir/...` path; the general fallback below
+    # (other callers) keeps os.path.relpath, which also covers the
+    # non-prefixed cases it was added for (WP-520 case 8).
+    rel="${orz#"$orz_base_dir"/}"
+    grep -qxF "$rel" "$tracked_set_file" && is_tracked=0
+  else
+    rel="$(python3 -c "import os,sys; print(os.path.relpath(sys.argv[2], sys.argv[3]))" -- "$orz" "$orz_base_dir")"
+    git -C "$orz_base_dir" ls-files --error-unmatch "$rel" >/dev/null 2>&1 && is_tracked=0
+  fi
+  if [ "$is_tracked" -ne 0 ]; then
     # WP-520 case 8 (11.08, peer session with Kimi): a session whose commit went
     # to main through an isolated worktree cannot stage the file in the live
     # checkout (busy on a foreign branch) -- session-guard-release inside the
@@ -3020,15 +3038,21 @@ if [ "$CMD" = "audit" ]; then
 
   # 3. ORZ-файлы с невалидным frontmatter/секциями
   echo "ORZ-файлы с дефектами (после $SINCE):"
+  # WP-484 line AC (31.08, peer-session with Kimi+Codex): one `git ls-files`
+  # for the whole tree instead of one per file inside validate_orz -- see the
+  # comment at its "git tracked" check for the measured cost this replaces.
+  AUDIT_TRACKED_SET=$(mktemp)
+  git -C "$ORZ_DIR" ls-files > "$AUDIT_TRACKED_SET" 2>/dev/null
   find "$ORZ_DIR" -maxdepth 2 -mindepth 2 -name '*.md' -type f ! -name '00-index.md' -newermt "$SINCE" 2>/dev/null | while read -r orz; do
     tmp_errors=$(mktemp)
     orz_agent=$(grep -E "^agent:" "$orz" | sed 's/^agent: *//' | head -1 || true)
-    if ! validate_orz "$orz" "${orz_agent:-unknown}" >"$tmp_errors" 2>&1 && [ -s "$tmp_errors" ]; then
+    if ! validate_orz "$orz" "${orz_agent:-unknown}" "$ORZ_DIR" "$AUDIT_TRACKED_SET" >"$tmp_errors" 2>&1 && [ -s "$tmp_errors" ]; then
       echo "  $(basename "$orz"):"
       sed 's/^/    /' "$tmp_errors"
     fi
     rm -f "$tmp_errors"
   done
+  rm -f "$AUDIT_TRACKED_SET"
   echo
 
   # 4. Untracked ORZ-файлы

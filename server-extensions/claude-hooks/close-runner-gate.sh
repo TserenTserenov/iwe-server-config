@@ -69,9 +69,64 @@ SESSION_ID_SAFE=$(printf '%s' "$SESSION_ID" | tr -cd 'A-Za-z0-9._-')
 # kimi/codex/hermes) is not known here, and this hook only ever runs under
 # claude-code's own PreToolUse anyway (harness_session_id is unique per host
 # session regardless of which semaphore file it ended up in).
-CLOSE_PATH_MATCH=$(grep -l "harness_session_id: $SESSION_ID" \
-  "$IWE_ROOT"/.iwe-runtime/sessions/*.open 2>/dev/null | head -1)
-if [ -n "$CLOSE_PATH_MATCH" ] && grep -q '^close_path: peer-session$' "$CLOSE_PATH_MATCH" 2>/dev/null; then
+#
+# bug-2026-08-31 (найдено cold-review, тот же класс дефекта, что чинили в
+# close_obligation.py::_is_peer_session_close_path() в тот же день, пир-сессия
+# 2026-08-31-37 с Codex+Kimi): смотрели только "*.open" и брали первый файл в
+# порядке glob() -- этот порядок лексикографический (не связан со свежестью
+# семафора), см. регрессию в тестах -- session-guard.sh close переименовывает
+# семафор "<id>.open" -> "<id>.open.closed" при штатном закрытии, поэтому ровно
+# в момент штатного закрытия дочерней пир-сессии гейт переставал видеть её
+# признак. Один harness_session_id (постоянный на весь CLI-процесс,
+# session-guard.sh:1630) может встретиться на нескольких семафорах подряд за
+# долгую сессию -- значит нужен не "любой первый", а самый свежий кандидат
+# среди ОБОИХ состояний по (opened_at/created_at, filename), с точным
+# совпадением поля harness_session_id (не подстрокой). Реализовано через
+# python3-хелпер (тот же приём, что уже используется в этом файле ниже для
+# NONCE-подстановки) -- в bash это была бы либо хрупкая сортировка через awk,
+# либо повторный проход циклом; один python3-вызов читает каждый файл ровно
+# один раз и печатает "MATCH" только если выбранный (freshest) кандидат несёт
+# close_path: peer-session.
+CLOSE_PATH_MATCH=$(python3 - "$IWE_ROOT/.iwe-runtime/sessions" "$SESSION_ID" <<'PYEOF'
+import sys, glob, os
+
+def field(text, name):
+    prefix = name + ": "
+    for line in text.splitlines():
+        if line.startswith(prefix):
+            return line[len(prefix):]
+    return None
+
+sessions_dir, session_id = sys.argv[1], sys.argv[2]
+candidates = glob.glob(os.path.join(sessions_dir, "*.open")) + \
+             glob.glob(os.path.join(sessions_dir, "*.open.closed"))
+best_key = None
+best_text = None
+for path in candidates:
+    try:
+        with open(path, encoding="utf-8") as f:
+            text = f.read()
+    except (OSError, UnicodeDecodeError):
+        # UnicodeDecodeError не подкласс OSError -- битый/частично записанный
+        # семафор не должен ронять весь гейт, только пропускается как нечитаемый
+        # (тот же контракт, что close_obligation.py:566-570).
+        continue
+    if field(text, "harness_session_id") != session_id:
+        continue
+    ts = field(text, "opened_at") or field(text, "created_at")
+    if ts is None:
+        # Кандидат без timestamp не может быть признан "самым свежим" --
+        # fail-closed: просто не участвует в выборе (не становится default-
+        # победителем при отсутствии других кандидатов).
+        continue
+    key = (ts, os.path.basename(path))
+    if best_key is None or key > best_key:
+        best_key, best_text = key, text
+if best_text is not None and "close_path: peer-session" in best_text.splitlines():
+    print("MATCH")
+PYEOF
+)
+if [ "$CLOSE_PATH_MATCH" = "MATCH" ]; then
   echo "[close-runner-gate] session=$SESSION_ID_SAFE close_path=peer-session — раннер не требуется, гейт пропускает" >&2
   exit 0
 fi
