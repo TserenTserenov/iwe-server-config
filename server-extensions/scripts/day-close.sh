@@ -142,6 +142,14 @@ PYEOF
   # связи не роняет Day Close и не оставляет там частично записанный файл.
   # Направление всегда Мак -> tsekh-1 (hostname-гвард не даёт tsekh-1 пушить самому
   # себе, если Day Close когда-нибудь выполнится там же).
+  #
+  # Собственность (закрыто 31.08, РП-526): Мак — единственный источник истины для
+  # этого файла. Проверено: на tsekh-1 do_backup() (и вся эта функция) НИКОГДА не
+  # запускается сама по себе — там стоит только сторож-таймер
+  # iwe-day-close-watchdog.timer, который лишь ПРОВЕРЯЕТ, что Day Close прошёл на
+  # Маке (dead man's switch, тревога при отсутствии), не запускает его локально.
+  # Значит tsekh-1 физически не может независимо изменить свою копию —
+  # hostname-гвард ниже уже достаточная защита, конфликта версий не бывает.
   if [ -f "$rhythm_dst" ] && [ "$(hostname -s)" != "tsekh-1" ]; then
     if python3 -c "import sys, yaml; yaml.safe_load(open(sys.argv[1]))" "$rhythm_dst" 2>/dev/null; then
       local ssh_opts=(-o BatchMode=yes -o ConnectTimeout=5 -o ServerAliveInterval=5 -o ServerAliveCountMax=2)

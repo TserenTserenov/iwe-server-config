@@ -170,5 +170,57 @@ write_semaphore "peer-session" "claude-code-sess-abc-longer.open" "sess-abc-long
 expect "prefix session_id must not false-match: still blocks" \
   2 'git commit -m x' sess-abc
 
+# === Сценарий 15 (bug-2026-08-31-close-runner-gate-owner-session-id-null-under-
+# peer-session, живой прогон в этой же сессии): "process-runner.py start
+# quick-close" из сессии с close_path=peer-session ДОЛЖЕН по-прежнему получить
+# harness-session mapping -- эта запись раньше делалась в блоке НИЖЕ прежнего
+# места exit-on-match, и потому peer-session-сессии, которые реально зовут
+# раннер (а не только close_obligation.py cancel --action close-override),
+# получали owner_session_id: null на карточке прогона. Живой репрод в
+# продакшене: три подряд запуска process-runner.py start quick-close из
+# session_id e287e028-c78d-42da-bf47-0525cafae86a (у которой был открыт
+# close_path=peer-session семафор) все получили owner_session_id null --
+# CLOSE_PATH_MATCH выходил exit 0 до того, как код успевал записать mapping.
+# Проверяем НАБЛЮДАЕМЫЙ эффект (файл на диске), не просто "не упало".
+arm sess-mapping
+write_semaphore "peer-session" "claude-code-sess-mapping.open" "sess-mapping"
+MAPPING_SLUG="peer-session-mapping-check"
+MAPPING_FILE="$IWE_ROOT_TEST/.iwe-runtime/quick-close-harness-session/quick-close-$MAPPING_SLUG.session_id"
+rm -f "$MAPPING_FILE"
+expect "peer-session quick-close start: still allowed (not a git commit/push)" \
+  0 "python3 scripts/process-runner.py start quick-close --slug $MAPPING_SLUG --input '{}'" sess-mapping
+if [ -f "$MAPPING_FILE" ] && [ "$(cat "$MAPPING_FILE")" = "sess-mapping" ]; then
+  PASS=$((PASS+1))
+else
+  FAIL=$((FAIL+1))
+  echo "FAIL: peer-session quick-close start writes harness-session mapping (got: $([ -f "$MAPPING_FILE" ] && cat "$MAPPING_FILE" || echo '<file missing>'))"
+fi
+rm -f "$MAPPING_FILE"
+
+# === Сценарий 16 (Codex review, turn 1 of peer-session
+# 2026-08-31-47-close-runner-gate-order): same relocation, but with a
+# quick-close start command that carries NO recognizable --slug. The
+# bookkeeping block's own `if [ -n "$SLUG" ]` guards both the mapping write
+# and the ticket issuance -- neither runs -- so control falls through the
+# bookkeeping block's closing `fi` to the relocated CLOSE_PATH_MATCH check
+# below it. Two things must both hold: (a) the call is still allowed (exit 0,
+# it is not a git commit/push, and even if it were, the peer-session exemption
+# now applies at this exact point), and (b) no mapping file gets written for
+# ANY slug -- nothing to key it on. This closes the branch Codex asked to see
+# covered by an assertion, not just by manual code reading.
+arm sess-no-slug
+write_semaphore "peer-session" "claude-code-sess-no-slug.open" "sess-no-slug"
+HARNESS_MAP_DIR_TEST="$IWE_ROOT_TEST/.iwe-runtime/quick-close-harness-session"
+rm -rf "$HARNESS_MAP_DIR_TEST"
+expect "peer-session quick-close start without --slug: still allowed" \
+  0 'python3 scripts/process-runner.py start quick-close --input "{}"' sess-no-slug
+if [ ! -d "$HARNESS_MAP_DIR_TEST" ] || [ -z "$(ls -A "$HARNESS_MAP_DIR_TEST" 2>/dev/null)" ]; then
+  PASS=$((PASS+1))
+else
+  FAIL=$((FAIL+1))
+  echo "FAIL: quick-close start without --slug must not write any harness-session mapping (found: $(ls -A "$HARNESS_MAP_DIR_TEST" 2>/dev/null))"
+fi
+rm -rf "$HARNESS_MAP_DIR_TEST"
+
 echo "PASS=$PASS FAIL=$FAIL"
 [ "$FAIL" -eq 0 ]

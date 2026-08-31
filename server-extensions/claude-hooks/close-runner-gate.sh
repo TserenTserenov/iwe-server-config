@@ -143,10 +143,25 @@ if best_text is not None and "close_path: peer-session" in best_text.splitlines(
     print("MATCH")
 PYEOF
 )
-if [ "$CLOSE_PATH_MATCH" = "MATCH" ]; then
-  echo "[close-runner-gate] session=$SESSION_ID_SAFE close_path=peer-session — раннер не требуется, гейт пропускает" >&2
-  exit 0
-fi
+# NB (bug-2026-08-31-close-runner-gate-owner-session-id-null-under-peer-session,
+# live diagnostic same day): CLOSE_PATH_MATCH is deliberately NOT checked here
+# anymore. It used to `exit 0` at this point -- before the quick-close-start
+# bookkeeping block below ever ran. That silently skipped the harness-session
+# mapping write AND the close-ticket issuance for any "process-runner.py start
+# quick-close" invoked from a peer-session-flagged conversation, producing a
+# permanently null owner_session_id on the resulting card even though the
+# payload session_id resolved correctly. Confirmed live: three real
+# `process-runner.py start quick-close` calls from this exact session (which
+# carries a `close_path: peer-session` semaphore) all hit this exit before the
+# fallback added earlier today (CLAUDE_CODE_SESSION_ID) ever got a chance to
+# matter -- that fallback was fixing a real but unrelated defect, not this one.
+# The Ф118 exemption's actual intent (19.08) was narrower: let a peer-session
+# `git commit`/`git push` through without the runner-required block below,
+# because peer-sessions normally close via close_obligation.py
+# cancel/close-override, not via this runner. It was never meant to suppress
+# bookkeeping for a quick-close start that a peer-session DOES issue directly
+# (as happened here). CLOSE_PATH_MATCH is checked again further down, right
+# before the git-commit/push block it was actually written to exempt.
 
 RUNNER_MARKER_DIR="/tmp/iwe-close-runner-started"
 RUNNER_MARKER="$RUNNER_MARKER_DIR/$SESSION_ID_SAFE.flag"
@@ -224,6 +239,18 @@ sys.stdout.write(re.sub(r"(process-runner\.py\s+start\s+quick-close)", r"\1 --cl
       fi
     fi
   fi
+fi
+
+# WP-484 Ф118 (19.08) exemption, moved here from before the quick-close-start
+# bookkeeping block above (bug-2026-08-31-close-runner-gate-owner-session-id-
+# null-under-peer-session): a peer-session that declared its close_path in
+# advance has nothing left for THIS gate to check on a direct git commit/push
+# -- the runner is structurally not applicable to its close flow. That is
+# still true, but it must not also skip the bookkeeping above for a
+# quick-close start the peer-session issues directly (own bug, same day).
+if [ "$CLOSE_PATH_MATCH" = "MATCH" ]; then
+  echo "[close-runner-gate] session=$SESSION_ID_SAFE close_path=peer-session — раннер не требуется, гейт пропускает" >&2
+  exit 0
 fi
 
 # Применимо к блокировке только прямой git commit/push. process-runner.py сам
