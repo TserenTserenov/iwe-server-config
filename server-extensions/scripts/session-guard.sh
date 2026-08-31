@@ -62,7 +62,13 @@ set -euo pipefail
 IWE_ROOT="${IWE_ROOT:-$HOME/IWE}"
 # issue #266: hardcoded "DS-my-strategy" broke every template user whose
 # governance repo is named "DS-strategy" (the shipped default — see create-wp.sh).
-GOV_REPO="${IWE_GOVERNANCE_REPO:-DS-strategy}"
+# Fail-closed: no silent default for the governance repo. Any default here is
+# a liability -- a stale or wrong name causes silent failures in whatever
+# reads GOV_REPO downstream, and the caller has no signal that anything went
+# wrong (WP-484, peer-session 2026-08-30-28-night-cycle-hooks-fix: traced a
+# week of failing automated runs to exactly this -- callers that never set
+# the variable got a quietly wrong repo instead of an error).
+GOV_REPO="${IWE_GOVERNANCE_REPO:?IWE_ERROR: IWE_GOVERNANCE_REPO is required, no silent default}"
 SESSION_DIR="$IWE_ROOT/.iwe-runtime/sessions"
 # OPEN_LOG stays a stable local path -- 8+ readers across session-guard.sh's
 # own repo AND two foreign ones (DS-ai-systems/synchronizer, DS-MCP/
