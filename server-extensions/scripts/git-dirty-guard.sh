@@ -106,6 +106,50 @@ alert_dedup_send() {
     "$type" "$signature" "$prev_first" "$now" > "$state_file"
 }
 
+# WP-538, 01.09.2026 (прямой запрос пилота): "реальные несохранённые правки"
+# на активно используемых репозиториях (несколько параллельных сессий
+# постоянно что-то не успевают закоммитить) — обычное, не тревожное
+# состояние. Список конкретных файлов меняется почти на каждом прогоне,
+# поэтому alert_dedup_send выше (дедуп по точной сигнатуре) видит "новую
+# проблему" почти всегда и шлёт алерт заново. Здесь — отдельный, более
+# грубый счётчик: не по конкретному набору файлов, а по самому факту "этот
+# репозиторий не был полностью чистым уже N часов", не зависящий от того,
+# какие именно файлы виноваты сейчас. Не тревожим, пока это моложе суток —
+# считаем текущей работой; после суток — считаем забытой и алертим.
+GIT_DIRTY_GUARD_CHRONIC_HOURS="${GIT_DIRTY_GUARD_CHRONIC_HOURS:-24}"
+
+differ_clear_chronic() {
+  rm -f "$GIT_DIR/dirty-guard-chronic-since" 2>/dev/null || true
+}
+
+# differ_chronic_gate <full_msg> <cta> — как alert_dedup_send, но решение
+# "слать ли вообще" принимает не по сигнатуре набора файлов, а по возрасту
+# непрерывной "нечистоты" репозитория.
+differ_chronic_gate() {
+  local full_msg="$1" cta="$2"
+  local chronic_file="$GIT_DIR/dirty-guard-chronic-since"
+  local now dirty_since
+  now=$(date +%s)
+
+  if [ -f "$chronic_file" ]; then
+    dirty_since=$(cat "$chronic_file" 2>/dev/null)
+    [[ "$dirty_since" =~ ^[0-9]+$ ]] || dirty_since="$now"
+  else
+    dirty_since="$now"
+    printf '%s' "$now" > "$chronic_file" 2>/dev/null || true
+  fi
+
+  local age_h=$(( (now - dirty_since) / 3600 ))
+  if [ "$age_h" -lt "$GIT_DIRTY_GUARD_CHRONIC_HOURS" ]; then
+    echo "git-dirty-guard: реальные незакоммиченные правки, но моложе ${GIT_DIRTY_GUARD_CHRONIC_HOURS}ч (${age_h}ч) — не тревожим, только лог" >&2
+    return 0
+  fi
+
+  echo "git-dirty-guard: незакоммиченные правки держатся дольше ${GIT_DIRTY_GUARD_CHRONIC_HOURS}ч — считаю забытыми, алерт" >&2
+  alert_dedup_send differ-chronic "chronic-${dirty_since}" \
+    "${full_msg} (не решается уже ${age_h}ч)" "$cta"
+}
+
 cd "$REPO" 2>/dev/null || { echo "git-dirty-guard: cannot cd to $REPO" >&2; exit 2; }
 git rev-parse --is-inside-work-tree >/dev/null 2>&1 || { echo "git-dirty-guard: $REPO is not a git repo" >&2; exit 2; }
 
@@ -199,6 +243,7 @@ done < <(git status --porcelain -z)
 if [ "${#TRACKED_DIRTY[@]}" -eq 0 ]; then
   echo "git-dirty-guard: clean (or untracked-only) — nothing to heal"
   alert_state_clear
+  differ_clear_chronic
   exit 0
 fi
 
@@ -282,6 +327,11 @@ if [ "${#DIFFERING[@]}" -eq 0 ] && [ "$UNPUSHED" = "false" ]; then
   git reset --hard "origin/$BRANCH" >/dev/null
   tg_alert "🩹 git-dirty-guard: $REPO самовосстановился (${#TRACKED_DIRTY[@]} устаревших файлов сброшено на origin/$BRANCH, содержимое не менялось)."
   alert_state_clear
+  # differ уже пуст здесь по условию ветки — тот же "проблема решена" случай,
+  # что и полностью чистый репозиторий выше; без этого следующая genuine
+  # dirty-ситуация унаследует старую отметку времени и решит, что ей уже
+  # сутки, хотя она только что началась.
+  differ_clear_chronic
   exit 0
 fi
 
@@ -308,11 +358,13 @@ echo "git-dirty-guard: ${#DIFFERING[@]} file(s) genuinely differ from origin/$BR
 printf '  %s\n' "${DIFFERING[@]}" >&2
 LIST=$(printf '%s, ' "${DIFFERING[@]:0:5}")
 LIST="${LIST%, }"
-# Signature = status+path per file (Codex, ход 5), not path alone — a file that
-# changes shape (e.g. modified → modified-and-staged) while staying in
-# DIFFERING is still worth a fresh look, not silent dedup against the old shape.
-DIFFERING_SIG=$(git status --porcelain -- "${DIFFERING[@]}" 2>/dev/null | sort | tr '\n' ';')
-alert_dedup_send differ "$DIFFERING_SIG" \
+# WP-538, 01.09.2026: раньше здесь была сигнатура по точному набору файлов
+# (status+path каждого) — но на активно используемом репозитории этот набор
+# меняется почти на каждом прогоне, из-за чего alert_dedup_send видел
+# "новую проблему" почти всегда и слал алерт заново каждый раз. Теперь —
+# differ_chronic_gate: не по конкретным файлам, а по тому, сколько часов
+# репозиторий вообще остаётся не полностью чистым (см. определение выше).
+differ_chronic_gate \
   "🚨 git-dirty-guard: $REPO — ${#DIFFERING[@]} файл(ов) с реальными несохранёнными правками (не тронул): $LIST. Pull пропущен, нужна ручная проверка." \
   "Реальные несохранённые правки — зайди и посмотри: git -C $REPO status; закоммить или отложить (git stash)"
 exit 1

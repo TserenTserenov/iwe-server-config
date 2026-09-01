@@ -2148,6 +2148,35 @@ if [ "$CMD" = "close" ]; then
       [ -f "$card" ] && RUNNER_CARDS+=("$card")
     done
   done
+
+  # WP-484 V(b) (01.09, пир-сессия с Kimi+Codex): SLUG глоб выше не различает
+  # владельца -- две параллельные сессии с одинаковым именем задачи дадут
+  # одинаковый SLUG, и completed-карточка чужой сессии молча закрывает ЭТОТ
+  # close. HARNESS_SESSION_ID (уже используется ниже, в cancel-obligation
+  # ветке WP-537) читается здесь один раз и фильтрует RUNNER_CARDS ДО того,
+  # как его увидит любая из веток ниже -- предикат общий для всех них, не
+  # копия в каждом цикле (третье совпадающее место было бы дублем, P2).
+  # Fail-open, не fail-closed, когда HARNESS_SESSION_ID у ЭТОЙ сессии
+  # неизвестен: комментарий Ф118 выше документирует независимую гонку, из-за
+  # которой harness_session_id часто отсутствует в семафоре на вполне
+  # легитимных close -- требовать его здесь безусловно превратило бы редкую
+  # security-дыру в частую поломку обычного quick-close. Когда он ИЗВЕСТЕН,
+  # карточка без owner_session_id (легаси, до 25.08) или с чужим
+  # owner_session_id отбрасывается -- именно тот случай, где сравнение
+  # реально возможно и должно быть строгим.
+  HARNESS_SESSION_ID=$(grep "^harness_session_id: " "${SEM_FILE:-}" 2>/dev/null | cut -d' ' -f2- || true)
+  if [ -n "$HARNESS_SESSION_ID" ] && [ ${#RUNNER_CARDS[@]} -gt 0 ]; then
+    OWNED_CARDS=()
+    for card in "${RUNNER_CARDS[@]}"; do
+      CARD_OWNER=$(grep '^owner_session_id: ' "$card" 2>/dev/null | head -1 | cut -d' ' -f2- || true)
+      if [ "$CARD_OWNER" = "$HARNESS_SESSION_ID" ]; then
+        OWNED_CARDS+=("$card")
+      else
+        echo "Session CLOSE: пропускаю $card -- owner_session_id ($CARD_OWNER) не совпадает с этой сессией ($HARNESS_SESSION_ID)" >&2
+      fi
+    done
+    RUNNER_CARDS=("${OWNED_CARDS[@]+"${OWNED_CARDS[@]}"}")
+  fi
   RUNNER_OK=""
 
   # WP-484 Ф118 (19.08, пир-сессия с Codex): сессия, открытая с "open
@@ -2311,7 +2340,7 @@ print(json.dumps({"wp": sys.argv[1], "slug": sys.argv[2], "agent": sys.argv[3], 
   # harness_session_id ЭТОЙ сессии — не отсутствие обязательства вообще
   # (cmd_cancel_status различает эти случаи, см. close_obligation.py).
   if [ -z "$RUNNER_OK" ]; then
-    HARNESS_SESSION_ID=$(grep "^harness_session_id: " "$SEM_FILE" | cut -d' ' -f2- || true)
+    # HARNESS_SESSION_ID уже вычислен выше (V(b) owner-фильтр RUNNER_CARDS).
     OBLIGATION_CLI="$IWE_ROOT/$GOV_REPO/scripts/close_obligation.py"
     if [ -n "$HARNESS_SESSION_ID" ] && [ -f "$OBLIGATION_CLI" ]; then
       CANCEL_STATUS=$(python3 "$OBLIGATION_CLI" cancel-status --session-id "$HARNESS_SESSION_ID" 2>/dev/null) || CANCEL_STATUS=""
