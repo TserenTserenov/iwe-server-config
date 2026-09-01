@@ -76,6 +76,11 @@ self_test() {
   # First case group (list_variables/list_secrets/...) — bulk_tool set on the
   # original code path, kept as a regression guard.
   run_case list_variables_denied deny "mcp__railway__list_variables"
+  # WP-544 D27 (2026-09-01): the REAL Railway tool name uses a hyphen, not an
+  # underscore. This case was missing before the fix — the self-test tested
+  # only the underscore spelling above and stayed green while the hyphenated
+  # production tool leaked (31.08 incident). Regression guard for the fix.
+  run_case list_variables_hyphen_denied deny "mcp__railway__list-variables"
   # Second case group — WP544 D6.8 (785e7ed25d) dropped bulk_tool=true here
   # while restructuring the original single-branch deny into a bulk_tool
   # flag composed with pattern/path violations; the tools matched fell
@@ -134,7 +139,11 @@ pattern_ids=$(printf '%s' "$analysis" | "$SECRET_BYPASS_JQ" -r '.pattern_ids | j
 sensitive_path=$(printf '%s' "$analysis" | "$SECRET_BYPASS_JQ" -r '.sensitive_path') || fail_closed
 
 bulk_tool=false
-tool_name_lower=$(printf '%s' "$tool_name" | tr '[:upper:]' '[:lower:]')
+# WP-544 D27 (2026-09-01): mcp__railway__list-variables uses a hyphen; the
+# bare case match below is underscore-only and silently let it through
+# (31.08 incident). Normalize both hyphen forms to underscore before
+# matching so tool-name spelling drift can't reopen this gap.
+tool_name_lower=$(printf '%s' "$tool_name" | tr '[:upper:]' '[:lower:]' | tr '-' '_')
 case "$tool_name_lower" in
   *list_variables*|*list_secrets*|*get_variables*|*get_secrets*|*list_env*|*dump_env*|*list_vars*|*get_env*)
     bulk_tool=true

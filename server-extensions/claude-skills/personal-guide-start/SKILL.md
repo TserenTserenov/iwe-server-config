@@ -5,7 +5,7 @@ argument-hint: "[необязательно: override домена — knowledge
 experimental: true
 sunset: "после DONE WP-222 (Портной, ~июнь 2026) и WP-149 Ф6 (книга ЛР v3)"
 related: [personal-guide-render, WP-245, WP-222, WP-149, PD.FORM.089, PD.CAT.003]
-version: 1.1.0
+version: 1.2.0
 layer: L1
 status: active
 triggers:
@@ -85,6 +85,29 @@ for skill_path in SKILLS_TO_DISTRIBUTE:
 ```
 
 Если один из вызовов вернул ошибку — сообщить пилоту: «Не удалось установить скилл {skill_path}. Установка прервана. Повтори /personal-guide-start для завершения.» Стоп.
+
+### CLAUDE.md-заглушка (идемпотентно, WP-527)
+
+> **Зачем:** репо `DS-personal-guide` создаётся напрямую через `create_repository`, минуя гейт `/repo-new` (осознанное разделение — этот скилл UX-обёртка под IntegrationGate exception WP-245 Ф28 Открытое решение #7, не полноценный гейт создания). Без CLAUDE.md первое содержательное действие в этом репо (например, локальный клон + правка) встретит Repo-Touch Gate пустым. Реестр репозиториев экосистемы (`DS-ecosystem-development/0.OPS/REPOSITORY-REGISTRY.md`) сюда НЕ подходит — тот реестр про инфраструктуру самой экосистемы, не про персональные репозитории каждого участника; текущий трекинг per-пилот уже есть через `github_status`/`personal_list_sources`, дублировать не нужно.
+
+Через `personal_search(source: "DS-personal-guide", path: "CLAUDE.md")` проверь наличие. Если нет — записать:
+
+```python
+personal_write(
+    source="DS-personal-guide",
+    path="CLAUDE.md",
+    content="""# DS-personal-guide — инструкции для Claude Code
+
+> **Класс:** личное пространство данных пилота. **Назначение:** персональное руководство — план, методы, история занятий пилота. **Писатель:** пилот (правки) + render-скилл `/personal-guide-render` (пересборка). **Владелец:** пилот. **Читатели:** пилот, его агенты сессии.
+
+Создан через `/personal-guide-start` (быстрый bootstrap для этого конкретного случая — не общий гейт создания репозитория).
+
+## Работа с этим репозиторием
+
+Основные правки сюда идут через `/personal-guide-render` (пересборка) или обычные текстовые правки пилота — отдельный процесс/задача здесь не нужны, это личный рабочий репозиторий, не командный.
+""",
+)
+```
 
 ### Reflection-template (идемпотентно)
 

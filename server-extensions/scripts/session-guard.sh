@@ -2165,7 +2165,10 @@ if [ "$CMD" = "close" ]; then
   # опора на него здесь сделала бы этот bypass ненадёжным именно в сценарии,
   # где он нужнее всего. close_path сам по себе — достаточное свидетельство.
   # Должен идти ПОСЛЕ "RUNNER_OK=\"\"" выше — иначе сброс стирает значение.
-  if grep -q '^close_path: peer-session$' "$SEM_FILE" 2>/dev/null; then
+  # ${SEM_FILE:-} (портировано из шаблона, T22, 30.08): T22 подключает это
+  # окно отдельно под set -u без заглушки семафора; пустой путь -> grep не
+  # находит совпадение -> обход корректно не срабатывает.
+  if grep -q '^close_path: peer-session$' "${SEM_FILE:-}" 2>/dev/null; then
     RUNNER_OK="declared-peer-session:$SLUG"
     FORCED_CARD="declared-peer-session:$SLUG"
     echo "Session CLOSE: close_path=peer-session объявлен при open — раннер не требуется (WP-484 Ф118)." >&2

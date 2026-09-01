@@ -742,6 +742,24 @@ def path_fragments(value):
     return cleaned
 
 
+SENSITIVE_EXACT_PATHS = (
+    "/etc/iwe/env",
+    "/etc/iwe/secrets",
+    "/etc/iwe/config",
+)
+
+_SENSITIVE_ETC_DIR = re.compile(r"^/etc/[^/]+$")
+
+
+def is_sensitive_etc_dir_file(dir_part, basename):
+    # One level of nesting only: /etc/iwe/env matches, /etc/nginx/conf.d/env
+    # does not (WP-544 D27, 2026-09-01 sudo cat /etc/iwe/env incident — the
+    # prior name/extension-only heuristic never covered extensionless files).
+    if not _SENSITIVE_ETC_DIR.match(dir_part):
+        return False
+    return basename in ("env", "secrets", "config", "credentials", ".envrc")
+
+
 def is_sensitive_path(value):
     value = value.replace("\\", "/").strip()
     if not value:
@@ -751,6 +769,16 @@ def is_sensitive_path(value):
     template_markers = (".example.", ".sample.", ".template.", ".dist.")
     if basename.endswith(template_suffixes) or any(marker in basename for marker in template_markers):
         return False
+    # normpath collapses "//" and "./" segments lexically (no filesystem I/O,
+    # no symlink resolution) so /etc//iwe/env and /etc/./iwe/env resolve to
+    # the same canonical form the exact-path/dir-pattern checks below expect
+    # — found by independent review, 2026-09-01: the raw string comparison
+    # missed this trivial path-rewrite bypass of the WP-544 D27 fix.
+    normalized = os.path.normpath(value.lower())
+    if normalized in SENSITIVE_EXACT_PATHS:
+        return True
+    if "/" in normalized and is_sensitive_etc_dir_file(normalized.rsplit("/", 1)[0], basename):
+        return True
     parts = tuple(part.lower() for part in value.split("/") if part not in ("", ".", ".."))
     if ".secrets" in parts or ".railway" in parts:
         return True
@@ -1698,11 +1726,27 @@ def self_test():
         except SystemExit:
             continue
         fail("invalid hook envelope was accepted")
+    # WP-544 D27 (2026-09-01): the double-slash/dot-segment bypass an
+    # independent review found in is_sensitive_path, pinned here so a
+    # future edit does not silently reopen it (the same class of gap that
+    # let the MCP tool-name bug go undetected for months).
+    path_bypass_cases = (
+        ("/etc/iwe/env", True),
+        ("/etc//iwe/env", True),
+        ("/etc/./iwe/env", True),
+        ("/etc/nginx/conf.d/env", False),
+        ("/etc/passwd", False),
+    )
+    for path_value, expected in path_bypass_cases:
+        if is_sensitive_path(path_value) != expected:
+            fail(f"is_sensitive_path({path_value!r}) expected {expected}")
+
     print("PASS canonical_pattern_corpus")
     print("PASS structured_output_shape")
     print("PASS direct_sensitive_upload")
     print("PASS shell_lexical_normalization")
     print("PASS mcp_input_and_output")
+    print("PASS path_bypass_normalization")
 
 
 mode = sys.argv[1]
