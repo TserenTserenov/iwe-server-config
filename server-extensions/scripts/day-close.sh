@@ -40,10 +40,11 @@ readonly RC_REINDEX_PARTIAL=3
 SELECTIVE_REINDEX="${IWE_SELECTIVE_REINDEX:-$WORKSPACE_DIR/DS-MCP/knowledge-mcp/scripts/selective-reindex.sh}"
 SOURCES_JSON="${IWE_SOURCES_JSON:-$WORKSPACE_DIR/DS-MCP/knowledge-mcp/scripts/sources.json}"
 SOURCES_PERSONAL_JSON="${IWE_SOURCES_PERSONAL_JSON:-$WORKSPACE_DIR/DS-MCP/knowledge-mcp/scripts/sources-personal.json}"
-# issue #463: linear_sync_path и слияние day-rhythm-config.yaml ниже читаются через
-# `python3 -c "import yaml..." 2>/dev/null || echo ""` — без pyyaml это не падает,
-# а тихо возвращает пустую строку, неотличимую от «поля нет в конфиге». Один явный
-# warning здесь вместо голого ModuleNotFoundError на каждом отдельном вызове.
+# issue #463 / WP-484: linear_sync_path читается через `python3 -c "import yaml..."
+# 2>/dev/null || echo ""` — без pyyaml возвращает пустую строку. Ранний warning
+# здесь для этого случая. Отдельно: merge day-rhythm-config.yaml ниже (guard
+# добавлен cold review 01.09) защищён тем же условием, т.к. под set -e
+# отсутствие pyyaml там обрывало бы весь скрипт, а не «тихо пропускалось».
 if ! python3 -c "import yaml" 2>/dev/null; then
   echo "⚠ pyyaml не найден — linear sync и merge day-rhythm-config.yaml тихо пропустятся. Установите: pip3 install --user pyyaml" >&2
 fi
@@ -118,6 +119,13 @@ do_backup() {
   if [ -f "$rhythm_src" ]; then
     if [ ! -f "$rhythm_dst" ]; then
       cp "$rhythm_src" "$rhythm_dst"
+    elif ! python3 -c "import yaml" 2>/dev/null; then
+      # issue #463 follow-up (cold review 01.09, WP-484): this merge runs
+      # under `set -e` — a bare "import yaml" ModuleNotFoundError here would
+      # abort day-close.sh entirely, not "тихо пропустится" as the top-of-file
+      # probe promises. Guard it the same way the probe intends: warn and
+      # keep the existing dst untouched.
+      warn "  day-rhythm-config.yaml: pyyaml недоступен — merge пропущен, существующий $rhythm_dst сохранён"
     else
       python3 - "$rhythm_src" "$rhythm_dst" << 'PYEOF'
 import sys, yaml
