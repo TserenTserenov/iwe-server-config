@@ -59,7 +59,19 @@ let
   # restic — backup-stress-test.sh SC1/SC3 вызывают `restic` (в т.ч. внутри sudo bash -c,
   # который наследует этот же PATH — secure_path в sudoers не задан). Без пакета в commonPath —
   # "restic: command not found" (WP-317, тот же инцидент, довылавлено 25.07.2026).
-  commonPath = with pkgs; [ git openssh bash curl jq gawk caffeinate-stub postgresql pythonForIWE nodejs perl gh restic ]
+  #
+  # iweTgShim — узкий, управляемый shim только на iwe-tg (не весь DS-my-strategy/scripts/,
+  # 300+ файлов там — риск коллизии имён с системными командами при попадании в PATH).
+  # `command -v iwe-tg` внутри session-guard.sh (audit --cleanup-orphans) молча уходил
+  # в "iwe-tg unavailable" на каждом из ~71 IWE-юнита — сторож видел зависшие семафоры
+  # ночного цикла, но алерт в Telegram никогда не доходил (найдено 01.09.2026,
+  # пир-сессия с Codex, tsekh-1 orphan-sweep не молчал в логе, но не в TG).
+  iweTgShim = pkgs.runCommand "iwe-tg-shim" { } ''
+    mkdir -p $out/bin
+    ln -s ${iwe}/DS-my-strategy/scripts/iwe-tg $out/bin/iwe-tg
+  '';
+
+  commonPath = with pkgs; [ git openssh bash curl jq gawk caffeinate-stub postgresql pythonForIWE nodejs perl gh restic iweTgShim ]
     ++ [ "/home/tseren/.npm-global" "/run/wrappers" ];
 
   commonEnv = {
