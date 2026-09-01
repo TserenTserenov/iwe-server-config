@@ -40,6 +40,13 @@ readonly RC_REINDEX_PARTIAL=3
 SELECTIVE_REINDEX="${IWE_SELECTIVE_REINDEX:-$WORKSPACE_DIR/DS-MCP/knowledge-mcp/scripts/selective-reindex.sh}"
 SOURCES_JSON="${IWE_SOURCES_JSON:-$WORKSPACE_DIR/DS-MCP/knowledge-mcp/scripts/sources.json}"
 SOURCES_PERSONAL_JSON="${IWE_SOURCES_PERSONAL_JSON:-$WORKSPACE_DIR/DS-MCP/knowledge-mcp/scripts/sources-personal.json}"
+# issue #463: linear_sync_path и слияние day-rhythm-config.yaml ниже читаются через
+# `python3 -c "import yaml..." 2>/dev/null || echo ""` — без pyyaml это не падает,
+# а тихо возвращает пустую строку, неотличимую от «поля нет в конфиге». Один явный
+# warning здесь вместо голого ModuleNotFoundError на каждом отдельном вызове.
+if ! python3 -c "import yaml" 2>/dev/null; then
+  echo "⚠ pyyaml не найден — linear sync и merge day-rhythm-config.yaml тихо пропустятся. Установите: pip3 install --user pyyaml" >&2
+fi
 # Linear sync: путь читается из params.yaml (ключ linear_sync_path)
 PARAMS_YAML="$WORKSPACE_DIR/params.yaml"
 LINEAR_SYNC=""
