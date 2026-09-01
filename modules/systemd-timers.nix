@@ -242,13 +242,55 @@ let
     done
 
     # TG-алерт при ошибках. exit 0 always — не блокируем scheduler tick.
+    # WP-538, 01.09.2026: не более одного сообщения на один и тот же набор
+    # проблем за DEDUP_TTL_MIN минут (единица — минуты). Отдельный if вместо
+    # вложенной ${iwe} внутри ''${VAR:-...} — вложенная Nix-интерполяция
+    # внутри экранированного bash-выражения технически работает, но ловушка
+    # для будущих правок (найдено пир-сессией с Kimi, 01.09).
     if [ "''${#failed[@]}" -gt 0 ]; then
-      msg="⚠️ IWE pull-repos warnings (tsekh-1, $(${pkgs.coreutils}/bin/date '+%Y-%m-%d %H:%M')): ''${failed[*]}"
-      ${pkgs.curl}/bin/curl -s --max-time 10 -X POST \
-        "https://api.telegram.org/bot''${TELEGRAM_BOT_TOKEN}/sendMessage" \
-        -d "chat_id=''${TELEGRAM_CHAT_ID}" \
-        --data-urlencode "text=$msg" \
-        > /dev/null || true
+      # Некорректный PULL_REPOS_DEDUP_TTL_MIN откатывается на 60 минут по
+      # умолчанию (не exit 1 — весь файл держит инвариант "exit 0 всегда, не
+      # блокируем тик планировщика"), но сигнал не тихий: логируется с
+      # приоритетом user.warning, заметным в `journalctl -p warning`.
+      dedup_ttl_min="''${PULL_REPOS_DEDUP_TTL_MIN:-60}"
+      if ! [[ "$dedup_ttl_min" =~ ^[0-9]+$ ]]; then
+        ${pkgs.util-linux}/bin/logger -p user.warning -t iwe-pull-repos "invalid PULL_REPOS_DEDUP_TTL_MIN='$dedup_ttl_min' — используется значение по умолчанию 60 минут"
+        dedup_ttl_min=60
+      fi
+      dedup_state="''${PULL_REPOS_DEDUP_STATE:-}"
+      if [ -z "$dedup_state" ]; then
+        dedup_state="${iwe}/.iwe-runtime/iwe-pull-repos-dedup.state"
+      fi
+      ${pkgs.coreutils}/bin/mkdir -p "$(${pkgs.coreutils}/bin/dirname "$dedup_state")" 2>/dev/null || true
+
+      sig_hash=$(${pkgs.coreutils}/bin/printf '%s\n' "''${failed[@]}" | ${pkgs.coreutils}/bin/sort | ${pkgs.coreutils}/bin/sha256sum | ${pkgs.coreutils}/bin/cut -c1-16)
+      now=$(${pkgs.coreutils}/bin/date -u +%s)
+      send_alert=1
+      if [ -f "$dedup_state" ]; then
+        prev_hash="" prev_ts=0
+        read -r prev_hash prev_ts < "$dedup_state" 2>/dev/null || true
+        if [ "$prev_hash" = "$sig_hash" ] && [[ "$prev_ts" =~ ^[0-9]+$ ]] \
+            && [ "$prev_ts" -le "$now" ] \
+            && [ $(( (now - prev_ts) / 60 )) -lt "$dedup_ttl_min" ]; then
+          send_alert=0
+        fi
+      fi
+
+      if [ "$send_alert" -eq 1 ]; then
+        # Запись state ТОЛЬКО здесь (WP-538, найдено Kimi 01.09) — безусловная
+        # запись на каждом тике (включая подавленные) продлевала бы TTL-окно
+        # бесконечно, и длящаяся проблема замолчала бы навсегда вместо
+        # периодического напоминания раз в dedup_ttl_min минут.
+        ${pkgs.coreutils}/bin/printf '%s %s\n' "$sig_hash" "$now" > "$dedup_state" 2>/dev/null || true
+        msg="⚠️ IWE pull-repos warnings (tsekh-1, $(${pkgs.coreutils}/bin/date '+%Y-%m-%d %H:%M')): ''${failed[*]}"
+        ${pkgs.curl}/bin/curl -s --max-time 10 -X POST \
+          "https://api.telegram.org/bot''${TELEGRAM_BOT_TOKEN}/sendMessage" \
+          -d "chat_id=''${TELEGRAM_CHAT_ID}" \
+          --data-urlencode "text=$msg" \
+          > /dev/null || true
+      else
+        ${pkgs.util-linux}/bin/logger -t iwe-pull-repos "alert suppressed (dedup): same failed-set within ''${dedup_ttl_min}min"
+      fi
     fi
 
     exit 0
