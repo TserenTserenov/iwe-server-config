@@ -43,7 +43,18 @@ secret_pattern_process() {
   # while redact-envelope returns only the transformed tool response.
   local mode="$1"
   [ -x "$SECRET_BYPASS_PYTHON" ] || return 1
-  # The single-quoted argument is an embedded Python program.
+  # The single-quoted argument below is an embedded Python program spanning
+  # roughly 1800 lines, ending at the matching closing quote further down
+  # this function. WARNING (found live 2026-09-01, WP-544 F6, twice in one
+  # session): a bash single-quoted string cannot contain a literal quote
+  # character at all -- one apostrophe in an English comment or string
+  # anywhere in this block (a possessive like path_fragments()s, do not
+  # write that either) ends the bash string early, and everything after
+  # becomes raw unquoted bash text that fails to parse. Every protected
+  # Bash/Read/Edit call in this session sources this file, so one stray
+  # quote character here breaks every tool call, not just ones touching
+  # this file. Before editing anything below, grep the planned change for
+  # the quote character and confirm zero matches.
   # shellcheck disable=SC2016
   "$SECRET_BYPASS_PYTHON" -c '
 import contextlib
@@ -735,8 +746,21 @@ def path_fragments(value):
     cleaned = []
     for fragment in fragments:
         fragment = fragment.strip(" \t\r\n[]{}(),;")
-        if fragment.startswith("file://"):
-            fragment = fragment[7:]
+        # file:// stripping was case-sensitive and required exactly two
+        # slashes -- File://, FILE://, file:/ all fell through unstripped
+        # and then matched no sensitive-path pattern (URI schemes are
+        # case-insensitive per RFC 3986). Found live 2026-09-01 by
+        # independent post-deploy review, WP-544 F6: secret-mcp-dump-guard.sh
+        # silently allowed File://.../aist/env with no audit trail. A file:
+        # URI always names an absolute path, so any slash run after the
+        # scheme collapses to exactly one leading slash below -- a plain
+        # greedy strip broke file:///abs/path (2 URI slashes plus the
+        # leading slash already present in the absolute path itself, 3 in a
+        # row) by eating that leading slash too, turning an absolute path
+        # into a relative one that no longer classified.
+        file_uri = re.match(r"^file:/+", fragment, re.IGNORECASE)
+        if file_uri:
+            fragment = "/" + fragment[file_uri.end():]
         if fragment:
             cleaned.append(fragment)
     return cleaned
@@ -1791,6 +1815,23 @@ def self_test():
         if is_sensitive_path(path_value) != expected:
             fail(f"is_sensitive_path({path_value!r}) expected {expected}")
 
+    # Found live 2026-09-01 by independent post-deploy review, WP-544 F6:
+    # the file:// prefix stripping in path_fragments (see above) was
+    # case-sensitive and required exactly two slashes, so
+    # File://.../aist/env fell through to is_sensitive_path unstripped and
+    # matched no pattern (URI schemes are case-insensitive per RFC 3986).
+    file_uri_cases = (
+        ("file://" + os.path.expanduser("~/.config/aist/env"), True),
+        ("File://" + os.path.expanduser("~/.config/aist/env"), True),
+        ("FILE://" + os.path.expanduser("~/.config/aist/env"), True),
+        ("file:/" + os.path.expanduser("~/.config/aist/env"), True),
+        ("file:///etc/iwe/env", True),
+    )
+    for path_value, expected in file_uri_cases:
+        fragments = path_fragments(path_value)
+        if any(is_sensitive_path(fragment) for fragment in fragments) != expected:
+            fail(f"path_fragments/is_sensitive_path({path_value!r}) expected {expected}")
+
     print("PASS canonical_pattern_corpus")
     print("PASS structured_output_shape")
     print("PASS direct_sensitive_upload")
@@ -1798,6 +1839,7 @@ def self_test():
     print("PASS mcp_input_and_output")
     print("PASS path_bypass_normalization")
     print("PASS home_config_dir_coverage")
+    print("PASS file_uri_case_insensitive")
 
 
 mode = sys.argv[1]
