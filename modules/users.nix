@@ -56,5 +56,26 @@ in
 
     # sudo без пароля для wheel (только ключи и так)
     security.sudo.wheelNeedsPassword = false;
+
+    # WP-544 D27/Vg2 (2026-09-01): P0-барьер против bulk-чтения секретного
+    # файла окружения через sudo. NixOS не использует /etc/sudoers.d — все
+    # правила деклаpируются здесь и попадают в единый сгенерированный
+    # /etc/sudoers (правка руками стирается следующим nixos-rebuild, см.
+    # CLAUDE.md «Антипаттерны»). extraConfig дописывается в конец файла,
+    # поэтому при совпадении команды побеждает эта запись, а не более ранняя
+    # групповая %wheel NOPASSWD: ALL — sudo применяет последнее совпадение,
+    # не более специфичное. Известный остаток (awk/python3/symlink на тот
+    # же файл всё ещё проходят) задокументирован и принят как P0, не P1.
+    security.sudo.extraConfig = ''
+      Cmnd_Alias IWE_SECRET_DENY = \
+          /bin/cat /etc/iwe/env, /usr/bin/cat /etc/iwe/env, \
+          /bin/less /etc/iwe/env, /usr/bin/less /etc/iwe/env, \
+          /bin/more /etc/iwe/env, /usr/bin/more /etc/iwe/env, \
+          /bin/head /etc/iwe/env, /usr/bin/head /etc/iwe/env, \
+          /bin/tail /etc/iwe/env, /usr/bin/tail /etc/iwe/env, \
+          /bin/cp /etc/iwe/env *, /usr/bin/cp /etc/iwe/env *, \
+          /usr/bin/scp /etc/iwe/env *
+      tseren ALL=(ALL:ALL) NOPASSWD: ALL, !IWE_SECRET_DENY
+    '';
   };
 }
