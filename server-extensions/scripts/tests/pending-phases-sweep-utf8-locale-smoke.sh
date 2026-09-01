@@ -18,7 +18,7 @@ make_fixture() {
     tmp=$(mktemp -d)
     dir="$tmp/inbox"
     mkdir -p "$dir"
-    printf 'status: in_progress\n\n- [ ] Ф1: Выполнен полностью\n- [ ] Ф2: Незакрытый остаток\n- [ ] Ф3: сама уборка не выполнена\n' \
+    printf 'status: in_progress\n\n- [ ] Ф1: Выполнен полностью\n- [ ] Ф2: Незакрытый остаток\n- [ ] Ф3: сама уборка не выполнена\n- [ ] Ф4: Незакрытый пункт, но статус Выполнен\n- [ ] Ф5: проверка не выполнена, но раздел уже Закрыт по факту\n' \
         > "$dir/WP-9001.md"
     echo "$tmp"
 }
@@ -60,6 +60,25 @@ for locale in C en_US.UTF-8 C.UTF-8; do
         echo "FAIL [$locale]: Ф3 (не выполнена, раздельно) ложно закрыт"
         echo "$out" | sed 's/^/    /'
         fail=1
+    fi
+
+    # Ф4/Ф5: отрицание И настоящий закрывающий маркер в одной строке —
+    # early-return на негации гасил бы реальный маркер дальше в той же
+    # строке (регрессия, найдена code review 01.09). Оба НЕ должны попасть
+    # в pending: маркер "Выполнен"/"Закрыт" в конце строки перевешивает.
+    if echo "$out" | grep -q "Ф4 —"; then
+        echo "FAIL [$locale]: Ф4 (негация + отдельный Выполнен) ложно остался pending — регрессия early-return"
+        echo "$out" | sed 's/^/    /'
+        fail=1
+    else
+        echo "OK [$locale]: Ф4 (негация + отдельный Выполнен) корректно исключён из pending"
+    fi
+    if echo "$out" | grep -q "Ф5 —"; then
+        echo "FAIL [$locale]: Ф5 (негация + отдельный Закрыт) ложно остался pending — регрессия early-return"
+        echo "$out" | sed 's/^/    /'
+        fail=1
+    else
+        echo "OK [$locale]: Ф5 (негация + отдельный Закрыт) корректно исключён из pending"
     fi
 done
 

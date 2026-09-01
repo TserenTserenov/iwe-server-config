@@ -751,6 +751,38 @@ SENSITIVE_EXACT_PATHS = (
 _SENSITIVE_ETC_DIR = re.compile(r"^/etc/[^/]+$")
 
 
+def _home_dir_normalized():
+    # os.environ["HOME"] can be unset for some hook-invocation paths; fall
+    # back to expanduser (resolves via the pwd module even without HOME) so
+    # the absolute-path form of the check does not silently go dark — found
+    # by cold code review 2026-09-01, WP-544 F6.
+    home = os.environ.get("HOME", "") or os.path.expanduser("~")
+    if home == "~":
+        return ""
+    return os.path.normpath(home.lower())
+
+
+def is_sensitive_home_config_dir_file(dir_part, basename):
+    # ~/.config/<service>/{env,secrets,config,credentials} — same one-level-
+    # of-nesting shape as the /etc/<service>/... rule above, but for
+    # user-level secret stores. Found live 2026-09-01 (WP-544 F6 peer-session
+    # with Kimi+Codex): the actual Mac credential file (~/.config/aist/env,
+    # holds ANTHROPIC_API_KEY and Neon refs) matched NONE of the existing
+    # rules — basename "env" has no dot, so it fell through .env/.env.*/*.env
+    # and every other pattern below. Checks both the literal "~/.config/..."
+    # form (unexpanded in shell text) and the expanded absolute form.
+    prefixes = ["~/.config/"]
+    home = _home_dir_normalized()
+    if home:
+        prefixes.append(home + "/.config/")
+    for prefix in prefixes:
+        if dir_part.startswith(prefix):
+            remainder = dir_part[len(prefix):]
+            if remainder and "/" not in remainder:
+                return basename in ("env", "secrets", "config", "credentials", ".envrc")
+    return False
+
+
 def is_sensitive_etc_dir_file(dir_part, basename):
     # One level of nesting only: /etc/iwe/env matches, /etc/nginx/conf.d/env
     # does not (WP-544 D27, 2026-09-01 sudo cat /etc/iwe/env incident — the
@@ -778,6 +810,8 @@ def is_sensitive_path(value):
     if normalized in SENSITIVE_EXACT_PATHS:
         return True
     if "/" in normalized and is_sensitive_etc_dir_file(normalized.rsplit("/", 1)[0], basename):
+        return True
+    if "/" in normalized and is_sensitive_home_config_dir_file(normalized.rsplit("/", 1)[0], basename):
         return True
     parts = tuple(part.lower() for part in value.split("/") if part not in ("", ".", ".."))
     if ".secrets" in parts or ".railway" in parts:
@@ -1741,12 +1775,29 @@ def self_test():
         if is_sensitive_path(path_value) != expected:
             fail(f"is_sensitive_path({path_value!r}) expected {expected}")
 
+    # WP-544 F6 (2026-09-01, peer-session with Kimi+Codex): the real Mac
+    # credential file ~/.config/aist/env matched no existing rule (basename
+    # "env" has no dot). Pinned here so a future edit does not silently drop
+    # coverage the way it was silently missing before this fix.
+    home_config_cases = (
+        ("~/.config/aist/env", True),
+        (os.path.expanduser("~/.config/aist/env"), True),
+        ("~/.config/aist/env.example", False),
+        ("~/.config/aist/notes.txt", False),
+        ("~/.config/aist/sub/env", False),
+        ("~/.config/nginx/nginx.conf", False),
+    )
+    for path_value, expected in home_config_cases:
+        if is_sensitive_path(path_value) != expected:
+            fail(f"is_sensitive_path({path_value!r}) expected {expected}")
+
     print("PASS canonical_pattern_corpus")
     print("PASS structured_output_shape")
     print("PASS direct_sensitive_upload")
     print("PASS shell_lexical_normalization")
     print("PASS mcp_input_and_output")
     print("PASS path_bypass_normalization")
+    print("PASS home_config_dir_coverage")
 
 
 mode = sys.argv[1]
