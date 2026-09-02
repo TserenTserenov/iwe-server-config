@@ -203,6 +203,35 @@ SKIP_REFLECTION_RE='(без *рефлекс|не спрашивай.{0,20}реф
 # должен содержать только то, что пилот сам пометил как рефлексию.
 REFLECTION_MARKER_RE='[Рр]ефлекси[яю][[:space:]]*[:—–-]+'
 
+# WP-484 (bug-2026-08-15-close-intent-sentinel-armed-by-quoted-text.md,
+# пир-сессия 2026-09-02-36 с Kimi+Codex): длина текста ДО первого совпадения
+# триггера в символах, не байтах. Живые репро 02.09: триггер погребён в
+# многокилобайтном вставленном логе/цитате — реальная команда пилота в этом
+# файле везде короткая и стоит в начале фразы. НЕ полная quote-vs-command
+# классификация (отклонена пир-сессией 2026-08-11-05, не переоткрывать) —
+# узкий механический фильтр по одному сигналу (длина префикса).
+CLOSE_TRIGGER_RE='закрывай|закрываю|закрой'
+CLOSE_TRIGGER_PREFIX_THRESHOLD=600
+
+_prefix_char_len_before_trigger() {
+  # python3 — уже жёсткая зависимость этого хука (_obligation_available).
+  # Unicode- и multiline-safe: sys.stdin.buffer.read().decode("utf-8") не
+  # зависит от LC_ALL/LANG (снимает риск локали в CI/минимальных окружениях),
+  # re.search на всём тексте целиком (включая embedded \n) корректно даёт
+  # позицию во всём префиксе — awk match() по умолчанию считает только в
+  # границах строки с совпадением, теряя все предыдущие строки многострочного
+  # вставленного лога (найдено Codex, ход 1 этой пир-сессии — ровно основной
+  # репро-сценарий). Python недоступен → пустой вывод → вызывающий код падает
+  # в старое поведение (armed как раньше), не ослабляет защиту.
+  command -v python3 >/dev/null 2>&1 || return 0
+  printf '%s' "$PROMPT" | python3 -c '
+import re, sys
+text = sys.stdin.buffer.read().decode("utf-8")
+m = re.search(sys.argv[1], text)
+print(len(text[:m.start()]) if m else "")
+' "$1" 2>/dev/null
+}
+
 _record_close_intent() {
   if ! _obligation_available; then
     return 0
@@ -301,14 +330,19 @@ _record_close_intent() {
     echo "[close-gate-reminder] session=$SESSION_ID record-intent failed (non-fatal — render falls back to interactive path)" >&2
 }
 
-if echo "$PROMPT" | grep -qE '(закрывай|закрываю|закрой)'; then
-  _arm_and_sentinel block ""
-  _record_close_intent
+if echo "$PROMPT" | grep -qE "($CLOSE_TRIGGER_RE)"; then
+  PREFIX_LEN=$(_prefix_char_len_before_trigger "$CLOSE_TRIGGER_RE")
+  if [ -n "$PREFIX_LEN" ] && [ "$PREFIX_LEN" -gt "$CLOSE_TRIGGER_PREFIX_THRESHOLD" ] 2>/dev/null; then
+    echo "[close-gate-reminder] session=$SESSION_ID close-trigger matched but prefix_len=$PREFIX_LEN > $CLOSE_TRIGGER_PREFIX_THRESHOLD chars — treated as quoted/pasted text, not armed" >&2
+  else
+    _arm_and_sentinel block ""
+    _record_close_intent
 
-  cat <<'EOF'
+    cat <<'EOF'
 {"additionalContext": "⛔ БЛОКИРУЮЩЕЕ: Session Close выполняется ТОЛЬКО через skill /run-protocol с аргументом 'close'. ПЕРВОЕ И ЕДИНСТВЕННОЕ действие = вызвать Skill tool: skill='run-protocol', args='close'. НЕ выполнять шаги самостоятельно. /run-protocol гарантирует пошаговый TodoList + верификацию. Обязательство закрытия (Ф74б) зафиксировано: тихое завершение без карточки RUN-quick-close будет заблокировано на Stop. Если в этой же фразе уже была названа рефлексия — она уже записана как close-intent record, повторно не спрашивай (session-reflection-render прочитает её сам)."}
 EOF
-  exit 0
+    exit 0
+  fi
 fi
 
 if echo "$PROMPT" | grep -qE '(заливай|запуши|запушь)'; then

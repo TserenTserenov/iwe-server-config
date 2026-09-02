@@ -74,7 +74,14 @@ if [ "$INITIAL_BRANCH" != "$BRANCH" ]; then
 fi
 
 query_guard() {
-  GIT_DIRTY_GUARD_REQUIRE_FETCH=true \
+  # This gate is read-only and its caller (pull-on-touch hook) already tells the
+  # agent "potentially stale". A dirty shared checkout under parallel agent
+  # sessions is normal work, not an incident for the pilot: 9 of 13 Telegram
+  # alerts on 2026-09-02 were this path, one per dirty repo per new session
+  # (WP-538 Ф4). Callers that do want the pilot told (tsekh1-git-sync,
+  # day-open-pipeline) keep their own guard invocation and alert policy.
+  GIT_DIRTY_GUARD_TG_ALERTS=false \
+    GIT_DIRTY_GUARD_REQUIRE_FETCH=true \
     GIT_DIRTY_GUARD_FETCH_TIMEOUT="$FETCH_TIMEOUT" \
     GIT_DIRTY_GUARD_REMOTE_OID_OUTPUT=true \
     GIT_DIRTY_GUARD_FETCH_DEST_REF='' \

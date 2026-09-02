@@ -180,5 +180,165 @@ PYEOF
 expect_write_content "заявление внутри Write-файла хода (напарнику, не пилоту)" \
   yes "Cloudflare API token в моём окружении не нашёл, деплой без него не сделать."
 
+# === v3 (02.09.2026, WP-544, пятый рецидив — WP-547): отклонённый хуком вызов ===
+# Реальная форма транскрипта Claude Code при PreToolUse-deny (снята живьём
+# 02.09): tool_use получает id, а tool_result — is_error=true и текст
+# «PreToolUse:Bash hook error: [...]». Команда НЕ выполнялась, значит это не
+# проверка доступа. $4=denied(0|1): 1 — tool_result отклонён хуком.
+build_transcript_with_result() {
+  local text="$1" command="$2" denied="$3" path
+  path="$TMP_DIR/transcript-$$-$RANDOM.jsonl"
+  python3 - "$path" "$text" "$command" "$denied" <<'PYEOF'
+import json, sys
+path, text, command, denied = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4] == "1"
+result = {"type": "tool_result", "tool_use_id": "toolu_test01", "content": "ok"}
+if denied:
+    result = {"type": "tool_result", "tool_use_id": "toolu_test01", "is_error": True,
+              "content": "PreToolUse:Bash hook error: [$CLAUDE_PROJECT_DIR/.claude/hooks/secret-leak-block.sh]: Чтение чувствительного файла через Bash заблокировано"}
+with open(path, "w") as f:
+    f.write(json.dumps({"role": "user", "content": "проверь доступ"}) + "\n")
+    f.write(json.dumps({"role": "assistant", "content": [
+        {"type": "tool_use", "id": "toolu_test01", "name": "Bash", "input": {"command": command}}
+    ]}) + "\n")
+    f.write(json.dumps({"role": "user", "content": [result]}) + "\n")
+    f.write(json.dumps({"role": "assistant", "content": [{"type": "text", "text": text}]}) + "\n")
+PYEOF
+  echo "$path"
+}
+
+expect_with_result() {
+  local desc="$1" want="$2" text="$3" command="$4" denied="$5"
+  local transcript input out got
+  transcript=$(build_transcript_with_result "$text" "$command" "$denied")
+  input=$(python3 -c 'import json,sys; print(json.dumps({"hook_event_name":"Stop","transcript_path":sys.argv[1],"session_id":"test","cwd":sys.argv[2]}))' \
+    "$transcript" "$HOME/IWE/DS-my-strategy")
+  out=$(printf '%s' "$input" | bash "$DETECTOR" 2>/dev/null)
+  if [ -n "$out" ]; then got="yes"; else got="no"; fi
+  if [ "$got" = "$want" ]; then
+    PASS=$((PASS+1))
+  else
+    FAIL=$((FAIL+1))
+    echo "FAIL: $desc (ожидалось fires=$want, получено fires=$got)"
+  fi
+}
+
+# Релевантная команда (neon/credential в обеих сторонах), но хук её отклонил —
+# v2 подавлял детектор, v3 обязан сработать: проверки не было.
+expect_with_result "отклонённый хуком релевантный Bash (WP-547 02.09) — не проверка" \
+  yes "Доступа к базе neon нет — штатного пути к credential в этой сессии не нашёл." \
+  "grep NEON_REFERENCE_URL ~/.config/aist/env" 1
+
+# Та же команда, но прошедшая (tool_result без ошибки) — подавление сохраняется.
+expect_with_result "прошедший релевантный Bash с id — подавление не сломано" \
+  no "Доступа к базе neon нет — штатного пути к credential в этой сессии не нашёл." \
+  "grep NEON_REFERENCE_URL ~/.config/aist/env" 0
+
+# Ревью Codex/Kimi 02.09: (1) content отклонённого tool_result бывает массивом
+# блоков, не строкой; (2) в одном ходу один вызов отклонён, другой релевантный
+# прошёл — прошедший остаётся evidence, детектор молчит.
+build_transcript_mixed() {
+  local text="$1" path
+  path="$TMP_DIR/transcript-$$-$RANDOM.jsonl"
+  python3 - "$path" "$text" <<'PYEOF'
+import json, sys
+path, text = sys.argv[1], sys.argv[2]
+denied = {"type": "tool_result", "tool_use_id": "toolu_denied", "is_error": True,
+          "content": [{"type": "text", "text": "PreToolUse:Bash hook error: [$CLAUDE_PROJECT_DIR/.claude/hooks/secret-leak-block.sh]: заблокировано"}]}
+passed = {"type": "tool_result", "tool_use_id": "toolu_passed", "content": "env loaded: yes"}
+with open(path, "w") as f:
+    f.write(json.dumps({"role": "user", "content": "проверь доступ"}) + "\n")
+    f.write(json.dumps({"role": "assistant", "content": [
+        {"type": "tool_use", "id": "toolu_denied", "name": "Bash", "input": {"command": "grep NEON_REFERENCE_URL ~/.config/aist/env"}}
+    ]}) + "\n")
+    f.write(json.dumps({"role": "user", "content": [denied]}) + "\n")
+    f.write(json.dumps({"role": "assistant", "content": [
+        {"type": "tool_use", "id": "toolu_passed", "name": "Bash", "input": {"command": "scripts/with-aist-env.sh python3 probe.py  # neon credential probe"}}
+    ]}) + "\n")
+    f.write(json.dumps({"role": "user", "content": [passed]}) + "\n")
+    f.write(json.dumps({"role": "assistant", "content": [{"type": "text", "text": text}]}) + "\n")
+PYEOF
+  echo "$path"
+}
+
+expect_mixed() {
+  local desc="$1" want="$2" text="$3"
+  local transcript input out got
+  transcript=$(build_transcript_mixed "$text")
+  input=$(python3 -c 'import json,sys; print(json.dumps({"hook_event_name":"Stop","transcript_path":sys.argv[1],"session_id":"test","cwd":sys.argv[2]}))' \
+    "$transcript" "$HOME/IWE/DS-my-strategy")
+  out=$(printf '%s' "$input" | bash "$DETECTOR" 2>/dev/null)
+  if [ -n "$out" ]; then got="yes"; else got="no"; fi
+  if [ "$got" = "$want" ]; then
+    PASS=$((PASS+1))
+  else
+    FAIL=$((FAIL+1))
+    echo "FAIL: $desc (ожидалось fires=$want, получено fires=$got)"
+  fi
+}
+
+expect_mixed "отклонённый (массив content) + прошедший релевантный Bash в одном ходу — прошедший остаётся evidence" \
+  no "Доступа к базе neon нет — credential в этой сессии не нашёл."
+
+# Отклонённый tool_result с content-массивом в одиночку — должен сработать
+# (проверяем ветку map(.text) в детекторе, не только строковую форму).
+build_transcript_denied_array() {
+  local text="$1" path
+  path="$TMP_DIR/transcript-$$-$RANDOM.jsonl"
+  python3 - "$path" "$text" <<'PYEOF'
+import json, sys
+path, text = sys.argv[1], sys.argv[2]
+denied = {"type": "tool_result", "tool_use_id": "toolu_denied", "is_error": True,
+          "content": [{"type": "text", "text": "PreToolUse:Bash hook error: [$CLAUDE_PROJECT_DIR/.claude/hooks/secret-leak-block.sh]: заблокировано"}]}
+with open(path, "w") as f:
+    f.write(json.dumps({"role": "user", "content": "проверь доступ"}) + "\n")
+    f.write(json.dumps({"role": "assistant", "content": [
+        {"type": "tool_use", "id": "toolu_denied", "name": "Bash", "input": {"command": "grep NEON_REFERENCE_URL ~/.config/aist/env"}}
+    ]}) + "\n")
+    f.write(json.dumps({"role": "user", "content": [denied]}) + "\n")
+    f.write(json.dumps({"role": "assistant", "content": [{"type": "text", "text": text}]}) + "\n")
+PYEOF
+  echo "$path"
+}
+transcript=$(build_transcript_denied_array "Доступа к базе neon нет — credential в этой сессии не нашёл.")
+input=$(python3 -c 'import json,sys; print(json.dumps({"hook_event_name":"Stop","transcript_path":sys.argv[1],"session_id":"test","cwd":sys.argv[2]}))' \
+  "$transcript" "$HOME/IWE/DS-my-strategy")
+if [ -n "$(printf '%s' "$input" | bash "$DETECTOR" 2>/dev/null)" ]; then
+  PASS=$((PASS+1))
+else
+  FAIL=$((FAIL+1)); echo "FAIL: отклонённый tool_result с content-массивом должен считаться отказом (ожидалось fires=yes)"
+fi
+
+# Граница матча (Codex, ревью 02.09): is_error без префикса PreToolUse — это
+# ошибка УЖЕ выполненной команды (connection refused, 401), т.е. настоящая
+# проверка доступа. Она обязана подавлять детектор, как и раньше. Живого
+# образца отказа пользователем (не хуком) в транскриптах Мака на 02.09 нет —
+# такая форма сознательно не матчится до появления fixture.
+build_transcript_exec_error() {
+  local text="$1" path
+  path="$TMP_DIR/transcript-$$-$RANDOM.jsonl"
+  python3 - "$path" "$text" <<'PYEOF'
+import json, sys
+path, text = sys.argv[1], sys.argv[2]
+err = {"type": "tool_result", "tool_use_id": "toolu_exec", "is_error": True,
+       "content": "psql: error: connection to server failed: Connection refused (neon endpoint)"}
+with open(path, "w") as f:
+    f.write(json.dumps({"role": "user", "content": "проверь доступ"}) + "\n")
+    f.write(json.dumps({"role": "assistant", "content": [
+        {"type": "tool_use", "id": "toolu_exec", "name": "Bash", "input": {"command": "scripts/with-aist-env.sh psql-probe neon"}}
+    ]}) + "\n")
+    f.write(json.dumps({"role": "user", "content": [err]}) + "\n")
+    f.write(json.dumps({"role": "assistant", "content": [{"type": "text", "text": text}]}) + "\n")
+PYEOF
+  echo "$path"
+}
+transcript=$(build_transcript_exec_error "Доступа к базе neon нет — подключение отклонено сервером.")
+input=$(python3 -c 'import json,sys; print(json.dumps({"hook_event_name":"Stop","transcript_path":sys.argv[1],"session_id":"test","cwd":sys.argv[2]}))' \
+  "$transcript" "$HOME/IWE/DS-my-strategy")
+if [ -z "$(printf '%s' "$input" | bash "$DETECTOR" 2>/dev/null)" ]; then
+  PASS=$((PASS+1))
+else
+  FAIL=$((FAIL+1)); echo "FAIL: is_error выполненной команды (не хук) — это проверка, детектор не должен срабатывать (ожидалось fires=no)"
+fi
+
 echo "PASS=$PASS FAIL=$FAIL"
 [ "$FAIL" -eq 0 ]
