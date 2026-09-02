@@ -116,7 +116,8 @@ def field(text, name):
 
 sessions_dir, session_id = sys.argv[1], sys.argv[2]
 candidates = glob.glob(os.path.join(sessions_dir, "*.open")) + \
-             glob.glob(os.path.join(sessions_dir, "*.open.closed"))
+             glob.glob(os.path.join(sessions_dir, "*.open.closed")) + \
+             glob.glob(os.path.join(sessions_dir, "*.open.orphaned-*"))
 best_key = None
 best_text = None
 for path in candidates:

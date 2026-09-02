@@ -2080,12 +2080,6 @@ if [ "$CMD" = "close" ]; then
   PERSONALITY_FROM_SEM="${PERSONALITY_FROM_SEM:-unassigned}"
 
   ORZ_BASENAME=$(grep "^orz_file: " "$SEM_FILE" | cut -d' ' -f2- || true)
-  if [ -z "$ORZ_BASENAME" ]; then
-    # Fallback для старых семафоров без поля orz_file
-    OPENED_DATE=$(grep "^opened_at: " "$SEM_FILE" | cut -d' ' -f2- | cut -dT -f1 || true)
-    OPENED_DATE="${OPENED_DATE:-$(now_date)}"
-    ORZ_BASENAME="${OPENED_DATE:0:7}/${OPENED_DATE}-${SLUG:-$WP}.md"
-  fi
   # Read back the directory `open` actually resolved via gov_repo_dir() (found
   # in code review 2026-08-12, same peer-session as the open-side fix): re-
   # deriving gov_repo_dir() here would resolve against THIS invocation's cwd,
@@ -2093,9 +2087,33 @@ if [ "$CMD" = "close" ]; then
   # session-guard-release.sh handler) and silently point at the wrong
   # worktree. Semaphores written before this fix have no such field --
   # canonical $ORZ_DIR is the correct fallback for them, since that's where
-  # open put the file at the time.
+  # open put the file at the time. Resolved BEFORE the orz_file fallback below
+  # (WP-484 Ф149, peer-session code review) -- the fallback needs it to probe
+  # for an existing daily-scheme file, and `set -u` makes an out-of-order read
+  # here an unbound-variable crash, not a silent empty string.
   ORZ_SESSIONS_DIR=$(grep "^orz_sessions_dir: " "$SEM_FILE" | cut -d' ' -f2- || true)
   ORZ_SESSIONS_DIR="${ORZ_SESSIONS_DIR:-$ORZ_DIR}"
+  if [ -z "$ORZ_BASENAME" ]; then
+    # Fallback для старых семафоров без поля orz_file (открытых до появления
+    # этого поля в коде). WP-484 Ф149 (peer-session 2026-09-02): после
+    # переезда сессий на подпапку-на-сессию (WP-526 Ф2) реальный файл может
+    # лежать по новой по-дневной схеме -- пробуем её первой, с фоллбэком на
+    # старую плоскую. Проверяем оба возможных каталога (snapshot и
+    # канонический): если сессия закрывается после того, как её worktree уже
+    # убран, snapshot-каталог может не совпадать с тем, где реально лежит
+    # daily-файл.
+    OPENED_DATE=$(grep "^opened_at: " "$SEM_FILE" | cut -d' ' -f2- | cut -dT -f1 || true)
+    OPENED_DATE="${OPENED_DATE:-$(now_date)}"
+    if [[ "$OPENED_DATE" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]]; then
+      DAILY_CANDIDATE="${OPENED_DATE:0:7}/${OPENED_DATE:8:2}/${SLUG:-$WP}/report.md"
+      if [ -f "$ORZ_SESSIONS_DIR/$DAILY_CANDIDATE" ] || [ -f "$ORZ_DIR/$DAILY_CANDIDATE" ]; then
+        ORZ_BASENAME="$DAILY_CANDIDATE"
+      fi
+    fi
+    if [ -z "$ORZ_BASENAME" ]; then
+      ORZ_BASENAME="${OPENED_DATE:0:7}/${OPENED_DATE}-${SLUG:-$WP}.md"
+    fi
+  fi
   ORZ_FILE="$ORZ_SESSIONS_DIR/$ORZ_BASENAME"
 
   # WP-484 Ф99 (2026-08-15, peer session with Kimi; live case: РП524, three
