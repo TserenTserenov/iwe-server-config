@@ -362,6 +362,12 @@ bash ~/IWE/DS-my-strategy/scripts/day-close-prepare.sh --verify-week-summary --f
 
 `bash ~/IWE/scripts/day-close-step-log.sh end 9b`
 
+### 14c. Extensions (after)
+
+> Добавлено 02.09.2026 (РП-561 Ф3, разовая правка с разрешения пилота): развёрнутая версия ритуала не содержала эту точку расширения, хотя шаблон IWE её уже добавил — `extensions/day-close.after.md` (в т.ч. отправка события закрытия дня для персонального руководства) существовал, но никогда не запускался.
+
+`bash .claude/scripts/load-extensions.sh day-close after` → exit 0: `Read` каждый файл из вывода (alphabetic) → выполнить. Exit 1 → пропустить. Поддерживает `extensions/day-close.after.md` И `extensions/day-close.after.<suffix>.md`. Вызывается ДО финального коммита (шаг 15), чтобы правки расширений попадали в тот же коммит, не оставались незакоммиченным хвостом.
+
 ### 15. Закоммитить DS-my-strategy [[gate:AR.005]]
 
 ```bash
