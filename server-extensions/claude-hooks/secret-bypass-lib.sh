@@ -66,6 +66,45 @@ import shlex
 import sys
 
 
+# WP-544 (peer-session 2026-09-02-44 round 7/8, Claude+Codex; Kimi contributed
+# the underlying analysis before an adapter fault dropped it from the final
+# round): the bare (?:live|test)_[A-Za-z0-9_-]{30,} yookassa shape below also
+# matches ordinary long snake_case pytest identifiers (test_denied_consent_
+# blocks_when_config_invalid is 44 characters and contains only letters,
+# digits and underscores, exactly what the class allows). Confirmed against a
+# real, non-secret source file on disk: every def test_... name in
+# FMT-exocortex-template/scripts/tests/test_residency_gate_skill_adapter.py
+# matched and was redacted. Fail-closed by design: this callback exempts a
+# candidate ONLY when it is BOTH shaped like a pytest identifier (five or
+# more lowercase snake_case segments, no mixed case or extra characters a
+# real key would have) AND appears in one of two narrowly recognized source
+# contexts (a def/async def line, or a pytest node id after ::). Any other
+# context, including a bare occurrence with no surrounding text, is still
+# redacted -- the cost of a missed real secret is judged higher than the
+# cost of an unnecessarily redacted test name.
+YOOKASSA_CANDIDATE_RE = re.compile(r"(?:live|test)_[A-Za-z0-9_-]{30,}")
+YOOKASSA_PYTEST_SHAPE_RE = re.compile(r"test_[a-z][a-z0-9]*(?:_[a-z][a-z0-9]*){4,}\Z")
+
+
+def redact_yookassa(match):
+    value = match.group(0)
+    if not value.startswith("test_"):
+        return "[REDACTED-YOOKASSA-KEY]"
+    before = match.string[max(0, match.start() - 160):match.start()]
+    after = match.string[match.end():match.end() + 32]
+    source_definition = (
+        re.search(r"\b(?:async\s+)?def\s+\Z", before) is not None
+        and re.match(r"\s*\(", after) is not None
+    )
+    pytest_nodeid = (
+        before.endswith("::")
+        and re.match(r"(?:\[[^\]\r\n]*\])?(?=\s|$|:)", after) is not None
+    )
+    if YOOKASSA_PYTEST_SHAPE_RE.fullmatch(value) and (source_definition or pytest_nodeid):
+        return value
+    return "[REDACTED-YOOKASSA-KEY]"
+
+
 PATTERNS = (
     ("neon-api", re.compile(r"napi_[A-Za-z0-9]{30,}"), "[REDACTED-NEON-KEY]"),
     ("database-url", re.compile(r"postgres(?:ql)?(?:\+[A-Za-z0-9_.-]+)?://[^:\s]+:[^@\s]+@", re.I), "[REDACTED-DATABASE-URL]"),
@@ -73,7 +112,7 @@ PATTERNS = (
     ("openai-scoped", re.compile(r"sk-(?:proj|svcacct|admin)-[A-Za-z0-9_-]{20,}"), "[REDACTED-OPENAI-KEY]"),
     ("openai-legacy", re.compile(r"sk-[A-Za-z0-9]{20,}"), "[REDACTED-OPENAI-KEY]"),
     ("stripe-key", re.compile(r"(?:sk|rk|pk)_(?:live|test)_[A-Za-z0-9]{16,}"), "[REDACTED-STRIPE-KEY]"),
-    ("yookassa", re.compile(r"(?:live|test)_[A-Za-z0-9_-]{30,}"), "[REDACTED-YOOKASSA-KEY]"),
+    ("yookassa", YOOKASSA_CANDIDATE_RE, redact_yookassa),
     ("github-stateless-installation", re.compile(r"ghs_[0-9]+_eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+"), "[REDACTED-GITHUB-TOKEN]"),
     ("github-fine-grained", re.compile(r"github_pat_[A-Za-z0-9_]{20,}"), "[REDACTED-GITHUB-TOKEN]"),
     ("github-installation-legacy", re.compile(r"ghs_[A-Za-z0-9]{30,}"), "[REDACTED-GITHUB-TOKEN]"),
@@ -161,23 +200,53 @@ def unique(values):
     return list(dict.fromkeys(values))
 
 
+def apply_pattern(regex, replacement, text):
+    # WP-544 (peer-session 2026-09-02-44 round 8): re.sub/re.subn count every
+    # regex MATCH, not every actual TEXT CHANGE -- a callable replacement
+    # that intentionally returns its input unchanged (redact_yookassa on a
+    # recognized pytest identifier) still counted as one redaction under the
+    # old regex.sub-based implementation. That count feeds two consumers:
+    # the PostToolUse banner (cosmetic overcount only) and the PreToolUse
+    # Bash command gate in secret-leak-block.sh, which denies the tool call
+    # outright whenever pattern_ids is non-empty (a real, not cosmetic,
+    # false-positive block on any Bash command whose literal text -- e.g.
+    # pytest -k some_test_name -- contained an exempted candidate). This
+    # helper walks matches manually and only counts ones where the applied
+    # replacement differs from the original text, for every pattern here,
+    # not only the new callable one -- match.expand() on the existing plain
+    # string and backreference replacements always differs from the matched
+    # secret text, so this is a no-op for all other patterns.
+    parts = []
+    last_end = 0
+    changed_starts = []
+    for match in regex.finditer(text):
+        original = match.group(0)
+        new_value = replacement(match) if callable(replacement) else match.expand(replacement)
+        parts.append(text[last_end:match.start()])
+        parts.append(new_value)
+        last_end = match.end()
+        if new_value != original:
+            changed_starts.append(match.start())
+    parts.append(text[last_end:])
+    return "".join(parts), changed_starts
+
+
 def scan(text):
     ids = []
     total = 0
     details = []
     for pattern_id, regex, replacement in PATTERNS + ASSIGNMENT_PATTERNS:
-        matches = list(regex.finditer(text))
-        if not matches:
-            continue
-        lines = sorted({text.count("\n", 0, match.start()) + 1 for match in matches})
-        count = len(matches)
-        ids.append(pattern_id)
-        total += count
-        details.append({"pattern_id": pattern_id, "count": count, "lines": lines})
         # Sequential substitution prevents a stateless GitHub token from also
         # being reported as its embedded JWT and overlapping assignments from
         # being counted twice.
-        text = regex.sub(replacement, text)
+        text, changed_starts = apply_pattern(regex, replacement, text)
+        if not changed_starts:
+            continue
+        lines = sorted({text.count("\n", 0, pos) + 1 for pos in changed_starts})
+        count = len(changed_starts)
+        ids.append(pattern_id)
+        total += count
+        details.append({"pattern_id": pattern_id, "count": count, "lines": lines})
     return ids, total, details
 
 
@@ -185,10 +254,10 @@ def redact_text(text):
     ids = []
     total = 0
     for pattern_id, regex, replacement in PATTERNS + ASSIGNMENT_PATTERNS:
-        text, count = regex.subn(replacement, text)
-        if count:
+        text, changed_starts = apply_pattern(regex, replacement, text)
+        if changed_starts:
             ids.append(pattern_id)
-            total += count
+            total += len(changed_starts)
     return text, ids, total
 
 
@@ -1550,6 +1619,8 @@ def self_test():
         "slack": "xoxb-" + "1" * 12 + "-" + "T" * 16,
         "private-key": "-----BEGIN PRIVATE KEY-----",
         "bearer": "Bearer " + "Q" * 28,
+        "yookassa-dense": "test_" + "9" * 32,
+        "yookassa-bare-pytest-shape-no-context": "test_alpha_bravo_charlie_delta_echo",
     }
     negatives = (
         "sk-proj-short",
@@ -1558,6 +1629,8 @@ def self_test():
         "ghs_APPID_JWT",
         "AKIA-not-a-real-key",
         "123456789:short",
+        "def test_alpha_bravo_charlie_delta_echo(self):",
+        "tests/test_foo.py::test_alpha_bravo_charlie_delta_echo PASSED",
     )
     for name, value in positives.items():
         ids, count, _details = scan(value)
