@@ -29,7 +29,24 @@
 # of origin/<branch>. If either fails, this script does nothing and exits 0
 # — it is not this script's job to diagnose or alert on those cases
 # (git-dirty-guard.sh and the pilot's own Pull-on-Touch flow already own
-# diagnosing a genuinely dirty or diverged tree).
+# diagnosing a genuinely dirty or diverged tree)...
+#
+# ...with one narrow, provable exception (WP-538 Ф5а, 2026-09-03, peer
+# session with Kimi+Codex, root cause: sync-strategy-files.sh's `git
+# checkout origin/$BRANCH -- $FILE` stages content that already matches
+# origin for specific known paths, leaving the tree tracked-dirty relative
+# to a stale HEAD even though nothing would actually be lost by catching up
+# — this was blocking iwe-tsekh1-sync for 62 commits at a time, repeatedly).
+# When the tracked-dirty set is provably a mirror of a captured remote OID —
+# every touched path belongs to a declared automation in
+# automation-contract.conf, the whole index tree equals that OID's tree, and
+# the whole worktree equals the index — advancing HEAD with `git reset
+# --soft` loses nothing (index/worktree are untouched, already correct) and
+# is not a self-heal reset of unknown dirt. Any tree that fails even one of
+# these checks (unknown path, real edit, partial mirror, mid-race change)
+# falls straight through to the unchanged refusal below. git-dirty-guard.sh
+# itself is not touched by this — its exit contract for its 20+ other
+# callers stays exactly as it was.
 #
 # Usage: canon-refresh.sh <repo-path> [branch]
 # Exit codes: 0 = nothing to do, or fast-forwarded successfully.
@@ -40,6 +57,10 @@
 #             2 = usage/repo error.
 
 set -uo pipefail
+
+SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+# shellcheck source=lib/automation-contract.sh
+. "$SCRIPT_DIR/lib/automation-contract.sh"
 
 if [ -z "${1:-}" ]; then
   echo "usage: canon-refresh.sh <repo-path> [branch]" >&2
@@ -127,7 +148,113 @@ is_clean() {
   [ -z "$status_output" ]
 }
 
+# automation_mirror_snapshot <automation-name> <remote-oid>
+# Fails closed (return 1) on anything that isn't a provable, whole-tree
+# mirror of <remote-oid> made entirely of paths <automation-name> owns:
+#   - no untracked files (status must be tracked-changes-only)
+#   - every changed path has a plain modify/add status (no delete, rename,
+#     copy, type-change or unmerged entry — sync-strategy-files.sh never
+#     produces those, so seeing one means this isn't that automation's work)
+#   - every changed path is declared for <automation-name> in
+#     automation-contract.conf
+#   - the whole index tree equals <remote-oid>'s tree, and the whole
+#     worktree equals the index (not just the paths git-status flagged —
+#     Codex's cold-review finding: origin could have also changed a path
+#     outside the automation's allowlist that still matches the old,
+#     stale HEAD locally, so it never shows up as dirty on its own)
+automation_mirror_snapshot() {
+  local automation="$1" remote_oid="$2"
+  local status_output line xy x y path touched_paths=""
+
+  status_output=$(git status --porcelain=v1 --untracked-files=all 2>/dev/null) || return 1
+  [ -n "$status_output" ] || return 1
+
+  while IFS= read -r line; do
+    [ -n "$line" ] || continue
+    xy="${line:0:2}"
+    path="${line:3}"
+    x="${xy:0:1}"
+    y="${xy:1:1}"
+    case "$x" in
+      ' '|'M'|'A') ;;
+      *) return 1 ;;  # delete/rename/copy/unmerged/untracked marker in X
+    esac
+    case "$y" in
+      ' '|'M') ;;
+      *) return 1 ;;  # anything but "matches index" or "modified since staged"
+    esac
+    touched_paths="${touched_paths}${path}"$'\n'
+  done <<EOF
+$status_output
+EOF
+
+  [ -n "$touched_paths" ] || return 1
+  while IFS= read -r path; do
+    [ -n "$path" ] || continue
+    automation_contract_path_allowed "$automation" "$path" || return 1
+  done <<EOF
+$touched_paths
+EOF
+
+  git diff --cached --quiet "$remote_oid" -- 2>/dev/null || return 1
+  git diff-files --quiet -- 2>/dev/null || return 1
+  return 0
+}
+
+# try_automation_mirror_recovery <remote-oid>
+# Returns 0 and leaves HEAD reset onto <remote-oid> only when every check in
+# automation_mirror_snapshot passes twice in a row — once to decide, once
+# again immediately before the mutation (same narrowing-the-window spirit as
+# the pre-existing re-check above the ff-only merge below). Returns 1 with
+# nothing touched for every other case, including a snapshot that stops
+# passing between the two checks.
+try_automation_mirror_recovery() {
+  local remote_oid="$1" automation="sync-strategy-files" old_head new_head
+
+  old_head=$(git rev-parse HEAD 2>/dev/null) || return 1
+  git merge-base --is-ancestor "$old_head" "$remote_oid" 2>/dev/null || return 1
+  automation_mirror_snapshot "$automation" "$remote_oid" || return 1
+
+  # Re-check immediately before mutating: narrows the race window to the
+  # width of these two calls — same spirit as the ff-only path's own late
+  # re-check below. A HEAD that moved between the two checks means some
+  # other process touched this repo concurrently; bail rather than trust a
+  # snapshot taken against a HEAD that's no longer current.
+  #
+  # This narrows, but — same as every other check in this file and in
+  # git-dirty-guard.sh — does not close the window outright: "This lock does
+  # not authorize mutation: ordinary editors do not honor it, which is why
+  # automatic reset/self-heal is deliberately absent" (git-dirty-guard.sh's
+  # own words for the identical caveat). What makes this safe regardless is
+  # `git reset --soft` itself, not the lock: it only moves the branch ref,
+  # never touches the index or worktree, so even a same-instant edit by
+  # something outside this lock's three cooperating scripts can't be
+  # overwritten or lost by this call — the postcondition check right below
+  # would catch the resulting mismatch and hard-fail instead of masking it.
+  [ "$(git rev-parse HEAD 2>/dev/null)" = "$old_head" ] || return 1
+  automation_mirror_snapshot "$automation" "$remote_oid" || return 1
+
+  if ! git reset --soft "$remote_oid" 2>&1; then
+    echo "canon-refresh: automation-mirror reset failed unexpectedly" >&2
+    return 1
+  fi
+
+  new_head=$(git rev-parse HEAD 2>/dev/null)
+  if [ "$new_head" != "$remote_oid" ] || ! git diff --cached --quiet 2>/dev/null \
+    || ! git diff-files --quiet -- 2>/dev/null; then
+    echo "canon-refresh: automation-mirror reset postcondition violated (HEAD=$new_head, expected $remote_oid) — investigate manually" >&2
+    exit 1
+  fi
+
+  echo "canon-refresh: resolved a $automation mirror in $REPO — HEAD ${old_head:0:12} -> ${new_head:0:12} (git reset --soft, no index/worktree change)"
+  return 0
+}
+
 if ! is_clean; then
+  REMOTE_OID_FOR_RECOVERY=$(git rev-parse "origin/$BRANCH" 2>/dev/null) || REMOTE_OID_FOR_RECOVERY=""
+  if [ -n "$REMOTE_OID_FOR_RECOVERY" ] && try_automation_mirror_recovery "$REMOTE_OID_FOR_RECOVERY"; then
+    exit 0
+  fi
   echo "canon-refresh: tree not clean — nothing to do (git-dirty-guard.sh/pilot own that case)"
   exit 0
 fi

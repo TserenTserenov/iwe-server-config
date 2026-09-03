@@ -1673,8 +1673,33 @@ $isolate_status_code $isolate_status_path"
     # review finding, this session): path used to be relative to $ORZ_DIR's
     # PARENT because ORZ_DIR was a "sessions" subfolder of the governance repo
     # -- now ORZ_DIR IS the MC-sessions repo root, so $ORZ_BASENAME alone is
-    # already the correct repo-relative path (no parent prefix to add).
-    echo "file: $ORZ_BASENAME"
+    # already the correct repo-relative path in that layout (no parent prefix
+    # to add).
+    #
+    # WP-484 (03.09, peer-session "fix-quickclose-test-debt", Codex diagnosis):
+    # the comment above is only true when $ORZ_SESSIONS_DIR IS a git repo's
+    # root -- the modern MC-sessions layout. resolve_orz_sessions_dir()'s
+    # legacy fallback (no MC-sessions repo found) returns "$GOV_REPO/sessions",
+    # a SUBDIRECTORY of the governance repo, not its own repo root -- a commit
+    # from $GOV_REPO then sees this file at "sessions/$ORZ_BASENAME", one path
+    # segment longer than what used to be registered here unconditionally, so
+    # the scope gate's exact-match never fired (live-reproduced, legacy layout
+    # only). Compute the git-root-relative path the same way note-file already
+    # does for the general case (below, ~line 2645), instead of assuming
+    # $ORZ_BASENAME already is one -- realpath() on BOTH sides is required,
+    # not optional: `git rev-parse --show-toplevel` resolves symlinks (macOS
+    # /var -> /private/var), while $ORZ_FILE is built from $IWE_ROOT verbatim
+    # -- os.path.relpath() on one resolved + one unresolved absolute path
+    # produces a long, wrong "../../../private/var/..." chain instead of the
+    # short in-repo path (caught live testing this same fix, mktemp -d sandbox).
+    ORZ_GIT_ROOT="$(git -C "$ORZ_SESSIONS_DIR" rev-parse --show-toplevel 2>/dev/null || echo "$ORZ_SESSIONS_DIR")"
+    ORZ_REL_PATH="$(python3 -c "
+import os, sys
+f = os.path.realpath(sys.argv[1])
+r = os.path.realpath(sys.argv[2])
+print(os.path.relpath(f, r))
+" "$ORZ_FILE" "$ORZ_GIT_ROOT")"
+    echo "file: $ORZ_REL_PATH"
     # Same class of gap as the ORZ line above (Ф32 п.5), found for --isolate
     # re-entry (peer-session 2026-08-14-13, turn 15, Codex): OPEN_LOG's own
     # append below is a real, expected, this-session side effect --

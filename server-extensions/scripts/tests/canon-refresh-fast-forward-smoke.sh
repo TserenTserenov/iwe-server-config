@@ -272,4 +272,183 @@ assert_eq "case14 broken status exit code" "0" "$broken_status_rc"
 assert_contains "case14 broken status diagnostic" "$broken_status_out" "tree not clean"
 assert_eq "case14 broken status HEAD unchanged" "$BROKEN_STATUS_HEAD" "$("$REAL_GIT" -C "$CLONE14" rev-parse HEAD)"
 
-echo "PASS: canon-refresh-fast-forward-smoke.sh (14 scenarios)"
+# --- WP-538 Ф5а: automation-mirror recovery scenarios (15-19) ---------------
+# Each scenario gets its own isolated contract file (AUTOMATION_CONTRACT_FILE)
+# rather than depending on the real scripts/automation-contract.conf, so a
+# future edit to production contract data can't silently change what these
+# scenarios exercise.
+CONTRACT15="$TEST_ROOT/contract-sync-strategy-files.conf"
+printf 'sync-strategy-files\tsync-strategy-files.sh\tinbox/WP-*.md,current/*.md,MEMORY.md\n' > "$CONTRACT15"
+
+# --- Scenario 15: known-automation mirror -> recovered via reset --soft ---
+new_origin_and_clone case15 >/dev/null
+CLONE15="$TEST_ROOT/case15-clone"
+SEED15="$TEST_ROOT/case15-seed"
+mkdir -p "$SEED15/inbox"
+printf 'card body\n' > "$SEED15/inbox/WP-999.md"
+"$REAL_GIT" -C "$SEED15" add inbox/WP-999.md
+"$REAL_GIT" -C "$SEED15" commit -qm "add WP-999 card"
+"$REAL_GIT" -C "$SEED15" push -q
+REMOTE_HEAD15=$("$REAL_GIT" -C "$SEED15" rev-parse HEAD)
+"$REAL_GIT" -C "$CLONE15" fetch -q origin
+# Simulate exactly what sync-strategy-files.sh does: stage the one path it
+# owns from origin, without touching HEAD.
+"$REAL_GIT" -C "$CLONE15" checkout -q "origin/main" -- inbox/WP-999.md
+out15=$(AUTOMATION_CONTRACT_FILE="$CONTRACT15" bash "$SCRIPT" "$CLONE15" main 2>&1)
+rc15=$?
+assert_eq "case15 exit code" "0" "$rc15"
+assert_contains "case15 diagnostic" "$out15" "resolved a sync-strategy-files mirror"
+assert_eq "case15 HEAD advanced" "$REMOTE_HEAD15" "$("$REAL_GIT" -C "$CLONE15" rev-parse HEAD)"
+assert_eq "case15 tree clean after recovery" "" "$("$REAL_GIT" -C "$CLONE15" status --porcelain)"
+assert_eq "case15 card content correct" "card body" "$(cat "$CLONE15/inbox/WP-999.md")"
+
+# --- Scenario 16: mirror on a path outside the contract -> not recovered ---
+new_origin_and_clone case16 >/dev/null
+CLONE16="$TEST_ROOT/case16-clone"
+SEED16="$TEST_ROOT/case16-seed"
+mkdir -p "$SEED16/scripts"
+printf 'new script\n' > "$SEED16/scripts/other.sh"
+"$REAL_GIT" -C "$SEED16" add scripts/other.sh
+"$REAL_GIT" -C "$SEED16" commit -qm "add scripts/other.sh"
+"$REAL_GIT" -C "$SEED16" push -q
+PRE16_HEAD=$("$REAL_GIT" -C "$CLONE16" rev-parse HEAD)
+"$REAL_GIT" -C "$CLONE16" fetch -q origin
+"$REAL_GIT" -C "$CLONE16" checkout -q "origin/main" -- scripts/other.sh
+out16=$(AUTOMATION_CONTRACT_FILE="$CONTRACT15" bash "$SCRIPT" "$CLONE16" main 2>&1)
+rc16=$?
+assert_eq "case16 exit code" "0" "$rc16"
+assert_contains "case16 diagnostic" "$out16" "tree not clean"
+assert_eq "case16 HEAD unchanged" "$PRE16_HEAD" "$("$REAL_GIT" -C "$CLONE16" rev-parse HEAD)"
+assert_contains "case16 staged file preserved" "$("$REAL_GIT" -C "$CLONE16" status --porcelain)" "scripts/other.sh"
+
+# --- Scenario 17: an UNSTAGED worktree edit on top of already-mirrored
+# staged content -> not recovered. This exercises the worktree-vs-index leg
+# (`git diff-files`) of the whole-tree check, not the index-vs-remote leg
+# (`git diff --cached`) — scenario 20 below covers that one, a genuinely
+# staged edit (cold-context review, 2026-09-03: the checked-in scenarios
+# didn't originally distinguish the two, even though the whole-tree check
+# has two independent legs and either one failing must refuse recovery). --
+new_origin_and_clone case17 >/dev/null
+CLONE17="$TEST_ROOT/case17-clone"
+SEED17="$TEST_ROOT/case17-seed"
+mkdir -p "$SEED17/inbox"
+printf 'origin body\n' > "$SEED17/inbox/WP-1000.md"
+"$REAL_GIT" -C "$SEED17" add inbox/WP-1000.md
+"$REAL_GIT" -C "$SEED17" commit -qm "add WP-1000 card"
+"$REAL_GIT" -C "$SEED17" push -q
+PRE17_HEAD=$("$REAL_GIT" -C "$CLONE17" rev-parse HEAD)
+"$REAL_GIT" -C "$CLONE17" fetch -q origin
+"$REAL_GIT" -C "$CLONE17" checkout -q "origin/main" -- inbox/WP-1000.md
+printf 'origin body\nlocal edit on top\n' > "$CLONE17/inbox/WP-1000.md"
+out17=$(AUTOMATION_CONTRACT_FILE="$CONTRACT15" bash "$SCRIPT" "$CLONE17" main 2>&1)
+rc17=$?
+assert_eq "case17 exit code" "0" "$rc17"
+assert_contains "case17 diagnostic" "$out17" "tree not clean"
+assert_eq "case17 HEAD unchanged" "$PRE17_HEAD" "$("$REAL_GIT" -C "$CLONE17" rev-parse HEAD)"
+assert_eq "case17 local edit preserved" "origin body
+local edit on top" "$(cat "$CLONE17/inbox/WP-1000.md")"
+
+# --- Scenario 18: an unrelated untracked file blocks recovery --------------
+new_origin_and_clone case18 >/dev/null
+CLONE18="$TEST_ROOT/case18-clone"
+SEED18="$TEST_ROOT/case18-seed"
+mkdir -p "$SEED18/inbox"
+printf 'card body\n' > "$SEED18/inbox/WP-1001.md"
+"$REAL_GIT" -C "$SEED18" add inbox/WP-1001.md
+"$REAL_GIT" -C "$SEED18" commit -qm "add WP-1001 card"
+"$REAL_GIT" -C "$SEED18" push -q
+PRE18_HEAD=$("$REAL_GIT" -C "$CLONE18" rev-parse HEAD)
+"$REAL_GIT" -C "$CLONE18" fetch -q origin
+"$REAL_GIT" -C "$CLONE18" checkout -q "origin/main" -- inbox/WP-1001.md
+printf 'unrelated scratch file\n' > "$CLONE18/scratch.txt"
+out18=$(AUTOMATION_CONTRACT_FILE="$CONTRACT15" bash "$SCRIPT" "$CLONE18" main 2>&1)
+rc18=$?
+assert_eq "case18 exit code" "0" "$rc18"
+assert_contains "case18 diagnostic" "$out18" "tree not clean"
+assert_eq "case18 HEAD unchanged" "$PRE18_HEAD" "$("$REAL_GIT" -C "$CLONE18" rev-parse HEAD)"
+[ -f "$CLONE18/scratch.txt" ] || fail "case18 untracked file must survive untouched"
+
+# --- Scenario 19: origin also changed a path OUTSIDE the contract that the
+# local mirror never touched (still equals the OLD head, so it never shows
+# up as dirty on its own) -> the whole-tree check must still catch this and
+# refuse, or a reset --soft would silently introduce new local dirtiness on
+# that path (Codex's cold-review finding, round 4 of the design session). --
+new_origin_and_clone case19 >/dev/null
+CLONE19="$TEST_ROOT/case19-clone"
+SEED19="$TEST_ROOT/case19-seed"
+mkdir -p "$SEED19/inbox" "$SEED19/scripts"
+printf 'other v1\n' > "$SEED19/scripts/other.sh"
+"$REAL_GIT" -C "$SEED19" add scripts/other.sh
+"$REAL_GIT" -C "$SEED19" commit -qm "add scripts/other.sh v1"
+"$REAL_GIT" -C "$SEED19" push -q
+# The clone catches up to v1 first, so v1 is part of its own committed
+# history (not just something it could fetch) — the point of this scenario
+# is a path that is stale-but-clean locally, not a path the clone has never
+# seen at all.
+"$REAL_GIT" -C "$CLONE19" fetch -q origin
+"$REAL_GIT" -C "$CLONE19" merge -q --ff-only origin/main
+PRE19_HEAD=$("$REAL_GIT" -C "$CLONE19" rev-parse HEAD)
+# Origin advances twice more: once on the contract path (what sync-strategy-
+# files.sh will mirror), once on a path outside the contract (what it must
+# NOT touch, by its own design) — exactly the "origin moved a second,
+# unrelated file" shape.
+printf 'card body\n' > "$SEED19/inbox/WP-1002.md"
+"$REAL_GIT" -C "$SEED19" add inbox/WP-1002.md
+"$REAL_GIT" -C "$SEED19" commit -qm "add WP-1002 card"
+printf 'other v2\n' > "$SEED19/scripts/other.sh"
+"$REAL_GIT" -C "$SEED19" add scripts/other.sh
+"$REAL_GIT" -C "$SEED19" commit -qm "advance scripts/other.sh to v2"
+"$REAL_GIT" -C "$SEED19" push -q
+"$REAL_GIT" -C "$CLONE19" fetch -q origin
+"$REAL_GIT" -C "$CLONE19" checkout -q "origin/main" -- inbox/WP-1002.md
+out19=$(AUTOMATION_CONTRACT_FILE="$CONTRACT15" bash "$SCRIPT" "$CLONE19" main 2>&1)
+rc19=$?
+assert_eq "case19 exit code" "0" "$rc19"
+assert_contains "case19 diagnostic" "$out19" "tree not clean"
+assert_eq "case19 HEAD unchanged (must not silently adopt scripts/other.sh v2)" \
+  "$PRE19_HEAD" "$("$REAL_GIT" -C "$CLONE19" rev-parse HEAD)"
+assert_eq "case19 scripts/other.sh still at old content" "other v1" "$(cat "$CLONE19/scripts/other.sh")"
+
+# --- Scenario 20: a genuinely STAGED edit (git add, not a mirror checkout)
+# on a contract-owned path, diverging from origin -> not recovered. This is
+# the exact shape the whole feature exists to distinguish from a real mirror
+# (a pilot or another agent commits-in-progress work on an inbox card while
+# origin has also moved) — cold-context review, 2026-09-03, found the
+# checked-in scenarios didn't construct it: 16/18/19 differ by path or
+# untracked status, and 17 only covers the worktree-vs-index leg (unstaged
+# on top of an already-mirrored stage), not this index-vs-remote leg
+# (`git diff --cached "$remote_oid"`, canon-refresh.sh's other check). Both
+# legs must independently refuse, not just one of them. ----------------------
+new_origin_and_clone case20 >/dev/null
+CLONE20="$TEST_ROOT/case20-clone"
+SEED20="$TEST_ROOT/case20-seed"
+mkdir -p "$SEED20/inbox"
+printf 'origin body v1\n' > "$SEED20/inbox/WP-2000.md"
+"$REAL_GIT" -C "$SEED20" add inbox/WP-2000.md
+"$REAL_GIT" -C "$SEED20" commit -qm "add WP-2000 card"
+"$REAL_GIT" -C "$SEED20" push -q
+"$REAL_GIT" -C "$CLONE20" fetch -q origin
+"$REAL_GIT" -C "$CLONE20" merge -q --ff-only origin/main
+PRE20_HEAD=$("$REAL_GIT" -C "$CLONE20" rev-parse HEAD)
+# Origin advances (what a real mirror would pick up)...
+printf 'origin body v2\n' > "$SEED20/inbox/WP-2000.md"
+"$REAL_GIT" -C "$SEED20" add inbox/WP-2000.md
+"$REAL_GIT" -C "$SEED20" commit -qm "advance WP-2000 to v2"
+"$REAL_GIT" -C "$SEED20" push -q
+"$REAL_GIT" -C "$CLONE20" fetch -q origin
+# ...but the clone has real, staged (not mirrored) local work on the SAME
+# path instead — the pilot editing this exact card, not sync-strategy-files.sh.
+printf 'pilot v1\nreal edit, not from origin\n' > "$CLONE20/inbox/WP-2000.md"
+"$REAL_GIT" -C "$CLONE20" add inbox/WP-2000.md
+out20=$(AUTOMATION_CONTRACT_FILE="$CONTRACT15" bash "$SCRIPT" "$CLONE20" main 2>&1)
+rc20=$?
+assert_eq "case20 exit code" "0" "$rc20"
+assert_contains "case20 diagnostic" "$out20" "tree not clean"
+assert_eq "case20 HEAD unchanged (real staged work must never be reset away)" \
+  "$PRE20_HEAD" "$("$REAL_GIT" -C "$CLONE20" rev-parse HEAD)"
+assert_eq "case20 staged pilot edit preserved" "pilot v1
+real edit, not from origin" "$(cat "$CLONE20/inbox/WP-2000.md")"
+assert_contains "case20 edit still staged, not lost" \
+  "$("$REAL_GIT" -C "$CLONE20" diff --cached --name-only)" "inbox/WP-2000.md"
+
+echo "PASS: canon-refresh-fast-forward-smoke.sh (20 scenarios)"

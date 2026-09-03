@@ -23,11 +23,47 @@
 #     WP-506 дважды 07-08.08, WP-406+WP-504 08.08).
 #
 # Запуск: через iwe-sync-strategy-files.timer (раз в 10 мин).
+#
+# Lock (WP-538 Ф5а, 2026-09-03): this script's own `git checkout origin/
+# $BRANCH -- $FILE` calls stage content that can end up byte-identical to
+# origin while HEAD stays behind — canon-refresh.sh recognizes that exact
+# shape as a safe, known-automation mirror and resolves it with a `git reset
+# --soft`. That recovery snapshot must not be taken mid-checkout-loop here,
+# so this script takes the same $GIT_DIR/dirty-guard.lock that git-dirty-
+# guard.sh and canon-refresh.sh already share (mkdir-based; whichever
+# acquires it first runs to completion before the other's mkdir succeeds).
+# Non-blocking, same as canon-refresh.sh: a busy lock just skips this tick,
+# the timer tries again in 10 minutes.
 
 set -euo pipefail
 
 REPO_PATH="${1:-/home/tseren/IWE/DS-my-strategy}"
 cd "$REPO_PATH"
+
+git rev-parse --is-inside-work-tree >/dev/null 2>&1 || {
+  echo "[sync-strategy-files] $REPO_PATH is not a git repo" >&2
+  exit 2
+}
+GIT_DIR=$(git rev-parse --absolute-git-dir)
+LOCK_DIR="$GIT_DIR/dirty-guard.lock"
+LOCK_META="$LOCK_DIR/owner"
+HOSTNAME_NOW="${HOSTNAME:-$(hostname 2>/dev/null || echo unknown)}"
+if ! mkdir "$LOCK_DIR" 2>/dev/null; then
+  if [ -f "$LOCK_META" ]; then
+    OTHER_HOST=$(awk -F= '$1=="host"{print $2}' "$LOCK_META" 2>/dev/null)
+    OTHER_PID=$(awk -F= '$1=="pid"{print $2}' "$LOCK_META" 2>/dev/null)
+    if [ "$OTHER_HOST" = "$HOSTNAME_NOW" ] && [ -n "$OTHER_PID" ] && ! kill -0 "$OTHER_PID" 2>/dev/null; then
+      echo "[sync-strategy-files] reclaiming stale lock (pid=$OTHER_PID on $OTHER_HOST no longer running)" >&2
+      rm -rf "$LOCK_DIR" 2>/dev/null
+    fi
+  fi
+  if ! mkdir "$LOCK_DIR" 2>/dev/null; then
+    echo "[sync-strategy-files] lock busy (guard or canon-refresh running), skipping this cycle" >&2
+    exit 0
+  fi
+fi
+trap 'rm -rf "$LOCK_DIR" 2>/dev/null' EXIT
+printf 'host=%s\npid=%s\n' "$HOSTNAME_NOW" "$$" > "$LOCK_META"
 
 BRANCH=$(git rev-parse --abbrev-ref HEAD)
 REMOTE="origin"
@@ -51,6 +87,17 @@ fi
 
 # Glob список файлов для синхронизации (read-only в сторону сервера).
 # git ls-tree не поддерживает glob magic — используем grep-фильтр.
+#
+# Этот список — source of truth для automation-contract.conf (WP-538 Ф5а):
+# scripts/tests/automation-contract-consistency-smoke.sh проверяет репрезентативные
+# пути с обеих сторон (не полную формальную эквивалентность — grep-паттерны
+# ниже — это regex, где "." переходит "/", а contract-файл сознательно
+# ограничен ровно одним уровнем вложенности на "*", см. automation-contract.sh;
+# расхождение на глубже вложенных путях безопасно проваливается в отказ, не
+# в ложное разрешение). canon-refresh.sh доверяет contract-файлу при решении,
+# можно ли без коммита продвинуть HEAD поверх зеркала, который оставляет этот
+# скрипт — узнаваемое расхождение (для путей, которые реально встречаются)
+# сделало бы то решение неверным в обе стороны.
 FILES_TO_SYNC=()
 ALL_FILES=$(git ls-tree -r --name-only "${REMOTE}/${BRANCH}" 2>/dev/null)
 

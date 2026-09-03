@@ -21,7 +21,7 @@ automation_contract_file() {
 # prints nothing and returns 1 if the name has no entry (or the file is
 # missing/unreadable — fail closed, same as every other lookup in this repo).
 automation_contract_lookup() {
-  local name="$1" contract_file line auto caller globs
+  local name="$1" contract_file auto caller globs
   contract_file=$(automation_contract_file)
   [ -r "$contract_file" ] || return 1
   while IFS=$'\t' read -r auto caller globs || [ -n "$auto" ]; do
@@ -36,48 +36,76 @@ automation_contract_lookup() {
   return 1
 }
 
-# automation_contract_caller <automation-name>
-# Prints the declared caller-basename for <automation-name>, or nothing +
-# return 1 if unknown. Documentation/audit use — the runtime admission check
-# in canon-refresh.sh trusts observed git state, not a self-reported caller
-# identity (WP-538 Ф5а design session: a live "I am automation X" signal from
-# the writer process is not verifiable by the time canon-refresh.sh runs,
-# since that process has already exited).
-automation_contract_caller() {
-  local entry
-  entry=$(automation_contract_lookup "$1") || return 1
-  printf '%s\n' "${entry%%$'\t'*}"
+# _automation_glob_match <path> <glob>
+# A plain bash `case` glob's `*` matches '/' too — "inbox/WP-*.md" would
+# then also match an arbitrary nested path like "inbox/WP-anything/x.md" as
+# long as it ends in .md (found live while smoke-testing this file,
+# 2026-09-03; the reverse also surfaced live: the actual inbox convention is
+# `inbox/WP-{N}/WP-{N}.md`, a *nested* form the flat "inbox/WP-*.md" glob
+# alone can't express either). This matches path and glob segment-by-segment
+# ('/' as the separator): segment counts must be equal, and each glob
+# segment matches its corresponding path segment as an ordinary `case` glob
+# — since neither side of that per-segment comparison can contain '/', `*`
+# can no longer cross a path boundary in either direction.
+_automation_glob_match() {
+  local path="$1" glob="$2" ifs_saved path_segs glob_segs i n seg noglob_was_set
+  # Splitting an unquoted variable that contains glob metacharacters (the
+  # whole point of $glob here) does not just word-split on IFS — bash also
+  # runs pathname expansion on the result, against whatever the *caller's*
+  # current directory happens to be. Found live: running this from ~/IWE
+  # expanded "*/*.md" into real filenames from the repo root instead of
+  # leaving it as literal segments. `set -f` suppresses only that expansion;
+  # `case` pattern matching below is unaffected by it either way.
+  case "$-" in
+    *f*) noglob_was_set=1 ;;
+    *) noglob_was_set=0 ;;
+  esac
+  set -f
+  ifs_saved="$IFS"
+  IFS='/'
+  set -- $path
+  path_segs=("$@")
+  set -- $glob
+  glob_segs=("$@")
+  IFS="$ifs_saved"
+  [ "$noglob_was_set" -eq 1 ] || set +f
+  n="${#glob_segs[@]}"
+  [ "${#path_segs[@]}" -eq "$n" ] || return 1
+  i=0
+  while [ "$i" -lt "$n" ]; do
+    seg="${glob_segs[$i]}"
+    # shellcheck disable=SC2254  # intentional glob match — $seg is a shell
+    # glob segment from the contract file (e.g. "WP-*"), not a literal.
+    case "${path_segs[$i]}" in
+      $seg) ;;
+      *) return 1 ;;
+    esac
+    i=$((i + 1))
+  done
+  return 0
 }
 
 # automation_contract_path_allowed <automation-name> <path>
 # Returns 0 if <path> matches one of the automation's declared globs.
 automation_contract_path_allowed() {
-  local name="$1" path="$2" entry globs g ifs_saved
+  local name="$1" path="$2" entry globs g ifs_saved noglob_was_set
   entry=$(automation_contract_lookup "$name") || return 1
   globs="${entry#*$'\t'}"
+  # Same pathname-expansion trap as _automation_glob_match: $globs is a
+  # comma-separated list of glob patterns, so splitting it unquoted must not
+  # also let bash expand each piece against the current directory.
+  case "$-" in
+    *f*) noglob_was_set=1 ;;
+    *) noglob_was_set=0 ;;
+  esac
+  set -f
   ifs_saved="$IFS"
   IFS=','
   set -- $globs
   IFS="$ifs_saved"
+  [ "$noglob_was_set" -eq 1 ] || set +f
   for g in "$@"; do
-    case "$path" in
-      $g) return 0 ;;
-    esac
+    _automation_glob_match "$path" "$g" && return 0
   done
   return 1
-}
-
-# automation_contract_all_paths_allowed <automation-name> <path...>
-# Returns 0 only if every given path matches the automation's declared globs.
-# Empty path list is vacuously true (nothing to object to) — callers are
-# responsible for not treating "no paths differ" as "recovery needed" in the
-# first place.
-automation_contract_all_paths_allowed() {
-  local name="$1"
-  shift
-  local path
-  for path in "$@"; do
-    automation_contract_path_allowed "$name" "$path" || return 1
-  done
-  return 0
 }
