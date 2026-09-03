@@ -605,12 +605,23 @@ in
     # WP-7 S-C (7 мая 2026). Точечный pull WP-карточек и плана недели для DS-my-strategy.
     # Не делает full git pull (DS-my-strategy почти всегда dirty из-за iwe-sync-fleeting-notes).
     #
-    # Отключено (WP-538, 03.09): каждый прогон кладёт свежие карточки в git-индекс
-    # канонического чекаута; iwe-tsekh1-sync (2c ниже) видит staged-файлы как
-    # реальную незакоммиченную работу и отказывает в fast-forward — оба сервиса
-    # блокировали друг друга, канон отставал от origin на 62 коммита. Сервис
-    # оставлен объявленным (не удалён), но выключен — включать обратно только
-    # после починки критерия «зеркала» в git-dirty-guard.sh (см. wp-context WP-538).
+    # Было отключено (WP-538, 03.09): каждый прогон кладёт свежие карточки в
+    # git-индекс канонического чекаута; iwe-tsekh1-sync (2c ниже) видел
+    # staged-файлы как реальную незакоммиченную работу и отказывал в
+    # fast-forward — оба сервиса блокировали друг друга, канон отставал от
+    # origin на 62 коммита.
+    #
+    # Включено обратно (WP-538 Ф5а, 03.09, пир-сессия с Kimi+Codex): критерий
+    # «зеркала» реализован не в самом git-dirty-guard.sh (контракт для его
+    # 20+ вызывающих остался нетронутым), а узкой recovery-веткой в
+    # canon-refresh.sh — тот уже безопасно двигает HEAD под тем же
+    # dirty-guard.lock (WP-484 AF) и теперь распознаёт staged-мираж известной
+    # автоматизации (полное совпадение дерева с origin, allowlist путей из
+    # scripts/automation-contract.conf) и продвигает HEAD через
+    # `git reset --soft`, не оставляя канон застрявшим. canon-refresh.sh уже
+    # вызывается после каждой успешной публикации (ds-publish.sh) — отдельного
+    # нового триггера не требуется. sync-strategy-files.sh сам теперь тоже
+    # участвует в общем dirty-guard.lock. Подробности → wp-context WP-538 Ф5а.
 
     systemd.services."iwe-sync-strategy-files" = {
       description = "IWE — sync inbox/WP-*.md + current/*.md в DS-my-strategy (каждые 10 мин)";
@@ -623,9 +634,9 @@ in
     };
 
     systemd.timers."iwe-sync-strategy-files" = {
-      enable      = false;
+      enable      = true;
       wantedBy    = [ "timers.target" ];
-      description = "IWE strategy-files sync — каждые 10 мин (WP-538: выключен, конфликтовал с iwe-tsekh1-sync)";
+      description = "IWE strategy-files sync — каждые 10 мин (WP-538 Ф5а: снова включён, canon-refresh.sh теперь безопасно разрешает зеркало)";
       timerConfig = {
         OnBootSec       = "5min";
         OnUnitActiveSec = "10min";
