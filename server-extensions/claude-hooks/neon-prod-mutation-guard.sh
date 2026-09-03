@@ -121,7 +121,8 @@ print(command)
 
 SESSION_ID=$(printf '%s\n' "$PARSED" | sed -n '1p')
 COMMAND=$(printf '%s\n' "$PARSED" | sed -n '2,$p')
-AGENT_ID="claude-code-$SESSION_ID"
+AGENT_ID_BASE="claude-code"
+AGENT_ID="${AGENT_ID_BASE}-$SESSION_ID"
 
 # Shell-команда может законно занимать несколько строк. Для эвристического
 # scan удаляем line continuation, но сохраняем настоящий newline как shell-
@@ -289,7 +290,15 @@ if [ "$PSQL_SIGNAL" = "0" ] && [ "$DYNAMIC_COMMAND_SIGNAL" = "0" ] && \
   exit 0
 fi
 
-LOCK_JSON=$(IWE_AGENT_ID="$AGENT_ID" python3 "$GATEWAY_LOCK" check "$LOCK_KEY" 2>/dev/null)
+
+# WP-484 (03.09, peer-session 2026-09-03-11-wp484-remaining-kimi-session-open,
+# cold-review found this sibling of the write-path-lease-guard.sh fix): pass
+# only the BASE identity, not the already-suffixed $AGENT_ID -- gateway-lock.py
+# now resolves identity via iwe-agent-identity.sh, which appends
+# $CLAUDE_CODE_SESSION_ID itself. Feeding it an already-suffixed value here
+# would double-suffix ("claude-code-<sid>-<sid>"), producing a holder this
+# hook's own $AGENT_ID (line above) could never match again.
+LOCK_JSON=$(IWE_AGENT_ID="$AGENT_ID_BASE" python3 "$GATEWAY_LOCK" check "$LOCK_KEY" 2>/dev/null)
 CHECK_RC=$?
 
 case "$CHECK_RC" in
@@ -301,7 +310,7 @@ case "$CHECK_RC" in
     security_failure "боевая Neon-ветка сейчас под правкой другой сессии ($HOLDER). Дождись освобождения или согласуй с пилотом. Проверка: python3 $GATEWAY_LOCK check '$LOCK_KEY'"
     ;;
   3)
-    security_failure "команда обращается напрямую или неоднозначно к боевой Neon-ветке без аренды замка. Возьми аренду и повтори: mcp acquire_file_lock (file='$LOCK_KEY') или IWE_AGENT_ID=$AGENT_ID python3 $GATEWAY_LOCK acquire '$LOCK_KEY' 900, после выполнения - release. Если это мутация, сохрани её файлом миграции и закоммить, даже если применяешь вручную."
+    security_failure "команда обращается напрямую или неоднозначно к боевой Neon-ветке без аренды замка. Возьми аренду и повтори: mcp acquire_file_lock (file='$LOCK_KEY') или IWE_AGENT_ID=$AGENT_ID_BASE python3 $GATEWAY_LOCK acquire '$LOCK_KEY' 900, после выполнения - release. Если это мутация, сохрани её файлом миграции и закоммить, даже если применяешь вручную."
     ;;
   *)
     security_failure "шлюз замков недоступен, а команда обращается напрямую или неоднозначно к боевой Neon-ветке (fail-closed). Подними Local Gateway и повтори."

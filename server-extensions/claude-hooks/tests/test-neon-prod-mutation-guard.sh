@@ -519,5 +519,37 @@ expect "та же мутация от ДРУГОЙ сессии (sess-B), не �
 
 IWE_AGENT_ID="claude-code-sess-A" python3 "$GATEWAY_LOCK" release "$NEON_PROD_MUTATION_LOCK_KEY" >/dev/null 2>&1
 
+### Identity, переданная в реальный gateway-lock.py (WP-484, 03.09) ###
+# Эта фикстура (строка 41-43 выше) читает $IWE_AGENT_ID НАПРЯМУЮ как holder,
+# не через реальный резолвер сессии -- нарочно, чтобы изолировать проверку
+# логики самого хука. Но именно поэтому она не поймала бы регрессию, которую
+# нашёл cold-review этой сессии: реальный gateway-lock.py теперь резолвит
+# identity через iwe-agent-identity.sh, добавляя $CLAUDE_CODE_SESSION_ID --
+# передать сюда уже суффиксированный $AGENT_ID ("claude-code-<sid>") вместо
+# базы ("claude-code") дало бы двойной суффикс, и лок, взятый по подсказке
+# хука, никогда бы не совпал с тем, что хук сам вычисляет для сравнения.
+# Структурная проверка исходника -- тот же уровень, на котором был найден
+# баг (текст подсказки), не поведение фейкового шлюза.
+NEON_GUARD_SRC="$(dirname "$HOOK")/$(basename "$HOOK")"
+check_src() {  # $1 desc, $2 grep-паттерн, $3 ожидание найдено(1)/не найдено(0)
+  local found=0
+  grep -qF -- "$2" "$NEON_GUARD_SRC" && found=1
+  if [ "$found" -eq "$3" ]; then
+    echo "  ok: $1"
+    PASS=$((PASS + 1))
+  else
+    echo "  FAIL: $1"
+    FAIL=$((FAIL + 1))
+  fi
+}
+check_src "подсказка acquire передаёт БАЗУ identity (AGENT_ID_BASE), не готовый суффиксированный AGENT_ID" \
+  'IWE_AGENT_ID=$AGENT_ID_BASE python3 $GATEWAY_LOCK acquire' 1
+check_src "check-вызов тоже передаёт базу, не готовый AGENT_ID" \
+  'IWE_AGENT_ID="$AGENT_ID_BASE" python3 "$GATEWAY_LOCK" check' 1
+check_src "регрессия: нигде не осталось IWE_AGENT_ID=\$AGENT_ID (без _BASE) для gateway-lock.py" \
+  'IWE_AGENT_ID=$AGENT_ID python3' 0
+check_src "регрессия: нигде не осталось IWE_AGENT_ID=\"\$AGENT_ID\" (без _BASE, квотированный вариант)" \
+  'IWE_AGENT_ID="$AGENT_ID" python3' 0
+
 echo "PASS=$PASS FAIL=$FAIL"
 [ "$FAIL" -eq 0 ]

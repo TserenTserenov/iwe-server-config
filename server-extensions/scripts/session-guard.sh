@@ -1745,6 +1745,30 @@ EOF
     echo "ℹ️  $FINDINGS_COUNT запись(ей) в findings registry чужих RUN-карточек ($FINDINGS_REGISTRY) — разбор на Day/Week Close, не блокирует эту сессию" >&2
   fi
   echo "Session OPEN: $SEM_FILE (WP: $WP, agent: $AGENT, slug: ${SLUG:-$WP})"
+  # session_opened ledger event (WP-561 Ф6-а, TACT-01 contract DP.SC.201;
+  # designed peer-session 2026-09-03-13-wp561-sync-next-steps). Best-effort,
+  # never blocks open -- same discipline as session_closed_direct below.
+  # sync_gate_marker_present surfaces the .claude/state/wp-sync-<WP>.done
+  # freshness race-guard that protocol-open.md Sync Gate already writes as a
+  # mechanically checkable fact instead of trusting the agent's declaration
+  # that it ran Sync Gate; it does not enforce Sync Gate, only records it.
+  if [ -f "$IWE_ROOT/$GOV_REPO/scripts/ledger-append.sh" ]; then
+    _sync_marker="$IWE_ROOT/.claude/state/wp-sync-${WP}.done"
+    if find "$_sync_marker" -mmin -480 >/dev/null 2>&1; then
+      _sync_marker_present=true
+    else
+      _sync_marker_present=false
+    fi
+    _open_event=$(python3 -c '
+import json, sys
+print(json.dumps({"wp": sys.argv[1], "slug": sys.argv[2], "agent": sys.argv[3],
+                   "task": sys.argv[4], "sync_gate_marker_present": sys.argv[5] == "true"}))
+' "$WP" "${SLUG:-$WP}" "$AGENT" "${TASK:-}" "$_sync_marker_present" 2>/dev/null) || _open_event=""
+    if [ -n "$_open_event" ]; then
+      bash "$IWE_ROOT/$GOV_REPO/scripts/ledger-append.sh" day "$(now_date)" session_opened "$_open_event" session-guard \
+        >/dev/null 2>&1 || echo "  ⚠️  ledger session_opened не записан (best-effort, не блокирует open)" >&2
+    fi
+  fi
   # version-handshake (WP-484 Ф124/Ф125 план Этапа 0, линия 1, wiring 3а):
   # best-effort, never blocks open -- iwe-version.sh itself degrades to
   # "unknown" on a Mac host (no iwe-release.json there by design, see its

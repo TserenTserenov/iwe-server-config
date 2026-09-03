@@ -25,7 +25,14 @@ MANIFEST="$HOOK_DIR/write-path-manifest.yaml"
 IWE_ROOT="${IWE_WORKSPACE:-$HOME/IWE}"
 GOV_REPO="${IWE_GOVERNANCE_REPO:-DS-strategy}"
 GATEWAY_LOCK="$IWE_ROOT/$GOV_REPO/scripts/lib/gateway-lock.py"
-AGENT_ID="${IWE_AGENT_ID:-${IWE_AGENT:-claude-code}}"
+IDENTITY_RESOLVER="$IWE_ROOT/$GOV_REPO/scripts/lib/iwe-agent-identity.sh"
+# WP-484 (03.09, peer-session 2026-09-03-11-wp484-remaining-kimi-session-open,
+# Kimi+Codex): the old inline "${IWE_AGENT_ID:-${IWE_AGENT:-claude-code}}"
+# here never matched a lock acquired through the interactive MCP tool --
+# proxy.js suffixes holder with $CLAUDE_CODE_SESSION_ID (WP-530 Ф19, 31.08),
+# this hook didn't, so it always saw its own freshly-acquired lock as "held
+# by another agent". Same resolver as gateway-lock.py now, so both agree.
+AGENT_ID=$(bash "$IDENTITY_RESOLVER" 2>/dev/null) || AGENT_ID="claude-code"
 
 [ -f "$MANIFEST" ] || exit 0
 
@@ -85,7 +92,7 @@ if [ "${IWE_WRITE_GUARD_BYPASS:-0}" = "1" ]; then
   exit 0
 fi
 
-LOCK_JSON=$(IWE_AGENT_ID="$AGENT_ID" python3 "$GATEWAY_LOCK" check "$FILE_PATH" 2>/dev/null)
+LOCK_JSON=$(python3 "$GATEWAY_LOCK" check "$FILE_PATH" 2>/dev/null)
 CHECK_RC=$?
 
 if [ "$MODE" = "telemetry" ]; then
@@ -117,7 +124,14 @@ print(int(json.load(sys.stdin).get("expiresAt",0)) - int(time.time()*1000))' 2>/
     exit 2
     ;;
   3)
-    echo "write-path-lease-guard: запись в общий файл класса $CLASS_ID без аренды замка. Возьми аренду и повтори правку: mcp acquire_file_lock (или: IWE_AGENT_ID=$AGENT_ID python3 $GATEWAY_LOCK acquire '$FILE_PATH' 900), после записи — release. Аварийный обход (логируется): IWE_WRITE_GUARD_BYPASS=1" >&2
+    # WP-484 (03.09, same session): NOT "IWE_AGENT_ID=$AGENT_ID ..." -- $AGENT_ID
+    # here is already the fully resolved identity (base + session suffix).
+    # gateway-lock.py resolves its own identity the same way this hook does
+    # (same resolver, same environment) -- forcing an already-resolved value
+    # back into IWE_AGENT_ID would make its resolver append the session
+    # suffix a second time, producing a DIFFERENT identity than this hook
+    # just computed (found live testing this exact fix, before it shipped).
+    echo "write-path-lease-guard: запись в общий файл класса $CLASS_ID без аренды замка. Возьми аренду и повтори правку: mcp acquire_file_lock (или: python3 $GATEWAY_LOCK acquire '$FILE_PATH' 900), после записи — release. Аварийный обход (логируется): IWE_WRITE_GUARD_BYPASS=1" >&2
     exit 2
     ;;
   *)

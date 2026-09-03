@@ -1208,6 +1208,102 @@ IWE_AGENT=claude-code bash "${IWE_SCRIPTS:-$HOME/IWE/scripts}/session-guard.sh" 
   echo "session-guard close не прошёл — семафор останется активным до auto-orphan (TTL 30 мин на следующем open), не блокирует пилота"
 ```
 
+**4.5.3 Очистить close_obligation этой harness-сессии** (WP-484 «Восьмой случай», 03.09 — peer-session 2026-09-03-11-wp484-remaining-kimi-session-open, Kimi+Codex; фикс сужен после cold-review той же сессии). `close_obligation.cmd_stop_check()` разрешает Stop сразу при `close_path: peer-session` (Шаг 1.0), но НИЧЕГО не мутирует — если до или во время этой пир-сессии где-то в том же CLI-процессе успел встать `armed` close_obligation (например, ложное срабатывание close-intent-sentinel), он остаётся на диске нетронутым, и `close_obligation.cmd_mode()` продолжает возвращать его непустым — следующий `process-runner.py start quick-close` в этом же непрерывном разговоре падает на «completed-карточка не удовлетворяет обязательству закрытия», хотя Stop-гейт всё это время отвечал allow.
+
+Действие `cancel --action peer-session-close` (не `cancel-close`/`close-override` — те остаются только для явной команды пилота, поведение не менялось) — новое, узкое: очищает `armed` obligation тем же аудируемым (ledger `close_obligation`) путём, но **no-op при `state=="running"`**. Один долгий `$CLAUDE_CODE_SESSION_ID` может накрывать несколько РП подряд (`waiting`-шаг легитимно приостанавливает раннер и разрешает Stop, обязательство при этом остаётся `running`) — безусловная очистка здесь стёрла бы чужой ещё выполняющийся Quick Close другого РП той же сессии (cold-review нашёл эту дыру в первой версии фикса с `cancel-close`). Без `--force`: отказ ledger оставляет obligation на месте (fail-closed), шаг просто сообщает и не блокирует пилота — сильнее не нужно, следующий реальный Quick Close покажет проблему явно, если она не устранилась.
+
+```bash
+if [ -n "${CLAUDE_CODE_SESSION_ID:-}" ]; then
+  python3 "$HOME/IWE/${IWE_GOVERNANCE_REPO:-DS-strategy}/scripts/close_obligation.py" cancel \
+    --session-id "$CLAUDE_CODE_SESSION_ID" --action peer-session-close --actor peer-session-close \
+    --reason "peer-session $SESSION_ID closed via direct commit (Шаг 4.5.1), no runner obligation applies" \
+    2>&1 || echo "close_obligation cancel не прошёл — не блокирует пилота, следующий Quick Close покажет это явно, если проблема повторится"
+fi
+```
+
+**4.5.4 Приёмка закрытия такта «сессия»** (WP-561 Ф6-а, design/impl peer-session `2026-09-03-14-wp561-continue-tacts`, Kimi critic-consistency). До этой фазы закрытие через пир-сессию не имело НИКАКОЙ механической проверки — `close-runner-gate.sh` явно пропускает типизированный раннер (и его шаг R23-чеклиста) для `close_path: peer-session`, значит закрытие полагалось только на то, что 4.5.0-4.5.3 не упали. Три факта, которые TACT-02 (`docs/orz-pipeline-registry.yaml`) считает признаком «зелёного» закрытия, здесь никогда не сверялись вместе явно. Проверка читает **сам файл журнала на диске**, не git-версию — диск всегда ≥ того, что уже опубликовано (периодическая публикация читает С диска и коммитит, не наоборот), гонка «git опередил диск» исключена по построению (согласовано с Kimi, ход 2 сессии выше). Best-effort в том смысле, что сбой этой проверки НЕ откатывает уже сделанное закрытие (семафор уже закрыт на 4.5.2) — но расхождение эскалируется громко, тем же `ESCALATE_TO_USER`-механизмом, что и остальной скилл, а не тонет в stderr как обычный `|| echo warning`. Жёсткий блок здесь сознательно не сделан: у этого же РП уже было минимум два инцидента с зависающими закрытиями сессии от новых, необстрелянных gate (карантин семафора терял исключение peer-session; `close_obligation` застревал в armed) — риск добавить третий такой способ застрять выше риска пропустить одно расхождение.
+
+> **Cold-review фиксы (та же сессия, до деплоя):** (1) дата journal-файла — локальное время, как `now_date()` в `session-guard.sh`, не `date -u` (UTC-вычисление ночью давало ложный «нет события», уже был класс инцидента «ночная сессия» в этом РП); (2) `git ls-remote` обёрнут в `timeout` (тот же риск зависания, из-за которого сам этот шаг не делает жёсткий блок); (3) journal-путь — канонический `$HOME/IWE/DS-my-strategy`, не `$GOV_REPO_ROOT` (в isolate/freeze-сценарии тот указывает на изолированную копию СОВСЕМ ДРУГОГО репозитория — `session-guard.sh` пишет ledger-событие всегда в канонический governance-репо через свой собственный `$IWE_ROOT/$GOV_REPO`, а не через переменную этого скилла); (4) значения в Python — через переменные окружения, не строковой интерполяцией в исходный код (slug формируется словесной инструкцией агенту, не санитируется регуляркой); (5) сам файл эскалации получает отдельный маленький коммит+push — без этого он остаётся незакоммиченным после единственного commit+push Шага 4.5.1 и никогда не публикуется, вопреки заявленному «эскалируется громко».
+
+```bash
+LEDGER_DAY_FILE=$(date +%Y/%m/day-%Y-%m-%d.yaml)
+LEDGER_PATH="$HOME/IWE/${IWE_GOVERNANCE_REPO:-DS-strategy}/machine/ledger/day/$LEDGER_DAY_FILE"
+ACCEPTANCE_ISSUES=()
+
+# Факт 1: событие session_closed* с этим slug — на диске, не в git.
+if [ -f "$LEDGER_PATH" ]; then
+  HAS_EVENT=$(LEDGER_PATH_ENV="$LEDGER_PATH" SESSION_ID_ENV="$SESSION_ID" python3 -c "
+import os
+try:
+    import yaml
+    with open(os.environ['LEDGER_PATH_ENV']) as f:
+        data = yaml.safe_load(f) or {}
+    events = data.get('events', [])
+    slug = os.environ['SESSION_ID_ENV']
+    found = any(
+        str(e.get('kind', '')).startswith('session_closed')
+        and (e.get('data') or {}).get('slug') == slug
+        for e in events
+    )
+    print('yes' if found else 'no')
+except Exception as exc:
+    print('error:' + str(exc))
+")
+  [ "$HAS_EVENT" = "yes" ] || ACCEPTANCE_ISSUES+=("нет события session_closed* со slug=$SESSION_ID в $LEDGER_PATH (нашёл: $HAS_EVENT)")
+else
+  ACCEPTANCE_ISSUES+=("файл журнала $LEDGER_PATH не найден")
+fi
+
+# Факт 2: закрывающий ОРЗ-файл действительно закоммичен (не только записан на диск).
+if ! git -C "$SESSIONS_DIR" diff --quiet HEAD -- "$GUARD_ORZ" 2>/dev/null; then
+  ACCEPTANCE_ISSUES+=("$GUARD_ORZ отличается от закоммиченной версии")
+fi
+
+# Факт 3: коммит реально дошёл до remote (не только push вернул 0 локально).
+# timeout — та же дисциплина, что session-guard.sh:1956 (git fetch) и
+# git-dirty-guard.sh (git ls-remote) уже применяют к сетевым git-вызовам.
+LOCAL_SHA=$(git -C "$SESSIONS_DIR" rev-parse HEAD)
+REMOTE_SHA=$(timeout 5 git -C "$SESSIONS_DIR" ls-remote origin main 2>/dev/null | cut -f1)
+if [ -z "$REMOTE_SHA" ]; then
+  ACCEPTANCE_ISSUES+=("не удалось прочитать origin/main через ls-remote (таймаут/сеть) — сеть недоступна или репо переименовано")
+elif [ "$REMOTE_SHA" != "$LOCAL_SHA" ] && ! git -C "$SESSIONS_DIR" merge-base --is-ancestor "$LOCAL_SHA" "$REMOTE_SHA" 2>/dev/null; then
+  ACCEPTANCE_ISSUES+=("origin/main ($REMOTE_SHA) не содержит наш коммит ($LOCAL_SHA)")
+fi
+
+if [ "${#ACCEPTANCE_ISSUES[@]}" -gt 0 ]; then
+  ESCALATIONS=$((ESCALATIONS + 1))
+  ACCEPT_ESC_FILE="${SESSION_DIR}/escalation-$(printf '%02d' $((ESCALATIONS-1))).md"
+  {
+    echo "---"
+    echo "escalation_number: $ESCALATIONS"
+    echo "turn: close"
+    echo "timestamp: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    echo "reason: \"приёмка закрытия такта сессия нашла расхождение\""
+    echo "pilot_response: \"\""
+    echo "---"
+    echo ""
+    echo "# Эскалация $ESCALATIONS (закрытие)"
+    echo ""
+    echo "**Причина:** закрытие прошло (семафор закрыт), но приёмка нашла расхождение:"
+    for issue in "${ACCEPTANCE_ISSUES[@]}"; do echo "- $issue"; done
+  } > "$ACCEPT_ESC_FILE"
+  # Единственный commit+push сессии — Шаг 4.5.1, ДО этой проверки; без
+  # отдельной публикации файл эскалации остался бы untracked навсегда
+  # (cold-review, High) — маленький выделенный коммит именно под него.
+  sed "s/^escalations_count:.*/escalations_count: $ESCALATIONS/" "$SESSION_DIR/meta.yaml" > "$SESSION_DIR/meta.yaml.tmp" \
+    && mv "$SESSION_DIR/meta.yaml.tmp" "$SESSION_DIR/meta.yaml"
+  git -C "$SESSIONS_DIR" add "$ACCEPT_ESC_FILE" "$SESSION_DIR/meta.yaml"
+  git -C "$SESSIONS_DIR" commit -m "fix(peer): $SESSION_ID — эскалация приёмки закрытия" \
+    -- "$ACCEPT_ESC_FILE" "$SESSION_DIR/meta.yaml" 2>&1 || true
+  . "$HOME/IWE/DS-my-strategy/scripts/lib/publish-gate.sh"
+  push_branch "$SESSIONS_DIR" 2>&1 \
+    || echo "⚠️  публикация эскалации не удалась — коммит существует локально, файл не тонет, но не на remote" >&2
+  echo "⚠️  Приёмка закрытия сессии нашла расхождение (см. $ACCEPT_ESC_FILE) — сессия закрыта, но требует внимания пилота." >&2
+fi
+```
+
+**Известные ограничения v1** (Kimi, critic-consistency, ход 3 сессии выше — условие деплоя): (1) таймаут `ls-remote` попадает в ту же ветку, что «коммита реально нет» — сетевая нестабильность к origin выглядит как нарушение процесса, хотя это не одно и то же; не блокер, но при повторных срабатываниях стоит различить. (2) Файл эскалации не удаляется и не архивируется автоматически — накопление таких файлов при частых срабатываниях не рассмотрено. (3) Одна общая эскалация на все найденные расхождения сразу (не по одной на каждый тип) — при росте числа проверок читаемость может деградировать, пересмотреть схему при добавлении 4-й проверки.
+
 **Показать пилоту in-chat summary** (прочитать `report.md`, извлечь и вывести):
 
 ```
