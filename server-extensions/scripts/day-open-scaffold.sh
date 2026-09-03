@@ -1405,3 +1405,16 @@ $(render_attention)
 
 *Создан: $DATE (Day Open / day-open-scaffold.sh WP-264 Ф2)*
 EOF
+
+# Compact Dashboard (WP-7 Block DOC) — append after the DayPlan's own EOF block,
+# per render_compact_dashboard()'s own docstring contract. Bug (found 2026-09-03,
+# WP-417 morning check): this call was missing entirely since this file's own
+# init commit — render_compact_dashboard() existed, fully implemented, complete
+# with its own bug-2026-06-11 fix (top-7 from "План на сегодня" instead of a
+# raw active-WP sweep), but was never invoked, so day-open-llm-fill.py's
+# rebuild_compact_dashboard()/inject_panel_tile() (WP-417 Ф-cutover-switch,
+# 2026-09-02) had no ---COMPACT-DASHBOARD--- marker to find and rebuild —
+# every DayPlan silently shipped without the tile block, not because of any
+# scheduling race between the two nightly jobs (that theory was checked and
+# ruled out), purely because of this missing call.
+render_compact_dashboard

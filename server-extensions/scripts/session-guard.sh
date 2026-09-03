@@ -473,7 +473,14 @@ PY
 
 notify_zombie_escalation() {
   local semaphore="$1" age_seconds="$2"
-  local msg="IWE zombie semaphore: ${semaphore}; owner PID missing/invalid; age=${age_seconds}s"
+  # Human text (WP-538 addressee policy, peer-session 2026-09-03-05): what
+  # happened, who owns the next step, when it resolves on its own -- this is
+  # a fully automatic transition (see the comment above ZOMBIE_REGISTRY), so
+  # the pilot owns nothing here beyond "read if curious".
+  local age_h=$(( age_seconds / 3600 ))
+  local until_cleanup_h=$(( (IWE_ZOMBIE_CLEANUP_SEC - age_seconds) / 3600 ))
+  [ "$until_cleanup_h" -lt 0 ] && until_cleanup_h=0
+  local msg="Осиротевшая сессия IWE: $(basename -- "$semaphore") уже ${age_h}ч не подтверждает, что за ней кто-то следит. Ничего делать не нужно — сама автоматика уберёт её примерно через ${until_cleanup_h}ч."
 
   # Same fallback pattern as check-wp353-trigger.sh: never let a missing/failing
   # notifier block the quarantine decision itself.
