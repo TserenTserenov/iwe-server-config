@@ -526,17 +526,13 @@ in
         # даёт рабочий proxy shared secret тем же приёмом.
         #
         # WP-7 (21.07): пилот перевёл этот сервис с платного API-ключа на личную
-        # подписку Claude (claude-subscription-secret.nix) — тот же инцидент, что
-        # породил ретрай-лимит выше по цепочке (session-prep без порога попыток).
-        # Claude CLI выбирает auth-источник по приоритету (ANTHROPIC_AUTH_TOKEN >
-        # ANTHROPIC_API_KEY > ... > CLAUDE_CODE_OAUTH_TOKEN) — оставшийся в /etc/iwe/env
-        # ANTHROPIC_API_KEY молча победил бы токен подписки, если его не убрать явно.
-        # UnsetEnvironment — единственный способ перебить EnvironmentFile= (Environment=""
-        # не работает, EnvironmentFile применяется поверх: systemd issue #9788).
-        # /etc/iwe/env не трогаем — общий файл для сервисов, которым API-ключ всё ещё нужен
-        # (iwe-llm-health probe и др.).
-        EnvironmentFile = [ "/etc/iwe/env" "-/home/tseren/.iwe/.proxy-env" "/home/tseren/.secrets/claude-subscription" ];
-        UnsetEnvironment = [ "ANTHROPIC_BASE_URL" "ANTHROPIC_API_KEY" ];
+        # подписку Claude (claude-subscription-secret.nix). WP-538 (03.09): организация
+        # заблокировала доступ к подписке Claude Code целиком (`claude -p` отвечает
+        # «organization has disabled Claude subscription access»), не только истёкшим
+        # токеном — переподключение подписки не решит это. Вернулись на общий API-ключ,
+        # тот же приём, что у iwe-overnight-auditor. Модуль claude-subscription-secret.nix
+        # оставлен как есть (не удалён) — включить обратно, если организация вернёт доступ.
+        EnvironmentFile = [ "/etc/iwe/env" "-/home/tseren/.iwe/.proxy-env" ];
       };
       path = commonPath;
       environment = commonEnv // { ANTHROPIC_BASE_URL = "https://iwe-llm-proxy-production.up.railway.app"; };
@@ -608,7 +604,13 @@ in
     # =========================================================
     # WP-7 S-C (7 мая 2026). Точечный pull WP-карточек и плана недели для DS-my-strategy.
     # Не делает full git pull (DS-my-strategy почти всегда dirty из-за iwe-sync-fleeting-notes).
-    # Запускается реже чем fleeting-notes (каждые 10 мин).
+    #
+    # Отключено (WP-538, 03.09): каждый прогон кладёт свежие карточки в git-индекс
+    # канонического чекаута; iwe-tsekh1-sync (2c ниже) видит staged-файлы как
+    # реальную незакоммиченную работу и отказывает в fast-forward — оба сервиса
+    # блокировали друг друга, канон отставал от origin на 62 коммита. Сервис
+    # оставлен объявленным (не удалён), но выключен — включать обратно только
+    # после починки критерия «зеркала» в git-dirty-guard.sh (см. wp-context WP-538).
 
     systemd.services."iwe-sync-strategy-files" = {
       description = "IWE — sync inbox/WP-*.md + current/*.md в DS-my-strategy (каждые 10 мин)";
@@ -621,8 +623,9 @@ in
     };
 
     systemd.timers."iwe-sync-strategy-files" = {
+      enable      = false;
       wantedBy    = [ "timers.target" ];
-      description = "IWE strategy-files sync — каждые 10 мин";
+      description = "IWE strategy-files sync — каждые 10 мин (WP-538: выключен, конфликтовал с iwe-tsekh1-sync)";
       timerConfig = {
         OnBootSec       = "5min";
         OnUnitActiveSec = "10min";
