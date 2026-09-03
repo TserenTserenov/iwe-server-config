@@ -34,6 +34,11 @@ fi
 STRATEGY_DIR="$IWE_WORKSPACE/$GOV_REPO"
 INBOX_DIR="$STRATEGY_DIR/inbox"
 ARCHIVE_DIR="$STRATEGY_DIR/archive/wp-contexts"
+
+# Sibling helper — единственный источник дайджеста фаз (см. его собственный
+# заголовок: WP-561 2026-09-03-19, Codex "один и тот же парсер на обоих
+# концах"). Резолвится от расположения ЭТОГО файла, не хардкодом пути.
+PHASE_DIGEST_SCRIPT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/wp-phase-digest.sh"
 REGISTRY_FILE="$STRATEGY_DIR/docs/WP-REGISTRY.md"
 GIT_LOG_DAYS="${WP_SYNC_GIT_DAYS:-14}"
 
@@ -170,6 +175,43 @@ extract_blocker_wps() {
   ' "$file" 2>/dev/null \
     | grep -oE 'WP-[0-9]+' \
     || true
+}
+
+# Снимок зависимостей, записанный закрывающим агентом в frontmatter текущей
+# карточки (WP-561 A/B: `wp-context-update` пишет его при close для каждого
+# `depends_on`). Формат:
+#   handoff_snapshot:
+#     - ref: WP-484
+#       observed_status: in_progress
+#       observed_phase_digest: 64d50a10e003
+# Вывод: одна строка на запись, "ref|observed_status|observed_phase_digest".
+extract_handoff_snapshot() {
+  local file="$1"
+  awk '
+    function trim(v) {
+      sub(/[[:space:]]+#.*/, "", v)   # inline # comment, same as extract_all_structured_phases
+      gsub(/"/, "", v)                # quoted scalars ("WP-484"), same as extract_fm_field
+      sub(/^[[:space:]]+/, "", v); sub(/[[:space:]]+$/, "", v)
+      return v
+    }
+    function emit() { if (ref != "") print ref "|" ostatus "|" odigest }
+    /^---$/ { fm++; if (fm == 2) exit; next }
+    fm != 1 { next }
+    /^handoff_snapshot:[[:space:]]*$/ { in_block=1; next }
+    in_block && /^[A-Za-z_][A-Za-z0-9_-]*:/ { emit(); in_block=0; ref=""; ostatus=""; odigest=""; next }
+    !in_block { next }
+    /^[[:space:]]*-[[:space:]]*ref:[[:space:]]*/ {
+      emit(); ref=$0; sub(/^[[:space:]]*-[[:space:]]*ref:[[:space:]]*/, "", ref); ref=trim(ref)
+      ostatus=""; odigest=""; next
+    }
+    /^[[:space:]]+observed_status:[[:space:]]*/ {
+      ostatus=$0; sub(/^[[:space:]]+observed_status:[[:space:]]*/, "", ostatus); ostatus=trim(ostatus); next
+    }
+    /^[[:space:]]+observed_phase_digest:[[:space:]]*/ {
+      odigest=$0; sub(/^[[:space:]]+observed_phase_digest:[[:space:]]*/, "", odigest); odigest=trim(odigest); next
+    }
+    END { emit() }
+  ' "$file" 2>/dev/null || true
 }
 
 # Get relation type for a given WP number from current file's frontmatter
@@ -481,6 +523,12 @@ main() {
 
   local ref_date="${updated:-$spawned}"
 
+  # WP-561 C: снимок зависимостей, записанный прошлым close (см.
+  # extract_handoff_snapshot() выше) — читается один раз, сверяется внутри
+  # цикла по связанным РП ниже.
+  local handoff_snapshot
+  handoff_snapshot=$(extract_handoff_snapshot "$wp_file")
+
   # ---------------------------------------------------------------------------
   # Output header
   # ---------------------------------------------------------------------------
@@ -591,6 +639,27 @@ main() {
           )
           if [[ -n "$sig_commits" ]]; then
             echo "DRIFT: WP-${rnum} имеет коммит после ${ref_date} со словом завершения: \"${sig_commits}\"" >> "$drift_file"
+          fi
+        fi
+
+        # Drift: stale_handoff (WP-561 C) — прошлый close записал снимок
+        # {status, phase_digest} для этого WP-N в depends_on; если сейчас
+        # (тем же скриптом wp-phase-digest.sh, что писал снимок) дайджест
+        # или статус другие — план "what_next" мог устареть. Warn, не gate:
+        # расхождение часто означает "мир просто изменился", не ошибку агента.
+        if [[ -n "$handoff_snapshot" ]] && [[ -x "$PHASE_DIGEST_SCRIPT" ]]; then
+          local snap_line
+          snap_line=$(printf '%s\n' "$handoff_snapshot" | grep "^WP-${rnum}|" || true)
+          if [[ -n "$snap_line" ]]; then
+            local snap_status snap_digest current_digest_out current_status current_digest
+            snap_status=$(echo "$snap_line" | cut -d'|' -f2)
+            snap_digest=$(echo "$snap_line" | cut -d'|' -f3)
+            current_digest_out=$(bash "$PHASE_DIGEST_SCRIPT" "$rnum" 2>/dev/null || true)
+            current_status=$(echo "$current_digest_out" | grep '^status=' | sed 's/^status=//')
+            current_digest=$(echo "$current_digest_out" | grep '^phase_digest=' | sed 's/^phase_digest=//')
+            if [[ -n "$current_digest" ]] && { [[ "$current_status" != "$snap_status" ]] || [[ "$current_digest" != "$snap_digest" ]]; }; then
+              echo "DRIFT: stale_handoff — снимок WP-${rnum} на момент прошлого close (status=${snap_status}, digest=${snap_digest}) разошёлся с текущим (status=${current_status}, digest=${current_digest}); план \"what_next\" стоит перепроверить" >> "$drift_file"
+            fi
           fi
         fi
       fi

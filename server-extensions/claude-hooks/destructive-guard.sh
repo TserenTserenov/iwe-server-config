@@ -4,9 +4,14 @@
 # DROP/TRUNCATE/DELETE without WHERE), GitHub repo deletion. Exit 2 = block.
 set -euo pipefail
 
-CMD=$(jq -r '.tool_input.command // empty' 2>/dev/null || true)
+# Read stdin once: a pipe/redirected fd is fully drained by the first jq call,
+# so a second `jq` reading raw stdin always sees EOF and returns empty — this
+# silently zeroed out $CWD on every invocation (found WP-547, 03.09, while
+# verifying the stash-pop/apply check below, which depends on the real cwd).
+HOOK_INPUT=$(cat 2>/dev/null || true)
+CMD=$(printf '%s' "$HOOK_INPUT" | jq -r '.tool_input.command // empty' 2>/dev/null || true)
 [ -z "$CMD" ] && exit 0
-CWD=$(jq -r '.cwd // .tool_input.cwd // empty' 2>/dev/null || true)
+CWD=$(printf '%s' "$HOOK_INPUT" | jq -r '.cwd // .tool_input.cwd // empty' 2>/dev/null || true)
 HOOK_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
 WORKSPACE_ROOT="$(cd "$HOOK_DIR/../.." && pwd -P)"
 
@@ -204,6 +209,54 @@ if [ -n "$ADD_SEGMENT" ]; then
   if echo "$ADD_SEGMENT" | grep -qE -- '(^|[[:space:]])\.([[:space:]]|$)'; then
     block "git add . запрещён — подхватывает файлы других агентов (CLAUDE.md §Git Staging). Стейдж конкретные пути: git add <path>."
   fi
+fi
+
+# git stash pop/apply возвращает содержимое чужой заначки целиком, без разбора по
+# файлам — слепой pop/apply молча теряет уже закоммиченные/задеплоенные артефакты,
+# если заначка содержит удаления (WP-547, 03.09: именно так был утерян файл уже
+# применённой к проду миграции — агент увидел "deleted: ..." в списке файлов чужого
+# автостэша вперемешку с легитимной работой и вернул всё разом). Non-pop/apply
+# stash-подкоманды (show/list/drop/...) короткозамыкаются на "безопасно" — функция
+# только решает судьбу pop/apply. При неопределённости (не распарсили, не смогли
+# посмотреть содержимое) — тоже "небезопасно", как reset_is_non_destructive.
+stash_pop_apply_is_safe() {
+  local segment="$1" repo="${CWD:-$PWD}" ref=""
+  set -- $segment
+  [ "${1:-}" = "git" ] || return 1
+  shift
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      -C) repo="${2:-}"; shift 2 ;;
+      --git-dir|--work-tree|-c) shift 2 ;;
+      --git-dir=*|--work-tree=*|-c*) shift ;;
+      *) break ;;
+    esac
+  done
+  [ "${1:-}" = "stash" ] || return 0
+  shift
+  case "${1:-}" in
+    pop|apply) shift ;;
+    *) return 0 ;;
+  esac
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --index|--quiet|-q) shift ;;
+      --) shift; [ $# -eq 1 ] || return 1; ref="$1"; break ;;
+      -*) return 1 ;;
+      *) [ -z "$ref" ] || return 1; ref="$1" ;;
+    esac
+    shift
+  done
+  [ -n "$ref" ] || ref="stash@{0}"
+  git -C "$repo" rev-parse --is-inside-work-tree >/dev/null 2>&1 || return 1
+  local status
+  status=$(git -C "$repo" stash show --name-status -- "$ref" 2>/dev/null) || return 1
+  ! echo "$status" | grep -qE '^D[[:space:]]'
+}
+
+STASH_SEGMENT=$(git_segment stash)
+if [ -n "$STASH_SEGMENT" ] && ! stash_pop_apply_is_safe "$STASH_SEGMENT"; then
+  block "git stash pop/apply запрещён: заначка содержит удаления файлов (или их не удалось проверить). Слепой возврат может стереть уже закоммиченные/задеплоенные артефакты (прецедент WP-547, 03.09). Сначала 'git stash show --name-status <ref>' и разбери каждое удаление вручную; разовая необходимость — CC_ALLOW_DESTRUCTIVE_INPUT=1 из реального шелла пилота."
 fi
 
 # rm с одновременным recursive (-r/-R/--recursive) и force (-f/--force), в любом
