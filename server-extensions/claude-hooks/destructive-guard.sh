@@ -146,6 +146,33 @@ if [ -n "$PUSH_SEGMENT" ]; then
   if echo "$PUSH_FORCE_SCAN" | grep -qE -- '(^|[[:space:]])(--force([[:space:]]|=|$)|-[a-zA-Z]*f[a-zA-Z]*([[:space:]]|$))'; then
     block "git push --force запрещён. Используй --force-with-lease или согласуй с владельцем (CLAUDE.md §2)."
   fi
+
+  # git push --delete / -d and refspec deletion (:<ref>) — same irreversible
+  # class as --force (WP-544 Д28). `-d` really is git's short form of --delete
+  # (verified: `git push --help` lists `[-f | --force] [-d | --delete]`; short
+  # form for --dry-run is `-n`, unrelated letter). Matched only inside
+  # $PUSH_SEGMENT, never the raw $CMD — a same-day live incident in this
+  # session (bug-2026-09-04-destructive-guard-rm-rf-false-positive-cross-command.md)
+  # showed whole-command matching false-triggers on unrelated flags in other
+  # commands of the same compound Bash call. Known residual: variable
+  # obfuscation (REF=":main"; git push origin $REF) is not caught — the hook
+  # only sees literal command text, the same limit already documented for the
+  # neighbouring secret hooks (Д6.3).
+  if echo "$PUSH_SEGMENT" | grep -qE -- '(^|[[:space:]])(--delete([[:space:]]|=|$)|-[a-zA-Z]*d[a-zA-Z]*([[:space:]]|$))'; then
+    block "git push --delete запрещён — удаление удалённой ветки/тега необратимо. Согласуй с владельцем (CLAUDE.md §2)."
+  fi
+  if echo "$PUSH_SEGMENT" | grep -qE '(^|[[:space:]]):[^[:space:]]+'; then
+    block "git push с refspec-удалением (:<ref>) запрещён — удаление удалённой ветки/тега необратимо. Согласуй с владельцем (CLAUDE.md §2)."
+  fi
+
+  # git push --mirror — same class again (found in peer review, WP-544 Ф8,
+  # 04.09): syncs the remote to exactly the local ref set, silently deleting
+  # any remote branch/tag that doesn't exist locally. Not named in the
+  # original Д28 report but closed alongside it — same failure mode, cheap
+  # to cover while already here.
+  if echo "$PUSH_SEGMENT" | grep -qE -- '(^|[[:space:]])--mirror([[:space:]]|=|$)'; then
+    block "git push --mirror запрещён — синхронизирует remote с локальными ссылками, удаляя отсутствующие локально ветки/теги. Согласуй с владельцем (CLAUDE.md §2)."
+  fi
 fi
 
 # A hard reset is safe only when it cannot discard tracked work or local history:

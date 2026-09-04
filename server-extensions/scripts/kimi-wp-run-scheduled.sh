@@ -156,7 +156,11 @@ if [ ! -f "$PROMPT_FILE" ]; then
   # independently rather than parsed out of the open log, so a log-format
   # change can't silently desync the two again.
   ORZ_SLUG="sched-$ID"
-  ORZ_PATH="$IWE_GOVERNANCE_REPO/sessions/$(date '+%Y-%m')/$(date '+%Y-%m-%d')-${ORZ_SLUG}.md"
+  # Same default-fallback contract as session-guard.sh (ORZ_DIR / WP-526 Ф2):
+  # the actual scaffold session-guard open() creates above uses this exact
+  # formula, so ORZ_PATH must match it or the prompt below points nowhere.
+  SESSIONS_ROOT="${IWE_SESSIONS_ROOT:-$IWE_ROOT/MC-sessions}"
+  ORZ_PATH="$SESSIONS_ROOT/$(date '+%Y-%m')/$(date '+%Y-%m-%d')-${ORZ_SLUG}.md"
   cat > "$PROMPT_FILE" <<EOF
 Автономный запуск по расписанию (планировщик WP-487, DP.SC.192). WP Gate для этого РП уже согласован пилотом заранее — Ритуал согласования не требуется, работай сразу.
 

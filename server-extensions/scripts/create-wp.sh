@@ -800,6 +800,49 @@ else
   echo "   ⚠️  scripts/build-active-wp.py не найден (искали в \`$STRATEGY/scripts/\` и \`$IWE/FMT-exocortex-template/scripts/\`) — пересобрать вручную" >&2
 fi
 
+# --- decision_made (WP-427 Ф8.14, best-effort, never blocks WP creation) ---
+# Deterministic capture point for "согласование Ритуала перед РП" (WP-417 Ф3.6
+# decision_load tile): the consent-file precondition above already proves the
+# pilot said yes before this script could even reach step 1/5, so a successful
+# run to this point IS the decision. Needs three pieces of local config that
+# do not exist on a fresh checkout (confirmed live 2026-09-04, no PILOT_ACCOUNT_ID
+# convention, no GATEWAY_SHARED_SECRET/TRACE_ACCOUNTANT_URL outside the deployed
+# service) — silently no-ops until an operator provisions them, same pattern as
+# the external-tracker step above (MCP not connected → skip, don't fail).
+if [[ -n "${GATEWAY_SHARED_SECRET:-}" && -n "${TRACE_ACCOUNTANT_URL:-}" && -n "${PILOT_ACCOUNT_ID:-}" ]]; then
+  # Secret is read from os.environ inside the process, never passed as argv —
+  # argv is visible to other local users via `ps`, a process's own env is not.
+  WP_ID="$WP_ID" WP_TITLE="$TITLE" WP_PRIORITY="$PRIORITY" WP_HYPOTHESIS="$HYPOTHESIS" \
+    python3 -c '
+import json, os, urllib.error, urllib.request
+
+body = {
+    "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+    "params": {"name": "trace", "arguments": {
+        "sensor_id": "wp_ritual", "event_type": "decision_made",
+        "user_id": os.environ["PILOT_ACCOUNT_ID"],
+        "external_id": "wp-ritual-" + os.environ["WP_ID"],
+        "content": {"wp": "WP-" + os.environ["WP_ID"], "title": os.environ["WP_TITLE"],
+                    "priority": os.environ["WP_PRIORITY"], "hypothesis": os.environ["WP_HYPOTHESIS"]},
+        "prov": {"authorship_version": 1, "actor_type": "human"},
+    }},
+}
+req = urllib.request.Request(
+    os.environ["TRACE_ACCOUNTANT_URL"].rstrip("/") + "/mcp",
+    data=json.dumps(body).encode(),
+    headers={"Authorization": "Bearer " + os.environ["GATEWAY_SHARED_SECRET"], "Content-Type": "application/json"},
+)
+try:
+    urllib.request.urlopen(req, timeout=5)
+except (urllib.error.URLError, OSError) as exc:
+    raise SystemExit(f"trace-accountant не ответил: {exc}")
+' \
+    && echo "   ✅ decision_made записан (тайл нагрузки, РП417 Ф3.6)" \
+    || echo "   ⚠️  decision_made: не удалось записать — тайл нагрузки не увидит эту запись" >&2
+else
+  echo "ℹ️  decision_made пропущен: не заданы GATEWAY_SHARED_SECRET/TRACE_ACCOUNTANT_URL/PILOT_ACCOUNT_ID (штатно на большинстве машин сегодня)"
+fi
+
 # --- Внешний трекер (условный пост-шаг, issue #321) ---
 echo ""
 echo "ℹ️  Внешний трекер (если подключён): создать issue вручную или через MCP"
