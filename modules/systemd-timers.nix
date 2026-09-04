@@ -1428,7 +1428,7 @@ in
     };
 
     systemd.services."payment-registry-sync-contract" = {
-      description = "Payment Registry — contract sync + health-check + heartbeat (1 ч)";
+      description = "Payment Registry — contract sync + health-check + heartbeat (15 мин)";
       unitConfig  = commonUnitConfig;
       serviceConfig = commonServiceConfig // {
         ExecStart  = "${contractSyncWrapper}";
@@ -1437,9 +1437,10 @@ in
       path = commonPath;
       # BetterStack heartbeat contract-sync (monitor id 463852, session
       # 2026-06-09-07-contract-sync-heartbeat) — найден 16.07.2026 (WP-244).
-      # period=1h grace=30min (с 22.08.2026, синхронно с временным 1h-тиком):
-      # окно 1.5 ч до алерта переживает единичный неудачный тик без ложной
-      # тревоги. При возврате тика на 15min вернуть period=30min grace=15min.
+      # period=30min grace=15min, восстановлено 04.09.2026 (WP-556 Ф4) синхронно
+      # с возвратом тика на 15min — см. таймер ниже. Пилоту нужно вручную
+      # перевести монитор 463852 в BetterStack на period=1800/grace=900
+      # (агенту токен BetterStack API недоступен, известный пробел).
       environment = commonEnv // {
         HEARTBEAT_URL = "https://uptime.betterstack.com/api/v1/heartbeat/q4B73eNRTJp13T8RvGHeaqB4";
       };
@@ -1447,14 +1448,17 @@ in
 
     systemd.timers."payment-registry-sync-contract" = {
       wantedBy    = [ "timers.target" ];
-      # 1h ВРЕМЕННО (было 15min): миграция схем Neon 21.08.2026 ещё катится,
-      # search_path пула нестабилен — реже тик, меньше флап-алертов. Вернуть
-      # 15min после подтверждения окончания миграции (контур Андрея).
-      # BetterStack-монитор 463852 переведён на period=3600 grace=1800 синхронно.
-      description = "Payment Registry contract sync — каждый 1 ч (временно, до конца миграции)";
+      # 1h-тик (22.08.2026, миграция схем Neon 21.08) возвращён на штатные
+      # 15min 04.09.2026 (WP-556 Ф4, живой инцидент): корневой фикс —
+      # схема-квалификация + SET LOCAL search_path в sync-contracts.sh
+      # (payment-registry commit 23ea851) — стоит с 21.08 и держится чисто
+      # 13 дней (ноль сбоев тика с 22.08 08:00 по журналу sync-контракта);
+      # подтверждения от Андрея, что миграция закрыта, дождаться не успели —
+      # решение принял пилот по факту стабильности, не по формальному ответу.
+      description = "Payment Registry contract sync — каждые 15 мин";
       timerConfig = {
         OnBootSec       = "4min";
-        OnUnitActiveSec = "1h";
+        OnUnitActiveSec = "15min";
         Persistent      = true;
       };
     };
