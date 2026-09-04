@@ -995,6 +995,8 @@ gh pr create --title "feat(peer): $SESSION_ID" \
   || echo "WARN: gh pr create failed — merge manually or check gh auth"
 ```
 
+> **Семафор Kimi-standalone (`.iwe-runtime/sessions/kimi-*.open`) этот скилл НЕ закрывает** (найдено 2026-09-04, пир-сессия 2026-09-04-23-wp561-peer-session-closed-ledger-gap с Claude). Он открывается снаружи, `~/.kimi-code/skills/session-open/SKILL.md`, без `--close-path peer-session` — этот флаг задаётся только при `open` и не может быть передан отдельно при `close`, а слепое добавление `--close-path peer-session` в общий `session-open` неверно для НЕ-пир сессий Kimi (обошло бы типизированный раннер и там). Семафор сейчас закрывается только через `session-guard.sh`-хаусхолдинг (auto-orphan, TTL 30 мин) — событие `session_closed_direct` в дневном журнале для Kimi-writer сессий не пишется. Полноценный фикс требует координации между `~/.kimi-code/skills/session-open/SKILL.md` (вне IWE-репозитория) и этим файлом — вынесен в отдельную сессию (РП-561, follow-up фаза).
+
 Показать пилоту: «Сессия завершена. Отчёт: `MC-sessions:$MONTH/$DAY/$SESSION_ID/report.md`»
 
 ---

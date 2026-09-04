@@ -812,7 +812,14 @@ fi
 if [[ -n "${GATEWAY_SHARED_SECRET:-}" && -n "${TRACE_ACCOUNTANT_URL:-}" && -n "${PILOT_ACCOUNT_ID:-}" ]]; then
   # Secret is read from os.environ inside the process, never passed as argv —
   # argv is visible to other local users via `ps`, a process's own env is not.
+  # The three GATEWAY_*/TRACE_*/PILOT_* vars are re-assigned here explicitly
+  # (not just relied on from the caller's shell) so a caller who set them as
+  # plain, non-exported shell variables still reaches python3's environment —
+  # the `if` above only proves they're non-empty in bash, not that they were
+  # exported (code review Ф2, this session, 2026-09-04).
   WP_ID="$WP_ID" WP_TITLE="$TITLE" WP_PRIORITY="$PRIORITY" WP_HYPOTHESIS="$HYPOTHESIS" \
+  GATEWAY_SHARED_SECRET="$GATEWAY_SHARED_SECRET" TRACE_ACCOUNTANT_URL="$TRACE_ACCOUNTANT_URL" \
+  PILOT_ACCOUNT_ID="$PILOT_ACCOUNT_ID" \
     python3 -c '
 import json, os, urllib.error, urllib.request
 
@@ -833,9 +840,18 @@ req = urllib.request.Request(
     headers={"Authorization": "Bearer " + os.environ["GATEWAY_SHARED_SECRET"], "Content-Type": "application/json"},
 )
 try:
-    urllib.request.urlopen(req, timeout=5)
-except (urllib.error.URLError, OSError) as exc:
+    resp = urllib.request.urlopen(req, timeout=5)
+    result = json.loads(resp.read())
+except (urllib.error.URLError, OSError, json.JSONDecodeError) as exc:
     raise SystemExit(f"trace-accountant не ответил: {exc}")
+# The MCP endpoint returns HTTP 200 for both ok(...) and fail(...) — only 401 is
+# a non-2xx status (mcp-handler.ts createMcpHandler). A transport-level success
+# here does not mean the write succeeded; the JSON-RPC/tool-level error must be
+# checked explicitly, or every real call fails silently-successful while the
+# domain_event_allowed_source migration for these sensors is still unapplied
+# (found in code review of this same session, 2026-09-04).
+if "error" in result or result.get("result", {}).get("isError"):
+    raise SystemExit(f"trace-accountant вернул ошибку: {result}")
 ' \
     && echo "   ✅ decision_made записан (тайл нагрузки, РП417 Ф3.6)" \
     || echo "   ⚠️  decision_made: не удалось записать — тайл нагрузки не увидит эту запись" >&2

@@ -106,8 +106,12 @@ git_segment() {
         }
       }
       return unless $i < @tokens && $tokens[$i] eq $ENV{"SUBCMD"};
+      # Print and keep scanning — a compound command can chain more than one
+      # `git <subcmd>` invocation (`git push origin main && git push origin
+      # +:refs/heads/x`); exiting after the first match here used to hide
+      # every later one from every check that reads $PUSH_SEGMENT/etc, since
+      # they all share this one function (cold review, WP-544 Ф8, 04.09).
       print join(" ", @tokens[$start .. $#tokens]), "\n";
-      exit 0;
     }
 
     my $text = $ENV{"CMD_SCAN"};
@@ -147,30 +151,36 @@ if [ -n "$PUSH_SEGMENT" ]; then
     block "git push --force запрещён. Используй --force-with-lease или согласуй с владельцем (CLAUDE.md §2)."
   fi
 
-  # git push --delete / -d and refspec deletion (:<ref>) — same irreversible
-  # class as --force (WP-544 Д28). `-d` really is git's short form of --delete
-  # (verified: `git push --help` lists `[-f | --force] [-d | --delete]`; short
-  # form for --dry-run is `-n`, unrelated letter). Matched only inside
-  # $PUSH_SEGMENT, never the raw $CMD — a same-day live incident in this
-  # session (bug-2026-09-04-destructive-guard-rm-rf-false-positive-cross-command.md)
+  # git push --delete / -d and refspec deletion (:<ref>, or +:<ref> force-form)
+  # — same irreversible class as --force (WP-544 Д28). `-d` really is git's
+  # short form of --delete (verified: `git push --help` lists `[-f | --force]
+  # [-d | --delete]`; short form for --dry-run is `-n`, unrelated letter).
+  # `--del`/`--delet`/... also match: git's own prefix matching accepts any
+  # unambiguous abbreviation of a long option, and confirmed live that
+  # `--delet` executes as `--delete` (no other push option starts with "de").
+  # Matched only inside $PUSH_SEGMENT, never the raw $CMD — a same-day live
+  # incident in this session
+  # (bug-2026-09-04-destructive-guard-rm-rf-false-positive-cross-command.md)
   # showed whole-command matching false-triggers on unrelated flags in other
   # commands of the same compound Bash call. Known residual: variable
   # obfuscation (REF=":main"; git push origin $REF) is not caught — the hook
   # only sees literal command text, the same limit already documented for the
   # neighbouring secret hooks (Д6.3).
-  if echo "$PUSH_SEGMENT" | grep -qE -- '(^|[[:space:]])(--delete([[:space:]]|=|$)|-[a-zA-Z]*d[a-zA-Z]*([[:space:]]|$))'; then
+  if echo "$PUSH_SEGMENT" | grep -qE -- '(^|[[:space:]])(--de[a-zA-Z]*([[:space:]]|=|$)|-[a-zA-Z]*d[a-zA-Z]*([[:space:]]|$))'; then
     block "git push --delete запрещён — удаление удалённой ветки/тега необратимо. Согласуй с владельцем (CLAUDE.md §2)."
   fi
-  if echo "$PUSH_SEGMENT" | grep -qE '(^|[[:space:]]):[^[:space:]]+'; then
-    block "git push с refspec-удалением (:<ref>) запрещён — удаление удалённой ветки/тега необратимо. Согласуй с владельцем (CLAUDE.md §2)."
+  if echo "$PUSH_SEGMENT" | grep -qE -- '(^|[[:space:]])\+?:[^[:space:]]+'; then
+    block "git push с refspec-удалением (:<ref> или +:<ref>) запрещён — удаление удалённой ветки/тега необратимо. Согласуй с владельцем (CLAUDE.md §2)."
   fi
 
   # git push --mirror — same class again (found in peer review, WP-544 Ф8,
   # 04.09): syncs the remote to exactly the local ref set, silently deleting
   # any remote branch/tag that doesn't exist locally. Not named in the
   # original Д28 report but closed alongside it — same failure mode, cheap
-  # to cover while already here.
-  if echo "$PUSH_SEGMENT" | grep -qE -- '(^|[[:space:]])--mirror([[:space:]]|=|$)'; then
+  # to cover while already here. `--mi`/`--mir`/... also match — confirmed
+  # live that `--mir` executes as `--mirror` (no other push option starts
+  # with "mi").
+  if echo "$PUSH_SEGMENT" | grep -qE -- '(^|[[:space:]])--mi[a-zA-Z]*([[:space:]]|=|$)'; then
     block "git push --mirror запрещён — синхронизирует remote с локальными ссылками, удаляя отсутствующие локально ветки/теги. Согласуй с владельцем (CLAUDE.md §2)."
   fi
 fi
@@ -210,10 +220,20 @@ reset_is_non_destructive() {
   git -C "$repo" merge-base --is-ancestor HEAD "$target" 2>/dev/null
 }
 
-# git reset --hard
+# git reset --hard — one $RESET_SEGMENT line per chained `git reset` in the
+# command (WP-544 Ф8, 04.09: git_segment now returns every match, not just
+# the first — a compound `git reset --hard a && git reset --hard b` used to
+# hide the second call from this same check). reset_is_non_destructive()
+# parses token positions for exactly one invocation, so each line is checked
+# on its own, not concatenated.
 RESET_SEGMENT=$(git_segment reset)
-if [ -n "$RESET_SEGMENT" ] && echo "$RESET_SEGMENT" | grep -qE -- '(^|[[:space:]])--hard([[:space:]]|$)' && ! reset_is_non_destructive "$RESET_SEGMENT"; then
-  block "git reset --hard запрещён (теряет незакоммиченное). Используй git stash."
+if [ -n "$RESET_SEGMENT" ]; then
+  while IFS= read -r one_reset; do
+    [ -n "$one_reset" ] || continue
+    if echo "$one_reset" | grep -qE -- '(^|[[:space:]])--hard([[:space:]]|$)' && ! reset_is_non_destructive "$one_reset"; then
+      block "git reset --hard запрещён (теряет незакоммиченное). Используй git stash."
+    fi
+  done <<< "$RESET_SEGMENT"
 fi
 
 # git clean with delete flags (-f/-d/-x)
@@ -281,9 +301,16 @@ stash_pop_apply_is_safe() {
   ! echo "$status" | grep -qE '^D[[:space:]]'
 }
 
+# Same one-line-per-invocation reasoning as the reset check above — each
+# chained `git stash ...` gets its own token-position parse.
 STASH_SEGMENT=$(git_segment stash)
-if [ -n "$STASH_SEGMENT" ] && ! stash_pop_apply_is_safe "$STASH_SEGMENT"; then
-  block "git stash pop/apply запрещён: заначка содержит удаления файлов (или их не удалось проверить). Слепой возврат может стереть уже закоммиченные/задеплоенные артефакты (прецедент WP-547, 03.09). Сначала 'git stash show --name-status <ref>' и разбери каждое удаление вручную; разовая необходимость — CC_ALLOW_DESTRUCTIVE_INPUT=1 из реального шелла пилота."
+if [ -n "$STASH_SEGMENT" ]; then
+  while IFS= read -r one_stash; do
+    [ -n "$one_stash" ] || continue
+    if ! stash_pop_apply_is_safe "$one_stash"; then
+      block "git stash pop/apply запрещён: заначка содержит удаления файлов (или их не удалось проверить). Слепой возврат может стереть уже закоммиченные/задеплоенные артефакты (прецедент WP-547, 03.09). Сначала 'git stash show --name-status <ref>' и разбери каждое удаление вручную; разовая необходимость — CC_ALLOW_DESTRUCTIVE_INPUT=1 из реального шелла пилота."
+    fi
+  done <<< "$STASH_SEGMENT"
 fi
 
 # rm с одновременным recursive (-r/-R/--recursive) и force (-f/--force), в любом
@@ -312,6 +339,76 @@ fi
 # удаление репозитория на GitHub — необратимо.
 if echo "$CMD" | grep -qE '\bgh[[:space:]]+repo[[:space:]]+delete\b'; then
   block "gh repo delete запрещён — необратимо. Разовая необходимость: CC_ALLOW_DESTRUCTIVE_INPUT=1 из реального шелла пилота."
+fi
+
+# gh repo deploy-key add с правом записи (-w/--allow-write) — расширяет ACL
+# репозитория на внешнем сервисе без второго слоя проверки (WP-544, пир-сессия
+# 2026-09-04-16-wp544-permission-type-auto-approve, Claude + Kimi). По умолчанию
+# (без флага) ключ read-only — эта ветка не трогает `gh repo deploy-key add`
+# без -w/--allow-write, тот случай остаётся обычным interactive-approve.
+# Тот же residual, что у push --delete выше: whole-command grep, не
+# git_segment-изолированный per-invocation — variable-obfuscation не ловит.
+if echo "$CMD" | grep -qE '\bgh[[:space:]]+repo[[:space:]]+deploy-key[[:space:]]+add\b' \
+  && echo "$CMD" | grep -qE -- '(^|[[:space:]"'"'"'])(-w|--allow-write)([[:space:]"'"'"'=]|$)'; then
+  block "gh repo deploy-key add с -w/--allow-write запрещён — добавляет ключ с правом записи в репозиторий (необратимое расширение доступа). Разовая необходимость: CC_ALLOW_DESTRUCTIVE_INPUT=1 из реального шелла пилота."
+fi
+
+# iwe-commit-isolated.sh обязан быть единственной командой в Bash-вызове.
+# Разрешающее правило в settings.json матчит по префиксу пути к этому скрипту
+# с завершающим `:*` — без такого хвоста правило не переиспользуешь (разные
+# WP, разные пути worktree на каждый вызов), но с ним оно так же охотно
+# матчит и `&& что-угодно-ещё`, потому что permission-matcher — текстовый
+# префикс, не парсер shell-грамматики (WP-544, пир-сессия
+# 2026-09-04-16-wp544-permission-type-auto-approve, Claude + Kimi; тот же
+# класс ограничения, ради которого выше существует git_segment()). Проверка
+# ниже — тот же посегментный сплиттер, что использует git_segment() (текст
+# между `;&|(){}`/backtick вне кавычек — отдельный сегмент), но самостоятельная
+# копия, не общий рефакторинг: git_segment() уже несёт несколько проверок
+# (push/reset/clean/add/stash) и трогать её ради одного нового вызова —
+# больше риска регресса, чем пользы от устранения дублирования.
+ISOLATED_COMMIT_ANALYSIS=$(CMD_SCAN="$CMD" perl -e '
+  my $text = $ENV{"CMD_SCAN"};
+  my (@segments, $segment, $quote) = ((), q{}, undef);
+  for (my $i = 0; $i < length($text); $i++) {
+    my $char = substr($text, $i, 1);
+    if (defined $quote) {
+      $segment .= $char;
+      if ($char eq "\\" && $quote eq q{"} && $i + 1 < length($text)) {
+        $segment .= substr($text, ++$i, 1);
+      } elsif ($char eq $quote) {
+        undef $quote;
+      }
+    } elsif ($char eq q{"} || $char eq chr(39)) {
+      $quote = $char;
+      $segment .= $char;
+    } elsif ($char eq q{&} && length($segment) && substr($segment, -1, 1) eq q{>}) {
+      # `>&` fd-dup (`2>&1`, `>&2`, ...) — part of a redirect on the CURRENT
+      # command, not a separator. Found live during code review (WP-544,
+      # 2026-09-04): without this guard, any single command ending in
+      # `2>&1` — including ones that merely mention the wrapper filename
+      # in an unrelated argument (`cat .../iwe-commit-isolated.sh 2>&1`) —
+      # was mis-split into two segments and falsely blocked.
+      $segment .= $char;
+    } elsif ($char eq q{&} && $i + 1 < length($text) && substr($text, $i + 1, 1) eq q{>}) {
+      # `&>` (redirect both stdout+stderr) — same reasoning, other order.
+      $segment .= $char;
+    } elsif ($char =~ /[;&|(){}]/ || $char eq q{`}) {
+      push @segments, $segment;
+      $segment = q{};
+    } else {
+      $segment .= $char;
+    }
+  }
+  push @segments, $segment;
+  my @nonempty = grep { /\S/ } @segments;
+  my $total = scalar @nonempty;
+  my $wrapper_hits = grep { /iwe-commit-isolated\.sh/ } @nonempty;
+  print "$total $wrapper_hits\n";
+')
+ISOLATED_COMMIT_TOTAL_SEGMENTS=$(echo "$ISOLATED_COMMIT_ANALYSIS" | awk '{print $1}')
+ISOLATED_COMMIT_WRAPPER_HITS=$(echo "$ISOLATED_COMMIT_ANALYSIS" | awk '{print $2}')
+if [ "${ISOLATED_COMMIT_WRAPPER_HITS:-0}" -gt 0 ] && [ "${ISOLATED_COMMIT_TOTAL_SEGMENTS:-0}" -gt 1 ]; then
+  block "iwe-commit-isolated.sh обязан быть единственной командой в вызове — обнаружены другие сегменты той же compound-команды (после ; & | или в скобках/backtick). Раздели на отдельные Bash-вызовы."
 fi
 
 exit 0
