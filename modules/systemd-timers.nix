@@ -1438,9 +1438,8 @@ in
       # BetterStack heartbeat contract-sync (monitor id 463852, session
       # 2026-06-09-07-contract-sync-heartbeat) — найден 16.07.2026 (WP-244).
       # period=30min grace=15min, восстановлено 04.09.2026 (WP-556 Ф4) синхронно
-      # с возвратом тика на 15min — см. таймер ниже. Пилоту нужно вручную
-      # перевести монитор 463852 в BetterStack на period=1800/grace=900
-      # (агенту токен BetterStack API недоступен, известный пробел).
+      # с возвратом тика на 15min — см. таймер ниже. Монитор 463852 в BetterStack
+      # переведён на period=1800/grace=900 тем же днём через API.
       environment = commonEnv // {
         HEARTBEAT_URL = "https://uptime.betterstack.com/api/v1/heartbeat/q4B73eNRTJp13T8RvGHeaqB4";
       };
