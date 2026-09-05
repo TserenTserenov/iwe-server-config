@@ -55,6 +55,17 @@
 #      active we stay silent for all (false negatives accepted, false
 #      positives avoided).
 #
+#   3. Pending-approval detector (WP-7 F108, 2026-09-05) — an
+#      interaction.request with no matching interaction.resolved (paired
+#      by id) older than APPROVAL_WAIT_THRESHOLD_S. The permission panel
+#      in the VS Code extension is invisible to the pilot, so the session
+#      looks hung while it simply waits for a decision (live case:
+#      2026-09-05 20:39-21:03, 24 min, pilot cancelled the turn). This
+#      signal is deterministic — proven by the journal alone — so it does
+#      NOT join the CPU/net conjunction and is immune to extension-host
+#      masking that blinds detector 2b. Kimi wire.jsonl only; Claude
+#      Code shows its panel in the terminal the pilot already watches.
+#
 #      PID reuse: tree pids are snapshotted per iteration; a pid freed
 #      and recycled by the OS between snapshot and poll could attribute
 #      counters to an unrelated process. Not fixable without
@@ -70,9 +81,10 @@ IWE_ROOT="${IWE_ROOT:-$HOME/IWE}"
 SESSION_DIR="$IWE_ROOT/.iwe-runtime/sessions"
 SILENCE_THRESHOLD_S="${SILENCE_THRESHOLD_S:-180}"
 WIRE_SILENCE_THRESHOLD_S="${WIRE_SILENCE_THRESHOLD_S:-900}"
+APPROVAL_WAIT_THRESHOLD_S="${APPROVAL_WAIT_THRESHOLD_S:-300}"
 CHECK_INTERVAL_S="${CHECK_INTERVAL_S:-60}"
-STATE_DIR="$IWE_ROOT/.iwe-runtime/watchdog-progress"
-LOG_DIR="$IWE_ROOT/.iwe-runtime/logs"
+STATE_DIR="${STATE_DIR:-$IWE_ROOT/.iwe-runtime/watchdog-progress}"
+LOG_DIR="${LOG_DIR:-$IWE_ROOT/.iwe-runtime/logs}"
 VALIDATION_LOG="$LOG_DIR/progress-detector-validation.jsonl"
 KIMI_SESSIONS_ROOT="${KIMI_SESSIONS_ROOT:-$HOME/.kimi-code/sessions}"
 CLAUDE_PROJECTS_ROOT="${CLAUDE_PROJECTS_ROOT:-$HOME/.claude/projects}"
@@ -93,13 +105,16 @@ mac_notify() {
   fi
 }
 
-# alert_once <target-key> <message> <subtitle> <evidence-json> [quiet]
+# alert_once <target-key> <message> <subtitle> <evidence-json> [quiet] [validation]
 # One notification per episode: silent until the target shows activity again.
 # quiet=1 — только лог (без macOS-уведомления и валидационного снимка);
 # используется legacy heartbeat-детектором, чтобы не дублировать уведомление
 # детектора прогресса об одном и том же эпизоде.
+# validation=0 — не писать снимок в progress-detector-validation.jsonl:
+# тот журнал меряет ложные срабатывания СЕТЕВОГО сигнала детектора 2,
+# детерминированному детектору 3 (застрявшее разрешение) там не место.
 alert_once() {
-  local key="$1" msg="$2" subtitle="$3" evidence="$4" quiet="${5:-0}"
+  local key="$1" msg="$2" subtitle="$3" evidence="$4" quiet="${5:-0}" validation="${6:-1}"
   local state="$STATE_DIR/$key.state"
   if [ -f "$state" ] && grep -q '^alerted=1' "$state"; then
     return 0
@@ -107,7 +122,7 @@ alert_once() {
   [ "$quiet" = "1" ] || mac_notify "$msg" "$subtitle"
   echo "$(date -u +"%Y-%m-%dT%H:%M:%SZ") | $msg | $key" >> "$LOG_DIR/kimi-watchdog.log"
   # Validation protocol (see header): full snapshot for the first 10 alerts.
-  if [ "$quiet" != "1" ]; then
+  if [ "$quiet" != "1" ] && [ "$validation" != "0" ]; then
     local n_alerts=0
     [ -f "$VALIDATION_LOG" ] && n_alerts=$(wc -l < "$VALIDATION_LOG" | tr -d ' ')
     if [ "$n_alerts" -lt 10 ]; then
@@ -328,6 +343,76 @@ progress_check() {
     "{\"wire_age_s\":$wire_age,\"turn\":\"$turn\",\"cpu\":\"$cpu_state\",\"net\":\"$net_state\",\"streak\":$streak}"
 }
 
+# --- detector 3: pending approval (kimi wire.jsonl) ------------------------
+# pending_approval <wire.jsonl> → "<age_s>\t<request-id>\t<описание>" либо
+# пусто. interaction.request без парного interaction.resolved (по id) старше
+# порога — панель разрешения висит незамеченной. Файл читается целиком:
+# resolved может прийти спустя много событий после request, хвостом пару
+# не собрать.
+pending_approval() {
+  local wire="$1"
+  command -v python3 >/dev/null 2>&1 || return 0
+  python3 - "$wire" "$APPROVAL_WAIT_THRESHOLD_S" <<'PYEOF'
+import json, sys, time
+path, threshold = sys.argv[1], int(sys.argv[2])
+pending = {}
+try:
+    fh = open(path, "rb")
+except OSError:
+    sys.exit(0)
+with fh:
+    for line in fh:
+        try:
+            rec = json.loads(line)
+        except ValueError:
+            continue
+        rtype = rec.get("type")
+        rid = rec.get("id")
+        if not rid:
+            continue
+        if rtype == "interaction.request":
+            pending[rid] = rec
+        elif rtype == "interaction.resolved":
+            pending.pop(rid, None)
+if not pending:
+    sys.exit(0)
+now_ms = int(time.time() * 1000)
+oldest = min(pending.values(), key=lambda r: r.get("time") or now_ms)
+age = (now_ms - (oldest.get("time") or now_ms)) // 1000
+if age < threshold:
+    sys.exit(0)
+req = oldest.get("request") or {}
+desc = req.get("action") or (req.get("display") or {}).get("command") or oldest.get("kind") or "?"
+desc = " ".join(str(desc).split())[:120]
+print(f"{age}\t{oldest.get('id')}\t{desc}")
+PYEOF
+}
+
+# approval_check <wire.jsonl> <session-id> — один алерт на каждый request-id
+# (ключ эпизода = id запроса, поэтому очистка при разрешении не нужна:
+# повторного алерта о том же запросе не будет никогда, а новый запрос
+# получит новый ключ). Старшие 7 дней state-файлы сметает гигиена цикла.
+approval_check() {
+  local wire="$1" sid="$2"
+  local now mtime out age rid desc
+  # Файл писался недавно — висящая панель старше порога невозможна, python
+  # не зовём (экономия на активных сессиях).
+  now=$(now_epoch)
+  mtime=$(stat -f '%m' "$wire" 2>/dev/null || echo 0)
+  [ $((now - mtime)) -lt "$APPROVAL_WAIT_THRESHOLD_S" ] && return 0
+  out="$(pending_approval "$wire")"
+  [ -n "$out" ] || return 0
+  age="${out%%$'\t'*}"
+  out="${out#*$'\t'}"
+  rid="${out%%$'\t'*}"
+  desc="${out#*$'\t'}"
+  alert_once "$(target_key "approval-$rid")" \
+    "Панель разрешения ждёт ${age}s: ${desc}" \
+    "kimi $sid" \
+    "{\"approval_age_s\":$age,\"request_id\":\"$rid\",\"signal\":\"pending-approval\"}" \
+    0 0
+}
+
 latest_heartbeat_age() {
   local session_file="$1"
   local last_hb
@@ -423,6 +508,7 @@ while true; do
     [ -n "$wire" ] || continue
     sid=$(basename "$(dirname "$(dirname "$(dirname "$wire")")")")
     progress_check "$(target_key "kimi-$sid")" kimi "$wire" "$kpids" "kimi $sid"
+    approval_check "$wire" "$sid"
   done < <(kimi_wire_files)
 
   # Гигиена состояния: state-файлы завершившихся сессий старше 7 дней

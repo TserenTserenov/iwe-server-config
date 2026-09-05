@@ -173,6 +173,10 @@ if verification_class in ("open-loop", "problem-framing"):
 
 ## Шаг 1. Инициализация
 
+Slug = первые 4 латинских слова из задачи строчными буквами через дефис (не-латиница и дата убираются). Никакой даты в slug — она уже в SESSION_ID. Если латиницы нет → `session`.
+
+Номер сессии выдаёт **скрипт, а не инлайновый bash** (WP-530, пир-сессия `2026-09-05-24` с Kimi). Прежняя формула `find | wc -l + 1` с последующим `mkdir -p` давала две ошибки: гонку (две сессии в узком окне получали один номер, `mkdir -p` не отказывает на существующем каталоге — и обе молча писали журнал в один каталог) и перевыдачу номера после любой уборки (`count+1` ≠ `max+1`). Живой прогон 12 одновременных писателей на старой формуле: 12 сессий, 6 уникальных номеров. Инлайновый цикл-retry в markdown эту гонку не закрывает — спецификацию исполняет LLM, и два разных агента исполнят её по-разному; закрыть можно только там, где код один и исполняется буквально.
+
 ```bash
 SESSIONS_DIR="${IWE_SESSIONS_ROOT:-$HOME/IWE/MC-sessions}"
 TODAY=$(date +%Y-%m-%d)
@@ -180,13 +184,15 @@ MONTH=$(date +%Y-%m)
 DAY=$(date +%d)
 DAY_DIR="$SESSIONS_DIR/$MONTH/$DAY"
 mkdir -p "$DAY_DIR"
-NUM=$(printf "%02d" $(( $(find "$DAY_DIR" -maxdepth 1 -type d -name "${TODAY}-[0-9][0-9]-*" 2>/dev/null | wc -l | tr -d ' ') + 1 )))
+# Порядок резолва: настроенный каталог скриптов, затем корневой чекаут. На
+# хостах, где IWE_SCRIPTS указывает на копию шаблона, она может отставать.
+RESERVE="${IWE_SCRIPTS:-$HOME/IWE/scripts}/session-dir-reserve.sh"
+[ -x "$RESERVE" ] || RESERVE="$HOME/IWE/scripts/session-dir-reserve.sh"
+SESSION_ID=$(bash "$RESERVE" "$DAY_DIR" "$TODAY" "$SLUG") || { echo "резервация номера сессии не удалась (см. stderr выше)" >&2; exit 1; }
+SESSION_DIR="${DAY_DIR}/${SESSION_ID}"
 ```
 
-Slug = первые 4 латинских слова из задачи строчными буквами через дефис (не-латиница и дата убираются). Никакой даты в slug — она уже в SESSION_ID. Если латиницы нет → `session`.
-
-`SESSION_ID="${TODAY}-${NUM}-${SLUG}"`
-`SESSION_DIR="${DAY_DIR}/${SESSION_ID}"`
+Скрипт отказал (exit ≠ 0) → СТОП, сообщить пилоту причину из stderr. Не подставлять номер вручную: ручная подстановка возвращает ровно ту гонку, ради которой скрипт и написан.
 
 **1.0 Session-guard open (WP-398, обязательно, ДО любых Write/Edit в сессии).** Синхронизирует пир-сессию с `session-guard.sh` Scope gate — без этого коммит на Шаге 4.5 будет заблокирован pre-commit хуком (mtime файлов сессии старше семафора). WP берётся из Шага 0б (найденный или «day-close»/«unknown», если РП не назначен). `--close-path peer-session` (WP-484 Ф118, 19.08) объявляет протокол закрытия заранее — без него `close-runner-gate.sh`/`close-gate-reminder.sh` требуют раннер закрытия дня для прямого коммита Шага 4.5.1, хотя это другой протокол (живой симптом, воспроизводившийся каждую сессию до этой фазы):
 
@@ -215,10 +221,7 @@ GOV_REPO_ROOT="<извлечённый worktree_path>"
 
 Semaphore-файл session-guard создаёт СВОЙ ORZ-скаффолд-заготовку по пути `$SESSIONS_DIR/<MONTH>/<TODAY>-<CLEAN_SLUG>.md` — тот же путь, что закрывающий файл пир-сессии из Шага 4.4/4.5.0 (до 2026-08-03 эти два места ошибочно считали разные пути, см. пометку на Шаге 4.4); Шаг 4.5.0 дописывает в этот же файл финальное содержимое, а не создаёт новый. **WP-526 Ф2:** ORZ-скаффолд идёт в `MC-sessions` (`$SESSIONS_DIR`) безусловно, isolate или нет, — `session-guard.sh` больше не привязывает его к `$GOV_REPO_ROOT`. `GOV_REPO_ROOT` (переопределённый на isolate-fallback выше) по-прежнему нужен для остальных шагов скилла, которые читают/пишут файлы в самом governance-репо (не сессионные), — эти два пути больше не связаны между собой.
 
-**1.1 Создать папку:**
-```bash
-mkdir -p "$SESSION_DIR"
-```
+**1.1 Каталог сессии уже создан** — его создаёт `session-dir-reserve.sh` в тот же момент, когда выигрывает номер. Отдельный `mkdir -p` здесь был бы не просто лишним: он маскирует отказ резервации (создаёт каталог под номером, который скрипт не выдавал).
 
 **1.2 Записать `meta.yaml`** (Write):
 ```yaml
@@ -431,13 +434,21 @@ if [ "$PEER_VENDOR" = "hermes" ]; then
   # переменные не переживают границу между вызовами (найдено code review 01.08).
   HERMES_LAST_ID=$(grep -h "^session_id: " "${SESSION_DIR}"/[0-9][0-9]-peer.md 2>/dev/null | tail -1 | sed 's/^session_id: //')
   if [ -z "$HERMES_LAST_ID" ]; then
-    echo "<промпт>" | IWE_PEER_PLAIN=0 bash "$ADAPTER_PATH" > "$PEER_FILE" 2>/dev/null
+    echo "<промпт>" | IWE_PEER_PLAIN=0 bash "$ADAPTER_PATH" > "$PEER_FILE" 2> "${PEER_FILE%.md}.err"
   else
-    echo "<промпт>" | IWE_PEER_PLAIN=0 bash "$ADAPTER_PATH" --session-id "$HERMES_LAST_ID" > "$PEER_FILE" 2>/dev/null
+    echo "<промпт>" | IWE_PEER_PLAIN=0 bash "$ADAPTER_PATH" --session-id "$HERMES_LAST_ID" > "$PEER_FILE" 2> "${PEER_FILE%.md}.err"
   fi
 else
   printf '%s\n' "<промпт с минимальной текстовой проекцией>" | IWE_PEER_PLAIN=0 bash "$ADAPTER_PATH" \
     > "$PEER_FILE" 2> "${PEER_FILE%.md}.err"
+fi
+# Integrity warning check (WP-524 F6) — same as in the round-loop below, and
+# before the cleanup, which may delete the file.
+if grep -q '^INTEGRITY-WARNING:' "${PEER_FILE%.md}.err" 2>/dev/null; then
+  echo "⚠️  ЦЕЛОСТНОСТЬ: адаптер сообщил о возможной потере целого сообщения в ответе напарника." >&2
+  grep '^INTEGRITY-WARNING:' "${PEER_FILE%.md}.err" >&2
+  # Показать пилоту и не принимать реплику как полную: перезапросить ход
+  # либо сверить с журналом сессии напарника (scripts/kimi-final-text.py).
 fi
 # Same rule as in the round-loop below: an empty .err is noise, not evidence
 # (WP-481 F13).
@@ -574,19 +585,31 @@ if [ "$vendor" = "hermes" ]; then
   # переменные не переживают границу между вызовами (найдено code review 01.08).
   HERMES_LAST_ID=$(grep -h "^session_id: " "${SESSION_DIR}"/[0-9][0-9]-peer-hermes.md 2>/dev/null | tail -1 | sed 's/^session_id: //')
   if [ -z "$HERMES_LAST_ID" ]; then
-    cat "$PROMPT_FILE" | IWE_PEER_PLAIN=0 bash "${ADAPTER_PATH[$vendor]}" > "$PEER_FILE" 2>/dev/null
+    cat "$PROMPT_FILE" | IWE_PEER_PLAIN=0 bash "${ADAPTER_PATH[$vendor]}" > "$PEER_FILE" 2> "${PEER_FILE%.md}.err"
     STATUS=$?
   else
-    cat "$PROMPT_FILE" | IWE_PEER_PLAIN=0 bash "${ADAPTER_PATH[$vendor]}" --session-id "$HERMES_LAST_ID" > "$PEER_FILE" 2>/dev/null
+    cat "$PROMPT_FILE" | IWE_PEER_PLAIN=0 bash "${ADAPTER_PATH[$vendor]}" --session-id "$HERMES_LAST_ID" > "$PEER_FILE" 2> "${PEER_FILE%.md}.err"
     STATUS=$?
   fi
 else
   if [ "$vendor" = "claude" ]; then
     cat "$PROMPT_FILE" | IWE_PEER_PLAIN=0 bash "${ADAPTER_PATH[$vendor]}" > "$PEER_FILE" 2> "${PEER_FILE%.md}.err"
   else
-    cat "$PROMPT_FILE" | IWE_PEER_PLAIN=0 bash "${ADAPTER_PATH[$vendor]}" --add-dir "$SESSION_DIR" > "$PEER_FILE" 2>/dev/null
+    # stderr в .err, НЕ в /dev/null (WP-524 Ф6, 05.09): адаптер пишет туда
+    # предупреждение «ответ пришёл, но, возможно, потерялось целое сообщение».
+    # В /dev/null оно исчезало ровно в главном сценарии round-loop.
+    cat "$PROMPT_FILE" | IWE_PEER_PLAIN=0 bash "${ADAPTER_PATH[$vendor]}" --add-dir "$SESSION_DIR" > "$PEER_FILE" 2> "${PEER_FILE%.md}.err"
   fi
   STATUS=$?
+fi
+# Integrity warning check (WP-524 F6): the adapter can hand back a reply that
+# looks whole while a whole message was lost in transport. Read it BEFORE the
+# empty-.err cleanup below, or the file may already be gone.
+if grep -q '^INTEGRITY-WARNING:' "${PEER_FILE%.md}.err" 2>/dev/null; then
+  echo "⚠️  ЦЕЛОСТНОСТЬ: адаптер сообщил о возможной потере целого сообщения в ответе напарника." >&2
+  grep '^INTEGRITY-WARNING:' "${PEER_FILE%.md}.err" >&2
+  # Показать пилоту и не принимать реплику как полную: перезапросить ход
+  # либо сверить с журналом сессии напарника (scripts/kimi-final-text.py).
 fi
 # Keep the stderr file only when the adapter actually wrote to it. An empty
 # .err carries no diagnostics and just adds noise to the session folder
@@ -820,6 +843,23 @@ git commit -m "<type>(<scope>): <короткое описание>
 Refs: peer-session <SESSION_ID>
 Review iters: <REVIEW_ITER>
 Verify: PASS" -- <те же specific files>
+
+# WP-537: заявить свой коммит в семафоре сессии. Без этой строки закрытие
+# сессии проверяет «моя работа опубликована» по состоянию ВСЕЙ ветки, и один
+# непушенный коммит соседней сессии отклоняет честную заявку.
+# `-C "$NC_ROOT"` явно, не полагаясь на `cd` выше: верхнеуровневый `cd` в этом
+# репозитории блокирует собственный PreToolUse-хук (destructive-guard.sh),
+# и агент, переписывающий блок под `git -C`, без явного корня получил бы
+# HEAD текущего каталога вызова, а не репозитория деплоя — то самое ложное
+# свидетельство, ради исключения которого коммит выводился не из истории
+# файлов, а из явной заявки (найдено холодным ревью этой же сессии).
+NC_ROOT=$(git -C <repo path> rev-parse --show-toplevel)
+NOTE_COMMIT="${IWE_SCRIPTS:-$HOME/IWE/scripts}/session-guard.sh"
+[ -x "$NOTE_COMMIT" ] || NOTE_COMMIT="$HOME/IWE/scripts/session-guard.sh"
+if ! bash "$NOTE_COMMIT" note-commit "$(git -C "$NC_ROOT" rev-parse HEAD)" \
+       --repo "$(basename "$NC_ROOT")" --agent claude-code --slug "$SESSION_ID"; then
+  echo "WARN: коммит не заявлен в семафоре — закрытие сессии проверится по всей ветке" >&2
+fi
 ```
 
 **Публикация — через общий шлюз координации, не голым `git push`** (WP-530 Ф9, 19.08, пир-сессия с Codex: голый push здесь обходил тот же `ds-publish.sh`, которым уже пользуются quick-close/day-close/week-close/month-close/day-open — живой тест 18.08 дал 7 из 8 конфликтов при параллельной интерактивной записи без него). `REPO_ROOT` — обязательно через `git rev-parse --show-toplevel` вызывающего репо, не сырой путь (caller может стоять в поддиректории):
@@ -1174,6 +1214,16 @@ cd "$SESSIONS_DIR"
 PATHS=("$MONTH/$DAY/$SESSION_ID/" "$GUARD_ORZ")
 git add "${PATHS[@]}"
 git commit -m "feat(peer): $SESSION_ID — <задача кратко>" -- "${PATHS[@]}"
+
+# WP-537: заявить свой коммит в семафоре — тот же паттерн, что на Шаге 3.6.5,
+# явный `-C "$SESSIONS_DIR"` по той же причине (верхнеуровневый `cd` этот хук
+# блокирует, а implicit cwd после переписывания дал бы HEAD не того репозитория).
+NOTE_COMMIT="${IWE_SCRIPTS:-$HOME/IWE/scripts}/session-guard.sh"
+[ -x "$NOTE_COMMIT" ] || NOTE_COMMIT="$HOME/IWE/scripts/session-guard.sh"
+if ! bash "$NOTE_COMMIT" note-commit "$(git -C "$SESSIONS_DIR" rev-parse HEAD)" \
+       --repo "$(basename "$SESSIONS_DIR")" --agent claude-code --slug "$SESSION_ID"; then
+  echo "WARN: коммит не заявлен в семафоре — закрытие сессии проверится по всей ветке" >&2
+fi
 
 # F1 (пир-сессия 2026-08-21-02-day-close-anomaly-classes): attest-манифест
 # сессии — ПОСЛЕ payload-коммита с отчётом, ДО публикации. Без манифеста

@@ -18,6 +18,9 @@
 #   renew [--wp WP-N] [--slug "..."] [--agent ...]    # продлить право на коммит
 #   pre-commit-check
 #   note-file <path> [--agent ...]
+#   note-commit <sha> [--repo <name>] [--agent ...]   # заявить коммит сессии: даёт commit-push.sh
+#                                                      # проверять доставку по СВОИМ коммитам,
+#                                                      # а не по состоянию всей ветки (WP-537)
 #   freeze-canonical <path> [--force]                 # physical OS-level lock (chflags -R uchg
 #                                                      # on Darwin), prototype for WP-520 ADR —
 #                                                      # refuses if any semaphore for the target
@@ -145,6 +148,179 @@ now_date() { date +"%Y-%m-%d"; }
 now_month() { date +"%Y-%m"; }
 fail() { echo "session-guard: $1" >&2; exit "${2:-1}"; }
 
+# emit_session_closed <channel> <semaphore> <wp> <slug> <agent> -- hours for a
+# close that bypassed process-runner.py (WP-484, 05.09, peer-session
+# 2026-09-05-25 with Kimi). The `session_closed_direct` event written at the end
+# of `close` records WHO closed but carries no duration, and every hours consumer
+# filters on `kind == "session_closed"` by strict equality (ledger-rollup.sh:384,
+# day-close-prepare.sh:438, render-open.py:130,
+# day-open-multiplier-backfill-patch.py:142). Live count on 05.09: 7
+# `session_closed` against 21 `session_closed_direct` -- three quarters of the
+# day's closes were invisible to the very hours CONCEPT-night-cycle.md §8 calls
+# the universal source. Pilot decision that session (escalation-00.md): the
+# multiplier denominator means machine-hours of ALL sessions, peer ones included
+# -- so the fix belongs to the writer and no consumer changes.
+#
+# Duration comes from the SAME source the runner uses -- `opened_at` of this very
+# semaphore, with the Ф38 plausibility band -- so `duration_min` keeps one meaning
+# across runner and bypass closes. Measuring a peer session by its own meta.yaml
+# was rejected in that session: it measures the conversation, not the session, and
+# has no band (a live meta.yaml held -212 minutes that same day).
+#
+# Never fails the close: like `session_closed_direct`, the ledger is an auxiliary
+# channel here, not the purpose of `close`.
+emit_session_closed() {
+  local channel="$1" semaphore="$2" wp="$3" slug="$4" agent="$5"
+  local ledger_script="$IWE_ROOT/$GOV_REPO/scripts/ledger-append.sh"
+  [ -f "$ledger_script" ] || return 0
+
+  local personality orz_file session_id event_day
+  personality=$(grep '^personality: ' "$semaphore" 2>/dev/null | cut -d' ' -f2- || true)
+  orz_file=$(grep '^orz_file: ' "$semaphore" 2>/dev/null | cut -d' ' -f2- || true)
+  session_id=$(grep '^session_id: ' "$semaphore" 2>/dev/null | cut -d' ' -f2- || true)
+
+  # Event date from the session file, NOT from "today" -- the same rule and the
+  # same reason as session-ledger-append.sh:112-116 (cold review 05.09): a close
+  # that crosses midnight would otherwise file the whole session's hours under the
+  # wrong day, taking them from the day that earned them and giving them to the
+  # next one. Both the duplicate check and the write must use this date, or they
+  # would consult one day file and write into another.
+  event_day=$(printf '%s' "$orz_file" | grep -oE '[0-9]{4}-[0-9]{2}-[0-9]{2}' | head -1 || true)
+  [ -n "$event_day" ] || event_day=$(now_date)
+
+  # Idempotency, best-effort by design (Kimi, turn 3: two processes can both read
+  # an absent event and both write it -- there is no distributed lock here).
+  #
+  # Matching by slug alone was wrong (cold review 05.09, Critical): `open` defaults
+  # slug to $WP, so two independent sessions of the same WP on the same day share
+  # it, and the second close would be silently skipped -- losing exactly the hours
+  # this function exists to record. Identity is checked strongest-first: session_id
+  # (unique per semaphore), then the session file basename (this is what lets the
+  # check ALSO see an event the runner itself already wrote -- its events carry
+  # session_file but neither slug nor session_id), then slug as the last resort.
+  local ledger_file=""
+  if [ -f "$IWE_ROOT/$GOV_REPO/scripts/lib/ledger-path.sh" ]; then
+    # shellcheck source=../DS-my-strategy/scripts/lib/ledger-path.sh
+    . "$IWE_ROOT/$GOV_REPO/scripts/lib/ledger-path.sh"
+    ledger_file="$IWE_ROOT/$GOV_REPO/machine/ledger/$(ledger_path_rel day "$event_day" 2>/dev/null || true)"
+  fi
+  if [ -n "$ledger_file" ] && [ -f "$ledger_file" ]; then
+    local dup=""
+    dup=$(LEDGER_FILE_ENV="$ledger_file" SLUG_ENV="$slug" SID_ENV="${session_id:-}" \
+      ORZ_ENV="${orz_file:-}" python3 -c '
+import os, sys
+
+try:
+    import yaml
+    with open(os.environ["LEDGER_FILE_ENV"], encoding="utf-8") as fh:
+        doc = yaml.safe_load(fh) or {}
+except Exception as exc:
+    # An unreadable ledger is not proof of a duplicate: say so and let the caller
+    # write. Silence here would look identical to "checked, nothing found".
+    print("unreadable: %s" % exc, file=sys.stderr)
+    raise SystemExit(0)
+
+want_sid = os.environ["SID_ENV"]
+want_file = os.path.basename(os.environ["ORZ_ENV"])
+want_slug = os.environ["SLUG_ENV"]
+for event in doc.get("events") or []:
+    if not isinstance(event, dict) or event.get("kind") != "session_closed":
+        continue
+    data = event.get("data") or {}
+    if want_sid and str(data.get("session_id") or "") == want_sid:
+        print("session_id")
+        break
+    if want_file and os.path.basename(str(data.get("session_file") or "")) == want_file:
+        print("session_file")
+        break
+    if not want_sid and not want_file and data.get("slug") == want_slug:
+        print("slug")
+        break
+' 2>/dev/null) || dup=""
+    if [ -n "$dup" ]; then
+      echo "  ℹ️  session_closed уже есть в журнале за $event_day (совпадение по $dup) — не дублирую" >&2
+      return 0
+    fi
+  fi
+
+  local opened observed duration_json known reason max_min
+  max_min="${IWE_MAX_SESSION_MIN:-480}"
+  observed=0
+  duration_json=null
+  known=false
+  reason="field_missing"
+  opened=$(grep -E '^(opened_at|created_at): ' "$semaphore" 2>/dev/null | head -1 | cut -d' ' -f2- || true)
+  if [ -n "$opened" ]; then
+    local opened_epoch
+    opened_epoch=$(date -u -j -f "%Y-%m-%dT%H:%M:%SZ" "$opened" +%s 2>/dev/null \
+      || date -u -d "$opened" +%s 2>/dev/null || true)
+    if [ -n "$opened_epoch" ]; then
+      observed=$(( ( $(date -u +%s) - opened_epoch ) / 60 ))
+      # A negative reading means the clock or the timestamp is wrong, never a real
+      # session: it degrades to "unknown with a reason", the same verdict
+      # gather-session-facts.sh gives it, never a fabricated zero.
+      [ "$observed" -lt 0 ] && observed=0
+      if [ "$observed" -le 0 ]; then
+        reason="semaphore_zero"
+      elif [ "$observed" -gt "$max_min" ]; then
+        reason="semaphore_suspicious"
+      else
+        duration_json="$observed"
+        known=true
+        reason=""
+      fi
+    fi
+    # An unparsable timestamp keeps reason="field_missing" -- the same value
+    # gather-session-facts.sh leaves in that case, so duration_reason stays one
+    # shared vocabulary instead of two dialects of the same schema.
+  fi
+
+  # Every command substitution below is guarded: this script runs under `set -e`,
+  # where a bare `var=$(cmd)` on a failing command kills the whole close (verified
+  # empirically 05.09) -- which would break the "never fails the close" contract
+  # this function is written to keep, and would do it AFTER the semaphore is
+  # already renamed and the push already done.
+  local event_err event
+  event_err=$(mktemp 2>/dev/null) || event_err=""
+  event=$(CHANNEL_ENV="$channel" WP_ENV="$wp" SLUG_ENV="$slug" AGENT_ENV="$agent" \
+    PERSONALITY_ENV="${personality:-unassigned}" ORZ_ENV="${orz_file:-}" \
+    SID_ENV="${session_id:-}" DURATION_ENV="$duration_json" KNOWN_ENV="$known" \
+    OBSERVED_ENV="$observed" REASON_ENV="$reason" python3 -c '
+import json, os
+duration = os.environ["DURATION_ENV"]
+event = {
+    "wp": os.environ["WP_ENV"] or "unknown",
+    "slug": os.environ["SLUG_ENV"],
+    "session_id": os.environ["SID_ENV"],
+    "agent": os.environ["AGENT_ENV"] or "unknown",
+    "personality": os.environ["PERSONALITY_ENV"],
+    "close_channel": os.environ["CHANNEL_ENV"],
+    "duration_min": None if duration == "null" else int(duration),
+    "observed_duration_min": int(os.environ["OBSERVED_ENV"]),
+    "duration_known": os.environ["KNOWN_ENV"] == "true",
+    "duration_source": "session_semaphore",
+    # turns stays 0: a bypass close has no runner card to count them from, and a
+    # made-up number would be indistinguishable from a measured one.
+    "turns": 0,
+    "session_file": os.environ["ORZ_ENV"],
+    "repos": [],
+    "status": "completed",
+}
+if os.environ["REASON_ENV"]:
+    event["duration_reason"] = os.environ["REASON_ENV"]
+print(json.dumps(event, ensure_ascii=False))
+' 2>"${event_err:-/dev/null}") || event=""
+  if [ -z "$event" ]; then
+    echo "  ⚠️  session_closed не собран для канала $channel: $(cat "${event_err:-/dev/null}" 2>/dev/null)" >&2
+    [ -n "$event_err" ] && rm -f "$event_err"
+    return 0
+  fi
+  [ -n "$event_err" ] && rm -f "$event_err"
+
+  bash "$ledger_script" day "$event_day" session_closed "$event" session-guard \
+    >/dev/null 2>&1 || echo "  ⚠️  ledger session_closed не записан (best-effort, не блокирует close)" >&2
+}
+
 # resolve_orz_sessions_dir -- three-way resolver for the sessions-content
 # root (WP-526 Ф2 fix, 29.08). Prints the resolved path on success.
 #   1. IWE_SESSIONS_ROOT set explicitly -- always fail-closed if broken,
@@ -266,6 +442,18 @@ ISOLATE_LOCK_TTL_SEC="${IWE_ISOLATE_LOCK_TTL_SEC:-120}"  # generous over the ~2.
 # mkdir-is-atomic pattern already proven by lock-hot-file above, scoped per
 # session_id instead of per hot-file path, so two concurrent re-entries for
 # the SAME session_id can't both decide "worktree absent, create one".
+# Locks currently held by THIS process, innermost last. Only the EXIT trap
+# below reads it as a whole -- the normal return path pops just its own entry.
+_ISOLATE_LOCKS_HELD=()
+
+release_isolate_locks() {
+  local held
+  for held in ${_ISOLATE_LOCKS_HELD[@]+"${_ISOLATE_LOCKS_HELD[@]}"}; do
+    [ -n "$held" ] && rm -rf "$held"
+  done
+  _ISOLATE_LOCKS_HELD=()
+}
+
 with_isolate_lock() {
   local session_id="$1"; shift
   mkdir -p "$ISOLATE_LOCK_DIR"
@@ -307,9 +495,35 @@ with_isolate_lock() {
   done
   now_iso > "$lock_path/locked_at"
   echo $$ > "$lock_path/pid"
-  "$@"
-  local rc=$?
+  # Both exits out of the critical section have to release the lock, and neither
+  # did before (WP-530, peer session 2026-09-05-34 with Kimi):
+  #   - a non-zero return from the callback killed the script right here under
+  #     `set -euo pipefail` (line 63), before the release below ever ran;
+  #   - `fail()` (line 149) is "message + exit", so a callback failing deep
+  #     inside it leaves the function entirely -- which a RETURN trap would not
+  #     catch either, the reason this is an EXIT trap and not that.
+  # Nothing about waiting changes: a dead owner's lock is already reclaimed by
+  # the PID-liveness branch above on the next contender's first pass, so what
+  # leaked here was a stale directory on disk, not a window of protection.
+  # The trap is installed for the critical section only and cleared right after
+  # it -- this file's global EXIT trap belongs to another command
+  # (wp-context-guarded-edit), and leaving ours armed would take it over.
+  # The trap releases EVERY lock this process holds, not just this one. A
+  # process has a single EXIT trap, so a nested call that armed its own would
+  # disarm the outer one and leak the outer lock on an abort (cold review of
+  # this change, Medium). Holding the paths in one stack keeps the trap correct
+  # at any depth -- no call site nests today, and none has to remember not to.
+  _ISOLATE_LOCKS_HELD+=("$lock_path")
+  trap release_isolate_locks EXIT
+  local rc=0
+  "$@" || rc=$?
+  # Normal path releases only this call's own lock; an outer holder's lock is
+  # its own business and stays until that call returns.
+  unset "_ISOLATE_LOCKS_HELD[$(( ${#_ISOLATE_LOCKS_HELD[@]} - 1 ))]"
   rm -rf "$lock_path"
+  if [ "${#_ISOLATE_LOCKS_HELD[@]}" -eq 0 ]; then
+    trap - EXIT
+  fi
   return $rc
 }
 
@@ -899,6 +1113,7 @@ RESULT_ARG=""
 DEFER_ARG=""
 OWNER_PID=""
 SESSION_ID_ARG=""
+REPO_ARG=""
 CLEANUP_ORPHANS=0
 FORCE_NO_REFLECTION=""
 CANONICAL_OWNER=""
@@ -954,6 +1169,11 @@ while [[ $# -gt 0 ]]; do
     --personality) PERSONALITY="$2"; shift 2 ;;
     --owner-pid) OWNER_PID="$2"; shift 2 ;;
     --session-id) SESSION_ID_ARG="$2"; shift 2 ;;
+    --repo)
+      if [[ $# -lt 2 || -z "$2" ]]; then
+        fail "--repo требует непустое значение (имя репозитория внутри \$IWE_ROOT)" 1
+      fi
+      REPO_ARG="$2"; shift 2 ;;
     --expected-hash)
       if [[ $# -lt 2 || -z "$2" ]]; then
         fail "--expected-hash требует непустое значение (sha256 файла, который читал вызывающий)" 1
@@ -2650,6 +2870,41 @@ print(json.dumps({"wp": sys.argv[1], "slug": sys.argv[2], "agent": sys.argv[3], 
       bash "$IWE_ROOT/$GOV_REPO/scripts/ledger-append.sh" day "$(now_date)" session_closed_direct "$_direct_event" session-guard \
         >/dev/null 2>&1 || echo "  ⚠️  ledger session_closed_direct не записан (best-effort, не блокирует close)" >&2
     fi
+
+    # Which bypass path closed this session (WP-484, 05.09). Classified from the
+    # evidence FORCED_CARD already carries, not from a flag the caller could set
+    # wrong: the two synthetic values name their own channel, the two real cards
+    # are told apart by the step they stopped on. A future fifth bypass lands in
+    # `unclassified` and still gets its hours recorded (ledger-append.sh degrades
+    # the unknown name to "unknown" and keeps the original) -- losing the hours
+    # would be the worse failure of the two.
+    _close_channel="unclassified"
+    case "$FORCED_CARD" in
+      declared-peer-session:*) _close_channel="peer-session" ;;
+      cancel-obligation:*)     _close_channel="cancel-obligation" ;;
+      *)
+        if [ -f "$FORCED_CARD" ]; then
+          if grep -q '^current_step: wp-archive-run$' "$FORCED_CARD"; then
+            _close_channel="auto-archive-cancelled"
+          elif grep -q '^current_step: blocked-witness-unavailable$' "$FORCED_CARD"; then
+            _close_channel="force-no-reflection"
+          fi
+        fi
+        ;;
+    esac
+
+    # Every channel goes through the same call, including `auto-archive-cancelled`.
+    # The first cut skipped that one structurally, reasoning that its card sits at
+    # `current_step: wp-archive-run` and `session-ledger-append` runs earlier in
+    # quick-close.yaml, so the runner must already have written the event. Cold
+    # review 05.09 broke that reasoning: step ORDER is not step SUCCESS -- the
+    # ledger handler returns `{"status":"error"}` with exit 0 by contract ("never
+    # fails Quick Close"), and the YAML `next:` transition is not gated on it, so
+    # the pipeline reaches wp-archive-run even when nothing was actually written.
+    # Deciding from evidence instead of from ordering: emit_session_closed checks
+    # the ledger itself (by session_file, which the runner's own events carry) and
+    # skips only when the event is really there.
+    emit_session_closed "$_close_channel" "$_sem_read" "$WP" "$SLUG" "$AGENT"
   fi
 
   exit 0
@@ -2776,6 +3031,76 @@ print(os.path.relpath(f, r))
   fi
 
   echo "Noted in scope: $REL_PATH"
+  exit 0
+fi
+
+# --- NOTE-COMMIT (WP-537, peer session 2026-09-05-24 with Kimi) ---
+#
+#   session-guard.sh note-commit <sha> [--repo <name>] [--agent|--wp|--slug|--session-id ...]
+#
+# Records "this session produced this commit in this repo" in the semaphore, so
+# commit-push.sh can verify the claim "my work is already published" against the
+# session's OWN commits instead of the state of the whole branch.
+#
+# Why it is needed: the confirmed_clean_repos branch of commit-push.sh reads the
+# `file:` registry to scope its cleanliness check, but still answers "delivered?"
+# with `git rev-list @{u}..HEAD` over the entire branch. In a shared checkout one
+# unpushed commit from a NEIGHBOURING session rejects this session's honest
+# claim. Deriving the SHA after the fact (`git log -1 -- <my files>`) was
+# rejected in the same peer session: it answers "who last touched the file", not
+# "is my commit delivered", and can pass falsely once a newer pushed commit by
+# someone else touches the same file.
+#
+# Repo-qualified on purpose: one semaphore mixes repo-relative `file:` entries
+# from several repositories with no separator, so a bare `commit: <sha>` would
+# inherit exactly that ambiguity.
+if [ "$CMD" = "note-commit" ]; then
+  COMMIT_SHA="${POSITIONAL[0]:-}"
+  [ -z "$COMMIT_SHA" ] && fail "note-commit: не передан <sha> коммита" 1
+  NOTE_AGENT="${AGENT:-${IWE_AGENT:-claude-code}}"
+  if [ -n "$SESSION_ID_ARG" ]; then
+    SEM_FILE=$(resolve_semaphore_by_session_id "$NOTE_AGENT" "$SESSION_ID_ARG" "${WP:-}" "${SLUG:-}") \
+      || fail "note-commit: --session-id $SESSION_ID_ARG не резолвится (см. диагностику выше)" 1
+  else
+    SEM_FILE=$(select_semaphore "$NOTE_AGENT" "${WP:-}" "${SLUG:-}") && SG_RC=0 || SG_RC=$?
+    [ "$SG_RC" -eq 2 ] && exit 1
+    if [ "$SG_RC" -ne 0 ] || [ -z "$SEM_FILE" ] || [ ! -f "$SEM_FILE" ]; then
+      fail "note-commit: нет открытой сессии для агента '$NOTE_AGENT' (уточни --wp/--slug/--session-id)" 1
+    fi
+  fi
+  if [ -n "$REPO_ARG" ]; then
+    # cold review: ".." or a leading "/" would resolve outside $IWE_ROOT while
+    # the failure message below still (falsely) claims the check happened.
+    case "$REPO_ARG" in
+      */*|*..*) fail "note-commit: --repo '$REPO_ARG' должен быть именем каталога внутри $IWE_ROOT без '/' и '..'" 1 ;;
+    esac
+    NC_REPO_DIR="$IWE_ROOT/$REPO_ARG"
+    git -C "$NC_REPO_DIR" rev-parse --git-dir >/dev/null 2>&1 \
+      || fail "note-commit: '$REPO_ARG' не git-репозиторий внутри $IWE_ROOT" 1
+  else
+    NC_REPO_DIR=$(git rev-parse --show-toplevel 2>/dev/null || true)
+    [ -n "$NC_REPO_DIR" ] \
+      || fail "note-commit: текущий каталог вне git-контекста и --repo не задан — репозиторий определить нечем" 1
+  fi
+  NC_REPO_NAME=$(basename "$NC_REPO_DIR")
+  # The semaphore line is "commit: <repo> <sha>", split by the reader on the
+  # first space (commit-push.sh: c_entry%%' '*). A space in the name would
+  # silently corrupt that split and drop the claim into ahead-only with no
+  # diagnostic anywhere -- reject it here where the cause is still visible.
+  case "$NC_REPO_NAME" in
+    *' '*) fail "note-commit: имя репозитория '$NC_REPO_NAME' содержит пробел — формат семафора 'commit: <repo> <sha>' это не переживёт" 1 ;;
+  esac
+  # Full 40-char form only: a short SHA recorded today can become ambiguous as
+  # the repo grows, and the reader resolves it long after this session is gone.
+  NC_FULL_SHA=$(git -C "$NC_REPO_DIR" rev-parse --verify --quiet "${COMMIT_SHA}^{commit}" 2>/dev/null) \
+    || fail "note-commit: '$COMMIT_SHA' не резолвится в коммит репозитория '$NC_REPO_NAME'" 1
+  NC_ENTRY="commit: $NC_REPO_NAME $NC_FULL_SHA"
+  # Idempotent: the same commit may legitimately be reported twice (a retried
+  # close step), and a duplicated entry would be verified twice for nothing.
+  if ! grep -qxF "$NC_ENTRY" "$SEM_FILE" 2>/dev/null; then
+    echo "$NC_ENTRY" >> "$SEM_FILE"
+  fi
+  echo "Noted commit: $NC_REPO_NAME $NC_FULL_SHA"
   exit 0
 fi
 
@@ -3699,4 +4024,4 @@ if [ "$CMD" = "post-merge-check" ]; then
   exit 0
 fi
 
-fail "Unknown command: $CMD (use: open, close, audit, renew, note-file, recover-orphaned, pre-commit-check, post-merge-check)"
+fail "Unknown command: $CMD (use: open, close, audit, renew, note-file, note-commit, recover-orphaned, pre-commit-check, post-merge-check)"
