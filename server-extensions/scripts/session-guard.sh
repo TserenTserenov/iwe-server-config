@@ -3503,8 +3503,14 @@ EOF
     STAGED_VS_HEAD=()
     while IFS= read -r -d '' f; do STAGED_VS_HEAD+=("$f"); done \
       < <(git diff --cached --name-only -z --no-renames HEAD 2>/dev/null)
-    for f in "${THEIR_SIDE[@]}"; do
-      for g in "${STAGED_VS_HEAD[@]}"; do
+    # "${ARR[@]+"${ARR[@]}"}", not "${ARR[@]}": macOS ships bash 3.2 (GPLv3
+    # freeze) where iterating a zero-length array under `set -u` is an
+    # unbound-variable error, fixed only in bash 4.4+ (2016) -- same class
+    # that live-crashed session-guard.sh close on 16.08 (bug-2026-08-16-
+    # session-guard-close-bash32-empty-array-unbound.md), same fix already
+    # applied elsewhere in this file for the same reason.
+    for f in "${THEIR_SIDE[@]+"${THEIR_SIDE[@]}"}"; do
+      for g in "${STAGED_VS_HEAD[@]+"${STAGED_VS_HEAD[@]}"}"; do
         if [ "$f" = "$g" ]; then
           MERGE_FILES+=("$f")
           break
@@ -3515,7 +3521,7 @@ EOF
 
   is_merge_file() {
     local needle="$1" hay
-    for hay in "${MERGE_FILES[@]}"; do
+    for hay in "${MERGE_FILES[@]+"${MERGE_FILES[@]}"}"; do
       [ "$hay" = "$needle" ] && return 0
     done
     return 1
@@ -3535,6 +3541,10 @@ EOF
     status="${line%%$'\t'*}"
     f="${line##*$'\t'}"
     status_char="${status:0:1}"
+
+    if is_merge_file "$f"; then
+      continue
+    fi
 
     if [ "$status_char" = "D" ]; then
       # Deleted file: check append-log across all active semaphores
