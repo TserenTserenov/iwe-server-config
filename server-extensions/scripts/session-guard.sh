@@ -3457,6 +3457,70 @@ EOF
     exit 4
   fi
 
+  # WP-545/WP-530 (2026-09-05): merge-aware scope. Was an unconditional
+  # carve-out (any active merge skipped the entire scope gate -- exit 0
+  # before the per-file loop). ArchGate WP-530 (Ф21, peer-session
+  # 2026-09-05-17 with Kimi, cold-reviewed by Fable) narrows it: only paths
+  # git's own merge actually brought in skip the check; a file the session
+  # staged by hand during a stopped merge still goes through the normal
+  # scope loop below (the old carve-out let that slide too -- found live as
+  # a silent index/tree divergence risk on 05.09, same class the note-file
+  # gate below exists to catch for ordinary files).
+  #
+  # Two stages, because .git/MERGE_HEAD does not exist yet at the
+  # pre-merge-commit hook stage for a merge git can finish automatically
+  # (verified live, git 2.50.1 -- same finding as .githooks/pre-commit's
+  # Check 8):
+  #   (i)  IWE_HOOK_IS_MERGE=1 (exported by .githooks/pre-merge-commit):
+  #        this hook fires INSIDE the single `git merge` invocation, before
+  #        control returns to the caller's shell -- there is no window for
+  #        a manual `git add` to land between "git prepared the merge tree"
+  #        and "this hook ran." The index already equals the merge result,
+  #        so the merge set is simply everything staged vs HEAD.
+  #   (ii) MERGE_HEAD present (merge stopped -- conflicts, or a caller ran
+  #        `git merge --no-commit` -- resumed later via plain `git commit`,
+  #        which this same pre-commit hook also guards): here the caller DID
+  #        regain shell control, so the merge set is the intersection of
+  #        "their side changed this path" (three-dot HEAD...MERGE_HEAD --
+  #        two-dot is symmetric and would also match paths that changed only
+  #        on OUR side) and "this path is actually staged differently from
+  #        HEAD". A conflict resolved byte-for-byte back to HEAD produces no
+  #        --cached diff and correctly drops out here; a file additionally
+  #        hand-edited during the stopped merge stays in scope-gate
+  #        territory below -- which is the point of the intersection.
+  #        Known narrow gap: an octopus merge stores multiple parents under
+  #        MERGE_HEAD, so `rev-parse --verify` fails to resolve a single rev
+  #        and this branch does not fire -- fails safe (those paths fall
+  #        through to the ordinary, stricter scope check), not a hole.
+  MERGE_FILES=()
+  if [ -n "${IWE_HOOK_IS_MERGE:-}" ]; then
+    while IFS= read -r -d '' f; do MERGE_FILES+=("$f"); done \
+      < <(git diff --cached --name-only -z --no-renames 2>/dev/null)
+  elif git rev-parse -q --verify MERGE_HEAD >/dev/null 2>&1; then
+    THEIR_SIDE=()
+    while IFS= read -r -d '' f; do THEIR_SIDE+=("$f"); done \
+      < <(git diff --name-only -z --no-renames HEAD...MERGE_HEAD 2>/dev/null)
+    STAGED_VS_HEAD=()
+    while IFS= read -r -d '' f; do STAGED_VS_HEAD+=("$f"); done \
+      < <(git diff --cached --name-only -z --no-renames HEAD 2>/dev/null)
+    for f in "${THEIR_SIDE[@]}"; do
+      for g in "${STAGED_VS_HEAD[@]}"; do
+        if [ "$f" = "$g" ]; then
+          MERGE_FILES+=("$f")
+          break
+        fi
+      done
+    done
+  fi
+
+  is_merge_file() {
+    local needle="$1" hay
+    for hay in "${MERGE_FILES[@]}"; do
+      [ "$hay" = "$needle" ] && return 0
+    done
+    return 1
+  }
+
   # Scope gate: every staged file must be touched in at least one active session.
   # Existing/new files: mtime > semaphore mtime.
   # Deleted files: path must be listed in at least one semaphore append-log.
