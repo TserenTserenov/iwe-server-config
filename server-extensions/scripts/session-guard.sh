@@ -3336,6 +3336,57 @@ scope_has_path() {  # scope_has_path <semaphore> <repo-relative-path>
   return 1
 }
 
+# Sets ACTIVE/EXPIRED (newline-separated semaphore paths) from every *.open
+# file under SESSION_DIR. Split out of pre-commit-check (WP-530 Ф22) because
+# post-merge-check needs the same "who's currently allowed to write" list to
+# decide whether an incoming merge stayed inside a session's declared scope.
+list_active_semaphores() {
+  ALL_OPEN=$(find "$SESSION_DIR" -name "*.open" -type f 2>/dev/null)
+  ACTIVE=""
+  EXPIRED=""
+  for sem in $ALL_OPEN; do
+    if lease_valid "$sem"; then
+      ACTIVE="${ACTIVE}${sem}"$'\n'
+    else
+      EXPIRED="${EXPIRED}${sem}"$'\n'
+    fi
+  done
+  ACTIVE="${ACTIVE%$'\n'}"
+  EXPIRED="${EXPIRED%$'\n'}"
+}
+
+# Emits a merge_scope_widened ledger event (WP-530 Ф22, observability-only --
+# never blocks) for every path in $1 (newline-separated) that no ACTIVE
+# semaphore declares. $2 is the commit-ish to record as the audit fingerprint
+# (MERGE_HEAD sha for a resolved conflict, the merge commit's own sha for a
+# clean/fast-forward merge picked up by post-merge-check).
+emit_merge_scope_widened() {
+  local paths="$1" fingerprint="$2" widened="" p
+  list_active_semaphores
+  while IFS= read -r p; do
+    [ -z "$p" ] && continue
+    local found=0
+    for sem in $ACTIVE; do
+      scope_has_path "$sem" "$p" && { found=1; break; }
+    done
+    [ "$found" -eq 0 ] && widened="${widened}${p}"$'\n'
+  done <<< "$paths"
+  widened="${widened%$'\n'}"
+  [ -z "$widened" ] && return 0
+  [ -f "$IWE_ROOT/$GOV_REPO/scripts/ledger-append.sh" ] || return 0
+  # Observability must never be the thing that breaks a commit/merge under
+  # `set -e` (this function runs inline inside pre-commit-check, whose own
+  # caller does `... || exit $?`): a non-hex fingerprint or a python3 failure
+  # (missing binary, non-UTF8 path from git diff -z) degrades to a still-
+  # valid, still-informative ledger event instead of propagating.
+  [[ "$fingerprint" =~ ^[0-9a-f]+$ ]] || fingerprint="unknown"
+  local paths_json
+  paths_json=$(printf '%s\n' "$widened" | python3 -c "import sys,json; print(json.dumps([l for l in sys.stdin.read().split(chr(10)) if l]))" 2>/dev/null) \
+    || paths_json="[]"
+  bash "$IWE_ROOT/$GOV_REPO/scripts/ledger-append.sh" day "$(now_date)" merge_scope_widened \
+    "{\"fingerprint\":\"$fingerprint\",\"paths\":$paths_json}" session-guard 2>/dev/null || true
+}
+
 # --- GIT PRE-COMMIT CHECK ---
 if [ "$CMD" = "pre-commit-check" ]; then
   # WP-484 Ф49: право разрешать коммит истекает по аренде и отзывается у ВСЕГО
@@ -3350,18 +3401,7 @@ if [ "$CMD" = "pre-commit-check" ]; then
   # записью объекта git время идёт в любом случае, — а выглядела бы как
   # гарантия атомарности. При сроке в 4 часа «просрочен на доли секунды» и
   # «действителен» описывают одно и то же состояние сессии.
-  ALL_OPEN=$(find "$SESSION_DIR" -name "*.open" -type f 2>/dev/null)
-  ACTIVE=""
-  EXPIRED=""
-  for sem in $ALL_OPEN; do
-    if lease_valid "$sem"; then
-      ACTIVE="${ACTIVE}${sem}"$'\n'
-    else
-      EXPIRED="${EXPIRED}${sem}"$'\n'
-    fi
-  done
-  ACTIVE="${ACTIVE%$'\n'}"
-  EXPIRED="${EXPIRED%$'\n'}"
+  list_active_semaphores
 
   # Check 6a (WP-539, peer-session 2026-08-18-08-wp539-tsekh1-sync): an active
   # session can register an isolated worktree via `orz_sessions_dir` and still
@@ -3517,6 +3557,13 @@ EOF
         fi
       done
     done
+    # Observability, not enforcement (WP-530 Ф22 ArchGate decision): record
+    # which merge-brought paths land outside every active session's declared
+    # scope, but never block on it -- blocking a merge resolution is exactly
+    # the stuck-operation class this whole fix exists to remove.
+    if [ "${#MERGE_FILES[@]}" -gt 0 ]; then
+      emit_merge_scope_widened "$(printf '%s\n' "${MERGE_FILES[@]}")" "$(git rev-parse MERGE_HEAD)"
+    fi
   fi
 
   is_merge_file() {
@@ -3628,4 +3675,28 @@ EOF
   exit 0
 fi
 
-fail "Unknown command: $CMD (use: open, close, audit, renew, note-file, recover-orphaned, pre-commit-check)"
+# --- GIT POST-MERGE CHECK (WP-530 Ф22) ---
+# Fast-forward and clean non-FF merges never reach pre-commit-check's own
+# ledger emission (branch (ii) above only fires when MERGE_HEAD is on disk --
+# a fast-forward moves HEAD without ever writing one, and a clean non-FF
+# merge auto-commits through pre-merge-commit/IWE_HOOK_IS_MERGE before
+# MERGE_HEAD would matter). This is the other half of the same
+# observability contract, run from .githooks/post-merge. Never blocks --
+# post-merge fires after the merge already succeeded, there is nothing left
+# to gate.
+if [ "$CMD" = "post-merge-check" ]; then
+  RANGE_BASE=""
+  if git rev-parse -q --verify ORIG_HEAD >/dev/null 2>&1 \
+    && [ "$(git rev-parse ORIG_HEAD)" != "$(git rev-parse HEAD)" ]; then
+    RANGE_BASE=$(git rev-parse ORIG_HEAD)
+  elif git rev-parse -q --verify 'HEAD@{1}' >/dev/null 2>&1; then
+    RANGE_BASE=$(git rev-parse 'HEAD@{1}')
+  fi
+  if [ -n "$RANGE_BASE" ]; then
+    CHANGED=$(git diff --name-only -z --no-renames "$RANGE_BASE" HEAD 2>/dev/null | tr '\0' '\n')
+    [ -n "$CHANGED" ] && emit_merge_scope_widened "$CHANGED" "$(git rev-parse HEAD)"
+  fi
+  exit 0
+fi
+
+fail "Unknown command: $CMD (use: open, close, audit, renew, note-file, recover-orphaned, pre-commit-check, post-merge-check)"
