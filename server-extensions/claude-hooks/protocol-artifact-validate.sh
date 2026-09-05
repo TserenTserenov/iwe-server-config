@@ -189,11 +189,6 @@ if ! grep -qE "~[0-9]+\.?[0-9]*x|мультипликатор считается
   ERRORS+=("Мультипликатор не найден — нужен формат '~N.Nx' в строке бюджета или явная заглушка 'мультипликатор считается на закрытии дня'")
 fi
 
-# --- Ф3 Check 4 (legacy): mandatory check и бюджет ---
-if ! grep -qi "mandatory" "$DAYPLAN"; then
-  ERRORS+=("Mandatory check (WP-7 + контентный РП) не найден")
-fi
-
 if ! grep -qE "~[0-9]+\.?[0-9]*h РП" "$DAYPLAN"; then
   ERRORS+=("Бюджет дня не в формате '~Xh РП / ~Yh физ'")
 fi

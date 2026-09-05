@@ -176,11 +176,20 @@ RUNNER_MARKER="$RUNNER_MARKER_DIR/$SESSION_ID_SAFE.flag"
 # потреблении ticket (close_obligation.consume_ticket) — причинно, после
 # реального старта. Подделка echo создаёт максимум бесполезный ticket.
 if echo "$COMMAND" | grep -qE 'process-runner\.py[[:space:]]+start[[:space:]]+quick-close'; then
-  # WP-484 Ф74б: новый запуск раннера = новое поколение. Старый runner-маркер
-  # этой же сессии (если остался от прошлого поколения/проактивного старта)
-  # должен считаться недействительным, иначе stop-check мог бы принять его за
-  # маркер текущего obligation. Сам consume-ticket запишет новый маркер.
-  rm -f "$RUNNER_MARKER" 2>/dev/null
+  # WP-484 «Второй случай» (05.09, пир-сессия с Kimi): раньше здесь стоял
+  # безусловный `rm -f "$RUNNER_MARKER"` на КАЖДОЕ совпадение текста команды —
+  # до того, как известно, состоится ли реальный новый прогон. Живой баг:
+  # process-runner.py::cmd_start на статусе карточки running/waiting отвечает
+  # already_running РАНЬШЕ, чем доходит до close_obligation.cmd_consume_ticket()
+  # (единственная точка, что переписывает маркер) -- маркер, снесённый здесь,
+  # никогда не восстанавливался, и все последующие прямые git commit/push в
+  # этой сессии блокировались навсегда (даже в несвязанный репозиторий), пока
+  # не повторяли override-фразу на каждый коммит.
+  # Инвалидация маркера НЕ нужна здесь: единственные пути к новому поколению
+  # obligation — close_obligation.cmd_arm() (чистит маркер сам, атомарно, в
+  # момент реального re-arm) и cmd_consume_ticket() (безусловно перезаписывает
+  # маркер при каждом реальном создании нового прогона, включая ветку
+  # stuck-run-recovery). Оба уже гарантируют целостность без участия bash.
   # WP-484 Ф56: session-reflection-append.sh (reflex handler) needs to know which
   # Claude Code session_id this quick-close run belongs to, to find the matching
   # pilot-witness/<session_id>.jsonl -- reflex handlers only receive {results,

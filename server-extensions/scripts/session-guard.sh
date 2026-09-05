@@ -908,6 +908,7 @@ ISOLATE_FLAG=0
 EXPECTED_HASH=""
 EXPECTED_ABSENT=0
 BASE_SHA=""
+RENEW_FOREIGN=0
 POSITIONAL=()
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -933,6 +934,13 @@ while [[ $# -gt 0 ]]; do
     # in `audit`), not checked against a fixed set -- the freeze-block below
     # only tests non-empty.
     --canonical-owner) CANONICAL_OWNER="$2"; shift 2 ;;
+    # WP-545 (2026-09-05): `renew --session-id <X>` без `--foreign` продлевает
+    # ЧУЖОЙ семафор (другого agent/session_id) молча — использовано как обход
+    # lease-гейта живым инцидентом накануне (peer-session
+    # 2026-09-05-01-bot-alerts-diagnostika, продлил 3 просроченных семафора
+    # WP-526/WP-539, чтобы pre-commit пропустил СВОЙ коммит). --foreign делает
+    # это явным намерением, не побочным эффектом; проверка — в блоке CMD=renew.
+    --foreign) RENEW_FOREIGN=1; shift ;;
     --reason)
       # Same class of bug as --force-no-reflection below (WP-520 sixteenth
       # live finding, session-guard.sh:310 at the time): a value-bearing
@@ -940,7 +948,7 @@ while [[ $# -gt 0 ]]; do
       # argv end under `set -u`, killing the script mid-parse instead of
       # failing with a readable message.
       if [[ $# -lt 2 || -z "$2" ]]; then
-        fail "--reason требует непустое значение (причина запроса на разморозку)" 1
+        fail "--reason требует непустое значение (причина запроса)" 1
       fi
       UNFREEZE_REASON="$2"; shift 2 ;;
     --personality) PERSONALITY="$2"; shift 2 ;;
@@ -3088,6 +3096,14 @@ fi
 if [ "$CMD" = "renew" ]; then
   RENEW_AGENT="${AGENT:-${IWE_AGENT:-claude-code}}"
   if [ -n "$SESSION_ID_ARG" ]; then
+    # Explicit --session-id is how a caller reaches a session that isn't its
+    # own (renewing "my own currently open session" resolves via --wp/--slug
+    # below instead, with no session_id known in advance) — no scripted
+    # caller in this repo uses `renew --session-id` at all, only ad-hoc
+    # interactive use. Require the intent to be explicit.
+    if [ "$RENEW_FOREIGN" != "1" ] || [ -z "$UNFREEZE_REASON" ]; then
+      fail "renew --session-id продлевает семафор ПО ID, не обязательно свой -- требуется явное '--foreign --reason \"...\"'. Если сессия действительно твоя, продли через --wp/--slug без --session-id." 1
+    fi
     SEM_FILE="$SESSION_DIR/${RENEW_AGENT}-${SESSION_ID_ARG}.open"
     [ -f "$SEM_FILE" ] || fail "renew: нет открытой сессии ${RENEW_AGENT}-${SESSION_ID_ARG}" 3
   else
@@ -3117,6 +3133,14 @@ if [ "$CMD" = "renew" ]; then
   # поэтому у читателя нет выбора «первая или последняя запись».
   mv "$LEASE_TMP" "${SEM_FILE}.lease"
   echo "Lease RENEW: $(basename "$SEM_FILE") — права на коммит продлены на $((LEASE_SEC / 60)) мин"
+  if [ "$RENEW_FOREIGN" = "1" ] && [ -f "$IWE_ROOT/$GOV_REPO/scripts/ledger-append.sh" ]; then
+    _renew_event=$(python3 -c '
+import json, sys
+print(json.dumps({"agent": sys.argv[1], "session_id": sys.argv[2], "reason": sys.argv[3]}))
+' "$RENEW_AGENT" "$RENEW_SESSION_ID" "$UNFREEZE_REASON" 2>/dev/null) || _renew_event=""
+    [ -n "$_renew_event" ] && bash "$IWE_ROOT/$GOV_REPO/scripts/ledger-append.sh" day "$(now_date)" session_renewed_foreign "$_renew_event" session-guard \
+      >/dev/null 2>&1 || echo "  ⚠️  ledger session_renewed_foreign не записан (best-effort, не блокирует renew)" >&2
+  fi
   exit 0
 fi
 
