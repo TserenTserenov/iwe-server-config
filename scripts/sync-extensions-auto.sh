@@ -102,6 +102,61 @@ fi
 FILE_COUNT=$(echo "$CHANGED" | wc -l | tr -d ' ')
 FILE_LIST=$(echo "$CHANGED" | awk '{print $2}' | head -5 | tr '\n' ', ')
 
+# Test gate (WP-7 Ф111, живой инцидент 06.09: черновик хука со всеми
+# известными позже дефектами уехал на сервер через 5 минут после написания,
+# раньше первого ревью — это тик, который его бы синхронизировал). Для
+# каждого изменённого файла ищем соседний tests/-каталог и любой тест,
+# чьё имя содержит имя файла (обе конвенции этого репо: test-<name>.sh и
+# <name>-<scenario>-smoke.sh), запускаем; провал — тик отменяется целиком.
+#
+# Честная граница (peer-review с Kimi, 06.09): гейт снижает вероятность
+# ПОВТОРА уже известной регрессии — он не ловит то, для чего теста ещё не
+# написано. Сегодняшний инцидент был именно такого рода (тесты прошли,
+# два круга холодного ревью потом нашли то, что тесты ещё не проверяли) —
+# этот гейт его не поймал бы. Файл без соседнего теста проходит без
+# проверки, как и раньше.
+#
+# Открытое несогласие (peer, зафиксировано дословно по требованию
+# Kimi — WP-7 карточка, пир-сессия 2026-09-06-13): «ленивый гейт (skip if
+# no test) создаёт перверсный стимул к удалению тестов вместо их починки.
+# Рекомендуется при следующем ревизии рассмотреть обязательность тестового
+# покрытия для всех файлов в server-extensions/ либо альтернативный
+# механизм стимула (например, блокировка merge при снижении покрытия)».
+GATE_LOG=$(mktemp)
+GATE_FAILED=false
+while IFS= read -r changed_line; do
+  [ -n "$changed_line" ] || continue
+  rel_path=$(echo "$changed_line" | awk '{print $2}')
+  [ -n "$rel_path" ] || continue
+  case "$rel_path" in
+    */tests/*) continue ;;  # тест сам себя не тестирует
+  esac
+  base_noext=$(basename "$rel_path")
+  base_noext="${base_noext%.*}"
+  test_dir="$(dirname "$rel_path")/tests"
+  [ -d "$test_dir" ] || continue
+  found_tests=$(find "$test_dir" -maxdepth 1 -type f \( -name "*.sh" -o -name "*.py" \) 2>/dev/null | grep -F -- "$base_noext" || true)
+  [ -n "$found_tests" ] || continue
+  while IFS= read -r test_file; do
+    [ -n "$test_file" ] || continue
+    case "$test_file" in
+      *.py) test_runner=(python3 "$test_file") ;;
+      *)    test_runner=(bash "$test_file") ;;
+    esac
+    if ! "${test_runner[@]}" >> "$GATE_LOG" 2>&1; then
+      echo "GATE FAIL: $test_file (для $rel_path)" >> "$GATE_LOG"
+      GATE_FAILED=true
+    fi
+  done <<< "$found_tests"
+done <<< "$CHANGED"
+
+if [ "$GATE_FAILED" = true ]; then
+  alert "🚨 sync-extensions-auto: тестовый гейт нашёл провал — auto-sync отменён, коммит не создан ни для одного из ${FILE_COUNT} файлов (${FILE_LIST}...). $(tail -5 "$GATE_LOG" | tr '\n' ' ')"
+  rm -f "$GATE_LOG"
+  exit 1
+fi
+rm -f "$GATE_LOG"
+
 # Pathspec на commit (не только на add) — если параллельная сессия уже держит
 # в индексе свою незакоммиченную правку вне server-extensions/, она сюда не
 # попадёт (CLAUDE.md: несколько агентов работают в одном репозитории разом).
