@@ -244,6 +244,57 @@ else
   PASS=$((PASS+1))
 fi
 
+# --- Pathspec scope (WP-7 Ф107) ---------------------------------------------
+# Until now the hook read the WHOLE staged index of the governance repo. On the
+# shared Mac checkout several agent sessions stage into that index at the same
+# time, so a DayPlan/WeekPlan staged by ANOTHER session blocked a commit that
+# did not contain it. `$GOV` still has the foreign WeekPlan staged from above;
+# these cases add an unrelated file of "our own" and commit only that.
+echo "unrelated change" > "$GOV/notes.md"
+git -C "$GOV" add notes.md
+
+# 13. THE Ф107 BUG: commit scoped to an unrelated file while a foreign
+#     DayPlan/WeekPlan sits in the same shared index → must pass through.
+expect "pathspec-scoped commit of an unrelated file, foreign plan in shared index" pass "$GOV" \
+  "git commit -m x -- notes.md"
+
+# 14. The multi-line heredoc commit message this repo uses everywhere — the
+#     form that made the previous attempt give up, because normalizing
+#     newlines to `;` shreds the message into fake separate commands.
+expect "heredoc commit message plus unrelated pathspec" pass "$GOV" \
+  "$(printf 'git commit -m "$(cat <<'"'"'EOF'"'"'\nfix: multi-line message\n\nsecond paragraph\nEOF\n)" -- notes.md')"
+
+# 15. Legitimate block preserved: the staged plan file IS in this commit's
+#     pathspec and fails validation → must still block.
+expect "plan file inside the pathspec still validates" block "$GOV" \
+  "git commit -m x -- 'current/WeekPlan W99.md'"
+
+# 16. Legitimate block preserved: a directory pathspec that covers the plan
+#     file must not be narrowed away.
+expect "directory pathspec covering the plan file still validates" block "$GOV" \
+  "git commit -m x -- current/"
+
+# 17. Legitimate block preserved: no pathspec at all means the whole index is
+#     committed, plan file included.
+expect "bare commit still validates the whole index" block "$GOV" \
+  "git commit -m x"
+
+# 18. THE TRAP that makes naive text parsing lose a real block: `--` appears
+#     only inside the quoted commit message, so the commit has NO pathspec and
+#     the whole index — plan file included — is still at stake.
+expect "-- inside the commit message is not a pathspec" block "$GOV" \
+  "git commit -m 'see -- current/WeekPlan W99.md for details'"
+
+# 19. Compound command where one of the commits has no pathspec → the plan
+#     file may still go in, so validation stays.
+expect "compound command with one unscoped commit still validates" block "$GOV" \
+  "git commit -m a -- notes.md && git commit -m b"
+
+# 20. Narrowing must not resurrect the cross-repo bug: an unrelated repo's
+#     commit still passes through regardless of pathspec.
+expect "unrelated repo with pathspec still passes through" pass "$GOV" \
+  "git -C $OTHER commit -m x -- readme.md"
+
 echo ""
 echo "PASS=$PASS FAIL=$FAIL"
 [ "$FAIL" -eq 0 ]

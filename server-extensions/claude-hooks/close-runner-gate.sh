@@ -215,6 +215,17 @@ if echo "$COMMAND" | grep -qE 'process-runner\.py[[:space:]]+start[[:space:]]+qu
   # self-reproduced live via 2026-08-05-11-wp484-f56-quick-close-witness's own
   # test tooling (a stray file with an embedded newline in its name was found).
   SLUG=$(echo "$COMMAND" | grep -oE -- '--slug[[:space:]=]+"?[A-Za-z0-9._-]+' | head -1 | grep -oE '[A-Za-z0-9._-]+$')
+  # WP-484 (bug-2026-09-06-reflection-append-misses-pre-stated-skip.md, cold-
+  # review of this same fix): the sentinel below (UNRESOLVED_SLUG_SENTINEL in
+  # close_obligation.py) marks "regex could not extract a slug" -- nothing
+  # stops a REAL slug from coincidentally being that same literal string, and
+  # close_obligation.py cannot tell the two apart once it only sees the
+  # stored value. Reject the coincidence here, at the one place that still
+  # knows whether this value came from a real match or not: a literal slug
+  # equal to the sentinel is treated exactly like a failed match (falls
+  # through to the same WARN + non-strict ticket path below), so the
+  # sentinel's meaning stays unambiguous on the consuming side.
+  [ "$SLUG" = "unresolved-slug" ] && SLUG=""
   if [ -n "$SLUG" ]; then
     HARNESS_MAP_DIR="$IWE_ROOT/.iwe-runtime/quick-close-harness-session"
     mkdir -p "$HARNESS_MAP_DIR" 2>/dev/null
@@ -228,25 +239,42 @@ if echo "$COMMAND" | grep -qE 'process-runner\.py[[:space:]]+start[[:space:]]+qu
   # (ledger недоступен и пр.), инъекции нет — раннер пойдёт ticketless-веткой,
   # а armed obligation при этом останется неудовлетворённой и Stop-гейт
   # заблокирует тихое завершение (не молчаливый обход).
-  if [ -n "$SLUG" ]; then
-    TOOL_USE_ID=$(printf '%s' "$INPUT" | jq -r '.tool_use_id // empty' 2>/dev/null)
-    OBLIGATION_CLI="$IWE_ROOT/${IWE_GOVERNANCE_REPO:-DS-my-strategy}/scripts/close_obligation.py"
-    NONCE=$(python3 "$OBLIGATION_CLI" issue-ticket --session-id "$SESSION_ID" --slug "$SLUG" --tool-use-id "$TOOL_USE_ID" 2>/dev/null)
-    if [ -z "$NONCE" ]; then
-      echo "[close-runner-gate] session=$SESSION_ID_SAFE issue-ticket returned empty (obligation_cli=$OBLIGATION_CLI) — proceeding ticketless, Stop gate will still enforce" >&2
-    fi
-    if [ -n "$NONCE" ]; then
-      NEW_COMMAND=$(NONCE="$NONCE" python3 -c '
+  #
+  # WP-484 (bug-2026-09-06-reflection-append-misses-pre-stated-skip.md, пир-
+  # сессия 2026-09-06-07 с Kimi, ArchGate пройден, разрешение пилота):
+  # раньше билет не выпускался вовсе, если регэксп строки 217 не распознал
+  # --slug (например, значение передано shell-переменной, а не литералом) —
+  # обязательство закрытия (Ф74б) тихо пропускалось целиком, не только
+  # маппинг сессии. Теперь билет выпускается ВСЕГДА при совпадении команды
+  # запуска раннера; когда $SLUG пуст, в билет пишется sentinel вместо
+  # реального значения — close_obligation.py::cmd_consume_ticket() пропускает
+  # строгую проверку slug только для этого sentinel, доверяя настоящему,
+  # разобранному argparse значению, которое получает сам раннер. Безопасность
+  # держится на nonce (криптостойкий, минтится заново на каждый перехваченный
+  # вызов, инжектируется хуком именно в тот же вызов) — это единственный
+  # реальный ключ билета, не slug; см. разбор в 02-writer.md/03-peer.md той
+  # же пир-сессии.
+  if [ -z "$SLUG" ]; then
+    echo "[close-runner-gate] WARN: --slug не извлечён из команды регэкспом (harness-mapping и строгая проверка slug у билета пропущены для этого вызова; обязательство закрытия по-прежнему выдаётся) session=$SESSION_ID_SAFE" >&2
+  fi
+  TICKET_SLUG="${SLUG:-unresolved-slug}"
+  TOOL_USE_ID=$(printf '%s' "$INPUT" | jq -r '.tool_use_id // empty' 2>/dev/null)
+  OBLIGATION_CLI="$IWE_ROOT/${IWE_GOVERNANCE_REPO:-DS-my-strategy}/scripts/close_obligation.py"
+  NONCE=$(python3 "$OBLIGATION_CLI" issue-ticket --session-id "$SESSION_ID" --slug "$TICKET_SLUG" --tool-use-id "$TOOL_USE_ID" 2>/dev/null)
+  if [ -z "$NONCE" ]; then
+    echo "[close-runner-gate] session=$SESSION_ID_SAFE issue-ticket returned empty (obligation_cli=$OBLIGATION_CLI) — proceeding ticketless, Stop gate will still enforce" >&2
+  fi
+  if [ -n "$NONCE" ]; then
+    NEW_COMMAND=$(NONCE="$NONCE" python3 -c '
 import os, re, sys
 cmd = sys.stdin.read()
 nonce = os.environ["NONCE"]
 sys.stdout.write(re.sub(r"(process-runner\.py\s+start\s+quick-close)", r"\1 --close-ticket " + nonce, cmd, count=1))
 ' <<<"$COMMAND")
-      if [ "$NEW_COMMAND" != "$COMMAND" ]; then
-        jq -nc --arg cmd "$NEW_COMMAND" \
-          '{hookSpecificOutput:{hookEventName:"PreToolUse",updatedInput:{command:$cmd}}}'
-        exit 0
-      fi
+    if [ "$NEW_COMMAND" != "$COMMAND" ]; then
+      jq -nc --arg cmd "$NEW_COMMAND" \
+        '{hookSpecificOutput:{hookEventName:"PreToolUse",updatedInput:{command:$cmd}}}'
+      exit 0
     fi
   fi
 fi

@@ -129,10 +129,34 @@ GOV_PATH="$RESOLVE_FROM"
 # Старая логика грепала TOOL_INPUT на «DayPlan|day-close» — false positive
 # на любой коммит файла `day-close/SKILL.md` или сообщения с «day-close».
 # Принцип: «hook trigger = artifact (staged file), не TOOL_INPUT текст» (memory/hooks-design.md).
-STAGED=$(cd "$GOV_PATH" 2>/dev/null && git diff --cached --name-only 2>/dev/null || echo "")
-if ! echo "$STAGED" | grep -qE '^current/DayPlan.*\.md$|^current/WeekPlan.*\.md$'; then
+# `core.quotePath=false` keeps non-ASCII paths literal, so the pathspec
+# narrowing below compares the same spelling the command uses.
+STAGED=$(cd "$GOV_PATH" 2>/dev/null && git -c core.quotePath=false diff --cached --name-only 2>/dev/null || echo "")
+STAGED_PLANS=$(echo "$STAGED" | grep -E '^current/DayPlan.*\.md$|^current/WeekPlan.*\.md$' || true)
+if [ -z "$STAGED_PLANS" ]; then
   echo '{}'
   exit 0
+fi
+
+# Pathspec-scope fix (WP-7 Ф107, bug-2026-08-26/27/09-05 class): the index read
+# above belongs to the whole repo, but `git commit -- <paths>` commits only the
+# listed paths. On the shared Mac checkout several sessions stage into the same
+# index at once, so a DayPlan/WeekPlan staged by ANOTHER agent would otherwise
+# block a commit that does not contain it.
+# The helper only ever answers NARROW when the command text PROVES every commit
+# invocation excludes the staged plan files; a missing helper, a broken python3
+# or any doubt falls back to validating the whole index, exactly as before.
+PATHSPEC_HELPER="$(dirname "${BASH_SOURCE[0]}")/git-commit-pathspec.py"
+if [ -f "$PATHSPEC_HELPER" ]; then
+  PLAN_ARGS=()
+  while IFS= read -r staged_plan; do
+    [ -n "$staged_plan" ] && PLAN_ARGS+=("$staged_plan")
+  done <<< "$STAGED_PLANS"
+  PATHSPEC_DECISION=$(printf '%s' "$TOOL_INPUT" | python3 "$PATHSPEC_HELPER" "${PLAN_ARGS[@]}" 2>/dev/null || echo "KEEP")
+  if [ "$PATHSPEC_DECISION" = "NARROW" ]; then
+    echo '{}'
+    exit 0
+  fi
 fi
 
 # --- DayPlan Validation (выполняется только если DayPlan-файл существует) ---

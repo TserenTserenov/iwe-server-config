@@ -20,7 +20,9 @@
 #   note-file <path> [--agent ...]
 #   note-commit <sha> [--repo <name>] [--agent ...]   # заявить коммит сессии: даёт commit-push.sh
 #                                                      # проверять доставку по СВОИМ коммитам,
-#                                                      # а не по состоянию всей ветки (WP-537)
+#                                                      # а не по состоянию всей ветки (WP-537).
+#                                                      # <name> = каталог внутри $IWE_ROOT либо
+#                                                      # iwe-root — сам корневой репозиторий
 #   freeze-canonical <path> [--force]                 # physical OS-level lock (chflags -R uchg
 #                                                      # on Darwin), prototype for WP-520 ADR —
 #                                                      # refuses if any semaphore for the target
@@ -130,6 +132,28 @@ elif [ -n "$IWE_FROZEN_CANONICAL_PATH" ]; then
 else
   FROZEN_CANONICAL_PATHS=()
 fi
+
+# Prints the frozen checkout the caller is PHYSICALLY sitting in, or nothing.
+# The question is "where does this invocation actually stand", not "where would
+# a write land" -- gov_repo_dir() answers the second and falls back to $GOV_REPO
+# whenever cwd doesn't match it, which made a second frozen path structurally
+# unreachable (WP-484 Ф104 smoke test, 2026-08-16). Two callers now: the freeze
+# block in `open` and the housekeeping branch above it, which used to exit
+# before that block ever ran (WP-484, 2026-09-05).
+frozen_checkout_match() {
+  [ "${#FROZEN_CANONICAL_PATHS[@]}" -gt 0 ] || return 0
+  local toplevel real frozen frozen_real
+  toplevel="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
+  real=$(realpath "$toplevel" 2>/dev/null || echo "$toplevel")
+  for frozen in "${FROZEN_CANONICAL_PATHS[@]}"; do
+    frozen_real=$(realpath "$frozen" 2>/dev/null || echo "$frozen")
+    if [ "$real" = "$frozen_real" ]; then
+      echo "$toplevel"
+      return 0
+    fi
+  done
+}
+
 # $ORZ_DIR deliberately NOT created here (found 29.08: an unconditional
 # `mkdir -p "$ORZ_DIR"` at this point ran before any subcommand-specific
 # check could see whether MC-sessions actually existed -- "never existed"
@@ -147,6 +171,56 @@ now_iso() { date -u +"%Y-%m-%dT%H:%M:%SZ"; }
 now_date() { date +"%Y-%m-%d"; }
 now_month() { date +"%Y-%m"; }
 fail() { echo "session-guard: $1" >&2; exit "${2:-1}"; }
+
+# clear_peer_session_obligation <semaphore> <slug> -- release the conversation's
+# close obligation when a peer session closes (WP-484 "eighth case", peer session
+# 2026-09-05-33 with Kimi).
+#
+# close_obligation.py exempts a conversation from the Stop gate while the NEWEST
+# semaphore of that conversation declares `close_path: peer-session`, and a closed
+# peer-session semaphore keeps its `.open.closed` file forever -- so the exemption
+# outlives the session. Nothing on that path mutates the obligation, so it stays
+# armed and every later `process-runner.py start quick-close` in the same
+# conversation refuses to start. peer-conversation/SKILL.md Step 4.5.3 clears it,
+# but only if the session survives to that step: dying between the close and that
+# step leaves the whole conversation stuck. Clearing here removes the window --
+# close and clear stop being two steps something can happen between. The skill step
+# stays as an idempotent duplicate for conversations on an older copy of this file.
+#
+# The conversation id comes from the semaphore, not from the environment: another
+# process may be doing the closing, and its own CLAUDE_CODE_SESSION_ID would then
+# name the wrong conversation. peer-conversation/SKILL.md Step 4.5.3 reads it from
+# the environment instead -- the two agree in the normal case (the closing process
+# IS the conversation), and the skill step is the fallback for old copies of this
+# file, so the difference is not worth a second mechanism here.
+#
+# Not covered (known, cold review 06.09): sessions whose semaphore carries no
+# `close_path: peer-session` -- Kimi writer sessions open theirs outside IWE without
+# that flag (WP-561 follow-up), and 5 of 155 closed peer semaphores carry no
+# conversation id at all. For those this is a silent no-op and the original defect
+# stands; closing that needs the open side fixed, not this one.
+#
+# `--action peer-session-close` is a no-op while the obligation is `running`: one
+# long conversation can span several work products, and an unconditional clear
+# would wipe another product's Quick Close still in flight. Never fails the close,
+# and time-boxed -- this work product has already had two incidents where a new
+# gate hung a session close, and a missed clear is the cheaper of the two.
+clear_peer_session_obligation() {
+  local semaphore="$1" slug="$2"
+  local obligation_cli="$IWE_ROOT/$GOV_REPO/scripts/close_obligation.py"
+  [ -f "$obligation_cli" ] || return 0
+
+  local harness_sid
+  harness_sid=$(grep '^harness_session_id: ' "$semaphore" 2>/dev/null | head -1 | cut -d' ' -f2- || true)
+  [ -n "$harness_sid" ] || return 0
+
+  timeout 10 python3 "$obligation_cli" cancel \
+    --session-id "$harness_sid" --action peer-session-close --actor session-guard-close \
+    --reason "peer-session $slug закрыта через session-guard, обязательство раннера неприменимо" \
+    >/dev/null 2>&1 \
+    || echo "  ⚠️  close_obligation cancel не прошёл (best-effort, не блокирует close)" >&2
+  return 0
+}
 
 # emit_session_closed <channel> <semaphore> <wp> <slug> <agent> -- hours for a
 # close that bypassed process-runner.py (WP-484, 05.09, peer-session
@@ -1262,6 +1336,21 @@ if [ "$CMD" = "open" ]; then
   fi
 
   if [ -n "$HOUSEKEEPING" ]; then
+    # Freeze applies here too (WP-484, 2026-09-05). This branch returns before the
+    # freeze block below ever runs, so `open --housekeeping` used to sail through on
+    # the frozen canonical checkout where a plain `open` refuses -- a one-flag way
+    # around the freeze, found while Day Close itself took that route. Same rule as
+    # a plain open, minus the slug re-entry carve-out (a housekeeping semaphore is
+    # keyed by reason, not by slug, and its own TTL branch below already handles
+    # resuming): a scheduled runner names itself with --canonical-owner, everyone
+    # else goes to an isolated worktree.
+    if [ -z "$CANONICAL_OWNER" ]; then
+      HK_FROZEN_TOPLEVEL=$(frozen_checkout_match)
+      if [ -n "$HK_FROZEN_TOPLEVEL" ]; then
+        fail "этот checkout ($HK_FROZEN_TOPLEVEL) под freeze (WP-520/WP-484 Ф104) — housekeeping-сессия здесь не открывается. Плановому раннеру: добавь --canonical-owner <reason>. Остальным: изолированный worktree (EnterWorktree или 'git worktree add' от свежего origin/main)." 1
+      fi
+    fi
+
     # Housekeeping session: no ORZ, no WP, one semaphore per (agent, reason).
     HK_FILE="$SESSION_DIR/${AGENT}-housekeeping-${HOUSEKEEPING}.open"
     HK_MAX_AGE=1800  # 30 minutes default TTL for housekeeping semaphores
@@ -1390,41 +1479,24 @@ if [ "$CMD" = "open" ]; then
   #    fix (freeze fired first, unconditionally, before the isolate block
   #    below ever got the chance to run).
   if [ "${#FROZEN_CANONICAL_PATHS[@]}" -gt 0 ] && [ -z "$CANONICAL_OWNER" ] && [ "$ISOLATE_FLAG" != "1" ]; then
-    # WP-484 Ф104 smoke test (2026-08-16) caught this reusing $CURRENT_REPO_DIR
-    # (= gov_repo_dir(), set above for a DIFFERENT question -- "where should
-    # the ORZ scaffold land," which deliberately falls back to the canonical
-    # $GOV_REPO path whenever the caller's cwd doesn't remote/basename-match
-    # $GOV_REPO, per gov_repo_dir()'s own comment). That fallback made a
-    # second frozen path structurally unreachable: any cwd that isn't
-    # $GOV_REPO always resolved to $GOV_REPO here regardless of where it
-    # actually was, so $IWE_ROOT could never be recognized as the caller's
-    # own checkout. Freeze needs "what checkout is the caller actually
-    # sitting in," a different question with its own answer -- the real cwd
-    # of THIS invocation, not the target of a write $open hasn't been cleared
-    # to make yet.
-    ACTUAL_CWD_TOPLEVEL="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
-    CURRENT_CWD_REAL=$(realpath "$ACTUAL_CWD_TOPLEVEL" 2>/dev/null || echo "$ACTUAL_CWD_TOPLEVEL")
-    for FROZEN_PATH in "${FROZEN_CANONICAL_PATHS[@]}"; do
-      FROZEN_REAL=$(realpath "$FROZEN_PATH" 2>/dev/null || echo "$FROZEN_PATH")
-      if [ "$CURRENT_CWD_REAL" = "$FROZEN_REAL" ]; then
-        REENTRY_OK=false
-        if [ -n "$SLUG" ]; then
-          while IFS= read -r EXISTING_SEM; do
-            [ -z "$EXISTING_SEM" ] && continue
-            [ -f "$EXISTING_SEM" ] || continue
-            [ "$(grep "^wp: " "$EXISTING_SEM" | cut -d' ' -f2-)" = "$WP" ] || continue
-            [ "$(grep "^slug: " "$EXISTING_SEM" | cut -d' ' -f2-)" = "$SLUG" ] || continue
-            lease_valid "$EXISTING_SEM" || continue
-            REENTRY_OK=true
-            break
-          done < <(find "$SESSION_DIR" -name "${AGENT}-*.open" -type f 2>/dev/null)
-        fi
-        if ! $REENTRY_OK; then
-          fail "этот checkout ($ACTUAL_CWD_TOPLEVEL) под freeze (WP-520/WP-484 Ф104) — прямая запись не разрешена до отдельного решения. Используй изолированный worktree: EnterWorktree или 'git worktree add' от свежего origin/main. Плановому раннеру: добавь --canonical-owner <reason>." 1
-        fi
-        break
+    ACTUAL_CWD_TOPLEVEL=$(frozen_checkout_match)
+    if [ -n "$ACTUAL_CWD_TOPLEVEL" ]; then
+      REENTRY_OK=false
+      if [ -n "$SLUG" ]; then
+        while IFS= read -r EXISTING_SEM; do
+          [ -z "$EXISTING_SEM" ] && continue
+          [ -f "$EXISTING_SEM" ] || continue
+          [ "$(grep "^wp: " "$EXISTING_SEM" | cut -d' ' -f2-)" = "$WP" ] || continue
+          [ "$(grep "^slug: " "$EXISTING_SEM" | cut -d' ' -f2-)" = "$SLUG" ] || continue
+          lease_valid "$EXISTING_SEM" || continue
+          REENTRY_OK=true
+          break
+        done < <(find "$SESSION_DIR" -name "${AGENT}-*.open" -type f 2>/dev/null)
       fi
-    done
+      if ! $REENTRY_OK; then
+        fail "этот checkout ($ACTUAL_CWD_TOPLEVEL) под freeze (WP-520/WP-484 Ф104) — прямая запись не разрешена до отдельного решения. Используй изолированный worktree: EnterWorktree или 'git worktree add' от свежего origin/main. Плановому раннеру: добавь --canonical-owner <reason>." 1
+      fi
+    fi
   fi
 
   # --isolate: session-owned git worktree, created here so the caller never
@@ -2907,6 +2979,18 @@ print(json.dumps({"wp": sys.argv[1], "slug": sys.argv[2], "agent": sys.argv[3], 
     emit_session_closed "$_close_channel" "$_sem_read" "$WP" "$SLUG" "$AGENT"
   fi
 
+  # Deliberately OUTSIDE the ledger block above: releasing the close obligation has
+  # nothing to do with whether ledger-append.sh exists, and an unmigrated template
+  # install (no ledger writer) would otherwise silently keep the obligation forever
+  # (cold review 06.09, Medium). The evidence used here is the semaphore's own
+  # `close_path`, which is what actually makes this a peer session -- not the
+  # channel classification, which is derived inside that block for a different
+  # purpose. Why the clear belongs to the close and not to the calling skill: see
+  # the clear_peer_session_obligation() docstring.
+  if grep -q '^close_path: peer-session$' "$_sem_read" 2>/dev/null; then
+    clear_peer_session_obligation "$_sem_read" "$SLUG"
+  fi
+
   exit 0
 fi
 
@@ -3068,21 +3152,39 @@ if [ "$CMD" = "note-commit" ]; then
       fail "note-commit: нет открытой сессии для агента '$NOTE_AGENT' (уточни --wp/--slug/--session-id)" 1
     fi
   fi
+  # $IWE_ROOT is itself a git repository, but it is not a directory INSIDE
+  # $IWE_ROOT -- `--repo IWE` therefore resolved to $IWE_ROOT/IWE and was
+  # refused with "не git-репозиторий", which reads as "no such repo" for a
+  # repo that plainly exists (WP-537, 06.09: the workaround was to drop the
+  # flag and call from the root). `iwe-root` is the name the READERS of this
+  # claim already use for it (commit-push.sh / gather-session-facts.sh
+  # resolve_repo_dir, WP-525 Ф4), so it is the spelling recorded below --
+  # the root's basename is accepted as an alias for the same directory.
+  NC_ROOT_ALIAS="iwe-root"
+  NC_ROOT_BASENAME=$(basename "$IWE_ROOT")
   if [ -n "$REPO_ARG" ]; then
     # cold review: ".." or a leading "/" would resolve outside $IWE_ROOT while
     # the failure message below still (falsely) claims the check happened.
     case "$REPO_ARG" in
       */*|*..*) fail "note-commit: --repo '$REPO_ARG' должен быть именем каталога внутри $IWE_ROOT без '/' и '..'" 1 ;;
     esac
-    NC_REPO_DIR="$IWE_ROOT/$REPO_ARG"
+    if [ "$REPO_ARG" = "$NC_ROOT_ALIAS" ] || [ "$REPO_ARG" = "$NC_ROOT_BASENAME" ]; then
+      NC_REPO_DIR="$IWE_ROOT"
+    else
+      NC_REPO_DIR="$IWE_ROOT/$REPO_ARG"
+    fi
     git -C "$NC_REPO_DIR" rev-parse --git-dir >/dev/null 2>&1 \
-      || fail "note-commit: '$REPO_ARG' не git-репозиторий внутри $IWE_ROOT" 1
+      || fail "note-commit: '$REPO_ARG' не git-репозиторий внутри $IWE_ROOT (сам корневой репозиторий заявляется как --repo $NC_ROOT_ALIAS)" 1
   else
     NC_REPO_DIR=$(git rev-parse --show-toplevel 2>/dev/null || true)
     [ -n "$NC_REPO_DIR" ] \
       || fail "note-commit: текущий каталог вне git-контекста и --repo не задан — репозиторий определить нечем" 1
   fi
-  NC_REPO_NAME=$(basename "$NC_REPO_DIR")
+  if [ "$(realpath "$NC_REPO_DIR" 2>/dev/null || echo "$NC_REPO_DIR")" = "$(realpath "$IWE_ROOT" 2>/dev/null || echo "$IWE_ROOT")" ]; then
+    NC_REPO_NAME="$NC_ROOT_ALIAS"
+  else
+    NC_REPO_NAME=$(basename "$NC_REPO_DIR")
+  fi
   # The semaphore line is "commit: <repo> <sha>", split by the reader on the
   # first space (commit-push.sh: c_entry%%' '*). A space in the name would
   # silently corrupt that split and drop the claim into ahead-only with no

@@ -31,7 +31,10 @@ if ! grep -q 'под freeze (WP-520/WP-484 Ф104)' <<<"$OUT_1"; then
     echo "FAIL: expected freeze message, got: $OUT_1" >&2
     exit 1
 fi
-if [ -f "$TEST_ROOT/.iwe-runtime/sessions/fixture-"*.open ] 2>/dev/null; then
+# compgen -G, а не `[ -f ...*.open ]`: с глобом внутри `[ -f ]` проверка не работает вовсе —
+# несовпавший глоб остаётся литералом и даёт «файла нет» при любом исходе, то есть утверждение
+# не могло провалиться (найдено shellcheck SC2144 при правке этого теста 06.09).
+if compgen -G "$TEST_ROOT/.iwe-runtime/sessions/fixture-*.open" >/dev/null; then
     echo "FAIL: a blocked open must not leave a semaphore behind" >&2
     exit 1
 fi
@@ -90,4 +93,32 @@ if ! grep -q 'под freeze (WP-520/WP-484 Ф104)' <<<"$OUT_5"; then
     exit 1
 fi
 
-echo "PASS: session-guard freeze enforcement (block, --canonical-owner, exact-slug re-entry, mismatched-slug still blocks)"
+# 5. Housekeeping open obeys the freeze too (WP-484, 2026-09-05). This branch
+#    returns long before the freeze block, so `open --housekeeping` used to
+#    sail through on the frozen checkout where every case above refuses --
+#    one flag was enough to walk around the whole freeze, found live while
+#    Day Close itself took that route.
+if OUT_6=$(open_frozen --housekeeping hk-probe --agent hkfixture 2>&1); then
+    echo "FAIL: housekeeping open on a frozen checkout must fail, got exit 0: $OUT_6" >&2
+    exit 1
+fi
+if ! grep -q 'под freeze (WP-520/WP-484 Ф104)' <<<"$OUT_6"; then
+    echo "FAIL: expected freeze message for housekeeping open, got: $OUT_6" >&2
+    exit 1
+fi
+if [ -e "$TEST_ROOT/.iwe-runtime/sessions/hkfixture-housekeeping-hk-probe.open" ]; then
+    echo "FAIL: refused housekeeping open must not leave a semaphore behind" >&2
+    exit 1
+fi
+
+# 6. ...and the same carve-out as a plain open lets the scheduled runner through.
+if ! OUT_7=$(open_frozen --housekeeping hk-probe --agent hkfixture --canonical-owner day-close 2>&1); then
+    echo "FAIL: housekeeping open with --canonical-owner must be allowed, got: $OUT_7" >&2
+    exit 1
+fi
+if [ ! -e "$TEST_ROOT/.iwe-runtime/sessions/hkfixture-housekeeping-hk-probe.open" ]; then
+    echo "FAIL: allowed housekeeping open must create its semaphore, none found" >&2
+    exit 1
+fi
+
+echo "PASS: session-guard freeze enforcement (block, --canonical-owner, exact-slug re-entry, mismatched-slug still blocks, housekeeping obeys freeze)"

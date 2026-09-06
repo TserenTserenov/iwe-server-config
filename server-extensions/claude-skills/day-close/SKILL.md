@@ -44,13 +44,15 @@ Day Close = протокол. Исполнять ТОЛЬКО пошагово �
 ### 0.5. Housekeeping-сессия Day Close [[gate]]
 Day Close — кросс-РП инфраструктурная операция. Открыть упрощённую housekeeping-сессию, чтобы `session-guard` не блокировал коммит файлов, к которым нет привязки к открытому РП (например, backup `exocortex/` или архивация DayPlan).
 
+`--canonical-owner day-close` обязателен (WP-484, 05.09): housekeeping-ветка `session-guard` раньше выходила до freeze-проверки и проходила на замороженном каноне молча — дыра закрыта, теперь плановый раннер называет себя явно, как и обычный `open`.
+
 ```bash
 bash ~/IWE/scripts/day-close-step-log.sh start 0.5
-bash "${IWE_SCRIPTS:-$HOME/IWE/scripts}/session-guard.sh" open --housekeeping day-close --agent claude-code
+bash "${IWE_SCRIPTS:-$HOME/IWE/scripts}/session-guard.sh" open --housekeeping day-close --agent claude-code --canonical-owner day-close
 bash ~/IWE/scripts/day-close-step-log.sh end 0.5
 ```
 
-Закрыть её — только после п. 10 (после `git push`). Если сессия прервалась, TTL 30 мин переименует семафор в `.stale` при следующем запуске.
+Закрыть её — только после п. 15 (после публикации через `ds-publish.sh`). Если сессия прервалась, TTL 30 мин переименует семафор в `.stale` при следующем запуске.
 
 ### 0.6. Git-lock против гонки двух закрытий (WP-484 Ф2) [[gate]]
 
@@ -66,6 +68,8 @@ bash ~/IWE/scripts/day-close-step-log.sh end 0.6
 - Exit 1 → день уже закрыт сегодня (найден финальный коммит `day-close:`) — **остановиться немедленно**, закрыть housekeeping-семафор (`bash "${IWE_SCRIPTS:-$HOME/IWE/scripts}/session-guard.sh" close --housekeeping day-close --agent claude-code`), сообщить пилоту «день уже закрыт», не выполнять шаги 1-16 повторно.
 - Exit 3 → кто-то закрывает день прямо сейчас (свежий, <30 мин, маркер `day-close-start:` от другого агента/хоста) — **остановиться**, закрыть housekeeping-семафор (`bash "${IWE_SCRIPTS:-$HOME/IWE/scripts}/session-guard.sh" close --housekeeping day-close --agent claude-code`), сообщить пилоту кем и когда, предложить подождать или проверить вручную.
 - Exit 2 → git-операция не удалась (сеть/конфликт) — не считать день закрытым, сообщить пилоту причину, предложить повтор. Housekeeping-семафор не закрывать — повторный `acquire` пойдёт в рамках той же сессии.
+
+> **Замок рабочее дерево не трогает (WP-484, 05.09).** Метка собирается пустым коммитом поверх свежего `origin/<branch>` и пушится прямо туда; ни stash, ни rebase, ни checkout не выполняются. Прежняя версия ради того же результата прятала в stash всё дерево и трижды за вечер стёрла незакоммиченную работу параллельных сессий. Побочный эффект «замок заодно подтягивает канон» снят сознательно: под freeze канон отстаёт по замыслу, публикация идёт через `ds-publish.sh`.
 
 ---
 
@@ -377,7 +381,16 @@ git add "${DC_FILES[@]}"
 git diff --cached --name-only  # проверить scope — только day-close файлы
 # pathspec после `--`: commit ТОЛЬКО свои файлы, не подметаем чужой индекс
 git commit -m "day-close: $(TZ=UTC date +%Y-%m-%d)" -- "${DC_FILES[@]}"
-git push
+
+# Публикация — через ds-publish.sh, НЕ голым push (WP-484, 05.09).
+# Канон под freeze (WP-520/WP-484 Ф104): голый push с него отбивает pre-push хук,
+# а обход через IWE_CANONICAL_OWNER здесь неуместен — этот коммит несёт реальные
+# файлы, ровно то, от публикации чего из общего грязного дерева freeze и защищает.
+# ds-publish.sh --from-commit собирает одноразовую копию от свежего origin, переносит
+# туда ТОЛЬКО этот коммит и пушит оттуда; общий чекаут не трогается (тот же путь, что
+# у day-open-pipeline.sh и week-open-day-section-patch.sh).
+bash scripts/ds-publish.sh "$PWD" high --reason "day-close $(TZ=UTC date +%Y-%m-%d)" \
+  --from-commit "$(git rev-parse HEAD)" --mode retry-wrapper
 
 # Закрыть housekeeping-сессию Day Close (открыта в п. 0.5)
 bash "${IWE_SCRIPTS:-$HOME/IWE/scripts}/session-guard.sh" close --housekeeping day-close --agent claude-code

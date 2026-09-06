@@ -20,6 +20,66 @@ block() {
   exit 2
 }
 
+# --- what this hook is allowed to look at (WP-545, 06.09) -------------------
+#
+# Every check below used to match against the raw Bash call text. Two live
+# false positives in one session showed what that costs:
+#   * writing a document through `cat > file <<'EOF' ... EOF` was refused as
+#     `rm -rf`, because the check greps `rm`, a `-r`-ish flag and a `-f`-ish
+#     flag ANYWHERE in the call: `rm -f "$PROMPT_FILE"` (a temp-file cleanup)
+#     supplied two of them and the unrelated `--add-dir` of another command
+#     supplied the "recursive" one;
+#   * a session-close call was refused as `git add .`, because the standalone
+#     `.` of `. "$HOME/.../publish-gate.sh"` (shell `source`) sat on a LATER
+#     LINE of the same call, and the segment splitter did not treat a newline
+#     as a command separator, so it landed inside the `git add` segment.
+#
+# So the text scanned is narrowed twice, before any check runs: heredoc bodies
+# are removed (they are data being written, not commands being run), and a
+# newline separates commands the same way `;` does.
+CMD_EXEC=$(CMD_SCAN="$CMD" perl -e '
+  my $text = $ENV{"CMD_SCAN"};
+  my @lines = split(/\n/, $text, -1);
+  my (@out, @pending);
+  for my $line (@lines) {
+    if (@pending) {
+      my $body = $pending[0];
+      my $probe = $line;
+      $probe =~ s/^\t+// if $body->{indent};
+      if ($probe eq $body->{delim}) { shift @pending; push @out, q{}; next; }
+      push @out, $line if $body->{keep};
+      next;
+    }
+    push @out, $line;
+    # A body fed to something that EXECUTES it stays in the scanned text; a
+    # body written to a file or fed to a non-shell interpreter is content.
+    # Cold review 06.09 broke the first version of this test twice: it was
+    # anchored to the start of a line and to a bare name, so `/bin/bash <<EOF`
+    # and `ssh host bash <<EOF` slipped through, and `psql <<SQL ... DROP
+    # TABLE ... SQL` - executable SQL by any measure - was dropped as data.
+    # Matching a basename anywhere on the line covers all three; the cost of
+    # a false keep is a stricter scan, the cost of a false drop is a bypass.
+    my $keep = 0;
+    for my $word (split(/\s+/, $line)) {
+      $word =~ s/^.*\///;
+      $keep = 1 if $word =~ /^(?:ba|z|k|da)?sh$|^ssh$|^psql$|^mysql$|^sqlite3$/;
+    }
+    while ($line =~ /<<(-?)\s*(?!<)(?:([\x27"])([A-Za-z_][A-Za-z0-9_]*)\2|([A-Za-z_][A-Za-z0-9_]*))/g) {
+      push @pending, { indent => ($1 eq q{-}), delim => (defined $3 ? $3 : $4), keep => $keep };
+    }
+  }
+  # An unterminated body means this was not a heredoc at all (an arithmetic
+  # shift, a quoted "<<" in prose): stripping there would hide real commands,
+  # so the whole reduction is discarded rather than trusted.
+  if (@pending) { print "UNTERMINATED"; exit 0; }
+  print "OK", join("\n", @out);
+')
+if [ "$CMD_EXEC" = "UNTERMINATED" ]; then
+  CMD_EXEC="$CMD"
+else
+  CMD_EXEC="${CMD_EXEC#OK}"
+fi
+
 # Bypass: только из реального шелла пилота (тот же контракт, что secret-leak-block.sh —
 # хук читает свой процессный env, не текст команды, агент не может выставить это сам себе).
 # Строгое сравнение с "1" (не -n) — та же несогласованность в secret-leak-block.sh
@@ -30,11 +90,11 @@ block() {
 # #362: a top-level `cd` persists between Bash calls in Claude Code. Strip
 # quoted spans before detecting command segments; `(cd ... && ...)` remains
 # allowed because the opening parenthesis is not a top-level separator.
-if CMD_SCAN="$CMD" perl -e '
+if CMD_SCAN="$CMD_EXEC" perl -e '
   my $s=$ENV{"CMD_SCAN"};
   $s =~ s/'"'"'[^'"'"']*'"'"'/ Q /g;
   $s =~ s/"(?:\\.|[^"\\])*"/ Q /g;
-  exit($s =~ /(?:^|[;&|]\s*)cd\s+/ ? 0 : 1);
+  exit($s =~ /(?:^|[;&|\n]\s*)cd\s+/ ? 0 : 1);
 '; then
   block "верхнеуровневый cd запрещён: используй git -C <path>, абсолютный путь или (cd <path> && ...)."
 fi
@@ -42,80 +102,49 @@ fi
 if [ -n "$CWD" ]; then
   CWD_PHYSICAL=$(cd "$CWD" 2>/dev/null && pwd -P || printf '%s' "$CWD")
   if [ "$CWD_PHYSICAL" != "$WORKSPACE_ROOT" ] && \
-     echo "$CMD" | grep -qE "(^|[[:space:]\"'])(\\.claude/|scripts/|memory/)"; then
+     echo "$CMD_EXEC" | grep -qE "(^|[[:space:]\"'])(\\.claude/|scripts/|memory/)"; then
     block "root-relative path вызван из cwd=$CWD_PHYSICAL; используй абсолютный путь от $WORKSPACE_ROOT."
   fi
 fi
 
-git_segment() {
-  # Return a normalised shell segment only when `git <global-opts> <subcmd>`
-  # is the command being executed. A regex over the raw command saw `git reset`
-  # inside a quoted argument of another program as an actual Git command.
-  local subcmd="$1"
-  SUBCMD="$subcmd" CMD_SCAN="$CMD" perl -e '
-    sub words {
-      my ($text) = @_;
-      my (@out, $word, $quote) = ();
-      for (my $i = 0; $i < length($text); $i++) {
-        my $char = substr($text, $i, 1);
-        if (defined $quote) {
-          if ($char eq "\\" && $quote eq q{"} && $i + 1 < length($text)) {
-            $word .= substr($text, ++$i, 1);
-          } elsif ($char eq $quote) {
-            undef $quote;
-          } else {
-            $word .= $char;
-          }
-        } elsif ($char eq q{"} || $char eq chr(39)) {
-          $quote = $char;
-        } elsif ($char eq "\\" && $i + 1 < length($text)) {
+# One shell splitter, three readers (WP-545, 06.09). This file used to carry
+# two near-identical copies of the same perl segment scanner and a third
+# whole-command grep pass; each copy learned about `>&` redirects, newlines
+# and command positions separately, or not at all. MODE=match answers "which
+# invocations of <name> does this call actually run", MODE=count answers "how
+# many commands are in this call, and how many are <pattern>".
+SEGMENTER_PL='
+  sub words {
+    my ($text) = @_;
+    my (@out, $word, $quote) = ();
+    for (my $i = 0; $i < length($text); $i++) {
+      my $char = substr($text, $i, 1);
+      if (defined $quote) {
+        if ($char eq "\\" && $quote eq q{"} && $i + 1 < length($text)) {
           $word .= substr($text, ++$i, 1);
-        } elsif ($char =~ /\s/) {
-          push @out, $word if length $word;
-          $word = q{};
+        } elsif ($char eq $quote) {
+          undef $quote;
         } else {
           $word .= $char;
         }
+      } elsif ($char eq q{"} || $char eq chr(39)) {
+        $quote = $char;
+      } elsif ($char eq "\\" && $i + 1 < length($text)) {
+        $word .= substr($text, ++$i, 1);
+      } elsif ($char =~ /\s/) {
+        push @out, $word if length $word;
+        $word = q{};
+      } else {
+        $word .= $char;
       }
-      push @out, $word if length $word;
-      return @out;
     }
+    push @out, $word if length $word;
+    return @out;
+  }
 
-    sub inspect_segment {
-      my ($segment) = @_;
-      my @tokens = words($segment);
-      return unless @tokens;
-      my $i = 0;
-      while ($i < @tokens) {
-        if ($tokens[$i] =~ /^[A-Za-z_][A-Za-z0-9_]*=/ ||
-            $tokens[$i] =~ /^(?:command|env|nohup|time|sudo)$/) {
-          $i++;
-        } else {
-          last;
-        }
-      }
-      return unless $i < @tokens && $tokens[$i] eq "git";
-      my $start = $i++;
-      while ($i < @tokens) {
-        if ($tokens[$i] =~ /^-C$/ || $tokens[$i] =~ /^--(?:git-dir|work-tree)$/ || $tokens[$i] =~ /^-c$/) {
-          $i += 2;
-        } elsif ($tokens[$i] =~ /^--(?:git-dir|work-tree)=/ || $tokens[$i] =~ /^-c/) {
-          $i++;
-        } else {
-          last;
-        }
-      }
-      return unless $i < @tokens && $tokens[$i] eq $ENV{"SUBCMD"};
-      # Print and keep scanning — a compound command can chain more than one
-      # `git <subcmd>` invocation (`git push origin main && git push origin
-      # +:refs/heads/x`); exiting after the first match here used to hide
-      # every later one from every check that reads $PUSH_SEGMENT/etc, since
-      # they all share this one function (cold review, WP-544 Ф8, 04.09).
-      print join(" ", @tokens[$start .. $#tokens]), "\n";
-    }
-
-    my $text = $ENV{"CMD_SCAN"};
-    my ($segment, $quote) = (q{}, undef);
+  sub segments {
+    my ($text) = @_;
+    my (@out, $segment, $quote) = ((), q{}, undef);
     for (my $i = 0; $i < length($text); $i++) {
       my $char = substr($text, $i, 1);
       if (defined $quote) {
@@ -128,15 +157,152 @@ git_segment() {
       } elsif ($char eq q{"} || $char eq chr(39)) {
         $quote = $char;
         $segment .= $char;
-      } elsif ($char =~ /[;&|(){}]/ || $char eq q{`}) {
-        inspect_segment($segment);
+      } elsif ($char eq q{&} && length($segment) && substr($segment, -1, 1) eq q{>}) {
+        # `>&` fd-dup (`2>&1`, `>&2`) — part of the CURRENT command redirect,
+        # not a separator (WP-544, 04.09: without this, a lone command ending
+        # in `2>&1` was mis-split into two).
+        $segment .= $char;
+      } elsif ($char eq q{&} && $i + 1 < length($text) && substr($text, $i + 1, 1) eq q{>}) {
+        $segment .= $char;
+      } elsif ($char =~ /[;&|(){}\n]/ || $char eq q{`}) {
+        # A newline ends a command exactly like `;` does. Without it, every
+        # later line of a multi-line call was glued onto the first command
+        # of the call — how a `source` dot two lines below a `git add <path>`
+        # was read as `git add .` (WP-545).
+        push @out, $segment;
         $segment = q{};
       } else {
         $segment .= $char;
       }
     }
-    inspect_segment($segment);
-  '
+    push @out, $segment;
+    return @out;
+  }
+
+  sub command_indices {
+    # Token positions where a command NAME is expected — the executable of the
+    # segment, plus the standard "run this command" carriers. Anything else (a
+    # word inside a quoted argument, prose in an echo) is an argument, never a
+    # command, and must not arm a check.
+    #
+    # Wrappers are skipped WITH their own options: cold review 06.09 found
+    # `timeout 5 rm -rf …`, `nice rm -rf …`, `sudo -u nobody rm -rf …`,
+    # `env -i rm -rf …` and `xargs -n 1 rm -rf …` all passing, because the
+    # first option (or a bare duration) took the command position and the real
+    # command behind it was never looked at. The list is deliberately generous:
+    # a wrapper skipped in error only means one more position is examined.
+    my %option_with_argument = (
+      sudo    => qr/^(?:-u|-g|-h|-p|-C|-r|-t|--user|--group|--host|--prompt|--close-from|--role|--type)$/,
+      doas    => qr/^(?:-u|-C)$/,
+      env     => qr/^(?:-u|--unset|-C|--chdir|-S|--split-string)$/,
+      timeout => qr/^(?:-s|-k|--signal|--kill-after)$/,
+      nice    => qr/^(?:-n|--adjustment)$/,
+      ionice  => qr/^(?:-c|-n|-p|-P|-u)$/,
+      stdbuf  => qr/^(?:-i|-o|-e|--input|--output|--error)$/,
+      xargs   => qr/^(?:-n|-P|-I|-i|-L|-s|-E|-d|-a|--max-args|--max-procs|--replace|--max-lines|--max-chars|--eof|--delimiter|--arg-file)$/,
+    );
+    my (@tokens) = @_;
+    my @indices;
+    my $i = 0;
+    while ($i < @tokens) {
+      if ($tokens[$i] =~ /^[A-Za-z_][A-Za-z0-9_]*=/) { $i++; next; }
+      my $name = $tokens[$i];
+      $name =~ s/^.*\///;
+      last unless $name =~ /^(?:command|builtin|exec|env|nohup|time|sudo|doas|timeout|nice|ionice|stdbuf|setsid|xargs)$/;
+      my $pattern = $option_with_argument{$name};
+      $i++;
+      # `timeout 5 cmd`: the duration is not an option and not the command.
+      $i++ if $name eq "timeout" && $i < @tokens && $tokens[$i] =~ /^[0-9]+(?:\.[0-9]+)?[smhd]?$/;
+      while ($i < @tokens && $tokens[$i] =~ /^-/) {
+        my $option = $tokens[$i];
+        $i++;
+        $i++ if defined $pattern && $option =~ $pattern && $i < @tokens;
+      }
+    }
+    return () unless $i < @tokens;
+    push @indices, $i;
+    if ($tokens[$i] eq "find") {
+      for (my $j = $i + 1; $j < $#tokens; $j++) {
+        push @indices, $j + 1 if $tokens[$j] =~ /^-(?:exec|execdir)$/;
+      }
+    }
+    return @indices;
+  }
+
+  my @found = grep { /\S/ } segments($ENV{"CMD_SCAN"});
+  if ($ENV{"MODE"} eq "count") {
+    # A hit is the pattern standing where a COMMAND name stands: the segment
+    # executable, a command carried by find/xargs, or the script argument of a
+    # shell interpreter (`bash /path/wrapper.sh`). The same name inside an
+    # argument of another program (`find -name wrapper.sh`, `sed -n 1,60p
+    # /path/wrapper.sh`) is data about the file, not a run of it.
+    my $pattern = $ENV{"PATTERN"};
+    my $hits = 0;
+    for my $segment (@found) {
+      my @tokens = words($segment);
+      next unless @tokens;
+      my $hit = 0;
+      for my $index (command_indices(@tokens)) {
+        next unless $index <= $#tokens;
+        $hit = 1 if $tokens[$index] =~ /$pattern/;
+        next unless $tokens[$index] =~ /^(?:.*\/)?(?:ba|z|k|da)?sh$/;
+        for (my $j = $index + 1; $j <= $#tokens; $j++) {
+          next if $tokens[$j] =~ /^-/;
+          $hit = 1 if $tokens[$j] =~ /$pattern/;
+          last;
+        }
+      }
+      $hits += 1 if $hit;
+    }
+    print scalar(@found), " ", $hits, "\n";
+    exit 0;
+  }
+  my $name = $ENV{"NAME"};
+  my $subcmd = $ENV{"SUBCMD"};
+  for my $segment (@found) {
+    my @tokens = words($segment);
+    next unless @tokens;
+    for my $index (command_indices(@tokens)) {
+      next unless $index <= $#tokens && $tokens[$index] eq $name;
+      my $start = $index;
+      if (length $subcmd) {
+        my $i = $index + 1;
+        while ($i < @tokens) {
+          if ($tokens[$i] =~ /^-C$/ || $tokens[$i] =~ /^--(?:git-dir|work-tree)$/ || $tokens[$i] =~ /^-c$/) {
+            $i += 2;
+          } elsif ($tokens[$i] =~ /^--(?:git-dir|work-tree)=/ || $tokens[$i] =~ /^-c/) {
+            $i++;
+          } else {
+            last;
+          }
+        }
+        next unless $i < @tokens && $tokens[$i] eq $subcmd;
+      }
+      # Print and keep scanning — one call can chain several invocations of
+      # the same command (`git push origin main && git push origin +:refs/x`),
+      # and every check below reads all of them, one per line.
+      print join(" ", @tokens[$start .. $#tokens]), "\n";
+    }
+  }
+'
+
+shell_invocations() {
+  # shell_invocations <command-name> [<git-style subcommand>]
+  # One line per invocation actually run by this call, tokens normalised.
+  local name="$1" subcmd="${2:-}"
+  MODE=match NAME="$name" SUBCMD="$subcmd" CMD_SCAN="$CMD_EXEC" perl -e "$SEGMENTER_PL"
+}
+
+shell_segment_stats() {
+  # shell_segment_stats <perl-regex> -> "<total segments> <segments matching>"
+  MODE=count PATTERN="$1" CMD_SCAN="$CMD_EXEC" perl -e "$SEGMENTER_PL"
+}
+
+git_segment() {
+  # Invocations where `git <global-opts> <subcmd>` is the command being run.
+  # A regex over the raw command saw `git reset` inside a quoted argument of
+  # another program as an actual Git command.
+  shell_invocations git "$1"
 }
 
 is_git_subcmd() {
@@ -313,31 +479,53 @@ if [ -n "$STASH_SEGMENT" ]; then
   done <<< "$STASH_SEGMENT"
 fi
 
-# rm с одновременным recursive (-r/-R/--recursive) и force (-f/--force), в любом
-# сочетании флагов (слитных или раздельных) — вне временных/scratch-путей, где это
-# штатная уборка (пир-сессия с Codex, WP-544 Ф1, 20.08).
-if echo "$CMD" | grep -qE '(^|[[:space:]])rm([[:space:]]|$)' \
-  && echo "$CMD" | grep -qE -- '(^|[[:space:]])(-[^[:space:]]*[rR][^[:space:]]*|--recursive)([[:space:]]|$)' \
-  && echo "$CMD" | grep -qE -- '(^|[[:space:]])(-[^[:space:]]*f[^[:space:]]*|--force)([[:space:]]|$)' \
-  && ! echo "$CMD" | grep -qE '(/tmp/|/scratchpad/|\.claude/worktrees/)'; then
-  block "rm -r -f (в любом сочетании флагов) вне /tmp, scratchpad или worktree запрещён — удаление необратимо. Разовая необходимость: CC_ALLOW_DESTRUCTIVE_INPUT=1 из реального шелла пилота."
+# rm с одновременным recursive (-r/-R/--recursive) и force (-f/--force) — но
+# только когда оба флага принадлежат ОДНОМУ вызову rm. Три отдельных grep по
+# всему тексту вызова давали ложный отказ на записи документа: `rm -f
+# "$PROMPT_FILE"` (уборка временного файла) давал слово rm и флаг -f, а
+# несвязанный `--add-dir` другой команды прочитывался как «рекурсивно»
+# (живой случай 06.09, тот же класс, что зафиксирован 04.09 в
+# bug-2026-09-04-destructive-guard-rm-rf-false-positive-cross-command.md).
+#
+# Исключение (временные пути) намеренно осталось широким — оно смотрит и на
+# сам вызов, и на весь текст: сужение срабатывания убирает ложные ОТКАЗЫ,
+# сужение исключения добавило бы новые (`S=/tmp/x; rm -rf "$S/y"` — путь
+# виден только в присваивании выше).
+RM_INVOCATIONS=$(shell_invocations rm)
+if [ -n "$RM_INVOCATIONS" ]; then
+  while IFS= read -r one_rm; do
+    [ -n "$one_rm" ] || continue
+    if ! echo "$one_rm" | grep -qE -- '(^|[[:space:]])(-[^[:space:]]*[rR][^[:space:]]*|--recursive)([[:space:]]|$)'; then
+      continue
+    fi
+    if ! echo "$one_rm" | grep -qE -- '(^|[[:space:]])(-[^[:space:]]*f[^[:space:]]*|--force)([[:space:]]|$)'; then
+      continue
+    fi
+    if echo "$one_rm" | grep -qE '(/tmp/|/scratchpad/|\.claude/worktrees/)'; then
+      continue
+    fi
+    if echo "$CMD_EXEC" | grep -qE '(/tmp/|/scratchpad/|\.claude/worktrees/)'; then
+      continue
+    fi
+    block "rm -r -f (в любом сочетании флагов) вне /tmp, scratchpad или worktree запрещён — удаление необратимо. Разовая необходимость: CC_ALLOW_DESTRUCTIVE_INPUT=1 из реального шелла пилота."
+  done <<< "$RM_INVOCATIONS"
 fi
 
 # psql: DROP/TRUNCATE — необратимая потеря структуры/данных.
-if echo "$CMD" | grep -qiE '\bpsql\b' && echo "$CMD" | grep -qiE '\b(DROP[[:space:]]+(TABLE|SCHEMA|DATABASE)|TRUNCATE)\b'; then
+if echo "$CMD_EXEC" | grep -qiE '\bpsql\b' && echo "$CMD_EXEC" | grep -qiE '\b(DROP[[:space:]]+(TABLE|SCHEMA|DATABASE)|TRUNCATE)\b'; then
   block "DROP/TRUNCATE через psql запрещён — необратимая потеря данных. Разовая необходимость: CC_ALLOW_DESTRUCTIVE_INPUT=1 из реального шелла пилота."
 fi
 
 # psql: DELETE FROM без WHERE в том же операторе (эвристика: сегмент до ближайшего
 # ';' или конца строки — не защищает от WHERE в другом statement той же команды).
-if echo "$CMD" | grep -qiE '\bpsql\b' \
-  && echo "$CMD" | grep -qiE 'DELETE[[:space:]]+FROM' \
-  && ! echo "$CMD" | grep -qiE 'DELETE[[:space:]]+FROM[^;]*[[:space:]]WHERE([[:space:]]|$)'; then
+if echo "$CMD_EXEC" | grep -qiE '\bpsql\b' \
+  && echo "$CMD_EXEC" | grep -qiE 'DELETE[[:space:]]+FROM' \
+  && ! echo "$CMD_EXEC" | grep -qiE 'DELETE[[:space:]]+FROM[^;]*[[:space:]]WHERE([[:space:]]|$)'; then
   block "DELETE FROM без WHERE через psql запрещён — удалит всю таблицу. Разовая необходимость: CC_ALLOW_DESTRUCTIVE_INPUT=1 из реального шелла пилота."
 fi
 
 # удаление репозитория на GitHub — необратимо.
-if echo "$CMD" | grep -qE '\bgh[[:space:]]+repo[[:space:]]+delete\b'; then
+if echo "$CMD_EXEC" | grep -qE '\bgh[[:space:]]+repo[[:space:]]+delete\b'; then
   block "gh repo delete запрещён — необратимо. Разовая необходимость: CC_ALLOW_DESTRUCTIVE_INPUT=1 из реального шелла пилота."
 fi
 
@@ -348,8 +536,8 @@ fi
 # без -w/--allow-write, тот случай остаётся обычным interactive-approve.
 # Тот же residual, что у push --delete выше: whole-command grep, не
 # git_segment-изолированный per-invocation — variable-obfuscation не ловит.
-if echo "$CMD" | grep -qE '\bgh[[:space:]]+repo[[:space:]]+deploy-key[[:space:]]+add\b' \
-  && echo "$CMD" | grep -qE -- '(^|[[:space:]"'"'"'])(-w|--allow-write)([[:space:]"'"'"'=]|$)'; then
+if echo "$CMD_EXEC" | grep -qE '\bgh[[:space:]]+repo[[:space:]]+deploy-key[[:space:]]+add\b' \
+  && echo "$CMD_EXEC" | grep -qE -- '(^|[[:space:]"'"'"'])(-w|--allow-write)([[:space:]"'"'"'=]|$)'; then
   block "gh repo deploy-key add с -w/--allow-write запрещён — добавляет ключ с правом записи в репозиторий (необратимое расширение доступа). Разовая необходимость: CC_ALLOW_DESTRUCTIVE_INPUT=1 из реального шелла пилота."
 fi
 
@@ -359,52 +547,16 @@ fi
 # WP, разные пути worktree на каждый вызов), но с ним оно так же охотно
 # матчит и `&& что-угодно-ещё`, потому что permission-matcher — текстовый
 # префикс, не парсер shell-грамматики (WP-544, пир-сессия
-# 2026-09-04-16-wp544-permission-type-auto-approve, Claude + Kimi; тот же
-# класс ограничения, ради которого выше существует git_segment()). Проверка
-# ниже — тот же посегментный сплиттер, что использует git_segment() (текст
-# между `;&|(){}`/backtick вне кавычек — отдельный сегмент), но самостоятельная
-# копия, не общий рефакторинг: git_segment() уже несёт несколько проверок
-# (push/reset/clean/add/stash) и трогать её ради одного нового вызова —
-# больше риска регресса, чем пользы от устранения дублирования.
-ISOLATED_COMMIT_ANALYSIS=$(CMD_SCAN="$CMD" perl -e '
-  my $text = $ENV{"CMD_SCAN"};
-  my (@segments, $segment, $quote) = ((), q{}, undef);
-  for (my $i = 0; $i < length($text); $i++) {
-    my $char = substr($text, $i, 1);
-    if (defined $quote) {
-      $segment .= $char;
-      if ($char eq "\\" && $quote eq q{"} && $i + 1 < length($text)) {
-        $segment .= substr($text, ++$i, 1);
-      } elsif ($char eq $quote) {
-        undef $quote;
-      }
-    } elsif ($char eq q{"} || $char eq chr(39)) {
-      $quote = $char;
-      $segment .= $char;
-    } elsif ($char eq q{&} && length($segment) && substr($segment, -1, 1) eq q{>}) {
-      # `>&` fd-dup (`2>&1`, `>&2`, ...) — part of a redirect on the CURRENT
-      # command, not a separator. Found live during code review (WP-544,
-      # 2026-09-04): without this guard, any single command ending in
-      # `2>&1` — including ones that merely mention the wrapper filename
-      # in an unrelated argument (`cat .../iwe-commit-isolated.sh 2>&1`) —
-      # was mis-split into two segments and falsely blocked.
-      $segment .= $char;
-    } elsif ($char eq q{&} && $i + 1 < length($text) && substr($text, $i + 1, 1) eq q{>}) {
-      # `&>` (redirect both stdout+stderr) — same reasoning, other order.
-      $segment .= $char;
-    } elsif ($char =~ /[;&|(){}]/ || $char eq q{`}) {
-      push @segments, $segment;
-      $segment = q{};
-    } else {
-      $segment .= $char;
-    }
-  }
-  push @segments, $segment;
-  my @nonempty = grep { /\S/ } @segments;
-  my $total = scalar @nonempty;
-  my $wrapper_hits = grep { /iwe-commit-isolated\.sh/ } @nonempty;
-  print "$total $wrapper_hits\n";
-')
+# 2026-09-04-16-wp544-permission-type-auto-approve, Claude + Kimi).
+#
+# Проверка повторяет условие, при котором это правило вообще срабатывает:
+# вызов НАЧИНАЕТСЯ с пути к обёртке. Прежний вариант считал попаданием любое
+# упоминание имени в тексте сегмента, поэтому `find ... -name
+# iwe-commit-isolated.sh | head` блокировался как «обёртка плюс лишние
+# команды» — имя в аргументе чужой команды не запускает обёртку и не матчит
+# разрешающее правило (WP-545, 06.09: третий случай того же типа в этом
+# файле, найден живьём этим же хуком).
+ISOLATED_COMMIT_ANALYSIS=$(shell_segment_stats "iwe-commit-isolated\.sh")
 ISOLATED_COMMIT_TOTAL_SEGMENTS=$(echo "$ISOLATED_COMMIT_ANALYSIS" | awk '{print $1}')
 ISOLATED_COMMIT_WRAPPER_HITS=$(echo "$ISOLATED_COMMIT_ANALYSIS" | awk '{print $2}')
 if [ "${ISOLATED_COMMIT_WRAPPER_HITS:-0}" -gt 0 ] && [ "${ISOLATED_COMMIT_TOTAL_SEGMENTS:-0}" -gt 1 ]; then

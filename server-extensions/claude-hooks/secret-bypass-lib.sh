@@ -190,10 +190,32 @@ GH_DIRECT_FILE_OPTIONS = frozenset(("--input", "--body-file", "--notes-file"))
 GH_FIELD_FILE_OPTIONS = frozenset(("-F", "--field"))
 MCP_TOOL_NAME = re.compile(r"mcp__[A-Za-z0-9_.-]+__[A-Za-z0-9_.-]+\Z")
 
+# Commands whose normal output is the entire environment or an entire secret
+# store in cleartext, independent of any recognizable value shape - a
+# shape-based PATTERNS/ASSIGNMENT_PATTERNS scan cannot catch what it has never
+# seen before (app-specific tokens, arbitrary passwords), so this class is
+# blocked by command identity instead (WP-482 Ф7, agent_fault ids 43/49).
+BULK_ENV_DUMP_EXECUTABLES = frozenset(("env", "printenv"))
+# Опции env, которые забирают следующее слово себе.
+ENV_OPTIONS_WITH_ARGUMENT = frozenset(("-u", "--unset", "-C", "--chdir", "-S", "--split-string"))
+RAILWAY_SECRET_LIST_SUBCOMMANDS = frozenset(("variables", "variable"))
+
 
 def fail(message):
     print(message, file=sys.stderr)
     raise SystemExit(1)
+
+
+class ShellModelUnsupported(Exception):
+    """Valid Bash this analyzer does not model (a loop, an `elif`, ...).
+
+    Distinct from fail(): fail() means the INPUT is not a hook envelope at all
+    (or this analyzer is broken), and the caller must fail closed. This one
+    means the command is real work whose shell grammar the variable model does
+    not cover - refusing it outright turns "I cannot parse this" into "no work
+    happens", which is what took a whole session down on 06.09 (WP-545,
+    bug-2026-09-06-secret-leak-block-hook-fails-open-input-validation.md).
+    """
 
 
 def unique(values):
@@ -989,9 +1011,49 @@ def command_environment_variables(segment, command_index, inherited_variables):
 
 
 CONTROL_TOKENS = frozenset((";", "&&", "||", "|", "&", "(", ")", "\n"))
+# Keywords that stand BEFORE the command inside a compound statement. Without
+# them a segment like `do cat ~/.config/aist/env` was read as an invocation of
+# a program named "do", so every command in a loop body, a brace group or a
+# function body went unexamined - while the verdict still claimed a complete
+# analysis (found while covering the parse-failure policy, WP-545 06.09).
+STRUCTURAL_PREFIXES = frozenset(("do", "{", "}", "!"))
+LOOP_HEADERS = frozenset(("while", "until"))
+# `for f in a b` and `select x in ...` bind a name to a WORD LIST: there is no
+# command in that header to inspect. Residual: a sensitive path named in the
+# list and used through the loop variable (`for f in ~/.config/aist/env; do
+# cat "$f"; done`) is not tracked - the variable model does not follow loop
+# bindings.
+WORD_LIST_HEADERS = frozenset(("for", "select"))
+BLOCK_TERMINATORS = frozenset(("done", "esac", "fi"))
+
+
+def strip_structural_keywords(segment):
+    """-> (команда для разбора, слова заголовка цикла).
+
+    Второй элемент непустой только у `for`/`select`: там команды нет, но сами
+    слова осматриваются вызывающим. Иначе вердикт «разбор полный» выдавался бы
+    там, где кусок команды молча выброшен (холодное ревью 06.09).
+    """
+    index = 0
+    while index < len(segment):
+        token = segment[index]
+        if token in STRUCTURAL_PREFIXES or token in LOOP_HEADERS:
+            index += 1
+            continue
+        if token in WORD_LIST_HEADERS:
+            return [], segment[index + 1:]
+        if token in BLOCK_TERMINATORS:
+            return [], []
+        break
+    return segment[index:], []
+
 REDIRECT_TOKENS = frozenset(
     ("<", "<<", "<<<", "<>", ">", ">>", ">|", "<&", ">&", "&>")
 )
+# Начало перенаправления в одном токене: необязательный номер дескриптора или
+# амперсанд, затем оператор. Покрывает и слитную цель (">out.txt", "2>&1"), где
+# REDIRECT_TOKENS не совпадает с токеном целиком.
+REDIRECT_PREFIX_RE = re.compile(r"\A(?:[0-9]+|&)?(?:>>|>\||>&|<<<|<<|<>|<&|>|<)")
 SHELL_TOOLS = frozenset(("bash", "sh", "zsh", "dash", "ksh"))
 COMMAND_WRAPPERS = frozenset(("command", "builtin", "exec", "nohup"))
 ASSIGNMENT = re.compile(r"[A-Za-z_][A-Za-z0-9_]*=.*", re.S)
@@ -1026,8 +1088,14 @@ def executable_index(segment):
     index = 0
     while index < len(segment):
         token = segment[index]
-        if token in REDIRECT_TOKENS:
-            index += 2
+        # Точное совпадение с REDIRECT_TOKENS не видело номер дескриптора,
+        # который токенайзер отделяет в свой токен: в "2>&1 cat ~/.ssh/id_rsa"
+        # исполняемым объявлялась цифра, и разбор команды на этом кончался --
+        # мимо проходило и чтение секретного файла, и дамп окружения
+        # (холодное ревью 06.09).
+        span = redirection_span(segment, index)
+        if span:
+            index += span
             continue
         if ASSIGNMENT.fullmatch(token):
             index += 1
@@ -1037,11 +1105,12 @@ def executable_index(segment):
             index += 1
             continue
         if executable == "env":
-            index += 1
-            while index < len(segment) and (
-                segment[index].startswith("-") or ASSIGNMENT.fullmatch(segment[index])
-            ):
-                index += 1
+            offset = env_wrapped_command_offset(segment[index + 1:])
+            if offset is None:
+                # No wrapped command follows: `env` itself is what runs (dumps
+                # the whole environment), not a wrapper around a real command.
+                return index
+            index += 1 + offset
             continue
         if executable == "sudo":
             index += 1
@@ -1307,6 +1376,81 @@ def nested_shell_command(executable, arguments):
     return None
 
 
+def redirection_span(arguments, index):
+    """Сколько токенов занимает перенаправление с этой позиции, иначе ноль.
+
+    Голый оператор (">") забирает следующий токен как цель. Номер дескриптора
+    токенайзер отделяет в свой токен ("2>&1" даёт "2", ">&", "1"), поэтому
+    цифра перед оператором тоже часть перенаправления, а не аргумент команды.
+    """
+    argument = arguments[index]
+    if argument.isdigit() and index + 1 < len(arguments):
+        following = redirection_span(arguments, index + 1)
+        return 1 + following if following else 0
+    match = REDIRECT_PREFIX_RE.match(argument)
+    if not match:
+        return 0
+    return 2 if match.group(0) == argument else 1
+
+
+def env_wrapped_command_offset(arguments):
+    """Смещение обёрнутой командой позиции в аргументах env, иначе None.
+
+    Один разбор на два вопроса: где начинается обёрнутая команда (для
+    executable_index) и есть ли она вообще (для проверки дампа окружения).
+    Раздельные версии этого обхода разъезжались: `env FOO=bar` и `env -u NAME`
+    печатали всё окружение, но дампом не считались (холодное ревью 06.09).
+    """
+    index = 0
+    while index < len(arguments):
+        argument = arguments[index]
+        span = redirection_span(arguments, index)
+        if span:
+            # Перенаправление не обёрнутая команда: `env > out.txt` печатает всё
+            # окружение ровно так же, как голый `env`, и раньше проходило мимо
+            # проверки, потому что ">" считался началом команды (ревью 06.09).
+            index += span
+        elif ASSIGNMENT.fullmatch(argument):
+            index += 1
+        elif argument in ENV_OPTIONS_WITH_ARGUMENT:
+            index += 2
+        elif argument.startswith("-"):
+            index += 1
+        else:
+            return index
+    return None
+
+
+def command_arguments_without_redirections(arguments):
+    """Аргументы без перенаправлений: ни оператор, ни его цель не аргументы."""
+    cleaned = []
+    index = 0
+    while index < len(arguments):
+        span = redirection_span(arguments, index)
+        if span:
+            index += span
+            continue
+        cleaned.append(arguments[index])
+        index += 1
+    return cleaned
+
+
+def is_bulk_secret_enumeration(executable, arguments):
+    if executable == "env":
+        return env_wrapped_command_offset(arguments) is None
+    meaningful = command_arguments_without_redirections(arguments)
+    positional = [argument for argument in meaningful if not argument.startswith("-")]
+    if executable in BULK_ENV_DUMP_EXECUTABLES:
+        # A NAME argument (`printenv HOME`) prints one already-known variable,
+        # a different and narrower exposure than dumping everything; only the
+        # zero-argument, dump-everything form is this class. Redirections are
+        # stripped above: `printenv > out.txt` dumps everything just the same.
+        return not positional
+    if executable == "railway":
+        return bool(positional) and positional[0] in RAILWAY_SECRET_LIST_SUBCOMMANDS
+    return False
+
+
 def analyze_shell_variant(command, depth=0, inherited_variables=None):
     tokens = shell_tokens(command)
     segments = command_segments(tokens)
@@ -1314,10 +1458,21 @@ def analyze_shell_variant(command, depth=0, inherited_variables=None):
     current_depth = 0
     direct_read = False
     direct_upload = False
+    bulk_enumeration = False
     conditional_stack = []
 
     def process_segment(segment, before, after, sensitive_variables):
-        nonlocal direct_read, direct_upload
+        nonlocal direct_read, direct_upload, bulk_enumeration
+        segment, loop_words = strip_structural_keywords(segment)
+        if loop_words and any(
+            value_has_sensitive_path(word) for word in loop_words
+        ):
+            # `for f in ~/.config/aist/env; do cat "$f"; done` - привязка к
+            # переменной цикла моделью не отслеживается, поэтому чувствительный
+            # путь в самом списке слов считается обращением к файлу.
+            direct_read = True
+        if not segment:
+            return
         expansion_variables = set(sensitive_variables)
         index = executable_index(segment)
         if index is None:
@@ -1342,16 +1497,19 @@ def analyze_shell_variant(command, depth=0, inherited_variables=None):
             executable, arguments, segment, expansion_variables
         ):
             direct_upload = True
+        if is_bulk_secret_enumeration(executable, arguments):
+            bulk_enumeration = True
         nested = nested_shell_command(executable, arguments)
         if nested is not None and depth < 2:
             command_variables = command_environment_variables(
                 segment, index, expansion_variables
             )
-            nested_read, nested_upload = analyze_shell_paths(
+            nested_read, nested_upload, nested_enumeration = analyze_shell_paths(
                 nested, depth + 1, command_variables
             )
             direct_read = direct_read or nested_read
             direct_upload = direct_upload or nested_upload
+            bulk_enumeration = bulk_enumeration or nested_enumeration
         updated_variables = set(sensitive_variables)
         update_persistent_builtin(executable, arguments, updated_variables)
         if before in ("&&", "||"):
@@ -1396,7 +1554,7 @@ def analyze_shell_variant(command, depth=0, inherited_variables=None):
         if keyword == "if":
             condition_segment = segment[1:]
             if not condition_segment:
-                fail("unsupported shell conditional")
+                raise ShellModelUnsupported("shell conditional")
             process_segment(condition_segment, before, after, sensitive_variables)
             conditional_stack.append(
                 {
@@ -1410,20 +1568,20 @@ def analyze_shell_variant(command, depth=0, inherited_variables=None):
             continue
         if keyword in ("then", "else", "fi", "elif"):
             if not conditional_stack or conditional_stack[-1]["depth"] != segment_depth:
-                fail("unsupported shell conditional")
+                raise ShellModelUnsupported("shell conditional")
             context = conditional_stack[-1]
             if keyword == "elif":
-                fail("unsupported shell conditional")
+                raise ShellModelUnsupported("shell conditional")
             if keyword == "then":
                 if context["active_branch"] is not None:
-                    fail("unsupported shell conditional")
+                    raise ShellModelUnsupported("shell conditional")
                 context["active_branch"] = "then"
                 context["active_possible"] = context["condition"] is not False
                 scope_variables[-1] = set(context["base_variables"])
                 sensitive_variables = scope_variables[-1]
             elif keyword == "else":
                 if context["active_branch"] != "then":
-                    fail("unsupported shell conditional")
+                    raise ShellModelUnsupported("shell conditional")
                 if context["active_possible"]:
                     context["then_variables"] = set(sensitive_variables)
                 context["active_branch"] = "else"
@@ -1447,20 +1605,22 @@ def analyze_shell_variant(command, depth=0, inherited_variables=None):
             continue
         process_segment(segment, before, after, sensitive_variables)
     if conditional_stack:
-        fail("unterminated shell conditional")
-    return direct_read, direct_upload
+        raise ShellModelUnsupported("unterminated shell conditional")
+    return direct_read, direct_upload, bulk_enumeration
 
 
 def analyze_shell_paths(command, depth=0, inherited_variables=None):
     direct_read = False
     direct_upload = False
+    bulk_enumeration = False
     for variant in shell_command_variants(command):
-        variant_read, variant_upload = analyze_shell_variant(
+        variant_read, variant_upload, variant_enumeration = analyze_shell_variant(
             variant, depth, inherited_variables
         )
         direct_read = direct_read or variant_read
         direct_upload = direct_upload or variant_upload
-    return direct_read, direct_upload
+        bulk_enumeration = bulk_enumeration or variant_enumeration
+    return direct_read, direct_upload, bulk_enumeration
 
 
 def parse_envelope(raw, event):
@@ -1500,7 +1660,37 @@ def analyze_bash(raw):
         body_ids, body_count, _details = scan(body)
         pattern_ids.extend(body_ids)
         match_count += body_count
-    direct_read, direct_upload = analyze_shell_paths(shell_scaffold)
+    # The literal-value scan above needs no shell model at all, so it stands
+    # whatever happens next. Only the path/upload/enumeration questions need
+    # the variable model, and that model does not cover every valid Bash
+    # construct (loops, `elif`). When it gives up, the answer is a degraded
+    # verdict on the tokens themselves - not a refusal to run the call, which
+    # is what "unsupported shell conditional" used to mean in practice
+    # (06.09: `for d in */; do if ...; fi; done` blocked, message named the
+    # hook own validation, not the construct).
+    try:
+        direct_read, direct_upload, bulk_enumeration = analyze_shell_paths(shell_scaffold)
+        shell_model = "complete"
+    except ShellModelUnsupported:
+        shell_model = "unsupported"
+        scaffold_tokens = shell_tokens(shell_scaffold)
+        # Conservative token-level answers. value_has_sensitive_path, not
+        # is_sensitive_path: an uploader names the file INSIDE an argument
+        # (curl --data-binary @~/.config/aist/env), and a whole-token compare
+        # missed exactly that - cold review 06.09 showed the upload check was
+        # switched off entirely in this branch, so five characters of extra
+        # grammar (an elif) turned a refusal into a pass.
+        direct_read = any(
+            value_has_sensitive_path(token) for token in scaffold_tokens
+        )
+        # One mechanism covers both questions here: reading and sending name
+        # the same file, and without the shell model there is nothing left to
+        # tell the two apart. The refusal above is what stops both.
+        direct_upload = False
+        bulk_enumeration = any(
+            token in BULK_ENV_DUMP_EXECUTABLES or token == "railway"
+            for token in scaffold_tokens
+        )
     return {
         "applicable": True,
         "session_id": session_id,
@@ -1510,6 +1700,8 @@ def analyze_bash(raw):
         "match_count": match_count,
         "direct_sensitive_read": direct_read,
         "direct_sensitive_upload": direct_upload,
+        "bulk_secret_enumeration": bulk_enumeration,
+        "shell_model": shell_model,
     }
 
 
@@ -1750,11 +1942,71 @@ def self_test():
         "F=.env; (F=safe); cat $F",
         "F=.env; env F=safe true; cat $F",
         "export F=.env; cat $F",
+        # Перенаправление с номером дескриптора перед командой снимало и эту
+        # проверку: исполняемым становилась цифра (холодное ревью 06.09).
+        "2>&1 cat config.env",
+        "2> /dev/null cat .proxy-env",
     )
     for command in read_cases:
         upload["tool_input"] = {"command": command}
         if not analyze_bash(json.dumps(upload))["direct_sensitive_read"]:
             fail("direct sensitive read case failed")
+
+    bulk_enumeration_cases = (
+        "env",
+        "env | sort",
+        "env|sort",
+        "printenv",
+        "printenv | grep TOKEN",
+        "railway variables",
+        "railway variables --kv",
+        "railway variables --service aist_me_bot --kv",
+        "railway variable list",
+        "bash -c \"env\"",
+        # Перенаправление вместо конвейера: тот же дамп, и это первый обходной
+        # путь, который приходит в голову после отказа (холодное ревью 06.09).
+        "env > out.txt",
+        "env >> out.txt",
+        "env >/tmp/x",
+        "env 1>out.txt",
+        "env &> out.txt",
+        "env 2>&1 | tee /tmp/x",
+        "env < /dev/null",
+        "printenv > out.txt",
+        "printenv 2>&1",
+        "printenv 1> /tmp/x",
+        "railway variables 2>&1",
+        # Перенаправление ПЕРЕД командой, включая номер дескриптора: раньше
+        # исполняемым объявлялась цифра и разбор кончался, не дойдя до команды.
+        "> out.txt env",
+        "2>&1 env",
+        "2> /dev/null env",
+        "1> out.txt env",
+        "2>&1 printenv",
+        "2>&1 railway variables",
+    )
+    for command in bulk_enumeration_cases:
+        upload["tool_input"] = {"command": command}
+        if not analyze_bash(json.dumps(upload))["bulk_secret_enumeration"]:
+            fail("bulk secret enumeration case failed: " + command)
+
+    bulk_enumeration_safe_cases = (
+        "printenv HOME",
+        "env FOO=bar somecommand",
+        "env FOO=bar somecommand --flag",
+        "railway login",
+        "railway deploy",
+        "railway run --service aist_me_bot -- python3 script.py",
+        "printf %s \"env | sort\"",
+        # Перенаправление у чужой команды остаётся обычным перенаправлением.
+        "sort file.txt > out.txt",
+        "cat a.txt 2>&1",
+        "env FOO=bar somecommand > out.txt",
+    )
+    for command in bulk_enumeration_safe_cases:
+        upload["tool_input"] = {"command": command}
+        if analyze_bash(json.dumps(upload))["bulk_secret_enumeration"]:
+            fail("bulk secret enumeration false positive: " + command)
 
     upload["tool_input"] = {"command": "printf %s \"curl --data-binary @.env\""}
     quoted_prose = analyze_bash(json.dumps(upload))
