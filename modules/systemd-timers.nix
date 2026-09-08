@@ -149,12 +149,14 @@ let
       exit 0
     fi
 
+    # iwesys/guide-kit removed 08.09.2026 (WP-545 Ф12): no unit, timer or
+    # scheduler task on this host reads it — an unwatched clone is not a risk,
+    # a watched-but-unused one is only alert noise.
     repos=(
       "DS-IT-systems/DS-ai-systems"
       "DS-IT-systems/activity-hub"
       "DS-IT-systems/iwe-server"
       "DS-MCP/knowledge-mcp"
-      "iwesys/guide-kit"
       "DS-agent-workspace"
       "DS-autonomous-agents"
       "DS-ecosystem-development"
@@ -344,7 +346,6 @@ let
       "DS-IT-systems/activity-hub"
       "DS-IT-systems/iwe-server"
       "DS-MCP/knowledge-mcp"
-      "iwesys/guide-kit"
       "DS-agent-workspace"
       "DS-autonomous-agents"
       "DS-ecosystem-development"
