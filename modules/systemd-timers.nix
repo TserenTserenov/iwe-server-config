@@ -392,9 +392,16 @@ let
     human_name="''${unit%.service}"
     human_name="''${human_name#iwe-}"
     human_name="''${human_name//-/ }"
+    # Служебное имя юнита и команда journalctl (WP-538 Ф7, 08.09, пир-сессия
+    # с Kimi+Codex) -- только в собственный журнал этого сервиса
+    # (StandardOutput/Error = journal ниже), не в текст пилоту: сырая
+    # английская команда и голое имя юнита с точкой-service нарушали
+    # разговорный стиль (DP.SC.050). Агент ищет деталь через
+    # `journalctl -u iwe-failure-alert@<unit>.service`.
+    echo "unit=$unit journal_hint=journalctl -u $unit --since -1h"
     msg=$(${pkgs.coreutils}/bin/printf \
-      "🚨 Не выполнилась запланированная задача IWE: %s\nСервер: %s\nВремя: %s\nЖурнал: journalctl -u %s --since -1h\nСлужебное имя: %s" \
-      "$human_name" "$host" "$ts" "$unit" "$unit")
+      "🚨 Не выполнилась запланированная задача IWE: %s\nСервер: %s\nВремя: %s" \
+      "$human_name" "$host" "$ts")
     send_tg() {
       ${pkgs.curl}/bin/curl -s --max-time 10 -X POST \
         "https://api.telegram.org/bot''${TELEGRAM_BOT_TOKEN}/sendMessage" \
@@ -1178,7 +1185,12 @@ in
     # peer-сессия с Codex). Linger для tseren включён, шина живёт постоянно.
     systemd.services."iwe-night-cycle-verify-day" = {
       description = "IWE — внешний верификатор ночного цикла (день)";
-      unitConfig   = commonUnitConfig;
+      # Не используем commonUnitConfig с OnFailure (WP-538 Ф7, 08.09, пир-сессия
+      # с Kimi+Codex) — тот же приём, что уже применён к iwe-tsekh1-sync выше:
+      # night-cycle-verify.sh сам шлёт человекочитаемый Telegram-текст на любой
+      # результат (успех/сбой/частично), общий OnFailure-обработчик дублировал
+      # бы это ВТОРЫМ, менее читаемым сообщением с сырым journalctl-хвостом.
+      unitConfig   = { };
       serviceConfig = commonServiceConfig // {
         ExecStart  = "${pkgs.bash}/bin/bash ${iwe}/DS-my-strategy/scripts/night-cycle-verify.sh day";
         TimeoutSec = 300;
@@ -1198,7 +1210,9 @@ in
 
     systemd.services."iwe-night-cycle-verify-week" = {
       description = "IWE — внешний верификатор ночного цикла (неделя)";
-      unitConfig   = commonUnitConfig;
+      # Тот же opt-out, что у verify-day выше — свой человекочитаемый Telegram
+      # уже есть, generic OnFailure только дублировал бы его сырым текстом.
+      unitConfig   = { };
       serviceConfig = commonServiceConfig // {
         ExecStart  = "${pkgs.bash}/bin/bash ${iwe}/DS-my-strategy/scripts/night-cycle-verify.sh week";
         TimeoutSec = 300;
