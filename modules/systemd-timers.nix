@@ -296,6 +296,177 @@ let
     exit 0
   '';
 
+  # DS-ai-systems verified sync — WP-545 Ф11 (08.09.2026, peer-session
+  # 2026-09-08-08-wp545-server-guards, Kimi+Codex, АрхГейт f11-archgate.md).
+  #
+  # Находка этой фазы: `pullScript` выше был переведён на чистое наблюдение
+  # (`git fetch --prune`, WP-484 Ф108/Ф111, 17.08) и с тех пор НЕ двигает
+  # working tree ни для одного из 16 репозиториев в его списке — включая
+  # `DS-IT-systems/DS-ai-systems`, откуда `iwe-scheduler.service` запускает
+  # strategist.sh/extractor.sh/template-sync.sh. Единственный способ обновить
+  # код на сервере стал ручной `git pull` (см. WP-538 Ф6, инцидент "5+ коммитов
+  # позади 4 дня подряд"). Этот скрипт восстанавливает автоматическое
+  # продвижение — но ТОЛЬКО для DS-ai-systems (scope-решение пилота 08.09:
+  # остальные 15 репо в списке pullScript — отдельная задача, не эта фаза,
+  # чтобы не наступить на тот же класс гонки, ради которого их перевели в
+  # watcher-режим).
+  #
+  # Политика (АрхГейт accepted):
+  #   - pull-only, никогда не пишет обратно в git
+  #   - грязное дерево → отказ продвигать (fail-closed), state-файл не трогаем
+  #     (свежесть естественно "протухает" сама — её видит consumer-gate ниже)
+  #   - `merge --ff-only` — divergent/переписанная история (напр. force-push
+  #     origin/main, защита которой НЕ подтверждена) → отказ, не пытаемся
+  #     разрешить сами; это и есть промоушен-слой ArchGate, реализованный
+  #     существующим git-примитивом, а не отдельной инфраструктурой тегов
+  #     (решение пилота на втором проходе альтернатив — не изобретать заново)
+  #   - на успехе (включая "уже свежий") пишет provenance: SHA + время в
+  #     $HOME/.local/state/exocortex/ds-ai-systems-sync-state — тот же
+  #     каталог, что уже использует scheduler.sh (STATE_DIR), не новый путь
+  #   - тот же lock, что pullScript/pushAheadScript — сериализация git-операций
+  #     на общих чекаутах (WP-7, гонка FETCH_HEAD)
+  dsAiSystemsSyncScript = pkgs.writeShellScript "iwe-ds-ai-systems-sync" ''
+    set -uo pipefail
+    export GIT_TERMINAL_PROMPT=0
+    export GIT_SSH_COMMAND="ssh -o BatchMode=yes -o StrictHostKeyChecking=accept-new"
+
+    repo_dir="${iwe}/DS-IT-systems/DS-ai-systems"
+    state_dir="$HOME/.local/state/exocortex"
+    state_file="$state_dir/ds-ai-systems-sync-state"
+    dedup_state="$state_dir/ds-ai-systems-sync-alert-dedup"
+    dedup_ttl_min="''${DS_AI_SYSTEMS_SYNC_DEDUP_TTL_MIN:-240}"
+    if ! [[ "$dedup_ttl_min" =~ ^[0-9]+$ ]]; then
+      ${pkgs.util-linux}/bin/logger -p user.warning -t iwe-ds-ai-systems-sync "invalid DS_AI_SYSTEMS_SYNC_DEDUP_TTL_MIN='$dedup_ttl_min' — используется значение по умолчанию 240 минут"
+      dedup_ttl_min=240
+    fi
+
+    ${pkgs.coreutils}/bin/mkdir -p "$state_dir"
+
+    alert() {
+      local reason="$1"
+      local now sig prev_sig prev_ts send=1
+      now=$(${pkgs.coreutils}/bin/date -u +%s)
+      sig=$(${pkgs.coreutils}/bin/printf '%s' "$reason" | ${pkgs.coreutils}/bin/sha256sum | ${pkgs.coreutils}/bin/cut -c1-16)
+      if [ -f "$dedup_state" ]; then
+        prev_sig="" prev_ts=0
+        read -r prev_sig prev_ts < "$dedup_state" 2>/dev/null || true
+        if [ "$prev_sig" = "$sig" ] && [[ "$prev_ts" =~ ^[0-9]+$ ]] \
+            && [ "$prev_ts" -le "$now" ] \
+            && [ $(( (now - prev_ts) / 60 )) -lt "$dedup_ttl_min" ]; then
+          send=0
+        fi
+      fi
+      if [ "$send" -eq 1 ]; then
+        ${pkgs.coreutils}/bin/printf '%s %s\n' "$sig" "$now" > "$dedup_state" 2>/dev/null || true
+        local msg
+        msg="⚠️ IWE ds-ai-systems sync (tsekh-1, $(${pkgs.coreutils}/bin/date '+%Y-%m-%d %H:%M')): $reason"
+        ${pkgs.curl}/bin/curl -s --max-time 10 -X POST \
+          "https://api.telegram.org/bot''${TELEGRAM_BOT_TOKEN}/sendMessage" \
+          -d "chat_id=''${TELEGRAM_CHAT_ID}" \
+          --data-urlencode "text=$msg" \
+          > /dev/null || true
+      else
+        ${pkgs.util-linux}/bin/logger -t iwe-ds-ai-systems-sync "alert suppressed (dedup): $reason"
+      fi
+    }
+
+    # Единая точка "не продвинулись в этот тик, почему" — читает возраст
+    # ПРЕДЫДУЩЕГО успешного продвижения (state_file ещё не тронут этим тиком)
+    # и алертит, если хроника перевалила за порог. Вызывается из КАЖДОГО
+    # failure-пути attempt_sync ниже (не только dirty/non-ff — холодное ревью
+    # этой фазы нашло, что раньше молчали fetch-fail/unresolved-remote/
+    # post-merge-mismatch, а это тот же класс "код стареет незаметно",
+    # который вся эта фаза чинит).
+    check_staleness_and_alert() {
+      local reason="$1"
+      if [ ! -f "$state_file" ]; then
+        # Первый тик после деплоя / репо только что склонировано — ещё нет
+        # базовой линии для "давности". consumer-gate в scheduler.sh уже
+        # откажет запускать потребителей до первого успеха; отдельный алерт
+        # здесь был бы шумом на штатном bootstrap.
+        return
+      fi
+      local last_ts now
+      last_ts=$(${pkgs.gnugrep}/bin/grep -oE 'ts=[0-9]+' "$state_file" | ${pkgs.coreutils}/bin/cut -d= -f2)
+      now=$(${pkgs.coreutils}/bin/date -u +%s)
+      if [[ "$last_ts" =~ ^[0-9]+$ ]] && [ $(( (now - last_ts) / 3600 )) -ge 6 ]; then
+        alert "не продвигается ≥6ч подряд (последняя причина: $reason)"
+      fi
+    }
+
+    # attempt_sync — одна попытка продвинуть чекаут. 0 = продвинули или уже
+    # свежий (state_file записан); 1 = отказ, причина в $SYNC_FAIL_REASON
+    # (state_file НЕ трогаем — свежесть естественно "стареет" сама, её видит
+    # и consumer-gate в scheduler.sh, и check_staleness_and_alert выше).
+    attempt_sync() {
+      if [ ! -d "$repo_dir/.git" ]; then
+        SYNC_FAIL_REASON="repo not cloned at $repo_dir"
+        return 1
+      fi
+
+      cd "$repo_dir" || { SYNC_FAIL_REASON="cd $repo_dir failed"; return 1; }
+
+      local dirty
+      dirty=$(${pkgs.git}/bin/git status --porcelain 2>/dev/null)
+      if [ -n "$dirty" ]; then
+        SYNC_FAIL_REASON="грязное дерево — отказываюсь продвигать"
+        return 1
+      fi
+
+      local before_sha remote_sha after_sha
+      before_sha=$(${pkgs.git}/bin/git rev-parse HEAD)
+      if ! ${pkgs.coreutils}/bin/timeout 60s ${pkgs.git}/bin/git fetch --quiet origin main; then
+        SYNC_FAIL_REASON="git fetch failed"
+        return 1
+      fi
+
+      remote_sha=$(${pkgs.git}/bin/git rev-parse origin/main 2>/dev/null || echo "")
+      if [ -z "$remote_sha" ]; then
+        SYNC_FAIL_REASON="could not resolve origin/main"
+        return 1
+      fi
+
+      if [ "$before_sha" = "$remote_sha" ]; then
+        ${pkgs.coreutils}/bin/printf 'sha=%s\nts=%s\n' "$remote_sha" "$(${pkgs.coreutils}/bin/date -u +%s)" > "$state_file"
+        return 0
+      fi
+
+      if ! ${pkgs.git}/bin/git merge --ff-only origin/main >/dev/null 2>&1; then
+        # Не общий "устарело" — переписанная/разошедшаяся история main
+        # (в т.ч. возможный force-push, чью защиту от него ArchGate этой
+        # фазы не смог подтвердить) требует внимания СРАЗУ, не после 6ч
+        # накопления — отдельный немедленный алерт, вдобавок к общему
+        # check_staleness_and_alert ниже.
+        SYNC_FAIL_REASON="non-fast-forward ($before_sha vs $remote_sha) — main diverged/rewritten"
+        alert "origin/main разошёлся с локальной копией (не fast-forward) — нужна ручная проверка, автопродвижение отказало намеренно"
+        return 1
+      fi
+
+      after_sha=$(${pkgs.git}/bin/git rev-parse HEAD)
+      if [ "$after_sha" != "$remote_sha" ]; then
+        SYNC_FAIL_REASON="post-merge HEAD mismatch (expected $remote_sha, got $after_sha)"
+        return 1
+      fi
+
+      ${pkgs.coreutils}/bin/printf 'sha=%s\nts=%s\n' "$after_sha" "$(${pkgs.coreutils}/bin/date -u +%s)" > "$state_file"
+      ${pkgs.util-linux}/bin/logger -t iwe-ds-ai-systems-sync "advanced $before_sha -> $after_sha"
+      return 0
+    }
+
+    exec 201>"${iwe}/.iwe-git-ops.lock"
+    if ! ${pkgs.util-linux}/bin/flock -n 201; then
+      ${pkgs.util-linux}/bin/logger -t iwe-ds-ai-systems-sync "lock busy, skipping tick"
+      exit 0
+    fi
+
+    SYNC_FAIL_REASON=""
+    if ! attempt_sync; then
+      ${pkgs.util-linux}/bin/logger -t iwe-ds-ai-systems-sync "$SYNC_FAIL_REASON — refusing to advance"
+      check_staleness_and_alert "$SYNC_FAIL_REASON"
+    fi
+    exit 0
+  '';
+
   # Writer-delivery: пушит локальные коммиты, сделанные сессиями НА СЕРВЕРЕ,
   # которые иначе зависают (commit-without-push) → divergence → pull-repos alert
   # каждые 2ч (см. инцидент DS-Knowledge-Index-Tseren, peer-session 2026-06-11-01).
@@ -521,7 +692,11 @@ in
       serviceConfig = commonServiceConfig // {
         # WP-7 S-A: pre-tick git pull для IWE-репо (сторож-наблюдатель). Префикс `-` → fail не блокирует ExecStart.
         # peer-session 2026-06-11-01: push-ahead доставляет clean+ahead коммиты сессий (commit-without-push fix).
-        ExecStartPre = [ "-${pullScript}" "-${pushAheadScript}" ];
+        # WP-545 Ф11 (08.09): dsAiSystemsSyncScript — единственный из 16 репо, который
+        # реально продвигается (остальные с 17.08 только fetch-наблюдение, см. его
+        # комментарий выше) — стоит после pullScript (тот уже сделал fetch --prune
+        # для всех репо, включая этот; здесь отдельный явный fetch+merge --ff-only).
+        ExecStartPre = [ "-${pullScript}" "-${dsAiSystemsSyncScript}" "-${pushAheadScript}" ];
         ExecStart    = "${pkgs.bash}/bin/bash ${iwe}/DS-IT-systems/DS-ai-systems/synchronizer/scripts/scheduler.sh dispatch";
         # strategist-morning may legitimately use its 40-minute CLI budget;
         # leave five minutes for the pre-tick sync and scheduler bookkeeping.
