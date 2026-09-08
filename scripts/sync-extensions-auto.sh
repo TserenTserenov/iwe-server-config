@@ -28,14 +28,74 @@ if [ -f "$AIST_ENV" ]; then
   set +a
 fi
 
-alert() {
+# Stateful-эскалация вместо слепого realtime-на-каждый-тик (WP-538 Ф7, 08.09,
+# пир-сессия с Kimi+Codex — этот скрипт бьёт каждые 2 часа и раньше слал
+# идентичный текст на каждый повтор одного и того же хронического сбоя без
+# подавления, до 4+ раз/ночь). notify_escalation_update() — DS-my-strategy,
+# та же state-директория, что уже 3 месяца работает под notify_dedup_allow
+# (bash 3.2-совместимость, per-key flock, fail-open) — не заводить свою
+# отдельную реализацию. Все известные классы сбоя этого скрипта, для alert_ok
+# (перечислять новый класс сюда при добавлении нового failure-branch):
+ALERT_CLASSES=(cd pull source-behind sync-script test-gate add commit push)
+NOTIFY_LIB="${SYNC_EXTENSIONS_NOTIFY_LIB:-$HOME/IWE/DS-my-strategy/scripts/lib/notification-render.sh}"
+NOTIFY_LIB_AVAILABLE=false
+if [ -f "$NOTIFY_LIB" ]; then
+  # shellcheck source=/dev/null
+  . "$NOTIFY_LIB"
+  NOTIFY_LIB_AVAILABLE=true
+fi
+
+send_telegram() {
   local text="$1"
-  echo "$LOG_PREFIX $text"
   if [ -n "${TELEGRAM_BOT_TOKEN:-}" ] && [ -n "${TELEGRAM_CHAT_ID:-}" ]; then
     curl -s --max-time 10 -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
       -d "chat_id=${TELEGRAM_CHAT_ID}" \
       --data-urlencode "text=$text" > /dev/null || true
   fi
+}
+
+# alert <class> <text>: сбой класса <class>. Первый раз — сразу; повтор того
+# же класса — не чаще раза в NOTIFY_ESCALATION_REPEAT_MIN (дефолт 360 = раз
+# в 6 часов на двухчасовом таймере), с длительностью и числом попыток в
+# тексте повтора вместо голого дубля.
+alert() {
+  local class="$1" text="$2"
+  echo "$LOG_PREFIX $text"
+  local full_text="$text"
+  if $NOTIFY_LIB_AVAILABLE; then
+    if notify_escalation_update "sync-extensions-auto/$class" fail --repeat-after-min 360; then
+      if [ "$NOTIFY_ESCALATION_PHASE" = "ongoing" ]; then
+        full_text="$text (повторяется $NOTIFY_ESCALATION_COUNT раз подряд, не решается уже $(notify_format_duration "$NOTIFY_ESCALATION_DURATION_SEC"))"
+      fi
+    else
+      echo "$LOG_PREFIX подавлено (эскалация того же класса уже отправлена недавно, попытка #${NOTIFY_ESCALATION_COUNT:-?})"
+      return 0
+    fi
+  fi
+  send_telegram "$full_text"
+}
+
+# alert_ok <text>: успешный прогон — снимает активную эскалацию у ЛЮБОГО
+# класса (за один прогон реально активен максимум один, скрипт выходит на
+# первом сбое) и, если было что снимать, дописывает к тексту факт восстановления.
+alert_ok() {
+  local text="$1"
+  local full_text="$text"
+  if $NOTIFY_LIB_AVAILABLE; then
+    local class recovered_from="" recovered_count=0 recovered_dur=0
+    for class in "${ALERT_CLASSES[@]}"; do
+      if notify_escalation_update "sync-extensions-auto/$class" ok; then
+        recovered_from="$class"
+        recovered_count="$NOTIFY_ESCALATION_COUNT"
+        recovered_dur="$NOTIFY_ESCALATION_DURATION_SEC"
+      fi
+    done
+    if [ -n "$recovered_from" ]; then
+      full_text="$text (восстановилось после $recovered_count попыток, не решалось $(notify_format_duration "$recovered_dur"))"
+    fi
+  fi
+  echo "$LOG_PREFIX $full_text"
+  send_telegram "$full_text"
 }
 
 lock_acquire() {
@@ -62,14 +122,14 @@ on_exit() {
 }
 trap on_exit EXIT
 
-cd "$REPO_ROOT" || { alert "🚨 sync-extensions-auto: cd в $REPO_ROOT провалился"; exit 1; }
+cd "$REPO_ROOT" || { alert cd "🚨 sync-extensions-auto: cd в $REPO_ROOT провалился"; exit 1; }
 
 lock_acquire || exit 0
 
 # Синхронизируемся с origin ДО генерации diff — иначе можем закоммитить поверх
 # устаревшей базы и словить push-reject на каждом последующем тике.
 if ! git pull --ff-only --quiet 2>&1; then
-  alert "🚨 sync-extensions-auto: git pull --ff-only провалился (iwe-server-config разошёлся с origin) — auto-sync пропущен, нужна ручная проверка"
+  alert pull "🚨 sync-extensions-auto: git pull --ff-only провалился (iwe-server-config разошёлся с origin) — auto-sync пропущен, нужна ручная проверка"
   exit 1
 fi
 
@@ -83,13 +143,13 @@ bash "$HOME/IWE/scripts/iwe-safe-pull.sh" "$HOME/IWE" >/dev/null 2>&1 || true
 git -C "$HOME/IWE" fetch --quiet origin 2>/dev/null || true
 SRC_BEHIND=$(git -C "$HOME/IWE" rev-list --count HEAD..origin/main 2>/dev/null || echo 0)
 if [ "${SRC_BEHIND:-0}" -gt 0 ]; then
-  alert "🚨 sync-extensions-auto: источник ~/IWE отстаёт от origin на ${SRC_BEHIND} коммит(ов), safe-pull не смог обновить (вероятно, локальные правки) — тик пропущен, чтобы не увезти на сервер устаревшие проверки"
+  alert source-behind "🚨 sync-extensions-auto: источник ~/IWE отстаёт от origin на ${SRC_BEHIND} коммит(ов), safe-pull не смог обновить (вероятно, локальные правки) — тик пропущен, чтобы не увезти на сервер устаревшие проверки"
   exit 1
 fi
 
 SYNC_LOG="$(mktemp)"
 if ! bash "$REPO_ROOT/scripts/sync-extensions.sh" > "$SYNC_LOG" 2>&1; then
-  alert "🚨 sync-extensions-auto: sync-extensions.sh упал с ошибкой: $(tail -3 "$SYNC_LOG" | tr '\n' ' ')"
+  alert sync-script "🚨 sync-extensions-auto: sync-extensions.sh упал с ошибкой: $(tail -3 "$SYNC_LOG" | tr '\n' ' ')"
   exit 1
 fi
 
@@ -151,7 +211,7 @@ while IFS= read -r changed_line; do
 done <<< "$CHANGED"
 
 if [ "$GATE_FAILED" = true ]; then
-  alert "🚨 sync-extensions-auto: тестовый гейт нашёл провал — auto-sync отменён, коммит не создан ни для одного из ${FILE_COUNT} файлов (${FILE_LIST}...). $(tail -5 "$GATE_LOG" | tr '\n' ' ')"
+  alert test-gate "🚨 sync-extensions-auto: тестовый гейт нашёл провал — auto-sync отменён, коммит не создан ни для одного из ${FILE_COUNT} файлов (${FILE_LIST}...). $(tail -5 "$GATE_LOG" | tr '\n' ' ')"
   rm -f "$GATE_LOG"
   exit 1
 fi
@@ -161,18 +221,18 @@ rm -f "$GATE_LOG"
 # в индексе свою незакоммиченную правку вне server-extensions/, она сюда не
 # попадёт (CLAUDE.md: несколько агентов работают в одном репозитории разом).
 if ! git add server-extensions/; then
-  alert "🚨 sync-extensions-auto: git add провалился — auto-sync пропущен"
+  alert add "🚨 sync-extensions-auto: git add провалился — auto-sync пропущен"
   exit 1
 fi
 if ! git commit -m "sync: auto extensions (${FILE_COUNT} файлов) [sync-extensions-auto]" --quiet -- server-extensions/; then
-  alert "🚨 sync-extensions-auto: git commit провалился — auto-sync пропущен"
+  alert commit "🚨 sync-extensions-auto: git commit провалился — auto-sync пропущен"
   exit 1
 fi
 
 PUSH_OUT=""
 if ! PUSH_OUT=$(git push 2>&1); then
-  alert "🚨 sync-extensions-auto: коммит создан локально, но push провалился (${FILE_COUNT} файлов: ${FILE_LIST}...): $(echo "$PUSH_OUT" | tail -3 | tr '\n' ' ') — требуется ручное вмешательство"
+  alert push "🚨 sync-extensions-auto: коммит создан локально, но push провалился (${FILE_COUNT} файлов: ${FILE_LIST}...): $(echo "$PUSH_OUT" | tail -3 | tr '\n' ' ') — требуется ручное вмешательство"
   exit 1
 fi
 
-alert "✅ Автосинк конфигурации на сервер: ${FILE_COUNT} файлов (${FILE_LIST}...) — деплой на tsekh-1 запущен"
+alert_ok "✅ Автосинк конфигурации на сервер: ${FILE_COUNT} файлов (${FILE_LIST}...) — деплой на tsekh-1 запущен"
