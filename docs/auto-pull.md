@@ -70,6 +70,27 @@ PACK-personal                      # Pack-источник для PACK-personal-
 
 **11 пуллов в день × 7 репо = 77 fetch/день.** GitHub лимит 5000/час для аутентифицированных — порядок ничтожный, не риск.
 
+## Verified sync — продвижение клонов, которые читают headless-процессы (WP-545 Ф12)
+
+`iwe-pull-repos` выше — только наблюдатель (`fetch --prune` + dirty-алерт). С 17.08.2026 он не двигает рабочее дерево ни одного клона, поэтому код и контент, которые читают ночные сервисы, продвигает отдельный примитив `iwe-verified-sync` (`scripts/iwe-verified-sync.sh`, упакован `writeShellApplication` → `/nix/store`, тест `scripts/tests/iwe-verified-sync-smoke.sh`).
+
+**Четыре класса клонов на сервере:**
+
+| Класс | Что | Кто продвигает | Гейт |
+|---|---|---|---|
+| A — код, исполняемый юнитами | DS-ai-systems, activity-hub, iwe-server, knowledge-mcp, DS-autonomous-agents | `ExecStartPre` юнита: `-sync` (не блокирует) → `fresh` (блокирует старт) | `fresh`: exit 1 → юнит не стартует → OnFailure-алерт |
+| B — контент индекса знаний | пути из `knowledge-mcp/scripts/sources*.json` (паки, DS-ecosystem-development, индекс знаний, FPF/SPF…) | `scheduler.sh` → `sync_index_sources` перед reindex, ветка/политика из `DS-ai-systems/synchronizer/config/server-clones.tsv` | manifest `~/.local/state/exocortex/reindex-sources-manifest.tsv` + один алерт в день со списком stale/missing |
+| C — писатели с сервера | DS-agent-workspace (auto-commit), DS-my-strategy (`iwe-tsekh1-sync`) | свои механизмы, здесь `external` | — |
+| D — без потребителя | guide-kit | никто (решение пилота: убрать или задокументировать) | — |
+
+**Политика примитива:** pull-only; грязное дерево / расхождение истории / неудачный fetch → отказ, HEAD не трогается, state хранит provenance последнего успеха (`sha`, `upstream_sha`, `last_success_ts`) отдельно от последней попытки (`last_attempt_ts`, `last_error`). `fresh` проверяет тождество (`sha == upstream_sha == HEAD`), чистоту дерева (грязное = непроверенный код, блокирует сразу) и свежесть (`last_success_ts` не старше 6 ч и не в будущем) как отдельные предикаты; отказ sync сам по себе не блокирует потребителя — блокирует только устаревание за порог или грязное дерево. Ветка задаётся всегда явно (дефолта нет: docs бота живут на `pilot`).
+
+**Известная двойная тревога:** отказ `fresh` в `ExecStartPre` роняет юнит → общий `OnFailure`-обработчик шлёт своё сообщение (без дедупа) вдобавок к тревоге самого гейта (с дедупом 4 ч). Принято осознанно: потребители запускаются ≤3 раз в сутки; если включать таймер с частым тиком (`iwe-render-pilot-guides-queue`), сначала решить это.
+
+**Алерты:** `⚠️ verified-sync <имя> [<класс>]` — первый сразу, напоминание раз в 4 ч, `✅ … recovered` один раз. Классы: `dirty`, `diverged`, `fetch-failed`, `missing`, `wrong-branch`, `stale`, `future`, `identity`, `unknown`. Состояние: `iwe-verified-sync read --state <имя>`; имена state — `ds-ai-systems`, `activity-hub`, `iwe-server`, `knowledge-mcp`, `ds-autonomous-agents`, для источников индекса `idx-<имя клона>`.
+
+**Что делать при алерте:** `dirty` — на сервере кто-то правил руками, `git -C <клон> status`; `diverged` — история переписана (force-push?), сверить `git log origin/<ветка>` и решить вручную; `missing`/`config-error` в дневной сводке — клон не создан или нет строки в `server-clones.tsv` (клонирование — ручная операция с подтверждённым URL/веткой, автоматика никогда не клонирует); `stale` при зелёном sync — сверить часы.
+
 ## Troubleshooting
 
 ### Симптом: TG-шум «IWE pull-repos warnings»
