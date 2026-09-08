@@ -115,7 +115,7 @@ state_write() {
 send_telegram() {
   local text="$1"
   if [ -z "${TELEGRAM_BOT_TOKEN:-}" ] || [ -z "${TELEGRAM_CHAT_ID:-}" ]; then
-    log "telegram not configured — alert only in journal: $text"
+    log "telegram not configured - alert only in journal: $text"
     return 0
   fi
   curl -s --max-time 10 -X POST \
@@ -243,13 +243,13 @@ cmd_sync() {
   if ! flock -w "$LOCK_WAIT" 200; then
     # Not a failure of the clone: another git writer holds the shared lock.
     # State is left untouched so freshness ages naturally; the next tick retries.
-    log "$NAME: lock $LOCK_FILE busy for ${LOCK_WAIT}s — skipping this tick"; return 1
+    log "$NAME: lock $LOCK_FILE busy for ${LOCK_WAIT}s - skipping this tick"; return 1
   fi
 
   if [ -n "$(git -C "$REPO" status --porcelain 2>/dev/null)" ]; then
     sleep "$DIRTY_GRACE_SEC"
     if [ -n "$(git -C "$REPO" status --porcelain 2>/dev/null)" ]; then
-      record_refusal "dirty" "working tree has local changes — refusing to advance"; return 1
+      record_refusal "dirty" "working tree has local changes - refusing to advance"; return 1
     fi
   fi
 
@@ -270,7 +270,7 @@ cmd_sync() {
   fi
 
   if ! git -C "$REPO" merge --ff-only "$ref" > /dev/null 2>&1; then
-    record_refusal "diverged" "$ref is not a fast-forward of ${before_sha:0:7} — history diverged or rewritten, manual check required"; return 1
+    record_refusal "diverged" "$ref is not a fast-forward of ${before_sha:0:7} - history diverged or rewritten, manual check required"; return 1
   fi
   after_sha=$(git -C "$REPO" rev-parse HEAD)
   if [ "$after_sha" != "$upstream_sha" ]; then
@@ -299,7 +299,7 @@ cmd_fresh() {
   local path reason
   path=$(state_path "$NAME")
   if ! reason=$(state_check_file "$path"); then
-    fresh_fail "unknown" "state file $path: $reason — checkout unverified"; return 1
+    fresh_fail "unknown" "state file $path: $reason - checkout unverified"; return 1
   fi
   local schema status s_repo s_branch sha up ok_ts now head
   schema=$(state_get "$path" schema_version)
@@ -317,7 +317,7 @@ cmd_fresh() {
   fi
   case "$status" in
     ok) ;;
-    refused) log "$NAME: last sync attempt refused ($(state_get "$path" last_error)) — checking last-known-good" ;;
+    refused) log "$NAME: last sync attempt refused ($(state_get "$path" last_error)) - checking last-known-good" ;;
     *) fresh_fail "unknown" "unsupported status '$status'"; return 1 ;;
   esac
   if [ -z "$sha" ] || [ "$sha" != "$up" ]; then
@@ -328,14 +328,14 @@ cmd_fresh() {
     fresh_fail "identity" "checkout HEAD ${head:0:7} != verified sha ${sha:0:7}"; return 1
   fi
   if [ -n "$(git -C "$REPO" status --porcelain 2>/dev/null)" ]; then
-    fresh_fail "dirty" "working tree has local changes — a consumer would run unreviewed code"; return 1
+    fresh_fail "dirty" "working tree has local changes - a consumer would run unreviewed code"; return 1
   fi
   now=$(date -u +%s)
   if ! [[ "$ok_ts" =~ ^[0-9]+$ ]]; then
     fresh_fail "unknown" "last_success_ts '$ok_ts' is not a timestamp"; return 1
   fi
   if [ "$ok_ts" -gt $(( now + FUTURE_SKEW_SEC )) ]; then
-    fresh_fail "future" "last_success_ts is $(( ok_ts - now ))s in the future — clock or file tampering"; return 1
+    fresh_fail "future" "last_success_ts is $(( ok_ts - now ))s in the future - clock or file tampering"; return 1
   fi
   if [ $(( now - ok_ts )) -gt $(( TTL_H * 3600 )) ]; then
     fresh_fail "stale" "last verified sync $(( (now - ok_ts) / 3600 ))h ago (> ${TTL_H}h)"; return 1
