@@ -75,23 +75,28 @@ alert() {
   send_telegram "$full_text"
 }
 
-# alert_ok <text>: успешный прогон — снимает активную эскалацию у ЛЮБОГО
-# класса (за один прогон реально активен максимум один, скрипт выходит на
-# первом сбое) и, если было что снимать, дописывает к тексту факт восстановления.
+# alert_ok <text>: успешный прогон — снимает активную эскалацию у КАЖДОГО
+# класса, у которого она есть (cold-review WP-538 Ф7, 08.09: один прогон
+# роняет максимум один класс, но между прогонами могут накопиться отдельные
+# незакрытые инциденты в РАЗНЫХ классах — например pull упал на прогоне N,
+# push упал на прогоне N+1 уже после того, как pull снова заработал; первый
+# успешный прогон после этого восстанавливает оба сразу). Раньше цикл
+# перезаписывал recovered_from на каждой итерации — восстановление первого
+# класса терялось молча, пилот видел цифры только последнего.
 alert_ok() {
   local text="$1"
   local full_text="$text"
   if $NOTIFY_LIB_AVAILABLE; then
-    local class recovered_from="" recovered_count=0 recovered_dur=0
+    local class recovered_parts=()
     for class in "${ALERT_CLASSES[@]}"; do
       if notify_escalation_update "sync-extensions-auto/$class" ok; then
-        recovered_from="$class"
-        recovered_count="$NOTIFY_ESCALATION_COUNT"
-        recovered_dur="$NOTIFY_ESCALATION_DURATION_SEC"
+        recovered_parts+=("$class: $NOTIFY_ESCALATION_COUNT попыток, $(notify_format_duration "$NOTIFY_ESCALATION_DURATION_SEC")")
       fi
     done
-    if [ -n "$recovered_from" ]; then
-      full_text="$text (восстановилось после $recovered_count попыток, не решалось $(notify_format_duration "$recovered_dur"))"
+    if [ "${#recovered_parts[@]}" -gt 0 ]; then
+      local joined
+      joined=$(printf '%s; ' "${recovered_parts[@]}")
+      full_text="$text (восстановилось: ${joined%; })"
     fi
   fi
   echo "$LOG_PREFIX $full_text"
