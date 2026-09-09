@@ -154,7 +154,8 @@ fi
 
 SYNC_LOG="$(mktemp)"
 if ! bash "$REPO_ROOT/scripts/sync-extensions.sh" > "$SYNC_LOG" 2>&1; then
-  alert sync-script "🚨 sync-extensions-auto: sync-extensions.sh упал с ошибкой: $(tail -3 "$SYNC_LOG" | tr '\n' ' ')"
+  echo "$LOG_PREFIX sync-extensions.sh error tail: $(tail -3 "$SYNC_LOG" | tr '\n' ' ')"
+  alert sync-script "🚨 sync-extensions-auto: sync-extensions.sh упал с ошибкой — подробности в логе на Маке"
   exit 1
 fi
 
@@ -216,7 +217,8 @@ while IFS= read -r changed_line; do
 done <<< "$CHANGED"
 
 if [ "$GATE_FAILED" = true ]; then
-  alert test-gate "🚨 sync-extensions-auto: тестовый гейт нашёл провал — auto-sync отменён, коммит не создан ни для одного из ${FILE_COUNT} файлов (${FILE_LIST}...). $(tail -5 "$GATE_LOG" | tr '\n' ' ')"
+  echo "$LOG_PREFIX test-gate tail: $(tail -5 "$GATE_LOG" | tr '\n' ' ')"
+  alert test-gate "🚨 sync-extensions-auto: тестовый гейт нашёл провал — auto-sync отменён, коммит не создан ни для одного из ${FILE_COUNT} файлов (${FILE_LIST}...), подробности в логе на Маке"
   rm -f "$GATE_LOG"
   exit 1
 fi
@@ -236,7 +238,8 @@ fi
 
 PUSH_OUT=""
 if ! PUSH_OUT=$(git push 2>&1); then
-  alert push "🚨 sync-extensions-auto: коммит создан локально, но push провалился (${FILE_COUNT} файлов: ${FILE_LIST}...): $(echo "$PUSH_OUT" | tail -3 | tr '\n' ' ') — требуется ручное вмешательство"
+  echo "$LOG_PREFIX push error tail: $(echo "$PUSH_OUT" | tail -3 | tr '\n' ' ')"
+  alert push "🚨 sync-extensions-auto: коммит создан локально, но push провалился (${FILE_COUNT} файлов: ${FILE_LIST}...) — требуется ручное вмешательство, подробности в логе на Маке"
   exit 1
 fi
 
