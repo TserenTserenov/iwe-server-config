@@ -217,7 +217,15 @@ while IFS= read -r changed_line; do
 done <<< "$CHANGED"
 
 if [ "$GATE_FAILED" = true ]; then
-  echo "$LOG_PREFIX test-gate tail: $(tail -5 "$GATE_LOG" | tr '\n' ' ')"
+  # Раньше в лог (и в Telegram) шёл tail -5 всего GATE_LOG — при нескольких
+  # запущенных тестах в одном тике хвост почти всегда состоит из PASS-строк
+  # ПОСЛЕДНЕГО (прошедшего) теста, а сама строка "GATE FAIL: <file>" от более
+  # раннего провалившегося теста тонет выше и не попадает даже в лог агенту
+  # (найдено этой сессией по факту: живой лог 09.09 показывал только PASS/WARN,
+  # не саму причину провала). Явно выделяем FAIL-маркеры + пишем полный лог.
+  echo "$LOG_PREFIX test-gate failed: $(grep '^GATE FAIL:' "$GATE_LOG" | tr '\n' ' ')"
+  echo "$LOG_PREFIX test-gate full output follows:"
+  cat "$GATE_LOG"
   alert test-gate "🚨 sync-extensions-auto: тестовый гейт нашёл провал — auto-sync отменён, коммит не создан ни для одного из ${FILE_COUNT} файлов (${FILE_LIST}...), подробности в логе на Маке"
   rm -f "$GATE_LOG"
   exit 1
