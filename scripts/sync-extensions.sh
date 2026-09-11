@@ -42,6 +42,22 @@ if [ -f "$HOME/IWE/CLAUDE.md" ]; then
     cp "$HOME/IWE/CLAUDE.md" "$DST/CLAUDE.md"
 fi
 
+# WP-538 Ф8 (11.09, пир-сессия Codex+Kimi): регресс-гейт для источников,
+# шлющих Telegram напрямую через curl (git-dirty-guard.sh/semaphore-watchdog.sh/
+# day-open-preflight.sh) — они физически не видны рантайм-гейту допуска
+# scripts/lib/telegram.sh, потому что сознательно от него не зависят (Nix-
+# деплой из этого репозитория, не из DS-my-strategy). Это единственная точка,
+# через которую гарантированно проходит любая правка перед попаданием на
+# сервер, независимо от того, где она сделана — в ~/IWE/scripts (обычный путь)
+# или руками в server-extensions/scripts (нештатный).
+LINT="$HOME/IWE/DS-my-strategy/scripts/tests/telegram-raw-text-lint-smoke.sh"
+if [ ! -x "$LINT" ]; then
+    echo "ERROR: $LINT не найден или не исполняем — это единственный гейт для 3 raw-curl watchdog-скриптов, синк остановлен" >&2
+    exit 1
+fi
+echo "Проверка читаемости Telegram-текста (raw-curl источники)..."
+bash "$LINT" || { echo "ERROR: сырой Telegram-текст найден — синк остановлен, см. вывод выше" >&2; exit 1; }
+
 rsync -a --delete "$HOME/IWE/scripts/"                    "$DST/scripts/"
 rsync -a --delete "$HOME/IWE/extensions/"                 "$DST/extensions/"
 # Все скиллы целиком — раньше копировался только day-open, из-за этого audit-installation
