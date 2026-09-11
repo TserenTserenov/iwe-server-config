@@ -768,9 +768,21 @@ in
       serviceConfig = commonServiceConfig // {
         ExecStart  = "${pythonForIWE}/bin/python3 ${iwe}/.claude/scripts/rule-classifier.py";
         TimeoutSec = 300;
+        # rule-classifier.py вызывает `claude -p` напрямую (call_haiku) в расчёте на
+        # личную OAuth-подписку — рабочую на момент написания скрипта, но с 03.09.2026
+        # (WP-538) организация заблокировала автоматизированный доступ по подписке
+        # целиком (не только истёкшим токеном), из-за чего каждый вызов сначала висел
+        # ровно TIMEOUT_S=60 (внутренний хард-таймаут на подпроцесс в самом скрипте),
+        # а сейчас, когда сессии не осталось вовсе, падает сразу с "Not logged in"
+        # (пир-сессия 2026-09-11-22-bot-alerts-tsekh1, инцидент 11.09 00:00 — прогон
+        # не смог классифицировать ни одной записи за TimeoutSec=300 и был убит).
+        # Тот же приём, что уже стоит у iwe-overnight-auditor/iwe-scheduler/iwe-llm-health:
+        # claude CLI сам читает ANTHROPIC_API_KEY/ANTHROPIC_BASE_URL из окружения —
+        # второй EnvironmentFile даёт рабочий proxy shared secret вместо личной подписки.
+        EnvironmentFile = [ "/etc/iwe/env" "-/home/tseren/.iwe/.proxy-env" ];
       };
       path = commonPath;
-      environment = commonEnv;
+      environment = commonEnv // { ANTHROPIC_BASE_URL = "https://iwe-llm-proxy-production.up.railway.app"; };
     };
 
     systemd.timers."iwe-rule-classifier" = {
