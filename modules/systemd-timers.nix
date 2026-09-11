@@ -1138,7 +1138,7 @@ in
     # Env vars: LEARNING_URL, PERSONA_URL, GITHUB_TOKEN_ENCRYPTION_KEY (в /etc/iwe/env).
 
     systemd.services."iwe-activity-hub-sync" = {
-      description = "IWE Activity Hub — sync IWE→Neon (GitHub + WakaTime, 23:00 МСК)";
+      description = "IWE Activity Hub — sync IWE→Neon (GitHub + WakaTime, 23:05 МСК)";
       unitConfig  = commonUnitConfig;
       serviceConfig = commonServiceConfig // {
         ExecStartPre = verifiedSyncPre "DS-IT-systems/activity-hub" "main" "activity-hub";
@@ -1152,11 +1152,18 @@ in
 
     systemd.timers."iwe-activity-hub-sync" = {
       wantedBy    = [ "timers.target" ];
-      description = "Activity Hub sync — ежедн 23:00 МСК";
+      description = "Activity Hub sync — ежедн 23:05 МСК";
       timerConfig = {
+        # 23:05, не 23:00: iwe-scheduler тоже просыпается ровно в 23:00:00 и внутри
+        # гоняет iwe-pull-repos по всем репо — на dirty-репо тот держит общий
+        # .iwe-git-ops.lock по несколько минут (30s grace на каждый), из-за чего
+        # verifiedSyncPre для этого юнита не успевал взять лок и падал в stale
+        # (пир-сессия 2026-09-11-22-bot-alerts-tsekh1, инцидент 11.09 23:01).
+        # Тот же приём уже применён к iwe-stage-evaluator (04:35, после
+        # scheduler/profiler в 04:30) — здесь просто тот же сдвиг для 23:00.
         # Явный TZ → детерминированно МСК круглый год.
         # Без него systemd использует Europe/Helsinki: летом EEST=MSK, зимой EET=MSK-1h.
-        OnCalendar = "*-*-* 23:00:00 Europe/Moscow";
+        OnCalendar = "*-*-* 23:05:00 Europe/Moscow";
         Persistent = true;
       };
     };
