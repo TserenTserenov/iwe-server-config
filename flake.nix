@@ -58,6 +58,13 @@
       modules = [
         disko.nixosModules.disko
         sops-nix.nixosModules.sops
+        # Publish the exact flake revision into the activated NixOS system.
+        # The deployment receipt reads this option; without an explicit value
+        # it can only report "unknown", so a successful activation does not
+        # prove which server-config commit produced it.
+        ({ ... }: {
+          system.configurationRevision = self.rev or self.dirtyRev or null;
+        })
         ./instances/tsekh-1
       ];
     };

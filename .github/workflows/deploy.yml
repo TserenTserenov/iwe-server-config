@@ -76,6 +76,24 @@ jobs:
             --ssh-opts "-o StrictHostKeyChecking=yes" \
             .#tsekh-1
 
+      - name: Verify IWE release receipt provenance
+        run: |
+          RECEIPT=$(ssh -o StrictHostKeyChecking=yes root@95.216.75.148 \
+            cat /home/tseren/IWE/.iwe-runtime/iwe-release.json)
+          CONFIG_REVISION=$(printf '%s' "$RECEIPT" | jq -r '.config_revision')
+          ROOT_REVISION=$(printf '%s' "$RECEIPT" | jq -r '.root_commit')
+          EXPECTED_ROOT_REVISION=$(tr -d '\r\n' < server-extensions/ROOT_COMMIT_SHA)
+
+          if [ "$CONFIG_REVISION" != "$GITHUB_SHA" ]; then
+            echo "::error::Receipt config_revision=$CONFIG_REVISION, expected $GITHUB_SHA"
+            exit 1
+          fi
+          if [ "$ROOT_REVISION" != "$EXPECTED_ROOT_REVISION" ]; then
+            echo "::error::Receipt root_commit=$ROOT_REVISION, expected $EXPECTED_ROOT_REVISION"
+            exit 1
+          fi
+          echo "Release receipt matches config and root revisions"
+
       - name: Smoke test — /health endpoint (post-deploy)
         run: |
           # deploy-rs уже подтвердил активацию через SSH. /health — финальный sanity.
