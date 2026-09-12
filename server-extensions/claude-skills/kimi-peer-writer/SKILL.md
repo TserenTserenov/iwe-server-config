@@ -89,11 +89,47 @@ Peer-сессия DP.SC.154 где Kimi = писатель, напарник —
 Та же проверка, что `~/.kimi-code/skills/session-open/SKILL.md` уже делает для standalone-сессий Kimi (Ф33, 31.07) — до этой правки у пир-сессий Kimi-писателя не было НИКАКОЙ проверки, что сессия открыта честно (тот же класс дыры, что Ф28: закрытие пир-сессии сочло «у пир-сессии свой протокол» достаточным основанием и обошло вопрос-рефлексию):
 
 ```bash
-bash "$HOME/IWE/scripts/kimi-standalone-preflight.sh"
+PREFLIGHT_OUT=$(bash "$HOME/IWE/scripts/kimi-standalone-preflight.sh")
+PREFLIGHT_STATUS=$?
+printf '%s\n' "$PREFLIGHT_OUT"
 ```
 
-- Exit ≠ 0 (`ERROR: Kimi standalone session is NOT OPEN`) → **СТОП.** Не переходить к Шагу 0а.1 или 0б, не открывать WP Gate, не создавать `meta.yaml`/`00-writer.md`, не трогать файлы. Показать пилоту команду из stderr скрипта (`session-guard.sh open --wp WP-N --task "..." --agent kimi`) и ждать, пока сессия не будет открыта явно.
-- Exit 0 (в т.ч. с предупреждением про устаревшую/stale-сессию) → продолжать к Шагу 0а.1.
+`PREFLIGHT_OUT` захвачен (не просто выведен в терминал) — Шагу 0а.0б ниже нужна его `MARKER:`-строка, чтобы восстановить точный семафор без независимого `ls -t`.
+
+- `PREFLIGHT_STATUS ≠ 0` (`ERROR: Kimi standalone session is NOT OPEN`) → **СТОП.** Не переходить к Шагу 0а.1 или 0б, не открывать WP Gate, не создавать `meta.yaml`/`00-writer.md`, не трогать файлы. Показать пилоту команду из stderr скрипта (`session-guard.sh open --wp WP-N --task "..." --agent kimi`) и ждать, пока сессия не будет открыта явно.
+- `PREFLIGHT_STATUS = 0` (в т.ч. с предупреждением про устаревшую/stale-сессию) → продолжать к Шагу 0а.0б.
+
+## Шаг 0а.0б. Постфактум-исправление `close_path` (WP-561 Ф9, пир-сессия 2026-09-12-06 с Claude)
+
+`~/.kimi-code/skills/session-open/SKILL.md` (вне IWE-репозитория, не git) открывает семафор ДО того, как известно, что задание перерастёт в пир-сессию — пишет `close_path: unknown`, а не `close_path: peer-session`. `session-guard.sh close` и pre-commit хуки (`close-runner-gate.sh`, `close-gate-reminder.sh`) читают `close_path` заново с диска в момент своего вызова, не из снимка при `open` — значит значение можно безопасно исправить здесь, сразу после того, как стало понятно, что это пир-сессия писателя Kimi, и до первого коммита.
+
+Точный семафор восстанавливаем из `MARKER:`-строки, которую preflight уже вывел на предыдущем шаге (без независимого `ls -t` — тот выбрал бы «самый свежий» файл, а не обязательно тот же, что признал валидным preflight):
+
+```bash
+MARKER_LINES=$(grep -c '^MARKER: ' <<< "$PREFLIGHT_OUT")
+SEM_FILE=""
+if [ "$MARKER_LINES" -eq 1 ]; then
+  MARKER_LINE=$(grep '^MARKER: ' <<< "$PREFLIGHT_OUT")
+  SESSION_ID_FROM_MARKER=$(sed -E 's#.*kimi-standalone-(.*)\.marker$#\1#' <<< "$MARKER_LINE")
+  CANDIDATE="${IWE_ROOT:-$HOME/IWE}/.iwe-runtime/sessions/kimi-${SESSION_ID_FROM_MARKER}.open"
+  [ -n "$SESSION_ID_FROM_MARKER" ] && [ -f "$CANDIDATE" ] && SEM_FILE="$CANDIDATE"
+fi
+if [ -z "$SEM_FILE" ]; then
+  echo "WARN: close_path-патч пропущен — не удалось однозначно восстановить семафор из вывода preflight (0 или >1 строк MARKER:, либо файл не найден)" >&2
+elif grep -q '^close_path: unknown$' "$SEM_FILE" 2>/dev/null; then
+  # flock — defensive: снижает, но не доказанно устраняет окно между этой
+  # проверкой и записью (validation-to-use race), т.к. писатели вне IWE-репо
+  # (~/.kimi-code/) не обязаны использовать тот же .lock-файл.
+  (
+    flock -x 9
+    grep -q '^close_path: unknown$' "$SEM_FILE" 2>/dev/null || exit 0
+    sed -i 's/^close_path: unknown$/close_path: peer-session/' "$SEM_FILE"
+    grep -q '^close_path: peer-session$' "$SEM_FILE" || echo "WARN: close_path-патч не подтвердился после записи" >&2
+  ) 9>"$SEM_FILE.lock"
+fi
+```
+
+Не трогаем: явные значения `close_path` кроме `unknown` (`pipeline`, `machine-publish-only` и т.п. — от планировщика/автоматики, перезаписывать нельзя); сам `~/.kimi-code/skills/session-open/SKILL.md` (не git, вне зоны деплоя этой сессии — открытый пункт «Осталось» РП-561: научить `session-open` принимать явный сигнал пир-режима, например `IWE_SESSION_CLOSE_PATH`, отдельная межрепозиторная сессия).
 
 ## Шаг 0а.1. Доставка личности (Кир, WP-510 Ф22)
 
