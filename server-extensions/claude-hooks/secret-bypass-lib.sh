@@ -1960,7 +1960,7 @@ def self_test():
         "printenv | grep TOKEN",
         "railway variables",
         "railway variables --kv",
-        "railway variables --service aist_me_bot --kv",
+        "railway variables --service example-service --kv",
         "railway variable list",
         "bash -c \"env\"",
         # Перенаправление вместо конвейера: тот же дамп, и это первый обходной
@@ -1996,7 +1996,7 @@ def self_test():
         "env FOO=bar somecommand --flag",
         "railway login",
         "railway deploy",
-        "railway run --service aist_me_bot -- python3 script.py",
+        "railway run --service example-service -- python3 script.py",
         "printf %s \"env | sort\"",
         # Перенаправление у чужой команды остаётся обычным перенаправлением.
         "sort file.txt > out.txt",
@@ -2656,8 +2656,19 @@ secret_bypass_self_test() {
   audit_file="$audit_tmp/audit.jsonl"
   audit_link="$audit_tmp/audit-link.jsonl"
   audit_truncated="$audit_tmp/audit-truncated.jsonl"
+  # Portable octal-permission read (docs/PLATFORM-COMPAT.md): `stat -f` is
+  # BSD-only, `stat -c` is GNU-only — same Darwin/else split already used by
+  # destructive-guard.sh's neighbour dry-run-gate.sh for the same field.
+  # Called lazily inside the `&&` chain below (not hoisted above the `if`):
+  # $audit_file does not exist until secret_bypass_audit_append creates it.
+  portable_octal_perm() {
+    case "$(uname -s)" in
+      Darwin) stat -f '%Lp' "$1" 2>/dev/null ;;
+      *)      stat -c '%a' "$1" 2>/dev/null ;;
+    esac
+  }
   if secret_bypass_audit_append "$audit_file" '{"hook":"self-test","decision":"test"}' \
-    && [ "$(stat -f '%Lp' "$audit_file" 2>/dev/null)" = "600" ] \
+    && [ "$(portable_octal_perm "$audit_file")" = "600" ] \
     && grep -q '"decision":"test"' "$audit_file"; then
     printf 'PASS durable_private_audit\n'
   else

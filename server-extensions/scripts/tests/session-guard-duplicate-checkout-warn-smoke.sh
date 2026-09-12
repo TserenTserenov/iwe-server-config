@@ -20,13 +20,19 @@ trap 'rm -rf "$TEST_ROOT"' EXIT
 # from in this test — its only job is giving gov_repo_dir() something to
 # compare against.
 CANONICAL="$TEST_ROOT/canonical"
-CHECKOUT_A="$TEST_ROOT/checkout-a"
-CHECKOUT_B="$TEST_ROOT/checkout-b"
+CHECKOUT_A="$TEST_ROOT/.iwe-runtime/isolated-worktrees/checkout-a"
+CHECKOUT_B="$TEST_ROOT/.iwe-runtime/isolated-worktrees/checkout-b"
+MC_SESSIONS="$TEST_ROOT/MC-sessions"
 for dir in "$CANONICAL" "$CHECKOUT_A" "$CHECKOUT_B"; do
     mkdir -p "$dir/sessions"
     git init -q "$dir"
     git -C "$dir" remote add origin "https://github.com/example/shared-repo.git"
 done
+# Exercise the production WP-526 split: session content has a different git
+# identity, so deriving governance checkout from orz_sessions_dir would either
+# name this path or suppress the duplicate warning on remote mismatch.
+git init -q "$MC_SESSIONS"
+git -C "$MC_SESSIONS" remote add origin "https://github.com/example/session-content.git"
 
 open_from() {
     local checkout="$1" id="$2" wp="$3" slug="$4"
@@ -41,6 +47,11 @@ if grep -q 'WARNING: WP WP-900 уже открыт' <<<"$OUT_A"; then
     echo "FAIL: first open in an empty session dir must not warn: $OUT_A" >&2
     exit 1
 fi
+SEM_A="$TEST_ROOT/.iwe-runtime/sessions/fixture-alpha-alpha.open"
+if ! grep -qxF "governance_worktree: $CHECKOUT_A" "$SEM_A"; then
+    echo "FAIL: first semaphore must persist checkout A independently of MC-sessions" >&2
+    exit 1
+fi
 
 # Second session, same WP, different checkout of the same remote — must warn.
 OUT_B=$(open_from "$CHECKOUT_B" beta WP-900 second 2>&1)
@@ -52,11 +63,37 @@ if ! grep -q "$CHECKOUT_A" <<<"$OUT_B"; then
     echo "FAIL: warning must name the other checkout's path: $OUT_B" >&2
     exit 1
 fi
+if grep -Fq "checkout: $MC_SESSIONS" <<<"$OUT_B" \
+   || grep -Fq "checkout: $CANONICAL" <<<"$OUT_B"; then
+    echo "FAIL: warning attributed governance work to session-content/canonical repo: $OUT_B" >&2
+    exit 1
+fi
 
 # The warning must never block: `open` still succeeds (exit 0) and writes a
 # semaphore for checkout B — this is advisory, not a gate.
 if [ ! -f "$TEST_ROOT/.iwe-runtime/sessions/fixture-beta-beta.open" ]; then
     echo "FAIL: open must still succeed (advisory warning, not a block)" >&2
+    exit 1
+fi
+
+# The sibling pre-commit warning consumes the same governance identity. It
+# must see the actual checkouts even though orz_sessions_dir names MC-sessions,
+# and it remains advisory when git runs from canonical by mistake.
+mkdir -p "$TEST_ROOT/home"
+if ! PRECOMMIT_OUT=$(cd "$CANONICAL" && HOME="$TEST_ROOT/home" \
+    IWE_ROOT="$TEST_ROOT" IWE_GOVERNANCE_REPO="canonical" \
+    bash "$GUARD" pre-commit-check 2>&1); then
+    echo "FAIL: checkout-mismatch observation must not block pre-commit: $PRECOMMIT_OUT" >&2
+    exit 1
+fi
+if ! grep -q 'зарегистрированная worktree не совпадает' <<<"$PRECOMMIT_OUT" \
+   || ! grep -Fq "$CHECKOUT_A" <<<"$PRECOMMIT_OUT" \
+   || ! grep -Fq "$CHECKOUT_B" <<<"$PRECOMMIT_OUT"; then
+    echo "FAIL: pre-commit warning must attribute both governance checkouts: $PRECOMMIT_OUT" >&2
+    exit 1
+fi
+if grep -Fq "$MC_SESSIONS" <<<"$PRECOMMIT_OUT"; then
+    echo "FAIL: pre-commit warning must not treat MC-sessions as a governance checkout: $PRECOMMIT_OUT" >&2
     exit 1
 fi
 

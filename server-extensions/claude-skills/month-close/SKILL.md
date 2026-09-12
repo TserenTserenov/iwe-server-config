@@ -233,7 +233,25 @@ Push при явном триггере «заливай».
 Перед запуском R23 — `bash .claude/hooks/rule-engine.sh check-trace-satisfaction --protocol memory/protocol-close.md --section "Month Close"` (5 gate: Ревизия проектов, R-вопросник, Decommission-триаж, Decision log review, Strategy.md — каждый помечался `mark-gate month-close-gN` по ходу своего шага 4/5/7/8/9 выше, не одним блоком здесь). Verdict block → вернуться на незакрытый gate, потом R23. JSON вердикта приложить к вводу R23.
 
 Запустить sub-agent Haiku в роли R23 Верификатор (context isolation).
-Передать: (1) чеклист Month Close ниже, (2) `MonthClose YYYY-MM.md`, (3) изменения в Strategy.md, (4) JSON вердикта trace-satisfaction.
+Раннер сначала выполняет `verify-r23-mechanical`. Для Month Close в Ф151
+детерминированно проверяется только квитанция публикации; проверки области
+сессии, карточки РП и peer-отчёта заранее помечаются `notApplicable`.
+
+На шаге `verify-r23` передать модели: (1) смысловой чеклист Month Close ниже
+без пункта про коммит DS-my-strategy, (2) `MonthClose YYYY-MM.md`, (3) изменения
+в Strategy.md, (4) JSON trace-satisfaction. Ответ —
+`{"verdict":"pass|fail","scope":"semantic"}`. Модель не переоценивает
+механический результат и не пишет `passed`.
+
+В режиме `shadow` следующий шаг — отдельный context-isolated вызов Haiku.
+Передать только реестр `verify-r23-mechanical.sh --list month` и исходные
+артефакты, но не результат handler'а; вернуть строгую карту
+`{"observations":{"<check>":"pass|fail|notRun|notApplicable"}}`.
+Значения диагностического наблюдения не меняют `verdict`/`block`, но полная
+валидная карта обязательна для завершения shadow-прогона и зачёта серии 5/5.
+В `off` действует полный
+прежний чеклист и прежний ответ `{"verdict":"pass|fail"}`; handler и второй
+вызов не выполняются. В `enforce` второй вызов не выполняется.
 По ❌ — исправить до показа пользователю.
 
 ---
@@ -335,7 +353,7 @@ verified: R23 Верификатор
 - [ ] Если фаза/калибр сдвинулись — обновлены соответствующие секции Strategy.md
 - [ ] **«Ты свободен» сказано (шаг 9.5, WP-484)** — после всех решений пилота, до механических шагов 10-12
 - [ ] `archive/MonthClose YYYY-MM.md` создан, все секции заполнены
-- [ ] DS-my-strategy закоммичен
+- [ ] DS-my-strategy закоммичен (в `shadow`/`enforce` этот пункт модели не передавать — его владелец `verify-r23-mechanical`)
 - [ ] Верификация R23 пройдена (или явно пропущена)
 
 Все ✅ → «Месяц закрыт. Готов к Strategy Session первой недели.» Иначе — указать что осталось.

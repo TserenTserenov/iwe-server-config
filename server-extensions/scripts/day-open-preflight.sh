@@ -74,7 +74,7 @@ elif [ -n "$SCOUT_LOG" ]; then
     if [ -n "${TELEGRAM_BOT_TOKEN:-}" ] && [ -n "${TELEGRAM_CHAT_ID:-}" ]; then
       curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
         -H "Content-Type: application/json" \
-        -d "{\"chat_id\":\"${TELEGRAM_CHAT_ID}\",\"text\":\"🚨 Scout silent failure: last log $LOG_DATE (expected $DATE), backlog has pending tasks\"}" > /dev/null
+        -d "{\"chat_id\":\"${TELEGRAM_CHAT_ID}\",\"text\":\"🚨 Разведчик задач молчит — последний раз отчитывался $LOG_DATE, а в очереди есть незакрытые задачи.\"}" > /dev/null
     fi
   fi
 else
@@ -86,7 +86,7 @@ else
     if [ -n "${TELEGRAM_BOT_TOKEN:-}" ] && [ -n "${TELEGRAM_CHAT_ID:-}" ]; then
       curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
         -H "Content-Type: application/json" \
-        -d "{\"chat_id\":\"${TELEGRAM_CHAT_ID}\",\"text\":\"🚨 Scout silent failure: no logs found at all, backlog has pending tasks\"}" > /dev/null
+        -d "{\"chat_id\":\"${TELEGRAM_CHAT_ID}\",\"text\":\"🚨 Разведчик задач вообще не отчитывался, а в очереди есть незакрытые задачи.\"}" > /dev/null
     fi
   fi
 fi
@@ -114,7 +114,7 @@ else
   if [ ! -f "$YESTERDAY_FILE" ] && [ -n "${TELEGRAM_BOT_TOKEN:-}" ] && [ -n "${TELEGRAM_CHAT_ID:-}" ]; then
     curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
       -H "Content-Type: application/json" \
-      -d "{\"chat_id\":\"${TELEGRAM_CHAT_ID}\",\"text\":\"🚨 Feedback-triage silent failure: no reports since before $YESTERDAY\"}" > /dev/null
+      -d "{\"chat_id\":\"${TELEGRAM_CHAT_ID}\",\"text\":\"🚨 Разбор обратной связи не отчитывался с $YESTERDAY.\"}" > /dev/null
   fi
 fi
 

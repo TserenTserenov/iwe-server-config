@@ -14,10 +14,13 @@ TEST_ROOT=$(mktemp -d /private/tmp/session-guard-owner-session.XXXXXX)
 trap 'rm -rf "$TEST_ROOT"' EXIT
 
 REPO="$TEST_ROOT/DS-strategy"
+ORIGIN="$TEST_ROOT/origin.git"
 mkdir -p "$REPO/sessions" "$REPO/inbox/agent/tasks" "$REPO/scripts"
+git init --bare -q "$ORIGIN"
 git -C "$REPO" init -q
 git -C "$REPO" config user.email test@example.com
 git -C "$REPO" config user.name "Test"
+git -C "$REPO" remote add origin "$ORIGIN"
 cat > "$REPO/scripts/process-runner.py" <<'EOF'
 #!/usr/bin/env python3
 print("{}")
@@ -25,6 +28,7 @@ EOF
 chmod +x "$REPO/scripts/process-runner.py"
 git -C "$REPO" add scripts/process-runner.py
 git -C "$REPO" commit -qm init
+git -C "$REPO" push -q origin HEAD:main
 
 export IWE_ROOT="$TEST_ROOT"
 export IWE_GOVERNANCE_REPO="DS-strategy"
@@ -73,8 +77,14 @@ git -C "$REPO" commit -qm "orz A"
 cat > "$REPO/inbox/agent/tasks/RUN-quick-close-owner-smoke-a.md" <<'EOF'
 ---
 process_id: quick-close
+run_id: quick-close-owner-smoke-a
+requested_slug: owner-smoke-a
 status: completed
+current_step: done
 owner_session_id: session-FOREIGN
+results:
+  gather-session-facts:
+    wp: WP-484
 ---
 EOF
 echo "file: inbox/agent/tasks/RUN-quick-close-owner-smoke-a.md" >> "$SEM_A"
@@ -93,12 +103,19 @@ ORZ_BASENAME_B=$(grep '^orz_file: ' "$SEM_B" | cut -d' ' -f2-)
 write_orz "$REPO/sessions/$ORZ_BASENAME_B"
 git -C "$REPO" add "sessions/$ORZ_BASENAME_B"
 git -C "$REPO" commit -qm "orz B"
+git -C "$REPO" push -q origin HEAD:main
 
 cat > "$REPO/inbox/agent/tasks/RUN-quick-close-owner-smoke-b.md" <<'EOF'
 ---
 process_id: quick-close
+run_id: quick-close-owner-smoke-b
+requested_slug: owner-smoke-b
 status: completed
+current_step: done
 owner_session_id: session-B
+results:
+  gather-session-facts:
+    wp: WP-484
 ---
 EOF
 echo "file: inbox/agent/tasks/RUN-quick-close-owner-smoke-b.md" >> "$SEM_B"
@@ -123,7 +140,13 @@ git -C "$REPO" commit -qm "orz C"
 cat > "$REPO/inbox/agent/tasks/RUN-quick-close-owner-smoke-c.md" <<'EOF'
 ---
 process_id: quick-close
+run_id: quick-close-owner-smoke-c
+requested_slug: owner-smoke-c
 status: completed
+current_step: done
+results:
+  gather-session-facts:
+    wp: WP-484
 ---
 EOF
 echo "file: inbox/agent/tasks/RUN-quick-close-owner-smoke-c.md" >> "$SEM_C"
@@ -135,41 +158,54 @@ else
   echo "PASS: legacy card without owner_session_id rejected when this session's own id is known"
 fi
 
-# --- Scenario D: this session's own harness_session_id unknown -> fall back
-# to unfiltered (pre-fix) behaviour, no regression for the documented Ф118
-# race (CLAUDE_CODE_SESSION_ID not yet set at open time).
+# --- Scenario D: this session's harness_session_id is absent, so the guard's
+# own runtime-neutral UUID is the exact card owner.  This is the Kimi-like
+# shape: absence of a Claude harness must not weaken owner identity.
 REPO2="$TEST_ROOT/DS-strategy-noharness"
 mkdir -p "$REPO2/sessions" "$REPO2/inbox/agent/tasks" "$REPO2/scripts"
 git -C "$REPO2" init -q
 git -C "$REPO2" config user.email test@example.com
 git -C "$REPO2" config user.name "Test"
+ORIGIN2="$TEST_ROOT/origin-noharness.git"
+git init --bare -q "$ORIGIN2"
+git -C "$REPO2" remote add origin "$ORIGIN2"
 cp "$REPO/scripts/process-runner.py" "$REPO2/scripts/process-runner.py"
 chmod +x "$REPO2/scripts/process-runner.py"
 echo "placeholder" > "$REPO2/sessions/00-index.md"
 git -C "$REPO2" add sessions/00-index.md scripts/process-runner.py
 git -C "$REPO2" commit -qm init
+git -C "$REPO2" push -q origin HEAD:main
 
 unset CLAUDE_CODE_SESSION_ID
 IWE_ROOT="$TEST_ROOT" IWE_GOVERNANCE_REPO="DS-strategy-noharness" bash "$GUARD" open --wp WP-484 --task fixture --slug owner-smoke-d --agent fixture >/dev/null
 SEM_D=$(grep -l '^slug: owner-smoke-d$' "$TEST_ROOT"/.iwe-runtime/sessions/fixture-*.open)
 grep -q '^harness_session_id: ' "$SEM_D" && { echo "FAIL: fixture setup — harness_session_id unexpectedly recorded" >&2; exit 1; }
+GUARD_SESSION_D=$(sed -n 's/^session_id: //p' "$SEM_D")
 ORZ_BASENAME_D=$(grep '^orz_file: ' "$SEM_D" | cut -d' ' -f2-)
 write_orz "$REPO2/sessions/$ORZ_BASENAME_D"
 git -C "$REPO2" add "sessions/$ORZ_BASENAME_D"
 git -C "$REPO2" commit -qm "orz D"
+git -C "$REPO2" push -q origin HEAD:main
 
-cat > "$REPO2/inbox/agent/tasks/RUN-quick-close-owner-smoke-d.md" <<'EOF'
+cat > "$REPO2/inbox/agent/tasks/RUN-quick-close-owner-smoke-d.md" <<EOF
 ---
 process_id: quick-close
+run_id: quick-close-owner-smoke-d
+requested_slug: owner-smoke-d
 status: completed
+current_step: done
+owner_session_id: $GUARD_SESSION_D
+results:
+  gather-session-facts:
+    wp: WP-484
 ---
 EOF
 echo "file: inbox/agent/tasks/RUN-quick-close-owner-smoke-d.md" >> "$SEM_D"
 
 if IWE_ROOT="$TEST_ROOT" IWE_GOVERNANCE_REPO="DS-strategy-noharness" bash "$GUARD" close --wp WP-484 --slug owner-smoke-d --agent fixture; then
-  echo "PASS: unfiltered (pre-fix) behaviour preserved when this session's own harness_session_id is unknown"
+  echo "PASS: runtime-neutral guard UUID binds a no-harness terminal card"
 else
-  echo "FAIL: close regressed the documented Ф118 no-harness-session-id path" >&2
+  echo "FAIL: close rejected a no-harness card owned by the exact guard UUID" >&2
   exit 1
 fi
 

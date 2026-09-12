@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Tests for artifactor.py schema_version 2 (WP-481 Ф7 шаги 3-4).
+"""Tests for artifactor.py schema_version 3 (WP-575 Ф2).
 
 Ранее (WP-421) существовал только ручной прогон 23 фраз, не сохранённый как
 pytest — первое персистентное покрытие для этого файла (05.08.2026, консенсус
@@ -35,20 +35,21 @@ ALL_KEYWORDS = list(af.KEYWORD_MAP.items())
 
 
 @pytest.mark.parametrize("kw,expected", ALL_KEYWORDS, ids=[kw for kw, _ in ALL_KEYWORDS])
-def test_every_keyword_produces_valid_schema_v2(kw, expected):
+def test_every_keyword_produces_valid_schema_v3(kw, expected):
     """Каждая из всех записей KEYWORD_MAP классифицируется без падения и
-    возвращает согласованную форму (schema_version 2, WP-481 Ф7)."""
-    task_type, cls, kind_id, artifact = expected
+    возвращает согласованную форму (schema_version 3, WP-575 Ф2)."""
+    task_type, cls, kind_id, artifact, result_type = expected
     r = run_artifactor(kw)
     assert r.returncode == 0, r.stderr
     result = json.loads(r.stdout)
     assert result["task_type"] == task_type
     assert result["class"] == cls
-    assert result["schema_version"] == 2
+    assert result["schema_version"] == 3
     assert result["confidence"] == "high"
     assert result["resolution_path"] == "keyword"
     assert result["artifact"] == artifact
     assert result["artifact"]
+    assert result["result_type"] == result_type
     assert result["hypothesis_relation"] == "unclassified"
     if kind_id is None:
         assert result["expected_result_kind"] is None
@@ -138,5 +139,5 @@ def test_special_resolution_covers_exactly_the_none_kind_ids():
     """Инвариант модуля: kind_id=None в KEYWORD_MAP допустим ТОЛЬКО с записью
     в SPECIAL_RESOLUTION — иначе resolve_result_kind падает AssertionError
     (осознанный пропуск, не забытая карта)."""
-    none_task_types = {tt for tt, _, kind_id, _ in af.KEYWORD_MAP.values() if kind_id is None}
+    none_task_types = {tt for tt, _, kind_id, _, _ in af.KEYWORD_MAP.values() if kind_id is None}
     assert none_task_types == set(af.SPECIAL_RESOLUTION.keys())

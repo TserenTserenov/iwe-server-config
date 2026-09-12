@@ -79,6 +79,15 @@ while IFS= read -r repo; do
 
     dir="$IWE_ROOT/$repo"
 
+    # Stale staged diff sitting in the index предшествует этой сессии (найдено
+    # 11.09.2026 живьём: застейдженный откат WP-539/S-63/R23-shadow в
+    # iwe-local-config пролежал незамеченным несколько часов, потому что
+    # ничто не проверяет index на первом касании репо за сессию — read-only,
+    # никогда не блокирует, просто называет репо.
+    if ! git -C "$dir" diff --cached --quiet 2>/dev/null; then
+        warns="${warns}${repo}: в индексе застейджены изменения от прошлой/чужой сессии — проверь 'git diff --cached' перед тем как коммитить что-либо здесь. "
+    fi
+
     # Safe-pull не имеет права менять stash. Снимок OID ловит рост, уменьшение
     # и same-count replacement; конкурентное изменение не приписываем хуку.
     stash_before_ok=true

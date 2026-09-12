@@ -2,6 +2,29 @@
 
 <!-- AUTHOR-ONLY -->
 
+### Записать уточнённый мультипликатор в ledger (bug-2026-09-06)
+
+> **Источник:** ретроспективная сверка 06.09 нашла, что `facts_digest.multiplier_estimated` (пишется автоматическим шагом 10/11, формула WakaTime/session-hours) и «Мультипликатор дня» из шага 12 (формула Бюджет/WakaTime, после ручного sanity check) — две разные метрики под одним словом, и ledger никогда не получал второе число. Из-за этого Day Open на следующий день показывал грубую авто-оценку, а не уточнённое число из вчерашнего DayPlan. `render-open.py` уже умеет отдавать приоритет полю `multiplier_final` (правка того же дня) — не хватало только записи.
+
+**Когда выполнять:** сразу после шага 12 (Мультипликатор IWE), как только «Мультипликатор дня» посчитан и прошёл sanity check.
+
+```bash
+TODAY=$(date +%Y-%m-%d)
+MULT_FINAL="<число из шага 12, например 2.9>"
+DATA_JSON=$(python3 -c "
+import json,sys,datetime
+print(json.dumps({
+  'for_date': sys.argv[1],
+  'multiplier_final': float(sys.argv[2]),
+  'multiplier_final_source': 'day-close-manual-recalc (уточнённый по содержанию сессий)',
+  'multiplier_final_written_at': datetime.datetime.now(datetime.timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ'),
+}))
+" "$TODAY" "$MULT_FINAL")
+bash ~/IWE/DS-my-strategy/scripts/ledger-append.sh day "$TODAY" facts_digest "$DATA_JSON" "day-close-multiplier-final"
+```
+
+Идемпотентно по построению (append-only, `render-open.py` берёт последнее значение поля) — повторный запуск с тем же числом просто добавит ещё одну согласованную запись, без вреда.
+
 ### Emit day_close (WP-151 Блок B)
 
 > Выполнить **после** `day-close.sh` (основных шагов Close) и commit DayPlan.

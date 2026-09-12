@@ -2,7 +2,7 @@
 name: peer-conversation
 description: Многотуровый диалог писателя (Claude) с одним или несколькими напарниками (любой набор из kimi/codex/hermes/claude-headless) по задаче пилота (DP.SC.154). Ведёт turn-loop (2 участника) или round-loop (3+, WP-509), обнаруживает CONSENSUS/ESCALATE, после консенсуса — Decision Gate (зафиксировать vs реализовать → ревью → проверить → задеплоить), синтезирует report.md через Agent tool.
 argument-hint: "<описание задачи> [--peer kimi|codex|hermes|claude[,vendor2,...]] | --list | --interrupt <session_id> | --finalize <session_id>"
-version: 1.6.0
+version: 1.6.1
 layer: L3
 status: active
 triggers:
@@ -887,7 +887,8 @@ fi
 
 **Если commit/publish fail** (pre-commit hook отказал, конфликт с remote, `ds-publish.sh`/`publish_commit` вернул non-zero):
 - НЕ обходить хуки (`--no-verify` запрещён правилом 6).
-- Зафиксировать в logs, показать пилоту, ESCALATE_TO_USER.
+- **НЕ пересчитывать `$SHA` заново через `git rev-parse HEAD` и не вызывать `publish_commit` повторно с новым значением** (живой дефект, `inbox/bugs/bug-2026-09-09-publish-commit-against-canonical-checkout-silently-drops-commit.md`, WP-530 Ф36/Ф38 — общая рабочая копия могла сдвинуться между двумя вызовами по причине, не связанной с этим коммитом; повторный вызов с фрешовым HEAD обнаруживает, что HEAD уже патч-эквивалентен чему-то опубликованному, и возвращает ложноположительный `PUBLISH_OK`, реально не опубликовав исходный `$SHA` — тот остаётся только в `reflog`). `$SHA` — значение конкретного коммита, зафиксированное один раз сразу после `git commit`; при неудаче публикации это же значение остаётся единственно верным на протяжении всего дальнейшего разбора этой публикации.
+- Зафиксировать в logs, показать пилоту, ESCALATE_TO_USER. Если пилот просит повторить — пересобрать через `session-guard.sh open --isolate` (изолированный worktree от актуального `origin/main`, как и предписывает сам `isolate-push.sh`) и разрешить конфликт там, а не повторным вызовом `publish_commit` на этом же `$SHA` в общем чекауте.
 
 ### 3.6.6 Outcome дополнение к report-draft.md
 

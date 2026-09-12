@@ -352,7 +352,7 @@ fi
 if repo_has_operation; then
   echo "git-dirty-guard: $REPO is mid-operation -- refusing to touch" >&2
   alert_dedup_send mid-operation "mid-operation" \
-    "🚨 git-dirty-guard: $REPO застрял в git-операции — не тронул, нужно ручное восстановление." \
+    "🚨 $REPO застрял в git-операции — не тронул, нужно ручное восстановление." \
     "Незавершённая git-операция всё ещё висит, нужно ручное восстановление."
   exit 1
 fi
@@ -572,7 +572,7 @@ if [ "${#DIFFERING[@]}" -eq 0 ]; then
   echo "git-dirty-guard: ${#TRACKED_DIRTY[@]} tracked file(s) match origin/$BRANCH, but automatic self-heal is disabled to protect concurrent work" >&2
   STALE_SIG=$(printf '%s\n' "${TRACKED_DIRTY[@]}" | LC_ALL=C sort | cksum | cut -d' ' -f1)
   alert_dedup_send stale-mirror "$STALE_SIG" \
-    "🚨 git-dirty-guard: $REPO — найден устаревший зеркальный слой; автоматический reset отключён, нужна эксклюзивная ручная очистка." \
+    "🚨 $REPO — найден устаревший зеркальный слой, сам чинить не стал, нужна ручная очистка." \
     "Устаревший зеркальный слой всё ещё на месте, нужна эксклюзивная ручная очистка."
   exit 1
 fi
@@ -582,6 +582,6 @@ printf '  %s\n' "${DIFFERING[@]}" >&2
 LIST=$(printf '%s, ' "${DIFFERING[@]:0:5}")
 LIST="${LIST%, }"
 differ_chronic_gate \
-  "🚨 git-dirty-guard: $REPO — ${#DIFFERING[@]} файл(ов) с несохранёнными правками (не тронул): $LIST." \
+  "🚨 $REPO — ${#DIFFERING[@]} файл(ов) с несохранёнными правками, не тронул: $LIST." \
   "Незакоммиченные правки всё ещё не разобраны."
 exit 1

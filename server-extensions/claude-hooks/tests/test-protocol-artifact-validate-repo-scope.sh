@@ -291,9 +291,39 @@ expect "compound command with one unscoped commit still validates" block "$GOV" 
   "git commit -m a -- notes.md && git commit -m b"
 
 # 20. Narrowing must not resurrect the cross-repo bug: an unrelated repo's
-#     commit still passes through regardless of pathspec.
+#     commit still passes through regardless of pathspec. (Guards the OLD
+#     behaviour against this change, not the narrowing itself.)
 expect "unrelated repo with pathspec still passes through" pass "$GOV" \
   "git -C $OTHER commit -m x -- readme.md"
+
+# 21-22. Cold review of the first draft (2026-09-06) found six commands where
+# the narrowing answered "excluded" while the plan file really would have been
+# committed. The parser-level corpus is tests/test-git-commit-pathspec.py;
+# these two check the wiring end to end for the two most common shapes: two
+# commits sent as two LINES of one Bash call, and `commit -i`, which adds the
+# whole index on top of the pathspec.
+expect "second commit on the next line still validates" block "$GOV" \
+  "$(printf 'git commit -m a -- notes.md\ngit commit -m b')"
+
+expect "commit -i pulls in the index despite a narrow pathspec" block "$GOV" \
+  "git commit -i -m x -- notes.md"
+
+# 23-24. Second cold review (2026-09-06): a leading wrapper word this parser
+# doesn't recognize must not be silently treated as "unrelated" — env/nohup
+# and friends still run a real, unbounded git commit. A STANDALONE
+# `env git commit ...` or `git rebase --continue` never reaches the pathspec
+# helper in the first place: this hook's own top-level trigger (above, the
+# anchor requiring the literal word `commit` right after `git`) already skips
+# it before GOV_PATH is even resolved — a pre-existing gap in the whole hook,
+# out of scope for this narrowing fix. These two cases exercise the path that
+# IS reachable: a compound command whose FIRST invocation is a real,
+# pathspec-scoped `git commit` (so the top-level anchor fires), with the
+# wrapper/rebase invocation as the second one.
+expect "env wrapper as the second invocation still validates" block "$GOV" \
+  "git commit -m a -- notes.md && env git commit -m b"
+
+expect "rebase --continue as the second invocation still validates" block "$GOV" \
+  "git commit -m a -- notes.md && git rebase --continue"
 
 echo ""
 echo "PASS=$PASS FAIL=$FAIL"

@@ -1101,14 +1101,23 @@ render_compact_dashboard() {
 # replaces the old markdown "stage" column). "черновик" maps to status: written
 # (draft file exists, needs work) — proposed/accepted have no file yet, ready/published
 # are past the editing stage this section prompts for.
-render_self_dev() {
+#
+# WP-484 Этап 2 п.12 (issue #636, пир-сессия 08.09 с Kimi+Codex): single source of
+# truth for the active-topic lookup, shared between this section and the
+# "План на сегодня" table row below (§ SELF_DEV_TOPIC_ROW). Before this, the table
+# row was a bare `[тема]` placeholder never wired to topic-log.yaml at all — the
+# LLM filling that row had no grounded data and invented a plausible-sounding topic
+# (live case: fabricated topic carried forward by carry-over 12.08→02.09 with no
+# revalidation). Returns four \x1f-separated fields: status flag (ok/no-file/
+# no-python/no-entry/error), id, hook (human-readable topic title), draft_path.
+resolve_self_dev_topic() {
   local topic_log="$IWE/DS-Tseren-Brand/content/topic-log.yaml"
   if [ ! -f "$topic_log" ]; then
-    echo "**Активный черновик:** нет данных (DS-Tseren-Brand/content/topic-log.yaml не найден)"
+    echo "no-file"
     return
   fi
   if ! command -v python3 >/dev/null 2>&1; then
-    echo "**Активный черновик:** нет данных (python3 недоступен для чтения topic-log.yaml)"
+    echo "no-python"
     return
   fi
   local row
@@ -1117,30 +1126,73 @@ import yaml
 try:
     with open('$topic_log') as f:
         d = yaml.safe_load(f) or {}
+    for t in reversed(d.get('topics') or []):
+        if t.get('status') == 'written' and t.get('draft_path'):
+            print('ok\x1f' + str(t.get('id', '')) + '\x1f' + str(t.get('hook', '')) + '\x1f' + str(t['draft_path']))
+            break
 except Exception as e:
-    print('__error__\x1f' + str(e).replace(chr(10), ' ')[:200])
-    raise SystemExit
-for t in reversed(d.get('topics') or []):
-    if t.get('status') == 'written' and t.get('draft_path'):
-        print(str(t.get('id', '')) + '\x1f' + str(t['draft_path']))
-        break
+    print('error\x1f' + str(e).replace(chr(10), ' ')[:200])
 " 2>/dev/null)
   if [ -z "$row" ]; then
-    echo "**Активный черновик:** нет активных черновиков (status: written) в topic-log.yaml"
+    echo "no-entry"
     return
   fi
-  local dnum path
-  dnum="${row%%$'\x1f'*}"
-  path="${row#*$'\x1f'}"
-  if [ "$dnum" = "__error__" ]; then
-    echo "**Активный черновик:** нет данных (ошибка чтения topic-log.yaml: $path)"
-    return
-  fi
-  echo "**Активный черновик:** [$dnum]($path)"
+  echo "$row"
+}
+SELF_DEV_TOPIC_RAW=$(resolve_self_dev_topic)
+
+render_self_dev() {
+  local raw="$SELF_DEV_TOPIC_RAW"
+  case "$raw" in
+    no-file)
+      echo "**Активный черновик:** нет данных (DS-Tseren-Brand/content/topic-log.yaml не найден)"
+      return ;;
+    no-python)
+      echo "**Активный черновик:** нет данных (python3 недоступен для чтения topic-log.yaml)"
+      return ;;
+    no-entry)
+      echo "**Активный черновик:** нет активных черновиков (status: written) в topic-log.yaml"
+      return ;;
+    error*)
+      echo "**Активный черновик:** нет данных (ошибка чтения topic-log.yaml: ${raw#error$'\x1f'})"
+      return ;;
+  esac
+  local id path
+  id=$(cut -d$'\x1f' -f2 <<<"$raw")
+  path=$(cut -d$'\x1f' -f4 <<<"$raw")
+  echo "**Активный черновик:** [$id]($path)"
   echo "**Где остановился:** открой файл черновика — прогресс ведёт пилот."
   echo "**Сегодня:** 60-90 мин на редактирование / структурирование."
 }
 SELF_DEV_BLOCK=$(render_self_dev)
+
+# Table row for "План на сегодня" — the pre-fill half of the WP-484 п.12 fix.
+# The LLM pass over that table (day-open-llm-fill.py) can still reformulate or
+# drop this row (it isn't part of the protected wp_facts JSON) — the second,
+# mandatory half is the post-LLM deterministic retrofit in fill_chunk().
+render_self_dev_topic_row() {
+  local raw="$SELF_DEV_TOPIC_RAW"
+  case "$raw" in
+    ok*)
+      local id hook path
+      # Unescaped |/]/) from topic-log.yaml would split the table row or truncate
+      # the markdown link (cold-review, WP-484 п.12 session) — the title field
+      # (`hook`) is free-form prose most likely to carry that punctuation.
+      id=$(cut -d$'\x1f' -f2 <<<"$raw" | sed -e 's/|/\\|/g' -e 's/\]/\\]/g')
+      hook=$(cut -d$'\x1f' -f3 <<<"$raw" | sed -e 's/|/\\|/g' -e 's/\]/\\]/g')
+      path=$(cut -d$'\x1f' -f4 <<<"$raw" | sed -e 's/|/\\|/g' -e 's/)/%29/g')
+      if [ -n "$hook" ]; then
+        echo "**Саморазвитие** — [$id: $hook]($path)"
+      else
+        echo "**Саморазвитие** — [$id]($path)"
+      fi
+      ;;
+    *)
+      echo "**Саморазвитие** — тема не задана, выбрать с пилотом"
+      ;;
+  esac
+}
+SELF_DEV_TOPIC_ROW=$(render_self_dev_topic_row)
 
 # --- Pre-compute sweep list (single call, reused below) ---
 # SWEEP_WP_FULL: raw active-wp-sweep.sh output, kept only as input to SWEEP_WP_LIST below.
@@ -1227,8 +1279,6 @@ generated_by: day-open-scaffold.sh (WP-264 Ф2)
 <details>
 <summary><b>Саморазвитие</b></summary>
 
-- **Изучи персональное руководство:** [DS-personal-guide](https://github.com/TserenTserenov/DS-personal-guide)
-
 $SELF_DEV_BLOCK
 
 </details>
@@ -1258,8 +1308,8 @@ ${STRATEGY_CONTEXT:-не найдены}
 
 | 🚦 | ТВС | # | РП | h | Статус |
 |----|-----|---|-----|---|--------|
-| ⚫ | В | N | **Саморазвитие** — [тема] | 1-2 | pending |
-| 🔴 | С | NNN | **<!-- PENDING -->** | X | pending |
+| ⚫ | В | N | $SELF_DEV_TOPIC_ROW | 1-2 | pending |
+| <!-- PENDING: 🚦 (🔴/🟡/🟢) --> | <!-- PENDING: ТВС (С/В/Т) --> | <!-- PENDING: № РП --> | **<!-- PENDING: формулировка РП -->** | <!-- PENDING: оценка часов --> | <!-- PENDING: статус --> |
 
 > ТВС: **В** = Важное (развитие / критичное для R1-R6) · **Т** = Текущее (плановая работа) · **С** = Срочное (угроза конвейеру, дублируется в шапке 🚨)
 

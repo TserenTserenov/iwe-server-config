@@ -121,7 +121,7 @@ check_semaphore() {
   if [ -n "$peer_meta" ] && [ -f "$peer_meta" ]; then
     status="$(grep "^status: " "$peer_meta" | head -1 | sed -E 's/^status: *"?([^"]*)"?$/\1/' || true)"
     if [ "$status" = "completed" ] && [ "$age_s" -gt "$RULE_A_THRESHOLD_S" ]; then
-      local msg="Семафор не снят: сессия WP:${wp} (${slug:-unknown}) завершена (${peer_meta}), но .open висит ${age_s}s"
+      local msg="Сессия по РП $wp завершилась, но замок на файлы за собой не сняла — сам сниму, когда буду в этом репозитории."
       log_alert "RULE_A" "$sem_file" "$wp" "${slug:-unknown}" "$age_s" "peer meta status=completed at $peer_meta"
       notify_telegram "$msg"
       # RULE_A уже объяснило зависание конкретной причиной (работа выше по
@@ -137,7 +137,7 @@ check_semaphore() {
   # либо нет внешнего подтверждения, либо работа ещё не завершена. Страховка
   # от краша, который никогда не запишет status: completed никуда.
   if [ "$age_s" -gt "$RULE_B_THRESHOLD_S" ]; then
-    local msg="Семафор живёт подозрительно долго: WP:${wp} (${slug:-unknown}), .open висит ${age_s}s без Close"
+    local msg="Замок на файлы по РП $wp держится подозрительно долго без закрытия сессии — гляну, когда буду в этом репозитории."
     log_alert "RULE_B" "$sem_file" "$wp" "${slug:-unknown}" "$age_s" "no completion signal, absolute age threshold"
     notify_telegram "$msg"
   fi

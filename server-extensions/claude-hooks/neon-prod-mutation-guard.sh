@@ -77,16 +77,25 @@
 #   команда не похожа на прямое обращение к прод-ветке                    → пропустить молча
 #   обычный curl без method/body/upload/config (доказуемый GET/HEAD)       → пропустить молча
 #   любой прямой/динамический psql или неоднозначный curl                  → требовать аренду
-#   аренда моя (session_id совпал)                                        → пропустить
-#   аренда чужая                                                          → БЛОК (названа сессия-держатель)
-#   аренды нет                                                            → БЛОК (дана готовая команда acquire)
-#   шлюз недоступен                                                       → БЛОК (fail-closed, как у соседних гардов)
+#   локальная аренда моя И межмашинная аренда моя                         → пропустить
+#   любая из двух чужая                                                   → БЛОК (назван держатель)
+#   любой из двух аренды нет                                              → БЛОК (дана готовая команда acquire)
+#   шлюз или межмашинная аренда недоступны                                → БЛОК (fail-closed, как у соседних гардов)
+#
+# WP-530 Ф24 п.1 (АрхГейт 06.09): до этой правки хук требовал ТОЛЬКО аренду
+# замка Local Gateway. Шлюз -- unix-сокет, на цехе крутится свой экземпляр со
+# своей нумерацией токенов: две машины могли независимо держать "тот самый"
+# замок над одной боевой базой. Машинно-локальная защита над общим удалённым
+# ресурсом -- ровно то расхождение защиты и охвата, ради которого созывался
+# гейт. Теперь требуются оба уровня; берутся одной командой
+# (DS-my-strategy/scripts/lib/neon-prod-lease.sh acquire).
 
 set -uo pipefail
 
 IWE_ROOT="${IWE_WORKSPACE:-$HOME/IWE}"
 GOV_REPO="${IWE_GOVERNANCE_REPO:-DS-my-strategy}"
 GATEWAY_LOCK="$IWE_ROOT/$GOV_REPO/scripts/lib/gateway-lock.py"
+CROSS_HOST_LEASE="$IWE_ROOT/$GOV_REPO/scripts/lib/neon-prod-lease.sh"
 LOCK_KEY="${NEON_PROD_MUTATION_LOCK_KEY:-/virtual-locks/neon-production-mutation}"
 
 security_failure() {
@@ -291,6 +300,25 @@ if [ "$PSQL_SIGNAL" = "0" ] && [ "$DYNAMIC_COMMAND_SIGNAL" = "0" ] && \
 fi
 
 
+# Второй уровень (WP-530 Ф24 п.1): локальный замок доказывает только, что на
+# ЭТОЙ машине никто другой не пишет. Общую боевую базу делят обе машины, и
+# единственное место, которое они реально делят, -- origin. Отказ читается
+# fail-closed: недоступная защитная процедура блокирует затронутое действие,
+# а не пропускает его. Сетевая проверка делается только после того, как
+# локальный замок признан нашим, поэтому её ~1 с не платится на чужих отказах.
+require_cross_host_lease() {
+  [ -f "$CROSS_HOST_LEASE" ] || security_failure "нет CLI межмашинной аренды ($CROSS_HOST_LEASE) -- защитная процедура недоступна, прямое обращение к боевой базе заблокировано (fail-closed)"
+  local lease_out lease_rc
+  lease_out=$(bash "$CROSS_HOST_LEASE" check 2>&1)
+  lease_rc=$?
+  case "$lease_rc" in
+    0) return 0 ;;
+    3) security_failure "локальный замок твой, но межмашинная аренда не взята: на другой машине (цех) ничто не мешает писать в ту же боевую базу. Возьми обе одной командой: bash $CROSS_HOST_LEASE acquire \"причина\", после работы -- release" ;;
+    4) security_failure "боевая база занята другой машиной или сессией: $lease_out. Дождись освобождения (bash $CROSS_HOST_LEASE status)" ;;
+    *) security_failure "состояние межмашинной аренды прочитать не удалось ($lease_out) -- fail-closed. Проверь сеть/доступ к origin и повтори" ;;
+  esac
+}
+
 # WP-484 (03.09, peer-session 2026-09-03-11-wp484-remaining-kimi-session-open,
 # cold-review found this sibling of the write-path-lease-guard.sh fix): pass
 # only the BASE identity, not the already-suffixed $AGENT_ID -- gateway-lock.py
@@ -305,12 +333,13 @@ case "$CHECK_RC" in
   0)
     HOLDER=$(printf '%s' "$LOCK_JSON" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("holder",""))' 2>/dev/null)
     if [ "$HOLDER" = "$AGENT_ID" ]; then
+      require_cross_host_lease
       exit 0
     fi
     security_failure "боевая Neon-ветка сейчас под правкой другой сессии ($HOLDER). Дождись освобождения или согласуй с пилотом. Проверка: python3 $GATEWAY_LOCK check '$LOCK_KEY'"
     ;;
   3)
-    security_failure "команда обращается напрямую или неоднозначно к боевой Neon-ветке без аренды замка. Возьми аренду и повтори: mcp acquire_file_lock (file='$LOCK_KEY') или IWE_AGENT_ID=$AGENT_ID_BASE python3 $GATEWAY_LOCK acquire '$LOCK_KEY' 900, после выполнения - release. Если это мутация, сохрани её файлом миграции и закоммить, даже если применяешь вручную."
+    security_failure "команда обращается напрямую или неоднозначно к боевой Neon-ветке без аренды. Возьми ОБА уровня одной командой и повтори: bash $CROSS_HOST_LEASE acquire \"причина\", после выполнения - bash $CROSS_HOST_LEASE release. Если это мутация, сохрани её файлом миграции и закоммить, даже если применяешь вручную."
     ;;
   *)
     security_failure "шлюз замков недоступен, а команда обращается напрямую или неоднозначно к боевой Neon-ветке (fail-closed). Подними Local Gateway и повтори."

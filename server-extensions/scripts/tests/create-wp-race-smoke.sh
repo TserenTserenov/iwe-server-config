@@ -47,7 +47,7 @@ PIDS=()
 for i in 1 2 3 4 5 6 7 8; do
   (
     IWE_ROOT="$TMP" IWE_GOVERNANCE_REPO="DS-test-strategy" IWE_SCRIPTS="$(dirname "$SESSION_GUARD")" \
-      bash "$CREATE_WP" --title "Карточка гонки $i" --budget 1h --priority P3 --no-consent-check \
+      bash "$CREATE_WP" --title "Карточка гонки $i" --budget 1h --priority P3 --no-consent-check --no-artifactor-check \
       > "$TMP/race-$i.log" 2>&1
     echo $? > "$TMP/race-$i.exit"
   ) &
@@ -80,9 +80,25 @@ ORIGINAL_ROW_INTACT=$(grep -c "^| 100 | P2 | Существующий РП" "$GO
 check "исходная строка WP-100 не тронута" "1" "$ORIGINAL_ROW_INTACT"
 
 if [ -f "$GOV/inbox/WP-101/WP-101.md" ]; then
-  CARD_TITLE=$(grep '^title:' "$GOV/inbox/WP-101/WP-101.md" | head -1)
+  CARD_FILE="$GOV/inbox/WP-101/WP-101.md"
+  CARD_TITLE=$(grep '^title:' "$CARD_FILE" | head -1)
   REGISTRY_TITLE_MATCH=$(grep -q "$(echo "$CARD_TITLE" | sed 's/title: "//;s/"$//')" "$GOV/docs/WP-REGISTRY.md" && echo yes || echo no)
   check "название в карточке совпадает с REGISTRY (не смешаны две сессии)" "yes" "$REGISTRY_TITLE_MATCH"
+
+  for field in \
+    "Что пробовали" \
+    "Что узнали" \
+    "Что дальше" \
+    "Следующий шаг" \
+    "Контекст для следующей сессии" \
+    "Заблокировано" \
+    "Зависит от" \
+    "Актуально до"; do
+    FIELD_COUNT=$(grep -Fc "**${field}:**" "$CARD_FILE")
+    check "поле '${field}' создано ровно один раз" "1" "$FIELD_COUNT"
+  done
+  MEMORY_COUNT=$(grep -c '^[[:space:]]*→ memory:' "$CARD_FILE")
+  check "строка → memory создана ровно один раз" "1" "$MEMORY_COUNT"
 fi
 
 echo

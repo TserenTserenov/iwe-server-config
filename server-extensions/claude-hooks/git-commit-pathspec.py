@@ -27,14 +27,20 @@ false block, which is visible and annoying; a wrong NARROW silently drops a
 real validation, which nobody would ever notice.
 """
 
+import posixpath
 import re
 import shlex
 import sys
+import unicodedata
 
 # Pathspec magic (`:(exclude)`, `:!`, `:/`) changes matching rules in ways this
 # text-only check does not model. Treat any such entry as "could match".
 PATHSPEC_MAGIC_PREFIX = ":"
 GLOB_CHARS = "*?["
+# A pathspec entry carrying a shell expansion can expand to anything, including
+# a plan file. The `-C` handling in protocol-artifact-validate.sh refuses to
+# resolve these for the same reason.
+EXPANSION_CHARS = "$`"
 
 # `git` accepts these before the subcommand; each consumes a following value,
 # so the value must not be mistaken for the `commit` token.
@@ -47,7 +53,25 @@ GIT_GLOBAL_FLAGS_WITH_VALUE = {
     "--exec-path",
 }
 
-COMMAND_SEPARATORS = {";", "&&", "||", "|", "&", "(", ")", "\n"}
+# `commit -i`/`--include` commits the index IN ADDITION to the listed paths,
+# so the pathspec no longer bounds what goes in. `-a`/`--all` has no such
+# case to cover: git itself rejects `-a`/`--all` combined with an explicit
+# pathspec ("paths ... with -a does not make sense"), so by the time a
+# pathspec is present here `-a` could never have been accepted.
+INDEX_INCLUDING_LONG_FLAGS = {"--include"}
+INDEX_INCLUDING_SHORT_LETTERS = set("i")
+
+# Commands that run further commands from text this parser cannot see. Their
+# presence anywhere makes the whole call unmodellable.
+SHELL_INDIRECTION = {"sh", "bash", "zsh", "dash", "ksh", "eval", "xargs"}
+
+# `git <subcmd> --continue` (after a conflict) or a fast-forward-less `pull`
+# can create a commit that is not spelled `commit` and is not bounded by any
+# pathspec this parser could check — treat their mere presence as index-wide,
+# the same as `commit -a`/`-i`.
+GIT_SUBCOMMANDS_MAY_COMMIT = {"rebase", "merge", "cherry-pick", "revert", "am", "pull"}
+
+COMMAND_SEPARATORS = {";", "&&", "||", "|", "|&", "&", "(", ")", "\n"}
 
 ENV_ASSIGNMENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
 COMMAND_WRAPPERS = ("command", "builtin", "exec")
@@ -60,9 +84,18 @@ def tokenize(command):
     `-m "$(cat <<'EOF' ... EOF)"` form used throughout this repo — as ONE
     token, so a `--` inside the message text can never be read as the
     pathspec separator.
+
+    A newline is a command separator, not whitespace: agents routinely send
+    two commits as two lines of one Bash call, and treating the newline as
+    plain whitespace merged them into a single invocation whose pathspec then
+    covered a bare `git commit` on the next line. Comment handling is off for
+    the same reason — an unquoted `#` inside `-m fix#123` is a literal, and
+    dropping the rest of the line there loses the pathspec.
     """
-    lexer = shlex.shlex(command, posix=True, punctuation_chars=True)
+    lexer = shlex.shlex(command, posix=True, punctuation_chars="();<>|&\n")
+    lexer.whitespace = " \t\r"
     lexer.whitespace_split = True
+    lexer.commenters = ""
     try:
         return list(lexer)
     except ValueError:
@@ -87,11 +120,21 @@ def split_invocations(tokens):
     return invocations
 
 
-def commit_args(invocation):
-    """Return the args after `commit` for a `git ... commit` call, else None.
+def classify_invocation(invocation):
+    """Classify one invocation. Returns a `(kind, payload)` pair:
 
-    Leading `VAR=value` assignments and `command`/`exec`/`builtin` wrappers are
-    skipped, matching the invocation anchoring in protocol-artifact-validate.sh.
+      ("commit", args)   — a `git ... commit` call; args = tokens after commit
+      ("other-git", sub) — `git <sub>`, sub not `commit` (`sub` is `None` for
+                            a bare `git`/`git -C x` with nothing after)
+      ("unmodellable", None) — the leading token, after skipping bare `VAR=`
+          assignments and the POSIX `command`/`builtin`/`exec` wrappers, is
+          not literally `git`. This is NOT the same as "proven unrelated":
+          `env git commit`, `/usr/bin/git commit`, `nohup git commit`, a
+          backtick-substitution, or a shell keyword (`for`, `if`, `{`) can
+          all still run a commit that this text-only parser cannot see —
+          conflating "unrecognized" with "safe to ignore" is exactly how the
+          first draft of this parser missed several real commits (cold
+          review, 2026-09-06). Only a bucket the caller must treat as KEEP.
     """
     index = 0
     while index < len(invocation) and (
@@ -101,22 +144,37 @@ def commit_args(invocation):
         index += 1
 
     if index >= len(invocation) or invocation[index] != "git":
-        return None
+        return ("unmodellable", None)
     index += 1
 
     while index < len(invocation):
         token = invocation[index]
         if token == "commit":
-            return invocation[index + 1 :]
+            return ("commit", invocation[index + 1 :])
         if not token.startswith("-"):
-            # A non-flag token before `commit` means this is some other
-            # subcommand (`git rev-parse`, `git merge`, ...).
-            return None
+            return ("other-git", token)
         if token in GIT_GLOBAL_FLAGS_WITH_VALUE:
             index += 2
             continue
         index += 1
-    return None
+    return ("other-git", None)
+
+
+def includes_whole_index(args):
+    """True when `commit` flags pull in more than the listed pathspec."""
+    for token in args:
+        if token == "--":
+            return False
+        if token in INDEX_INCLUDING_LONG_FLAGS:
+            return True
+        if (
+            token.startswith("-")
+            and not token.startswith("--")
+            and set(token[1:]) & INDEX_INCLUDING_SHORT_LETTERS
+        ):
+            # Short flags combine: `-am`, `-im` behave like `-a`/`-i`.
+            return True
+    return False
 
 
 def explicit_pathspec(args):
@@ -137,13 +195,20 @@ def could_match(entry, plan_path):
         return True
     if any(char in entry for char in GLOB_CHARS):
         return True
+    if any(char in entry for char in EXPANSION_CHARS):
+        # `-- $FILE` can expand to the plan file itself.
+        return True
 
-    normalized = entry
-    while normalized.startswith("./"):
-        normalized = normalized[2:]
-    normalized = normalized.rstrip("/")
+    # normpath collapses `./`, `//` and `..`, so `current//DayPlan X.md` and
+    # `inbox/../current/DayPlan X.md` compare like the plain spelling. NFC
+    # normalization matters on macOS, where the filesystem accepts either
+    # composed or decomposed accented/Cyrillic spellings of the same name.
+    normalized = unicodedata.normalize(
+        "NFC", posixpath.normpath(entry.rstrip("/"))
+    )
+    plan_path = unicodedata.normalize("NFC", plan_path)
 
-    if normalized in ("", "."):
+    if normalized in ("", ".", "/"):
         # The whole repository.
         return True
     if normalized == plan_path:
@@ -154,6 +219,22 @@ def could_match(entry, plan_path):
     if normalized.endswith("/" + plan_path):
         # An absolute or otherwise-prefixed spelling of the same file.
         return True
+    plan_dir = posixpath.dirname(plan_path)
+    if plan_dir and (
+        normalized == plan_dir
+        or normalized.endswith("/" + plan_dir)
+        or posixpath.basename(normalized) == plan_dir
+    ):
+        # A directory prefix of the plan file, spelled from the repo root, an
+        # absolute path, or (like the file-name fallback below) relative to
+        # an invocation directory this text-only check cannot resolve.
+        return True
+    if posixpath.basename(normalized) == posixpath.basename(plan_path):
+        # A pathspec is relative to the invocation's own directory, which this
+        # text-only check cannot resolve — `git commit -- "DayPlan X.md"` run
+        # from `current/` commits the plan file. Matching on the file name
+        # alone keeps that case on the safe side.
+        return True
     return False
 
 
@@ -161,16 +242,31 @@ def decide(command, plan_paths):
     tokens = tokenize(command)
     if tokens is None:
         return "KEEP"
-
-    commit_calls = [
-        args
-        for args in (commit_args(inv) for inv in split_invocations(tokens))
-        if args is not None
-    ]
-    if not commit_calls:
+    if any(token in SHELL_INDIRECTION for token in tokens):
+        # `sh -c '...'` and `xargs ... git commit` run commands this parser
+        # never sees, so no pathspec here bounds what actually gets committed.
         return "KEEP"
 
-    for args in commit_calls:
+    saw_commit = False
+    for invocation in split_invocations(tokens):
+        kind, payload = classify_invocation(invocation)
+
+        if kind == "unmodellable":
+            # Not proven unrelated — see classify_invocation's docstring.
+            return "KEEP"
+
+        if kind == "other-git":
+            if payload in GIT_SUBCOMMANDS_MAY_COMMIT:
+                # `rebase/merge/... --continue` can create a commit that
+                # carries the whole index and is not spelled `commit`.
+                return "KEEP"
+            continue
+
+        # kind == "commit"
+        saw_commit = True
+        args = payload
+        if includes_whole_index(args):
+            return "KEEP"
         pathspec = explicit_pathspec(args)
         if pathspec is None:
             # `git commit -m x` / `git commit -a` commit the whole index —
@@ -179,6 +275,13 @@ def decide(command, plan_paths):
         for entry in pathspec:
             if any(could_match(entry, plan) for plan in plan_paths):
                 return "KEEP"
+
+    if not saw_commit:
+        # No `git commit` anywhere in the command — nothing for this hook to
+        # validate regardless (the caller only ever asks about `git commit`
+        # invocations, see protocol-artifact-validate.sh's own anchor check),
+        # but stay on the safe side rather than assume that invariant here.
+        return "KEEP"
     return "NARROW"
 
 

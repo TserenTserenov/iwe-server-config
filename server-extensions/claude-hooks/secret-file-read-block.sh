@@ -53,6 +53,107 @@ log_decision() {
   secret_bypass_audit_append "$LOG_FILE" "$record"
 }
 
+make_payload() {
+  # make_payload <tool_name> <field> <value-or-empty> <has_value> <value_type:str|num>
+  python3 - "$1" "$2" "${3-}" "$4" "${5:-str}" <<'PYEOF'
+import json
+import sys
+
+tool_name, field, value, has_value, value_type = sys.argv[1:6]
+if has_value != "1":
+    tool_input = {}
+elif value_type == "num":
+    tool_input = {field: int(value)}
+else:
+    tool_input = {field: value}
+print(json.dumps({
+    "hook_event_name": "PreToolUse",
+    "session_id": "self-test-session",
+    "tool_name": tool_name,
+    "tool_input": tool_input,
+}))
+PYEOF
+}
+
+self_test() {
+  local failures=0
+
+  run_case() {
+    # run_case <name> <expect: deny|allow|error(rc=N)> <tool_name> <field> <value> [has_value=1] [value_type=str]
+    local name expect tool_name field value has_value value_type out rc decision
+    name="$1"; expect="$2"; tool_name="$3"; field="$4"; value="${5-}"; has_value="${6:-1}"; value_type="${7:-str}"
+    out=$(make_payload "$tool_name" "$field" "$value" "$has_value" "$value_type" | "$0" 2>/dev/null)
+    rc=$?
+    if [ "$rc" -ne 0 ]; then
+      decision="error(rc=$rc)"
+    elif [ -z "$out" ]; then
+      decision="allow"
+    else
+      decision=$(printf '%s' "$out" | "$SECRET_BYPASS_JQ" -r '.hookSpecificOutput.permissionDecision // "allow"' 2>/dev/null)
+    fi
+    if [ "$decision" = "$expect" ]; then
+      printf 'PASS %s\n' "$name"
+    else
+      printf 'FAIL %s: tool=%s field=%s value=%s expected=%s got=%s\n' \
+        "$name" "$tool_name" "$field" "$value" "$expect" "$decision" >&2
+      failures=$((failures + 1))
+    fi
+  }
+
+  # One positive case per matched category (lines 94-123) — a regression guard
+  # per pattern class, same density as the sibling self-tests in this family.
+  run_case env_file_denied deny Read file_path ".env"
+  run_case env_suffix_denied deny Read file_path "config.env"
+  run_case pem_denied deny Read file_path "server.pem"
+  run_case token_denied deny Read file_path "api.token"
+  run_case ssh_key_denied deny Read file_path "id_rsa"
+  run_case ssh_key_pub_denied deny Read file_path "id_rsa.pub"
+  run_case secret_creds_file_denied deny Read file_path "secrets.yaml"
+  run_case dash_secret_file_denied deny Read file_path "db-secret.yaml"
+  run_case secrets_dir_denied deny Read file_path "config/secrets/db.yaml"
+  run_case dotsecrets_dir_denied deny Read file_path "/home/user/.secrets/api"
+  run_case dotrailway_dir_denied deny Read file_path "/home/user/.railway/token"
+  run_case wrangler_toml_denied deny Read file_path "wrangler.toml"
+  run_case netrc_denied deny Read file_path ".netrc"
+  # Home-config-dir extensionless files (WP-544 post-v1 находка 10.09) — the
+  # actual regression this fix closes: basename "env" has no dot, so it
+  # matched none of the patterns above before this case was added.
+  run_case home_config_env_denied deny Read file_path "/home/user/.config/aist/env"
+  run_case home_config_credentials_denied deny Read file_path "/home/user/.config/aist/credentials"
+  run_case home_config_two_levels_allowed allow Read file_path "/home/user/.config/aist/sub/env"
+  # Lowercasing (base_n/target_n) must not regress — a mixed-case path is the
+  # same file as its lowercase form on a case-insensitive filesystem.
+  run_case case_insensitive_denied deny Read file_path "ID_RSA"
+
+  # Every matcher tool_name, not just Read — the case in lines 66-70 must
+  # apply the same deny to Edit/MultiEdit as it does to Read.
+  run_case edit_denied deny Edit file_path ".env"
+  run_case multiedit_denied deny MultiEdit file_path "id_rsa"
+
+  run_case safe_file_allowed allow Read file_path "README.md"
+  # Template-exception short-circuit (lines 94-99) runs BEFORE the pattern
+  # match — a *.example copy of a secret filename must still be readable.
+  run_case template_exception_allowed allow Read file_path "secrets.yaml.example"
+  # Grep's path is optional (lines 78-88): missing or whitespace-only must
+  # allow, not fail closed like the same case would for Read/Edit/MultiEdit.
+  run_case grep_missing_path_allowed allow Grep path "" 0
+  run_case grep_whitespace_path_allowed allow Grep path "   "
+
+  # Malformed/unexpected input must fail closed (security_failure, exit 2),
+  # never fall through to allow — same invariant this whole session's Д22
+  # fix enforced in the destructive-* hooks.
+  run_case unknown_tool_fails_closed "error(rc=2)" Bash file_path ".env"
+  run_case missing_tool_name_fails_closed "error(rc=2)" "" file_path ".env"
+  run_case wrong_type_file_path_fails_closed "error(rc=2)" Read file_path "123" 1 num
+
+  [ "$failures" -eq 0 ]
+}
+
+if [ "${1:-}" = "--self-test" ]; then
+  self_test
+  exit $?
+fi
+
 input=$(cat) || security_failure
 printf '%s' "$input" | "$SECRET_BYPASS_JQ" -e '
   type == "object"
@@ -119,6 +220,28 @@ if [ -z "$matched" ]; then
     *-secret.yaml|*-secret.yml|*-secret.json|*-secret.txt|*-secret.ini|*-secret.conf|secrets.yaml|secrets.yml|secrets.json|credentials.yaml|credentials.yml|credentials.json) matched="secret/creds file" ;;
     .netrc|.proxy-env|.proxy-secret) matched=".netrc/proxy" ;;
     wrangler.toml) matched="wrangler.toml" ;;
+  esac
+fi
+if [ -z "$matched" ]; then
+  # ~/.config/<service>/{env,secrets,config,credentials,.envrc} — one level of
+  # nesting, mirrors is_sensitive_home_config_dir_file() in secret-bypass-lib.sh
+  # (WP-544 F6, 2026-09-01), which only the Bash-side guard (secret-leak-block.sh)
+  # carries. This Read/Edit/MultiEdit/Grep-side guard never got the same fix —
+  # found live 2026-09-10 (WP-544 post-v1 находка): Read on ~/.config/aist/env
+  # matched none of the patterns above (basename "env" has no dot).
+  case "$base_n" in
+    env|secrets|config|credentials|.envrc)
+      dir_n=$(dirname -- "$target_n")
+      case "$dir_n" in
+        */.config/*)
+          remainder="${dir_n#*/.config/}"
+          case "$remainder" in
+            */*) ;;
+            *) [ -n "$remainder" ] && matched="home-config-dir file" ;;
+          esac
+          ;;
+      esac
+      ;;
   esac
 fi
 

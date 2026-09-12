@@ -4,21 +4,48 @@
 # DROP/TRUNCATE/DELETE without WHERE), GitHub repo deletion. Exit 2 = block.
 set -euo pipefail
 
+block() {
+  echo "BLOCKED: $1" >&2
+  exit 2
+}
+
 # Read stdin once: a pipe/redirected fd is fully drained by the first jq call,
 # so a second `jq` reading raw stdin always sees EOF and returns empty — this
 # silently zeroed out $CWD on every invocation (found WP-547, 03.09, while
 # verifying the stash-pop/apply check below, which depends on the real cwd).
 HOOK_INPUT=$(cat 2>/dev/null || true)
-CMD=$(printf '%s' "$HOOK_INPUT" | jq -r '.tool_input.command // empty' 2>/dev/null || true)
-[ -z "$CMD" ] && exit 0
+
+# Fail-closed on a malformed/schema-invalid envelope (WP-544 Д22, peer session
+# 2026-09-08-25-wp544-continue-f7, Codex). The old `jq ... // empty || true`
+# swallowed any jq parse error into an empty $CMD, and the next line read
+# that as "no command, nothing to check" and exited 0 — a truncated payload
+# with a real `rm -rf /x` inside it passed silently (reproduced live). `jq -e`
+# on the whole envelope fails (non-zero exit) on a parse error, a non-object
+# root, a missing/null/non-string/empty `tool_input.command`, or `jq` itself
+# missing — none of those can be told apart from an actually-dangerous
+# command with certainty, so all of them block rather than pass through.
+# Never echo the raw payload here: it can carry command text with secrets.
+# `timeout 5` on every jq call over $HOOK_INPUT (defense-in-depth, cold review
+# WP-544 Д22, 08.09): jq reads over a pipe so it isn't hit by the ARG_MAX bug
+# above, but nothing bounded how long it could run on a pathological payload
+# either — a hang here would hang the hook, and by the same fail-closed logic
+# as the rest of this block, a hung/killed jq (exit 124) blocks too.
+if ! printf '%s' "$HOOK_INPUT" | timeout 5 jq -e \
+  'type == "object" and (.tool_input | type) == "object" and (.tool_input.command | type) == "string" and (.tool_input.command | length) > 0' \
+  >/dev/null 2>&1; then
+  block "не удалось разобрать вход хука, либо tool_input.command отсутствует/пустой/неверного типа — блокирую как неопределённо опасный запрос."
+fi
+# `|| block ...`, not a bare assignment: under `set -e` a failing command
+# substitution assigned straight to a variable kills the script with jq's own
+# raw exit code, bypassing block()'s deliberate exit 2 — the same "crash
+# instead of a decision" class as the ARG_MAX bug above. This jq call should
+# never actually fail here (the identical content just parsed successfully
+# one line up), but "should never fail" is exactly the assumption Д22 exists
+# to not make.
+CMD=$(printf '%s' "$HOOK_INPUT" | jq -r '.tool_input.command') || block "jq отказал при извлечении команды после успешной валидации — блокирую."
 CWD=$(printf '%s' "$HOOK_INPUT" | jq -r '.cwd // .tool_input.cwd // empty' 2>/dev/null || true)
 HOOK_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
 WORKSPACE_ROOT="$(cd "$HOOK_DIR/../.." && pwd -P)"
-
-block() {
-  echo "BLOCKED: $1" >&2
-  exit 2
-}
 
 # --- what this hook is allowed to look at (WP-545, 06.09) -------------------
 #
@@ -37,8 +64,13 @@ block() {
 # So the text scanned is narrowed twice, before any check runs: heredoc bodies
 # are removed (they are data being written, not commands being run), and a
 # newline separates commands the same way `;` does.
-CMD_EXEC=$(CMD_SCAN="$CMD" perl -e '
-  my $text = $ENV{"CMD_SCAN"};
+CMD_EXEC=$(printf '%s' "$CMD" | perl -e '
+  # Read via stdin, not $ENV{CMD_SCAN}: a command text passed through the
+  # process environment is subject to the same execve ARG_MAX as argv (found
+  # by cold review, WP-544 Д22, 08.09 — a ~1.1MB command crashed this call
+  # with "Argument list too long" (exit 126) instead of reaching block() or
+  # exit 0, bypassing every check below it). Stdin has no such limit.
+  my $text = do { local $/; <STDIN> };
   my @lines = split(/\n/, $text, -1);
   my (@out, @pending);
   for my $line (@lines) {
@@ -90,8 +122,8 @@ fi
 # #362: a top-level `cd` persists between Bash calls in Claude Code. Strip
 # quoted spans before detecting command segments; `(cd ... && ...)` remains
 # allowed because the opening parenthesis is not a top-level separator.
-if CMD_SCAN="$CMD_EXEC" perl -e '
-  my $s=$ENV{"CMD_SCAN"};
+if printf '%s' "$CMD_EXEC" | perl -e '
+  my $s = do { local $/; <STDIN> };
   $s =~ s/'"'"'[^'"'"']*'"'"'/ Q /g;
   $s =~ s/"(?:\\.|[^"\\])*"/ Q /g;
   exit($s =~ /(?:^|[;&|\n]\s*)cd\s+/ ? 0 : 1);
@@ -229,7 +261,8 @@ SEGMENTER_PL='
     return @indices;
   }
 
-  my @found = grep { /\S/ } segments($ENV{"CMD_SCAN"});
+  my $cmd_scan = do { local $/; <STDIN> };
+  my @found = grep { /\S/ } segments($cmd_scan);
   if ($ENV{"MODE"} eq "count") {
     # A hit is the pattern standing where a COMMAND name stands: the segment
     # executable, a command carried by find/xargs, or the script argument of a
@@ -289,13 +322,16 @@ SEGMENTER_PL='
 shell_invocations() {
   # shell_invocations <command-name> [<git-style subcommand>]
   # One line per invocation actually run by this call, tokens normalised.
+  # $CMD_EXEC goes over stdin, not as CMD_SCAN in the environment — an
+  # execve-sized command text in the env hits the same ARG_MAX crash as the
+  # perl calls above (found by cold review, WP-544 Д22, 08.09).
   local name="$1" subcmd="${2:-}"
-  MODE=match NAME="$name" SUBCMD="$subcmd" CMD_SCAN="$CMD_EXEC" perl -e "$SEGMENTER_PL"
+  printf '%s' "$CMD_EXEC" | MODE=match NAME="$name" SUBCMD="$subcmd" perl -e "$SEGMENTER_PL"
 }
 
 shell_segment_stats() {
   # shell_segment_stats <perl-regex> -> "<total segments> <segments matching>"
-  MODE=count PATTERN="$1" CMD_SCAN="$CMD_EXEC" perl -e "$SEGMENTER_PL"
+  printf '%s' "$CMD_EXEC" | MODE=count PATTERN="$1" perl -e "$SEGMENTER_PL"
 }
 
 git_segment() {

@@ -89,7 +89,7 @@ Context-файл нового РП создаётся ТОЛЬКО через sc
 Прямой Write/MultiEdit этой гарантии не даёт (найдено живьём на WP-490, 16.07.2026).
 
   touch $HOME/IWE/.claude/state/wp-consent-${WP_NUM}
-  bash $HOME/IWE/scripts/create-wp.sh --title "..." --budget Nh --priority PN
+  bash $HOME/IWE/scripts/create-wp.sh --artifactor-result result.json --budget Nh --priority PN
 EOF
     exit 2
 fi

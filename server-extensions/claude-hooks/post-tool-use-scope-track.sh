@@ -37,6 +37,7 @@ print(t.get("file_path","") or t.get("path",""))
 IWE_ROOT="${IWE_ROOT:-$HOME/IWE}"
 SESSION_DIR="$IWE_ROOT/.iwe-runtime/sessions"
 AGENT="${IWE_AGENT:-claude-code}"
+SESSION_GUARD="$IWE_ROOT/scripts/session-guard.sh"
 
 # WP-484 Ф101 Находка 1 (16.08): the old singleton current-<agent>.ptr names one
 # semaphore per agent, not per session -- a second concurrent `open` of the same
@@ -53,25 +54,18 @@ SEM_MATCHES=$(grep -lF "harness_session_id: $HARNESS_SESSION_ID" "$SESSION_DIR/$
 SEM_COUNT=$(printf '%s\n' "$SEM_MATCHES" | grep -c . || true)
 [ "$SEM_COUNT" -ne 1 ] && exit 0
 SEM_FILE="$SEM_MATCHES"
-
-# Normalize to git-root-relative path (resolve symlinks/macOS /tmp vs /private/tmp)
-REPO_ROOT=$(git -C "$(dirname "$FILE_PATH")" rev-parse --show-toplevel 2>/dev/null || true)
-if [ -n "$REPO_ROOT" ]; then
-  REL_PATH=$(python3 -c "
-import os,sys
-f = os.path.realpath(sys.argv[2])
-r = os.path.realpath(sys.argv[3])
-print(os.path.relpath(f, r))
-" -- "$FILE_PATH" "$REPO_ROOT")
-else
-  REL_PATH="$FILE_PATH"
-fi
-
-# Avoid duplicate consecutive entries
-LAST=$(tail -1 "$SEM_FILE" 2>/dev/null || true)
-if [ "$LAST" = "file: $REL_PATH" ]; then
+GUARD_SESSION_ID=$(sed -n 's/^session_id: //p' "$SEM_FILE" 2>/dev/null)
+if ! [[ "$GUARD_SESSION_ID" =~ ^[a-zA-Z0-9][a-zA-Z0-9._-]{0,255}$ ]]; then
   exit 0
 fi
 
-echo "file: $REL_PATH" >> "$SEM_FILE"
+# The hook is intentionally non-blocking, but it must never write the
+# semaphore itself. `note-file` re-resolves this exact guard session, takes
+# the persistent session-transition lock, revalidates the open inode and
+# serializes the append against close. A close in this window simply makes
+# the guarded call fail; no shell redirection can recreate `.open`.
+if [ -f "$SESSION_GUARD" ] && [ -n "${IWE_GOVERNANCE_REPO:-}" ]; then
+  bash "$SESSION_GUARD" note-file "$FILE_PATH" --agent "$AGENT" \
+    --session-id "$GUARD_SESSION_ID" >/dev/null 2>&1 || true
+fi
 exit 0

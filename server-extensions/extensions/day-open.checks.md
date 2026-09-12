@@ -58,7 +58,7 @@ echo "  ✅ Саморазвитие: D-NNN/C-NNN присутствует, PEND
 
 ```bash
 FILE="${FILE:-$(ls ~/IWE/DS-my-strategy/current/DayPlan\ *.md 2>/dev/null | sort | tail -1)}"
-PRIO="$HOME/IWE/DS-my-strategy/current/priorities.yaml"
+PRIO="${GOV_REPO_DIR:-$HOME/IWE/DS-my-strategy}/current/priorities.yaml"
 echo "=== Проверка: все РП из priorities.yaml присутствуют в DayPlan ==="
 if [ -f "$PRIO" ]; then
   WPS=$(python3 -c "
@@ -327,7 +327,7 @@ check_section "Видео" "video"
 
 ```bash
 FILE="${FILE:-$(ls ~/IWE/DS-my-strategy/current/DayPlan\ *.md 2>/dev/null | sort | tail -1)}"
-REPORTS_DIR="$HOME/IWE/DS-my-strategy/inbox/extraction-reports"
+REPORTS_DIR="${GOV_REPO_DIR:-$HOME/IWE/DS-my-strategy}/inbox/extraction-reports"
 # `|| true`: под pipefail (наследуется от day-open-checks-runner.sh) статус пайпа —
 # статус самой правой упавшей команды. При 0 pending-report'ов (штатный случай)
 # grep -rl вернёт 1, и это молча оборвёт блок ДО echo/if под set -e — тот же
@@ -503,7 +503,7 @@ TODAY="${DAY_OPEN_EXPECTED_DATE:-$(date +%Y-%m-%d)}"
 # `|| true`: без него, ноль зависших планов (штатный случай) даёт grep -v exit 1,
 # и под set -e присвоение молча обрывает блок до if — тот же класс бага, что
 # markdown-ссылки/OPENS-SUMMARIES выше (WP-5 Ф2 09.07).
-STALE=$(ls "$HOME/IWE/DS-my-strategy/current/" 2>/dev/null | grep -E "^DayPlan [0-9]{4}-[0-9]{2}-[0-9]{2}\.md$" | grep -v "$TODAY" || true)
+STALE=$(ls "${GOV_REPO_DIR:-$HOME/IWE/DS-my-strategy}/current/" 2>/dev/null | grep -E "^DayPlan [0-9]{4}-[0-9]{2}-[0-9]{2}\.md$" | grep -v "$TODAY" || true)
 if [ -n "$STALE" ]; then
   echo "  ❌ Зависшие DayPlan в current/:"
   while IFS= read -r f; do
@@ -534,7 +534,7 @@ TODAY="${DAY_OPEN_EXPECTED_DATE:-$(date +%Y-%m-%d)}"
 DOW=$(date -d "$TODAY" +%u 2>/dev/null || date -j -f "%Y-%m-%d" "$TODAY" +%u)  # 1=Mon ... 7=Sun
 TODAY_WEEKDAY_NAME=$(date -d "$TODAY" +%A 2>/dev/null || date -j -f "%Y-%m-%d" "$TODAY" +%A)
 CFG="$HOME/IWE/memory/day-rhythm-config.yaml"
-RUNS_DIR="$HOME/IWE/DS-my-strategy/inbox/bottleneck-pick-runs"
+RUNS_DIR="${GOV_REPO_DIR:-$HOME/IWE/DS-my-strategy}/inbox/bottleneck-pick-runs"
 echo "=== Калибровка /bottleneck-pick (BLOCKING) ==="
 
 # Условие пропуска: strategy_day (под секцией day_open: в day-rhythm-config.yaml) или выходной (Сб/Вс)
@@ -632,15 +632,23 @@ exit 0
 
 > **Источник:** WP-7 Block DOF. `fill_chunk()` в `day-open-llm-fill.py` сравнивал с тегом-обёрткой
 > вместо содержимого куска, поэтому секция «План на сегодня» не заполнялась и уходила в коммит
-> с примером-заглушкой из скаффолда (`day-open-scaffold.sh:1003`):
+> с примером-заглушкой из скаффолда:
 > `| 🔴 | С | NNN | **<!-- PENDING -->** | X | pending |`. Ни один существующий чек этого не
 > ловил — баг нашёлся только потому, что пилот прямо спросил про полноту открытия дня.
+>
+> **Живой рецидив 09.09.2026 (WP-561 Ф11):** тот же класс, другой механизм — из шести значений
+> строки-образца был явно помечен плейсхолдером только один (`<!-- PENDING -->`), остальные
+> (`NNN`/`X`/`pending`) выглядели как обычный текст. Модель иногда добавляла реальные строки РП,
+> но саму строку-образец оставляла как есть — проверка сработала верно (`grep` ловил её и по
+> старому формату). Скаффолд переписан: теперь все шесть значений — явные `<!-- PENDING: ... -->`.
+> Третья альтернатива regex ослаблена с точного `<!-- PENDING -->` до префикса `<!-- PENDING` —
+> иначе новый формат (с описанием после двоеточия) саму себя больше не ловил бы при утечке.
 
 ```bash
 FILE="${FILE:-$(ls ~/IWE/DS-my-strategy/current/DayPlan\ *.md 2>/dev/null | sort | tail -1)}"
 PLAN_TABLE=$(awk '/<summary><b>План на сегодня<\/b><\/summary>/{f=1} f&&/^\|/{print} f&&/<\/details>/{exit}' "$FILE")
 echo "=== Проверка: таблица плана без шаблонных заглушек (Block DOF) ==="
-if printf '%s\n' "$PLAN_TABLE" | grep -qE '\| *NNN *\||<!-- PENDING -->|\| *X *\|'; then
+if printf '%s\n' "$PLAN_TABLE" | grep -qE '\| *NNN *\||<!-- PENDING|\| *X *\|'; then
   echo "  ❌ КРИТИЧЕСКИЙ: таблица «План на сегодня» содержит шаблонную заглушку (NNN/X/PENDING) вместо реальных данных — COMMIT БЛОКИРОВАН"
   echo "       Тот же дефект, что Block DOF: fill_chunk() не заполнил секцию, ушёл пример-заглушка."
   exit 2
@@ -649,7 +657,7 @@ else
 fi
 ```
 
-- [ ] Таблица «План на сегодня» не содержит `NNN`, `<!-- PENDING -->` или одиночный `X` вместо реального номера/часов. Если ❌ — commit заблокирован.
+- [ ] Таблица «План на сегодня» не содержит `NNN`, `<!-- PENDING` (в любом виде, включая с описанием) или одиночный `X` вместо реального номера/часов. Если ❌ — commit заблокирован.
 
 ### Проверка (не блокирующая с 2026-08-16): «физ» в бюджете дня — не fallback-заглушка (bug-2026-07-16, разблокировано WP-484 Ф101)
 
@@ -665,7 +673,7 @@ fi
 
 ```bash
 FILE="${FILE:-$(ls ~/IWE/DS-my-strategy/current/DayPlan\ *.md 2>/dev/null | sort | tail -1)}"
-PRIO="$HOME/IWE/DS-my-strategy/current/priorities.yaml"
+PRIO="${GOV_REPO_DIR:-$HOME/IWE/DS-my-strategy}/current/priorities.yaml"
 echo "=== Проверка: «физ» в бюджете дня — не fallback-заглушка ==="
 PHYS_ISSUE=0
 if ! grep -qE "^phys_hours:" "$PRIO" 2>/dev/null; then
@@ -686,6 +694,33 @@ fi
 ```
 
 - [ ] `priorities.yaml` содержит `phys_hours:` (не fallback-дефолт), «физ» в DayPlan ≤14ч, либо расхождение отмечено в «Требует внимания». Больше не блокирует commit.
+
+### Проверка (не блокирующая): ссылка на персональное руководство — ровно один раз (bug-2026-09-09, WP-561 Ф11 продолжение)
+
+> **Источник:** `day-open-scaffold.sh` раньше жёстко вписывал строку `- **Изучи персональное
+> руководство:** [DS-personal-guide](...)` прямо в заготовку раздела «Саморазвитие»,
+> а отдельный, более новый механизм (`inject_guide_link()`, `day-open-llm-fill.py`,
+> WP-521, 03.09) идемпотентно вставляет ТУ ЖЕ строку в то же место при каждом запуске
+> (свой блок вырезает и вставляет заново — сам с собой не дублируется). Два независимых
+> источника одного и того же контента, ни один не знал о другом — строка удвоилась.
+> Жёсткая строка убрана из заготовки 09.09 — эта проверка ловит РЕЦИДИВ (в этом самом
+> месте или где угодно ещё в файле — что угодно, что должно встречаться ровно один раз,
+> а не «сколько источников решили его вписать»), не заменяет сам фикс.
+
+```bash
+FILE="${FILE:-$(ls ~/IWE/DS-my-strategy/current/DayPlan\ *.md 2>/dev/null | sort | tail -1)}"
+echo "=== Проверка: ссылка на персональное руководство — ровно один раз ==="
+GUIDE_COUNT=$(grep -cF "Изучи персональное руководство" "$FILE" 2>/dev/null || echo 0)
+if [ "$GUIDE_COUNT" -eq 1 ]; then
+  echo "  ✅ Ссылка на руководство: встречается 1 раз"
+elif [ "$GUIDE_COUNT" -eq 0 ]; then
+  echo "  ⚠️ Ссылка на руководство отсутствует — inject_guide_link() не сработал или раздел «Саморазвитие» пропал (не блокирует, проверь вручную)"
+else
+  echo "  ⚠️ Ссылка на руководство встречается ${GUIDE_COUNT} раз(а) — дублирование, тот же класс bug-2026-09-09 (не блокирует, почисти вручную)"
+fi
+```
+
+- [ ] Строка «Изучи персональное руководство» встречается в DayPlan ровно один раз. Не блокирует — расхождение просто указывает на возврат класса бага (два независимых источника одного контента).
 
 ### 🔴 БЛОКИРУЮЩАЯ ПРОВЕРКА: health-значений в DayPlan быть НЕ должно (резидентность WP-469, фаза WP-7 DayPlan-Health-Residency)
 

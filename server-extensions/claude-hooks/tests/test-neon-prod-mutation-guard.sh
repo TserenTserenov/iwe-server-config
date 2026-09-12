@@ -68,6 +68,27 @@ if action == \"release\":
 sys.exit(2)
 """)' "$GATEWAY_LOCK"
 
+# WP-530 Ф24 п.1 (06.09): хук требует ВТОРОЙ уровень -- межмашинную аренду на
+# git-ссылке. Здесь она имитируется тем же способом, что и шлюз: файл
+# состояния вместо сети. "self" = аренда наша, любое другое непустое значение
+# = держит другая машина, "unreadable" = состояние прочитать не удалось,
+# отсутствие файла = аренда свободна.
+CROSS_HOST_LEASE="$IWE_WORKSPACE/$IWE_GOVERNANCE_REPO/scripts/lib/neon-prod-lease.sh"
+export FAKE_LEASE_STATE="$TMP_DIR/lease-state"
+cat > "$CROSS_HOST_LEASE" <<'FAKE_LEASE'
+#!/usr/bin/env bash
+state="$FAKE_LEASE_STATE"
+[ -f "$state" ] || exit 3
+value=$(cat "$state")
+case "$value" in
+  self) echo "аренда наша"; exit 0 ;;
+  unreadable) echo "состояние прочитать не удалось" >&2; exit 2 ;;
+  "") exit 3 ;;
+  *) echo "аренду держит $value"; exit 4 ;;
+esac
+FAKE_LEASE
+chmod +x "$CROSS_HOST_LEASE"
+
 cleanup() {
   IWE_AGENT_ID="claude-code-sess-A" python3 "$GATEWAY_LOCK" release "$NEON_PROD_MUTATION_LOCK_KEY" >/dev/null 2>&1 || true
   rm -rf "$TMP_DIR"
@@ -511,13 +532,38 @@ expect "cat heredoc с реальной следующей командой -> �
 
 IWE_AGENT_ID="claude-code-sess-A" python3 "$GATEWAY_LOCK" acquire "$NEON_PROD_MUTATION_LOCK_KEY" 60 >/dev/null 2>&1
 
-expect "та же мутация под своим же замком (sess-A) -> пропуск" 0 \
+echo "self" > "$FAKE_LEASE_STATE"
+expect "та же мутация под своим замком И своей межмашинной арендой (sess-A) -> пропуск" 0 \
   "$(fixture "sess-A" "$PROD_ALTER")"
 
 expect "та же мутация от ДРУГОЙ сессии (sess-B), не державшей замок -> блок" 2 \
   "$(fixture "sess-B" "$PROD_ALTER")"
 
+### Второй уровень: межмашинная аренда (WP-530 Ф24 п.1, 06.09) ###
+
+rm -f "$FAKE_LEASE_STATE"
+expect "локальный замок мой, межмашинной аренды нет -> блок (другая машина не остановлена)" 2 \
+  "$(fixture "sess-A" "$PROD_ALTER")"
+
+echo "tsekh-1/claude-code-sess-Z" > "$FAKE_LEASE_STATE"
+expect "локальный замок мой, межмашинную аренду держит цех -> блок" 2 \
+  "$(fixture "sess-A" "$PROD_ALTER")"
+
+echo "unreadable" > "$FAKE_LEASE_STATE"
+expect "состояние межмашинной аренды не читается -> блок (fail-closed)" 2 \
+  "$(fixture "sess-A" "$PROD_ALTER")"
+
+echo "self" > "$FAKE_LEASE_STATE"
+mv "$CROSS_HOST_LEASE" "$CROSS_HOST_LEASE.hidden"
+expect "CLI межмашинной аренды отсутствует -> блок (защитная процедура недоступна)" 2 \
+  "$(fixture "sess-A" "$PROD_ALTER")"
+mv "$CROSS_HOST_LEASE.hidden" "$CROSS_HOST_LEASE"
+
+expect "неопасная команда без прод-маркера не трогает межмашинную аренду вовсе -> пропуск" 0 \
+  "$(fixture "sess-A" "$OTHER_ALTER")"
+
 IWE_AGENT_ID="claude-code-sess-A" python3 "$GATEWAY_LOCK" release "$NEON_PROD_MUTATION_LOCK_KEY" >/dev/null 2>&1
+rm -f "$FAKE_LEASE_STATE"
 
 ### Identity, переданная в реальный gateway-lock.py (WP-484, 03.09) ###
 # Эта фикстура (строка 41-43 выше) читает $IWE_AGENT_ID НАПРЯМУЮ как holder,
@@ -542,8 +588,32 @@ check_src() {  # $1 desc, $2 grep-паттерн, $3 ожидание найде
     FAIL=$((FAIL + 1))
   fi
 }
-check_src "подсказка acquire передаёт БАЗУ identity (AGENT_ID_BASE), не готовый суффиксированный AGENT_ID" \
-  'IWE_AGENT_ID=$AGENT_ID_BASE python3 $GATEWAY_LOCK acquire' 1
+# WP-530 Ф24 п.1: подсказку acquire теперь даёт единая команда neon-prod-lease.sh
+# (два уровня одной строкой). Требование к identity никуда не делось -- оно
+# переехало вместе с вызовом: суффикс сессии добавляет сам резолвер, поэтому
+# передавать надо базу.
+check_src_file() {  # check_src_file <описание> <файл> <строка> <ожидание 0|1>
+  local desc="$1" file="$2" needle="$3" want="$4" got=0
+  grep -qF "$needle" "$file" && got=1
+  if [ "$got" -eq "$want" ]; then
+    PASS=$((PASS + 1))
+  else
+    echo "  FAIL: $desc"
+    FAIL=$((FAIL + 1))
+  fi
+}
+LEASE_SRC="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)/DS-my-strategy/scripts/lib/neon-prod-lease.sh"
+if [ -f "$LEASE_SRC" ]; then
+  check_src_file "CLI аренды передаёт шлюзу БАЗУ identity, суффикс добавляет резолвер" \
+    "$LEASE_SRC" 'IWE_AGENT_ID="claude-code" python3 "$GATEWAY_LOCK"' 1
+  check_src_file "CLI аренды не изобретает собственную суффиксацию сессии" \
+    "$LEASE_SRC" 'CLAUDE_CODE_SESSION_ID' 0
+else
+  echo "  FAIL: не найден CLI межмашинной аренды ($LEASE_SRC)"
+  FAIL=$((FAIL + 1))
+fi
+check_src "подсказка хука ведёт на единую команду двух уровней (neon-prod-lease.sh acquire)" \
+  'bash $CROSS_HOST_LEASE acquire' 1
 check_src "check-вызов тоже передаёт базу, не готовый AGENT_ID" \
   'IWE_AGENT_ID="$AGENT_ID_BASE" python3 "$GATEWAY_LOCK" check' 1
 check_src "регрессия: нигде не осталось IWE_AGENT_ID=\$AGENT_ID (без _BASE) для gateway-lock.py" \

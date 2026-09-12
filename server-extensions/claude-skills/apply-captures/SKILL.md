@@ -350,12 +350,30 @@ git add <target_path> [MAP если был] && git commit -m "feat(KE apply): <i
 
 ### Шаг 6. Обновить status отчёта
 
-Правила:
-- Все кандидаты resolved (accept/reject/defer) → `applied` если ≥1 applied, иначе `rejected` если все reject, `deferred` если есть defer без applied.
-- Часть кандидатов pending → `partially-applied`.
-- **Validation gate (peer-session 2026-05-31-22):** если хотя бы один кандидат имеет `decision: defer` без поля `defer_until` — отчёт НЕ может получить финальный статус `deferred`. Остаётся `partially-applied`. В тело отчёта добавить блок `## Unresolved candidates` со списком `candidate_id` + причиной (отсутствует `defer_until`). Следующий `/apply-captures`-запуск начинает с unresolved-блока. Это закрывает дыру «masked cancel» — отложенные кандидаты без триггера возврата.
+**Найдено живьём 2026-09-09 (WP-170, peer-session с Codex, `2026-09-09-14-wp170-ke-status-fix`):** «вручную проставь `status:` и сохрани файл» на практике не выполнялось ни разу за неделю — 12 отчётов остались `pending-review` в файле, хотя решения по ним давно записаны в Pack (`ke-queue-stats.sh` доверяет именно этому полю для SLA-индикатора очереди, поэтому забытая правка сделала индикатор перманентно неверным). Правка руками — по конструкции забываемый шаг; решение — превратить его в один детерминированный вызов вместо ручной редактуры.
 
-Обновить `status:` в frontmatter отчёта и сохранить файл.
+**Правило:**
+- Все кандидаты отчёта resolved (accept/reject/defer, включая корректный `defer_until` у всех defer — validation gate ниже) → отчёт закрыт. **НЕ редактировать `status:` руками.** Вместо этого — один коммит с явной меткой закрытия:
+  ```bash
+  cd ~/IWE/${IWE_GOVERNANCE_REPO:-DS-strategy}
+  git commit --allow-empty -m "$(cat <<'EOF'
+  chore(apply-captures): report closed — <filename1>[, <filename2>, ...]
+
+  Reports-Closed: <filename1>[, <filename2>, ...]
+  EOF
+  )"
+  ```
+  Список файлов — ВСЕ отчёты, полностью разобранные в этом запуске `/apply-captures` (не только один — если сессия закрыла несколько, один коммит на все сразу). `--allow-empty` намеренно: закрытие отчёта — событие само по себе, независимо от того, писал ли этот конкретный прогон файлы в Pack (чисто-reject батч тоже должен получить эту метку).
+  Публикация — тем же шлюзом, что Шаг 5г (`publish_commit`/`push_branch` из `publish-gate.sh`), не голым push. **Обязательно дождаться, что этот коммит реально ушёл на `main`** (тот же шлюз это проверяет) — реконсилер ниже читает только эту ветку, не любой локальный ref; неопубликованный коммит для него не существует.
+  Затем вызвать `ke-report-reconcile.sh` (без аргументов — сканирует всю очередь, идемпотентно) — он найдёт этот коммит по метке и сам проставит `status: applied` (единое терминальное значение — реконсилер не различает исход accept/reject самого отчёта, только «закрыт/не закрыт»; настоящая разбивка accept/reject живёт в Pack и `feedback-log.md`, не в этом поле) + `reconciled_at`/`reconciled_by_commit` в frontmatter. Не редактировать frontmatter отчёта самому — реконсилер это единственная точка записи `status:`, чтобы не разойтись с тем, что он же проверяет при следующем самостоятельном прогоне (day-open).
+  **Реконсилер меняет файлы отчётов на диске — это тоже нужно закоммитить и запушить** (тем же шлюзом), иначе флип статуса останется только локальным изменением на этой машине — ровно тот же класс бага, ради которого всё это делается:
+  ```bash
+  bash "${IWE_SCRIPTS:-$HOME/IWE/DS-my-strategy/scripts}/ke-report-reconcile.sh"
+  git add inbox/extraction-reports/  # только реально изменённые реконсилером файлы, свериться через git status перед add
+  git commit -m "chore(apply-captures): sync extraction-report status after reconcile"
+  ```
+- Часть кандидатов ещё pending → отчёт не закрыт в этом прогоне, `Reports-Closed` для него не пишется — следующий `/apply-captures` продолжит с него же.
+- **Validation gate (peer-session 2026-05-31-22):** если хотя бы один кандидат имеет `decision: defer` без поля `defer_until` — отчёт НЕ считается закрытым, `Reports-Closed` для него не пишется. В тело отчёта добавить блок `## Unresolved candidates` со списком `candidate_id` + причиной (отсутствует `defer_until`). Следующий `/apply-captures`-запуск начинает с unresolved-блока. Это закрывает дыру «masked cancel» — отложенные кандидаты без триггера возврата.
 
 ### Шаг 7. Итоговый отчёт
 

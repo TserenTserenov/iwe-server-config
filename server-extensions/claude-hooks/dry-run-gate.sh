@@ -10,17 +10,25 @@
 # smoke-теста — sentinel создавал главный агент, subagent Stop-хук снимал
 # по своему (пустому) SID, чужой sentinel оставался и залипал на весь TTL.
 # Единый файл убирает рассинхрон создания/очистки одним ходом (issue #237 п.2).
-# TTL: 600 секунд (10 минут) от mtime.
+# TTL: 2400 секунд (40 минут) от mtime — измеренный `close day` занимает ~26
+# минут (issue #460), запас держит легитимную репетицию живой без heartbeat
+# (WP-7 Ф109, синхронизировано со значением из FMT-exocortex-template).
 #
 # Принципы:
 # - jq отсутствует → skip с явной диагностикой (setup должен ставить jq; см. issue #192)
-# - exit 0 = allow (sentinel отсутствует / TTL истёк / gate skipped из-за missing jq)
+# - exit 0 = allow (sentinel отсутствует / gate skipped из-за missing jq)
+# - TTL истёк → block, не allow (WP-7 Ф109): гейт, не видящий собственное
+#   состояние, не имеет оснований разрешать запись — истечение TTL означает
+#   «владелец репетиции упал или забыл убрать файл», а не «репетиция кончилась
+#   штатно» (`memory/dry-run-contract.md §Fail-safe`). Разблокировка — ручным
+#   `rm` после подтверждения, что репетиция реально не идёт.
 # - exit 2 = block (с диагностикой в stderr)
 
 set -uo pipefail
 export PATH="/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin:${PATH:-}"
 
-SENTINEL=/tmp/iwe-dry-run.flag
+SENTINEL="${IWE_DRY_RUN_SENTINEL:-/tmp/iwe-dry-run.flag}"
+TTL_SECONDS=2400
 
 # jq нужен для разбора payload. Если его нет, не брикуем все write-tools:
 # setup/requirements должны установить jq, а gate явно сообщает, что проверка пропущена.
@@ -43,9 +51,18 @@ if [ -z "$MTIME" ]; then
 fi
 
 NOW=$(date +%s)
-if [ $((NOW - MTIME)) -gt 600 ]; then
-    rm -f "$SENTINEL" 2>/dev/null
-    exit 0
+if [ $((NOW - MTIME)) -gt "$TTL_SECONDS" ]; then
+    # Fail-closed (WP-7 Ф109): do NOT rm the sentinel here — that would
+    # re-allow writes for every session on the shared checkout the moment
+    # one rehearsal happens to overrun its TTL, which is exactly the bug
+    # this branch replaces. Unblocking is a deliberate `rm` after a human
+    # confirms no rehearsal is actually still running.
+    {
+        echo "[dry-run-gate] BLOCKED: sentinel stale (older than ${TTL_SECONDS}s)"
+        echo "Reason: TTL expired without cleanup — owner likely crashed or forgot to remove $SENTINEL; protection kept fail-closed, not silently allowed"
+        echo "Fix: confirm no rehearsal is running, then rm $SENTINEL"
+    } >&2
+    exit 2
 fi
 
 # Прочитать tool_name и tool_input из stdin

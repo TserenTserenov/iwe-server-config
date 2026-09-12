@@ -23,6 +23,13 @@ JOURNAL_DIR="${RULE_JOURNAL_DIR:-$HOME/logs/rule-engine}"
 mkdir -p "$JOURNAL_DIR"
 JOURNAL_FILE="$JOURNAL_DIR/$(date +%Y-%m-%d).jsonl"
 
+# AR.112 dedup state — same env-override convention as JOURNAL_DIR above, so
+# `test` mode can point it at a throwaway directory instead of the real one
+# (cold-review, peer-session 2026-09-07-19: the smoke suite reused the prod
+# dedup dir, so a second `test` run the same day silently suppressed every
+# D6.2 warn as a false "duplicate").
+AR112_DEDUP_DIR="${RULE_AR112_DEDUP_DIR:-${XDG_RUNTIME_DIR:-${TMPDIR:-/tmp}}/iwe-rule-engine/ar112}"
+
 # Session-state: per-session warn/block log (WP-272 Ф5)
 SESSION_ID="${CLAUDE_SESSION_ID:-default}"
 SESSION_STATE_DIR="$HOME/.claude/state"
@@ -1393,6 +1400,34 @@ PYEOF
 
 check_bypassrls_explicit_where() {
     # AR.112: a regex can find PII access but cannot prove SQL identity scope.
+    # Peer-session 2026-09-07-19 (Kimi critic-consistency + Codex implementer-
+    # reviewer), FP rate 10-100%/day over the preceding week: two noise
+    # sources were fixable without weakening the control itself. Migration
+    # files stay `warn` — a self-declared marker or a file's folder location
+    # cannot prove a security-gate review happened (both peers rejected the
+    # downgrade-to-`info` plan the pilot had approved before the session;
+    # pilot chose to keep `warn` after hearing the objection).
+    # `${RULE_CONTEXT:-{}}` is NOT a safe way to spell this default: bash's
+    # brace-matching for `${VAR:-...}` treats the embedded `{}` as closing
+    # the expansion early and appends a stray literal `}` whenever RULE_CONTEXT
+    # is already set (verified directly — this silently broke file_path
+    # extraction, cold-review found the effect but not this root cause).
+    # Same two-line unset/empty pattern already used elsewhere in this file
+    # (e.g. the `local ctx=` lines above) avoids the parser trap entirely.
+    local ctx_raw="${RULE_CONTEXT:-}"
+    [ -z "$ctx_raw" ] && ctx_raw='{}'
+    local file_path
+    file_path=$(printf '%s' "$ctx_raw" | python3 -c 'import json,sys; print(json.loads(sys.stdin.read() or "{}").get("file_path",""))' 2>/dev/null)
+
+    # Exception 1: read-only agent scratchpad. The process has no prod
+    # credentials there regardless of what the SQL text says — narrow match
+    # only (claude-<pid>/.../scratchpad/*.sql), not all of $TMPDIR, which can
+    # also hold real executable scripts.
+    if printf '%s' "$file_path" | grep -qE '(^|/)tmp/claude-[0-9][^/]*/.*/scratchpad/[^/]+\.sql$'; then
+        emit_verdict "ok" "AR.112" "excluded: read-only agent scratchpad ($file_path)"
+        return
+    fi
+
     local analysis status unsafe_count
     if ! analysis=$(sql_security_analysis 2>/dev/null); then
         emit_verdict "warn" "AR.112" "SQL detector failed — privileged PII operation requires manual review"
@@ -1402,8 +1437,48 @@ check_bypassrls_explicit_where() {
     [ "$status" != "ok" ] && { emit_verdict "warn" "AR.112" "SQL detector returned an invalid analysis — manual review required"; return; }
     unsafe_count=$(printf '%s' "$analysis" | python3 -c 'import json,sys; print(len(json.load(sys.stdin).get("unsafe_rls_statements", [])))' 2>/dev/null)
     case "$unsafe_count" in ''|*[!0-9]*) emit_verdict "warn" "AR.112" "SQL detector returned an invalid count — manual review required"; return ;; esac
+
     if [ "$unsafe_count" -gt 0 ]; then
-        emit_verdict "warn" "AR.112" "$unsafe_count PII/dynamic SQL statement(s) require manual identity-scope review — regex evidence cannot prove safe boolean, alias, CTE or dynamic-SQL semantics"
+        local category="general"
+        printf '%s' "$file_path" | grep -qE '(^|/)(db/)?migrations/|neon-migrations/' && category="migration"
+
+        # Exception 2: dedup — one warn per (path + content) per day. Keyed
+        # on content, not just path (Codex, round 1): a file can change
+        # substantially after the first warning, and a stale suppression
+        # would hide a genuinely new statement. Detector-failure/invalid-
+        # analysis branches above are never deduped — a broken detector
+        # must stay loud every time.
+        if [ -n "$file_path" ]; then
+            local dedup_key dedup_dir dedup_file
+            dedup_key=$(printf '%s' "$ctx_raw" | python3 -c '
+import hashlib, json, sys
+d = json.loads(sys.stdin.read() or "{}")
+h = hashlib.sha256()
+h.update(d.get("file_path", "").encode())
+h.update(d.get("file_content", "").encode())
+print(h.hexdigest())
+' 2>/dev/null)
+            if [ -n "$dedup_key" ]; then
+                dedup_dir="$AR112_DEDUP_DIR/$(date -u +%Y-%m-%d)"
+                mkdir -p "$dedup_dir" 2>/dev/null
+                # Retention (cold-review Medium, peer-session 2026-09-07-19):
+                # a dedup key is only ever read back on the SAME calendar day
+                # it was written, so nothing beyond that is useful — prune
+                # here rather than via a separate cron, since this branch is
+                # the only code path that grows the directory in the first
+                # place. 3-day margin, not 1, so a same-day debugging session
+                # spanning UTC midnight can still see yesterday's markers.
+                find "$AR112_DEDUP_DIR" -maxdepth 1 -type d -name '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]' -mtime +3 -exec rm -rf {} + 2>/dev/null
+                dedup_file="$dedup_dir/$dedup_key"
+                if [ -f "$dedup_file" ]; then
+                    emit_verdict "ok" "AR.112" "duplicate warning suppressed for today ($file_path, category=$category)"
+                    return
+                fi
+                : > "$dedup_file" 2>/dev/null || true
+            fi
+        fi
+
+        emit_verdict "warn" "AR.112" "$unsafe_count PII/dynamic SQL statement(s) require manual identity-scope review — regex evidence cannot prove safe boolean, alias, CTE or dynamic-SQL semantics (category=$category)"
         return
     fi
     emit_verdict "ok" "AR.112" "no known PII data operation or dynamic SQL detected"
@@ -1809,6 +1884,15 @@ for r in reg.get('rules', []):
         # WP-272 ревизия 2026-04-30: тесты пишут в отдельный журнал, не в production
         export RULE_JOURNAL_DIR="${HOME}/logs/rule-engine/test"
         mkdir -p "$RULE_JOURNAL_DIR"
+        # Peer-session 2026-09-07-19 cold-review (Critical): AR.112 dedup marker
+        # files used to live in the SAME directory as real dispatch calls, so a
+        # second `test` run the same UTC day silently turned every D6.2 warn into
+        # a false "duplicate" ok. Wipe+recreate a dedicated test dir every run —
+        # same isolation contract as RULE_JOURNAL_DIR above, applied to AR.112's
+        # own state.
+        export RULE_AR112_DEDUP_DIR="${HOME}/logs/rule-engine/test-ar112-dedup"
+        rm -rf "$RULE_AR112_DEDUP_DIR"
+        mkdir -p "$RULE_AR112_DEDUP_DIR"
         PASS=0; FAIL=0
         run_test() {
             local num="$1" desc="$2" expected_verdict="$3"
@@ -2117,6 +2201,19 @@ for r in reg.get('rules', []):
         run_test D6.2am "disabling table triggers requires security review → warn" "warn" \
             RULE_EVENT="sql_file_write" RULE_CONTEXT='{"file_path":"migration.sql","file_content":"ALTER TABLE audit_log DISABLE TRIGGER ALL;"}'
 
+        # AR.112 ревизия 2026-09-08 (peer-session 2026-09-07-19, FP>20%): wired
+        # as real run_test calls, not left as prose in the rule's frontmatter —
+        # a dispatched-twice regression (the Critical cold-review finding on
+        # this same revision) would otherwise ship silently again.
+        run_test D6.2an "scratchpad path excluded regardless of unsafe content → ok" "ok" \
+            RULE_EVENT="sql_file_write" RULE_CONTEXT='{"file_path":"/private/tmp/claude-501/session/scratchpad/check.sql","file_content":"SELECT * FROM user_events;"}'
+        run_test D6.2ao "first occurrence of a migration file today → warn" "warn" \
+            RULE_EVENT="sql_file_write" RULE_CONTEXT='{"file_path":"neon-migrations/mvp/999-test-dedup.sql","file_content":"SELECT * FROM user_events;"}'
+        run_test D6.2ap "identical path+content repeated same day → ok (duplicate suppressed)" "ok" \
+            RULE_EVENT="sql_file_write" RULE_CONTEXT='{"file_path":"neon-migrations/mvp/999-test-dedup.sql","file_content":"SELECT * FROM user_events;"}'
+        run_test D6.2aq "same path, different content → warn again (not deduped)" "warn" \
+            RULE_EVENT="sql_file_write" RULE_CONTEXT='{"file_path":"neon-migrations/mvp/999-test-dedup.sql","file_content":"SELECT * FROM user_events WHERE true;"}'
+
 
         # AR.013 IntegrationGate phase-skip classifier
         run_test 31 "impl без SC/Role → warn (phase skip)" "warn" \
@@ -2147,9 +2244,17 @@ for r in reg.get('rules', []):
         run_test 38 "новый не-схема файл (.md) → ok (вне scope)" "ok" \
             RULE_EVENT="schema_registration_attempt" \
             RULE_CONTEXT='{"target_path":"/tmp/iwe-dogfood-notes.md","is_new_file":true}'
+        # $REGISTRY, not a hardcoded $HOME/IWE/... literal (cold-review,
+        # peer-session 2026-09-07-19 CI wiring, 08.09): this test wants ANY
+        # file guaranteed to exist next to rule-engine.sh — $REGISTRY already
+        # is that, and it resolves correctly on the pilot's machine AND on a
+        # CI runner (via RULE_REGISTRY env override) alike. The literal
+        # $HOME/IWE path silently degraded to fail-open "ok" for months
+        # (SCHEMA_TRIGGERS_CONFIG being unset made the whole check no-op)
+        # and only surfaced as a real failure once that config was fixed.
         run_test 39 "существующий registry-файл → ok (экземпляр/edit, не новая схема)" "ok" \
             RULE_EVENT="schema_registration_attempt" \
-            RULE_CONTEXT="{\"target_path\":\"$HOME/IWE/.claude/rules-registry.yaml\",\"is_new_file\":false}"
+            RULE_CONTEXT="{\"target_path\":\"$REGISTRY\",\"is_new_file\":false}"
 
         # AR.234 dogfood: живость membership-конфига (ADR-IWE-020 §5 — анти-молчаливая-смерть).
         # Проверяет: (1) schema-triggers.yaml читается; (2) fired_event совпадает с triggers AR.234 в реестре.
@@ -2249,11 +2354,11 @@ FIXEOF
         fi
         T46=$(bash "$0" list-gates --section "Week Close" 2>/dev/null)
         T46_KEYS=$(printf '%s' "$T46" | cut -f1 | sort | tr '\n' ',')
-        if [ "$T46_KEYS" = "week-close-g1,week-close-g2,week-close-g3,week-close-g4,week-close-g5,week-close-g6," ]; then
-            echo "PASS Test 46: list-gates --section 'Week Close' → 6 гейтов недели (WP-484 30.07 добавил «Ретро недели» — фикстура актуализирована), Quick Close/Exit Protocol не просочились, ключи не коллизят с quick-close-g*"
+        if [ "$T46_KEYS" = "week-close-g1,week-close-g2,week-close-g3,week-close-g4,week-close-g5,week-close-g6,week-close-g7," ]; then
+            echo "PASS Test 46: list-gates --section 'Week Close' → 7 гейтов недели (WP-545 Ф3, 21.08 добавил «Каденция архивации карточек» — фикстура актуализирована) — не подключено к CI, тест простоял красным от 21.08 до 08.09 незамеченным, отсюда rule-engine-tests.yml"
             PASS=$((PASS+1))
         else
-            echo "FAIL Test 46: expected week-close-g1..g6 got $T46_KEYS"
+            echo "FAIL Test 46: expected week-close-g1..g7 got $T46_KEYS"
             FAIL=$((FAIL+1))
         fi
         T47=$(bash "$0" list-gates --section "no-such-section-xyz" 2>&1 >/dev/null)

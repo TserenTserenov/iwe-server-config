@@ -79,6 +79,10 @@ set -euo pipefail
 
 IWE_ROOT="${IWE_ROOT:-$HOME/IWE}"
 SESSION_DIR="$IWE_ROOT/.iwe-runtime/sessions"
+# Peer-adapter liveness is observational, not commit/admission authority.  Its
+# beacons therefore live outside SESSION_DIR so a peer process can never look
+# like a malformed formal session to session-guard.
+PEER_HEARTBEAT_DIR="$IWE_ROOT/.iwe-runtime/peer-heartbeats"
 SILENCE_THRESHOLD_S="${SILENCE_THRESHOLD_S:-180}"
 WIRE_SILENCE_THRESHOLD_S="${WIRE_SILENCE_THRESHOLD_S:-900}"
 APPROVAL_WAIT_THRESHOLD_S="${APPROVAL_WAIT_THRESHOLD_S:-300}"
@@ -477,6 +481,25 @@ while true; do
         "Kimi молчит ${age}s в WP:${wp}. Возможно, зависание (heartbeat-сигнал, низкая точность)." \
         "$task" \
         "{\"heartbeat_age_s\":$age,\"signal\":\"heartbeat-only\"}" \
+        1
+    else
+      clear_alert "$(target_key "$session")"
+    fi
+  done
+
+  # Same low-confidence heartbeat detector for Kimi peer-adapter beacons.
+  # These files intentionally never participate in session-guard admission or
+  # scope checks; the producer owns their create/remove lifecycle.
+  for session in "$PEER_HEARTBEAT_DIR"/kimi-peer-*.heartbeat; do
+    [ -f "$session" ] && [ ! -L "$session" ] || continue
+    age="$(latest_heartbeat_age "$session")"
+    if [ "$age" -gt "$SILENCE_THRESHOLD_S" ]; then
+      wp="$(grep "^wp: " "$session" | tail -1 | cut -d' ' -f2- || echo "unknown")"
+      task="$(grep "^task: " "$session" | tail -1 | cut -d' ' -f2- || echo "unknown")"
+      alert_once "$(target_key "$session")" \
+        "Kimi peer молчит ${age}s в WP:${wp}. Возможно, зависание (heartbeat-сигнал, низкая точность)." \
+        "$task" \
+        "{\"heartbeat_age_s\":$age,\"signal\":\"peer-heartbeat-only\"}" \
         1
     else
       clear_alert "$(target_key "$session")"
