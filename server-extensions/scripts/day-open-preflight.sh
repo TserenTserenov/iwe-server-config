@@ -128,15 +128,24 @@ else
 fi
 
 # --- sync_drift: how long has each repo been behind its origin? ---
-# check_repo_drift <repo_path> <threshold_sec> -> echoes "ok" or "fail:<age_h>ч:<repo_name>"
-# Best-effort fetch (5s timeout); no network / no repo -> caller treats as unknown, not fail.
+# check_repo_drift <repo_path> <threshold_sec> -> echoes "absent" | "unknown" | "ok" | "fail:<age_h>"
+# "unknown" (cold-review finding, 14.09): a failed fetch or a missing/renamed
+# default-branch ref must NOT read as "ok" — that's the exact silent-failure
+# shape this whole check exists to catch (comment above originally promised
+# "unknown" but the code fell through to "ok" on both, verified live: an
+# unreachable origin with no cached origin/<default> ref produced "ok").
 check_repo_drift() {
   local repo="$1" threshold_sec="$2"
   [ -d "$repo/.git" ] || { echo "absent"; return; }
-  timeout 5 git -C "$repo" fetch --quiet origin 2>/dev/null
+  local default_branch
+  default_branch=$(git -C "$repo" symbolic-ref --short refs/remotes/origin/HEAD 2>/dev/null)
+  default_branch="${default_branch#origin/}"
+  [ -n "$default_branch" ] || default_branch="main"
+  timeout 5 git -C "$repo" fetch --quiet origin 2>/dev/null || { echo "unknown"; return; }
+  git -C "$repo" rev-parse --verify --quiet "origin/$default_branch" >/dev/null 2>&1 || { echo "unknown"; return; }
   local oldest_unapplied
-  oldest_unapplied=$(git -C "$repo" log HEAD..origin/main --format=%ct 2>/dev/null | tail -1)
-  [ -n "$oldest_unapplied" ] || { echo "ok"; return; }  # not behind, or fetch/log unavailable
+  oldest_unapplied=$(git -C "$repo" log "HEAD..origin/$default_branch" --format=%ct 2>/dev/null | tail -1)
+  [ -n "$oldest_unapplied" ] || { echo "ok"; return; }  # fetch succeeded, ref exists, genuinely not behind
   local age_sec=$(( $(date +%s) - oldest_unapplied ))
   if [ "$age_sec" -ge "$threshold_sec" ]; then
     echo "fail:$(( age_sec / 3600 ))"
@@ -149,15 +158,21 @@ SYNC_DRIFT_THRESHOLD_SEC="${SYNC_DRIFT_THRESHOLD_SEC:-21600}"  # 6h, same thresh
 SYNC_DRIFT_STATUS="ok"
 SYNC_DRIFT_REASON=""
 STALE_REPOS=()
+UNKNOWN_REPOS=()
 for repo_name in "$IWE" "$IWE/iwe-server-config"; do
   result=$(check_repo_drift "$repo_name" "$SYNC_DRIFT_THRESHOLD_SEC")
   case "$result" in
     fail:*) STALE_REPOS+=("$(basename "$repo_name"): ${result#fail:}ч") ;;
+    unknown) UNKNOWN_REPOS+=("$(basename "$repo_name")") ;;
   esac
 done
 if [ "${#STALE_REPOS[@]}" -gt 0 ]; then
   SYNC_DRIFT_STATUS="fail"
   SYNC_DRIFT_REASON=$(printf '%s, ' "${STALE_REPOS[@]}")
+  [ "${#UNKNOWN_REPOS[@]}" -eq 0 ] || SYNC_DRIFT_REASON+=$(printf '; не удалось проверить: %s' "$(IFS=', '; echo "${UNKNOWN_REPOS[*]}")")
+elif [ "${#UNKNOWN_REPOS[@]}" -gt 0 ]; then
+  SYNC_DRIFT_STATUS="unknown"
+  SYNC_DRIFT_REASON=$(printf 'не удалось проверить (сеть/fetch): %s' "$(IFS=', '; echo "${UNKNOWN_REPOS[*]}")")
   SYNC_DRIFT_REASON="${SYNC_DRIFT_REASON%, } отстаёт от origin дольше порога"
 fi
 

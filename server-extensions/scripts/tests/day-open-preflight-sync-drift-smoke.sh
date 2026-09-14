@@ -93,6 +93,18 @@ OUT4=$(run_preflight "$IWE4")
 [ "$(echo "$OUT4" | jq -r .sync_drift)" = "ok" ] && ok "iwe-server-config не установлен: sync_drift не считается провалом" \
     || bad "iwe-server-config отсутствует: sync_drift=ok" "$(echo "$OUT4" | jq -r .sync_drift)"
 
+# --- Сценарий 5: origin недостижим (сеть упала) — unknown, НЕ ok ------------
+# Cold-review finding (14.09): недоступный origin без кэшированного
+# origin/<default> раньше молча читался как "ok" — ровно тот класс
+# силентного отказа, который весь этот health-check должен ловить.
+IWE5="$WORKDIR/iwe5"; mkdir -p "$IWE5"
+git init --quiet "$IWE5"
+git -C "$IWE5" -c user.email=t@t -c user.name=t commit --quiet --allow-empty -m "seed"
+git -C "$IWE5" remote add origin "https://127.0.0.1:1/nonexistent.git"  # unreachable, no cached ref
+OUT5=$(run_preflight "$IWE5")
+[ "$(echo "$OUT5" | jq -r .sync_drift)" = "unknown" ] && ok "origin недостижим: sync_drift=unknown, не молчаливый ok" \
+    || bad "origin недостижим: sync_drift=unknown" "$(echo "$OUT5" | jq -r .sync_drift)"
+
 echo "---"
 echo "PASS=$PASS FAIL=$FAIL"
 [ "$FAIL" -eq 0 ]

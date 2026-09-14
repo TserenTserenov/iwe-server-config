@@ -8199,7 +8199,15 @@ for path in active_paths:
         wp = unique(text, "wp").upper()
         if wp in NON_PRODUCT_WP_SENTINELS:
             # A sentinel must not double as a way to dodge an active per-WP freeze.
-            if any(re.search(r"\bWP-[1-9][0-9]*\b", line, re.I) for line in text.splitlines()):
+            # `file:` lines are the session's touched-path scope and routinely
+            # name a real WP-N folder for legitimate reasons (e.g. filing a bug
+            # report into that WP's inbox from a no-WP session) -- that's not
+            # evidence of evasion, so they're excluded from this scan.
+            if any(
+                re.search(r"\bWP-[1-9][0-9]*\b", line, re.I)
+                for line in text.splitlines()
+                if not line.startswith("file: ")
+            ):
                 raise ValueError("non-product wp sentinel references a real WP")
             continue
         if not re.fullmatch(r"WP-[1-9][0-9]*", wp):
