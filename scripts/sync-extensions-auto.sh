@@ -58,13 +58,29 @@ send_telegram() {
 # же класса — не чаще раза в NOTIFY_ESCALATION_REPEAT_MIN (дефолт 360 = раз
 # в 6 часов на двухчасовом таймере), с длительностью и числом попыток в
 # тексте повтора вместо голого дубля.
+#
+# --urgent-after-sec (WP-484, 14.09, пир-сессия с Kimi+Codex): живой
+# инцидент — этот же троттлинг 3 суток подряд подавлял один и тот же класс
+# `pull`, и текст «повторяется N раз» никогда не ушёл пилоту, потому что
+# каждый повтор попадал в то же 6-часовое окно подавления. Порог ниже
+# работает НЕЗАВИСИМО от repeat_after_min: при пересечении длительности
+# инцидента одно сообщение уходит немедленно, минуя частотный троттлинг,
+# после чего откат на собственный цикл urgent_repeat_after_min — не «раз в
+# сутки навсегда», а «раз в сутки, пока инцидент открыт».
+NOTIFY_ESCALATION_URGENT_AFTER_SEC="${NOTIFY_ESCALATION_URGENT_AFTER_SEC:-21600}"
+NOTIFY_ESCALATION_URGENT_REPEAT_MIN="${NOTIFY_ESCALATION_URGENT_REPEAT_MIN:-1440}"
 alert() {
   local class="$1" text="$2"
   echo "$LOG_PREFIX $text"
   local full_text="$text"
   if $NOTIFY_LIB_AVAILABLE; then
-    if notify_escalation_update "sync-extensions-auto/$class" fail --repeat-after-min 360; then
-      if [ "$NOTIFY_ESCALATION_PHASE" = "ongoing" ]; then
+    if notify_escalation_update "sync-extensions-auto/$class" fail \
+         --repeat-after-min 360 \
+         --urgent-after-sec "$NOTIFY_ESCALATION_URGENT_AFTER_SEC" \
+         --urgent-repeat-after-min "$NOTIFY_ESCALATION_URGENT_REPEAT_MIN"; then
+      if [ "$NOTIFY_ESCALATION_PHASE" = "urgent" ]; then
+        full_text="🆘 $text — конвейер доставки стоит уже $(notify_format_duration "$NOTIFY_ESCALATION_DURATION_SEC") ($NOTIFY_ESCALATION_COUNT попыток подряд), нужно ручное вмешательство"
+      elif [ "$NOTIFY_ESCALATION_PHASE" = "ongoing" ]; then
         full_text="$text (повторяется $NOTIFY_ESCALATION_COUNT раз подряд, не решается уже $(notify_format_duration "$NOTIFY_ESCALATION_DURATION_SEC"))"
       fi
     else
