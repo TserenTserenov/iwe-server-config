@@ -6,9 +6,10 @@
 # Author-only: sources personal Focus To-Do data (WP-470), not shipped in
 # FMT-exocortex-template.
 #
-# Same stdout-empty residency rule as day-open.summary-extra.sh (health, WP-469
-# retrofit-audit 2026-07-24): DayPlan is git-tracked and pushed to GitHub — the
-# daily summary goes to a local non-git file instead.
+# Same residency rule the health hook follows (day-open.after.health-owner.md,
+# health-residency-guard.sh, WP-469 retrofit-audit 2026-07-24): DayPlan is
+# git-tracked and pushed to GitHub — the daily summary goes to a local non-git
+# file instead.
 #
 # Source format: single JSON export file written by a separate tool (staged
 # 2026-07-26, not installed on this Mac yet — see WP-470.md "Focus To-Do"),

@@ -397,6 +397,33 @@ IWE_SESSION_GUARD_FAULT_POINT=after-prepared /bin/bash "$GUARD" machine-close \
 REMOTE_PREPARE_RC=$?
 set -e
 [ "$REMOTE_PREPARE_RC" -eq 99 ] || { echo "FAIL: remote-bound fixture did not stop after PREPARED" >&2; exit 1; }
+PREPARED_SNAPSHOT="$TEST_ROOT/prepared-claims.snapshot"
+cp "$REMOTE_BOUND_SEM" "$PREPARED_SNAPSHOT"
+REMOTE_BOUND_HEAD=$(git -C "$REMOTE_BOUND_WORKTREE" rev-parse HEAD)
+if /bin/bash "$GUARD" note-commit "$REMOTE_BOUND_HEAD" --repo DS-strategy \
+   --agent night-cycle --session-id "$REMOTE_BOUND_SID" >/dev/null 2>&1; then
+  echo "FAIL: note-commit extended frozen PREPARED claims" >&2
+  exit 1
+fi
+cmp -s "$REMOTE_BOUND_SEM" "$PREPARED_SNAPSHOT" \
+  || { echo "FAIL: refused note-commit mutated PREPARED" >&2; exit 1; }
+if /bin/bash "$GUARD" note-file extra.txt --agent night-cycle \
+   --session-id "$REMOTE_BOUND_SID" >/dev/null 2>&1; then
+  echo "FAIL: note-file extended frozen PREPARED scope" >&2
+  exit 1
+fi
+cmp -s "$REMOTE_BOUND_SEM" "$PREPARED_SNAPSHOT" \
+  || { echo "FAIL: refused note-file mutated PREPARED" >&2; exit 1; }
+# Deliberate corruption of a disposable fixture, never a live semaphore.
+printf 'commit: DS-strategy %s\n' "$REMOTE_BOUND_HEAD" >> "$REMOTE_BOUND_SEM"
+if /bin/bash "$GUARD" machine-close --agent night-cycle --session-id "$REMOTE_BOUND_SID" \
+   >/dev/null 2>&1; then
+  echo "FAIL: PREPARED retry accepted a changed claim snapshot" >&2
+  exit 1
+fi
+[ -f "$REMOTE_BOUND_SEM" ] && [ ! -e "$REMOTE_BOUND_SEM.closed" ] && [ -d "$REMOTE_BOUND_WORKTREE" ] \
+  || { echo "FAIL: claim tampering consumed PREPARED/worktree" >&2; exit 1; }
+cp "$PREPARED_SNAPSHOT" "$REMOTE_BOUND_SEM"
 REPLACEMENT_ORIGIN="$TEST_ROOT/replacement-origin.git"
 git init -q --bare -b main "$REPLACEMENT_ORIGIN"
 git -C "$REPO" remote set-url origin "$REPLACEMENT_ORIGIN"

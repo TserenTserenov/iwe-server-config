@@ -15,7 +15,7 @@
 #   - маркер покрытия обязателен: поток REST идёт с 07.07, июль покрыт не полностью —
 #     мнимая полнота хуже честного "N из D дней".
 #
-# Per-day selection mirrors day-open.summary-extra.sh exactly:
+# Per-day selection matches the same tie-break rules used elsewhere for this data:
 #   - sleep: Pillow row preferred, tie-break by received_at (several Pillow rows per night
 #     happen, same as resting_heart_rate refined revisions — see day hook header);
 #   - resting HR: latest row by received_at (Apple resends refined daily aggregates);

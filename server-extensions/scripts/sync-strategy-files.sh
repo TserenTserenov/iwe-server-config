@@ -129,6 +129,45 @@ if [ "${#FILES_TO_SYNC[@]}" -eq 0 ]; then
   exit 0
 fi
 
+# A staged path is OUR stale mirror -- refreshable without data loss -- only
+# when every check of the peer-agreed contract passes (WP-5 F42-B recurrence,
+# peer-session 2026-09-12-17: Codex arbitration + Kimi hardening):
+#   1. worktree content == index content (no unstaged edits on the path);
+#   2. path is inside this script's own sync scope (guaranteed by the caller --
+#      the function is only reached for FILES_TO_SYNC entries);
+#   3. index blob differs from the current origin blob (refresh is meaningful);
+#   4. index blob is some PAST origin/main version of this path (bounded scan --
+#      mirrors are always recent, 200 revisions is plenty);
+#   5. index blob does not appear in local-only commits of this path -- a
+#      deliberate local revert to an old origin version is human work, not a
+#      mirror (peer-agreed replacement for an "authorship" check, which staged
+#      blobs do not carry).
+is_own_stale_mirror() {
+  local file="$1"
+  git diff --quiet -- "$file" 2>/dev/null || return 1
+
+  local index_blob remote_blob
+  index_blob=$(git rev-parse ":${file}" 2>/dev/null) || return 1
+  remote_blob=$(git rev-parse "${REMOTE}/${BRANCH}:${file}" 2>/dev/null) || return 1
+  [ "$index_blob" != "$remote_blob" ] || return 1
+
+  local rev matched=false
+  for rev in $(git rev-list -n 200 "${REMOTE}/${BRANCH}" -- "$file"); do
+    if [ "$(git rev-parse "${rev}:${file}" 2>/dev/null)" = "$index_blob" ]; then
+      matched=true
+      break
+    fi
+  done
+  [ "$matched" = true ] || return 1
+
+  for rev in $(git rev-list HEAD --not "${REMOTE}/${BRANCH}" -- "$file"); do
+    if [ "$(git rev-parse "${rev}:${file}" 2>/dev/null)" = "$index_blob" ]; then
+      return 1
+    fi
+  done
+  return 0
+}
+
 SYNCED=0
 SKIPPED=0
 SKIPPED_DIRTY=0
@@ -160,8 +199,24 @@ for FILE in "${FILES_TO_SYNC[@]}"; do
   # файла (git rm/mv или голый rm без коммита — `git diff HEAD` ловит оба:
   # для отсутствующего на диске, но отслеживаемого в HEAD пути он тоже вернёт
   # "отличается"). Для путей, никогда не отслеживавшихся локально, вернёт
-  # "чисто" — безвредно. Не трогаем, что бы ни было на remote.
+  # "чисто" — безвредно. Не трогаем, что бы ни было на remote — кроме одного
+  # доказуемого случая: наше же протухшее зеркало (см. is_own_stale_mirror).
   if ! git diff --quiet HEAD -- "$FILE" 2>/dev/null; then
+    if is_own_stale_mirror "$FILE"; then
+      # Refresh our own stale mirror to the current origin content. Without
+      # this, a mirror staged from an older origin tip is treated as "dirty"
+      # forever, canon-refresh stops recognizing the tree as a single-tip
+      # mirror, and tsekh1-git-sync deadlocks (WP-5 F42-B recurrence,
+      # peer-session 2026-09-12-17, Kimi+Codex contract).
+      if git checkout "${REMOTE}/${BRANCH}" -- "$FILE" 2>/dev/null; then
+        SYNCED=$((SYNCED + 1))
+        echo "$TS [sync-strategy-files] refreshed own stale mirror: $FILE" >&2
+      else
+        FAILED=$((FAILED + 1))
+        echo "$TS [sync-strategy-files] FAIL refreshing stale mirror: $FILE" >&2
+      fi
+      continue
+    fi
     SKIPPED_DIRTY=$((SKIPPED_DIRTY + 1))
     continue
   fi

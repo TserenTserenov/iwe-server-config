@@ -4,9 +4,18 @@
 # day-open-preflight.sh — pre-flight healthcheck для Day Open
 # WP-7 ФDay-Open-Hardening (DOC6 3-состояния: peer-session 2026-07-14-07)
 # Возвращает единый JSON: {"calendar":"ok|fail|pending","scout":"ok|fail|disabled|pending","scout_reason":"...",
-#   "triage":"ok|fail|disabled|pending","triage_reason":"...","memory":"ok|stale|missing"}
+#   "triage":"ok|fail|disabled|pending","triage_reason":"...","memory":"ok|stale|missing",
+#   "sync_drift":"ok|fail|disabled|unknown","sync_drift_reason":"..."}
 # "disabled" = источник намеренно не настроен на этой машине (Scout/triage репо отсутствуют).
 # "fail" = источник настроен, но данные не собрались (диагностика нужна).
+#
+# sync_drift (WP-484, 14.09, пир-сессия с Kimi+Codex): независимый от
+# алертинга sync-extensions-auto.sh канал — тот 3-суточный сбой доставки
+# Мак->GitHub->сервер стоял незамеченным, потому что каждый Telegram-алерт
+# попадал в частотный троттлинг. Этот health-check не заменяет тот алертинг
+# (см. NOTIFY_ESCALATION_URGENT_AFTER_SEC в sync-extensions-auto.sh) — он
+# второй, независимый способ пилоту увидеть тот же факт, который сработает,
+# даже если Telegram-канал молчал.
 
 set -uo pipefail
 
@@ -118,6 +127,40 @@ else
   fi
 fi
 
+# --- sync_drift: how long has each repo been behind its origin? ---
+# check_repo_drift <repo_path> <threshold_sec> -> echoes "ok" or "fail:<age_h>ч:<repo_name>"
+# Best-effort fetch (5s timeout); no network / no repo -> caller treats as unknown, not fail.
+check_repo_drift() {
+  local repo="$1" threshold_sec="$2"
+  [ -d "$repo/.git" ] || { echo "absent"; return; }
+  timeout 5 git -C "$repo" fetch --quiet origin 2>/dev/null
+  local oldest_unapplied
+  oldest_unapplied=$(git -C "$repo" log HEAD..origin/main --format=%ct 2>/dev/null | tail -1)
+  [ -n "$oldest_unapplied" ] || { echo "ok"; return; }  # not behind, or fetch/log unavailable
+  local age_sec=$(( $(date +%s) - oldest_unapplied ))
+  if [ "$age_sec" -ge "$threshold_sec" ]; then
+    echo "fail:$(( age_sec / 3600 ))"
+  else
+    echo "ok"
+  fi
+}
+
+SYNC_DRIFT_THRESHOLD_SEC="${SYNC_DRIFT_THRESHOLD_SEC:-21600}"  # 6h, same threshold as sync-extensions-auto.sh urgent escalation
+SYNC_DRIFT_STATUS="ok"
+SYNC_DRIFT_REASON=""
+STALE_REPOS=()
+for repo_name in "$IWE" "$IWE/iwe-server-config"; do
+  result=$(check_repo_drift "$repo_name" "$SYNC_DRIFT_THRESHOLD_SEC")
+  case "$result" in
+    fail:*) STALE_REPOS+=("$(basename "$repo_name"): ${result#fail:}ч") ;;
+  esac
+done
+if [ "${#STALE_REPOS[@]}" -gt 0 ]; then
+  SYNC_DRIFT_STATUS="fail"
+  SYNC_DRIFT_REASON=$(printf '%s, ' "${STALE_REPOS[@]}")
+  SYNC_DRIFT_REASON="${SYNC_DRIFT_REASON%, } отстаёт от origin дольше порога"
+fi
+
 # --- active-wp.md stale check ---
 MEMORY_STATUS="ok"
 ACTIVE_WP="$IWE/$GOV_REPO/current/active-wp.md"
@@ -143,5 +186,8 @@ jq -n \
   --arg triage "$TRIAGE_STATUS" \
   --arg triage_reason "$TRIAGE_REASON" \
   --arg memory "$MEMORY_STATUS" \
+  --arg sync_drift "$SYNC_DRIFT_STATUS" \
+  --arg sync_drift_reason "$SYNC_DRIFT_REASON" \
   '{calendar: $calendar, scout: $scout, scout_reason: $scout_reason,
-    triage: $triage, triage_reason: $triage_reason, memory: $memory}'
+    triage: $triage, triage_reason: $triage_reason, memory: $memory,
+    sync_drift: $sync_drift, sync_drift_reason: $sync_drift_reason}'
