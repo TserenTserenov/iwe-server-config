@@ -36,7 +36,7 @@ fi
 # (bash 3.2-совместимость, per-key flock, fail-open) — не заводить свою
 # отдельную реализацию. Все известные классы сбоя этого скрипта, для alert_ok
 # (перечислять новый класс сюда при добавлении нового failure-branch):
-ALERT_CLASSES=(cd pull source-behind sync-script test-gate add commit push)
+ALERT_CLASSES=(cd pull source-behind sync-script test-env test-gate add commit push)
 NOTIFY_LIB="${SYNC_EXTENSIONS_NOTIFY_LIB:-$HOME/IWE/DS-my-strategy/scripts/lib/notification-render.sh}"
 NOTIFY_LIB_AVAILABLE=false
 if [ -f "$NOTIFY_LIB" ]; then
@@ -137,8 +137,46 @@ lock_release() {
 }
 
 SYNC_LOG=""
+
+# Test env shim (WP-530, peer-session 2026-09-16 с Kimi): ~15 скриптов в
+# server-extensions/scripts/*.sh делают `source ".../.claude/lib/..."`, но
+# этот checkout хранит ту же библиотеку под именем `claude-lib/` (без точки)
+# — на tsekh-1 разрыва нет, там modules/iwe-extensions-sync.nix rsync'ит
+# claude-lib/ в реальный .claude/lib/ при деплое. Здесь символические ссылки
+# только на время прогона тестового гейта: коммитить их нельзя — на Цехе уже
+# есть настоящий .claude/lib/ от Nix, симлинк с тем же именем поверх него
+# столкнётся с деплоем непредсказуемо.
+EXT_DIR="$REPO_ROOT/server-extensions"
+TEST_ENV_CREATED=()
+setup_test_env() {
+  local pairs=(claude-lib:.claude/lib claude-skills:.claude/skills claude-hooks:.claude/hooks claude-scripts:.claude/scripts)
+  local pair src target rel
+  for pair in "${pairs[@]}"; do
+    src="${pair%%:*}"
+    target="${pair#*:}"
+    rel="../$src"
+    mkdir -p "$EXT_DIR/$(dirname "$target")"
+    if [ -e "$EXT_DIR/$target" ] || [ -L "$EXT_DIR/$target" ]; then
+      if [ -L "$EXT_DIR/$target" ] && [ "$(readlink "$EXT_DIR/$target")" = "$rel" ]; then
+        continue  # уже настроено (например, хвост незавершённого прошлого прогона) — не наш симлинк, cleanup его не трогает
+      fi
+      echo "$LOG_PREFIX ABORT: $EXT_DIR/$target уже существует и это не ожидаемый симлинок на $src — окружению нельзя доверять, тестовый гейт не запускаю" >&2
+      return 1
+    fi
+    ln -s "$rel" "$EXT_DIR/$target"
+    TEST_ENV_CREATED+=("$EXT_DIR/$target")
+  done
+}
+cleanup_test_env() {
+  local path
+  for path in "${TEST_ENV_CREATED[@]:-}"; do
+    [ -n "$path" ] && rm -f "$path"
+  done
+}
+
 on_exit() {
   [ -n "$SYNC_LOG" ] && rm -f "$SYNC_LOG"
+  cleanup_test_env
   lock_release
 }
 trap on_exit EXIT
@@ -204,6 +242,11 @@ FILE_LIST=$(echo "$CHANGED" | awk '{print $2}' | head -5 | tr '\n' ', ')
 # Рекомендуется при следующем ревизии рассмотреть обязательность тестового
 # покрытия для всех файлов в server-extensions/ либо альтернативный
 # механизм стимула (например, блокировка merge при снижении покрытия)».
+if ! setup_test_env; then
+  alert test-env "🚨 sync-extensions-auto: тестовое окружение (.claude/lib и соседи) не удалось подготовить — auto-sync отменён, подробности в логе на Маке"
+  exit 1
+fi
+
 GATE_LOG=$(mktemp)
 GATE_FAILED=false
 while IFS= read -r changed_line; do
@@ -247,6 +290,14 @@ if [ "$GATE_FAILED" = true ]; then
   exit 1
 fi
 rm -f "$GATE_LOG"
+
+# Явно, не полагаясь на on_exit() в конце скрипта (cold-review, Critical,
+# WP-530 2026-09-16): trap срабатывает ПОСЛЕ git add/commit/push ниже --
+# симлинки setup_test_env() ещё лежат бы в дереве в момент add и реально
+# закоммитились бы (`git add -n` живьём подтвердил: подхватывает все 4
+# .claude/{lib,skills,hooks,scripts}), нарушая ровно то, ради чего они
+# сделаны временными (см. комментарий у setup_test_env выше).
+cleanup_test_env
 
 # Pathspec на commit (не только на add) — если параллельная сессия уже держит
 # в индексе свою незакоммиченную правку вне server-extensions/, она сюда не
