@@ -28,10 +28,14 @@ DAY_CLOSE_SELF="$SCRIPT_DIR/$(basename "${BASH_SOURCE[0]}")"
 source "$SCRIPT_DIR/../.claude/lib/iwe-env-bootstrap.sh" || exit 1
 GOVERNANCE_REPO="${GOVERNANCE_REPO:-${IWE_GOVERNANCE_REPO:-DS-strategy}}"
 DS_STRATEGY="$WORKSPACE_DIR/$GOVERNANCE_REPO"
-# Slug derived from WORKSPACE_DIR (not $HOME) so it matches Claude's project key
-# regardless of workspace location. Override via IWE_MEMORY_SRC if needed.
-WORKSPACE_SLUG=$(echo "$WORKSPACE_DIR" | tr '/_ ' '-')
-MEMORY_SRC="${IWE_MEMORY_SRC:-$HOME/.claude/projects/${WORKSPACE_SLUG}/memory}"
+# `$WORKSPACE_DIR/memory` is already a symlink to the real auto-memory directory
+# (set up once at install time) -- reading through it works for any pilot's CLI,
+# not only Claude Code. An earlier version reconstructed the target path from
+# Claude's own `~/.claude/projects/<slug>/` naming convention instead of using
+# this symlink directly; that path doesn't exist at all for pilots who never ran
+# Claude Code (issue #637) -- do_backup failed preflight for them on every run.
+# Override via IWE_MEMORY_SRC if needed.
+MEMORY_SRC="${IWE_MEMORY_SRC:-$WORKSPACE_DIR/memory}"
 EXOCORTEX_DST="$DS_STRATEGY/exocortex"
 # MCP reindex — опциональный компонент (WP-187 iwe-knowledge Gateway заменяет локальный knowledge-mcp).
 # Переопределить путь можно через env IWE_SELECTIVE_REINDEX.

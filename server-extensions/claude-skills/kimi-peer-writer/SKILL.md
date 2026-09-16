@@ -5,6 +5,7 @@ argument-hint: "<описание задачи> | --list | --interrupt <session_
 version: 1.4.0
 layer: L1
 status: active
+browser_safe: false
 triggers:
   slash: [/peer-writer]
   phrases: ["начни peer-сессию", "запусти диалог с Клодом", "peer-сессия", "вместе с Клодом", "с Клодом", "привлеки Клода"]
@@ -123,7 +124,10 @@ elif grep -q '^close_path: unknown$' "$SEM_FILE" 2>/dev/null; then
   (
     flock -x 9
     grep -q '^close_path: unknown$' "$SEM_FILE" 2>/dev/null || exit 0
-    sed -i 's/^close_path: unknown$/close_path: peer-session/' "$SEM_FILE"
+    # `sed -i` без развилки BSD/GNU ломается на macOS (тот же класс,
+    # что уже ловили в Ф136-B этого РП) — temp-file+mv портируем, как
+    # уже сделано в peer-conversation/SKILL.md Шаг 4.1 для meta.yaml.
+    tmpf=$(mktemp "${SEM_FILE}.XXXXXX") && sed 's/^close_path: unknown$/close_path: peer-session/' "$SEM_FILE" > "$tmpf" && mv "$tmpf" "$SEM_FILE"
     grep -q '^close_path: peer-session$' "$SEM_FILE" || echo "WARN: close_path-патч не подтвердился после записи" >&2
   ) 9>"$SEM_FILE.lock"
 fi

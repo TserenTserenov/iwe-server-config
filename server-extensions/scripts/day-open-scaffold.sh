@@ -964,6 +964,17 @@ render_attention() {
     done < <(grep -E '^\|.*⚠' "$orgdev_file" | sed -E 's/^\| *[0-9]+ *\| *//; s/ *\|$//; s/ *\| */: /g')
   fi
 
+  # WP-561 Ф15: WeekState warnings (⚠️/🗓️) belong here too — the directions
+  # section is collapsed, «Требует внимания» is what reaches the compact dashboard.
+  local weekstate="$IWE/${IWE_GOVERNANCE_REPO:-DS-strategy}/current/WeekState W$((10#$WEEK_NUM)).md"
+  if [ -f "$weekstate" ]; then
+    local ws_row
+    while IFS= read -r ws_row; do
+      [ -z "$ws_row" ] && continue
+      items+=("направления недели: ${ws_row}")
+    done < <(grep -E '^(⚠️|🗓️)' "$weekstate")
+  fi
+
   if [ "${#items[@]}" -eq 0 ]; then
     echo "— нет сигналов, требующих внимания."
     return
@@ -975,6 +986,31 @@ render_attention() {
 }
 
 # --- Section: Итоги вчера (commits stats + sessions) ---
+render_directions_today() {
+  # WP-561 Ф14 (пир-сессия 2026-09-15-12): рендерит уже готовое содержимое —
+  # никакого <!-- PENDING --> здесь никогда не появляется, поэтому
+  # day-open-llm-fill.py (снапшот из FMT-exocortex-template, правится только
+  # через template-sync.sh, не отсюда) эту секцию не трогает по своему же
+  # инварианту "секция без PENDING = неизменна". Best-effort: скрипт
+  # деградирует сам (см. его docstring), поэтому здесь нет отдельного
+  # || echo fallback — падение самого python3 (не найден, синтаксис) —
+  # единственный случай, когда нужен запасной текст.
+  local repo="$IWE/${IWE_GOVERNANCE_REPO:-DS-strategy}"
+  local out
+  out=$(python3 "$repo/scripts/day-open-weekstate-render.py" \
+    --governance-repo "$repo" --for-date "$DATE" 2>/dev/null)
+  if [ -z "$out" ]; then
+    echo "<details>"
+    echo "<summary><b>Направления сегодня</b></summary>"
+    echo
+    echo "> нет данных — day-open-weekstate-render.py не вернул вывод (см. stderr прогона)"
+    echo
+    echo "</details>"
+  else
+    printf '%s\n' "$out"
+  fi
+}
+
 render_yesterday() {
   local total=0 repos=0
   while IFS= read -r repo; do
@@ -1424,6 +1460,8 @@ $WORLD_SECTION
 <!-- PENDING: week_context — фокус недели + текущий бюджет/мультипликатор + ТОС. Источник: ${IWE_GOVERNANCE_REPO:-DS-strategy}/current/WeekPlan W$WEEK_NUM*.md. -->
 
 </details>
+
+$(render_directions_today)
 
 <details>
 <summary><b>Итоги вчера ($YDAY_NUM $YDAY_MONTH_RU)</b></summary>

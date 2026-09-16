@@ -78,6 +78,18 @@
 
 set -euo pipefail
 
+# P1(b), WP-484 п.19: several unsynced copies of this script exist on a given
+# host at once (canonical, FMT-exocortex-template, iwe-local-config); when
+# `open` writes a semaphore with one copy and `close` reads it with another,
+# a mismatch in the field set they expect surfaces only indirectly -- as a
+# generic "governance checkout не доказан" failure with no clue which script
+# wrote what (the WP-573 incident, 14.09, took a multi-agent investigation to
+# even locate). Stamping the writer's own schema version into every semaphore
+# makes that skew directly greppable instead of requiring archaeology.
+# Bump only when the semaphore's field set changes in a way `close` needs to
+# know about (a new required field, a removed one) -- not on every edit here.
+readonly GUARD_SCHEMA_VERSION=1
+
 IWE_ROOT="${IWE_ROOT:-$HOME/IWE}"
 # issue #266: hardcoded "DS-my-strategy" broke every template user whose
 # governance repo is named "DS-strategy" (the shipped default — see create-wp.sh).
@@ -2575,6 +2587,107 @@ _semaphore_transition_lock_id() {  # <absolute semaphore path>
   python3 -c 'import hashlib,sys; print("semaphore-" + hashlib.sha256(sys.argv[1].encode()).hexdigest())' "$1"
 }
 
+_cancel_dead_session_quick_close_runs() {  # <semaphore>
+  # Ф42/Ф43 (2026-09-15, peer-session with Kimi, canon-sync-prevention):
+  # the semaphore itself stays .open (dead-PID evidence is never fencing --
+  # see the callers below), but any quick-close run this dead owner started
+  # is orphaned right now, not at whatever later moment a foreign
+  # `start quick-close` happens to hit reap_orphan_cards()'s admission-limit
+  # trigger (process-runner.py, docstring on that function) or a human
+  # notices the uncommitted RUN-quick-close-*.md card sitting in the canon
+  # (31 of 57 dirty Mac paths were exactly this on 15.09). cancel-session
+  # only cancels non-terminal cards it can prove belong to this session_id
+  # -- it never touches the semaphore, so this stays exactly as
+  # conservative as the escalation at each call site.
+  local semaphore="$1" session_id runner
+  session_id=$(grep '^session_id: ' "$semaphore" 2>/dev/null | head -1 | cut -d' ' -f2- || true)
+  [ -n "$session_id" ] || return 0
+  runner="$IWE_ROOT/$GOV_REPO/scripts/process-runner.py"
+  [ -f "$runner" ] || return 0
+  (cd "$IWE_ROOT/$GOV_REPO" && python3 "$runner" cancel-session quick-close "$session_id") \
+    2>&1 || echo "WARNING: cancel-session для мёртвой сессии $session_id не прошёл (не блокирует sweep)" >&2
+}
+
+_classify_pid_identity_mismatch() {  # <semaphore> <pid> <observed comm>
+  # Ф43 (2026-09-15, peer-session with Kimi): `kill -0 $pid` only proves
+  # SOME process holds this pid right now -- the pid-reuse case found live
+  # yesterday (a claude-code semaphore's pid had been reassigned to an
+  # unrelated `node` process, WP-484 close-proof-drift session) sailed
+  # straight past the sweep loop's fast "alive, continue" path with no
+  # escalation at all, because that path never checked WHICH process. This
+  # is the same escalate-only contract as _classify_dead_semaphore right
+  # below -- the semaphore stays .open, only a Telegram notice and (for the
+  # non-scheduled case) an orphan-card sweep for this session_id happen
+  # automatically.
+  local semaphore="$1" pid="$2" observed_comm="$3" target epoch age
+  [ -f "$semaphore" ] && [ ! -L "$semaphore" ] || return 0
+  # Cold-review Critical/High (2026-09-15): the caller reads pid+comm BEFORE
+  # taking the transition lock -- re-confirm both under the lock, the same
+  # anti-TOCTOU discipline _classify_dead_semaphore already applies to its
+  # own `kill -0` re-check right below. A resolved mismatch (pid rotated
+  # again, or the semaphore already got closed) must not escalate on a
+  # snapshot that is no longer true.
+  pid=$(grep '^pid: ' "$semaphore" 2>/dev/null | head -1 | cut -d' ' -f2- || true)
+  [[ "$pid" =~ ^[1-9][0-9]*$ ]] || return 0
+  observed_comm=$(ps -p "$pid" -o comm= 2>/dev/null || true)
+  case "$observed_comm" in
+    *claude*) return 0 ;;  # mismatch resolved (or pid died) since the snapshot
+  esac
+
+  # Same distinct class as _classify_dead_semaphore's scheduled_owner branch:
+  # even proven identity mismatch on a scheduler-owned semaphore only freezes
+  # after the exact drain contract, never cancels quick-close runs directly
+  # (_freeze_scheduled_drained itself requires the pid to be truly dead, so a
+  # live-but-wrong-process pid always fails that check and falls through to
+  # escalate-only below -- structurally identical to the dead-PID sibling on
+  # purpose, not copy-paste).
+  if grep -q '^scheduled_owner:' "$semaphore" 2>/dev/null; then
+    target="${semaphore}.orphaned-scheduled-drained"
+    if _freeze_scheduled_drained "$semaphore" "$target"; then
+      echo "WARNING: exact scheduled drain proven despite live pid $pid (identity mismatch, comm=$observed_comm); semaphore frozen, worktree retained" >&2
+      _SWEEP_SCHEDULED_FROZEN=$((_SWEEP_SCHEDULED_FROZEN + 1))
+      return 0
+    fi
+    epoch=$(semaphore_epoch "$semaphore" || echo 0)
+    age=$(( $(date +%s) - epoch ))
+    [ "$age" -lt 0 ] && age=0
+    if ! zombie_registry_has_action "$semaphore" "escalated"; then
+      append_zombie_event "scheduled_owner_pid_identity_mismatch:${pid}:${observed_comm}" \
+        "$semaphore" "$epoch" "$age" "escalated"
+      notify_zombie_escalation "$semaphore" "$age"
+      _SWEEP_ZOMBIES_ESCALATED=$((_SWEEP_ZOMBIES_ESCALATED + 1))
+    fi
+    echo "WARNING: scheduled owner pid $pid is alive but comm ($observed_comm) does not match; exact drain proof absent; $(basename "$semaphore") remains .open" >&2
+    _SWEEP_AMBIGUOUS=$((_SWEEP_AMBIGUOUS + 1))
+    return 0
+  fi
+
+  epoch=$(semaphore_epoch "$semaphore" || echo 0)
+  age=$(( $(date +%s) - epoch ))
+  [ "$age" -lt 0 ] && age=0
+  # zombie_registry_has_action's dedup key is (semaphore, action) only, not
+  # reason -- if this mismatch later resolves into a confirmed-dead pid
+  # (_classify_dead_semaphore), that second escalation is silently skipped
+  # (cold-review Medium, 2026-09-15). Not fixed here: pre-existing dedup
+  # design, only newly reachable as a two-reason sequence by this patch.
+  if ! zombie_registry_has_action "$semaphore" "escalated"; then
+    append_zombie_event "pid_identity_mismatch:${pid}:${observed_comm}" \
+      "$semaphore" "$epoch" "$age" "escalated"
+    notify_zombie_escalation "$semaphore" "$age"
+    _SWEEP_ZOMBIES_ESCALATED=$((_SWEEP_ZOMBIES_ESCALATED + 1))
+    # Unlike _classify_dead_semaphore's generic branch (cold-review Critical,
+    # 2026-09-15: cancelling there would be a NEW behavior on an existing,
+    # already-tuned false-positive-prone path, reverted), a proven identity
+    # mismatch is stronger evidence than a bare dead-PID check -- the kernel
+    # would not have handed this pid to an unrelated process while the
+    # original owner was still alive, so cancelling this session's orphaned
+    # quick-close runs here is not a new risk class.
+    _cancel_dead_session_quick_close_runs "$semaphore"
+  fi
+  echo "WARNING: pid $pid is alive but comm ($observed_comm) does not match the recorded owner; $(basename "$semaphore") remains .open, manual review required" >&2
+  _SWEEP_AMBIGUOUS=$((_SWEEP_AMBIGUOUS + 1))
+}
+
 _classify_dead_semaphore() {  # <semaphore> <observed pid>
   local semaphore="$1" observed_pid="$2" pid target epoch age
   [ -f "$semaphore" ] && [ ! -L "$semaphore" ] || return 0
@@ -2618,13 +2731,21 @@ _classify_dead_semaphore() {  # <semaphore> <observed pid>
       "$semaphore" "$epoch" "$age" "escalated"
     notify_zombie_escalation "$semaphore" "$age"
     _SWEEP_ZOMBIES_ESCALATED=$((_SWEEP_ZOMBIES_ESCALATED + 1))
+    # Cold-review Critical (2026-09-15): cancelling this session's quick-close
+    # runs here (bare dead-PID, no terminal/scheduled-drain proof) would be a
+    # NEW behavior change on an already-tuned false-positive-prone path, not
+    # a refactor -- deliberately NOT wired up, unlike the pid-identity-
+    # mismatch sibling below (_classify_pid_identity_mismatch), whose
+    # evidence for death is strictly stronger (a live, unrelated process
+    # holding the pid, not just kill -0 failing). This branch stays exactly
+    # as conservative as before this patch: notify only, human decides.
   fi
   echo "WARNING: pid $pid is dead, but terminal/scheduled-drain proof is absent or changed; $(basename "$semaphore") remains .open" >&2
   _SWEEP_AMBIGUOUS=$((_SWEEP_AMBIGUOUS + 1))
 }
 
 _sweep_orphaned_semaphores_body() {
-  local semaphore pid epoch age
+  local semaphore pid epoch age agent comm
   _SWEEP_AMBIGUOUS=0
   _SWEEP_TERMINAL_REAPED=0
   _SWEEP_SCHEDULED_FROZEN=0
@@ -2641,6 +2762,34 @@ _sweep_orphaned_semaphores_body() {
     if [[ "$pid" =~ ^[1-9][0-9]*$ ]]; then
       if ! kill -0 "$pid" 2>/dev/null; then
         with_session_transition_lock "$semaphore" _classify_dead_semaphore "$semaphore" "$pid"
+        continue
+      fi
+      # Ф43 (2026-09-15): a live pid alone is not proof of the RIGHT owner --
+      # PID reuse (dead original process, kernel hands the number to something
+      # unrelated) sailed straight past this "alive, continue" path with no
+      # escalation at all until a human noticed by hand (WP-484
+      # close-proof-drift session, 15.09: a claude-code semaphore's pid had
+      # been reassigned to an unrelated `node` process). Only agents that are
+      # ever observed recording a numeric pid get checked -- currently only
+      # claude-code (kimi/codex semaphores carry no pid field at all, see the
+      # missing/invalid-pid branch below). `ps -o comm=` returns the full
+      # binary path on macOS and a 15-char-truncated basename on Linux; a
+      # substring match on "claude" is what's portable across both, and is
+      # exactly the signal that caught yesterday's `node` mismatch. Depends
+      # on Claude Code's current distribution shipping a binary/argv0 that
+      # contains "claude" (verified live on both hosts, cold-review
+      # 2026-09-15) -- a future distribution change (e.g. bare `node cli.js`)
+      # would need this substring revisited, or every live session escalates.
+      agent=$(grep '^agent: ' "$semaphore" 2>/dev/null | head -1 | cut -d' ' -f2- || true)
+      if [ "$agent" = "claude-code" ]; then
+        comm=$(ps -p "$pid" -o comm= 2>/dev/null || true)
+        case "$comm" in
+          *claude*) : ;;
+          *)
+            with_session_transition_lock "$semaphore" _classify_pid_identity_mismatch \
+              "$semaphore" "$pid" "${comm:-<no such pid>}"
+            ;;
+        esac
       fi
       continue
     fi
@@ -3817,6 +3966,7 @@ $isolate_status_code $isolate_status_path"
     echo "opened_at: $(now_iso)"
     echo "created_at: $(now_iso)"
     echo "session_id: $SESSION_ID"
+    echo "guard_schema: $GUARD_SCHEMA_VERSION"
     # WP-484 Ф101 Находка 1: PostToolUse hooks (post-tool-use-scope-track.sh)
     # only see this env var, never WP/slug -- those are known only to the
     # code calling `open`, not to a hook firing on every later Write/Edit.
@@ -4328,10 +4478,23 @@ _unique_record_field() {  # <file> <top-level key>
   ' "$1" 2>/dev/null
 }
 
-_repo_scope_has_publish_proof() {  # <governance repo> <exact semaphore> <fresh remote OID>
+_repo_scope_has_publish_proof() {  # <governance repo> <exact semaphore> <fresh remote OID> [<legacy canonical repo>] [<legacy sessions dir>]
   # Shared canonical HEAD also includes neighbouring sessions.  Their history
   # cannot vouch for (or prevent delivery of) our registered output.  This
   # fallback requires current exact trees, never a historical blob/patch match.
+  #
+  # <legacy canonical repo>, <legacy sessions dir> (WP-484, peer-session
+  # 2026-09-14-13, Claude+Kimi+Codex): both set ONLY by the caller's own
+  # structural-absence check (all three of governance_worktree/
+  # isolated_worktree/orz_sessions_dir missing from the semaphore, see
+  # _close_delivery_and_transition) -- never read from the semaphore file
+  # itself. A legacy semaphore, by definition, cannot name either its own
+  # governance checkout or its own sessions checkout; without the second one
+  # too, every legacy semaphore refuses on its own ORZ scaffold file (which
+  # `open` always registers in scope) even once the governance side is
+  # fixed -- found live testing this same phase's D scenario: fixing
+  # governance alone still refused with "путь отсутствует или неоднозначен
+  # между репозиториями" on the ORZ path.
   python3 - "$@" "$IWE_ROOT" <<'PY'
 import os
 from pathlib import Path, PurePosixPath
@@ -4340,7 +4503,7 @@ import stat
 import subprocess
 import sys
 
-repo, semaphore, remote, iwe_root = sys.argv[1:]
+repo, semaphore, remote, legacy_canonical, legacy_sessions, iwe_root = sys.argv[1:]
 
 def refuse(message):
     raise SystemExit("Session CLOSE: scoped publish proof: " + message)
@@ -4363,7 +4526,23 @@ if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or info.st_uid != os.get
 snapshot = Path(semaphore).read_bytes()
 lines = snapshot.decode("utf-8").splitlines()
 governance = [line[21:] for line in lines if line.startswith("governance_worktree: ")]
-if len(governance) != 1 or os.path.realpath(governance[0]) != os.path.realpath(repo):
+structurally_legacy = not any(
+    line.startswith(("governance_worktree:", "isolated_worktree:", "orz_sessions_dir:"))
+    for line in lines
+)
+if len(governance) == 1:
+    if os.path.realpath(governance[0]) != os.path.realpath(repo):
+        refuse("governance checkout не связан с точным semaphore")
+elif structurally_legacy and legacy_canonical:
+    # Trust boundary shifts from "semaphore-declared path" to "caller's own
+    # resolved canonical" -- legal ONLY when the semaphore structurally
+    # names none of the three fields (checked above, not merely that this
+    # one line count is 0) AND the caller passed a non-empty value.  A
+    # partially-modern semaphore (e.g. only orz_sessions_dir present) is not
+    # "structurally legacy" and falls through to the refusal below.
+    if os.path.realpath(legacy_canonical) != os.path.realpath(repo):
+        refuse("legacy canonical repo не совпадает с проверяемым checkout")
+else:
     refuse("governance checkout не связан с точным semaphore")
 if any(line.startswith("isolated_worktree:") for line in lines):
     refuse("scoped fallback недопустим для isolated checkout")
@@ -4415,6 +4594,14 @@ other_repos = [iwe_root]
 sessions = [line[18:] for line in lines if line.startswith("orz_sessions_dir: ")]
 if len(sessions) > 1:
     refuse("неоднозначный sessions checkout")
+if not sessions and structurally_legacy and legacy_sessions:
+    # Same trust shift as governance above: caller-resolved, not read from
+    # the semaphore. Without this, a legacy semaphore's own ORZ scaffold
+    # file (always in scope, `open` registers it unconditionally) has no
+    # repo left to be found in and refuses on "путь отсутствует или
+    # неоднозначен между репозиториями" -- reproduced live testing this
+    # phase's scenario D before this line existed.
+    sessions = [legacy_sessions]
 other_repos.extend(sessions)
 other_repos = {os.path.realpath(path) for path in other_repos
                if os.path.lexists(Path(path) / ".git")}
@@ -4454,7 +4641,7 @@ if Path(semaphore).read_bytes() != snapshot:
 PY
 }
 
-_repo_head_has_publish_proof() {  # <repo> <role> [exact non-isolated governance semaphore]
+_repo_head_has_publish_proof() {  # <repo> <role> [exact non-isolated governance semaphore] [legacy canonical repo] [legacy sessions dir]
   local repo="$1" role="$2" root origin_url origin_ref
   root=$(git -C "$repo" rev-parse --show-toplevel 2>/dev/null) || {
     echo "Session CLOSE: $role не является читаемым git checkout: $repo" >&2
@@ -4478,7 +4665,7 @@ _repo_head_has_publish_proof() {  # <repo> <role> [exact non-isolated governance
     return 1
   }
   if ! git -C "$root" merge-base --is-ancestor HEAD "$origin_ref" 2>/dev/null; then
-    if [ -n "${3:-}" ] && _repo_scope_has_publish_proof "$root" "$3" "$origin_ref"; then
+    if [ -n "${3:-}" ] && _repo_scope_has_publish_proof "$root" "$3" "$origin_ref" "${4:-}" "${5:-}"; then
       echo "Session CLOSE: текущие файлы и commit scope этой сессии подтверждены свежим origin/main: $root" >&2
       return 0
     fi
@@ -6036,6 +6223,54 @@ _close_delivery_and_transition() {
   fi
 
   governance_repo=$(semaphore_governance_worktree "$SEM_FILE" || true)
+  legacy_semaphore_canonical=""
+  legacy_semaphore_sessions_dir=""
+  if [ -z "$governance_repo" ] && [ -z "$isolated_worktree" ] \
+     && ! grep -qE '^(governance_worktree|isolated_worktree|orz_sessions_dir): ' "$SEM_FILE"; then
+    # Legacy semaphore predating governance_worktree/orz_sessions_dir
+    # (WP-484, 14.09: opened by a session-guard.sh copy older than
+    # e2d3a2423e, 12.09 -- confirmed live on two semaphores the same day).
+    # Before --isolate existed every non-isolated session worked in the
+    # canonical checkout unconditionally; restore that default here instead
+    # of failing closed. Mirrors the fallback session_scope_dirty_paths()
+    # already applies at the scope-check step.
+    #
+    # Scoped to the STRUCTURAL absence of all three fields, not merely to
+    # semaphore_governance_worktree() returning empty (cold-review, Codex):
+    # a modern semaphore can legitimately name an independent, non-canonical
+    # governance_worktree that is currently unresolvable (gone, unreachable)
+    # -- that case must stay fail-closed, since substituting canonical there
+    # would silently accept a checkout that never actually owned the scope.
+    governance_repo=$(git -C "$IWE_ROOT/$GOV_REPO" rev-parse --show-toplevel 2>/dev/null || true)
+    # WP-484 Ф(peer-session 2026-09-14-13): the fallback above only fixed the
+    # HEAD-ancestry check having *some* repo to test against.  It never let
+    # the scoped fallback (_repo_scope_has_publish_proof) fire, because that
+    # function still demanded a `governance_worktree:` line the legacy
+    # semaphore structurally cannot have -- so a legacy semaphore with a
+    # dirty/diverged canonical (own commits real, HEAD not an origin/main
+    # ancestor because of unrelated foreign history) still failed closed on
+    # the strict ancestry check with no fallback left to try. Recorded here,
+    # not read from the semaphore, so the trust boundary is the caller's own
+    # verified structural-absence check, never semaphore content.
+    legacy_semaphore_canonical="$governance_repo"
+    # A legacy semaphore also lacks orz_sessions_dir, and `open` always
+    # registers the session's own ORZ scaffold file in scope -- without a
+    # sessions checkout to check that path against, the scoped fallback
+    # above refuses on it every time ("путь отсутствует или неоднозначен
+    # между репозиториями"), found live testing this same phase. Best
+    # effort: resolve_orz_sessions_dir() can itself fail() (e.g.
+    # IWE_SESSIONS_ROOT set but broken) -- that must not abort close, since
+    # this is an enrichment, not a requirement; an empty value here just
+    # means the ORZ path stays unrecognized, same as before this fix.
+    legacy_semaphore_sessions_dir=$(resolve_orz_sessions_dir 2>/dev/null || true)
+    # P1(b), WP-484 п.19: pure diagnostic, no effect on the fallback above --
+    # names which script version (if any) wrote this semaphore, so the next
+    # incident like WP-573 (14.09, several unsynced session-guard.sh copies
+    # on one host) is greppable from the semaphore itself instead of needing
+    # a multi-agent git-archaeology session to even locate the drifted copy.
+    _legacy_guard_schema=$(grep '^guard_schema: ' "$SEM_FILE" 2>/dev/null | head -1 | cut -d' ' -f2- || true)
+    echo "Session CLOSE: legacy semaphore (структурно без governance_worktree/isolated_worktree/orz_sessions_dir) -- writer guard_schema=${_legacy_guard_schema:-отсутствует (написан копией старше введения этого поля)}, читает closer с guard_schema=$GUARD_SCHEMA_VERSION" >&2
+  fi
   [ -n "$governance_repo" ] \
     || fail "close: governance checkout не доказан; clean/terminal transition запрещён" 7
 
@@ -6043,8 +6278,63 @@ _close_delivery_and_transition() {
   # alternative proof covers this session's current exact output and declared
   # commits.  The independent sessions checkout keeps the strict HEAD proof.
   # Missing origin or a tracking ref is never implicit `clean`.
-  if [ -z "$isolated_worktree" ]; then
-    _repo_head_has_publish_proof "$governance_repo" "governance checkout" "$SEM_FILE" \
+  #
+  # WP-484 (16.09, peer-session 2026-09-16-13-wp484-close-drift-fix,
+  # Claude+Kimi): a session that never touched the governance repo has
+  # nothing to prove there. This check used to run unconditionally for every
+  # non-isolated session regardless of scope, demanding the WHOLE shared
+  # canonical checkout's HEAD be an ancestor of origin/main -- a checkout
+  # that drifts constantly under real concurrency (other sessions committing
+  # locally without pushing yet), so a session with zero footprint in this
+  # repo failed for a divergence it had no part in.
+  #
+  # Cold-review Critical (same session, before deploy): gating on `commit:`
+  # claims alone is not the same as "touched nothing" -- a session that
+  # edited a file here (auto-tracked as a `file:` claim by
+  # post-tool-use-scope-track.sh) and committed it directly, forgetting to
+  # call `note-commit`, would previously fail closed on this exact check (its
+  # unpublished HEAD commit fails the ancestor test, and the scoped fallback
+  # also refuses with an empty `commit:` list) -- a real, if accidental,
+  # safety net. Skipping whenever `commit:` is empty silently drops that net.
+  # Fixed by requiring EITHER a `commit:` claim for this repo OR at least one
+  # `file:` claim that resolves to a path actually present under
+  # $governance_repo -- a session with neither has provably no footprint here
+  # (nothing committed, nothing present to have been committed), so there is
+  # still nothing to prove; a session with a stray `file:` claim under this
+  # repo still runs the full check, the same as before this fix (rejected the
+  # alternative of comparing HEAD against its value at `open`: in a shared
+  # checkout that drifts from sibling sessions just as easily, that proves
+  # nothing more than the existing ancestry check).
+  GOVERNANCE_REPO_BASENAME=$(basename "$governance_repo")
+  GOVERNANCE_REPO_HAS_FOOTPRINT=0
+  if grep -qF "commit: ${GOVERNANCE_REPO_BASENAME} " "$SEM_FILE" 2>/dev/null; then
+    GOVERNANCE_REPO_HAS_FOOTPRINT=1
+  else
+    # Second cold-review (same session): a bare `file:` claim is not
+    # repo-qualified -- the same relative path can legitimately exist in more
+    # than one repo (confirmed live: CLAUDE.md/AGENTS.md/.claude/settings.json
+    # and several scripts/* exist verbatim in both $IWE_ROOT and every
+    # governance checkout). A naive existence check alone would count a root
+    # repo edit (e.g. this file's own CLAUDE.md) as governance-repo footprint
+    # and re-trigger the exact false block this fix exists to remove -- not
+    # rare, CLAUDE.md/AGENTS.md are edited routinely per this file's own §7.
+    # Only trust a path as this session's governance-repo footprint when it
+    # exists HERE and NOT at the same relative path under $IWE_ROOT; an
+    # ambiguous path falls through with no footprint from this claim (still
+    # picked up by the `commit:` signal above, or by another unambiguous
+    # `file:` claim) rather than forcing a check that fails for unrelated
+    # repo drift on a session that never touched this file here.
+    while IFS= read -r _footprint_path; do
+      _footprint_path="${_footprint_path#file: }"
+      [ -n "$_footprint_path" ] || continue
+      if [ -e "$governance_repo/$_footprint_path" ] && [ ! -e "$IWE_ROOT/$_footprint_path" ]; then
+        GOVERNANCE_REPO_HAS_FOOTPRINT=1
+        break
+      fi
+    done < <(grep '^file: ' "$SEM_FILE" 2>/dev/null || true)
+  fi
+  if [ -z "$isolated_worktree" ] && [ "$GOVERNANCE_REPO_HAS_FOOTPRINT" -eq 1 ]; then
+    _repo_head_has_publish_proof "$governance_repo" "governance checkout" "$SEM_FILE" "$legacy_semaphore_canonical" "$legacy_semaphore_sessions_dir" \
       || fail "close: governance delivery не подтверждена; .open/lease/pointer сохранены" 7
   fi
   if [ -z "$isolated_worktree" ]; then
@@ -6629,10 +6919,24 @@ print(json.dumps({"wp": sys.argv[1], "slug": sys.argv[2], "agent": sys.argv[3], 
   if [ -z "$RUNNER_OK" ]; then
     # HARNESS_SESSION_ID уже вычислен выше (V(b) owner-фильтр RUNNER_CARDS).
     OBLIGATION_CLI="$IWE_ROOT/$GOV_REPO/scripts/close_obligation.py"
-    if [ -n "$HARNESS_SESSION_ID" ] && [ -f "$OBLIGATION_CLI" ]; then
-      CANCEL_STATUS=$(python3 "$OBLIGATION_CLI" cancel-status --session-id "$HARNESS_SESSION_ID" 2>/dev/null) || CANCEL_STATUS=""
+    # WP-484 п.16 (16.09, пир-сессия с Kimi): harness_session_id отсутствует в
+    # семафоре у любой сессии без CLAUDE_CODE_SESSION_ID в окружении при open
+    # -- не только легаси-семафоры, но и живые сессии, где переменная не
+    # долетела во вложенный вызов. session_id: (эпохальный, из имени самого
+    # семафора) пишется всегда -- тот же fail-closed фолбэк-паттерн (уникальное
+    # непустое поле или ничего), что _orphaned_worktree_terminal_outcome_proven
+    # уже применяет для той же развилки (:2278, через _unique_record_field).
+    # Не решает случай неинтерактивных/плановых (launchd) сессий: у них
+    # close_obligation обычно не армируется вовсе (record-intent висит на
+    # UserPromptSubmit, событии интерактивного харнесса) -- cancel-status
+    # ниже честно ответит "нечего отменять", а не притворится, что ID был
+    # недостижим.
+    CANCEL_LOOKUP_ID="$HARNESS_SESSION_ID"
+    [ -n "$CANCEL_LOOKUP_ID" ] || CANCEL_LOOKUP_ID=$(_unique_record_field "${SEM_FILE:-}" session_id || true)
+    if [ -n "$CANCEL_LOOKUP_ID" ] && [ -f "$OBLIGATION_CLI" ]; then
+      CANCEL_STATUS=$(python3 "$OBLIGATION_CLI" cancel-status --session-id "$CANCEL_LOOKUP_ID" 2>/dev/null) || CANCEL_STATUS=""
       if [ -n "$CANCEL_STATUS" ] && [ "$(printf '%s' "$CANCEL_STATUS" | jq -r '.cancelled // false' 2>/dev/null)" = "true" ]; then
-        RUNNER_OK="cancel-obligation:$HARNESS_SESSION_ID"
+        RUNNER_OK="cancel-obligation:$CANCEL_LOOKUP_ID"
         TERMINAL_PROOF_MODE="sentinel"
         # Нет реальной карточки раннера -- пусть downstream-очистка (ниже, по
         # тому же признаку, что force-no-reflection) пойдёт по generic-пути
@@ -6640,11 +6944,23 @@ print(json.dumps({"wp": sys.argv[1], "slug": sys.argv[2], "agent": sys.argv[3], 
         # RUNNER_OK. FORCED_CARD гарантированно пуст здесь: этот блок выполняется
         # только когда RUNNER_OK ещё пуст, а force-no-reflection выше уже вышел бы
         # с непустым RUNNER_OK, если бы сам его установил.
-        FORCED_CARD="cancel-obligation:$HARNESS_SESSION_ID"
+        FORCED_CARD="cancel-obligation:$CANCEL_LOOKUP_ID"
         CANCEL_ACTION=$(printf '%s' "$CANCEL_STATUS" | jq -r '.action // "unknown"' 2>/dev/null)
         CANCEL_ACTOR=$(printf '%s' "$CANCEL_STATUS" | jq -r '.actor // "unknown"' 2>/dev/null)
         echo "Session CLOSE: раннер не завершён, но close-обязательство явно отменено пилотом ($CANCEL_ACTION, actor=$CANCEL_ACTOR) — признаю терминальным (WP-537)." >&2
       fi
+    fi
+
+    # WP-484 п.16: готовый текст-подсказка для fail()-сообщений ниже по коду --
+    # вычисляется один раз здесь, где CANCEL_LOOKUP_ID гарантированно уже
+    # присвоена (та же ветка `-z "$RUNNER_OK"`), а не дублируется в каждом
+    # fail() (P2). Без CANCEL_LOOKUP_ID показывать псевдо-команду с
+    # плейсхолдером вместо ID нечестно (агент-исполнитель может выполнить её
+    # буквально) -- отдельная ветка без готовой к копипасту команды.
+    if [ -n "$CANCEL_LOOKUP_ID" ]; then
+      CANCEL_HINT="попроси пилота об явной отмене: python3 close_obligation.py cancel --session-id '$CANCEL_LOOKUP_ID' --action cancel-close. Сессия неинтерактивная/плановая (launchd) -- для таких close-обязательство обычно не заводится вовсе, отмена вернёт \"нечего отменять\": используй process-runner.py cancel <run-id> или ручной карантин семафора (S-33)"
+    else
+      CANCEL_HINT="явная отмена через close_obligation.py недоступна -- у этой сессии не определился ни harness_session_id, ни session_id семафора. Попроси пилота о ручном карантине семафора (S-33) или используй process-runner.py cancel <run-id>"
     fi
   fi
 
@@ -6763,11 +7079,11 @@ print(json.dumps({"wp": sys.argv[1], "slug": sys.argv[2], "agent": sys.argv[3], 
       # Шаг правильный, но не прошёл push-инвариант выше -- отдельное
       # сообщение, иначе текст ниже звучит противоречиво («не безопасный
       # шаг», хотя шаг ровно тот, что признаётся безопасным).
-      fail "Quick Close не завершён для slug '$SLUG': карточка отменена на шаге wp-archive-run, но push не подтверждён (нет all_pushed:true и commit_needed:false) -- WP-537 признаёт этот шаг терминальным только с доказанным push. Проверь commit-push вручную или попроси пилота об явной отмене (close_obligation.py cancel --action cancel-close)." 7
+      fail "Quick Close не завершён для slug '$SLUG': карточка отменена на шаге wp-archive-run, но push не подтверждён (нет all_pushed:true и commit_needed:false) -- WP-537 признаёт этот шаг терминальным только с доказанным push. Проверь commit-push вручную, либо $CANCEL_HINT." 7
     elif [ -n "$CANCELLED_STEP" ]; then
-      fail "Quick Close не завершён для slug '$SLUG': карточка отменена на шаге '$CANCELLED_STEP' -- это не автоматически безопасный терминальный шаг (только wp-archive-run с доказанным push признаётся без ручного вмешательства, WP-537) и нет отмены close-обязательства. Попроси пилота об явной отмене (close_obligation.py cancel --action cancel-close) или доведи раннер до wp-archive-run/completed." 7
+      fail "Quick Close не завершён для slug '$SLUG': карточка отменена на шаге '$CANCELLED_STEP' -- это не автоматически безопасный терминальный шаг (только wp-archive-run с доказанным push признаётся без ручного вмешательства, WP-537) и нет отмены close-обязательства. Доведи раннер до wp-archive-run/completed, либо $CANCEL_HINT." 7
     fi
-    fail "Quick Close не завершён для slug '$SLUG': нет terminal RUN-quick-close-${SLUG}*.md и нет отмены close-обязательства (close_obligation.py cancel --action cancel-close) для этой сессии. Сначала запусти process-runner.py start quick-close с тем же --slug, либо попроси пилота об явной отмене." 7
+    fail "Quick Close не завершён для slug '$SLUG': нет terminal RUN-quick-close-${SLUG}*.md и нет отмены close-обязательства для этой сессии. Сначала запусти process-runner.py start quick-close с тем же --slug, либо $CANCEL_HINT." 7
   fi
 
   # WP-484 Ф87 (пир-сессия с Codex, 11.08): подчистить чужие незавершённые
@@ -8203,10 +8519,16 @@ for path in active_paths:
             # name a real WP-N folder for legitimate reasons (e.g. filing a bug
             # report into that WP's inbox from a no-WP session) -- that's not
             # evidence of evasion, so they're excluded from this scan.
+            # `task:` is free text the session opener chose (WP-484, 14.09,
+            # live false positive): a no-WP session routinely narrates a real
+            # WP-N in its own task description (e.g. "разбор находки WP-484")
+            # without touching that WP's scope at all. Scanning it the same
+            # way as any other line turned an ordinary parallel session into
+            # a repo-wide commit barrier for every agent, not just itself.
             if any(
                 re.search(r"\bWP-[1-9][0-9]*\b", line, re.I)
                 for line in text.splitlines()
-                if not line.startswith("file: ")
+                if not line.startswith("file: ") and not line.startswith("task: ")
             ):
                 raise ValueError("non-product wp sentinel references a real WP")
             continue

@@ -7,12 +7,23 @@
 # проверки — что при этом замок продолжает делать свою работу (берёт лок, видит чужой свежий
 # маркер, видит уже закрытый день) и что публикация метки проходит через pre-push хук freeze.
 #
-# Запуск: bash scripts/tests/day-close-lock-no-stash-smoke.sh
+# Запуск: bash scripts/tests/day-close-lock-no-stash-smoke.sh -- требует
+# .claude/lib/ рядом с этим чекаутом (day-close-lock.sh источник его
+# безусловно). Здесь, в корневом ~/IWE, она настоящая; при синхронизации
+# этого файла в iwe-server-config/server-extensions/ (sync-extensions.sh)
+# та же папка там называется claude-lib/ без точки -- sync-extensions-auto.sh
+# готовит там временный шим перед тестовым гейтом (setup_test_env(), WP-530
+# 2026-09-16). Явная проверка вместо невразумительного «acquire вернул 1»
+# в среде, где шим не готов (cold-review, Critical, та же сессия).
 
 set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 LOCK_SH="$SCRIPT_DIR/../day-close-lock.sh"
+if [ ! -f "$SCRIPT_DIR/../../.claude/lib/iwe-env-bootstrap.sh" ]; then
+  echo "SKIP: .claude/lib/ отсутствует рядом с этим чекаутом -- в iwe-server-config/server-extensions запусти через scripts/sync-extensions-auto.sh (готовит шим) или создай симлинки вручную" >&2
+  exit 1
+fi
 # Хук живёт в governance-репозитории — это ОТДЕЛЬНЫЙ репозиторий, не подкаталог корневого,
 # поэтому путь считается от корня рабочего пространства, а не от каталога этого скрипта
 # (в изолированной копии корневого репо DS-my-strategy рядом просто нет).
@@ -34,8 +45,13 @@ git_sandbox() { git -C "$CLONE" "$@"; }
 
 # acquire в песочнице: WORKSPACE_DIR/GOVERNANCE_REPO подменяются через окружение,
 # iwe-env-bootstrap.sh их уважает (переменная-первоисточник, п. 1 его же докстринга).
-run_acquire() {
-  ( cd "$CLONE" && WORKSPACE_DIR="$SANDBOX" GOVERNANCE_REPO="$GOV" bash "$LOCK_SH" acquire >/dev/null 2>&1 )
+run_acquire() {  # [agent override -- simulates a DIFFERENT session for contention scenarios]
+  local agent="${1:-}"
+  (
+    cd "$CLONE" && export WORKSPACE_DIR="$SANDBOX" GOVERNANCE_REPO="$GOV"
+    [ -n "$agent" ] && export IWE_AGENT="$agent"
+    bash "$LOCK_SH" acquire >/dev/null 2>&1
+  )
   echo $?
 }
 
@@ -50,6 +66,15 @@ setup_sandbox() {
   git_sandbox push --quiet -u origin HEAD:main
   git_sandbox branch --quiet -M main
   git_sandbox branch --quiet --set-upstream-to=origin/main main
+  # day-close-lock.sh (с перехода на publish-lease.sh, Ф25 06.09) читает
+  # $REPO_DIR/scripts/lib/{publish-lease.sh,gateway-lock.py} обычным `source`
+  # с диска, не из git-истории -- симлинки на настоящие файлы избавляют от
+  # копии, которая иначе тихо разошлась бы с оригиналом при следующей правке
+  # (найдено WP-530, пир-сессия 2026-09-16-15 с Kimi).
+  local lib_dir="${IWE_WORKSPACE:-$HOME/IWE}/${IWE_GOVERNANCE_REPO:-DS-my-strategy}/scripts/lib"
+  mkdir -p "$CLONE/scripts/lib"
+  ln -sf "$lib_dir/publish-lease.sh" "$CLONE/scripts/lib/publish-lease.sh"
+  ln -sf "$lib_dir/gateway-lock.py" "$CLONE/scripts/lib/gateway-lock.py"
 }
 
 # Слепок ровно того, что прежняя реализация теряла: содержимое рабочих файлов,
@@ -88,14 +113,30 @@ else
 fi
 check "новых записей в stash не появилось" "$(git_sandbox stash list | wc -l | tr -d ' ')" "0"
 
-MARKER_SUBJECT=$(git_sandbox log origin/main -1 --format=%s 2>/dev/null)
-check "метка запушена в origin" "${MARKER_SUBJECT%% by *}" "day-close-start: $(TZ=UTC date +%Y-%m-%d)"
-MARKER_TREE=$(git_sandbox rev-parse "origin/main^{tree}")
-PARENT_TREE=$(git_sandbox rev-parse "origin/main^^{tree}")
-check "метка пустая (дерево не изменилось)" "$MARKER_TREE" "$PARENT_TREE"
+# С перехода на publish-lease.sh (Ф25, 06.09) лиза живёт на отдельном
+# git-ref (refs/notes/iwe-day-close-lock), не коммитом на origin/main —
+# старая проверка тут молчала на "base" (subject первого коммита песочницы)
+# вместо реального содержимого лизы (найдено WP-530, пир-сессия
+# 2026-09-16-15 с Kimi). Коммит лизы — orphan (без родителя, commit-tree от
+# пустого дерева) на каждый acquire, поэтому "дерево не изменилось" теперь
+# проверяется как "дерево лизы совпадает с пустым деревом", а не как
+# "совпадает с деревом родителя" (родителя у orphan-коммита просто нет).
+git_sandbox fetch --quiet origin refs/notes/iwe-day-close-lock:refs/iwe-day-close-lock-check 2>/dev/null
+LEASE_REASON=$(git_sandbox log -1 --format=%B refs/iwe-day-close-lock-check 2>/dev/null | sed -n 's/^reason: //p')
+check "метка запушена в лизу (refs/notes/iwe-day-close-lock)" "${LEASE_REASON%% by *}" "day-close-start: $(TZ=UTC date +%Y-%m-%d)"
+LEASE_TREE=$(git_sandbox rev-parse "refs/iwe-day-close-lock-check^{tree}" 2>/dev/null)
+EMPTY_TREE=$(git_sandbox hash-object -t tree /dev/null)
+check "метка пустая (дерево не изменилось)" "$LEASE_TREE" "$EMPTY_TREE"
 
 echo "== 2. Свежая чужая метка останавливает второй прогон =="
-check "повторный acquire вернул 3" "$(run_acquire)" "3"
+# publish_lease_acquire намеренно разрешает тому же owner (agent@host)
+# перезахватить свою же лизу (renewal, не contention) — второй вызов из
+# ТОГО ЖЕ процесса под тем же IWE_AGENT раньше "проходил" только потому,
+# что старый branch-marker механизм не различал владельцев вообще, любой
+# существующий коммит-маркер блокировал безусловно (найдено той же сессией).
+# Чтобы реально проверить отказ чужому агенту, второй вызов должен НЕСТИ
+# другого owner — иначе это не contention-сценарий, а renewal.
+check "повторный acquire вернул 3" "$(run_acquire other-session)" "3"
 
 echo "== 3. Уже закрытый день останавливает прогон =="
 rm -rf "${SANDBOX:?}/origin.git" "$CLONE"

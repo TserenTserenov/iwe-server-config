@@ -300,7 +300,17 @@ class ScopePublicationProofTests(unittest.TestCase):
         command = "set -euo pipefail\n" + "\n".join(
             key + "=" + shlex.quote(value) for key, value in setup.items()
         ) + "\n" + self.functions + "\n" + TARGET + " " + shlex.join(
-            [str(self.repo), str(self.sem), self.remote]
+            # 4th/5th positional: legacy-canonical repo / legacy sessions dir
+            # (WP-484, peer-session 2026-09-14-13). Both empty here -- every
+            # fixture in this class writes a modern semaphore with
+            # governance_worktree: set (see semaphore() above), so the
+            # legacy branch never applies and must not be exercised by
+            # omission. Cold-review (subagent, same phase) caught this
+            # argument count going stale once already when a second
+            # positional was added after the first fix -- if a 6th
+            # positional is added later, update this call too, not just the
+            # bash-side callers.
+            [str(self.repo), str(self.sem), self.remote, "", ""]
         ) + "\n"
         result = subprocess.run(
             ["/bin/bash"], input=command, text=True, capture_output=True,

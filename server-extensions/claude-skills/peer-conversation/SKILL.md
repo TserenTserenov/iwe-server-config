@@ -3,8 +3,9 @@ name: peer-conversation
 description: Многотуровый диалог писателя (Claude) с одним или несколькими напарниками (любой набор из kimi/codex/hermes/claude-headless) по задаче пилота (DP.SC.154). Ведёт turn-loop (2 участника) или round-loop (3+, WP-509), обнаруживает CONSENSUS/ESCALATE, после консенсуса — Decision Gate (зафиксировать vs реализовать → ревью → проверить → задеплоить), синтезирует report.md через Agent tool.
 argument-hint: "<описание задачи> [--peer kimi|codex|hermes|claude[,vendor2,...]] | --list | --interrupt <session_id> | --finalize <session_id>"
 version: 1.6.1
-layer: L3
+layer: L1
 status: active
+browser_safe: false
 triggers:
   slash: [/peer-conversation]
   phrases: ["начни peer-сессию", "запусти диалог с Кими", "запусти диалог с Codex", "peer-сессия"]
@@ -198,21 +199,26 @@ SESSION_DIR="${DAY_DIR}/${SESSION_ID}"
 
 ```bash
 GOV_REPO_ROOT="$HOME/IWE/${IWE_GOVERNANCE_REPO:-DS-strategy}"
-OPEN_OUTPUT=$(IWE_AGENT=claude-code bash "${IWE_SCRIPTS:-$HOME/IWE/scripts}/session-guard.sh" open \
+OPEN_OUTPUT=$(cd "$GOV_REPO_ROOT" && IWE_AGENT=claude-code bash "${IWE_SCRIPTS:-$HOME/IWE/scripts}/session-guard.sh" open \
   --wp "<WP-NNN из Шага 0б>" --agent claude-code --close-path peer-session \
   --task "<задача одной строкой>" --slug "$SESSION_ID" 2>&1)
 OPEN_STATUS=$?
 printf '%s\n' "$OPEN_OUTPUT"
 ```
 
+> **`cd "$GOV_REPO_ROOT" &&` перед вызовом — обязательно, не косметика (WP-484, найдено 14.09 вечером, пир-сессия `2026-09-14-13-wp484-close-proof-drift`, Claude+Kimi+Codex).** `session-guard.sh` резолвит и freeze-проверку (`frozen_checkout_match()`), и целевой репозиторий для `--isolate` (`ISOLATE_BASE_DIR`, `scripts/session-guard.sh:3387`) через `git rev-parse --show-toplevel` от РАБОЧЕЙ ДИРЕКТОРИИ ПРОЦЕССА, не от `GOV_REPO_ROOT` как значения переменной — так и задумано (WP-484 Ф104, 16.08): `--isolate` обязан снимать копию именно того репозитория, откуда его реально вызвали, не тихо подставлять канон вместо cwd (это была ОБРАТНАЯ ошибка Ф104, которую нельзя откатывать правкой самого скрипта). Раньше эта строка запускала `session-guard.sh` с cwd = каталог, откуда стартовала сама сессия (обычно `~/IWE`, корень) — при работе над `DS-my-strategy` это (а) молча гасило freeze-проверку (сверялся не тот repo, совпадения не находилось), и (б) при freeze-fallback `--isolate` ниже изолировал КОРЕНЬ (`iwe-local-config`), а не governance-репо, записывая эту чужую копию как `governance_worktree:` в семафор — живой инцидент этой же сессии, независимо повторённый в тот же вечер сессией РП-7 Ф147 (`lessons_session_guard_isolate_targets_root_repo_not_governance`).
+
+
+
 > **Не хардкодить `~/IWE/scripts/session-guard.sh`.** Пир-сессия 2026-07-31-16-wp484-new-order-cutover сначала внесла такой хардкод по образцу `day-close/SKILL.md`, но холодный ревью нашёл: у обычного пользователя шаблона `setup.sh` НЕ копирует корневую `scripts/` — существует только каталог скриптов внутри шаблона, и `${IWE_SCRIPTS:-...}` резолвится именно туда намеренно (issue #266, commit `835d5ea` — тот же хардкод уже один раз чинили этим фоллбэком). Хардкод в `day-close/SKILL.md` — недокументированный долг, ждущий той же поломки при промоции, не образец для копирования. Для author-mode расхождение реальное (FMT-копия `session-guard.sh` отстаёт от корневой на фиксы WP-484 Нить1) — но лечится синком `template-sync.sh` (с отдельного разрешения пилота, S-33) или личной правкой `~/.iwe-paths`, не хардкодом в файле, который промотируется всем пользователям шаблона.
 
 **Freeze-fallback (WP-484 Ф133, 24.08 — живой инцидент Ф132 п.3: freeze-гейт блокировал интерактивную пир-сессию без штатного пути закрыться).** `open` без `--isolate` — быстрый путь, достаточный вне freeze (большинство сессий). Если `OPEN_STATUS != 0` И `$OPEN_OUTPUT` содержит `под freeze` (`grep -q 'под freeze' <<<"$OPEN_OUTPUT"`) — canonical checkout заморожен (WP-520/WP-484 Ф104), сам гейт рекомендует `--isolate`, он для этого и существует (найдено этой же фазой — Класс 2, `--isolate` уже решает проблему, просто не был подключён здесь). Повторить с флагом:
 ```bash
-ISOLATE_OUTPUT=$(IWE_AGENT=claude-code bash "${IWE_SCRIPTS:-$HOME/IWE/scripts}/session-guard.sh" open \
+ISOLATE_OUTPUT=$(cd "$GOV_REPO_ROOT" && IWE_AGENT=claude-code bash "${IWE_SCRIPTS:-$HOME/IWE/scripts}/session-guard.sh" open \
   --wp "<WP-NNN из Шага 0б>" --agent claude-code --close-path peer-session \
   --task "<задача одной строкой>" --slug "$SESSION_ID" --isolate)
 ```
+> Тот же `cd "$GOV_REPO_ROOT" &&`, что и выше, и по той же причине: `--isolate` без него снимает копию каталога, откуда физически стартовала сессия (обычно корень `~/IWE`), а не governance-репо, для которого только что сработал freeze. `$GOV_REPO_ROOT` в этой точке — ещё канонический путь (переопределение на `worktree_path` идёт строкой ниже, после этого вызова).
 Успех → `$ISOLATE_OUTPUT` содержит строку JSON `{"worktree_path": "...", "branch": "...", "session_id": "..."}`. Извлечь `worktree_path` (`python3 -c 'import json,sys; print(json.loads(sys.argv[1])["worktree_path"])' "$(grep -o '{.*}' <<<"$ISOLATE_OUTPUT")"`) и переопределить корень репозитория на оставшуюся часть скилла:
 ```bash
 GOV_REPO_ROOT="<извлечённый worktree_path>"

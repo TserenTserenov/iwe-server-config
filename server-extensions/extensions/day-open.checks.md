@@ -354,11 +354,8 @@ fi
 
 ```bash
 echo "=== Проверка: KE-очередь — согласованность day-open-smoke.sh vs ke-queue-stats.sh ==="
-# || true: оба источника могут вернуть ненулевой код при валидном stdout-JSON
-# (ke-queue-stats.sh с 09-13.09 выходит с 1 при непустых diagnostics — 30 legacy-отчётов);
-# set -e раннера убивал блок ДО его собственной ветки «пропуск, не блокирует» (16.09).
-SMOKE_JSON=$(bash ~/IWE/DS-my-strategy/scripts/day-open-smoke.sh 2>/dev/null || true)
-STATS_JSON=$(bash ~/IWE/DS-my-strategy/scripts/ke-queue-stats.sh 2>/dev/null || true)
+SMOKE_JSON=$(bash ~/IWE/DS-my-strategy/scripts/day-open-smoke.sh 2>/dev/null)
+STATS_JSON=$(bash ~/IWE/DS-my-strategy/scripts/ke-queue-stats.sh 2>/dev/null)
 SMOKE_COUNT=$(echo "$SMOKE_JSON" | python3 -c "import json,sys; print(json.load(sys.stdin)['ke_count'])" 2>/dev/null)
 SMOKE_OLDEST=$(echo "$SMOKE_JSON" | python3 -c "import json,sys; print(json.load(sys.stdin)['ke_oldest_days'])" 2>/dev/null)
 STATS_COUNT=$(echo "$STATS_JSON" | python3 -c "import json,sys; print(json.load(sys.stdin)['count'])" 2>/dev/null)

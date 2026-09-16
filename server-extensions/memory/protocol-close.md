@@ -12,7 +12,7 @@ domains: [protocol]
 status: active
 owner: user
 schema_version: 1
-modified: 2026-09-10T09:40:25.054Z
+modified: 2026-09-15T11:35:11.612Z
 ---
 # Протокол Close (ОРЗ-фрактал)
 
@@ -45,8 +45,15 @@ modified: 2026-09-10T09:40:25.054Z
 
 ### Раннер — обязательный драйвер (WP-482 Ф3+Ф5, дефолт с 17.07)
 
+> **`IWE_SESSION_ID` обязателен для НЕ-Claude-агентов (WP-484, 15.09 — живой случай WP-579, Kimi).** `_env_session_id_fallback()` (`process-runner.py`) резолвит владельца карточки через `IWE_SESSION_ID`, затем `CLAUDE_CODE_SESSION_ID`. У Claude Code харнесс сам прокидывает `CLAUDE_CODE_SESSION_ID` в каждый вызов Bash — отдельный шаг не нужен. У Kimi/Hermes/Codex такого автопрокидывания нет — без явного `IWE_SESSION_ID` карточка получает `owner_session_id: null` и `session-guard.sh close` не может снять terminal proof («immutable owned snapshot»), закрытие зацикливается. Перед запуском раннера найти свой семафор точным совпадением по `slug:` (не по PID/mtime — эвристика ловит чужую параллельную сессию) среди `.iwe-runtime/sessions/<agent>-*.open` и прочитать его `session_id:`:
+> ```bash
+> _IWE_OWN_SEM=$(grep -l "^slug: <slug сессии>\$" .iwe-runtime/sessions/<agent>-*.open 2>/dev/null | head -1)
+> _IWE_SID=$(grep '^session_id: ' "$_IWE_OWN_SEM" | head -1 | cut -d' ' -f2-)
+> ```
+> Передать `IWE_SESSION_ID="$_IWE_SID"` инлайн на команде ниже. Для Claude Code это не меняет поведения (тот же приоритет, то же значение по смыслу) — можно опускать, если харнесс уже гарантированно проставляет `CLAUDE_CODE_SESSION_ID`.
+
 ```bash
-cd DS-my-strategy && python3 scripts/process-runner.py start quick-close --slug <slug сессии> \
+cd DS-my-strategy && IWE_SESSION_ID="$_IWE_SID" python3 scripts/process-runner.py start quick-close --slug <slug сессии> \
   --input '{"agent":"<agent>","wp":"<WP-N сессии или null, если сессия без своего РП>","slug":"<slug>","session_file":"<путь или null>","repos":["<repo1>", ...],"agent_suggestions":["<кандидат рефлексии 1>","<кандидат 2>"]}'
 ```
 
