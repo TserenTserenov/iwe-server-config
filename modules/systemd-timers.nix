@@ -1726,5 +1726,58 @@ in
       };
     };
 
+    # =========================================================
+    # NOTIFICATION CENTER COUNTER — WP-568 Ф3
+    # =========================================================
+    # Стоячий счётчик неразобранных алертов в закреплённом Telegram-сообщении
+    # (пир-сессия 2026-09-16-06-wp568-standing-counter, Claude+Kimi). Timer
+    # 60s, oneshot — тот же паттерн, что все остальные джобы этого файла
+    # (проверили прецедент: ни одного демона с Restart=always здесь нет).
+    #
+    # НЕ commonUnitConfig: этот сервис тикает чаще любого другого в файле
+    # (60s против минимум 20 мин у iwe-tsekh1-sync), а общий
+    # iwe-failure-alert@ не дедуплицирует — тот же класс флуда, ради
+    # которого iwe-tsekh1-sync уже отказался от commonUnitConfig (см. выше).
+    # Свой OnFailure с дедупом (notify_escalation_update, тот же примитив,
+    # что уже в проде в sync-extensions-auto.sh).
+    #
+    # Недоступность самой Grafana НЕ считается сбоем этого сервиса — счётчик
+    # тогда показывает явный деградированный статус в самом закреплённом
+    # сообщении (решение пилота, escalation-00.md той же сессии) и завершается
+    # exit 0. OnFailure здесь — только на случай, если сломался сам скрипт.
+    systemd.services."iwe-notification-center-counter" = {
+      description = "IWE — Центр уведомлений: счётчик неразобранных (60s)";
+      unitConfig = {
+        OnFailure = "iwe-notification-center-counter-alert.service";
+      };
+      serviceConfig = commonServiceConfig // {
+        ExecStart = "${pkgs.bash}/bin/bash ${iwe}/DS-my-strategy/scripts/notification-center-counter.sh";
+        TimeoutStartSec = 45;
+      };
+      path = commonPath;
+      environment = commonEnv;
+    };
+
+    systemd.timers."iwe-notification-center-counter" = {
+      wantedBy    = [ "timers.target" ];
+      description = "IWE Notification Center counter — каждые 60s";
+      timerConfig = {
+        OnBootSec       = "1min";
+        OnUnitActiveSec = "60s";
+        # Пропущенный тик при простое сервера не нужно нагонять — счётчик
+        # заботится только о ТЕКУЩЕМ состоянии, не об истории тиков.
+        Persistent      = false;
+      };
+    };
+
+    systemd.services."iwe-notification-center-counter-alert" = {
+      description = "IWE — TG-алерт при сбое счётчика Центра уведомлений (с дедупом)";
+      serviceConfig = commonServiceConfig // {
+        ExecStart = "${pkgs.bash}/bin/bash ${iwe}/DS-my-strategy/scripts/notification-center-counter-alert.sh";
+      };
+      path = commonPath;
+      environment = commonEnv;
+    };
+
   };
 }
