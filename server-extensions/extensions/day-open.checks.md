@@ -66,7 +66,7 @@ import yaml,sys
 d=yaml.safe_load(open('$PRIO')) or {}
 for w in (d.get('today') or []):
     print(str(w).strip())
-" 2>/dev/null)
+" 2>/dev/null || true)
   PLAN_TABLE=$(awk '/<summary><b>План на сегодня<\/b><\/summary>/{f=1} f&&/^\|/{print} f&&/<\/details>/{exit}' "$FILE")
   MISSING=0
   while IFS= read -r wp; do
@@ -354,12 +354,18 @@ fi
 
 ```bash
 echo "=== Проверка: KE-очередь — согласованность day-open-smoke.sh vs ke-queue-stats.sh ==="
-SMOKE_JSON=$(bash ~/IWE/DS-my-strategy/scripts/day-open-smoke.sh 2>/dev/null)
-STATS_JSON=$(bash ~/IWE/DS-my-strategy/scripts/ke-queue-stats.sh 2>/dev/null)
-SMOKE_COUNT=$(echo "$SMOKE_JSON" | python3 -c "import json,sys; print(json.load(sys.stdin)['ke_count'])" 2>/dev/null)
-SMOKE_OLDEST=$(echo "$SMOKE_JSON" | python3 -c "import json,sys; print(json.load(sys.stdin)['ke_oldest_days'])" 2>/dev/null)
-STATS_COUNT=$(echo "$STATS_JSON" | python3 -c "import json,sys; print(json.load(sys.stdin)['count'])" 2>/dev/null)
-STATS_OLDEST=$(echo "$STATS_JSON" | python3 -c "import json,sys; print(json.load(sys.stdin)['oldest_age_days'])" 2>/dev/null)
+# || true: оба источника могут вернуть ненулевой код при валидном stdout-JSON
+# (ke-queue-stats.sh с 09-13.09 выходит с 1 при непустых diagnostics — 30 legacy-отчётов);
+# set -e раннера убивал блок ДО его собственной ветки «пропуск, не блокирует» (16.09).
+# То же на парсинге (17.09, cold-review Fable): невалидный/пустой JSON роняет python3
+# с кодом 1 → pipefail+set -e убивают блок до ветки ⚠️ — || true и здесь, пустое
+# значение ловит проверка -z ниже.
+SMOKE_JSON=$(bash ~/IWE/DS-my-strategy/scripts/day-open-smoke.sh 2>/dev/null || true)
+STATS_JSON=$(bash ~/IWE/DS-my-strategy/scripts/ke-queue-stats.sh 2>/dev/null || true)
+SMOKE_COUNT=$(echo "$SMOKE_JSON" | python3 -c "import json,sys; print(json.load(sys.stdin)['ke_count'])" 2>/dev/null || true)
+SMOKE_OLDEST=$(echo "$SMOKE_JSON" | python3 -c "import json,sys; print(json.load(sys.stdin)['ke_oldest_days'])" 2>/dev/null || true)
+STATS_COUNT=$(echo "$STATS_JSON" | python3 -c "import json,sys; print(json.load(sys.stdin)['count'])" 2>/dev/null || true)
+STATS_OLDEST=$(echo "$STATS_JSON" | python3 -c "import json,sys; print(json.load(sys.stdin)['oldest_age_days'])" 2>/dev/null || true)
 if [ -z "$SMOKE_COUNT" ] || [ -z "$STATS_COUNT" ]; then
   echo "  ⚠️ KE-очередь: не удалось прочитать один из источников (smoke='$SMOKE_JSON', stats='$STATS_JSON') — пропуск, не блокирует"
 elif [ "$SMOKE_COUNT" = "$STATS_COUNT" ] && [ "$SMOKE_OLDEST" = "$STATS_OLDEST" ]; then
@@ -710,7 +716,12 @@ fi
 ```bash
 FILE="${FILE:-$(ls ~/IWE/DS-my-strategy/current/DayPlan\ *.md 2>/dev/null | sort | tail -1)}"
 echo "=== Проверка: ссылка на персональное руководство — ровно один раз ==="
-GUIDE_COUNT=$(grep -cF "Изучи персональное руководство" "$FILE" 2>/dev/null || echo 0)
+# || true, не || echo 0: grep -c при нуле совпадений САМ печатает «0» и выходит с 1 —
+# || echo 0 давал «0\n0», оба -eq падали и срабатывала ложная ветка «дублирование»
+# (тот же класс, что задокументирован у проверки «физ» выше). Пустое значение
+# (файла нет, grep exit 2 без stdout) нормализуем отдельно.
+GUIDE_COUNT=$(grep -cF "Изучи персональное руководство" "$FILE" 2>/dev/null || true)
+GUIDE_COUNT="${GUIDE_COUNT:-0}"
 if [ "$GUIDE_COUNT" -eq 1 ]; then
   echo "  ✅ Ссылка на руководство: встречается 1 раз"
 elif [ "$GUIDE_COUNT" -eq 0 ]; then

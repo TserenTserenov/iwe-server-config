@@ -4052,6 +4052,22 @@ print(os.path.relpath(f, r))
     } > "$SEM_TEMP"
     _publish_new_open_semaphore "$SEM_TEMP" "$SEM_FILE" \
       || fail "open: atomic no-clobber semaphore publication не прошла" 1
+    # WP-484 (16.09, peer-session 2026-09-16-28-wp484-close-gate-triage):
+    # `orz_sessions_dir:` above is written unconditionally in this same block,
+    # yet a live semaphore missing it anyway was observed the same evening --
+    # cause not found (not a blocker for this fix; flagged in the session's
+    # own carta for a dedicated follow-up). Whatever the cause, a semaphore
+    # silently missing this field is undetectable at `open` time today and
+    # only surfaces hours later as a `close` refusal nobody can explain from
+    # the semaphore alone. Fail loudly here instead, before the caller is
+    # ever told `open` succeeded -- nothing external depends on this session
+    # yet, so refusing now is safe where refusing at `close` time is not.
+    # `.+` after the colon (Kimi cold-review, same session): a present-but-
+    # empty value would pass a bare presence check and only fail later, at
+    # `close`, when resolve_orz_sessions_dir()'s fallback also comes back
+    # empty -- the whole point of this check is catching that at `open`.
+    grep -qE '^orz_sessions_dir: .+' "$SEM_FILE" \
+      || fail "open: опубликованный semaphore не содержит orz_sessions_dir (внутренняя ошибка записи, см. РП484 16.09) -- сессия не считается открытой" 1
   fi
   # Marker is a projection: a missing marker can be rebuilt, while a marker
   # without a durable semaphore must never be treated as session authority.
@@ -4478,23 +4494,32 @@ _unique_record_field() {  # <file> <top-level key>
   ' "$1" 2>/dev/null
 }
 
-_repo_scope_has_publish_proof() {  # <governance repo> <exact semaphore> <fresh remote OID> [<legacy canonical repo>] [<legacy sessions dir>]
+_repo_scope_has_publish_proof() {  # <repo> <role> <exact semaphore> <fresh remote OID> <own field> <other field> [<legacy own>] [<legacy other>]
   # Shared canonical HEAD also includes neighbouring sessions.  Their history
   # cannot vouch for (or prevent delivery of) our registered output.  This
   # fallback requires current exact trees, never a historical blob/patch match.
   #
-  # <legacy canonical repo>, <legacy sessions dir> (WP-484, peer-session
-  # 2026-09-14-13, Claude+Kimi+Codex): both set ONLY by the caller's own
-  # structural-absence check (all three of governance_worktree/
-  # isolated_worktree/orz_sessions_dir missing from the semaphore, see
-  # _close_delivery_and_transition) -- never read from the semaphore file
-  # itself. A legacy semaphore, by definition, cannot name either its own
-  # governance checkout or its own sessions checkout; without the second one
-  # too, every legacy semaphore refuses on its own ORZ scaffold file (which
-  # `open` always registers in scope) even once the governance side is
-  # fixed -- found live testing this same phase's D scenario: fixing
-  # governance alone still refused with "путь отсутствует или неоднозначен
-  # между репозиториями" on the ORZ path.
+  # <own field>/<other field> (WP-484, 16.09, peer-session
+  # 2026-09-16-22-wp484-close-mechanism-hard-snapshot, Claude+Kimi):
+  # parameterized from a governance-only function -- the caller names which
+  # semaphore field identifies THIS repo (own field) and which identifies the
+  # sibling scope repo (other field), so the same scope-check now serves both
+  # the governance checkout (own=governance_worktree, other=orz_sessions_dir)
+  # and the sessions checkout (own=orz_sessions_dir, other=governance_worktree,
+  # "находка 1" from the FMT orz_sessions_dir patch session earlier the same
+  # day).
+  #
+  # <legacy own>, <legacy other> (WP-484, peer-session 2026-09-14-13,
+  # Claude+Kimi+Codex): both set ONLY by the caller's own structural-absence
+  # check (all three of governance_worktree/isolated_worktree/orz_sessions_dir
+  # missing from the semaphore, see _close_delivery_and_transition) -- never
+  # read from the semaphore file itself. A legacy semaphore, by definition,
+  # cannot name either of its own scope checkouts; without the other one too,
+  # every legacy semaphore refuses on its own ORZ scaffold file (which `open`
+  # always registers in scope) even once one side is fixed -- found live
+  # testing this same phase's D scenario: fixing governance alone still
+  # refused with "путь отсутствует или неоднозначен между репозиториями" on
+  # the ORZ path.
   python3 - "$@" "$IWE_ROOT" <<'PY'
 import os
 from pathlib import Path, PurePosixPath
@@ -4503,7 +4528,7 @@ import stat
 import subprocess
 import sys
 
-repo, semaphore, remote, legacy_canonical, legacy_sessions, iwe_root = sys.argv[1:]
+repo, role, semaphore, remote, own_field, other_field, legacy_own, legacy_other, iwe_root = sys.argv[1:]
 
 def refuse(message):
     raise SystemExit("Session CLOSE: scoped publish proof: " + message)
@@ -4525,25 +4550,31 @@ if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or info.st_uid != os.get
     refuse("небезопасный semaphore")
 snapshot = Path(semaphore).read_bytes()
 lines = snapshot.decode("utf-8").splitlines()
-governance = [line[21:] for line in lines if line.startswith("governance_worktree: ")]
-structurally_legacy = not any(
-    line.startswith(("governance_worktree:", "isolated_worktree:", "orz_sessions_dir:"))
-    for line in lines
-)
-if len(governance) == 1:
-    if os.path.realpath(governance[0]) != os.path.realpath(repo):
-        refuse("governance checkout не связан с точным semaphore")
-elif structurally_legacy and legacy_canonical:
-    # Trust boundary shifts from "semaphore-declared path" to "caller's own
-    # resolved canonical" -- legal ONLY when the semaphore structurally
-    # names none of the three fields (checked above, not merely that this
-    # one line count is 0) AND the caller passed a non-empty value.  A
-    # partially-modern semaphore (e.g. only orz_sessions_dir present) is not
-    # "structurally legacy" and falls through to the refusal below.
-    if os.path.realpath(legacy_canonical) != os.path.realpath(repo):
-        refuse("legacy canonical repo не совпадает с проверяемым checkout")
+own_prefix = own_field + ": "
+own_matches = [line[len(own_prefix):] for line in lines if line.startswith(own_prefix)]
+if len(own_matches) == 1:
+    if os.path.realpath(own_matches[0]) != os.path.realpath(repo):
+        refuse(role + " не связан с точным semaphore")
+elif not own_matches and legacy_own:
+    # WP-484 (17.09, own-field mirror of the other_field fallback below --
+    # peer-session 2026-09-17-02-own-field-mirror-fix, Claude+Codex): the
+    # other_field branch a few lines down was already narrowed from
+    # "structurally legacy" (all three scope fields absent) to "this one
+    # field absent" (16.09, находка 1). This own_field branch kept the old,
+    # wider-refusing condition -- a semaphore missing ONLY own_field (e.g.
+    # governance_worktree present, orz_sessions_dir absent) is not
+    # "structurally legacy" and fell straight to the refusal below with no
+    # fallback at all, live-reproduced closing the 16.09 session that fixed
+    # other_field. Trust boundary is unchanged from before: `legacy_own` is
+    # still only ever the caller's own independently-resolved value, never
+    # read from the semaphore text -- only the CONDITION for consulting it
+    # widened, from "all three fields absent" to "this specific field
+    # absent". `len(own_matches) > 1` still falls through to the refusal
+    # below unchanged (this branch only matches an empty list).
+    if os.path.realpath(legacy_own) != os.path.realpath(repo):
+        refuse("legacy " + role + " не совпадает с проверяемым checkout")
 else:
-    refuse("governance checkout не связан с точным semaphore")
+    refuse(role + " не связан с точным semaphore")
 if any(line.startswith("isolated_worktree:") for line in lines):
     refuse("scoped fallback недопустим для isolated checkout")
 if not re.fullmatch(r"[0-9a-f]{40,64}", remote):
@@ -4590,19 +4621,43 @@ def entry(revision, path):
     return git("ls-tree", "-z", revision, "--", path)
 
 relevant = set(claimed_paths)
-other_repos = [iwe_root]
-sessions = [line[18:] for line in lines if line.startswith("orz_sessions_dir: ")]
-if len(sessions) > 1:
-    refuse("неоднозначный sessions checkout")
-if not sessions and structurally_legacy and legacy_sessions:
-    # Same trust shift as governance above: caller-resolved, not read from
+other_repos = [iwe_root, os.path.join(iwe_root, "memory")]
+other_prefix = other_field + ": "
+other_declared = [line[len(other_prefix):] for line in lines if line.startswith(other_prefix)]
+if len(other_declared) > 1:
+    refuse("неоднозначный " + other_field + " checkout")
+if not other_declared and legacy_other:
+    # Same trust shift as own_field above: caller-resolved, not read from
     # the semaphore. Without this, a legacy semaphore's own ORZ scaffold
     # file (always in scope, `open` registers it unconditionally) has no
     # repo left to be found in and refuses on "путь отсутствует или
     # неоднозначен между репозиториями" -- reproduced live testing this
     # phase's scenario D before this line existed.
-    sessions = [legacy_sessions]
-other_repos.extend(sessions)
+    #
+    # WP-484 (16.09, peer-session 2026-09-16-28-wp484-close-gate-triage,
+    # Claude+Kimi): condition narrowed from "structurally_legacy" (all three
+    # scope fields absent) to "this one field absent" -- a semaphore missing
+    # only `other_field` (own_field present and already matched above) was
+    # falling through to the strict refusal below with no fallback at all,
+    # even though the caller always resolves `legacy_other` independently of
+    # semaphore content now (never trusts what the semaphore claims). Kimi's
+    # objection stands and is answered here, not hidden: this does widen
+    # which semaphores get the caller-resolved fallback, from "all three
+    # fields absent" to "this specific field absent" -- but the TRUST SOURCE
+    # is unchanged (own_field's exact-match check above is untouched, and
+    # `legacy_other` is still never read from the semaphore itself).
+    #
+    # `repo` (own_field, from the semaphore) and `legacy_other` (independent
+    # resolve) CAN legitimately name the same real path in a partially-legacy
+    # case -- e.g. an unmigrated install where resolve_orz_sessions_dir()'s
+    # own legacy fallback is a subdirectory of the governance repo itself
+    # (Kimi cold-review, same session). That is not a collision to guard
+    # against here: `other_repos.discard(os.path.realpath(repo))` a few lines
+    # below already removes `repo` from the other-side set unconditionally,
+    # so a same-path `legacy_other` simply contributes nothing new, exactly
+    # like a same-path `other_declared` from the semaphore already would.
+    other_declared = [legacy_other]
+other_repos.extend(other_declared)
 other_repos = {os.path.realpath(path) for path in other_repos
                if os.path.lexists(Path(path) / ".git")}
 other_repos.discard(os.path.realpath(repo))
@@ -4641,7 +4696,7 @@ if Path(semaphore).read_bytes() != snapshot:
 PY
 }
 
-_repo_head_has_publish_proof() {  # <repo> <role> [exact non-isolated governance semaphore] [legacy canonical repo] [legacy sessions dir]
+_repo_head_has_publish_proof() {  # <repo> <role> [exact semaphore] [own field] [other field] [legacy own] [legacy other]
   local repo="$1" role="$2" root origin_url origin_ref
   root=$(git -C "$repo" rev-parse --show-toplevel 2>/dev/null) || {
     echo "Session CLOSE: $role не является читаемым git checkout: $repo" >&2
@@ -4665,7 +4720,8 @@ _repo_head_has_publish_proof() {  # <repo> <role> [exact non-isolated governance
     return 1
   }
   if ! git -C "$root" merge-base --is-ancestor HEAD "$origin_ref" 2>/dev/null; then
-    if [ -n "${3:-}" ] && _repo_scope_has_publish_proof "$root" "$3" "$origin_ref" "${4:-}" "${5:-}"; then
+    if [ -n "${3:-}" ] && [ -n "${4:-}" ] && [ -n "${5:-}" ] \
+       && _repo_scope_has_publish_proof "$root" "$role" "$3" "$origin_ref" "$4" "$5" "${6:-}" "${7:-}"; then
       echo "Session CLOSE: текущие файлы и commit scope этой сессии подтверждены свежим origin/main: $root" >&2
       return 0
     fi
@@ -6134,8 +6190,38 @@ _close_delivery_and_transition() {
     sessions_repo=$(git -C "$ORZ_SESSIONS_DIR" rev-parse --show-toplevel 2>/dev/null || true)
     [ -n "$sessions_repo" ] \
       || fail "close: sessions checkout не доказан; clean/terminal transition запрещён" 7
+    # Resolved here, ahead of its other (redundant but side-effect-free, see
+    # that line's own comment) read further down for the governance-checkout
+    # call -- this call site runs first and needs its own legacy fallback
+    # value now, not after governance_repo is resolved below (WP-484, 17.09,
+    # peer-session 2026-09-17-02-own-field-mirror-fix).
+    legacy_semaphore_sessions_dir=$(resolve_orz_sessions_dir 2>/dev/null || true)
     if [ "$sessions_repo" != "$isolated_worktree" ]; then
-      _repo_head_has_publish_proof "$sessions_repo" "sessions checkout" \
+      # находка 1 (WP-484, session 2026-09-16-18-wp484-fmt-orz-sessions-dir-patch
+      # §5-6; fixed 2026-09-16, peer-session
+      # 2026-09-16-22-wp484-close-mechanism-hard-snapshot, Claude+Kimi): this
+      # call used to pass no semaphore/field args at all, so the scoped
+      # fallback in _repo_head_has_publish_proof (guarded on a non-empty 3rd
+      # arg) never engaged here -- every session hit the bare ancestry check,
+      # which fails whenever MC-sessions has honestly diverged from
+      # origin/main (routine under real concurrency: 15-20 sessions commit to
+      # it daily, isolate-push republishes under a different SHA).
+      #
+      # own-field legacy fallback (WP-484, 17.09, peer-session
+      # 2026-09-17-02-own-field-mirror-fix, Claude+Codex): this call used to
+      # pass no legacy fallback at all, on the assumption that `open()`
+      # writes `orz_sessions_dir:` unconditionally so this field can never be
+      # absent on a modern semaphore -- disproved live the same week (this
+      # session's OWN semaphore, opened before that write got a self-check,
+      # had `governance_worktree:` but no `orz_sessions_dir:`). Only the own
+      # field's fallback is wired here (`legacy_semaphore_sessions_dir`,
+      # already resolved unconditionally a few lines above); the other
+      # field's fallback is deliberately withheld pending its own
+      # justification and test (Codex cold-review, same session) -- passing
+      # it would silently widen this call's trust surface for a case this
+      # fix does not need to cover.
+      _repo_head_has_publish_proof "$sessions_repo" "sessions checkout" "$SEM_FILE" \
+        "orz_sessions_dir" "governance_worktree" "$legacy_semaphore_sessions_dir" \
         || fail "close: ORZ/session delivery не подтверждена; .open/lease/pointer сохранены" 7
     fi
   fi
@@ -6223,8 +6309,18 @@ _close_delivery_and_transition() {
   fi
 
   governance_repo=$(semaphore_governance_worktree "$SEM_FILE" || true)
-  legacy_semaphore_canonical=""
-  legacy_semaphore_sessions_dir=""
+  # WP-484 (16.09, peer-session 2026-09-16-28-wp484-close-gate-triage,
+  # Claude+Kimi): resolved unconditionally now, not only inside the "fully
+  # legacy" branch below. A semaphore missing exactly ONE of the three scope
+  # fields (e.g. governance_worktree present, orz_sessions_dir absent --
+  # confirmed live on WP-568's semaphore, opened through a session-guard.sh
+  # copy that wrote only the former) is not "structurally legacy" by the
+  # check below, so it never reached this assignment before, and
+  # _repo_scope_has_publish_proof's per-field fallback (see its own comment)
+  # had nothing to fall back to for the one absent field. Both reads are
+  # cheap and side-effect-free regardless of which fields the semaphore has.
+  legacy_semaphore_canonical=$(git -C "$IWE_ROOT/$GOV_REPO" rev-parse --show-toplevel 2>/dev/null || true)
+  legacy_semaphore_sessions_dir=$(resolve_orz_sessions_dir 2>/dev/null || true)
   if [ -z "$governance_repo" ] && [ -z "$isolated_worktree" ] \
      && ! grep -qE '^(governance_worktree|isolated_worktree|orz_sessions_dir): ' "$SEM_FILE"; then
     # Legacy semaphore predating governance_worktree/orz_sessions_dir
@@ -6334,7 +6430,8 @@ _close_delivery_and_transition() {
     done < <(grep '^file: ' "$SEM_FILE" 2>/dev/null || true)
   fi
   if [ -z "$isolated_worktree" ] && [ "$GOVERNANCE_REPO_HAS_FOOTPRINT" -eq 1 ]; then
-    _repo_head_has_publish_proof "$governance_repo" "governance checkout" "$SEM_FILE" "$legacy_semaphore_canonical" "$legacy_semaphore_sessions_dir" \
+    _repo_head_has_publish_proof "$governance_repo" "governance checkout" "$SEM_FILE" \
+      "governance_worktree" "orz_sessions_dir" "$legacy_semaphore_canonical" "$legacy_semaphore_sessions_dir" \
       || fail "close: governance delivery не подтверждена; .open/lease/pointer сохранены" 7
   fi
   if [ -z "$isolated_worktree" ]; then
@@ -7975,6 +8072,39 @@ if [ "$CMD" = "renew" ]; then
     || fail "renew: semaphore изменился после resolve или уже закрывается" 3
   [ "$(_close_delivery_state "$SEM_FILE" "$RENEW_SESSION_ID" || true)" = "none" ] \
     || fail "renew: close transition уже подготовлен; lease не продлевается" 3
+  # WP-484 п.24а3 (systemic fix, 17.09): frozen_checkout_match() refuses a
+  # FRESH `open` against the canonical checkout without --isolate/
+  # --canonical-owner (see the freeze block above `open`'s guard), but this
+  # command extends an ALREADY-open session's commit rights without ever
+  # re-running that check -- a session that got in before drift accumulated
+  # could renew indefinitely against an increasingly stale canonical checkout.
+  # This is how the 178-commit divergence of 16.09 grew unnoticed across many
+  # renewals. governance_worktree: records the exact repo path this session
+  # writes to (an isolated session records its own worktree there, which
+  # never matches a frozen canonical path -- this check is a structural no-op
+  # for isolated sessions, not a special case).
+  RENEW_WORKTREE=$(sed -n 's/^governance_worktree: //p' "$SEM_FILE" 2>/dev/null | head -1)
+  if [ -n "$RENEW_WORKTREE" ] && [ "${#FROZEN_CANONICAL_PATHS[@]}" -gt 0 ]; then
+    RENEW_WT_REAL=$(realpath "$RENEW_WORKTREE" 2>/dev/null || echo "$RENEW_WORKTREE")
+    RENEW_FROZEN=false
+    for _frozen in "${FROZEN_CANONICAL_PATHS[@]}"; do
+      [ "$RENEW_WT_REAL" = "$(realpath "$_frozen" 2>/dev/null || echo "$_frozen")" ] \
+        && RENEW_FROZEN=true && break
+    done
+    if $RENEW_FROZEN && [ -z "$UNFREEZE_REASON" ]; then
+      # Read-only: git fetch only updates the remote-tracking ref, never
+      # HEAD/index/worktree -- same "safe" class as iwe-safe-pull.sh and
+      # day-close-prepare.sh's own canon-drift check (12.6 CANON DRIFT).
+      # Best-effort: a network hiccup must not block a legitimate renewal,
+      # it only means the drift check is skipped for this tick.
+      if timeout 10 git -C "$RENEW_WORKTREE" fetch origin main --quiet 2>/dev/null; then
+        RENEW_BEHIND=$(git -C "$RENEW_WORKTREE" rev-list --count HEAD..origin/main 2>/dev/null || echo 0)
+        if [ "$RENEW_BEHIND" -ge 10 ]; then
+          fail "renew: канонический checkout ($RENEW_WORKTREE) отстал от origin на $RENEW_BEHIND коммитов с момента open -- продление приостановлено, чтобы расхождение не росло молча. Закрой сессию и открой заново (пройдёт свежую проверку freeze/--isolate), либо явно подтверди риск: renew ... --reason '<причина>'." 1
+        fi
+      fi
+    fi
+  fi
   LEASE_TMP="${SEM_FILE}.lease.tmp.$$"
   {
     echo "renewed_at: $(now_iso)"

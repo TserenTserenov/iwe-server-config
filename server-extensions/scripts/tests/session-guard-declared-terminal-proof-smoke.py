@@ -300,17 +300,23 @@ class ScopePublicationProofTests(unittest.TestCase):
         command = "set -euo pipefail\n" + "\n".join(
             key + "=" + shlex.quote(value) for key, value in setup.items()
         ) + "\n" + self.functions + "\n" + TARGET + " " + shlex.join(
-            # 4th/5th positional: legacy-canonical repo / legacy sessions dir
-            # (WP-484, peer-session 2026-09-14-13). Both empty here -- every
-            # fixture in this class writes a modern semaphore with
-            # governance_worktree: set (see semaphore() above), so the
-            # legacy branch never applies and must not be exercised by
-            # omission. Cold-review (subagent, same phase) caught this
+            # own field/other field (WP-484, 16.09, peer-session
+            # 2026-09-16-22-wp484-close-mechanism-hard-snapshot): the function
+            # was parameterized to serve both the governance and the sessions
+            # checkout; this test class exercises the governance role only
+            # (every fixture writes a modern semaphore with
+            # governance_worktree: set, see semaphore() above), so own field
+            # is governance_worktree and other field is orz_sessions_dir.
+            # 7th/8th positional: legacy-own / legacy-other repo (WP-484,
+            # peer-session 2026-09-14-13). Both empty here -- a modern
+            # semaphore never takes the legacy branch, must not be exercised
+            # by omission. Cold-review (subagent, same phase) caught this
             # argument count going stale once already when a second
-            # positional was added after the first fix -- if a 6th
+            # positional was added after the first fix -- if another
             # positional is added later, update this call too, not just the
             # bash-side callers.
-            [str(self.repo), str(self.sem), self.remote, "", ""]
+            [str(self.repo), "governance checkout", str(self.sem), self.remote,
+             "governance_worktree", "orz_sessions_dir", "", ""]
         ) + "\n"
         result = subprocess.run(
             ["/bin/bash"], input=command, text=True, capture_output=True,

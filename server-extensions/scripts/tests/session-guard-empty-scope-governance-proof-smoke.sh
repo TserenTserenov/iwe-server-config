@@ -172,7 +172,8 @@ check "commit:-заявка -> проверка запускается" \
 # 4. And when the real (unstubbed) proof function runs, it still fails closed
 #    for a genuinely unpushed commit -- the fix must not weaken protection
 #    for a session that actually changed something here.
-if _repo_head_has_publish_proof "$SANDBOX/work" "governance checkout" "$SEM_WITH_COMMIT" "" "" 2>/dev/null; then
+if _repo_head_has_publish_proof "$SANDBOX/work" "governance checkout" "$SEM_WITH_COMMIT" \
+     "governance_worktree" "orz_sessions_dir" 2>/dev/null; then
   PROOF_RESULT="passed"
 else
   PROOF_RESULT="failed"
