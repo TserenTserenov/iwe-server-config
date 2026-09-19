@@ -13,7 +13,12 @@ mkdir -p "$TEST_ROOT/DS-strategy/inbox/WP-001"
 printf '%s\n' 'hypothesis_relation: "tests"' > "$TEST_ROOT/DS-strategy/inbox/WP-001/WP-001.md"
 
 open_with() {
-    IWE_ROOT="$TEST_ROOT" IWE_GOVERNANCE_REPO="DS-strategy" \
+    # This fixture's DS-strategy is a plain directory, not a git repo (this
+    # suite doesn't test freeze). WP-530 Ф56 made frozen_checkout_match() also
+    # check gov_repo_dir()'s canonical fallback, which for a non-git canonical
+    # candidate always equals the frozen path string verbatim -- disarm freeze
+    # explicitly so this suite keeps testing only the unknown-flag contract.
+    IWE_ROOT="$TEST_ROOT" IWE_GOVERNANCE_REPO="DS-strategy" IWE_FROZEN_CANONICAL_PATH="" \
         bash "$GUARD" open --wp WP-001 --agent fixture "$@"
 }
 

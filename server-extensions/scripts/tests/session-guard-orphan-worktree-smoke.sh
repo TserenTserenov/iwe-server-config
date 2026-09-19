@@ -16,6 +16,12 @@ MANAGED_WORKTREES="$TEST_ROOT/.iwe-runtime/isolated-worktrees"
 PUSH_MARKER="$TEST_ROOT/isolate-push-called"
 LEDGER_ROOT="$TEST_ROOT/ledger"
 export IWE_SESSIONS_ROOT="$GOV/sessions"
+# $GOV has no origin (plain `git init`, this suite doesn't test freeze). WP-530
+# Ф56 made frozen_checkout_match() also check gov_repo_dir()'s canonical
+# fallback, which for an origin-less canonical candidate always equals the
+# frozen path string verbatim -- disarm freeze explicitly so every `open` call
+# below keeps testing only orphan/scheduled-drain sweep behaviour.
+export IWE_FROZEN_CANONICAL_PATH=""
 mkdir -p "$GOV/scripts" "$GOV/sessions" "$SESSION_DIR" "$MANAGED_WORKTREES" "$TEST_ROOT/bin"
 git -C "$GOV" init -q
 

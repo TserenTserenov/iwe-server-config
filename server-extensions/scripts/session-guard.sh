@@ -171,17 +171,42 @@ fi
 # unreachable (WP-484 Ф104 smoke test, 2026-08-16). Two callers now: the freeze
 # block in `open` and the housekeeping branch above it, which used to exit
 # before that block ever ran (WP-484, 2026-09-05).
+#
+# WP-530 Ф56 (peer-session 2026-09-18-10, consensus Claude+Kimi+Codex, rounds
+# 3-5): the `pwd` fallback below and gov_repo_dir()'s own canonical fallback
+# disagreed on the exact same case -- cwd outside any git repo. A session
+# opened that way (interactive `claude-code-...` semaphore, 2026-09-18 09:09,
+# WP-484) sailed through this check (pwd never matches a frozen path) while
+# `open` still wrote `governance_worktree: <canon>` from gov_repo_dir(), the
+# one that decides the ACTUAL write target. Checking gov_repo_dir()'s result
+# alone would close that gap but silently reopen a different one Codex found
+# live-testing an `IWE_FROZEN_CANONICAL_PATH="$IWE_ROOT"` override: from cwd
+# = $IWE_ROOT itself (a real git repo whose origin isn't DS-my-strategy's),
+# gov_repo_dir() falls back to the DS-my-strategy canonical path, which is
+# NOT in that override's frozen set, and the raw cwd (which IS the frozen
+# path today) would never get checked at all. Kimi's residual worry -- could
+# gov_repo_dir() return a path candidate #1 wouldn't already have seen? -- is
+# closed by construction: every git-repo path gov_repo_dir() can return came
+# from its own `git rev-parse --show-toplevel` of this same cwd, the exact
+# call candidate #1 already makes; the only value it can add is its
+# canonical-path fallback, never $IWE_ROOT or any other frozen path #1 missed.
+# Checking both inside this one function -- not two independent call sites --
+# keeps a single choke point while covering both real incidents.
 frozen_checkout_match() {
   [ "${#FROZEN_CANONICAL_PATHS[@]}" -gt 0 ] || return 0
-  local toplevel real frozen frozen_real
-  toplevel="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
-  real=$(realpath "$toplevel" 2>/dev/null || echo "$toplevel")
-  for frozen in "${FROZEN_CANONICAL_PATHS[@]}"; do
-    frozen_real=$(realpath "$frozen" 2>/dev/null || echo "$frozen")
-    if [ "$real" = "$frozen_real" ]; then
-      echo "$toplevel"
-      return 0
-    fi
+  local cwd_toplevel gov_candidate candidate real frozen frozen_real
+  cwd_toplevel="$(git rev-parse --show-toplevel 2>/dev/null || true)"
+  gov_candidate="$(gov_repo_dir)"
+  for candidate in "$cwd_toplevel" "$gov_candidate"; do
+    [ -n "$candidate" ] || continue
+    real=$(realpath "$candidate" 2>/dev/null || echo "$candidate")
+    for frozen in "${FROZEN_CANONICAL_PATHS[@]}"; do
+      frozen_real=$(realpath "$frozen" 2>/dev/null || echo "$frozen")
+      if [ "$real" = "$frozen_real" ]; then
+        echo "$candidate"
+        return 0
+      fi
+    done
   done
 }
 
