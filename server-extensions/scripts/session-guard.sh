@@ -14,7 +14,12 @@
 #                                                      # blocked-witness-unavailable И push уже
 #                                                      # подтверждён (all_pushed: true)
 #   close --housekeeping <reason> [--agent ...]       # закрыть housekeeping-сессию
-#   audit [--since YYYY-MM-DD] [--cleanup-orphans]
+#   audit [--since YYYY-MM-DD] [--cleanup-orphans [--quarantine-dead-interactive]]
+#                                                      # --quarantine-dead-interactive (WP-530 Ф53):
+#                                                      # opt-in terminal path for ordinary semaphores
+#                                                      # whose owner pid is gone on this host, lease
+#                                                      # expired and heartbeat stale -> renamed to
+#                                                      # .open.orphaned-dead-interactive, evidence kept
 #   renew [--wp WP-N] [--slug "..."] [--agent ...]    # продлить право на коммит
 #   pre-commit-check
 #   note-file <path> [--agent ...]
@@ -2148,16 +2153,8 @@ with open(path, "a", encoding="utf-8") as stream:
 PY
 }
 
-notify_zombie_escalation() {
-  local semaphore="$1" age_seconds="$2"
-  # Human text (WP-538 addressee policy, peer-session 2026-09-03-05): what
-  # happened, who owns the next step, when it resolves on its own -- this is
-  # a fully automatic transition (see the comment above ZOMBIE_REGISTRY), so
-  # the pilot owns nothing here beyond "read if curious".
-  local age_h=$(( age_seconds / 3600 ))
-  local msg
-  msg="Осиротевшая сессия IWE: $(basename -- "$semaphore") уже ${age_h}ч не подтверждает, что за ней кто-то следит. Защитный барьер оставлен на месте: нужен точный terminal/drain proof или ручной разбор."
-
+_session_guard_notify() {  # <human message> <semaphore path for the log>
+  local msg="$1" semaphore="$2"
   # Same fallback pattern as check-wp353-trigger.sh: never let a missing/failing
   # notifier block the quarantine decision itself.
   # WP-538 Ф7 (11.09): iwe-tg routes through the allowlist gate — --source is
@@ -2168,12 +2165,113 @@ notify_zombie_escalation() {
     iwe-tg --source session-guard "$msg" || tg_rc=$?
     case "$tg_rc" in
       0) ;;
-      3) echo "WARN: zombie alert quarantined by the allowlist gate (not delivered), only in log: $semaphore" >&2 ;;
-      *) echo "WARN: iwe-tg failed (rc=$tg_rc), zombie alert only in log: $semaphore" >&2 ;;
+      3) echo "WARN: session-guard alert quarantined by the allowlist gate (not delivered), only in log: $semaphore" >&2 ;;
+      *) echo "WARN: iwe-tg failed (rc=$tg_rc), session-guard alert only in log: $semaphore" >&2 ;;
     esac
   else
-    echo "INFO: iwe-tg unavailable, zombie alert only in log: $semaphore" >&2
+    echo "INFO: iwe-tg unavailable, session-guard alert only in log: $semaphore" >&2
   fi
+}
+
+notify_zombie_escalation() {
+  local semaphore="$1" age_seconds="$2"
+  # Human text (WP-538 addressee policy, peer-session 2026-09-03-05): what
+  # happened, who owns the next step, when it resolves on its own -- this is
+  # a fully automatic transition (see the comment above ZOMBIE_REGISTRY), so
+  # the pilot owns nothing here beyond "read if curious".
+  local age_h=$(( age_seconds / 3600 ))
+  _session_guard_notify "Осиротевшая сессия IWE: $(basename -- "$semaphore") уже ${age_h}ч не подтверждает, что за ней кто-то следит. Защитный барьер оставлен на месте: нужен точный terminal/drain proof или ручной разбор." "$semaphore"
+}
+
+# WP-530 Ф53 (2026-09-19, peer-session 2026-09-18-10 Claude+Kimi+Codex, ArchGate
+# DRR-f53-single-writer-canon.md): the first terminal path for an ordinary
+# (non-scheduled) interactive semaphore whose owner is gone. Before this phase
+# `_classify_dead_semaphore` could only escalate: exact `close` needs a publish
+# proof the dead owner never produced, and nothing else may touch `.open` --
+# 46 such semaphores had accumulated on two hosts and every one of them kept
+# fencing unrelated commits through pre-commit-check. Deliberately opt-in
+# (`audit --cleanup-orphans --quarantine-dead-interactive`): existing callers
+# (kimi-wp-run-scheduled.sh:86) keep the escalate-only behaviour until the
+# review date in the DRR.
+#
+# Liveness proof, all four required, evaluated under the session transition
+# lock the caller already holds: (1) the recorded pid no longer exists on THIS
+# host -- a reused pid looks alive and therefore never quarantines, which is
+# the safe direction; (2) the semaphore names this host, or predates the host
+# field; (3) the commit lease has expired; (4) the last heartbeat, when one was
+# ever recorded, is older than IWE_HEARTBEAT_STALE_SEC. This is a liveness
+# proof only: the rename lifts fencing, it never claims the session's work was
+# published -- the file body, its `.lease` and any worktree stay on disk for
+# manual review, and the decision is appended to the zombie registry.
+IWE_HEARTBEAT_STALE_SEC="${IWE_HEARTBEAT_STALE_SEC:-1800}"
+# A non-numeric threshold would make `[ N -lt abc ]` return 2 and skip the
+# "fresh heartbeat" refusal -- the one direction this proof must never fail in.
+[[ "$IWE_HEARTBEAT_STALE_SEC" =~ ^[0-9]+$ ]] \
+  || fail "IWE_HEARTBEAT_STALE_SEC должен быть целым числом секунд (получено: '$IWE_HEARTBEAT_STALE_SEC')" 1
+DEAD_INTERACTIVE_SUFFIX=".orphaned-dead-interactive"
+
+_semaphore_last_field() {  # <semaphore> <key>
+  grep "^$2: " "$1" 2>/dev/null | tail -1 | cut -d' ' -f2- || true
+}
+
+_iso_to_epoch() {  # <ISO-8601 UTC>; prints nothing when unparseable
+  date -u -j -f "%Y-%m-%dT%H:%M:%SZ" "$1" +%s 2>/dev/null \
+    || date -u -d "$1" +%s 2>/dev/null || true
+}
+
+_dead_interactive_refusal() {  # <semaphore> <reason>
+  echo "INFO: $(basename -- "$1") not quarantined ($2); remains .open" >&2
+}
+
+_quarantine_dead_interactive() {  # <semaphore> <observed dead pid>
+  local semaphore="$1" pid="$2"
+  local host lease_deadline heartbeat_at heartbeat_epoch now snapshot destination epoch age worktree
+  now=$(date +%s)
+  if kill -0 "$pid" 2>/dev/null; then
+    _dead_interactive_refusal "$semaphore" "pid $pid is alive again"; return 1
+  fi
+  host=$(_semaphore_last_field "$semaphore" host)
+  if [ -n "$host" ] && [ "$host" != "$(hostname)" ]; then
+    _dead_interactive_refusal "$semaphore" "recorded host $host is not $(hostname)"; return 1
+  fi
+  lease_deadline=$(lease_deadline_epoch "$semaphore") \
+    || { _dead_interactive_refusal "$semaphore" "no parseable opened_at"; return 1; }
+  if [ "$now" -lt "$lease_deadline" ]; then
+    _dead_interactive_refusal "$semaphore" "lease still valid for $(( lease_deadline - now ))s"; return 1
+  fi
+  heartbeat_at=$(_semaphore_last_field "$semaphore" heartbeat_at)
+  if [ -n "$heartbeat_at" ]; then
+    heartbeat_epoch=$(_iso_to_epoch "$heartbeat_at")
+    if [ -z "$heartbeat_epoch" ]; then
+      _dead_interactive_refusal "$semaphore" "unparseable heartbeat_at $heartbeat_at"; return 1
+    fi
+    if [ $(( now - heartbeat_epoch )) -lt "$IWE_HEARTBEAT_STALE_SEC" ]; then
+      _dead_interactive_refusal "$semaphore" "heartbeat $heartbeat_at is fresh"; return 1
+    fi
+  fi
+  snapshot=$(_owned_semaphore_snapshot_sha "$semaphore" 0) \
+    || { _dead_interactive_refusal "$semaphore" "no exclusive owned snapshot (close in progress or foreign file)"; return 1; }
+  destination="${semaphore}${DEAD_INTERACTIVE_SUFFIX}"
+  _rename_owned_semaphore_cas "$semaphore" "$destination" "$snapshot" \
+    || { _dead_interactive_refusal "$semaphore" "CAS rename refused, file changed underneath"; return 1; }
+  epoch=$(semaphore_epoch "$destination" || echo 0)
+  age=$(( now - epoch ))
+  [ "$age" -lt 0 ] && age=0
+  # The rename is already terminal at this point; a registry failure must be
+  # loud, not swallowed, but it cannot undo the transition.
+  append_zombie_event \
+    "dead_interactive_owner_proven:pid=$pid:lease_expired=$lease_deadline:heartbeat=${heartbeat_at:-absent}:snapshot=$snapshot" \
+    "$semaphore" "$epoch" "$age" "quarantined" \
+    || echo "WARN: quarantine of $(basename -- "$semaphore") is done but not recorded in $ZOMBIE_REGISTRY" >&2
+  worktree=$(_semaphore_last_field "$destination" isolated_worktree)
+  [ -n "$worktree" ] || worktree=$(_semaphore_last_field "$destination" governance_worktree)
+  notify_dead_quarantine "$destination" "$age" "$worktree"
+  echo "QUARANTINED: $(basename -- "$semaphore") -> $(basename -- "$destination") (pid $pid dead, lease expired, heartbeat ${heartbeat_at:-absent}); worktree retained: ${worktree:-unknown}"
+}
+
+notify_dead_quarantine() {  # <quarantined path> <age seconds> <worktree>
+  local age_h=$(( $2 / 3600 ))
+  _session_guard_notify "Мёртвая сессия IWE переведена в карантин: $(basename -- "$1") (возраст ${age_h}ч; процесс-владелец не существует, аренда истекла, пульса нет). Барьер на коммиты снят, файл и улики сохранены. Незакоммиченная работа, если была, лежит в ${3:-неизвестной копии} — разобрать вручную." "$1"
 }
 
 # WP-484 (session-close-hygiene peer-session, 2026-08-20, consensus Claude+
@@ -2719,6 +2817,14 @@ _classify_dead_semaphore() {  # <semaphore> <observed pid>
     return 0
   fi
 
+  # WP-530 Ф53: opt-in terminal path, proof and refusal reasons live in
+  # _quarantine_dead_interactive; a refusal falls through to escalate-only.
+  if [ "${QUARANTINE_DEAD_INTERACTIVE:-0}" = "1" ] \
+    && _quarantine_dead_interactive "$semaphore" "$pid"; then
+    _SWEEP_DEAD_QUARANTINED=$((_SWEEP_DEAD_QUARANTINED + 1))
+    return 0
+  fi
+
   # Generic dead-PID evidence is never fencing.  Even a terminal-looking
   # mutable card is consumed only by the explicit recovery transaction,
   # which can bind its receipt and ledger recovery_id.  Sweep therefore
@@ -2750,6 +2856,7 @@ _sweep_orphaned_semaphores_body() {
   _SWEEP_TERMINAL_REAPED=0
   _SWEEP_SCHEDULED_FROZEN=0
   _SWEEP_ZOMBIES_ESCALATED=0
+  _SWEEP_DEAD_QUARANTINED=0
   while IFS= read -r semaphore; do
     [ -f "$semaphore" ] || continue
     pid=$(grep '^pid: ' "$semaphore" | head -1 | cut -d' ' -f2- || true)
@@ -2818,7 +2925,7 @@ _sweep_orphaned_semaphores_body() {
       _SWEEP_AMBIGUOUS=$((_SWEEP_AMBIGUOUS + 1))
     fi
   done < <(find "$SESSION_DIR" -name '*.open' -type f 2>/dev/null)
-  echo "Semaphore sweep: terminal_reaped=$_SWEEP_TERMINAL_REAPED scheduled_frozen=$_SWEEP_SCHEDULED_FROZEN ambiguous=$_SWEEP_AMBIGUOUS zombies_escalated=$_SWEEP_ZOMBIES_ESCALATED"
+  echo "Semaphore sweep: terminal_reaped=$_SWEEP_TERMINAL_REAPED scheduled_frozen=$_SWEEP_SCHEDULED_FROZEN dead_quarantined=$_SWEEP_DEAD_QUARANTINED ambiguous=$_SWEEP_AMBIGUOUS zombies_escalated=$_SWEEP_ZOMBIES_ESCALATED"
 }
 
 # WP-484 (session-close-hygiene peer-session, 2026-08-20): every `open`
@@ -3065,6 +3172,7 @@ SCHEDULED_RUN_ID=""
 SESSION_ID_ARG=""
 REPO_ARG=""
 CLEANUP_ORPHANS=0
+QUARANTINE_DEAD_INTERACTIVE=0
 FORCE_NO_REFLECTION=""
 CANONICAL_OWNER=""
 FORCE_FLAG=0
@@ -3170,6 +3278,7 @@ while [[ $# -gt 0 ]]; do
       BASE_SHA="$2"; shift 2 ;;
     --since)  SINCE="$2"; shift 2 ;;
     --cleanup-orphans) CLEANUP_ORPHANS=1; shift ;;
+    --quarantine-dead-interactive) QUARANTINE_DEAD_INTERACTIVE=1; shift ;;
     --force)  FORCE_FLAG=1; shift ;;
     --isolate) ISOLATE_FLAG=1; shift ;;
     --force-no-reflection)
@@ -3193,6 +3302,12 @@ done
 
 if [ -z "$AGENT" ] && { [ "$CMD" = "open" ] || [ "$CMD" = "close" ] || [ "$CMD" = "note-scheduled-drain" ] || [ "$CMD" = "heartbeat" ] || [ "$CMD" = "machine-close" ]; }; then
   fail "--agent обязателен для open/close/machine-close/note-scheduled-drain/heartbeat (или переменная IWE_AGENT)" 1
+fi
+
+# WP-530 Ф53: the quarantine flag is meaningless anywhere else; refusing keeps
+# the WP-7 Ф83 contract (no flag is ever silently ignored).
+if [ "$QUARANTINE_DEAD_INTERACTIVE" -eq 1 ] && { [ "$CMD" != "audit" ] || [ "$CLEANUP_ORPHANS" -ne 1 ]; }; then
+  fail "--quarantine-dead-interactive применим только к audit --cleanup-orphans" 1
 fi
 
 # --isolate and --canonical-owner are two different classes of session
@@ -3555,6 +3670,39 @@ if [ "$CMD" = "open" ]; then
     esac
     printf 'session-guard: --isolate: изолирую %q (origin: %q)\n' \
       "$ISOLATE_BASE_DIR" "$ISOLATE_BASE_ORIGIN" >&2
+
+    # WP-7 Ф154 (2026-09-17): 4th live occurrence of the same mis-isolation
+    # class as WP-484 Ф104 (silent repo substitution, fixed) and Ф140 (this
+    # printf above, added so a wrong resolution would at least be visible).
+    # Both incidents since (2026-08-25, 2026-09-17) show a human-readable
+    # line is not enough under load -- the caller reads a wall of other
+    # output and still misses it. This turns the same signal into a
+    # structural check instead of a line to notice: when --wp is given and
+    # the resolved repo looks like a governance repo (top-level inbox/),
+    # its registered WP folder/file must actually be there, or open refuses
+    # instead of silently isolating the wrong repo.
+    #
+    # Cold review (same phase) caught a false-positive before deploy: --wp
+    # is documented and actually used bare-number, no "WP-" prefix (e.g.
+    # `--wp 149` in inbox/bugs/blocker-2026-07-27-session-guard-stat-f-linux.md,
+    # `--wp 289` in MC-sessions/2026-08/2026-08-09-wp289-actualize-closability.md)
+    # alongside the "WP-N" form this session used. Check both spellings
+    # instead of assuming the caller always types the prefix.
+    if [ -n "$WP" ] && [ -d "$ISOLATE_BASE_DIR/inbox" ] && [ "$FORCE_FLAG" != "1" ]; then
+      case "$WP" in
+        WP-*) WP_INBOX_ALT="$WP" ;;
+        *)    WP_INBOX_ALT="WP-$WP" ;;
+      esac
+      if [ ! -e "$ISOLATE_BASE_DIR/inbox/$WP" ] && [ ! -e "$ISOLATE_BASE_DIR/inbox/$WP.md" ] \
+        && [ ! -e "$ISOLATE_BASE_DIR/inbox/$WP_INBOX_ALT" ] && [ ! -e "$ISOLATE_BASE_DIR/inbox/$WP_INBOX_ALT.md" ]; then
+        if [ "$WP_INBOX_ALT" = "$WP" ]; then
+          WP_INBOX_TRIED="inbox/$WP"
+        else
+          WP_INBOX_TRIED="inbox/$WP (и inbox/$WP_INBOX_ALT)"
+        fi
+        fail "--isolate: резолвнутый репозиторий ($ISOLATE_BASE_DIR) похож на governance-репо (есть inbox/), но $WP_INBOX_TRIED там нет -- open вызван не из того репозитория (cd в него перед --isolate). Если WP осознанно размещается не здесь (например, только что создаётся) -- повтори с --force." 1
+      fi
+    fi
 
     # Peer-session 2026-08-14-13-wp520-two-layer-closing-arch (turns 12-16,
     # 3 rounds with Codex after 2 live-tested failed attempts). A re-entry of
@@ -3996,6 +4144,14 @@ $isolate_status_code $isolate_status_path"
     # Never substitute this script's $$: it dies immediately after open and
     # would falsely quarantine a still-live session.
     [ -n "${OWNER_PID:-${CLAUDE_PID:-}}" ] && echo "pid: ${OWNER_PID:-$CLAUDE_PID}"
+    # WP-530 Ф53: host + process start time let a sweep distinguish "this
+    # host's pid is gone" from "another host's pid" and, in the next phase, a
+    # reused pid from the original owner. Informational for today's readers.
+    echo "host: $(hostname)"
+    if [ -n "${OWNER_PID:-${CLAUDE_PID:-}}" ]; then
+      OWNER_PID_START=$(ps -p "${OWNER_PID:-$CLAUDE_PID}" -o lstart= 2>/dev/null | sed 's/^ *//; s/ *$//' || true)
+      [ -n "$OWNER_PID_START" ] && echo "pid_start: $OWNER_PID_START"
+    fi
     echo "---"
     # initial --files CSV → append-log entries (git-root-relative expected from caller)
     if [ -n "${FILES:-}" ]; then
@@ -6471,6 +6627,22 @@ _close_delivery_and_transition() {
     [ "$actual_origin" = "$source_origin" ] \
       || fail "close: source origin изменился во время PREPARED snapshot" 7
     target_ref="refs/heads/main"
+    # bug-2026-09-16-quick-close-session-release-circular-terminal-check.md,
+    # peer-session 2026-09-17-14 (Kimi cold-review, conditional consensus):
+    # _worktree_clean_status_sha treats ANY ignored path (scripts/__pycache__/,
+    # lock files a pipeline step left behind) as unclean -- the same
+    # false-positive class already fixed for night-cycle's own worktree
+    # (clean_day_open_ignored_debris, commit 70225e28a), but this PREPARE-write
+    # path had no equivalent call. -X only: never touches tracked or
+    # untracked-but-not-ignored content, so it cannot discard real work.
+    # Residual risk (Kimi): a deliberately-gitignored file that is NOT pipeline
+    # debris (e.g. an uncommitted .env dropped into this isolated worktree)
+    # would also be removed here -- but close already refused unconditionally
+    # whenever such a file was present, so this can only unblock a session,
+    # never silently discard something that used to close cleanly.
+    # Best-effort by design (matches clean_day_open_ignored_debris) -- a clean
+    # failure here just means the check below fails with its normal message.
+    git -C "$CLOSING_WORKTREE" clean -fdX --quiet 2>/dev/null || true
     source_status=$(_worktree_clean_status_sha "$CLOSING_WORKTREE" || true)
     [ -n "$source_status" ] \
       || fail "close: isolated worktree не полностью clean (включая ignored/untracked); PREPARED не пишу" 7
@@ -8643,6 +8815,19 @@ for path in active_paths:
                 raise ValueError("malformed housekeeping")
             continue
         wp = unique(text, "wp").upper()
+        # WP-7 Ф154 (2026-09-17, live production incident): a bare-number --wp
+        # (e.g. `--wp 578`, no "WP-" prefix) is documented, real historical
+        # usage (cold-review finding, same phase: `--wp 149`/`--wp 289` in
+        # existing bug/session records) -- `open`/`--isolate` already accept
+        # it. This classifier didn't, so a session opened that way raised
+        # ValueError below and SystemExit(2) turned into a repo-wide "fail
+        # closed" commit barrier for EVERY agent, not just its own session --
+        # caught live when a throwaway --wp 578 test session blocked an
+        # unrelated commit in a different worktree. Normalize before
+        # validating, so active_wps stores the same canonical WP-N form the
+        # orphaned-marker loop below already requires.
+        if re.fullmatch(r"[1-9][0-9]*", wp):
+            wp = "WP-" + wp
         if wp in NON_PRODUCT_WP_SENTINELS:
             # A sentinel must not double as a way to dodge an active per-WP freeze.
             # `file:` lines are the session's touched-path scope and routinely
