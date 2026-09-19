@@ -452,6 +452,45 @@ let
       exit "$sync_status"
     fi
 
+    # WP-7 Ф159 (19.09): sync-contracts.sh now skips a row whose date range is
+    # malformed instead of aborting the whole tick on it (contract_check used
+    # to reject one bad LMS row and roll back all ~580 subscribers' updates
+    # with it, every 15 min, with a repeat OnFailure alert each time). The
+    # tick now succeeds even with rejects, so OnFailure=iwe-failure-alert@
+    # (commonUnitConfig) no longer fires for this class at all -- without a
+    # replacement signal, a permanently-skipped row would go silent forever.
+    # Notify once when the REJECT SET actually changes (new/cleared rows),
+    # not once per tick: diff the reject file's hash against the hash from
+    # the last time this sent a message.
+    rejectLog="${iwe}/.iwe-runtime/payment-registry-contract-reject.csv"
+    rejectState="${iwe}/.iwe-runtime/payment-registry-contract-reject.notified-sha256"
+    # Cold-review (2026-09-19): \copy ... WITH CSV HEADER writes the header
+    # line every tick regardless of row count, so `[ -s "$rejectLog" ]` is
+    # true on EVERY successful tick, not just ones with real rejects --
+    # would have fired a false "0 подписок пропущено" alert on first deploy
+    # and again every time the reject count returned to 0. Count rows, not
+    # bytes.
+    rejectedCount=0
+    if [ -s "$rejectLog" ]; then
+      rejectedCount=$(( $(${pkgs.coreutils}/bin/wc -l < "$rejectLog") - 1 ))
+    fi
+    if [ "$rejectedCount" -gt 0 ]; then
+      rejectHash=$(${pkgs.coreutils}/bin/sha256sum "$rejectLog" | ${pkgs.coreutils}/bin/cut -d' ' -f1)
+      prevHash=$(${pkgs.coreutils}/bin/cat "$rejectState" 2>/dev/null || true)
+      if [ "$rejectHash" != "$prevHash" ]; then
+        ${pkgs.curl}/bin/curl -s --max-time 10 -X POST \
+          "https://api.telegram.org/bot''${TELEGRAM_BOT_TOKEN}/sendMessage" \
+          -d "chat_id=''${TELEGRAM_CHAT_ID}" \
+          --data-urlencode "text=⚠️ Contract sync (tsekh-1): ''${rejectedCount} подписок пропущено (некорректный период from/to в LMS), остальные синхронизированы. Список: $rejectLog на сервере." \
+          > /dev/null || true
+        echo "$rejectHash" > "$rejectState"
+      fi
+    else
+      # Reject list cleared (nothing malformed this tick) -- drop the state
+      # so a future reappearance (same row or a new one) reads as new again.
+      ${pkgs.coreutils}/bin/rm -f "$rejectState"
+    fi
+
     # Health check: active-but-expired (см. contract-sync.yml для источника запроса/порога).
     attempt=1
     abe=""
