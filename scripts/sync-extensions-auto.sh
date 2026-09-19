@@ -258,6 +258,27 @@ fi
 
 GATE_LOG=$(mktemp)
 GATE_FAILED=false
+delivery_source_path() {
+  local delivered_path="$1"
+  case "$delivered_path" in
+    server-extensions/scripts/*)
+      printf '%s/scripts/%s\n' "$SOURCE_SNAPSHOT" "${delivered_path#server-extensions/scripts/}"
+      ;;
+    server-extensions/extensions/*)
+      printf '%s/extensions/%s\n' "$SOURCE_SNAPSHOT" "${delivered_path#server-extensions/extensions/}"
+      ;;
+    server-extensions/claude-skills/*)
+      printf '%s/.claude/skills/%s\n' "$SOURCE_SNAPSHOT" "${delivered_path#server-extensions/claude-skills/}"
+      ;;
+    server-extensions/claude-hooks/*)
+      printf '%s/.claude/hooks/%s\n' "$SOURCE_SNAPSHOT" "${delivered_path#server-extensions/claude-hooks/}"
+      ;;
+    server-extensions/claude-scripts/*)
+      printf '%s/.claude/scripts/%s\n' "$SOURCE_SNAPSHOT" "${delivered_path#server-extensions/claude-scripts/}"
+      ;;
+    *) return 1 ;;
+  esac
+}
 while IFS= read -r changed_line; do
   [ -n "$changed_line" ] || continue
   rel_path=$(echo "$changed_line" | awk '{print $2}')
@@ -265,9 +286,11 @@ while IFS= read -r changed_line; do
   case "$rel_path" in
     */tests/*) continue ;;  # тест сам себя не тестирует
   esac
-  base_noext=$(basename "$rel_path")
+  source_path=$(delivery_source_path "$rel_path" || true)
+  [ -n "$source_path" ] && [ -f "$source_path" ] || continue
+  base_noext=$(basename "$source_path")
   base_noext="${base_noext%.*}"
-  test_dir="$(dirname "$rel_path")/tests"
+  test_dir="$(dirname "$source_path")/tests"
   [ -d "$test_dir" ] || continue
   found_tests=$(find "$test_dir" -maxdepth 1 -type f \( -name "*.sh" -o -name "*.py" \) 2>/dev/null | grep -F -- "$base_noext" || true)
   [ -n "$found_tests" ] || continue
