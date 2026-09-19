@@ -464,26 +464,38 @@ let
     # the last time this sent a message.
     rejectLog="${iwe}/.iwe-runtime/payment-registry-contract-reject.csv"
     rejectState="${iwe}/.iwe-runtime/payment-registry-contract-reject.notified-sha256"
-    # Cold-review (2026-09-19): \copy ... WITH CSV HEADER writes the header
-    # line every tick regardless of row count, so `[ -s "$rejectLog" ]` is
-    # true on EVERY successful tick, not just ones with real rejects --
-    # would have fired a false "0 подписок пропущено" alert on first deploy
-    # and again every time the reject count returned to 0. Count rows, not
-    # bytes.
-    rejectedCount=0
-    if [ -s "$rejectLog" ]; then
-      rejectedCount=$(( $(${pkgs.coreutils}/bin/wc -l < "$rejectLog") - 1 ))
-    fi
+    # Parse CSV records, not physical lines: malformed source values can
+    # contain newlines. Missing/corrupt output must not clear delivery state.
+    rejectedCount=$(${pkgs.python3}/bin/python3 -c '
+    import csv, sys
+    with open(sys.argv[1], newline="") as stream:
+        rows = csv.DictReader(stream, strict=True)
+        if not rows.fieldnames or "lms_subscription_id" not in rows.fieldnames:
+            raise ValueError("contract reject CSV header missing")
+        print(sum(1 for _ in rows))
+    ' "$rejectLog") || exit 1
     if [ "$rejectedCount" -gt 0 ]; then
-      rejectHash=$(${pkgs.coreutils}/bin/sha256sum "$rejectLog" | ${pkgs.coreutils}/bin/cut -d' ' -f1)
+      rejectHash=$(${pkgs.coreutils}/bin/sha256sum "$rejectLog" | ${pkgs.coreutils}/bin/cut -d' ' -f1) || exit 1
       prevHash=$(${pkgs.coreutils}/bin/cat "$rejectState" 2>/dev/null || true)
       if [ "$rejectHash" != "$prevHash" ]; then
-        ${pkgs.curl}/bin/curl -s --max-time 10 -X POST \
+        # HTTP success alone is insufficient: Telegram can return ok=false.
+        # Do not consume the retry when delivery fails. A crash after delivery
+        # but before persisting the hash may duplicate the message (at-least-once).
+        if response=$(${pkgs.curl}/bin/curl -fsS --max-time 10 -X POST \
           "https://api.telegram.org/bot''${TELEGRAM_BOT_TOKEN}/sendMessage" \
           -d "chat_id=''${TELEGRAM_CHAT_ID}" \
-          --data-urlencode "text=⚠️ Contract sync (tsekh-1): ''${rejectedCount} подписок пропущено (некорректный период from/to в LMS), остальные синхронизированы. Список: $rejectLog на сервере." \
-          > /dev/null || true
-        echo "$rejectHash" > "$rejectState"
+          --data-urlencode "text=⚠️ Contract sync (tsekh-1): ''${rejectedCount} подписок пропущено (некорректный период from/to в LMS), остальные синхронизированы. Список: $rejectLog на сервере.") \
+          && printf '%s' "$response" | ${pkgs.jq}/bin/jq -e '.ok == true' >/dev/null; then
+          stateTmp=$(${pkgs.coreutils}/bin/mktemp "''${rejectState}.XXXXXX") || exit 1
+          if ! { printf '%s\n' "$rejectHash" > "$stateTmp" \
+            && ${pkgs.coreutils}/bin/mv -f "$stateTmp" "$rejectState"; }; then
+            ${pkgs.coreutils}/bin/rm -f "$stateTmp"
+            echo "contract reject notification: could not persist delivery state" >&2
+            exit 1
+          fi
+        else
+          echo "contract reject notification failed; next successful sync will retry" >&2
+        fi
       fi
     else
       # Reject list cleared (nothing malformed this tick) -- drop the state
