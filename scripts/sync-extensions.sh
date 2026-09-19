@@ -21,9 +21,10 @@ set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 DST="$REPO_ROOT/server-extensions"
+SOURCE_ROOT="${IWE_EXTENSIONS_SOURCE_ROOT:-$HOME/IWE}"
 
-if [ ! -d "$HOME/IWE/scripts" ]; then
-    echo "ERROR: $HOME/IWE/scripts не найден — это запускается на Mac, не на сервере" >&2
+if [ ! -d "$SOURCE_ROOT/scripts" ]; then
+    echo "ERROR: $SOURCE_ROOT/scripts не найден — источник расширений неполон" >&2
     exit 1
 fi
 
@@ -35,11 +36,11 @@ mkdir -p "$DST"/{scripts,extensions,claude-skills,claude-scripts,claude-hooks,me
 # iwe-release.json (version-handshake, WP-484). Пишется здесь, не в Nix,
 # потому что git доступен на Mac в момент staging, не на сервере в момент
 # сборки (nix build sandbox не имеет сетевого доступа к .git).
-git -C "$HOME/IWE" rev-parse HEAD > "$DST/ROOT_COMMIT_SHA"
+git -C "$SOURCE_ROOT" rev-parse HEAD > "$DST/ROOT_COMMIT_SHA"
 
 # Root-level CLAUDE.md (slim-ядро инструкций, нужен агенту на сервере)
-if [ -f "$HOME/IWE/CLAUDE.md" ]; then
-    cp "$HOME/IWE/CLAUDE.md" "$DST/CLAUDE.md"
+if [ -f "$SOURCE_ROOT/CLAUDE.md" ]; then
+    cp "$SOURCE_ROOT/CLAUDE.md" "$DST/CLAUDE.md"
 fi
 
 # WP-538 Ф8 (11.09, пир-сессия Codex+Kimi): регресс-гейт для источников,
@@ -50,7 +51,7 @@ fi
 # через которую гарантированно проходит любая правка перед попаданием на
 # сервер, независимо от того, где она сделана — в ~/IWE/scripts (обычный путь)
 # или руками в server-extensions/scripts (нештатный).
-LINT="$HOME/IWE/DS-my-strategy/scripts/tests/telegram-raw-text-lint-smoke.sh"
+LINT="${SYNC_EXTENSIONS_LINT:-$HOME/IWE/DS-my-strategy/scripts/tests/telegram-raw-text-lint-smoke.sh}"
 if [ ! -x "$LINT" ]; then
     echo "ERROR: $LINT не найден или не исполняем — это единственный гейт для 3 raw-curl watchdog-скриптов, синк остановлен" >&2
     exit 1
@@ -58,19 +59,20 @@ fi
 echo "Проверка читаемости Telegram-текста (raw-curl источники)..."
 bash "$LINT" || { echo "ERROR: сырой Telegram-текст найден — синк остановлен, см. вывод выше" >&2; exit 1; }
 
-rsync -a --delete "$HOME/IWE/scripts/"                    "$DST/scripts/"
-rsync -a --delete "$HOME/IWE/extensions/"                 "$DST/extensions/"
+rsync -a --delete "$SOURCE_ROOT/scripts/"                 "$DST/scripts/"
+rsync -a --delete "$SOURCE_ROOT/extensions/"              "$DST/extensions/"
 # Все скиллы целиком — раньше копировался только day-open, из-за этого audit-installation
 # и др. отсутствовали на сервере (SchedulerReport 6 мая «Source not found»).
-rsync -a --delete "$HOME/IWE/.claude/skills/"             "$DST/claude-skills/"
-rsync -a --delete "$HOME/IWE/.claude/hooks/"              "$DST/claude-hooks/"
-rsync -a --delete "$HOME/IWE/.claude/scripts/"            "$DST/claude-scripts/"
+rsync -a --delete "$SOURCE_ROOT/.claude/skills/"          "$DST/claude-skills/"
+rsync -a --delete "$SOURCE_ROOT/.claude/hooks/"           "$DST/claude-hooks/"
+rsync -a --delete "$SOURCE_ROOT/.claude/scripts/"         "$DST/claude-scripts/"
 
 # Memory: classify-memory.py решает, что managed (см. модуль для критерия
 # и обоснования — hardcoded-список из 9 имён был тем же классом дыры, что
 # 03.08 нашла для root<->FMT-шаблона: файл появился в memory/, никто не
 # вспомнил добавить его в список, дальше он просто не доставлялся).
-python3 "$REPO_ROOT/scripts/classify-memory.py"
+CLASSIFIER="${SYNC_EXTENSIONS_CLASSIFIER:-$REPO_ROOT/scripts/classify-memory.py}"
+python3 "$CLASSIFIER"
 
 echo ""
 echo "Изменения:"

@@ -36,7 +36,7 @@ fi
 # (bash 3.2-совместимость, per-key flock, fail-open) — не заводить свою
 # отдельную реализацию. Все известные классы сбоя этого скрипта, для alert_ok
 # (перечислять новый класс сюда при добавлении нового failure-branch):
-ALERT_CLASSES=(cd pull source-behind sync-script test-env test-gate add commit push)
+ALERT_CLASSES=(cd pull source-behind source-snapshot sync-script test-env test-gate add commit push)
 NOTIFY_LIB="${SYNC_EXTENSIONS_NOTIFY_LIB:-$HOME/IWE/DS-my-strategy/scripts/lib/notification-render.sh}"
 NOTIFY_LIB_AVAILABLE=false
 if [ -f "$NOTIFY_LIB" ]; then
@@ -137,6 +137,8 @@ lock_release() {
 }
 
 SYNC_LOG=""
+SOURCE_CLONE_LOG=""
+SOURCE_SNAPSHOT=""
 
 # Test env shim (WP-530, peer-session 2026-09-16 с Kimi): ~15 скриптов в
 # server-extensions/scripts/*.sh делают `source ".../.claude/lib/..."`, но
@@ -176,6 +178,8 @@ cleanup_test_env() {
 
 on_exit() {
   [ -n "$SYNC_LOG" ] && rm -f "$SYNC_LOG"
+  [ -n "$SOURCE_CLONE_LOG" ] && rm -f "$SOURCE_CLONE_LOG"
+  [ -n "$SOURCE_SNAPSHOT" ] && rm -rf "$SOURCE_SNAPSHOT"
   cleanup_test_env
   lock_release
 }
@@ -192,22 +196,27 @@ if ! git pull --ff-only --quiet 2>&1; then
   exit 1
 fi
 
-# Свежесть источника (инцидент 30.08): sync-extensions.sh читает рабочее дерево
-# ~/IWE (iwe-local-config). Если оно отстаёт от origin (фикс запушен с другого
-# хоста), тик увёз бы на сервер устаревшие проверки и откатил починку. Обновляем
-# через защищённый pull; если источник всё ещё позади — громкий пропуск тика
-# вместо тихой доставки отката (контракт скрипта: никогда тихий пропуск на
-# реальном событии).
-bash "$HOME/IWE/scripts/iwe-safe-pull.sh" "$HOME/IWE" >/dev/null 2>&1 || true
-git -C "$HOME/IWE" fetch --quiet origin 2>/dev/null || true
-SRC_BEHIND=$(git -C "$HOME/IWE" rev-list --count HEAD..origin/main 2>/dev/null || echo 0)
-if [ "${SRC_BEHIND:-0}" -gt 0 ]; then
-  alert source-behind "🚨 sync-extensions-auto: источник ~/IWE отстаёт от origin на ${SRC_BEHIND} коммит(ов), safe-pull не смог обновить (вероятно, локальные правки) — тик пропущен, чтобы не увезти на сервер устаревшие проверки"
+# Канонический ~/IWE — общая рабочая копия нескольких живых сессий. Защитный
+# iwe-safe-pull по контракту только проверяет её и никогда не двигает HEAD,
+# поэтому прежняя связка «safe-pull, затем ожидаем обновлённый HEAD» навсегда
+# блокировала доставку после первого push из изолированной worktree. Берём
+# отдельный снимок origin/main и вообще не меняем общую копию.
+SOURCE_REMOTE=$(git -C "$HOME/IWE" remote get-url origin 2>/dev/null || true)
+if [ -z "$SOURCE_REMOTE" ]; then
+  alert source-snapshot "🚨 sync-extensions-auto: не удалось определить origin источника ~/IWE — auto-sync пропущен"
+  exit 1
+fi
+SOURCE_SNAPSHOT=$(mktemp -d "${TMPDIR:-/tmp}/iwe-extension-source.XXXXXX")
+SOURCE_CLONE_LOG=$(mktemp)
+if ! git clone --quiet --depth 1 --branch main "$SOURCE_REMOTE" "$SOURCE_SNAPSHOT" > "$SOURCE_CLONE_LOG" 2>&1; then
+  echo "$LOG_PREFIX source snapshot error tail: $(tail -3 "$SOURCE_CLONE_LOG" | tr '\n' ' ')"
+  alert source-snapshot "🚨 sync-extensions-auto: не удалось получить чистый снимок origin/main для ~/IWE — auto-sync пропущен"
   exit 1
 fi
 
 SYNC_LOG="$(mktemp)"
-if ! bash "$REPO_ROOT/scripts/sync-extensions.sh" > "$SYNC_LOG" 2>&1; then
+if ! IWE_EXTENSIONS_SOURCE_ROOT="$SOURCE_SNAPSHOT" \
+     bash "$REPO_ROOT/scripts/sync-extensions.sh" > "$SYNC_LOG" 2>&1; then
   echo "$LOG_PREFIX sync-extensions.sh error tail: $(tail -3 "$SYNC_LOG" | tr '\n' ' ')"
   alert sync-script "🚨 sync-extensions-auto: sync-extensions.sh упал с ошибкой — подробности в логе на Маке"
   exit 1

@@ -1460,8 +1460,9 @@ in
       description = "Payment Registry — incremental payment sync (10 мин)";
       unitConfig  = commonUnitConfig;
       serviceConfig = commonServiceConfig // {
+        ExecStartPre = verifiedSyncPre "payment-registry" "main" "payment-registry";
         ExecStart  = "${pkgs.bash}/bin/bash ${iwe}/payment-registry/scripts/incremental-sync.sh";
-        TimeoutSec = 300;
+        TimeoutSec = 420;
       };
       path = commonPath;
       environment = commonEnv;
@@ -1481,8 +1482,9 @@ in
       description = "Payment Registry — subscription sync (30 мин)";
       unitConfig  = commonUnitConfig;
       serviceConfig = commonServiceConfig // {
+        ExecStartPre = verifiedSyncPre "payment-registry" "main" "payment-registry";
         ExecStart  = "${pkgs.bash}/bin/bash ${iwe}/payment-registry/scripts/sync-subscriptions.sh";
-        TimeoutSec = 300;
+        TimeoutSec = 420;
       };
       path = commonPath;
       environment = commonEnv;
@@ -1502,6 +1504,7 @@ in
       description = "Payment Registry — contract sync + health-check + heartbeat (15 мин)";
       unitConfig  = commonUnitConfig;
       serviceConfig = commonServiceConfig // {
+        ExecStartPre = verifiedSyncPre "payment-registry" "main" "payment-registry";
         ExecStart  = "${contractSyncWrapper}";
         TimeoutSec = 600;
       };
