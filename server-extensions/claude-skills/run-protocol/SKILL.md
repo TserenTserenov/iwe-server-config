@@ -1,6 +1,6 @@
 ---
 name: run-protocol
-description: Выполнение протокола ОРЗ как набора ограничений (CGUS, WP-481 Ф5): [[gate]]-шаги обязательны и проверяются trace-satisfaction при Close, [[narrative]] — демонстрационный порядок (skippable). Предотвращает пропуск обязательных шагов (включая верификацию).
+description: "Выполнение протокола ОРЗ как набора ограничений (CGUS, WP-481 Ф5): [[gate]]-шаги обязательны и проверяются trace-satisfaction при Close, [[narrative]] — демонстрационный порядок (skippable). Предотвращает пропуск обязательных шагов (включая верификацию)."
 argument-hint: "[open|close] [day|session]"
 version: 1.0.0
 layer: L1

@@ -18,7 +18,7 @@ set -euo pipefail
 
 ROOT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
 GUARD="$ROOT_DIR/scripts/session-guard.sh"
-TEST_ROOT=$(mktemp -d /private/tmp/session-guard-isolated-close.XXXXXX)
+TEST_ROOT=$(mktemp -d "${TMPDIR:-/tmp}/session-guard-isolated-close.XXXXXX")
 trap 'rm -rf "$TEST_ROOT"' EXIT
 mkdir -p "$TEST_ROOT/scripts"
 cat > "$TEST_ROOT/scripts/agent-status-report.sh" <<EOF
@@ -88,7 +88,7 @@ export IWE_AGENT="fixture"
 export IWE_SESSIONS_ROOT="$SESSIONS_REPO"
 export CLAUDE_CODE_SESSION_ID="isolated-close-smoke"
 
-OPEN_OUTPUT=$(cd "$REPO" && bash "$GUARD" open --wp WP-484 --task fixture --slug isolated-close-smoke --agent fixture --isolate)
+OPEN_OUTPUT=$(cd "$REPO" && bash "$GUARD" open --wp WP-484 --task fixture --slug isolated-close-smoke --agent fixture --isolate --force)
 WORKTREE_PATH=$(printf '%s\n' "$OPEN_OUTPUT" | grep -o '"worktree_path": "[^"]*"' | cut -d'"' -f4)
 [ -n "$WORKTREE_PATH" ] && [ -d "$WORKTREE_PATH" ] || { echo "FAIL: fixture setup — open --isolate did not produce a worktree_path" >&2; exit 1; }
 
@@ -168,7 +168,7 @@ prepare_isolated_session() {  # <slug> <session-id>
   export CLAUDE_CODE_SESSION_ID="$session_id"
   export IWE_SESSION_ID="$session_id"
   output=$(cd "$REPO" && /bin/bash "$GUARD" open \
-    --wp WP-484 --task fixture --slug "$slug" --agent fixture --isolate)
+    --wp WP-484 --task fixture --slug "$slug" --agent fixture --isolate --force)
   CASE_WORKTREE=$(printf '%s\n' "$output" | grep -o '"worktree_path": "[^"]*"' | cut -d'"' -f4)
   CASE_SEM="$TEST_ROOT/.iwe-runtime/sessions/fixture-$session_id.open"
   [ -d "$CASE_WORKTREE" ] && [ -f "$CASE_SEM" ] \
@@ -357,7 +357,7 @@ prepare_machine_session() {  # <session UUID> <slug> <close-path>
   unset CLAUDE_CODE_SESSION_ID
   output=$(cd "$REPO" && IWE_SESSION_ID="$machine_session" /bin/bash "$GUARD" open \
     --wp WP-539 --task fixture --slug "$machine_slug" --agent night-cycle \
-    --isolate --owner-pid "$$" --close-path "$machine_close_path")
+    --isolate --force --owner-pid "$$" --close-path "$machine_close_path")
   MACHINE_WORKTREE=$(printf '%s\n' "$output" | grep -o '"worktree_path": "[^"]*"' | cut -d'"' -f4)
   MACHINE_SEM="$TEST_ROOT/.iwe-runtime/sessions/night-cycle-$machine_session.open"
   [ -d "$MACHINE_WORKTREE" ] && [ -f "$MACHINE_SEM" ] \
@@ -545,7 +545,7 @@ session=$3
 worktree=$4
 cd "$repo"
 IWE_SESSION_ID=$session /bin/bash "$guard" open --wp WP-539 --task fixture \
-  --slug machine-dead-owner --agent night-cycle --isolate --owner-pid "$$" \
+  --slug machine-dead-owner --agent night-cycle --isolate --force --owner-pid "$$" \
   --close-path machine-publish-only >/dev/null
 printf "%s\n" retry > "$worktree/retry-owned.txt"
 git -C "$worktree" add retry-owned.txt

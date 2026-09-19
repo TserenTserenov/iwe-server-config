@@ -19,13 +19,13 @@ set -euo pipefail
 
 ROOT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
 GUARD="$ROOT_DIR/scripts/session-guard.sh"
-TEST_ROOT=$(mktemp -d /private/tmp/session-guard-sessions-scope.XXXXXX)
+TEST_ROOT=$(mktemp -d "${TMPDIR:-/tmp}/session-guard-sessions-scope.XXXXXX")
 trap 'rm -rf "$TEST_ROOT"' EXIT
 
 REPO="$TEST_ROOT/DS-strategy"
 ORIGIN="$TEST_ROOT/origin.git"
 mkdir -p "$REPO/inbox/agent/tasks" "$REPO/scripts"
-git init --bare -q "$ORIGIN"
+git init --bare -q -b main "$ORIGIN"
 git -C "$REPO" init -q
 git -C "$REPO" config user.email test@example.com
 git -C "$REPO" config user.name "Test"
@@ -42,7 +42,7 @@ git -C "$REPO" push -q origin HEAD:main
 SESSIONS="$TEST_ROOT/MC-sessions"
 SESSIONS_ORIGIN="$TEST_ROOT/sessions-origin.git"
 mkdir -p "$SESSIONS"
-git init --bare -q "$SESSIONS_ORIGIN"
+git init --bare -q -b main "$SESSIONS_ORIGIN"
 git -C "$SESSIONS" init -q
 git -C "$SESSIONS" config user.email test@example.com
 git -C "$SESSIONS" config user.name "Test"

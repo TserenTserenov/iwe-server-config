@@ -1,8 +1,8 @@
 ---
 name: peer-conversation
-description: Многотуровый диалог писателя (Claude) с одним или несколькими напарниками (любой набор из kimi/codex/hermes/claude-headless) по задаче пилота (DP.SC.154). Ведёт turn-loop (2 участника) или round-loop (3+, WP-509), обнаруживает CONSENSUS/ESCALATE, после консенсуса — Decision Gate (зафиксировать vs реализовать → ревью → проверить → задеплоить), синтезирует report.md через Agent tool.
-argument-hint: "<описание задачи> [--peer kimi|codex|hermes|claude[,vendor2,...]] | --list | --interrupt <session_id> | --finalize <session_id>"
-version: 1.6.1
+description: Многотуровый диалог писателя (Claude) с одним или несколькими напарниками (любой набор из kimi/codex/hermes/claude-headless/grok) по задаче пилота (DP.SC.154). Ведёт turn-loop (2 участника) или round-loop (3+, WP-509), обнаруживает CONSENSUS/ESCALATE, после консенсуса — Decision Gate (зафиксировать vs реализовать → ревью → проверить → задеплоить), синтезирует report.md через Agent tool.
+argument-hint: "<описание задачи> [--peer kimi|codex|hermes|claude|grok[,vendor2,...]] | --list | --interrupt <session_id> | --finalize <session_id>"
+version: 1.7.0
 layer: L1
 status: active
 browser_safe: false
@@ -66,8 +66,11 @@ gates_rationale: "операционный скилл; WP Gate применим 
 | `codex` | `scripts/codex-peer-adapter.sh` | `codex` | да | да | — |
 | `hermes` | `scripts/hermes-peer-adapter.sh` | `hermes` | **нет** | **нет** | `--session-id <id>` вместо |
 | `claude` | `scripts/claude-peer-adapter.sh` | `claude-code-headless` | **нет** | да | text-only; контекст в stdin |
+| `grok` | `scripts/grok-peer-adapter.sh` | `grok` | да, только как отфильтрованная копия (PII/.agentigore) | да | read-only: `--sandbox read-only`+`--tools ""` жёстко зашиты адаптером, не проброс |
 
-Каждый элемент `PEER_VENDORS` валидировать отдельно. Неизвестный `PEER_VENDOR` в списке → СТОП **на этом элементе, не на всём списке**: сообщить пилоту, какой конкретно vendor не распознан («Напарник `<vendor>` не зарегистрирован. Известные: kimi, codex, hermes, claude.»), предложить продолжить с оставшимися распознанными или прервать целиком. Добавление нового вендора — правка таблицы выше + написание `<vendor>-peer-adapter.sh` по контракту §0в.1.
+**Grok (xAI) — принятые митигации (АрхГейт WP-530 Ф51, 18.09.2026).** Только read-only участник: адаптер не открывает/не коммитит сессии, `session-guard.sh` не расширялся под этого вендора. Пилот принял риск передачи контекста хода внешнему провайдеру с условием: (1) реплики Grok помечать как «непроверенный критик» на первых сессиях — ответственность писателя при показе пилоту, не механика адаптера; (2) тот же content-filter/.agentigore, что у остальных вендоров, без исключений — уже так (адаптер переиспользует те же шаблонные скрипты); (3) передавать только минимальный контекст хода, как остальным вендорам. Известный пробел: `--sandbox read-only` пока не проходит end-to-end на этом хосте — сторонний дефект резолва самой песочницы Grok (не резолвит симлинк `/var/run/docker.sock`, воспроизводится и при запущенном и здоровом Docker) — фейлит громко и безопасно (exit 1), не тихим ослаблением; upstream-фикс не в наших руках, до него боевые пир-сессии с Grok не запускать.
+
+Каждый элемент `PEER_VENDORS` валидировать отдельно. Неизвестный `PEER_VENDOR` в списке → СТОП **на этом элементе, не на всём списке**: сообщить пилоту, какой конкретно vendor не распознан («Напарник `<vendor>` не зарегистрирован. Известные: kimi, codex, hermes, claude, grok.»), предложить продолжить с оставшимися распознанными или прервать целиком. Добавление нового вендора — правка таблицы выше + написание `<vendor>-peer-adapter.sh` по контракту §0в.1.
 
 **§0в.1 Общий контракт адаптера** (для добавления нового вендора; актуализирован WP-516 Ф5, peer-session 2026-08-11-22-wp516-f5-contract-adapter):
 

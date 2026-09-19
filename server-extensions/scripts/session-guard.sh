@@ -2153,17 +2153,26 @@ PY
 }
 
 append_zombie_event() {
-  local reason="$1" semaphore="$2" opened_epoch="$3" age_seconds="$4" action="$5"
+  # WP-538 Ф9 cold-review round 2 (Codex, 19.09): the compact sweep summary
+  # tells the pilot to "search by pass key" in $ZOMBIE_REGISTRY, but nothing
+  # ever wrote the pass key into a registry record -- recorded_at is a
+  # SEPARATE, independently-computed timestamp (this function's own
+  # dt.datetime.now() call), close to but not equal to the caller's
+  # _SWEEP_PASS_KEY, so grepping for the pass key found nothing. pass_key is
+  # optional (6th arg) so this function's own contract stays correct for any
+  # future caller outside a sweep pass, same reasoning as _session_guard_notify's
+  # queue-or-immediate fallback below.
+  local reason="$1" semaphore="$2" opened_epoch="$3" age_seconds="$4" action="$5" pass_key="${6:-}"
   mkdir -p "$(dirname "$ZOMBIE_REGISTRY")"
 
   # The enclosing orphan-sweep lock makes check-then-append idempotent.
   python3 - "$ZOMBIE_REGISTRY" "$reason" "$semaphore" \
-    "$opened_epoch" "$age_seconds" "$action" <<'PY'
+    "$opened_epoch" "$age_seconds" "$action" "$pass_key" <<'PY'
 import datetime as dt
 import json
 import sys
 
-path, reason, semaphore, opened_epoch, age_seconds, action = sys.argv[1:]
+path, reason, semaphore, opened_epoch, age_seconds, action, pass_key = sys.argv[1:]
 event = {
     "recorded_at": dt.datetime.now(dt.timezone.utc).isoformat().replace("+00:00", "Z"),
     "reason": reason,
@@ -2172,14 +2181,170 @@ event = {
     "opened_epoch": int(opened_epoch),
     "age_seconds": int(age_seconds),
     "action": action,
+    "pass_key": pass_key or None,
 }
 with open(path, "a", encoding="utf-8") as stream:
     stream.write(json.dumps(event, ensure_ascii=False, separators=(",", ":")) + "\n")
 PY
 }
 
-_session_guard_notify() {  # <human message> <semaphore path for the log>
-  local msg="$1" semaphore="$2"
+_SWEEP_NOTIFY_PENDING_FILE="$IWE_ROOT/.iwe-runtime/sweep-notify-pending.log"
+
+# WP-538 Ф9 cold-review round 2 (Codex, 19.09): v2's pending file held one
+# base64-opaque message per line -- a pass recovered on the NEXT run could
+# only be counted as "some number of events", never broken down by
+# type, because nothing said whether a recovered message was an escalation
+# or a quarantine. One JSON record per line (matching $ZOMBIE_REGISTRY's own
+# convention) carries that type alongside the semaphore and pass key,
+# json.dumps already escapes embedded newlines so the file stays
+# line-delimited the same way base64 did. A persistence failure stops this
+# event before it reaches the in-memory queue: otherwise a later SIGKILL could
+# still lose the only copy.
+_sweep_notify_pending_append() {  # <message> <type> <semaphore> <pass key> <reason> <opened epoch> <age seconds> <action>
+  if ! python3 - "$_SWEEP_NOTIFY_PENDING_FILE" "$1" "$2" "$3" "$4" \
+    "${5:-}" "${6:-0}" "${7:-0}" "${8:-$2}" 2>/dev/null <<'PY'
+import datetime as dt
+import json
+import os
+import sys
+
+path, message, type_, semaphore, pass_key, reason, opened_epoch, age_seconds, action = sys.argv[1:]
+record = dict(
+    recorded_at=dt.datetime.now(dt.timezone.utc).isoformat().replace("+00:00", "Z"),
+    type=type_,
+    semaphore=semaphore,
+    pass_key=pass_key or None,
+    message=message,
+    reason=reason,
+    opened_epoch=int(opened_epoch),
+    age_seconds=int(age_seconds),
+    action=action,
+)
+with open(path, "a", encoding="utf-8") as stream:
+    stream.write(json.dumps(record, ensure_ascii=False) + "\n")
+    stream.flush()
+    os.fsync(stream.fileno())
+PY
+  then
+    echo "WARN: could not persist a queued sweep notification for crash recovery" >&2
+    return 1
+  fi
+}
+
+# WP-538 Ф9 cold-review (Codex, 19.09): the first version of this queue lost
+# a notification permanently if the process died (or iwe-tg failed) between
+# append_zombie_event marking an event "escalated"/quarantined and the flush
+# at the end of the loop -- the dedup guard at each call site means a later
+# pass never re-enters that code path for the same semaphore, so nothing
+# would ever regenerate the lost message. This loads whatever a PRIOR pass
+# persisted but never confirmed-delivered, before this pass resets/adds
+# anything of its own -- the leftover rides along with (or becomes) this
+# pass's summary. _sweep_flush_notify_queue only clears the file on confirmed
+# delivery (tg_rc=0); an interruption or delivery failure leaves it for the
+# next call to pick up again.
+# Recovers both the message text (for the queue) and its type (for the
+# _SWEEP_NOTIFY_*_COUNT breakdown below) from the JSON pending file in one
+# python3 pass -- printing "type<TAB>base64(message)" keeps the bash side a
+# plain read loop with no risk of a message's own newlines/tabs breaking the
+# line format, and avoids spawning python3 once per pending line.
+_sweep_notify_pending_load() {
+  [ -s "$_SWEEP_NOTIFY_PENDING_FILE" ] || return 0
+  local recovered type_ pass_key b64msg msg
+  recovered=$(python3 - "$_SWEEP_NOTIFY_PENDING_FILE" "$ZOMBIE_REGISTRY" <<'PY'
+import base64
+import datetime as dt
+import json
+import os
+import sys
+
+pending_path, registry_path = sys.argv[1:]
+known = set()
+try:
+    with open(registry_path, "r", encoding="utf-8") as stream:
+        for line in stream:
+            try:
+                event = json.loads(line)
+            except ValueError:
+                continue
+            known.add((event.get("semaphore"), event.get("action")))
+except FileNotFoundError:
+    pass
+
+with open(pending_path, "r", encoding="utf-8") as stream:
+    records = [json.loads(line) for line in stream if line.strip()]
+
+os.makedirs(os.path.dirname(registry_path), exist_ok=True)
+seen = set()
+with open(registry_path, "a", encoding="utf-8") as registry:
+    for record in records:
+        type_ = record.get("type", "")
+        semaphore = record.get("semaphore", "")
+        action = record.get("action") or type_
+        dedup_key = (semaphore, action)
+        if dedup_key in seen:
+            continue
+        seen.add(dedup_key)
+        if dedup_key not in known:
+            event = {
+                "recorded_at": record.get("recorded_at")
+                or dt.datetime.now(dt.timezone.utc).isoformat().replace("+00:00", "Z"),
+                "reason": record.get("reason") or "recovered_pending_notification_without_original_audit",
+                "source": "session-guard.sh audit --cleanup-orphans",
+                "semaphore": semaphore,
+                "opened_epoch": int(record.get("opened_epoch") or 0),
+                "age_seconds": int(record.get("age_seconds") or 0),
+                "action": action,
+                "pass_key": record.get("pass_key"),
+                "audit_recovered": True,
+            }
+            registry.write(json.dumps(event, ensure_ascii=False, separators=(",", ":")) + "\n")
+            registry.flush()
+            os.fsync(registry.fileno())
+            known.add(dedup_key)
+        message = str(record.get("message", ""))
+        encoded = base64.b64encode(message.encode("utf-8")).decode("ascii")
+        print(f"{type_}\t{record.get('pass_key') or ''}\t{encoded}")
+PY
+  ) || {
+    echo "WARN: could not reconcile queued sweep notifications with $ZOMBIE_REGISTRY; retained for retry" >&2
+    _SWEEP_NOTIFY_CAN_FLUSH=0
+    return 0
+  }
+  while IFS=$'\t' read -r type_ pass_key b64msg; do
+    [ -n "$b64msg" ] || continue
+    msg=$(printf '%s' "$b64msg" | base64 -d 2>/dev/null) || continue
+    _SWEEP_NOTIFY_QUEUE+=("$msg")
+    [ -n "$pass_key" ] && _SWEEP_NOTIFY_PASS_KEYS+=("$pass_key")
+    case "$type_" in
+      escalated) _SWEEP_NOTIFY_ESCALATED_COUNT=$((_SWEEP_NOTIFY_ESCALATED_COUNT + 1)) ;;
+      quarantined) _SWEEP_NOTIFY_QUARANTINED_COUNT=$((_SWEEP_NOTIFY_QUARANTINED_COUNT + 1)) ;;
+    esac
+  done <<< "$recovered"
+}
+
+_session_guard_notify() {  # <message> <semaphore> <type> <pass key> [reason opened_epoch age action]
+  local msg="$1" semaphore="$2" type="$3" pass_key="$4"
+  local reason="${5:-}" opened_epoch="${6:-0}" age_seconds="${7:-0}" action="${8:-$type}"
+  # WP-538 Ф9 (19.09): a sweep pass queues into _SWEEP_NOTIFY_QUEUE instead
+  # of sending here -- _sweep_flush_notify_queue sends the one summary after
+  # the loop. Outside a sweep (array unset) this falls straight through to
+  # immediate delivery, same as before Ф9 -- callers of this function only
+  # exist inside the sweep today, but the fallback keeps the function correct
+  # on its own contract rather than depending on that. type/pass_key are only
+  # meaningful for the queued path (crash-recovery breakdown, round 2
+  # cold-review) and are unused on the immediate-delivery fallback.
+  if declare -p _SWEEP_NOTIFY_QUEUE >/dev/null 2>&1; then
+    _sweep_notify_pending_append "$msg" "$type" "$semaphore" "$pass_key" \
+      "$reason" "$opened_epoch" "$age_seconds" "$action"
+    _SWEEP_NOTIFY_QUEUE+=("$msg")
+    declare -p _SWEEP_NOTIFY_PASS_KEYS >/dev/null 2>&1 || _SWEEP_NOTIFY_PASS_KEYS=()
+    [ -n "$pass_key" ] && _SWEEP_NOTIFY_PASS_KEYS+=("$pass_key")
+    case "$type" in
+      escalated) _SWEEP_NOTIFY_ESCALATED_COUNT=$((_SWEEP_NOTIFY_ESCALATED_COUNT + 1)) ;;
+      quarantined) _SWEEP_NOTIFY_QUARANTINED_COUNT=$((_SWEEP_NOTIFY_QUARANTINED_COUNT + 1)) ;;
+    esac
+    return 0
+  fi
   # Same fallback pattern as check-wp353-trigger.sh: never let a missing/failing
   # notifier block the quarantine decision itself.
   # WP-538 Ф7 (11.09): iwe-tg routes through the allowlist gate — --source is
@@ -2198,14 +2363,15 @@ _session_guard_notify() {  # <human message> <semaphore path for the log>
   fi
 }
 
-notify_zombie_escalation() {
-  local semaphore="$1" age_seconds="$2"
+notify_zombie_escalation() {  # <semaphore> <age seconds> <pass key> <reason> <opened epoch>
+  local semaphore="$1" age_seconds="$2" pass_key="$3" reason="$4" opened_epoch="$5"
   # Human text (WP-538 addressee policy, peer-session 2026-09-03-05): what
   # happened, who owns the next step, when it resolves on its own -- this is
   # a fully automatic transition (see the comment above ZOMBIE_REGISTRY), so
   # the pilot owns nothing here beyond "read if curious".
   local age_h=$(( age_seconds / 3600 ))
-  _session_guard_notify "Осиротевшая сессия IWE: $(basename -- "$semaphore") уже ${age_h}ч не подтверждает, что за ней кто-то следит. Защитный барьер оставлен на месте: нужен точный terminal/drain proof или ручной разбор." "$semaphore"
+  _session_guard_notify "Осиротевшая сессия IWE: $(basename -- "$semaphore") уже ${age_h}ч не подтверждает, что за ней кто-то следит. Защитный барьер оставлен на месте: нужен точный terminal/drain proof или ручной разбор." \
+    "$semaphore" "escalated" "$pass_key" "$reason" "$opened_epoch" "$age_seconds" "escalated"
 }
 
 # WP-530 Ф53 (2026-09-19, peer-session 2026-09-18-10 Claude+Kimi+Codex, ArchGate
@@ -2250,7 +2416,7 @@ _dead_interactive_refusal() {  # <semaphore> <reason>
 
 _quarantine_dead_interactive() {  # <semaphore> <observed dead pid>
   local semaphore="$1" pid="$2"
-  local host lease_deadline heartbeat_at heartbeat_epoch now snapshot destination epoch age worktree
+  local host lease_deadline heartbeat_at heartbeat_epoch now snapshot destination epoch age worktree reason
   now=$(date +%s)
   if kill -0 "$pid" 2>/dev/null; then
     _dead_interactive_refusal "$semaphore" "pid $pid is alive again"; return 1
@@ -2284,19 +2450,29 @@ _quarantine_dead_interactive() {  # <semaphore> <observed dead pid>
   [ "$age" -lt 0 ] && age=0
   # The rename is already terminal at this point; a registry failure must be
   # loud, not swallowed, but it cannot undo the transition.
-  append_zombie_event \
-    "dead_interactive_owner_proven:pid=$pid:lease_expired=$lease_deadline:heartbeat=${heartbeat_at:-absent}:snapshot=$snapshot" \
-    "$semaphore" "$epoch" "$age" "quarantined" \
-    || echo "WARN: quarantine of $(basename -- "$semaphore") is done but not recorded in $ZOMBIE_REGISTRY" >&2
+  # The durable pending record is written before the audit record. If SIGKILL
+  # lands between them, the next pass restores the missing audit from pending
+  # before it scans *.open. That matters here because the quarantine rename
+  # already removed this semaphore from the next scan.
   worktree=$(_semaphore_last_field "$destination" isolated_worktree)
   [ -n "$worktree" ] || worktree=$(_semaphore_last_field "$destination" governance_worktree)
-  notify_dead_quarantine "$destination" "$age" "$worktree"
+  reason="dead_interactive_owner_proven:pid=$pid:lease_expired=$lease_deadline:heartbeat=${heartbeat_at:-absent}:snapshot=$snapshot"
+  notify_dead_quarantine "$destination" "$age" "$worktree" "${_SWEEP_PASS_KEY:-}" \
+    "$reason" "$semaphore" "$epoch"
+  append_zombie_event \
+    "$reason" \
+    "$semaphore" "$epoch" "$age" "quarantined" "${_SWEEP_PASS_KEY:-}" \
+    || {
+      _SWEEP_NOTIFY_CAN_FLUSH=0
+      echo "WARN: quarantine of $(basename -- "$semaphore") is done but not recorded in $ZOMBIE_REGISTRY; notification retained for retry" >&2
+    }
   echo "QUARANTINED: $(basename -- "$semaphore") -> $(basename -- "$destination") (pid $pid dead, lease expired, heartbeat ${heartbeat_at:-absent}); worktree retained: ${worktree:-unknown}"
 }
 
-notify_dead_quarantine() {  # <quarantined path> <age seconds> <worktree>
+notify_dead_quarantine() {  # <quarantined path> <age> <worktree> <pass key> <reason> <original semaphore> <opened epoch>
   local age_h=$(( $2 / 3600 ))
-  _session_guard_notify "Мёртвая сессия IWE переведена в карантин: $(basename -- "$1") (возраст ${age_h}ч; процесс-владелец не существует, аренда истекла, пульса нет). Барьер на коммиты снят, файл и улики сохранены. Незакоммиченная работа, если была, лежит в ${3:-неизвестной копии} — разобрать вручную." "$1"
+  _session_guard_notify "Мёртвая сессия IWE переведена в карантин: $(basename -- "$1") (возраст ${age_h}ч; процесс-владелец не существует, аренда истекла, пульса нет). Барьер на коммиты снят, файл и улики сохранены. Незакоммиченная работа, если была, лежит в ${3:-неизвестной копии} — разобрать вручную." \
+    "$6" "quarantined" "$4" "$5" "$7" "$2" "quarantined"
 }
 
 # WP-484 (session-close-hygiene peer-session, 2026-08-20, consensus Claude+
@@ -2775,9 +2951,13 @@ _classify_pid_identity_mismatch() {  # <semaphore> <pid> <observed comm>
     age=$(( $(date +%s) - epoch ))
     [ "$age" -lt 0 ] && age=0
     if ! zombie_registry_has_action "$semaphore" "escalated"; then
+      # Notify-before-append (Codex round 2, 19.09) -- see the comment at
+      # _quarantine_dead_interactive's call site for the SIGKILL-window
+      # reasoning; identical fix, same call-order swap, at every classify site.
+      notify_zombie_escalation "$semaphore" "$age" "${_SWEEP_PASS_KEY:-}" \
+        "scheduled_owner_pid_identity_mismatch:${pid}:${observed_comm}" "$epoch"
       append_zombie_event "scheduled_owner_pid_identity_mismatch:${pid}:${observed_comm}" \
-        "$semaphore" "$epoch" "$age" "escalated"
-      notify_zombie_escalation "$semaphore" "$age"
+        "$semaphore" "$epoch" "$age" "escalated" "${_SWEEP_PASS_KEY:-}"
       _SWEEP_ZOMBIES_ESCALATED=$((_SWEEP_ZOMBIES_ESCALATED + 1))
     fi
     echo "WARNING: scheduled owner pid $pid is alive but comm ($observed_comm) does not match; exact drain proof absent; $(basename "$semaphore") remains .open" >&2
@@ -2794,9 +2974,10 @@ _classify_pid_identity_mismatch() {  # <semaphore> <pid> <observed comm>
   # (cold-review Medium, 2026-09-15). Not fixed here: pre-existing dedup
   # design, only newly reachable as a two-reason sequence by this patch.
   if ! zombie_registry_has_action "$semaphore" "escalated"; then
+    notify_zombie_escalation "$semaphore" "$age" "${_SWEEP_PASS_KEY:-}" \
+      "pid_identity_mismatch:${pid}:${observed_comm}" "$epoch"
     append_zombie_event "pid_identity_mismatch:${pid}:${observed_comm}" \
-      "$semaphore" "$epoch" "$age" "escalated"
-    notify_zombie_escalation "$semaphore" "$age"
+      "$semaphore" "$epoch" "$age" "escalated" "${_SWEEP_PASS_KEY:-}"
     _SWEEP_ZOMBIES_ESCALATED=$((_SWEEP_ZOMBIES_ESCALATED + 1))
     # Unlike _classify_dead_semaphore's generic branch (cold-review Critical,
     # 2026-09-15: cancelling there would be a NEW behavior on an existing,
@@ -2832,9 +3013,10 @@ _classify_dead_semaphore() {  # <semaphore> <observed pid>
     age=$(( $(date +%s) - epoch ))
     [ "$age" -lt 0 ] && age=0
     if ! zombie_registry_has_action "$semaphore" "escalated"; then
+      notify_zombie_escalation "$semaphore" "$age" "${_SWEEP_PASS_KEY:-}" \
+        "scheduled_owner_without_exact_drain_proof" "$epoch"
       append_zombie_event "scheduled_owner_without_exact_drain_proof" \
-        "$semaphore" "$epoch" "$age" "escalated"
-      notify_zombie_escalation "$semaphore" "$age"
+        "$semaphore" "$epoch" "$age" "escalated" "${_SWEEP_PASS_KEY:-}"
       _SWEEP_ZOMBIES_ESCALATED=$((_SWEEP_ZOMBIES_ESCALATED + 1))
     fi
     echo "WARNING: scheduled owner pid $pid is dead, but exact drain proof is absent; $(basename "$semaphore") remains .open" >&2
@@ -2858,9 +3040,10 @@ _classify_dead_semaphore() {  # <semaphore> <observed pid>
   age=$(( $(date +%s) - epoch ))
   [ "$age" -lt 0 ] && age=0
   if ! zombie_registry_has_action "$semaphore" "escalated"; then
+    notify_zombie_escalation "$semaphore" "$age" "${_SWEEP_PASS_KEY:-}" \
+      "dead_owner_without_terminal_or_drain_proof" "$epoch"
     append_zombie_event "dead_owner_without_terminal_or_drain_proof" \
-      "$semaphore" "$epoch" "$age" "escalated"
-    notify_zombie_escalation "$semaphore" "$age"
+      "$semaphore" "$epoch" "$age" "escalated" "${_SWEEP_PASS_KEY:-}"
     _SWEEP_ZOMBIES_ESCALATED=$((_SWEEP_ZOMBIES_ESCALATED + 1))
     # Cold-review Critical (2026-09-15): cancelling this session's quick-close
     # runs here (bare dead-PID, no terminal/scheduled-drain proof) would be a
@@ -2882,6 +3065,29 @@ _sweep_orphaned_semaphores_body() {
   _SWEEP_SCHEDULED_FROZEN=0
   _SWEEP_ZOMBIES_ESCALATED=0
   _SWEEP_DEAD_QUARANTINED=0
+  # WP-538 Ф9 (19.09, Codex plan): one pass used to fire one Telegram message
+  # per orphaned/quarantined semaphore -- a night with 26 stale sessions sent
+  # 26 separate alerts. _session_guard_notify queues into this array instead
+  # of sending immediately; _sweep_flush_notify_queue below sends ONE summary
+  # after the loop. Per-semaphore detail is unaffected -- append_zombie_event
+  # at each call site still writes the full record to ZOMBIE_REGISTRY
+  # synchronously, during the loop, same as before this change.
+  _SWEEP_NOTIFY_QUEUE=()
+  # WP-538 Ф9 cold-review round 2 (Codex, 19.09): deliberately SEPARATE from
+  # _SWEEP_ZOMBIES_ESCALATED/_SWEEP_DEAD_QUARANTINED above -- those two keep
+  # meaning "fresh classifications this pass" for the plain-text "Semaphore
+  # sweep: ..." line at the end of this function. These two count every
+  # enqueue into _SWEEP_NOTIFY_QUEUE, fresh or recovered from a prior
+  # interrupted pass, so the compact Telegram summary's type breakdown
+  # (_sweep_flush_notify_queue) always sums to the queue length by
+  # construction, including on a pass that recovers messages from a pass
+  # that produced zero fresh classifications of its own.
+  _SWEEP_NOTIFY_ESCALATED_COUNT=0
+  _SWEEP_NOTIFY_QUARANTINED_COUNT=0
+  _SWEEP_NOTIFY_PASS_KEYS=()
+  _SWEEP_NOTIFY_CAN_FLUSH=1
+  _SWEEP_PASS_KEY=$(date -u +%Y%m%dT%H%M%SZ)
+  _sweep_notify_pending_load
   while IFS= read -r semaphore; do
     [ -f "$semaphore" ] || continue
     pid=$(grep '^pid: ' "$semaphore" | head -1 | cut -d' ' -f2- || true)
@@ -2939,9 +3145,10 @@ _sweep_orphaned_semaphores_body() {
 
     if [ "$age" -ge "$IWE_ZOMBIE_ESCALATE_SEC" ] \
        && ! zombie_registry_has_action "$semaphore" "escalated"; then
+      notify_zombie_escalation "$semaphore" "$age" "${_SWEEP_PASS_KEY:-}" \
+        "missing_or_invalid_owner_pid" "$epoch"
       append_zombie_event "missing_or_invalid_owner_pid" "$semaphore" \
-        "$epoch" "$age" "escalated"
-      notify_zombie_escalation "$semaphore" "$age"
+        "$epoch" "$age" "escalated" "${_SWEEP_PASS_KEY:-}"
       _SWEEP_ZOMBIES_ESCALATED=$((_SWEEP_ZOMBIES_ESCALATED + 1))
     fi
 
@@ -2950,7 +3157,91 @@ _sweep_orphaned_semaphores_body() {
       _SWEEP_AMBIGUOUS=$((_SWEEP_AMBIGUOUS + 1))
     fi
   done < <(find "$SESSION_DIR" -name '*.open' -type f 2>/dev/null)
+  _sweep_flush_notify_queue
+  # WP-538 Ф9 cold-review (Codex, 19.09): the array is global-scope by design
+  # (same as the other _SWEEP_* counters, read by the caller after this
+  # function returns) -- left declared after this pass, it silently
+  # swallowed any LATER, non-sweep call to _session_guard_notify in the same
+  # process into a queue nothing would ever flush again. Unsetting it here
+  # restores "not inside a sweep -> deliver immediately" for every call site
+  # after this point, regardless of what this pass queued or sent.
+  unset _SWEEP_NOTIFY_QUEUE
+  unset _SWEEP_NOTIFY_PASS_KEYS
   echo "Semaphore sweep: terminal_reaped=$_SWEEP_TERMINAL_REAPED scheduled_frozen=$_SWEEP_SCHEDULED_FROZEN dead_quarantined=$_SWEEP_DEAD_QUARANTINED ambiguous=$_SWEEP_AMBIGUOUS zombies_escalated=$_SWEEP_ZOMBIES_ESCALATED"
+}
+
+# WP-538 Ф9 (19.09): sends the _SWEEP_NOTIFY_QUEUE collected by
+# _session_guard_notify during this sweep pass as ONE Telegram message
+# instead of one per semaphore. Below _SWEEP_QUARANTINE_SUMMARY_THRESHOLD
+# items the original per-semaphore messages are reused verbatim (each
+# already carries the WHY and the "разобрать вручную" caution -- quarantine
+# is never implied to mean the work was published) so a normal, small pass
+# reads exactly as before, just merged into one delivery. Above the
+# threshold only counts + a pointer to ZOMBIE_REGISTRY are sent -- the
+# per-semaphore append_zombie_event record made during the loop is already
+# the detailed account, repeating all of it inline would make the one
+# message as noisy as the many it replaces.
+_SWEEP_QUARANTINE_SUMMARY_THRESHOLD=5
+
+_sweep_flush_notify_queue() {
+  local total=${#_SWEEP_NOTIFY_QUEUE[@]}
+  [ "$total" -gt 0 ] || return 0
+  if [ "${_SWEEP_NOTIFY_CAN_FLUSH:-1}" != "1" ]; then
+    echo "WARN: sweep summary retained because its audit record is not durable yet" >&2
+    return 0
+  fi
+  local summary unique_pass_keys pass_key_count pass_scope admission_digest admission_key
+  unique_pass_keys=$(printf '%s\n' "${_SWEEP_NOTIFY_PASS_KEYS[@]}" | awk 'NF && !seen[$0]++')
+  pass_key_count=$(printf '%s\n' "$unique_pass_keys" | awk 'NF { count++ } END { print count+0 }')
+  if [ "$pass_key_count" -eq 1 ]; then
+    pass_scope="за проход $unique_pass_keys"
+  elif [ "$pass_key_count" -gt 1 ]; then
+    pass_scope="из $pass_key_count проходов (ключи: $(printf '%s\n' "$unique_pass_keys" | awk 'BEGIN { sep="" } { printf "%s%s", sep, $0; sep=", " }'))"
+  else
+    pass_scope="за проход $_SWEEP_PASS_KEY"
+  fi
+  admission_digest=$(printf '%s\n' "${unique_pass_keys:-$_SWEEP_PASS_KEY}" | python3 -c '
+import hashlib
+import sys
+print(hashlib.sha256(sys.stdin.buffer.read()).hexdigest()[:16])
+')
+  admission_key="unexpected:session-guard:sweep-$admission_digest"
+  if [ "$total" -le "$_SWEEP_QUARANTINE_SUMMARY_THRESHOLD" ]; then
+    summary=$(printf '🔔 Сторож сессий: %d событий %s\n\n%s' \
+      "$total" "$pass_scope" "$(printf '%s\n\n' "${_SWEEP_NOTIFY_QUEUE[@]}")")
+  else
+    # WP-538 Ф9 cold-review (Codex, 19.09): a bare count + "see the registry"
+    # gave no way to find which registry entries belong to THIS pass, or
+    # even whether it was mostly escalations or mostly quarantines.
+    # Round 2 (Codex, 19.09): the first version read this breakdown from
+    # _SWEEP_ZOMBIES_ESCALATED/_SWEEP_DEAD_QUARANTINED, which only count
+    # FRESH classifications made during this pass -- a pass that recovers a
+    # prior pass's undelivered queue (_sweep_notify_pending_load) showed
+    # "6 событий ... осиротевшие: 0, в карантине: 0", accurate for nothing
+    # new but silently wrong for the 6 it actually just sent. The dedicated
+    # _SWEEP_NOTIFY_*_COUNT counters increment on every enqueue regardless of
+    # origin (see their init comment above), so this breakdown always sums
+    # to $total. The registry now also carries each record's own pass_key
+    # (append_zombie_event), so "ищи по ключу прохода" is an actual grep,
+    # not just a suggestion with nothing to match against.
+    summary="🔔 Сторож сессий: $total событий $pass_scope (осиротевшие: $_SWEEP_NOTIFY_ESCALATED_COUNT, в карантине: $_SWEEP_NOTIFY_QUARANTINED_COUNT). Карантин не значит, что незакоммиченная работа этих сессий опубликована — каждая требует отдельного разбора. Подробности каждой — в $ZOMBIE_REGISTRY, ищи по указанному ключу прохода."
+  fi
+  if command -v iwe-tg >/dev/null 2>&1; then
+    local tg_rc=0
+    iwe-tg --source session-guard --admission-key "$admission_key" "$summary" || tg_rc=$?
+    case "$tg_rc" in
+      # WP-538 Ф9 cold-review (Codex, 19.09): only a CONFIRMED delivery
+      # clears the crash-recovery file -- a quarantine or transport failure
+      # must leave it in place so the next pass's _sweep_notify_pending_load
+      # picks these same messages back up, instead of losing them the way
+      # the first version of this queue did.
+      0) rm -f "$_SWEEP_NOTIFY_PENDING_FILE" ;;
+      3) echo "WARN: sweep summary quarantined by the allowlist gate (not delivered), $total events only in log/registry, retained for retry on the next pass" >&2 ;;
+      *) echo "WARN: iwe-tg failed (rc=$tg_rc), sweep summary only in log/registry, retained for retry on the next pass" >&2 ;;
+    esac
+  else
+    echo "INFO: iwe-tg unavailable, sweep summary only in log/registry, retained for retry on the next pass" >&2
+  fi
 }
 
 # WP-484 (session-close-hygiene peer-session, 2026-08-20): every `open`
@@ -3986,6 +4277,13 @@ $isolate_status_code $isolate_status_path"
     ' -- "$ISOLATE_BASE_DIR" "$ISOLATED_WORKTREE_PATH" "$ISOLATED_WORKTREE_BRANCH" "$ISOLATE_STORE_DIR_REAL" "${SLUG:-}" "$AGENT" "$ISOLATE_SEM_EXISTS" "$BASE_SHA" \
       || fail "--isolate: не удалось создать или переиспользовать worktree (см. сообщение выше)" 1
 
+    # Store and print the physical path. On macOS, mktemp commonly returns
+    # /var/... while Git reports the same checkout as /private/var/.... A raw
+    # spelling in the semaphore later made close compare one checkout as two
+    # different governance worktrees and fail before publication.
+    ISOLATED_WORKTREE_PATH=$(realpath "$ISOLATED_WORKTREE_PATH" 2>/dev/null) \
+      || fail "--isolate: созданный worktree не удалось канонизировать" 1
+
     # WP-526 Ф2: no more per-worktree ORZ_ISOLATE_OVERRIDE assignment here
     # (was "$ISOLATED_WORKTREE_PATH/sessions"). The untracked-ORZ-blocks-a-
     # neighbor bug this used to work around (live-reproduced 2026-08-15,
@@ -4702,6 +5000,7 @@ _repo_scope_has_publish_proof() {  # <repo> <role> <exact semaphore> <fresh remo
   # refused with "путь отсутствует или неоднозначен между репозиториями" on
   # the ORZ path.
   python3 - "$@" "$IWE_ROOT" <<'PY'
+import difflib
 import os
 from pathlib import Path, PurePosixPath
 import re
@@ -4801,6 +5100,135 @@ if not claims or not claimed_paths or not claimed_paths.issubset(scope):
 def entry(revision, path):
     return git("ls-tree", "-z", revision, "--", path)
 
+# WP-537 (17.09) / WP-484 peer-session 2026-09-19-05 (Claude+Kimi+Codex,
+# same day as _prepared_source_set_has_publish_proof's twin fallback): the
+# exact-tree compare below can never succeed on a hot file (docs/WP-REGISTRY.md,
+# WeekPlan) that a sibling session commits to between this session's delivery
+# and this proof running. Opt-in (default off, IWE_SESSION_GUARD_ANCHORED_FALLBACK=1),
+# claimed-path-only fallback: prove our own insertion is still uniquely
+# anchored inside the current published blob, reusing the same primitive
+# already trusted for commit-claim supersession and for the sibling function.
+anchored_fallback_enabled = os.environ.get("IWE_SESSION_GUARD_ANCHORED_FALLBACK") == "1"
+
+def _raw_git(*args):
+    result = subprocess.run(
+        ["git", "--literal-pathspecs", "-C", repo, *args],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+        check=False,
+    )
+    return result.stdout if result.returncode == 0 else None
+
+def blob_entry_fields(revision, raw_path):
+    row = _raw_git("ls-tree", "-z", revision, "--", raw_path)
+    return tuple(row.split(b"\t", 1)[0].split()) if row else None
+
+def blob_by_oid(oid):
+    return _raw_git("cat-file", "blob", oid.decode("ascii"))
+
+def unique_position(seq, needle):
+    positions = [i for i in range(len(seq) - len(needle) + 1)
+                 if seq[i:i + len(needle)] == needle]
+    return positions[0] if len(positions) == 1 else None
+
+def anchored_insertions(base, own, published):
+    if any(b"\0" in blob or len(blob) > 262144 for blob in (base, own, published)):
+        return False
+    base, own, published = (blob.splitlines(keepends=True) for blob in (base, own, published))
+    if max(map(len, (base, own, published))) > 4096:
+        return False
+    own_ops = difflib.SequenceMatcher(None, base, own, autojunk=False).get_opcodes()
+    target_ops = difflib.SequenceMatcher(None, base, published, autojunk=False).get_opcodes()
+    inserts = [op for op in own_ops if op[0] != "equal"]
+    if not inserts or any(op[0] != "insert" for op in inserts):
+        return False
+
+    def equal_mapping(ops, start, end):
+        for tag, a, b, c, _ in ops:
+            if tag == "equal" and a <= start < end <= b:
+                return c + start - a
+        return None
+
+    for _, boundary, _, own_start, own_end in inserts:
+        matches = [op for op in target_ops if op[0] == "insert" and op[1] == boundary]
+        if len(matches) != 1 or boundary == 0 or boundary == len(base):
+            return False
+        target_start, target_end = matches[0][3:]
+        if unique_position(published[target_start:target_end], own[own_start:own_end]) is None:
+            return False
+        for left in (True, False):
+            anchored = False
+            for width in range(1, 9):
+                start, end = (boundary - width, boundary) if left else (boundary, boundary + width)
+                if start < 0 or end > len(base):
+                    continue
+                anchor = base[start:end]
+                own_position = equal_mapping(own_ops, start, end)
+                target_position = equal_mapping(target_ops, start, end)
+                if (own_position is not None and target_position is not None
+                        and unique_position(base, anchor) == start
+                        and unique_position(own, anchor) == own_position
+                        and unique_position(published, anchor) == target_position):
+                    anchored = True
+                    break
+            if not anchored:
+                return False
+    return True
+
+def _is_ancestor(a, b):
+    result = subprocess.run(
+        ["git", "-C", repo, "merge-base", "--is-ancestor", a, b],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        check=False,
+    )
+    return result.returncode == 0
+
+_session_base_cache = {}
+
+def resolve_session_base():
+    # Order-independent (Kimi, round 5): the semaphore's `commit:` lines are
+    # append order, not proven git ancestry order. Find the claim that is an
+    # ancestor of every OTHER claim and of head -- not just take claims[0].
+    # No such claim (parallel/out-of-order claims) -> fallback stays
+    # unavailable, exact-tree behaviour is unchanged.
+    # Accepted residual risk (cold-review, same day): a stray extra `commit:`
+    # claim for an unrelated, much older commit on this repo would shift
+    # base_rev further back than this session's real start. That makes
+    # anchored_insertions() prove a LARGER insert region, a strictly harder
+    # bar -- biases toward spurious refusal, not toward a false accept.
+    if "value" not in _session_base_cache:
+        base_rev = None
+        for candidate in claims:
+            if (all(candidate == other or _is_ancestor(candidate, other) for other in claims)
+                    and _is_ancestor(candidate, head)):
+                parent = _raw_git("rev-parse", "--verify", candidate + "^")
+                base_rev = parent.strip().decode() if parent else None
+                break
+        _session_base_cache["value"] = base_rev
+    return _session_base_cache["value"]
+
+def path_has_anchored_fallback_proof(raw_path):
+    if not anchored_fallback_enabled or raw_path not in claimed_paths:
+        return False
+    base_rev = resolve_session_base()
+    if base_rev is None:
+        return False
+    base_fields = blob_entry_fields(base_rev, raw_path)
+    own_fields = blob_entry_fields(head, raw_path)
+    published_fields = blob_entry_fields(remote, raw_path)
+    if base_fields is None or own_fields is None or published_fields is None:
+        return False
+    base_mode, own_mode, published_mode = base_fields[0], own_fields[0], published_fields[0]
+    if not (base_mode == own_mode == published_mode) or base_mode not in (b"100644", b"100755"):
+        return False
+    base_blob = blob_by_oid(base_fields[2])
+    own_blob = blob_by_oid(own_fields[2])
+    published_blob = blob_by_oid(published_fields[2])
+    if base_blob is None or own_blob is None or published_blob is None:
+        return False
+    return anchored_insertions(base_blob, own_blob, published_blob)
+
 relevant = set(claimed_paths)
 other_repos = [iwe_root, os.path.join(iwe_root, "memory")]
 other_prefix = other_field + ": "
@@ -4864,7 +5292,8 @@ for path in sorted(relevant):
         refuse("собственные файлы не закоммичены: " + path)
     local_entry = entry(head, path)
     if local_entry != entry(remote, path):
-        refuse("текущий результат не совпадает с origin/main: " + path)
+        if not path_has_anchored_fallback_proof(path):
+            refuse("текущий результат не совпадает с origin/main: " + path)
     if not local_entry and os.path.lexists(Path(repo) / path):
         refuse("файл отсутствует в опубликованном дереве: " + path)
     material = material or bool(local_entry)
@@ -6251,6 +6680,7 @@ PY
 
 _prepared_source_set_has_publish_proof() {  # <semaphore> <worktree>, fresh origin/main required
   python3 - "$1" "$2" <<'PY' 2>/dev/null
+import difflib
 import json
 import os
 import subprocess
@@ -6325,9 +6755,104 @@ def tree_entry(revision, raw_path):
         raise SystemExit(1)
     return result.stdout
 
+# WP-537 (17.09) / WP-484 peer-session 2026-09-19-05 (Claude+Kimi+Codex): a
+# byte-exact whole-blob compare can never succeed on a hot file
+# (docs/WP-REGISTRY.md, WeekPlan) that a concurrent session commits to
+# between this session's delivery and this proof running -- the blob at
+# that path keeps moving, so source_head is a permanently stale snapshot of
+# it. Opt-in (default off, IWE_SESSION_GUARD_ANCHORED_FALLBACK=1): on a
+# mismatch, prove instead that our own insertion is still uniquely anchored
+# inside the current published blob, reusing the same anchored-insertion
+# primitive already trusted for commit-claim supersession
+# (_commit_claim_supersession_has_publish_proof). Only a pure insertion (no
+# replace/delete) at a path whose mode is unchanged qualifies -- anything
+# else still fails closed exactly as before this fallback existed.
+anchored_fallback_enabled = os.environ.get("IWE_SESSION_GUARD_ANCHORED_FALLBACK") == "1"
+
+def blob_entry_fields(revision, raw_path):
+    row = tree_entry(revision, raw_path)
+    return tuple(row.split(b"\t", 1)[0].split()) if row else None
+
+def blob_by_oid(oid):
+    result = subprocess.run(
+        ["git", "-C", worktree, "cat-file", "blob", oid],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+        check=False,
+    )
+    return result.stdout if result.returncode == 0 else None
+
+def unique_position(lines, needle):
+    positions = [i for i in range(len(lines) - len(needle) + 1)
+                 if lines[i:i + len(needle)] == needle]
+    return positions[0] if len(positions) == 1 else None
+
+def anchored_insertions(base, own, published):
+    if any(b"\0" in blob or len(blob) > 262144 for blob in (base, own, published)):
+        return False
+    base, own, published = (blob.splitlines(keepends=True) for blob in (base, own, published))
+    if max(map(len, (base, own, published))) > 4096:
+        return False
+    own_ops = difflib.SequenceMatcher(None, base, own, autojunk=False).get_opcodes()
+    target_ops = difflib.SequenceMatcher(None, base, published, autojunk=False).get_opcodes()
+    inserts = [op for op in own_ops if op[0] != "equal"]
+    if not inserts or any(op[0] != "insert" for op in inserts):
+        return False
+
+    def equal_mapping(ops, start, end):
+        for tag, a, b, c, _ in ops:
+            if tag == "equal" and a <= start < end <= b:
+                return c + start - a
+        return None
+
+    for _, boundary, _, own_start, own_end in inserts:
+        matches = [op for op in target_ops if op[0] == "insert" and op[1] == boundary]
+        if len(matches) != 1 or boundary == 0 or boundary == len(base):
+            return False
+        target_start, target_end = matches[0][3:]
+        if unique_position(published[target_start:target_end], own[own_start:own_end]) is None:
+            return False
+        for left in (True, False):
+            anchored = False
+            for width in range(1, 9):
+                start, end = (boundary - width, boundary) if left else (boundary, boundary + width)
+                if start < 0 or end > len(base):
+                    continue
+                anchor = base[start:end]
+                own_position = equal_mapping(own_ops, start, end)
+                target_position = equal_mapping(target_ops, start, end)
+                if (own_position is not None and target_position is not None
+                        and unique_position(base, anchor) == start
+                        and unique_position(own, anchor) == own_position
+                        and unique_position(published, anchor) == target_position):
+                    anchored = True
+                    break
+            if not anchored:
+                return False
+    return True
+
+def path_has_anchored_fallback_proof(raw_path):
+    if not anchored_fallback_enabled:
+        return False
+    base_fields = blob_entry_fields(source_base, raw_path)
+    own_fields = blob_entry_fields(source_head, raw_path)
+    published_fields = blob_entry_fields(remote_head, raw_path)
+    if base_fields is None or own_fields is None or published_fields is None:
+        return False
+    base_mode, own_mode, published_mode = base_fields[0], own_fields[0], published_fields[0]
+    if not (base_mode == own_mode == published_mode) or base_mode not in (b"100644", b"100755"):
+        return False
+    base_blob = blob_by_oid(base_fields[2])
+    own_blob = blob_by_oid(own_fields[2])
+    published_blob = blob_by_oid(published_fields[2])
+    if base_blob is None or own_blob is None or published_blob is None:
+        return False
+    return anchored_insertions(base_blob, own_blob, published_blob)
+
 for raw_path in sorted(paths):
     if tree_entry(source_head, raw_path) != tree_entry(remote_head, raw_path):
-        raise SystemExit(1)
+        if not path_has_anchored_fallback_proof(raw_path):
+            raise SystemExit(1)
 PY
 }
 
@@ -6622,7 +7147,8 @@ _close_delivery_and_transition() {
 
   if [ -n "$isolated_worktree" ]; then
     CLOSING_WORKTREE="$isolated_worktree"
-    [ "$governance_repo" = "$CLOSING_WORKTREE" ] \
+    [ "$(realpath "$governance_repo" 2>/dev/null || echo "$governance_repo")" = \
+      "$(realpath "$CLOSING_WORKTREE" 2>/dev/null || echo "$CLOSING_WORKTREE")" ] \
       || fail "close: isolated_worktree не совпадает с governance checkout; ничего не публикую" 7
     isolate_push_script="$IWE_ROOT/$GOV_REPO/scripts/isolate-push.sh"
     [ -x "$isolate_push_script" ] \

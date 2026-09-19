@@ -63,6 +63,25 @@ fi
 
 fail() { echo "FAIL: $*" >&2; exit 1; }
 
+write_pausing_python3() {  # <marker substring> <reached-file> <release-file>
+  local marker="$1" reached="$2" release="$3" real_python3
+  real_python3=$(command -v python3)
+  cat > "$TEST_ROOT/bin/python3" <<EOF
+#!/usr/bin/env bash
+STDIN_CONTENT=\$(cat)
+if [ "\$1" = "-" ] && grep -qF '$marker' <<<"\$STDIN_CONTENT"; then
+  printf '%s' "\$STDIN_CONTENT" | "$real_python3" "\$@"
+  rc=\$?
+  touch "$reached"
+  i=0
+  while [ ! -e "$release" ] && [ "\$i" -lt 500 ]; do sleep 0.01; i=\$((i + 1)); done
+  exit "\$rc"
+fi
+printf '%s' "\$STDIN_CONTENT" | exec "$real_python3" "\$@"
+EOF
+  chmod +x "$TEST_ROOT/bin/python3"
+}
+
 # 1. Without the flag a dead, lease-expired semaphore keeps today's behaviour:
 #    escalate only, file stays .open.
 BASE="$SESSION_DIR/claude-code-dead-base.open"
@@ -147,7 +166,37 @@ if OUT=$(IWE_HEARTBEAT_STALE_SEC=abc run_audit --cleanup-orphans --quarantine-de
 fi
 grep -q 'IWE_HEARTBEAT_STALE_SEC должен быть целым' <<<"$OUT" || fail "wrong diagnostic for a non-numeric threshold: $OUT"
 
-# 11. `open` records host: and pid_start: for the owner pid.
+# 11. A SIGKILL after the quarantine rename and durable pending write, but
+#     before the registry append, must rebuild the missing audit record on the
+#     next pass. The renamed semaphore is no longer discoverable as *.open, so
+#     recovery has to come from the pending record itself.
+KILL_CASE="$SESSION_DIR/claude-code-kill-quarantine.open"
+write_semaphore "$KILL_CASE" kill-quarantine "$DEAD_PID" "host: $(hostname)"
+REACHED="$TEST_ROOT/reached-after-quarantine-pending"
+RELEASE="$TEST_ROOT/release-quarantine-python"
+write_pausing_python3 'message=message,' "$REACHED" "$RELEASE"
+: > "$TG_LOG"
+IWE_ROOT="$TEST_ROOT" IWE_GOVERNANCE_REPO=DS-strategy IWE_ZOMBIE_ESCALATE_SEC=1 \
+  IWE_HEARTBEAT_STALE_SEC=600 PATH="$TEST_ROOT/bin:$PATH" /bin/bash "$GUARD" \
+  audit --cleanup-orphans --quarantine-dead-interactive >"$TEST_ROOT/kill-quarantine.log" 2>&1 &
+AUDIT_PID=$!
+waited=0
+while [ ! -e "$REACHED" ] && [ "$waited" -lt 500 ]; do sleep 0.01; waited=$((waited + 1)); done
+[ -e "$REACHED" ] || { kill -9 "$AUDIT_PID" 2>/dev/null || true; fail "did not reach quarantine pending-write window"; }
+[ -f "$KILL_CASE.orphaned-dead-interactive" ] || fail "quarantine rename did not happen before pending write"
+grep -qF "\"semaphore\":\"$KILL_CASE\"" "$REGISTRY" 2>/dev/null \
+  && fail "registry already contained killed quarantine before intended window"
+kill -9 "$AUDIT_PID" 2>/dev/null || true
+wait "$AUDIT_PID" 2>/dev/null || true
+touch "$RELEASE"
+rm -f "$TEST_ROOT/bin/python3"
+OUT=$(run_audit --cleanup-orphans --quarantine-dead-interactive)
+grep -q 'kill-quarantine' "$TG_LOG" || fail "pending quarantine notification was not recovered"
+grep -qF "\"semaphore\":\"$KILL_CASE\"" "$REGISTRY" \
+  || fail "terminal quarantine was delivered after SIGKILL but its audit record was never recovered"
+grep -q '"audit_recovered":true' "$REGISTRY" || fail "recovered quarantine audit record lacks its recovery marker"
+
+# 12. `open` records host: and pid_start: for the owner pid.
 OUT=$( cd "$GOV" && IWE_ROOT="$TEST_ROOT" IWE_GOVERNANCE_REPO=DS-strategy IWE_FROZEN_CANONICAL_PATH="" \
   PATH="$TEST_ROOT/bin:$PATH" /bin/bash "$GUARD" open --wp WP-530 --agent claude-code --owner-pid "$$" \
   --slug open-fields-smoke --task "open fields smoke" 2>&1 ) || fail "open failed in the fixture: $OUT"

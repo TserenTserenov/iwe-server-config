@@ -32,7 +32,7 @@ set -uo pipefail
 
 HOOK_DIR_REAL="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 HOOK="$HOOK_DIR_REAL/write-path-lease-guard.sh"
-REAL_RESOLVER="$HOOK_DIR_REAL/../../DS-my-strategy/scripts/lib/iwe-agent-identity.sh"
+REAL_RESOLVER="${IWE_IDENTITY_RESOLVER:-$HOME/IWE/DS-my-strategy/scripts/lib/iwe-agent-identity.sh}"
 [ -f "$HOOK" ] || { echo "FAIL: хук не найден: $HOOK"; exit 1; }
 [ -f "$REAL_RESOLVER" ] || { echo "FAIL: резолвер не найден: $REAL_RESOLVER"; exit 1; }
 
