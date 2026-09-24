@@ -1078,7 +1078,14 @@ render_yesterday() {
     # 00-index.md is the one place that covers every session-record layout (flat .md files and nested peer-turn folders).
     local sessions_dir="${IWE_SESSIONS_ROOT:-$IWE/MC-sessions}"  # WP-526 Ф2
     local yday_rows
-    yday_rows=$(grep -F "| $YDAY |" "$sessions_dir/00-index.md" 2>/dev/null \
+    # WP-484/WP-585 (21.09): read the PUBLISHED table (origin/main), not the working-tree copy. The
+    # snapshotter no longer writes into the shared checkout, which is busy and often cannot be
+    # fast-forwarded, so its copy of the index can lag behind by any amount; origin/main holds the union
+    # of every host's rows. Offline: fall back to the working-tree copy.
+    yday_rows=$( { git -C "$sessions_dir" fetch -q origin main 2>/dev/null \
+                     && git -C "$sessions_dir" show origin/main:00-index.md 2>/dev/null \
+                     || cat "$sessions_dir/00-index.md" 2>/dev/null; } \
+      | grep -F "| $YDAY |" \
       | awk -F'|' '{gsub(/^[ \t]+|[ \t]+$/,"",$4); print $4}')
     if [ -n "$yday_rows" ]; then
       echo "$yday_rows" | sed 's/^/- /'

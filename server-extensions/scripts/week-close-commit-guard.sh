@@ -27,6 +27,12 @@
 
 set -uo pipefail
 
+# The "HEAD already on origin" verdict below (merge-base --is-ancestor) must not trust
+# local replacement refs or legacy grafts: a forged object can make an undelivered
+# commit look pushed, so the commit is silently never delivered (WP-7 Ф161).
+export GIT_NO_REPLACE_OBJECTS=1
+export GIT_GRAFT_FILE=/dev/null/iwe-no-grafts
+
 MAX_RETRIES=3
 
 if [ "$#" -lt 3 ]; then

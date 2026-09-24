@@ -610,7 +610,7 @@ if ! bash "$NOTE_COMMIT" note-commit "$(git -C "$NC_ROOT" rev-parse HEAD)" \
 fi
 ```
 
-**Публикация — через общий шлюз координации, не голым `git push`** (WP-530 Ф9, 19.08, пир-сессия Клода с Codex: голый push здесь обходил тот же `ds-publish.sh`, которым уже пользуются quick-close/day-close/week-close/month-close/day-open — живой тест 18.08 дал 7 из 8 конфликтов при параллельной интерактивной записи без него). Шаг 4.5 этого же скилла (закрытие сессии) не трогаем — там уже другой, независимо обоснованный механизм (feature-branch + `gh pr create --auto-merge`, WP-436 Ф2), не тот класс дыры. `REPO_ROOT` — обязательно через `git rev-parse --show-toplevel`, не сырой путь:
+**Публикация — через общий шлюз координации, не голым `git push`** (WP-530 Ф9, 19.08, пир-сессия Клода с Codex: голый push здесь обходил тот же `ds-publish.sh`, которым уже пользуются quick-close/day-close/week-close/month-close/day-open — живой тест 18.08 дал 7 из 8 конфликтов при параллельной интерактивной записи без него). Шаг 4.5 этого же скилла (закрытие сессии) прежде шёл отдельным путём (feature-branch + `gh pr create --auto-merge`, WP-436 Ф2); с 21.09 (WP-484) он публикует свои коммиты через тот же шлюз с `--exact-commit`, потому что ветка `peer/<id>` оставляла общий checkout MC-sessions не на `main`. `REPO_ROOT` — обязательно через `git rev-parse --show-toplevel`, не сырой путь:
 
 ```bash
 REPO_ROOT=$(git -C "<repo path>" rev-parse --show-toplevel)
@@ -1033,13 +1033,18 @@ grep -qF "status: completed" "$DRAFT_FILE" \
   || { echo "FAIL: $DRAFT_FILE: status != completed"; exit 1; }
 
 # pathspec после `--`: commit ТОЛЬКО файлы сессии (mis-attribution, 2026-06-20-39)
-# PR flow (WP-436 Ф2): push to feature branch + auto-merge PR → branch protection on main.
 # 00-index.md больше НЕ входит сюда (WP-537 Ф4) — см. комментарий выше.
+# WP-484 (21.09, пир-сессия 2026-09-21-08): здесь НЕ создаём ветку `peer/<id>` и не
+# открываем PR. Прежний шаг (`git checkout -b`, `git push origin "$BRANCH"`,
+# `gh pr create`) переключал ОБЩИЙ checkout MC-sessions на ветку сессии и оставлял
+# его там: пока ветка не слита, все следующие сессии, которые пишут в этот checkout,
+# коммитят в неё, а не в `main`, и `session-guard.sh close` не находит HEAD среди
+# предков origin/main (ветка `peer/2026-09-19-11-...` простояла с 19.09).
+# Коммитим в текущую ветку и публикуем ровно свои коммиты через шлюз (ниже).
 PATHS=("$MONTH/$DAY/$SESSION_ID/" "$MONTH/${TODAY}-${SESSION_SLUG}.md")
-BRANCH="peer/$SESSION_ID"
-git checkout -b "$BRANCH" 2>/dev/null || git checkout "$BRANCH"
 git add "${PATHS[@]}"
 git commit -m "feat(peer): $SESSION_ID (kimi-writer) — <задача кратко>" -- "${PATHS[@]}"
+OUR_SHAS=("$(git rev-parse HEAD)")   # публикуем ровно свои коммиты по одному
 
 # F1 (пир-сессия 2026-08-21-02-day-close-anomaly-classes): attest-манифест
 # сессии — ПОСЛЕ payload-коммита с отчётом, ДО публикации. Без манифеста
@@ -1049,12 +1054,22 @@ git commit -m "feat(peer): $SESSION_ID (kimi-writer) — <задача крат�
 # confirmed_clean_repos остаётся).
 bash "$HOME/IWE/${IWE_GOVERNANCE_REPO:-DS-strategy}/scripts/session-manifest-write.sh" "$(git rev-parse --show-toplevel)" "$SESSION_ID" \
   || echo "WARN: attest-манифест не создан — догоняющее закрытие этой сессии пойдёт legacy-путём"
+# attest-манифест — второй наш коммит (если создан): порядок публикации «payload, затем манифест»
+[ "$(git rev-parse HEAD)" = "${OUR_SHAS[0]}" ] || OUR_SHAS+=("$(git rev-parse HEAD)")
 
-git push origin "$BRANCH"
-gh pr create --title "feat(peer): $SESSION_ID" \
-  --body "Peer-сессия DP.SC.154. Kimi (writer) + <PEER_VENDOR> (peer)." \
-  --base main --auto-merge 2>/dev/null \
-  || echo "WARN: gh pr create failed — merge manually or check gh auth"
+# Публикация: только свои коммиты, по одному, через шлюз с `--exact-commit`.
+# НИКОГДА `git push` текущей ветки: если общий checkout стоит не на `main`, коммит
+# уйдёт в чужую ветку; а `--from-commit` без `--exact-commit` переносит весь диапазон
+# `origin/main..<sha>` (чужие коммиты, конфликт в `00-index.md`). Повтор идемпотентен:
+# уже опубликованный patch-эквивалент пропускается. Зависимые коммиты доставляются
+# не атомарно — при сбое между ними повторить цикл, он безопасен.
+REPO_ROOT=$(git rev-parse --show-toplevel)
+git -C "$REPO_ROOT" fetch -q origin main
+for SHA in "${OUR_SHAS[@]}"; do
+  bash "$HOME/IWE/DS-my-strategy/scripts/ds-publish.sh" "$REPO_ROOT" high \
+    --from-commit "$SHA" --exact-commit "$SHA" --reason "peer-session $SESSION_ID close" \
+    || { echo "ds-publish --exact-commit не удался для $SHA — см. вывод шлюза" >&2; exit 1; }
+done
 ```
 
 > **Семафор Kimi-standalone (`.iwe-runtime/sessions/kimi-*.open`) этот скилл НЕ закрывает** (найдено 2026-09-04, пир-сессия 2026-09-04-23-wp561-peer-session-closed-ledger-gap с Claude). Он открывается снаружи, `~/.kimi-code/skills/session-open/SKILL.md`, без `--close-path peer-session` — этот флаг задаётся только при `open` и не может быть передан отдельно при `close`, а слепое добавление `--close-path peer-session` в общий `session-open` неверно для НЕ-пир сессий Kimi (обошло бы типизированный раннер и там). Семафор сейчас закрывается только через `session-guard.sh`-хаусхолдинг (auto-orphan, TTL 30 мин) — событие `session_closed_direct` в дневном журнале для Kimi-writer сессий не пишется. Полноценный фикс требует координации между `~/.kimi-code/skills/session-open/SKILL.md` (вне IWE-репозитория) и этим файлом — вынесен в отдельную сессию (РП-561, follow-up фаза).

@@ -108,3 +108,153 @@ fi
 echo "OK: unreachable origin warns once, degrades to cache, second call in-process is a no-op"
 
 echo "PASS: session-guard close-time remote-refs refresh"
+
+# Code branch delivery uses a frozen runner receipt and freshly fetched exact OIDs.
+python3 - "$GUARD" "$TEST_ROOT" <<'PY'
+import json
+import os
+from pathlib import Path
+import re
+import subprocess
+import sys
+import yaml
+
+script, sandbox = map(Path, sys.argv[1:])
+source = script.read_text()
+start = source.index('_code_branch_claim_has_publish_proof() {')
+end = source.index('\n_claimed_commits_have_publish_proof()', start)
+helper = sandbox / 'branch-proof-functions.sh'
+helper.write_text(source[start:end])
+
+
+def git(path, *args):
+    return subprocess.run(['git', '-C', str(path), *args], check=True,
+                          capture_output=True, text=True).stdout.strip()
+
+
+def init(path, origin):
+    path.mkdir(parents=True, exist_ok=True)
+    git(path, 'init', '-q', '-b', 'main')
+    git(path, 'config', 'user.email', 'test@example.com')
+    git(path, 'config', 'user.name', 'test')
+    git(path, 'remote', 'add', 'origin', str(origin))
+
+
+def commit(path, text):
+    (path / 'code.txt').write_text(text)
+    git(path, 'add', 'code.txt')
+    git(path, 'commit', '-q', '-m', text)
+    return git(path, 'rev-parse', 'HEAD')
+
+
+def fixture(name):
+    case = sandbox / name
+    root, remote = case / 'IWE', case / 'origin.git'
+    remote.mkdir(parents=True)
+    git(remote, 'init', '-q', '--bare', '-b', 'main')
+    gov, orz, code = root / 'governance', root / 'sessions', root / 'DS-MCP/product'
+    for path in (root, gov, orz):
+        init(path, case / (path.name + '-origin.git'))
+    init(code, remote)
+    seed = commit(code, 'seed')
+    git(code, 'push', '-q', '-u', 'origin', 'main')
+    wt = root / '.iwe-runtime/isolated-worktrees/code'
+    wt.parent.mkdir(parents=True)
+    git(code, 'worktree', 'add', '-q', '-b', 'wp579', str(wt))
+    first = commit(wt, 'first')
+    head = commit(wt, 'second')
+    git(wt, 'push', '-q', '-u', 'origin', 'wp579')
+    metadata = {'slug': 'wp579', 'session_id': 'own-session',
+                'governance_worktree': str(gov), 'orz_sessions_dir': str(orz)}
+    card = {'process_id': 'quick-close', 'owner_session_id': 'own-session',
+            'requested_slug': 'wp579', 'results': {'commit-push': {
+                'all_pushed': True, 'failed': [], 'pushed': [
+                    {'repo': str(wt.relative_to(root)), 'sha': head}]}}}
+    return dict(root=root, remote=remote, gov=gov, orz=orz, code=code, wt=wt,
+                first=first, head=head, seed=seed, metadata=metadata, card=card)
+
+
+def verify(name, expected, mutate=None):
+    f = fixture(name)
+    if mutate:
+        mutate(f)
+    card_path = f['gov'] / 'inbox/agent/tasks/RUN-quick-close-wp579.md'
+    card_path.parent.mkdir(parents=True)
+    card_path.write_text('---\n' + yaml.safe_dump(f['card']) + '---\n')
+    git(f['gov'], 'add', 'inbox/agent/tasks/RUN-quick-close-wp579.md')
+    git(f['gov'], 'commit', '-q', '-m', 'freeze receipt')
+    frozen = git(f['gov'], 'rev-parse', 'HEAD')
+    # Live card is deliberately unusable: only the frozen Git blob may decide.
+    card_path.write_text('mutable live content is not a receipt\n')
+    sem = f['root'] / 'session.open'
+    sem.write_text('---\n' + yaml.safe_dump(f['metadata']) + '---\n'
+                   + f"close_delivery_source_head: {frozen}\n"
+                   + f"commit: product {f['first']}\ncommit: product {f['head']}\n")
+    for claim in (f['first'], f['head']):
+        result = subprocess.run(
+            ['bash', '-c', 'source "$1"; _code_branch_claim_has_publish_proof "$2" "$3" "$4" product',
+             'test', str(helper), str(sem), str(f['code']), claim],
+            env={**os.environ, 'IWE_ROOT': str(f['root'])}, capture_output=True, text=True,
+        )
+        assert (result.returncode == 0) == expected, (name, claim, result.stderr)
+    print('OK: branch-proof ' + name)
+
+
+def stale_deleted(f):
+    git(f['remote'], 'update-ref', '-d', 'refs/heads/wp579')
+
+
+def wrong_ref(f):
+    git(f['wt'], 'config', 'branch.wp579.merge', 'refs/heads/main')
+
+
+def nonancestor(f):
+    f['first'] = git(f['code'], 'commit-tree', f"{f['head']}^{{tree}}", '-p', f['seed'], '-m', 'foreign')
+    f['head'] = f['first']
+
+
+def patch_only(f):
+    alternate = git(f['code'], 'commit-tree', f"{f['head']}^{{tree}}", '-p', f['first'], '-m', 'rewritten')
+    git(f['code'], 'push', '-q', 'origin', alternate + ':refs/heads/rewritten')
+    git(f['remote'], 'update-ref', 'refs/heads/wp579', alternate)
+
+
+def protected(f, field):
+    if field == 'root':
+        git(f['root'], 'remote', 'set-url', 'origin', str(f['remote']))
+    else:
+        f['metadata'][field] = str(f['code'])
+
+
+def other_origin(f):
+    other = f['remote'].parent / 'different-origin.git'
+    git(f['remote'].parent, 'clone', '-q', '--bare', str(f['remote']), str(other))
+    git(f['code'], 'remote', 'set-url', 'origin', str(other))
+    # Same OIDs in a different repo must not make its worktree our receipt's source.
+    foreign = f['root'] / 'DS-MCP/foreign'
+    git(f['root'], 'clone', '-q', str(other), str(foreign))
+    git(foreign, 'checkout', '-q', 'wp579')
+    f['card']['results']['commit-push']['pushed'][0]['repo'] = str(foreign.relative_to(f['root']))
+
+
+def hidden(f, flag):
+    git(f['wt'], 'update-index', flag, 'code.txt')
+    (f['wt'] / 'code.txt').write_text('hidden unpublished content')
+
+
+verify('fresh-own-two-claims', True)
+verify('fresh-no-cached-ref', True, lambda f: git(f['code'], 'update-ref', '-d', 'refs/remotes/origin/wp579'))
+verify('stale-cache-deleted-ref', False, stale_deleted)
+verify('wrong-upstream-ref', False, wrong_ref)
+verify('nonancestor', False, nonancestor)
+verify('patch-equivalent-only', False, patch_only)
+verify('samehash-different-origin', False, other_origin)
+verify('protected-root-origin', False, lambda f: protected(f, 'root'))
+verify('protected-governance-common', False, lambda f: protected(f, 'governance_worktree'))
+verify('protected-orz-common', False, lambda f: protected(f, 'orz_sessions_dir'))
+verify('dirty-worktree', False, lambda f: (f['wt'] / 'code.txt').write_text('unpublished'))
+verify('hidden-assume-unchanged', False, lambda f: hidden(f, '--assume-unchanged'))
+verify('hidden-skip-worktree', False, lambda f: hidden(f, '--skip-worktree'))
+verify('foreign-receipt-owner', False, lambda f: f['card'].update(owner_session_id='foreign'))
+verify('wrong-session-slug', False, lambda f: f['metadata'].update(slug='wp58'))
+PY

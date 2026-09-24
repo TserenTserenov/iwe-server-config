@@ -37,6 +37,16 @@
 
 set -euo pipefail
 
+# Peer session 2026-09-21-17-wp7-f163-ancestry-hardening (Claude+Codex), WP-7
+# Ф163: both the repo-level `merge-base --is-ancestor` (REPO_DIVERGED) and the
+# file-level `git rev-list HEAD --not origin/branch -- <file>` in
+# is_own_stale_mirror() must be blind to local replacement refs and legacy
+# grafts. Without this, a forged origin/<branch> makes a real, unpublished
+# edit to a synced file (e.g. a WP card) look like this script's own stale
+# mirror and get silently overwritten -- reproduced live (WP-7 Ф163 report).
+export GIT_NO_REPLACE_OBJECTS=1
+export GIT_GRAFT_FILE=/dev/null/iwe-no-grafts
+
 REPO_PATH="${1:-/home/tseren/IWE/DS-my-strategy}"
 cd "$REPO_PATH"
 

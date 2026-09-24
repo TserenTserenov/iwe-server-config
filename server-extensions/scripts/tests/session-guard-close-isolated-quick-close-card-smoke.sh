@@ -19,6 +19,7 @@ set -euo pipefail
 ROOT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
 GUARD="$ROOT_DIR/scripts/session-guard.sh"
 TEST_ROOT=$(mktemp -d "${TMPDIR:-/tmp}/session-guard-isolated-close.XXXXXX")
+TEST_ROOT=$(cd "$TEST_ROOT" && pwd -P)
 trap 'rm -rf "$TEST_ROOT"' EXIT
 mkdir -p "$TEST_ROOT/scripts"
 cat > "$TEST_ROOT/scripts/agent-status-report.sh" <<EOF
@@ -261,6 +262,16 @@ results:
 EOF
 git -C "$RELEASE_WORKTREE" add inbox/agent/tasks/RUN-quick-close-release-step-proof.md
 git -C "$RELEASE_WORKTREE" commit -qm "release-step terminal proof"
+printf '\nRunner persisted its release-step history after publication.\n' \
+  >> "$RELEASE_WORKTREE/inbox/agent/tasks/RUN-quick-close-release-step-proof.md"
+if /bin/bash "$GUARD" close --wp WP-484 --slug release-step-proof --agent fixture >/dev/null 2>&1; then
+  echo "FAIL: isolated cleanup discarded unpublished runtime journal" >&2
+  exit 1
+fi
+[ -d "$RELEASE_WORKTREE" ] && [ -f "$CASE_SEM" ] \
+  || { echo "FAIL: refused cleanup lost worktree or semaphore" >&2; exit 1; }
+git -C "$RELEASE_WORKTREE" add inbox/agent/tasks/RUN-quick-close-release-step-proof.md
+git -C "$RELEASE_WORKTREE" commit -qm "persist runtime journal before isolated cleanup"
 /bin/bash "$GUARD" close --wp WP-484 --slug release-step-proof --agent fixture >/dev/null
 [ ! -e "$RELEASE_SEM" ] && [ -f "$RELEASE_SEM.closed" ] && [ ! -e "$RELEASE_WORKTREE" ] \
   || { echo "FAIL: nested verify-r23 release-step proof did not close exact isolated session" >&2; exit 1; }
@@ -633,3 +644,231 @@ echo "PASS: machine-close is exact, proof-staged, spoof-safe and crash-retryable
 echo "PASS: PREPARED isolate-push pre-commit authority is snapshot-bound and literal"
 
 echo "PASS: session-guard close resolves the isolated worktree from the semaphore, not from dirname(orz_sessions_dir)"
+
+# A published PREPARED result can retain foreign edits in the same files.
+# Accept only clean three-way absorption into the pinned current remote tree,
+# bound to the complete frozen source range; historical patch equality is not
+# enough. Fixtures also prove that an early whole-set check skips obsolete
+# replay while failed proof still reaches the original exact-commit publisher.
+python3 - "$GUARD" "$TEST_ROOT" <<'PY'
+from pathlib import Path
+import json
+import os
+import shutil
+import subprocess
+import sys
+import tempfile
+import time
+import unittest
+
+GUARD_SOURCE = Path(sys.argv[1]).read_text()
+FIXTURE_ROOT = Path(sys.argv[2]).resolve()
+REAL_GIT = shutil.which('git')
+
+
+def extract(name):
+    start = GUARD_SOURCE.index(name + '() {')
+    end = GUARD_SOURCE.index('\n}\n', start) + 3
+    return GUARD_SOURCE[start:end]
+
+
+def git(repo, *args):
+    return subprocess.check_output([REAL_GIT, '-C', str(repo), *args],
+                                   text=True, stderr=subprocess.PIPE).strip()
+
+
+def commit(repo, text, message):
+    (repo / 'result.txt').write_text(text)
+    git(repo, 'add', '--', 'result.txt')
+    git(repo, 'commit', '-qm', message)
+    return git(repo, 'rev-parse', 'HEAD')
+
+
+class PreparedAbsorption(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory(prefix='prepared-proof-fixture-', dir=FIXTURE_ROOT)
+        self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name).resolve()
+        self.repo = self.root / 'source'
+        self.repo.mkdir()
+        git(self.repo, 'init', '-q', '-b', 'main')
+        git(self.repo, 'config', 'user.name', 'Fixture')
+        git(self.repo, 'config', 'user.email', 'fixture@example.invalid')
+        git(self.repo, 'config', 'core.hooksPath', '/dev/null')
+        git(self.repo, 'config', 'commit.gpgsign', 'false')
+        self.base_text = ''.join(f'line {n}\n' for n in range(30))
+        self.base = commit(self.repo, self.base_text, 'base')
+        git(self.repo, 'checkout', '-qb', 'source')
+        self.own_text = self.base_text.replace('line 2\n', 'owned change\n')
+        self.head = commit(self.repo, self.own_text, 'own work')
+        git(self.repo, 'checkout', '-q', 'main')
+        self.remote_text = self.own_text.replace('line 25\n', 'foreign change\n')
+        self.remote = commit(self.repo, self.remote_text, 'published own and foreign work')
+        git(self.repo, 'checkout', '-q', 'source')
+        git(self.repo, 'update-ref', 'refs/remotes/origin/main', self.remote)
+        self.sem = self.root / 'prepared.open'
+        self.write_sem()
+        self.helper = self.root / 'proof.sh'
+        self.helper.write_text('\n'.join(extract(name) for name in (
+            '_unique_record_field', '_prepared_source_set_has_publish_proof', '_publish_prepared_source'
+        )) + '\n"$@"\n')
+        self.env = {**os.environ, 'GIT_OPTIONAL_LOCKS': '0'}
+        self.env.pop('IWE_SESSION_GUARD_ANCHORED_FALLBACK', None)
+
+    def write_sem(self, *, base=None, commits=None):
+        self.sem.write_text('\n'.join([
+            'close_delivery_source_base: ' + (base or self.base),
+            'close_delivery_source_head: ' + self.head,
+            'close_delivery_source_commits: ' + json.dumps([self.head] if commits is None else commits),
+        ]) + '\n')
+
+    def replace_remote(self, text):
+        git(self.repo, 'checkout', '-q', 'main')
+        self.remote = commit(self.repo, text, 'remote revision')
+        git(self.repo, 'checkout', '-q', 'source')
+        git(self.repo, 'update-ref', 'refs/remotes/origin/main', self.remote)
+
+    def fault_wrapper(self, mode):
+        # WP-484 (21.09): the fault is injected into `git rev-list`, the command EVERY proof path runs
+        # (the integrity check of the prepared set), not into `merge-tree`, which only the whole-tree
+        # proof uses: a text-absorption proof reaches success without it, so a fault hooked there
+        # never fired. The contract under test: the proof fails closed when the snapshot moves or a
+        # step times out while it runs, whichever proof was chosen.
+        commands = self.root / 'commands'
+        commands.mkdir()
+        wrapper = commands / 'git'
+        wrapper.write_text("#!/usr/bin/env python3\n"
+            "import os, sys, subprocess, time\nfrom pathlib import Path\n"
+            "real = os.environ['FIXTURE_REAL_GIT']\n"
+            "if 'rev-list' not in sys.argv[1:]:\n"
+            "    os.execv(real, [real, *sys.argv[1:]])\n"
+            "if os.environ['FIXTURE_FAULT'] == 'timeout': time.sleep(30)\n"
+            "result = subprocess.run([real, *sys.argv[1:]], stdout=subprocess.PIPE, stderr=subprocess.PIPE)\n"
+            "mode = os.environ['FIXTURE_FAULT']\n"
+            "if mode == 'semaphore':\n"
+            "    with Path(os.environ['FIXTURE_SEM']).open('a') as stream: stream.write('file: changed.txt\\n')\n"
+            "elif mode in ('head', 'remote'):\n"
+            "    ref = 'refs/heads/source' if mode == 'head' else 'refs/remotes/origin/main'\n"
+            "    subprocess.run([real, '-C', os.environ['FIXTURE_REPO'], 'update-ref', ref, os.environ['FIXTURE_BASE']], check=True)\n"
+            "sys.stdout.buffer.write(result.stdout)\nsys.stderr.buffer.write(result.stderr)\nsys.exit(result.returncode)\n")
+        wrapper.chmod(0o755)
+        self.env.update(PATH=str(commands) + os.pathsep + self.env['PATH'],
+                        FIXTURE_REAL_GIT=REAL_GIT, FIXTURE_FAULT=mode,
+                        FIXTURE_REPO=str(self.repo), FIXTURE_BASE=self.base, FIXTURE_SEM=str(self.sem))
+
+    def invoke(self, function='_prepared_source_set_has_publish_proof', *extra):
+        return subprocess.run(['bash', str(self.helper), function, str(self.sem), str(self.repo), *extra],
+                              env=self.env, text=True, capture_output=True, timeout=35)
+
+    def assert_proof(self, expected):
+        before = self.sem.read_bytes()
+        head = git(self.repo, 'rev-parse', 'HEAD')
+        result = self.invoke()
+        self.assertEqual(result.returncode == 0, expected, result.stderr)
+        self.assertEqual(self.sem.read_bytes(), before)
+        self.assertEqual(git(self.repo, 'rev-parse', 'HEAD'), head)
+
+    def test_current_remote_absorbs_own_and_foreign_changes(self):
+        self.assertNotEqual(git(self.repo, 'rev-parse', self.head + '^{tree}'),
+                            git(self.repo, 'rev-parse', self.remote + '^{tree}'))
+        self.assert_proof(True)
+
+    def test_missing_own_change_fails(self):
+        self.replace_remote(self.base_text.replace('line 25\n', 'foreign change\n'))
+        self.assert_proof(False)
+
+    def test_historically_published_then_reverted_change_fails(self):
+        # The independent publication remains an ancestor of current remote,
+        # but the current result no longer contains the prepared change.
+        delivered = self.remote
+        self.replace_remote(self.base_text.replace('line 25\n', 'foreign change\n'))
+        git(self.repo, 'merge-base', '--is-ancestor', delivered, self.remote)
+        self.assert_proof(False)
+
+    def test_conflicting_current_remote_fails(self):
+        self.replace_remote(self.base_text.replace('line 2\n', 'conflicting replacement\n'))
+        self.assert_proof(False)
+
+    def test_arbitrary_merge_base_cannot_erase_the_source_delta(self):
+        self.write_sem(base=self.head)
+        self.assert_proof(False)
+
+    def test_incomplete_source_set_cannot_enable_absorption(self):
+        first = self.head
+        self.own_text = self.own_text.replace('line 7\n', 'second owned change\n')
+        self.head = commit(self.repo, self.own_text, 'second own commit')
+        self.replace_remote(self.own_text.replace('line 25\n', 'foreign change\n'))
+        self.write_sem(commits=[first])
+        self.assert_proof(False)
+
+    def test_duplicate_source_commit_fails(self):
+        self.write_sem(commits=[self.head, self.head])
+        self.assert_proof(False)
+
+    def test_invalid_source_base_fails(self):
+        self.write_sem(base='not-a-commit')
+        self.assert_proof(False)
+
+    def test_changed_source_head_fails(self):
+        git(self.repo, 'checkout', '-q', '--detach', self.base)
+        self.assert_proof(False)
+
+    def test_source_moves_during_the_proof_fails(self):
+        self.fault_wrapper('head')
+        self.assertNotEqual(self.invoke().returncode, 0)
+
+    def test_semaphore_moves_during_the_proof_fails(self):
+        self.fault_wrapper('semaphore')
+        self.assertNotEqual(self.invoke().returncode, 0)
+
+    def test_remote_moves_during_the_proof_fails(self):
+        self.fault_wrapper('remote')
+        self.assertNotEqual(self.invoke().returncode, 0)
+
+    def test_absorption_timeout_fails_closed(self):
+        self.fault_wrapper('timeout')
+        started = time.monotonic()
+        self.assertNotEqual(self.invoke().returncode, 0)
+        self.assertLess(time.monotonic() - started, 20)
+
+    def test_custom_merge_driver_is_not_executed(self):
+        self.replace_remote(self.base_text.replace('line 2\n', 'conflicting replacement\n'))
+        marker = self.root / 'driver-executed'
+        (self.repo / '.git/info').mkdir(exist_ok=True)
+        (self.repo / '.git/info/attributes').write_text('result.txt merge=unsafe\n')
+        git(self.repo, 'config', 'merge.unsafe.driver', 'touch ' + str(marker))
+        self.assert_proof(False)
+        self.assertFalse(marker.exists())
+
+    def local_origin(self):
+        origin = self.root / 'origin.git'
+        subprocess.run([REAL_GIT, 'init', '--bare', '-q', str(origin)], check=True)
+        git(self.repo, 'remote', 'add', 'origin', str(origin))
+        git(self.repo, 'push', '-q', 'origin', self.remote + ':refs/heads/main')
+
+    def replay_stub(self):
+        stub = self.root / 'replay.sh'
+        stub.write_text('#!/usr/bin/env bash\nprintf "%s\\n" "$*" >> "' + str(self.root / 'replay-calls') + '"\nexit 42\n')
+        stub.chmod(0o755)
+        return str(stub)
+
+    def test_fresh_whole_set_proof_skips_obsolete_replay(self):
+        self.local_origin()
+        # Ref initially stale: early success must follow the actual fetch.
+        git(self.repo, 'update-ref', 'refs/remotes/origin/main', self.base)
+        result = self.invoke('_publish_prepared_source', self.replay_stub())
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(git(self.repo, 'rev-parse', 'origin/main'), self.remote)
+        self.assertFalse((self.root / 'replay-calls').exists())
+
+    def test_unproved_set_keeps_existing_exact_replay_failure(self):
+        self.replace_remote(self.base_text.replace('line 25\n', 'foreign change\n'))
+        self.local_origin()
+        result = self.invoke('_publish_prepared_source', self.replay_stub())
+        self.assertEqual(result.returncode, 42, result.stderr)
+        self.assertIn('--exact-commit ' + self.head, (self.root / 'replay-calls').read_text())
+
+
+if __name__ == '__main__':
+    unittest.main(argv=[sys.argv[0]], verbosity=2)
+PY

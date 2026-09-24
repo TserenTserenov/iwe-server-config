@@ -27,6 +27,14 @@
 
 set -uo pipefail
 
+# Peer session 2026-09-21-17-wp7-f163-ancestry-hardening (Claude+Codex), WP-7
+# Ф163: `merge-base --is-ancestor` below must be blind to local replacement
+# refs and legacy grafts, or a forged origin/<branch> can make a genuinely
+# diverged HEAD look like a pure fast-forward case and lose an unpublished
+# local commit via `merge --ff-only` -- reproduced live (WP-7 Ф163 report).
+export GIT_NO_REPLACE_OBJECTS=1
+export GIT_GRAFT_FILE=/dev/null/iwe-no-grafts
+
 if [ -z "${1:-}" ]; then
   echo "usage: canon-reconcile.sh <repo-path> [branch]" >&2
   exit 2

@@ -18,6 +18,16 @@
 # and drives it directly against hand-built git fixtures -- the function
 # only reads three revisions by SHA, so no isolate-push/close/RUN-card
 # machinery is needed to reach it.
+#
+# WP-484 (21.09, peer session 2026-09-21-12, Codex): UPDATED CONTRACT. Since 20.09 the proof also
+# accepts a path when a 3-way text merge of the delivered change into the current published blob
+# reproduces that blob exactly (path_absorbs_prepared_text), and a whole-tree merge (merge-tree) is
+# the last resort. Both are stricter than byte equality and broader than the anchored-insertion
+# fallback, so a change that IS present in the published blob (plus a foreign edit elsewhere) is
+# delivered with the flag off and on alike: the flag no longer decides these cases. What this test
+# now pins down is the invariant that matters: a change that is NOT present in the published blob is
+# never accepted, whichever proof is tried and whatever the flag says, and a broken prepared set
+# is refused (that part is exercised by session-guard-close-isolated-quick-close-card-smoke.sh).
 set -euo pipefail
 
 ROOT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
@@ -65,6 +75,8 @@ semaphore_for() {  # <base> <head> <commits-json> -> prints semaphore path
 }
 
 run_proof() {  # <flag: 0|1> <semaphore>
+  # The integrity check of the prepared set requires the worktree to stand on source_head.
+  git -C "$REPO" checkout -q --detach "$(grep '^close_delivery_source_head:' "$2" | cut -d' ' -f2)"
   if [ "$1" = "1" ]; then
     IWE_SESSION_GUARD_ANCHORED_FALLBACK=1 python3 "$PROOF_SCRIPT" "$2" "$REPO"
   else
@@ -94,7 +106,7 @@ set +e
 run_proof 0 "$SEM" >/dev/null 2>&1
 RC=$?
 set -e
-check "insertion into hot file with fallback OFF still refuses (default preserves prior behaviour)" 1 "$RC"
+check "insertion present in the published blob is delivered with the flag OFF (text absorption)" 0 "$RC"
 
 # --- Scenario 1b: same fixture, flag on -> the insertion is uniquely
 # anchored in the published blob (which also carries a foreign append) ->
@@ -103,7 +115,7 @@ set +e
 run_proof 1 "$SEM" >/dev/null 2>&1
 RC=$?
 set -e
-check "insertion into hot file with fallback ON is accepted (anchored in published blob)" 0 "$RC"
+check "insertion present in the published blob is delivered with the flag ON" 0 "$RC"
 
 # --- Scenario 2: a replace (not a pure insertion) must never be rescued by
 # the fallback, flag on or off -- anchored_insertions() only vouches for
@@ -117,7 +129,7 @@ set +e
 run_proof 1 "$SEM2" >/dev/null 2>&1
 RC=$?
 set -e
-check "replace (not insert) is not rescued by the fallback even with it ON" 1 "$RC"
+check "replace present in the published blob is delivered (text absorption covers replace too)" 0 "$RC"
 
 # --- Scenario 3: non-unique anchor (repeated identical lines) -- the
 # insertion boundary has no distinguishing context in the base file, so no
@@ -132,7 +144,7 @@ set +e
 run_proof 1 "$SEM3" >/dev/null 2>&1
 RC=$?
 set -e
-check "non-unique anchor (repeated identical lines) stays fail-closed" 1 "$RC"
+check "repeated identical lines: the change is at the same position in the published blob, delivered" 0 "$RC"
 
 # --- Scenario 4: budget edge -- a blob over the 4096-line anchored_insertions
 # budget must fail closed instead of silently skipping the size guard.
@@ -150,7 +162,7 @@ set +e
 run_proof 1 "$SEM4" >/dev/null 2>&1
 RC=$?
 set -e
-check "oversized blob (>4096 lines) stays fail-closed under the anchored_insertions budget guard" 1 "$RC"
+check "oversized blob (>4096 lines): the 4096-line budget belongs to the anchor heuristic, not to the exact text proof, delivered" 0 "$RC"
 
 # --- Scenario 5 (regression for cold-review finding, peer-session same day):
 # the fallback must check source_base's own mode too, not just own/published.
@@ -165,6 +177,7 @@ check "oversized blob (>4096 lines) stays fail-closed under the anchored_inserti
 # a self-check of this very test during authoring).
 BASE_SHA5=$(commit_content --orphan $'A\nB\nC\n')
 git -C "$REPO" checkout -q --detach "$BASE_SHA5"
+
 printf 'A\nB\nNEW\nC\n' > "$REPO/f.txt"
 chmod +x "$REPO/f.txt"
 git -C "$REPO" add f.txt
@@ -186,6 +199,23 @@ set +e
 run_proof 1 "$SEM5" >/dev/null 2>&1
 RC=$?
 set -e
-check "base->own executable-bit flip stays fail-closed even when own/published agree" 1 "$RC"
+check "base->own executable-bit flip that the published blob also has is delivered" 0 "$RC"
+
+# --- NEGATIVES: a change that is NOT in the published blob is never accepted, flag off or on ---
+neg() {  # <name> <base> <own> <published>
+  local b o p sem rc
+  b=$(commit_content --orphan "$2"); o=$(commit_content "$b" "$3"); p=$(commit_content "$b" "$4")
+  git -C "$REPO" update-ref refs/remotes/origin/main "$p"
+  sem=$(semaphore_for "$b" "$o" "[\"$o\"]")
+  for flag in 0 1; do
+    set +e; run_proof "$flag" "$sem" >/dev/null 2>&1; rc=$?; set -e
+    check "$1 (flag $flag): refused" 1 "$rc"
+  done
+}
+neg "insertion missing from the published blob" $'A\nB\nC\n' $'A\nB\nNEW\nC\n' $'A\nB\nC\nD\n'
+neg "replacement missing from the published blob" $'A\nB\nC\n' $'A\nX\nC\n' $'A\nB\nC\nD\n'
+neg "replacement overwritten by a different foreign change" $'A\nB\nC\n' $'A\nX\nC\n' $'A\nY\nC\n'
+neg "deletion the published blob does not have" $'A\nB\nC\n' $'A\nC\n' $'A\nB\nC\nD\n'
+neg "same text inserted at a different position" $'X\nX\nX\n' $'X\nX\nNEW\nX\n' $'X\nX\nX\nNEW\nD\n'
 
 exit "$FAILED"

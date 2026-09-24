@@ -42,6 +42,11 @@
 #       2 = usage / repo error
 set -uo pipefail
 
+# The delivery proof (git cherry) must not trust local replacement refs or legacy
+# grafts: a forged object can make an undelivered commit look published (WP-7 Ф161).
+export GIT_NO_REPLACE_OBJECTS=1
+export GIT_GRAFT_FILE=/dev/null/iwe-no-grafts
+
 usage() { echo "usage: canon-reconcile-published.sh <repo-path> <branch> [<pinned-oid>]" >&2; exit 2; }
 [ $# -ge 2 ] || usage
 REPO="$1"; BRANCH="$2"; PINNED_ARG="${3:-}"

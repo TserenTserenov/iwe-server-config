@@ -9,6 +9,18 @@
 
 set -euo pipefail
 
+# Peer session 2026-09-21-17-wp7-f163-ancestry-hardening (Claude+Codex), WP-7
+# Ф163: the AHEAD/BEHIND gate below (`rev-list --count`) is the earliest
+# ancestry-sensitive call in this file and it alone decides the "only
+# upstream ahead -> merge --ff-only" fast path further down -- a forged
+# origin/<branch> that fools it never even reaches the `cherry`/`patch-id`
+# checks meant to catch exactly this. Exporting here covers rev-list, cherry
+# and patch-id below in one shot -- reproduced live (WP-7 Ф163 report): an
+# unprotected run of this fast path actually discarded an unpublished local
+# commit via `merge --ff-only`.
+export GIT_NO_REPLACE_OBJECTS=1
+export GIT_GRAFT_FILE=/dev/null/iwe-no-grafts
+
 PUSH_IF_AHEAD=0
 
 # --- helpers ---

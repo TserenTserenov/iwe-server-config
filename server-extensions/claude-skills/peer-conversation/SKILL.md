@@ -45,7 +45,7 @@ gates_rationale: "операционный скилл; WP Gate применим 
 
 Определить режим из `$ARGUMENTS`:
 
-- `--list` → прочитать `${IWE_SESSIONS_ROOT:-$HOME/IWE/MC-sessions}/00-index.md` (WP-526 Ф2), вывести таблицу. Стоп.
+- `--list` → прочитать ОПУБЛИКОВАННУЮ таблицу: `git -C "${IWE_SESSIONS_ROOT:-$HOME/IWE/MC-sessions}" fetch -q origin main && git -C "${IWE_SESSIONS_ROOT:-$HOME/IWE/MC-sessions}" show origin/main:00-index.md` (WP-526 Ф2; WP-484/585, 21.09: снапшотер публикует индекс из приватной копии и общий каталог не обновляет, поэтому файл в рабочем дереве может отставать на любое время; без сети читать `00-index.md` из рабочего дерева), вывести таблицу. Стоп.
 - `--interrupt <id>` → перейти к **Шагу 5 (interrupt-режим)**. Стоп после.
 - `--finalize <id>` → перейти к **Шагу 6 (finalize-режим)**. Стоп после.
 - Иначе → новая сессия, продолжать к Шагу 0в.
@@ -1012,7 +1012,7 @@ note: синтез не выполнен (субагент недоступен 
 **При консенсусе (turn ≤ 10):**
 - Не переименовывать в `report.md`.
 - Спросить пилота: «Консенсус достигнут. Закрываем сессию или нужно дозакрытие?»
-- Если пилот говорит «закрываем» → переименовать `report-draft.md → report.md` (шаг 4.3).
+- Если пилот говорит «закрываем» → переименовать `report-draft.md → report.md` (шаг 4.3) **и снять заявку на черновик** (хук Write заявил путь в семафоре сам, а файла больше нет, поэтому `session-guard.sh close` откажет «путь не найден ни в одном checkout», WP-484 21.09): `bash "${IWE_SCRIPTS:-$HOME/IWE/scripts}/session-guard.sh" note-file --forget "<путь черновика относительно репозитория сессий, как в семафоре>" --agent claude-code --slug "$SESSION_ID"`, затем `note-file` для `report.md`. Отказ команды значит, что путь ещё есть на диске, в HEAD, в индексе, в истории веток/reflog или в заявленном коммите: заявка законна, черновик не удалять. Ответ «неизвестный флаг: --forget» значит устаревшую копию охранника на этом хосте (корневой чекаут `~/IWE` отстаёт от `origin/main`): вызвать `session-guard.sh` из свежего checkout корневого репозитория (worktree от `origin/main`) абсолютным путём с `IWE_ROOT="$HOME/IWE"`, не править семафор руками.
 - Если пилот запрашивает дозакрытие → продолжить turn-loop, а при финальном Close дописать `## Дополнение (turns N–M, <timestamp>)` в тот же `report-draft.md`, затем переименовать.
 
 **При дозакрытии:**
@@ -1224,6 +1224,7 @@ cd "$SESSIONS_DIR"
 PATHS=("$MONTH/$DAY/$SESSION_ID/" "$GUARD_ORZ")
 git add "${PATHS[@]}"
 git commit -m "feat(peer): $SESSION_ID — <задача кратко>" -- "${PATHS[@]}"
+OUR_SHAS=("$(git -C "$SESSIONS_DIR" rev-parse HEAD)")   # публикуем ровно свои коммиты по одному, см. блок публикации ниже
 
 # WP-537: заявить свой коммит в семафоре — тот же паттерн, что на Шаге 3.6.5,
 # явный `-C "$SESSIONS_DIR"` по той же причине (верхнеуровневый `cd` этот хук
@@ -1242,24 +1243,25 @@ fi
 # закрытие — WARN и legacy-путь confirmed_clean_repos.
 bash "$HOME/IWE/${IWE_GOVERNANCE_REPO:-DS-strategy}/scripts/session-manifest-write.sh" "$(git rev-parse --show-toplevel)" "$SESSION_ID" \
   || echo "WARN: attest-манифест не создан — догоняющее закрытие пойдёт legacy-путём"
+# attest-манифест — второй наш коммит (если он создан): порядок публикации «payload, затем манифест»
+[ "$(git -C "$SESSIONS_DIR" rev-parse HEAD)" = "${OUR_SHAS[0]}" ] || OUR_SHAS+=("$(git -C "$SESSIONS_DIR" rev-parse HEAD)")
 ```
 
-**Публикация — через общий шлюз координации, не голым `git push`** (WP-530 Ф9, 19.08, пир-сессия с Codex — тот же класс дыры, что в Шаге 3.6.5: голый push здесь обходил `ds-publish.sh`, которым уже пользуются quick-close/day-close/... — приоритет `high`, а не `normal` как в 3.6.5: пилот реально ждёт закрытие сессии сейчас, это не фоновый деплой):
+**Публикация репозитория сессий (`MC-sessions`): только свои коммиты, по одному, через шлюз с `--exact-commit`; НИКОГДА `git push` текущей ветки** (WP-484 21.09, пир-сессия 2026-09-21-08). Общий checkout `MC-sessions` может стоять НЕ на `main` (найдено 21.09: чужая ветка `peer/2026-09-19-11-...` с 19.09, её создал шаг 4.5 скилла kimi-peer-writer через `git checkout -b`). Тогда `push_branch` кладёт коммиты в чужую ветку и они не попадают в `main`, а `ds-publish.sh --from-commit <sha>` БЕЗ `--exact-commit <sha>` переносит весь диапазон `origin/main..<sha>` (14 чужих коммитов, конфликт в `00-index.md`). `--exact-commit` принимает аргумент (SHA) и переносит ровно один коммит от свежего `origin/main`; повтор идемпотентен (уже опубликованный patch-эквивалент пропускается). Зависимые коммиты (payload, затем attest-манифест) доставляются НЕ атомарно: при сбое между ними повторить цикл, он безопасен. Манифест сверяет по patch-id, а не по SHA, поэтому перенос cherry-pick'ом ему не мешает.
 
 ```bash
 REPO_ROOT=$(git rev-parse --show-toplevel)
-# shellcheck source=../../../../DS-my-strategy/scripts/lib/publish-gate.sh
-. "$HOME/IWE/DS-my-strategy/scripts/lib/publish-gate.sh"
-SHA=$(git -C "$REPO_ROOT" rev-parse HEAD)
-if is_ds_repo_by_origin "$REPO_ROOT"; then
-    publish_commit "$REPO_ROOT" "$SHA" high "peer-session $SESSION_ID close" \
-        || { echo "publish_commit не удался — см. stderr/Telegram-алерт ds-publish.sh" >&2; exit 1; }
-else
-    push_branch "$REPO_ROOT"
-fi
+git -C "$REPO_ROOT" fetch -q origin main
+for SHA in "${OUR_SHAS[@]}"; do
+    bash "$HOME/IWE/DS-my-strategy/scripts/ds-publish.sh" "$REPO_ROOT" high \
+        --from-commit "$SHA" --exact-commit "$SHA" --reason "peer-session $SESSION_ID close" \
+        || { echo "ds-publish --exact-commit не удался для $SHA — см. вывод шлюза" >&2; exit 1; }
+done
 ```
 
-**Если publish/push fail** (найдено холодным ревью Ф9: `exit 1` в блоке выше — обязательная часть паттерна, не текст-предупреждение; без него неудачная публикация выглядела бы завершившейся успешно): НЕ переходить к Шагу 4.5.2 — семафор session-guard не закрыт, коммит существует только локально. Показать пилоту вывод `publish_commit`/`git push`, ESCALATE_TO_USER. НЕ обходить хуки (`--no-verify` запрещён правилом 6).
+Приоритет `high`, а не `normal` как в 3.6.5: пилот реально ждёт закрытие сессии сейчас, это не фоновый деплой (WP-530 Ф9: голый push обходил шлюз координации, которым уже пользуются quick-close/day-close).
+
+**Если публикация не удалась** (`exit 1` в блоке выше — обязательная часть паттерна, не текст-предупреждение: без него неудачная публикация выглядела бы завершившейся успешно; найдено холодным ревью WP-530 Ф9): НЕ переходить к Шагу 4.5.2 — семафор session-guard не закрыт, коммит существует только локально. Показать пилоту вывод шлюза, ESCALATE_TO_USER. НЕ обходить хуки (`--no-verify` запрещён правилом 6). Конфликт в `00-index.md` в выводе шлюза при `--exact-commit` невозможен для наших коммитов (они его не трогают): если он появился, значит `--exact-commit` не передан.
 
 **4.5.2 Session-guard close** (best-effort, ПОСЛЕ успешного push — закрывать семафор раньше нельзя, иначе Scope gate на 4.5.1 не найдёт активного семафора):
 
@@ -1322,12 +1324,19 @@ fi
 # Факт 3: коммит реально дошёл до remote (не только push вернул 0 локально).
 # timeout — та же дисциплина, что session-guard.sh:1956 (git fetch) и
 # git-dirty-guard.sh (git ls-remote) уже применяют к сетевым git-вызовам.
-LOCAL_SHA=$(git -C "$SESSIONS_DIR" rev-parse HEAD)
-REMOTE_SHA=$(timeout 5 git -C "$SESSIONS_DIR" ls-remote origin main 2>/dev/null | cut -f1)
-if [ -z "$REMOTE_SHA" ]; then
-  ACCEPTANCE_ISSUES+=("не удалось прочитать origin/main через ls-remote (таймаут/сеть) — сеть недоступна или репо переименовано")
-elif [ "$REMOTE_SHA" != "$LOCAL_SHA" ] && ! git -C "$SESSIONS_DIR" merge-base --is-ancestor "$LOCAL_SHA" "$REMOTE_SHA" 2>/dev/null; then
-  ACCEPTANCE_ISSUES+=("origin/main ($REMOTE_SHA) не содержит наш коммит ($LOCAL_SHA)")
+# Доставка идёт cherry-pick'ом (`ds-publish.sh --exact-commit`), поэтому на
+# origin/main наш коммит лежит под ДРУГИМ SHA: проверка «мой SHA — предок
+# origin/main» дала бы ложное расхождение. Сравниваем по patch-id: `git cherry`
+# помечает коммит `-`, если на origin/main есть эквивалентный патч, и `+`, если нет
+# (пустые коммиты patch-id не имеют и здесь не встречаются).
+if ! timeout 20 git -C "$SESSIONS_DIR" fetch -q origin main 2>/dev/null; then
+  ACCEPTANCE_ISSUES+=("не удалось получить origin/main (таймаут/сеть) — доставку проверить нельзя")
+else
+  for OUR_SHA in "${OUR_SHAS[@]}"; do
+    if git -C "$SESSIONS_DIR" cherry origin/main "$OUR_SHA" "$OUR_SHA"^ 2>/dev/null | grep -q '^+'; then
+      ACCEPTANCE_ISSUES+=("на origin/main нет эквивалента нашего коммита $OUR_SHA (по patch-id)")
+    fi
+  done
 fi
 
 if [ "${#ACCEPTANCE_ISSUES[@]}" -gt 0 ]; then
@@ -1355,8 +1364,9 @@ if [ "${#ACCEPTANCE_ISSUES[@]}" -gt 0 ]; then
   git -C "$SESSIONS_DIR" add "$ACCEPT_ESC_FILE" "$SESSION_DIR/meta.yaml"
   git -C "$SESSIONS_DIR" commit -m "fix(peer): $SESSION_ID — эскалация приёмки закрытия" \
     -- "$ACCEPT_ESC_FILE" "$SESSION_DIR/meta.yaml" 2>&1 || true
-  . "$HOME/IWE/DS-my-strategy/scripts/lib/publish-gate.sh"
-  push_branch "$SESSIONS_DIR" 2>&1 \
+  bash "$HOME/IWE/DS-my-strategy/scripts/ds-publish.sh" "$SESSIONS_DIR" high \
+    --from-commit "$(git -C "$SESSIONS_DIR" rev-parse HEAD)" --exact-commit "$(git -C "$SESSIONS_DIR" rev-parse HEAD)" \
+    --reason "peer-session $SESSION_ID close: escalation" 2>&1 \
     || echo "⚠️  публикация эскалации не удалась — коммит существует локально, файл не тонет, но не на remote" >&2
   echo "⚠️  Приёмка закрытия сессии нашла расхождение (см. $ACCEPT_ESC_FILE) — сессия закрыта, но требует внимания пилота." >&2
 fi

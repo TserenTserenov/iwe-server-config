@@ -227,42 +227,43 @@ else
 fi
 ```
 
-### 🔴 БЛОКИРУЮЩАЯ ПРОВЕРКА: Контент-план — Стратегия заполнена (bug-2026-05-22)
+### Проверка (не блокирующая с 2026-09-22): Контент-план — Стратегия и TTL заполнены (bug-2026-05-22, разблокировано WP-484)
+
+> **Источник смягчения (WP-484, 2026-09-22, peer-session Claude+Kimi+Codex, пилот согласился):**
+> незаполненное поле — пробел полноты, не фабрикация и не утечка данных. Детекцию и запись
+> расхождения теперь делает `day-open-content-plan-patch.py` (шаг 4.593 pipeline, ДО этой
+> проверки) — пишет честный `PENDING`-маркер прямо в «Требует внимания», тем же принципом, что
+> уже работает для `BOTTLENECK-PENDING`. Эта проверка — только диагностическая сверка: если
+> patch-скрипт упал/не нашёл секцию — предупреждает, но НИКОГДА не блокирует commit.
 
 ```bash
 FILE="${FILE:-$(ls ~/IWE/DS-my-strategy/current/DayPlan\ *.md 2>/dev/null | sort | tail -1)}"
 echo "=== Проверка: Контент-план — Стратегия и TTL заполнены ==="
-VIOLATIONS=0
+PENDING_FIELDS=0
 
-if grep -q "\*\*Стратегия:\*\*" "$FILE"; then
-  if grep "\*\*Стратегия:\*\*" "$FILE" | grep -q "PENDING"; then
-    echo "  ❌ Контент-план: **Стратегия** не заполнена (PENDING) — COMMIT БЛОКИРОВАН"
-    VIOLATIONS=$((VIOLATIONS+1))
-  else
-    echo "  ✅ Контент-план: Стратегия заполнена"
-  fi
-else
-  echo "  ❌ Контент-план: строка **Стратегия** отсутствует — COMMIT БЛОКИРОВАН"
-  VIOLATIONS=$((VIOLATIONS+1))
+if grep -q "\*\*Стратегия:\*\*" "$FILE" && grep "\*\*Стратегия:\*\*" "$FILE" | grep -q "PENDING"; then
+  PENDING_FIELDS=$((PENDING_FIELDS+1))
+fi
+if ! grep -q "\*\*Стратегия:\*\*" "$FILE"; then
+  PENDING_FIELDS=$((PENDING_FIELDS+1))
+fi
+if grep -q "\*\*TTL просрочены:\*\*" "$FILE" && grep "\*\*TTL просрочены:\*\*" "$FILE" | grep -q "PENDING"; then
+  PENDING_FIELDS=$((PENDING_FIELDS+1))
+fi
+if ! grep -q "\*\*TTL просрочены:\*\*" "$FILE"; then
+  PENDING_FIELDS=$((PENDING_FIELDS+1))
 fi
 
-if grep -q "\*\*TTL просрочены:\*\*" "$FILE"; then
-  if grep "\*\*TTL просрочены:\*\*" "$FILE" | grep -q "PENDING"; then
-    echo "  ❌ Контент-план: **TTL просрочены** не заполнен (PENDING) — COMMIT БЛОКИРОВАН"
-    VIOLATIONS=$((VIOLATIONS+1))
-  else
-    echo "  ✅ Контент-план: TTL просрочены заполнен"
-  fi
+if [ "$PENDING_FIELDS" -eq 0 ]; then
+  echo "  ✅ Контент-план: Стратегия и TTL заполнены"
+elif grep -qE "Контент-план: \*\*(Стратегия|TTL просрочены)\*\* не заполнена" "$FILE"; then
+  echo "  ⚠️ Контент-план: $PENDING_FIELDS поле(й) не заполнено — уже отмечено в «Требует внимания» (не блокирует)"
 else
-  echo "  ❌ Контент-план: строка **TTL просрочены** отсутствует — COMMIT БЛОКИРОВАН"
-  VIOLATIONS=$((VIOLATIONS+1))
+  echo "  ⚠️ Контент-план: $PENDING_FIELDS поле(й) не заполнено, И patch-скрипт не записал находку — проверь вручную (не блокирует)"
 fi
-
-[ "$VIOLATIONS" -gt 0 ] && exit 1 || true
 ```
 
-- [ ] `**Стратегия:**` присутствует и не содержит `PENDING`. Если ❌ — commit заблокирован.
-- [ ] `**TTL просрочены:**` присутствует и не содержит `PENDING`. Если ❌ — commit заблокирован.
+- [ ] `**Стратегия:**` и `**TTL просрочены:**` присутствуют и не содержат `PENDING`, либо расхождение отмечено в «Требует внимания». Больше не блокирует commit.
 - [ ] Draft-list (1-3 темы)
 
 ### 🔴 БЛОКИРУЮЩАЯ ПРОВЕРКА: Мир — гиперссылки (WP-264 Ф6, bug-2026-05-01)
@@ -321,9 +322,15 @@ check_section "Видео" "video"
 
 - [ ] Нет тихих пропусков секций с `enabled: true` в `day-rhythm-config.yaml`. Если данные недоступны (headless/MCP) — секция помечается 🔴 в светофоре «IWE за ночь», а не вставляется фраза «отложено».
 
-### 🔴 БЛОКИРУЮЩАЯ ПРОВЕРКА: KE-кандидаты в DayPlan (bug-2026-05-17)
+### Проверка (не блокирующая с 2026-09-22): KE-кандидаты в DayPlan (bug-2026-05-17, разблокировано WP-484)
 
 > **Источник:** 3 дня подряд (15-17 мая) пропускался шаг 5e extensions/day-open.after.md. При N>0 pending-review extraction-reports секция `📚 KE-кандидаты` ОБЯЗАНА присутствовать в DayPlan.
+> **Смягчение (WP-484, 2026-09-22, peer-session Claude+Kimi+Codex, пилот согласился):** та же
+> подсистема и тот же аргумент, что у соседней проверки KE-очереди ниже — отсутствие секции
+> при живой очереди не безопаснее пилота держать план вообще без Дня, чем показать план с
+> честной пометкой. `day-open-ke-queue-patch.py` (шаг 4.595 pipeline, ДО этой проверки) пишет
+> находку в «Требует внимания», если секция должна быть, но её нет. Эта проверка — только
+> диагностическая сверка, никогда не блокирует.
 
 ```bash
 FILE="${FILE:-$(ls ~/IWE/DS-my-strategy/current/DayPlan\ *.md 2>/dev/null | sort | tail -1)}"
@@ -334,23 +341,29 @@ REPORTS_DIR="${GOV_REPO_DIR:-$HOME/IWE/DS-my-strategy}/inbox/extraction-reports"
 # класс бага, что NA_COUNT/OPENS/STALE выше (WP-5 Ф2 09.07).
 PENDING=$(grep -rl "status: pending-review" "$REPORTS_DIR"/*.md 2>/dev/null | wc -l | tr -d ' ' || true)
 echo "KE_PENDING=$PENDING"
-if [ "$PENDING" -gt 0 ]; then
-  if grep -q "KE-кандидаты" "$FILE" 2>/dev/null; then
-    echo "  ✅ KE-кандидаты: секция присутствует ($PENDING pending)"
-  else
-    echo "  ❌ KE-кандидаты: $PENDING extraction-reports pending-review, но секция ОТСУТСТВУЕТ — COMMIT БЛОКИРОВАН"
-    exit 1
-  fi
-else
+if [ "$PENDING" -eq 0 ]; then
   echo "  ✅ KE-кандидаты: N=0, секция не нужна"
+elif grep -q "KE-кандидаты" "$FILE" 2>/dev/null; then
+  echo "  ✅ KE-кандидаты: секция присутствует ($PENDING pending)"
+elif grep -qE "pending-review, но секция «KE-кандидаты» отсутствует" "$FILE"; then
+  echo "  ⚠️ KE-кандидаты: секция отсутствует ($PENDING pending) — уже отмечено в «Требует внимания» (не блокирует)"
+else
+  echo "  ⚠️ KE-кандидаты: секция отсутствует ($PENDING pending), И patch-скрипт не записал находку — проверь вручную (не блокирует)"
 fi
 ```
 
-- [ ] Если `KE_PENDING > 0` — секция `### 📚 KE-кандидаты` есть в DayPlan. Если нет — вернуться к шагу 5e extensions/day-open.after.md и дописать.
+- [ ] Если `KE_PENDING > 0` — секция `### 📚 KE-кандидаты` есть в DayPlan, либо расхождение отмечено в «Требует внимания». Больше не блокирует commit.
 
-### 🔴 БЛОКИРУЮЩАЯ ПРОВЕРКА: KE-очередь — согласованность параллельных источников (bug-2026-07-12)
+### Проверка (не блокирующая с 2026-09-22): KE-очередь — согласованность параллельных источников (bug-2026-07-12, разблокировано WP-484)
 
-> **Источник:** `day-open-smoke.sh` и `ke-queue-stats.sh` считают одну и ту же метрику (KE-очередь: count + oldest_age_days) разными способами фильтрации. 12.07.26 расхождение (132/44д против 9/0д) попало в DayPlan и было замечено только пилотом при ручной сверке. Оба скрипта приведены к одной логике фильтрации, но проверка нужна на случай будущего дрейфа одного из них.
+> **Источник:** `day-open-smoke.sh` и `ke-queue-stats.sh` считают одну и ту же метрику (KE-очередь: count + oldest_age_days) разными способами фильтрации. 12.07.26 расхождение (132/44д против 9/0д) попало в DayPlan и было замечено только пилотом при ручной сверке.
+> **Смягчение (WP-484, 2026-09-22, peer-session Claude+Kimi+Codex, пилот согласился после того, как
+> именно эта проверка заблокировала DayPlan 2026-09-22 на несколько часов):** корневая причина
+> расхождения (два независимых списка статусов) устранена в этой же сессии — общий файл
+> `scripts/lib/ke-open-statuses.txt`, который оба скрипта теперь читают. Риск многодневного
+> молчаливого дрейфа, из-за которого проверку когда-то ужесточили, ниже. `day-open-ke-queue-patch.py`
+> (шаг 4.595 pipeline, ДО этой проверки) пишет находку в «Требует внимания» при расхождении —
+> эта проверка больше не блокирует, только сверяет, что находка не потерялась.
 
 ```bash
 echo "=== Проверка: KE-очередь — согласованность day-open-smoke.sh vs ke-queue-stats.sh ==="
@@ -360,8 +373,17 @@ echo "=== Проверка: KE-очередь — согласованность
 # То же на парсинге (17.09, cold-review Fable): невалидный/пустой JSON роняет python3
 # с кодом 1 → pipefail+set -e убивают блок до ветки ⚠️ — || true и здесь, пустое
 # значение ловит проверка -z ниже.
-SMOKE_JSON=$(bash ~/IWE/DS-my-strategy/scripts/day-open-smoke.sh 2>/dev/null || true)
-STATS_JSON=$(bash ~/IWE/DS-my-strategy/scripts/ke-queue-stats.sh 2>/dev/null || true)
+#
+# ${GOV_REPO_DIR:-...}, не жёсткий ~/IWE/DS-my-strategy (WP-484, 2026-09-22
+# peer-session Claude+Kimi+Codex): день открывается в изолированном worktree
+# (day-open-checks-runner.sh экспортирует GOV_REPO_DIR именно для этого — см.
+# его же комментарий про инцидент 06.09), а этот блок один из немногих здесь
+# звал канонический путь напрямую. Из-за этого фикс расхождения статусов
+# (тот же WP-484), опубликованный из worktree, не долетал до проверки: она
+# продолжала читать устаревшую пару скриптов из канона, даже когда исправленная
+# версия уже была на origin/main.
+SMOKE_JSON=$(bash "${GOV_REPO_DIR:-$HOME/IWE/DS-my-strategy}/scripts/day-open-smoke.sh" 2>/dev/null || true)
+STATS_JSON=$(bash "${GOV_REPO_DIR:-$HOME/IWE/DS-my-strategy}/scripts/ke-queue-stats.sh" 2>/dev/null || true)
 SMOKE_COUNT=$(echo "$SMOKE_JSON" | python3 -c "import json,sys; print(json.load(sys.stdin)['ke_count'])" 2>/dev/null || true)
 SMOKE_OLDEST=$(echo "$SMOKE_JSON" | python3 -c "import json,sys; print(json.load(sys.stdin)['ke_oldest_days'])" 2>/dev/null || true)
 STATS_COUNT=$(echo "$STATS_JSON" | python3 -c "import json,sys; print(json.load(sys.stdin)['count'])" 2>/dev/null || true)
@@ -370,9 +392,10 @@ if [ -z "$SMOKE_COUNT" ] || [ -z "$STATS_COUNT" ]; then
   echo "  ⚠️ KE-очередь: не удалось прочитать один из источников (smoke='$SMOKE_JSON', stats='$STATS_JSON') — пропуск, не блокирует"
 elif [ "$SMOKE_COUNT" = "$STATS_COUNT" ] && [ "$SMOKE_OLDEST" = "$STATS_OLDEST" ]; then
   echo "  ✅ KE-очередь: источники согласованы ($STATS_COUNT отчётов, oldest ${STATS_OLDEST}д)"
+elif grep -qE "KE-очередь: расхождение источников" "$FILE" 2>/dev/null; then
+  echo "  ⚠️ KE-очередь: расхождение — day-open-smoke.sh(count=$SMOKE_COUNT,oldest=$SMOKE_OLDEST) vs ke-queue-stats.sh(count=$STATS_COUNT,oldest=$STATS_OLDEST) — уже отмечено в «Требует внимания» (не блокирует)"
 else
-  echo "  ❌ KE-очередь: расхождение — day-open-smoke.sh(count=$SMOKE_COUNT,oldest=$SMOKE_OLDEST) vs ke-queue-stats.sh(count=$STATS_COUNT,oldest=$STATS_OLDEST). COMMIT БЛОКИРОВАН — один из скриптов считает неверно, свериться перед записью в DayPlan."
-  exit 1
+  echo "  ⚠️ KE-очередь: расхождение — day-open-smoke.sh(count=$SMOKE_COUNT,oldest=$SMOKE_OLDEST) vs ke-queue-stats.sh(count=$STATS_COUNT,oldest=$STATS_OLDEST), И patch-скрипт не записал находку — проверь вручную (не блокирует)"
 fi
 ```
 

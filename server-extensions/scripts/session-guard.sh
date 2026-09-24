@@ -5573,6 +5573,11 @@ def claimed_other_owners(path):
             # cannot add a second owner to a path that already has one.
             if checkout != os.path.realpath(repo):
                 resolved_other_claims.setdefault(checkout, set()).add(commit)
+    def commit_touched_path(checkout, commits):
+        return any(os.fsencode(path) in git_at(
+            checkout, "diff-tree", "-m", "--root", "--no-commit-id", "--name-only",
+            "--no-renames", "-r", "-z", commit).split(b"\0") for commit in commits)
+
     def declared_owner(checkout, commits):
         if known_path(checkout, path):
             return True
@@ -5581,13 +5586,24 @@ def claimed_other_owners(path):
             # absent there yet legitimately delivered. Here the declared commit
             # must itself ADD or CHANGE the path: a bare "the tree contains it"
             # would let a stale or historical commit own a path it never touched.
-            return any(os.fsencode(path) in git_at(
-                checkout, "diff-tree", "-m", "--root", "--no-commit-id", "--name-only",
-                "--no-renames", "-r", "-z", commit).split(b"\0") for commit in commits)
+            return commit_touched_path(checkout, commits)
         return any(git_at(checkout, "ls-tree", "-z", commit, "--", path) for commit in commits)
 
-    return sum(declared_owner(checkout, commits)
-               for checkout, commits in resolved_other_claims.items())
+    owning = [(checkout, commits) for checkout, commits in resolved_other_claims.items()
+              if declared_owner(checkout, commits)]
+    if len(owning) > 1:
+        # Two claimed repositories can each legitimately hold their own, unrelated file
+        # at the same relative path (WP-7 Ф173, 2026-09-24: gateway-mcp and knowledge-mcp
+        # each have a src/scope.test.ts; only gateway-mcp's declared commit touched it).
+        # Narrow to whichever candidate's own declared commit(s) actually added or
+        # changed the path, when that narrows to exactly one — otherwise the original
+        # tree-presence count stands (fail closed, unchanged from before this narrowing;
+        # this also covers test_two_third_repo_claims_for_unknown_path_refuse, where both
+        # candidates' commits genuinely touch the path and the ambiguity is real).
+        touched = [checkout for checkout, commits in owning if commit_touched_path(checkout, commits)]
+        if len(touched) == 1:
+            return 1
+    return len(owning)
 
 for path in scope:
     local = path in claimed_paths or known_path(repo, path) or bool(entry(remote, path))

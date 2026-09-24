@@ -62,13 +62,16 @@ semaphore_for() {  # <extra-file-lines...> writes remaining args as "commit: <na
   printf '%s' "$sem"
 }
 
+# The extracted proof takes ten arguments; the tenth (the resolver functions for third-repository claims,
+# added 20.09) is empty here. With nine the script died on argument unpacking (exit 1) and this test
+# then "passed" every refusal scenario vacuously and failed every acceptance one.
 run_proof() {  # <flag: 0|1> <semaphore> <remote-oid>
   if [ "$1" = "1" ]; then
     IWE_SESSION_GUARD_ANCHORED_FALLBACK=1 python3 "$PROOF_SCRIPT" \
-      "$REPO" "test repo" "$2" "$3" governance_worktree orz_sessions_dir "" "" "$IWE_ROOT_FIXTURE"
+      "$REPO" "test repo" "$2" "$3" governance_worktree orz_sessions_dir "" "" "$IWE_ROOT_FIXTURE" ""
   else
     python3 "$PROOF_SCRIPT" \
-      "$REPO" "test repo" "$2" "$3" governance_worktree orz_sessions_dir "" "" "$IWE_ROOT_FIXTURE"
+      "$REPO" "test repo" "$2" "$3" governance_worktree orz_sessions_dir "" "" "$IWE_ROOT_FIXTURE" ""
   fi
 }
 

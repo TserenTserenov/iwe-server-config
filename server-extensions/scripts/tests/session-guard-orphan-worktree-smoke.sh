@@ -16,6 +16,12 @@ MANAGED_WORKTREES="$TEST_ROOT/.iwe-runtime/isolated-worktrees"
 PUSH_MARKER="$TEST_ROOT/isolate-push-called"
 LEDGER_ROOT="$TEST_ROOT/ledger"
 export IWE_SESSIONS_ROOT="$GOV/sessions"
+# session-guard.sh:135 has read GOV_REPO from IWE_GOVERNANCE_REPO with no
+# silent default since 30.08 (WP-484) -- exported once so the tail-exec guard
+# call (line ~472) and the heartbeat wrappers it shells out to (~486, ~491,
+# which themselves invoke session-guard.sh) all inherit it too, not just the
+# calls that already pass it inline.
+export IWE_GOVERNANCE_REPO=DS-strategy
 # $GOV has no origin (plain `git init`, this suite doesn't test freeze). WP-530
 # Ф56 made frozen_checkout_match() also check gov_repo_dir()'s canonical
 # fallback, which for an origin-less canonical candidate always equals the

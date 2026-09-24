@@ -8,6 +8,10 @@ GUARD="$ROOT_DIR/scripts/session-guard.sh"
 TEST_ROOT=$(mktemp -d /private/tmp/session-guard-selector.XXXXXX)
 trap 'rm -rf "$TEST_ROOT"' EXIT
 
+# session-guard.sh:135 has read GOV_REPO from IWE_GOVERNANCE_REPO with no
+# silent default since 30.08 (WP-484) -- every invocation below needs it.
+export IWE_GOVERNANCE_REPO=DS-strategy
+
 open_session() {
     local id="$1" wp="$2" slug="$3"
     # This fixture's repo dir defaults to the same name as the real canonical

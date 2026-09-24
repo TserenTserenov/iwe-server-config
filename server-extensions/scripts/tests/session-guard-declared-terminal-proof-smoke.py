@@ -2,6 +2,7 @@
 """Exercise shipped close selection and unchanged proof gates in temporary fixtures."""
 
 import hashlib
+import json
 import os
 from pathlib import Path
 import re
@@ -142,6 +143,175 @@ class DeclaredTerminalProofTests(unittest.TestCase):
         after = self.snapshot(card)
         self.assertEqual((before.returncode, after.returncode), (0, 0))
         self.assertNotEqual(before.stdout, after.stdout)
+
+    def test_running_release_card_is_not_unsaved_work(self):
+        repo = self.root / "repo"
+        self.git("init", "-q", str(repo))
+        cards = repo / "inbox/agent/tasks"
+        cards.mkdir(parents=True)
+        card = cards / "RUN-quick-close-fixture.md"
+        relative = str(card.relative_to(repo))
+        semaphore = self.root / "fixture.open"
+        semaphore.write_text(
+            "---\nagent: fixture\nsession_id: owner-A\nwp: WP-484\nslug: fixture\n---\n"
+            + "file: " + relative + "\nfile: artifact.txt\n"
+        )
+        source = self.card().read_text().replace(
+            "status: completed\ncurrent_step: done",
+            "status: running\ncurrent_step: session-guard-release",
+        ).replace("\n---\n", "\n  verify-r23:\n    verdict: pass\n---\n")
+        helpers = ["_unique_record_field", "_terminal_card_snapshot_sha",
+                   "is_append_safe_session_path", "_untracked_matches_published",
+                   "session_scope_dirty_paths"]
+        script = "\n".join(function_source(name) for name in helpers)
+        script += "\nsemaphore_governance_worktree() { printf '%s\\n' " + shlex.quote(str(repo)) + "; }\n"
+        script += "ORZ_DIR=" + shlex.quote(str(repo)) + "\n"
+        script += "session_scope_dirty_paths " + shlex.quote(str(semaphore))
+        card.write_text(source)
+        result = self.shell(script)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout, "", "own validated release card must not deadlock close")
+        (repo / "artifact.txt").write_text("unsaved work\n")
+        result = self.shell(script)
+        self.assertIn("artifact.txt", result.stdout)
+        self.assertNotIn(relative, result.stdout)
+        for original, replacement in (
+            ("owner-A", "owner-B"), ("verdict: pass", "verdict: fail"),
+            ("wp: WP-484", "wp: WP-583"), ("requested_slug: fixture", "requested_slug: other"),
+            ("status: running", "status: waiting"),
+            ("current_step: session-guard-release", "current_step: commit-push"),
+        ):
+            with self.subTest(replacement=replacement):
+                card.write_text(source.replace(original, replacement))
+                self.assertIn(relative, self.shell(script).stdout)
+
+    def test_release_retry_requires_current_owned_audited_runner_card(self):
+        import yaml
+
+        card = self.root / "RUN-quick-close-fixture.md"
+        semaphore = self.root / "fixture.open"
+        semaphore.write_text("harness_session_id: owner-A\nwp: WP-484\nslug: fixture\n")
+        audit_root = self.root / ".iwe-runtime/run-card-audit"
+        audit_root.mkdir(parents=True)
+        audit = audit_root / "quick-close-fixture.jsonl"
+        body = ("\n# Карточка запуска: quick-close\n\n"
+                "Автоматически обновляется `process-runner.py`. Не редактировать руками -- "
+                "карточка производная, source-of-truth = `~/.iwe/gate-decisions.jsonl` "
+                "и сам раннер (DP.SC.054 инвариант 3).\n")
+        helpers = ["_unique_record_field", "_terminal_card_snapshot_sha", "_runner_release_retry_snapshot_sha"]
+        script = "\n".join(function_source(name) for name in helpers)
+        script += "\nIWE_ROOT=" + shlex.quote(str(self.root))
+        script += "\n_runner_release_retry_snapshot_sha " + shlex.join([str(semaphore), str(card)])
+        for variant in ("valid", "owner", "wp", "slug", "waiting", "failed_verdict",
+                        "unpublished", "no_previous_release", "body", "missing_audit",
+                        "wrong_audit_hash", "wrong_audit_path", "symlink_audit"):
+            with self.subTest(variant=variant):
+                doc = dict(kind="process-run", process_id="quick-close", run_id="quick-close-fixture",
+                           requested_slug="fixture", owner_session_id="owner-A", status="running",
+                           current_step="session-guard-release",
+                           results={"gather-session-facts": {"wp": "WP-484"},
+                                    "verify-r23": {"verdict": "pass"}, "commit-push": {"all_pushed": True}},
+                           history=[{"step": "session-guard-release", "type": "reflex"}])
+                if variant in ("owner", "slug", "waiting"):
+                    key = {"owner": "owner_session_id", "slug": "requested_slug", "waiting": "status"}[variant]
+                    doc[key] = "different"
+                if variant == "wp":
+                    doc["results"]["gather-session-facts"]["wp"] = "WP-1"
+                if variant == "failed_verdict":
+                    doc["results"]["verify-r23"]["verdict"] = "fail"
+                if variant == "unpublished":
+                    doc["results"]["commit-push"]["all_pushed"] = False
+                if variant == "no_previous_release":
+                    doc["history"] = []
+                card.write_text("---\n" + yaml.safe_dump(doc, allow_unicode=True) + "---\n"
+                                + ("changed\n" if variant == "body" else body))
+                if audit.is_symlink() or audit.exists():
+                    audit.unlink()
+                event = dict(actor="process-runner", event="written", process_id="quick-close",
+                             run_id="quick-close-fixture", status="running", card_path=str(card),
+                             sha256=hashlib.sha256(card.read_bytes()).hexdigest())
+                if variant == "wrong_audit_hash":
+                    event["sha256"] = "0" * 64
+                if variant == "wrong_audit_path":
+                    event["card_path"] = str(self.root / "other.md")
+                if variant != "missing_audit":
+                    audit.write_text(json.dumps(event) + "\n")
+                if variant == "symlink_audit":
+                    moved = audit.with_suffix(".saved")
+                    audit.rename(moved)
+                    audit.symlink_to(moved)
+                before = semaphore.read_bytes()
+                result = self.shell(script)
+                self.assertEqual(result.returncode == 0, variant == "valid", result.stderr)
+                self.assertEqual(semaphore.read_bytes(), before)
+                if variant == "valid":
+                    expected = hashlib.sha256(b"file\0" + str(card).encode() + b"\0" + card.read_bytes()).hexdigest()
+                    self.assertEqual(result.stdout.strip(), expected)
+
+    def test_audited_retry_cannot_mask_changed_prepared_source(self):
+        import yaml
+
+        repo = self.root / "repo"
+        self.git("init", "-q", str(repo))
+        self.git("-C", str(repo), "config", "user.name", "Fixture")
+        self.git("-C", str(repo), "config", "user.email", "fixture@example.com")
+        self.git("-C", str(repo), "remote", "add", "origin", "https://example.com/fixture.git")
+        artifact = repo / "artifact.txt"
+        artifact.write_text("base\n")
+        self.git("-C", str(repo), "add", "artifact.txt")
+        self.git("-C", str(repo), "commit", "-qm", "base")
+        base = self.git("-C", str(repo), "rev-parse", "HEAD").stdout.strip()
+        artifact.write_text("own result\n")
+        self.git("-C", str(repo), "commit", "-qam", "own result")
+        head = self.git("-C", str(repo), "rev-parse", "HEAD").stdout.strip()
+        card = self.root / "RUN-quick-close-fixture.md"
+        doc = dict(kind="process-run", process_id="quick-close", run_id="quick-close-fixture",
+                   requested_slug="fixture", owner_session_id="owner-A", status="running",
+                   current_step="session-guard-release",
+                   results={"gather-session-facts": {"wp": "WP-484"},
+                            "verify-r23": {"verdict": "pass"}, "commit-push": {"all_pushed": True}},
+                   history=[])
+        body = ("\n# Карточка запуска: quick-close\n\n"
+                "Автоматически обновляется `process-runner.py`. Не редактировать руками -- "
+                "карточка производная, source-of-truth = `~/.iwe/gate-decisions.jsonl` "
+                "и сам раннер (DP.SC.054 инвариант 3).\n")
+        def write_card():
+            card.write_text("---\n" + yaml.safe_dump(doc, allow_unicode=True) + "---\n" + body)
+        write_card()
+        original_terminal = hashlib.sha256(b"file\0" + str(card).encode() + b"\0" + card.read_bytes()).hexdigest()
+        semaphore = self.root / "fixture.open"
+        fields = dict(harness_session_id="owner-A", wp="WP-484", slug="fixture",
+                      close_delivery_source_head=head, close_delivery_common_dir=str(repo / ".git"),
+                      close_delivery_source_status_sha256=hashlib.sha256(b"status-v2\0ignored\0").hexdigest(),
+                      close_delivery_source_base=base, close_delivery_source_commits=json.dumps([head], separators=(",", ":")),
+                      close_delivery_claimed_commits="[]", close_delivery_terminal_kind="file",
+                      close_delivery_terminal_reference=str(card), close_delivery_terminal_sha256=original_terminal,
+                      close_delivery_origin="example.com/fixture", close_delivery_target_ref="refs/heads/main")
+        semaphore.write_text("".join(key + ": " + value + "\n" for key, value in fields.items()))
+        before = semaphore.read_bytes()
+        helpers = ["_unique_record_field", "normalize_remote_url", "_worktree_clean_status_sha",
+                   "_isolated_source_commits_json", "_session_commit_claims_json", "_terminal_proof_snapshot_sha",
+                   "_terminal_card_snapshot_sha", "_runner_release_retry_snapshot_sha", "_prepared_source_snapshot_matches"]
+        script = "\n".join(function_source(name) for name in helpers)
+        script += "\nIWE_ROOT=" + shlex.quote(str(self.root))
+        script += "\n_prepared_source_snapshot_matches " + shlex.join([str(semaphore), str(repo)])
+        self.assertEqual(self.shell(script).returncode, 0)
+        doc["history"].append({"step": "session-guard-release", "type": "reflex"})
+        write_card()
+        self.assertNotEqual(self.shell(script).returncode, 0, "unaudited change must fail")
+        audit_root = self.root / ".iwe-runtime/run-card-audit"
+        audit_root.mkdir(parents=True)
+        event = dict(actor="process-runner", event="written", process_id="quick-close",
+                     run_id="quick-close-fixture", status="running", card_path=str(card),
+                     sha256=hashlib.sha256(card.read_bytes()).hexdigest())
+        (audit_root / "quick-close-fixture.jsonl").write_text(json.dumps(event) + "\n")
+        result = self.shell(script)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        artifact.write_text("unsaved change\n")
+        self.assertNotEqual(self.shell(script).returncode, 0, "dirty product must fail")
+        self.git("-C", str(repo), "commit", "-qam", "different source")
+        self.assertNotEqual(self.shell(script).returncode, 0, "changed HEAD must fail")
+        self.assertEqual(semaphore.read_bytes(), before)
 
     def test_unpublished_head_is_rejected(self):
         origin = self.root / "origin.git"
@@ -457,6 +627,13 @@ class ScopePublicationProofTests(unittest.TestCase):
         self.external_artifact(self.root, "owned/result.txt")
         self.assert_refuses()
 
+    def test_two_worktrees_of_one_external_repo_are_one_owner(self):
+        self.external_artifact(self.root, "scripts/only-root.sh")
+        self.sessions = self.root / "root-worktree"
+        self.git("-C", str(self.root), "worktree", "add", "--detach", str(self.sessions))
+        self.files.append("scripts/only-root.sh")
+        self.assert_accepts()
+
 
 COMMIT_TARGET = "_commit_current_tree_has_publish_proof"
 
@@ -602,7 +779,9 @@ class ClaimedSupersessionTests(unittest.TestCase):
     def setUpClass(cls):
         source = GUARD.read_text()
         cls.functions = "\n".join(extract_function(source, name) for name in (
-            COMMIT_TARGET, SUPERSESSION_TARGET, CLAIMS_TARGET,
+            COMMIT_TARGET, SUPERSESSION_TARGET, "_peer_metadata_claim_has_publish_proof",
+            "_claimed_source_chain_has_publish_proof", "_code_branch_claim_has_publish_proof",
+            "normalize_remote_url", "_resolve_repo_checkout", CLAIMS_TARGET,
         ))
 
     def setUp(self):
@@ -874,6 +1053,478 @@ class ClaimedSupersessionTests(unittest.TestCase):
         published = self.prefix + self.header + self.own_line + "Z" * 262145 + "\n" + self.suffix
         self.pair(old, published)
         self.refuses()
+
+
+class PeerMetadataPublicationTests(unittest.TestCase):
+    git = ScopePublicationProofTests.git
+    write = ScopePublicationProofTests.write
+    commit = ScopePublicationProofTests.commit
+    publish = ScopePublicationProofTests.publish
+    publish_current_branch = CommitCurrentTreeTests.publish_current_branch
+    immutable_state = ClaimedSupersessionTests.immutable_state
+    target = "_peer_metadata_claim_has_publish_proof"
+
+    def setUp(self):
+        self.make_pair()
+
+    def make_pair(self, transform=None, final_peer="Real peer reply\n"):
+        ScopePublicationProofTests.setUp(self)
+        self.env.update(GIT_ALLOW_PROTOCOL="file", GIT_OPTIONAL_LOCKS="0")
+        self.base = self.remote
+        self.slug = "2026-09-20-02-session"
+        self.folder = "2026-09/20/" + self.slug + "/"
+        self.meta = self.folder + "meta.yaml"
+        self.report = self.folder + "report.md"
+        self.draft = self.folder + "report-draft.md"
+        self.transcript = self.folder + "01-peer.md"
+        self.original = (
+            "session_id: " + self.slug + "\ndate: '2026-09-20'\n"
+            "start_time: '2026-09-20T11:00:30Z'\nend_time: ''\nwp: WP-484\n"
+            "status: agreed\nresult_path: report-draft.md\n"
+            "publication_status: awaiting_explicit_main_approval\n"
+            "writer_agent: codex\npeer: [claude]\nturns_count: 4\n"
+        )
+        self.final = self.original.replace("end_time: ''", "end_time: '2026-09-20T11:39:58Z'")
+        self.final = self.final.replace("status: agreed", "status: completed")
+        self.final = self.final.replace("result_path: report-draft.md", "result_path: report.md")
+        self.final = self.final.replace("awaiting_explicit_main_approval", "runner-managed")
+        self.final += (
+            "closure_run_id: quick-close-" + self.slug + "\n"
+            "closure_guard_session_id: fixture-session\npublication_target: main\n"
+            "publication_method: runner-publication-recovery\n"
+            "pilot_reflection: рефлексии нет\nmain_publication_approved: true\n"
+        )
+        if transform:
+            self.final = transform(self.final)
+        self.write(self.meta, self.original)
+        self.write(self.draft, "Original framing retained\n")
+        self.write(self.transcript, "Real peer reply\n")
+        self.source = self.commit("peer session", self.meta, self.draft, self.transcript)
+        self.write(self.meta, self.final)
+        self.write(self.report, "Final report\n")
+        self.write(self.transcript, final_peer)
+        self.successor = self.commit("finalize peer metadata", self.meta, self.report, self.transcript)
+        self.git("-C", str(self.repo), "checkout", "-q", "--detach", self.base)
+        for path, content in ((self.meta, self.final), (self.draft, "Original framing retained\n"),
+                              (self.transcript, final_peer), (self.report, "Final report\n")):
+            self.write(path, content)
+        self.published = self.commit("publish complete final packet", self.meta, self.draft,
+                                     self.transcript, self.report)
+        self.publish_current_branch()
+        self.git("-C", str(self.repo), "checkout", "-q", "--detach", self.successor)
+        self.files = [self.meta, self.draft, self.transcript, self.report]
+        self.claims = [self.source, self.successor, self.published]
+
+    def proof(self, caller=False):
+        self.sem.write_text(
+            "---\nagent: codex\nwp: WP-484\nslug: " + self.slug
+            + "\nsession_id: fixture-session\norz_sessions_dir: " + str(self.repo)
+            + "\n---\n" + "".join("file: " + path + "\n" for path in self.files)
+            + "".join("commit: " + self.repo.name + " " + sha + "\n" for sha in self.claims)
+        )
+        before = self.immutable_state()
+        function_names = [self.target]
+        if caller:
+            function_names += [COMMIT_TARGET, SUPERSESSION_TARGET,
+                               "_claimed_source_chain_has_publish_proof", "_code_branch_claim_has_publish_proof",
+                               "normalize_remote_url",
+                               "_resolve_repo_checkout", CLAIMS_TARGET]
+        source = "\n".join(extract_function(GUARD.read_text(), name) for name in function_names)
+        target = CLAIMS_TARGET if caller else self.target
+        arguments = ([str(self.sem)] if caller else
+                     [str(self.repo), self.source, self.remote, str(self.sem), self.repo.name])
+        result = subprocess.run(
+            ["/bin/bash"], input=source + "\n" + target + " " + shlex.join(arguments),
+            text=True, capture_output=True, cwd=self.root, env=self.env, timeout=30,
+        )
+        self.assertEqual(self.immutable_state(), before)
+        return result
+
+    def test_exact_claimed_lifecycle_update_is_published(self):
+        result = self.proof()
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_exact_lifecycle_update_passes_full_claim_gate(self):
+        result = self.proof(caller=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_unclaimed_local_successor_is_refused(self):
+        self.claims.remove(self.successor)
+        self.assertNotEqual(self.proof().returncode, 0)
+
+    def test_unclaimed_published_snapshot_is_refused(self):
+        self.claims.remove(self.published)
+        self.assertNotEqual(self.proof().returncode, 0)
+
+    def test_dirty_registered_file_is_refused(self):
+        self.write(self.transcript, "Changed peer reply\n")
+        self.assertNotEqual(self.proof().returncode, 0)
+
+    def test_unregistered_report_is_refused(self):
+        self.files.remove(self.report)
+        self.assertNotEqual(self.proof().returncode, 0)
+
+    def test_immutable_metadata_change_is_refused(self):
+        self.make_pair(lambda text: text.replace("turns_count: 4", "turns_count: 99"))
+        self.assertNotEqual(self.proof().returncode, 0)
+
+    def test_published_peer_reply_replacement_is_refused(self):
+        self.make_pair(final_peer="Invented peer reply\n")
+        self.assertNotEqual(self.proof().returncode, 0)
+
+    def test_unknown_lifecycle_key_is_refused(self):
+        self.make_pair(lambda text: text + "trust_me: true\n")
+        self.assertNotEqual(self.proof().returncode, 0)
+
+    def test_duplicate_key_is_refused(self):
+        self.make_pair(lambda text: text + "turns_count: 99\n")
+        self.assertNotEqual(self.proof().returncode, 0)
+
+    def test_wrong_guard_binding_is_refused(self):
+        self.make_pair(lambda text: text.replace("fixture-session", "other-session"))
+        self.assertNotEqual(self.proof().returncode, 0)
+
+    def test_invalid_completion_time_is_refused(self):
+        self.make_pair(lambda text: text.replace("11:39:58", "10:39:58"))
+        self.assertNotEqual(self.proof().returncode, 0)
+
+    def test_index_flags_cannot_hide_peer_file_change(self):
+        self.git("-C", str(self.repo), "update-index", "--assume-unchanged", self.transcript)
+        self.write(self.transcript, "Hidden replacement\n")
+        self.assertNotEqual(self.proof().returncode, 0)
+
+    def test_changed_current_main_does_not_use_historical_packet(self):
+        self.git("-C", str(self.repo), "checkout", "-q", "--detach", self.published)
+        self.write(self.transcript, "New remote content\n")
+        self.commit("remote changed after packet", self.transcript)
+        self.publish_current_branch()
+        self.git("-C", str(self.repo), "checkout", "-q", "--detach", self.successor)
+        self.assertNotEqual(self.proof().returncode, 0)
+
+    def test_core_filemode_cannot_hide_mode_change(self):
+        self.git("-C", str(self.repo), "config", "core.filemode", "false")
+        (self.repo / self.transcript).chmod(0o755)
+        self.assertNotEqual(self.proof().returncode, 0)
+
+
+class PreparedDeliveryRetryTests(unittest.TestCase):
+    git = ScopePublicationProofTests.git
+    write = ScopePublicationProofTests.write
+    commit = ScopePublicationProofTests.commit
+    publish = ScopePublicationProofTests.publish
+    publish_current_branch = CommitCurrentTreeTests.publish_current_branch
+
+    def setUp(self):
+        self.make_fixture()
+
+    def make_fixture(self, include_second=True, first_content="Final first result\n", shared_variant=None):
+        ScopePublicationProofTests.setUp(self)
+        self.env.update(GIT_ALLOW_PROTOCOL="file", GIT_OPTIONAL_LOCKS="0")
+        self.env.pop("IWE_SESSION_GUARD_ANCHORED_FALLBACK", None)
+        self.base = self.remote
+        shared_base = "first: old\nkeep1\nkeep2\nkeep3\nother: old\n"
+        if shared_variant:
+            self.write("shared.txt", shared_base)
+            self.base = self.commit("shared base", "shared.txt")
+            self.publish_current_branch()
+        self.write("owned/result.txt", "Final first result\n")
+        first_paths = ["owned/result.txt"]
+        if shared_variant:
+            self.write("shared.txt", shared_base.replace("first: old", "first: ours"))
+            first_paths.append("shared.txt")
+        first = self.commit("first prepared change", *first_paths)
+        self.write("owned/second.txt", "Final second result\n")
+        second = self.commit("second prepared change", "owned/second.txt")
+        self.source_head = second
+        self.source_commits = [first, second]
+        self.git("-C", str(self.repo), "checkout", "-q", "--detach", self.base)
+        self.write("owned/result.txt", first_content)
+        changed = ["owned/result.txt"]
+        if shared_variant:
+            shared = shared_base.replace("first: old", "first: ours").replace("other: old", "other: theirs")
+            if shared_variant == "concurrent_lost_own":
+                shared = shared.replace("first: ours", "first: old")
+            if shared_variant == "concurrent_conflict":
+                shared = shared.replace("first: ours", "first: conflict")
+            if shared_variant == "concurrent_binary":
+                shared += "\0"
+            self.write("shared.txt", shared)
+            if shared_variant == "concurrent_mode":
+                (self.repo / "shared.txt").chmod(0o755)
+            changed.append("shared.txt")
+        if include_second:
+            self.write("owned/second.txt", "Final second result\n")
+            changed.append("owned/second.txt")
+        self.published = self.commit("publish final prepared packet", *changed)
+        self.publish_current_branch()
+        self.git("-C", str(self.repo), "checkout", "-q", "--detach", self.source_head)
+        self.sem.write_text(
+            "close_delivery_source_base: " + self.base
+            + "\nclose_delivery_source_head: " + self.source_head
+            + "\nclose_delivery_source_commits: " + json.dumps(self.source_commits) + "\n"
+        )
+        self.replay_log = self.root / "replay.log"
+        self.replay = self.root / "isolate-push-fixture.sh"
+        self.replay.write_text('#!/bin/bash\nprintf "%s\\n" "$@" >> "$REPLAY_LOG"\nexit 73\n')
+        self.replay.chmod(0o755)
+        self.env["REPLAY_LOG"] = str(self.replay_log)
+        source = GUARD.read_text()
+        self.functions = "\n".join(extract_function(source, name) for name in (
+            "_unique_record_field", "_prepared_source_set_has_publish_proof", "_publish_prepared_source",
+        ))
+
+    def deliver(self):
+        before = self.sem.read_bytes()
+        head = self.git("-C", str(self.repo), "rev-parse", "HEAD").stdout
+        status = self.git("-C", str(self.repo), "status", "--porcelain").stdout
+        result = subprocess.run(
+            ["/bin/bash"], input="set -euo pipefail\n" + self.functions
+            + "\n_publish_prepared_source " + shlex.join([str(self.sem), str(self.repo), str(self.replay)]),
+            text=True, capture_output=True, cwd=self.root, env=self.env, timeout=30,
+        )
+        self.assertEqual(self.sem.read_bytes(), before)
+        self.assertEqual(self.git("-C", str(self.repo), "rev-parse", "HEAD").stdout, head)
+        self.assertEqual(self.git("-C", str(self.repo), "status", "--porcelain").stdout, status)
+        return result
+
+    def test_already_published_whole_snapshot_skips_replay_twice(self):
+        self.git("-C", str(self.repo), "update-ref", "refs/remotes/origin/main", self.base)
+        for _ in range(2):
+            result = self.deliver()
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertFalse(self.replay_log.exists())
+        self.assertEqual(self.git("-C", str(self.repo), "rev-parse", "origin/main").stdout.strip(), self.published)
+
+    def test_missing_second_commit_result_does_not_skip_replay(self):
+        self.make_fixture(include_second=False)
+        self.assertEqual(self.deliver().returncode, 73)
+        self.assertTrue(self.replay_log.exists())
+
+    def test_modified_prepared_path_does_not_skip_replay(self):
+        self.make_fixture(first_content="A different remote result\n")
+        self.assertEqual(self.deliver().returncode, 73)
+        self.assertTrue(self.replay_log.exists())
+
+    def test_fetch_failure_neither_trusts_cache_nor_replays(self):
+        self.git("-C", str(self.repo), "remote", "set-url", "origin", str(self.root / "absent.git"))
+        self.assertNotEqual(self.deliver().returncode, 0)
+        self.assertFalse(self.replay_log.exists())
+
+    def test_only_superseded_foreign_reaper_snapshots_skip_replay(self):
+        import copy
+        import yaml
+
+        for variant in ("completed", "cancelled", "concurrent", "concurrent_lost_own",
+                        "concurrent_conflict", "concurrent_mode", "concurrent_binary", "own", "wrong_slug", "lost_history",
+                        "lost_results", "changed_body", "product_path", "running",
+                        "manual_cancel", "duplicate_key"):
+            with self.subTest(variant=variant):
+                self.make_fixture(shared_variant=variant if variant.startswith("concurrent") else None)
+                path = "inbox/agent/tasks/RUN-quick-close-foreign.md"
+                if variant == "product_path":
+                    path = "owned/runtime-looking.md"
+                source = dict(id="RUN-quick-close-foreign", kind="process-run", process_id="quick-close",
+                              run_id="quick-close-foreign", requested_slug="foreign",
+                              owner_session_id="foreign-owner", status="cancelled",
+                              current_step="commit-push", cancel_reason="auto_reaped_orphan",
+                              history=[{"step": "gather", "at": "2026-09-20T10:00:00Z"}],
+                              results={"gather": {"wp": "WP-1"}})
+                if variant == "own":
+                    source["owner_session_id"] = "own-owner"
+                if variant == "manual_cancel":
+                    source["cancel_reason"] = "pilot_cancelled"
+                target = copy.deepcopy(source)
+                target.pop("cancel_reason")
+                target.update(status="completed", current_step="done")
+                target["history"].append({"step": "release", "at": "2026-09-20T11:00:00Z"})
+                target["results"]["release"] = {"status": "released"}
+                if variant in ("cancelled", "running"):
+                    target["status"] = variant
+                if variant == "wrong_slug":
+                    target["requested_slug"] = "different"
+                if variant == "lost_history":
+                    target["history"] = target["history"][1:]
+                if variant == "lost_results":
+                    del target["results"]["gather"]
+                body = "\n# Derived runtime card\n"
+                source_text = "---\n" + yaml.safe_dump(source) + "---\n" + body
+                self.write(path, source_text)
+                self.source_head = self.commit("stale reaper cancellation", path)
+                self.source_commits.append(self.source_head)
+                self.git("-C", str(self.repo), "checkout", "-q", "--detach", self.published)
+                target_text = "---\n" + yaml.safe_dump(target)
+                if variant == "duplicate_key":
+                    target_text += "status: completed\n"
+                self.write(path, target_text + "---\n" + ("Different authored body\n" if variant == "changed_body" else body))
+                self.published = self.commit("authoritative completed lifecycle", path)
+                self.publish_current_branch()
+                self.git("-C", str(self.repo), "checkout", "-q", "--detach", self.source_head)
+                self.sem.write_text(
+                    "slug: own\nsession_id: guard-own\nharness_session_id: own-owner\n"
+                    + "close_delivery_source_base: " + self.base
+                    + "\nclose_delivery_source_head: " + self.source_head
+                    + "\nclose_delivery_source_commits: " + json.dumps(self.source_commits) + "\n")
+                result = self.deliver()
+                accepted = variant in ("completed", "cancelled", "concurrent")
+                self.assertEqual(result.returncode, 0 if accepted else 73, result.stderr)
+                self.assertEqual(self.replay_log.exists(), not accepted)
+
+
+class ClaimedSourceChainPublicationTests(unittest.TestCase):
+    git = ScopePublicationProofTests.git
+    write = ScopePublicationProofTests.write
+    commit = ScopePublicationProofTests.commit
+    publish = ScopePublicationProofTests.publish
+    publish_current_branch = CommitCurrentTreeTests.publish_current_branch
+    immutable_state = ClaimedSupersessionTests.immutable_state
+    target = "_claimed_source_chain_has_publish_proof"
+
+    def setUp(self):
+        ScopePublicationProofTests.setUp(self)
+        self.env.update(GIT_ALLOW_PROTOCOL="file", GIT_OPTIONAL_LOCKS="0")
+        self.base = self.remote
+        self.report = "2026-09/19/2026-09-19-06-wp579/report.md"
+        self.meta = "2026-09/19/2026-09-19-06-wp579/meta.yaml"
+        self.transcript = "2026-09/19/2026-09-19-06-wp579/01-peer.md"
+        self.files = [self.report, self.meta, self.transcript]
+        self.write(self.report, "Session closed.\n")
+        self.write(self.meta, "guard_close_status: closed\n")
+        self.write(self.transcript, "Actual unchanged reply\n")
+        self.source = self.commit("initial packet", *self.files)
+        self.write(self.meta, "guard_close_status: pending\n")
+        self.middle = self.commit("correct own metadata", self.meta)
+        self.write(self.report, "Session not yet closed.\nExplanation appended.\n")
+        self.final = self.commit("correct own report", self.report)
+        packet = {path: (self.repo / path).read_text() for path in self.files}
+        self.git("-C", str(self.repo), "checkout", "-q", "--detach", self.base)
+        for path, content in packet.items():
+            self.write(path, content)
+        self.published = self.commit("publish final packet", *self.files)
+        self.publish_current_branch()
+        self.git("-C", str(self.repo), "checkout", "-q", "--detach", self.final)
+        self.claims = [self.source, self.middle, self.final, self.published]
+        self.frozen_override = None
+        self.omit_freeze = False
+
+    def proof(self, caller=False):
+        rows = [self.repo.name + " " + sha for sha in self.claims]
+        self.sem.write_text(
+            "---\nagent: codex\nwp: WP-579\nslug: wp579\nsession_id: fixture-session\n"
+            "close_path: peer-session\norz_sessions_dir: " + str(self.repo) + "\n---\n"
+            + "".join("file: " + path + "\n" for path in self.files)
+            + "".join("commit: " + row + "\n" for row in rows)
+            + ("" if self.omit_freeze else "close_delivery_claimed_commits: "
+               + json.dumps(self.frozen_override if self.frozen_override is not None else sorted(rows)) + "\n")
+        )
+        before = self.immutable_state()
+        names = [self.target]
+        if caller:
+            names += [COMMIT_TARGET, SUPERSESSION_TARGET, "_peer_metadata_claim_has_publish_proof",
+                      "_code_branch_claim_has_publish_proof",
+                      "normalize_remote_url", "_resolve_repo_checkout", CLAIMS_TARGET]
+        functions = "\n".join(extract_function(GUARD.read_text(), name) for name in names)
+        target = CLAIMS_TARGET if caller else self.target
+        args = [str(self.sem)] if caller else [
+            str(self.repo), self.source, self.remote, str(self.sem), self.repo.name,
+        ]
+        result = subprocess.run(["/bin/bash"], input=functions + "\n" + target + " " + shlex.join(args),
+                                text=True, capture_output=True, cwd=self.root, env=self.env, timeout=30)
+        self.assertEqual(self.immutable_state(), before, "Proof modified repository or frozen claims")
+        for error in ("command not found", "Traceback (most recent call last)"):
+            self.assertNotIn(error, result.stderr)
+        return result
+
+    def test_explicit_report_corrections_pass_helper_and_full_caller(self):
+        for caller in (False, True):
+            result = self.proof(caller)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn("frozen source chain published exactly", result.stderr)
+
+    def test_foreign_head_with_exact_untracked_published_packet(self):
+        packet = {path: (self.repo / path).read_bytes() for path in self.files}
+        self.git("-C", str(self.repo), "checkout", "-q", "--detach", self.base)
+        for path, content in packet.items():
+            target = self.repo / path
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(content)
+        result = self.proof()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        exclude = self.repo / ".git/info/exclude"
+        original_exclude = exclude.read_text()
+        exclude.write_text(original_exclude + "\n" + self.report + "\n")
+        self.assertNotEqual(self.proof().returncode, 0, "Ignored packet must not count as untracked")
+        exclude.write_text(original_exclude)
+        self.write(self.report, "Unpublished correction\n")
+        self.assertNotEqual(self.proof().returncode, 0)
+
+    def test_every_intermediate_commit_must_be_frozen(self):
+        self.claims.remove(self.middle)
+        self.assertNotEqual(self.proof().returncode, 0)
+        self.assertNotEqual(self.proof(caller=True).returncode, 0)
+
+    def test_final_revision_must_be_frozen(self):
+        self.claims.remove(self.final)
+        self.assertNotEqual(self.proof().returncode, 0)
+
+    def test_main_publication_must_be_frozen(self):
+        self.claims.remove(self.published)
+        self.assertNotEqual(self.proof().returncode, 0)
+
+    def test_missing_or_changed_frozen_claim_set_refused(self):
+        self.omit_freeze = True
+        self.assertNotEqual(self.proof().returncode, 0)
+        self.omit_freeze = False
+        self.frozen_override = [self.repo.name + " " + self.source]
+        self.assertNotEqual(self.proof().returncode, 0)
+
+    def test_changed_path_must_be_literal_registered_scope(self):
+        self.files.remove(self.meta)
+        self.assertNotEqual(self.proof().returncode, 0)
+        self.files.append("2026-09/**")
+        self.assertNotEqual(self.proof().returncode, 0)
+
+    def test_current_main_change_refused_even_when_older_packet_is_claimed(self):
+        self.git("-C", str(self.repo), "checkout", "-q", "--detach", self.published)
+        self.write(self.report, "Remote changed afterwards\n")
+        self.commit("remote changed", self.report)
+        self.publish_current_branch()
+        self.git("-C", str(self.repo), "checkout", "-q", "--detach", self.final)
+        self.assertNotEqual(self.proof().returncode, 0)
+
+    def test_hidden_worktree_change_refused(self):
+        self.git("-C", str(self.repo), "update-index", "--assume-unchanged", self.report)
+        self.write(self.report, "Hidden local edit\n")
+        self.assertNotEqual(self.proof().returncode, 0)
+
+    def test_mode_change_refused_even_when_git_ignores_it(self):
+        self.git("-C", str(self.repo), "config", "core.filemode", "false")
+        (self.repo / self.report).chmod(0o755)
+        self.assertNotEqual(self.proof().returncode, 0)
+
+    def test_staged_deletion_is_not_exact_untracked_packet(self):
+        self.git("-C", str(self.repo), "rm", "--cached", self.report)
+        self.assertNotEqual(self.proof().returncode, 0)
+
+    def test_symlink_substitution_refused(self):
+        path = self.repo / self.report
+        copy = self.root / "report-copy"
+        copy.write_bytes(path.read_bytes())
+        path.unlink()
+        path.symlink_to(copy)
+        self.assertNotEqual(self.proof().returncode, 0)
+
+    def test_unrelated_foreign_dirt_does_not_block_exact_packet(self):
+        self.write("foreign/notes.txt", "Other session work\n")
+        result = self.proof()
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_merge_final_revision_is_not_linear_chain(self):
+        tree = self.git("-C", str(self.repo), "rev-parse", self.final + "^{tree}").stdout.strip()
+        merge = self.git("-C", str(self.repo), "commit-tree", tree, "-p", self.middle,
+                         "-p", self.published, "-m", "merge final").stdout.strip()
+        self.claims.remove(self.final)
+        self.claims.append(merge)
+        self.assertNotEqual(self.proof().returncode, 0)
 
 
 if __name__ == "__main__":

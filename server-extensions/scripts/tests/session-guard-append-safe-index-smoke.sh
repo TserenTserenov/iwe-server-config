@@ -8,6 +8,12 @@
 # not-yet-pushed row) while every OTHER registered scope file is clean.
 set -euo pipefail
 
+# The guard binds a close to the harness session id of the caller (CLAUDE_CODE_SESSION_ID,
+# CODEX_THREAD_ID). Run from inside an agent session those variables name that session, not the
+# fixture's, and the fixture's own run card is refused as foreign: the test failed only when an agent
+# ran it. The fixture must not depend on who runs it.
+unset CLAUDE_CODE_SESSION_ID CODEX_THREAD_ID
+
 ROOT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
 GUARD="$ROOT_DIR/scripts/session-guard.sh"
 TEST_ROOT=$(mktemp -d /private/tmp/session-guard-append-safe.XXXXXX)

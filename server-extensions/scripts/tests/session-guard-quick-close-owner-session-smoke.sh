@@ -38,14 +38,14 @@ export IWE_FROZEN_CANONICAL_PATH=""
 write_orz() {
   local orz_path="$1"
   mkdir -p "$(dirname "$orz_path")"
-  cat > "$orz_path" <<'EOF'
+  cat > "$orz_path" <<EOF
 ---
 date: 2026-09-01
 type: work
 wp: WP-484
 duration_h: 0.1
 artifacts: []
-agent: fixture
+agent: ${2:-fixture}
 ---
 
 # Fixture session
@@ -209,4 +209,93 @@ else
   exit 1
 fi
 
+exercise_codex_owner() {
+  local slug="$1" legacy="$2" sem guard_id orz native="codex-$1"
+  (
+    cd "$REPO2"
+    IWE_GOVERNANCE_REPO=DS-strategy-noharness IWE_AGENT=codex CODEX_THREAD_ID="$native" \
+      CLAUDE_CODE_SESSION_ID=foreign-inherited-claude \
+      bash "$GUARD" open --wp WP-484 --task fixture --slug "$slug" --agent codex >/dev/null
+  )
+  sem=$(grep -l "^slug: $slug$" "$TEST_ROOT"/.iwe-runtime/sessions/codex-*.open)
+  grep -q "^harness_session_id: $native$" "$sem" || { echo "FAIL: native Codex identity not stored" >&2; exit 1; }
+  guard_id=$(sed -n 's/^session_id: //p' "$sem")
+  orz=$(sed -n 's/^orz_file: //p' "$sem")
+  write_orz "$REPO2/sessions/$orz" codex
+  git -C "$REPO2" add "sessions/$orz"
+  git -C "$REPO2" commit -qm "Codex ORZ $slug"
+  git -C "$REPO2" push -q origin HEAD:main
+  if [ "$legacy" = true ]; then
+    # Only the disposable fixture models a semaphore created before the fix.
+    sed '/^harness_session_id: /d' "$sem" > "$sem.fixture"
+    mv "$sem.fixture" "$sem"
+    chmod 600 "$sem"
+  fi
+  local card="$REPO2/inbox/agent/tasks/RUN-quick-close-$slug.md"
+  cat > "$card" <<EOF
+---
+process_id: quick-close
+run_id: quick-close-$slug
+requested_slug: $slug
+status: completed
+current_step: done
+owner_session_id: foreign-owner
+results:
+  gather-session-facts:
+    wp: WP-484
+---
+EOF
+  echo "file: inbox/agent/tasks/RUN-quick-close-$slug.md" >> "$sem"
+  if (cd "$REPO2"; IWE_GOVERNANCE_REPO=DS-strategy-noharness IWE_AGENT=codex \
+      IWE_SESSION_ID="$guard_id" CODEX_THREAD_ID="$native" \
+      bash "$GUARD" close --wp WP-484 --slug "$slug" --agent codex >/dev/null 2>&1); then
+    echo "FAIL: Codex accepted foreign card ($slug)" >&2; exit 1
+  fi
+  [ -f "$sem" ] || { echo "FAIL: refused close mutated semaphore" >&2; exit 1; }
+  sed "s/owner_session_id: foreign-owner/owner_session_id: $native/" "$card" > "$card.fixture"
+  mv "$card.fixture" "$card"
+  if [ "$legacy" = true ]; then
+    if (cd "$REPO2"; IWE_GOVERNANCE_REPO=DS-strategy-noharness IWE_AGENT=codex \
+        IWE_SESSION_ID=wrong-guard CODEX_THREAD_ID="$native" \
+        bash "$GUARD" close --wp WP-484 --slug "$slug" --agent codex >/dev/null 2>&1); then
+      echo "FAIL: legacy close accepted mismatched guard ID" >&2; exit 1
+    fi
+    if (cd "$REPO"; IWE_GOVERNANCE_REPO=DS-strategy-noharness IWE_AGENT=codex \
+        IWE_SESSION_ID="$guard_id" CODEX_THREAD_ID="$native" \
+        bash "$GUARD" close --wp WP-484 --slug "$slug" --agent codex >/dev/null 2>&1); then
+      echo "FAIL: legacy close accepted wrong worktree" >&2; exit 1
+    fi
+  fi
+  (cd "$REPO2"; IWE_GOVERNANCE_REPO=DS-strategy-noharness IWE_AGENT=codex \
+    IWE_SESSION_ID="$guard_id" CODEX_THREAD_ID="$native" \
+    bash "$GUARD" close --wp WP-484 --slug "$slug" --agent codex)
+  [ ! -f "$sem" ] && [ -f "$sem.closed" ] || { echo "FAIL: exact Codex close not terminal" >&2; exit 1; }
+  echo "PASS: exact Codex owner closes ($slug); foreign owner rejected"
+}
+
+exercise_codex_owner owner-smoke-native false
+exercise_codex_owner owner-smoke-legacy true
+python3 - "$GUARD" "$REPO2" "$REPO" "$TEST_ROOT" <<'PY'
+from pathlib import Path
+import subprocess
+import sys
+
+guard, repo, foreign, root = map(Path, sys.argv[1:])
+source = guard.read_text()
+start = source.index('_declared_governance_card_dir() {')
+function = source[start:source.index('\n}\n', start) + 3]
+worktree = root / 'governance-worktree'
+subprocess.run(['git', '-C', str(repo), 'worktree', 'add', '--detach', str(worktree)],
+               check=True, capture_output=True)
+alias = root / 'governance-alias'
+alias.symlink_to(worktree)
+for path, accepted in ((repo, True), (worktree, True), (foreign, False),
+                       (alias, False), (worktree / 'scripts', False)):
+    result = subprocess.run(['bash', '-c', function + '\n_declared_governance_card_dir "$1" "$2"',
+                             'fixture', str(path), str(repo)], capture_output=True, text=True)
+    assert (result.returncode == 0) == accepted, (path, result.stderr)
+    if accepted:
+        assert result.stdout.strip() == str(path / 'inbox/agent/tasks')
+print('PASS: registered governance route; foreign repository, symlink and subdirectory rejected')
+PY
 echo "PASS: session-guard quick-close owner_session_id gate (WP-484 V(b))"

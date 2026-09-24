@@ -40,6 +40,14 @@ assert_ref_absent() {
         || fail "$label — temporary safe-pull ref leaked"
 }
 
+assert_not_contains() {
+    local label="$1" text="$2" needle="$3"
+    case "$text" in
+        *"$needle"*) fail "$label — unexpected '$needle' in: $text" ;;
+        *) ;;
+    esac
+}
+
 object_store_checksum() {
     find "$1" -type f -exec shasum {} \; | LC_ALL=C sort | shasum | awk '{print $1}'
 }
@@ -90,6 +98,9 @@ EOF
 cat > "$CONTRACT_BIN/git" <<'EOF'
 #!/usr/bin/env bash
 printf '%s\n' "$*" >> "$GIT_CALL_LOG"
+if [ "$#" -ge 5 ] && [ "$1" = "-C" ] && [ "$3" = "diff" ] && [ "$4" = "--cached" ] && [ "$5" = "--quiet" ]; then
+    exit "${GIT_STAGED_DIFF_EXIT:-0}"
+fi
 if [ "$#" -ge 4 ] && [ "$1" = "-C" ] && [ "$3" = "stash" ] && [ "$4" = "list" ]; then
     count=0
     [ ! -f "$GIT_STASH_COUNTER" ] || count=$(cat "$GIT_STASH_COUNTER")
@@ -129,7 +140,7 @@ chmod +x "$CONTRACT_ROOT/scripts/iwe-safe-pull.sh" "$CONTRACT_BIN/git" \
 
 run_contract_hook() {
     local session="$1" safe_pull_exit="$2" stash_mutation="$3" kill_parent="${4:-0}"
-    local python_fail_on="${5:-0}"
+    local python_fail_on="${5:-0}" staged_diff_exit="${6:-0}"
     hook_input "$CONTRACT_REPO" "$session" | \
         HOME="$CONTRACT_HOME" \
         IWE_WORKSPACE="$CONTRACT_ROOT" \
@@ -140,6 +151,7 @@ run_contract_hook() {
         GIT_CALL_LOG="$GIT_CALL_LOG" \
         GIT_STASH_COUNTER="$GIT_STASH_COUNTER" \
         GIT_STASH_MUTATION="$stash_mutation" \
+        GIT_STAGED_DIFF_EXIT="$staged_diff_exit" \
         PYTHON_CALL_COUNTER="$PYTHON_CALL_COUNTER" \
         PYTHON_FAIL_ON="$python_fail_on" \
         REAL_PYTHON="$REAL_PYTHON" \
@@ -152,8 +164,15 @@ run_contract_hook() {
 : > "$GIT_STASH_COUNTER"
 contract_out=$(run_contract_hook contract-success 0 none | decode_context)
 assert_eq "safe-pull exact target" "$CONTRACT_REPO" "$(cat "$SAFE_PULL_LOG")"
-assert_eq "hook only reads stash twice" "2" "$(wc -l < "$GIT_CALL_LOG" | tr -d ' ')"
+assert_eq "hook makes exactly 3 git calls: staged-diff check + stash before/after" "3" "$(wc -l < "$GIT_CALL_LOG" | tr -d ' ')"
 assert_contains "successful freshness context" "$contract_out" "Проверил свежее: repo-contract"
+assert_not_contains "clean index does not warn about staged changes" "$contract_out" "застейджены изменения"
+
+: > "$SAFE_PULL_LOG"
+: > "$GIT_CALL_LOG"
+: > "$GIT_STASH_COUNTER"
+contract_out=$(run_contract_hook contract-staged-diff 0 none 0 0 1 | decode_context)
+assert_contains "staged diff at first touch is surfaced" "$contract_out" "застейджены изменения от прошлой/чужой сессии"
 
 : > "$SAFE_PULL_LOG"
 : > "$GIT_CALL_LOG"

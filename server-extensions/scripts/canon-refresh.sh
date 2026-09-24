@@ -58,6 +58,16 @@
 
 set -uo pipefail
 
+# Peer session 2026-09-21-17-wp7-f163-ancestry-hardening (Claude+Codex), WP-7
+# Ф163: every ancestry check below (`merge-base --is-ancestor`, both call
+# sites) must be blind to local replacement refs and legacy grafts, or a
+# forged remote tip can make a genuinely diverged HEAD look like a pure
+# fast-forward case -- reproduced live (WP-7 Ф163 report): without this, a
+# forged origin/<branch> made `merge --ff-only` actually discard an
+# unpublished local commit.
+export GIT_NO_REPLACE_OBJECTS=1
+export GIT_GRAFT_FILE=/dev/null/iwe-no-grafts
+
 SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 # shellcheck source=lib/automation-contract.sh
 . "$SCRIPT_DIR/lib/automation-contract.sh"

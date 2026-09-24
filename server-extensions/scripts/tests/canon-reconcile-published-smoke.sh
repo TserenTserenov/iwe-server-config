@@ -4,16 +4,52 @@
 set -uo pipefail
 SCRIPT="${1:-$(dirname "$0")/../canon-reconcile-published.sh}"
 [ -x "$SCRIPT" ] || SCRIPT="$(cd "$(dirname "$0")" && pwd)/../canon-reconcile-published.sh"
+# shellcheck source=ancestry-hardening-lib.sh
+. "$(cd "$(dirname "$0")" && pwd)/ancestry-hardening-lib.sh"
 SANDBOX=$(mktemp -d)
 trap 'rm -rf "$SANDBOX"' EXIT
 export IWE_WORKSPACE="$SANDBOX/no-workspace"   # ledger-append absent -> ledger_note is a no-op
 export IWE_RUNTIME="$SANDBOX/runtime"; mkdir -p "$IWE_RUNTIME/sessions"   # no live writers unless a scenario adds one
 fails=0
 assert() { if [ "$1" = "$2" ]; then echo "  ok   $3"; else echo "  FAIL $3 (got '$1', want '$2')"; fails=$((fails+1)); fi; }
+# `md5` is macOS-only (BSD coreutils); GitHub's ubuntu-latest runner has neither
+# `md5` nor a `md5` alias. shasum ships on both macOS and ubuntu-latest, so it
+# is the cross-platform default; sha256sum is the fallback for a bare Linux
+# box that lacks shasum.
+hash_stdin() {
+  if command -v shasum >/dev/null 2>&1; then
+    shasum -a 256
+  elif command -v sha256sum >/dev/null 2>&1; then
+    sha256sum
+  else
+    echo "FAIL: neither shasum nor sha256sum is available" >&2
+    return 1
+  fi
+}
+# Fail fast, not silently: without -e, a hash_stdin failure inside "$(git ... |
+# hash_stdin)" would leave the caller comparing two empty strings and passing
+# the assert -- checking the precondition once, up front, turns a missing tool
+# into a loud failure here instead of a quiet false-green at scenario 13.
+command -v shasum >/dev/null 2>&1 || command -v sha256sum >/dev/null 2>&1 || {
+  echo "FAIL: neither shasum nor sha256sum is available in this environment" >&2
+  exit 1
+}
 
 fresh() {  # <name> -- bare origin + canonical clone with one base commit; sets ORIGIN, CANON
   ORIGIN="$SANDBOX/$1-origin.git"; CANON="$SANDBOX/$1-canon"
-  git init -q --bare "$ORIGIN"
+  # -b main: a bare repo's HEAD symref defaults to whatever `init.defaultBranch`
+  # resolves to on the host, not necessarily "main" (GitHub's ubuntu-latest
+  # runner defaults to master; this Mac's git happens to default to main).
+  # Every clone of $ORIGIN below relies on its HEAD resolving to "main" to
+  # auto-checkout a local "main" branch -- an unresolvable HEAD symref instead
+  # produces "remote HEAD refers to nonexistent ref, unable to checkout" and a
+  # clone with no branch checked out at all, so every later `push origin main`
+  # from that clone fails with "src refspec main does not match any". Found
+  # live on the first real ubuntu-latest CI run (15 failed assertions), not
+  # locally on macOS. ancestry-mutation-guards-smoke.sh already does this
+  # correctly (`git init -q --template= -b main`) -- this file was the only
+  # one of the 7 missing it.
+  git init -q --bare -b main "$ORIGIN"
   git init -q "$CANON" && git -C "$CANON" -c user.name=t -c user.email=t@t checkout -q -b main
   echo base > "$CANON/a.txt"; git -C "$CANON" add a.txt; git -C "$CANON" -c user.name=t -c user.email=t@t commit -qm base
   git -C "$CANON" remote add origin "$ORIGIN"; git -C "$CANON" push -q origin main
@@ -159,10 +195,10 @@ assert "$([ -d "$CANON/.git/dirty-guard.lock" ] && echo present)" "present" "for
 
 echo "scenario 13: refusal writes nothing inside the repository (log goes to runtime dir)"
 fresh s13; echo one > "$CANON/b.txt"; commit_in "$CANON" "local"; C=$(git -C "$CANON" rev-parse HEAD); republish_on_origin "$CANON" "$C"
-echo two > "$CANON/c.txt"; commit_in "$CANON" "unique"; BEFORE=$(git -C "$CANON" status --porcelain | md5); MARK=$(mktemp); sleep 1
+echo two > "$CANON/c.txt"; commit_in "$CANON" "unique"; BEFORE=$(git -C "$CANON" status --porcelain | hash_stdin); MARK=$(mktemp); sleep 1
 LOG_BEFORE=$(grep -c ' refused ' "$IWE_RUNTIME/canon-reconcile-published.log" 2>/dev/null || echo 0)
 bash "$SCRIPT" "$CANON" main >/dev/null 2>&1
-assert "$(git -C "$CANON" status --porcelain | md5)" "$BEFORE" "repo status unchanged by the refusal"
+assert "$(git -C "$CANON" status --porcelain | hash_stdin)" "$BEFORE" "repo status unchanged by the refusal"
 assert "$(find "$CANON" -newer "$MARK" -type f -not -path "$CANON/.git/*" | wc -l | tr -d ' ')" "0" "no working-tree file written by the refusal (git's own fetch bookkeeping under .git is expected)"
 assert "$(( $(grep -c ' refused ' "$IWE_RUNTIME/canon-reconcile-published.log") - LOG_BEFORE ))" "1" "refusal logged exactly once in the runtime log"
 
@@ -188,5 +224,32 @@ pub="$SANDBOX/pub-conv"; git clone -q "$ORIGIN" "$pub"; git -C "$pub" rm -q conv
 bash "$SCRIPT" "$CANON" main >/dev/null 2>&1; rc=$?
 git -C "$CANON" fetch -q origin
 assert "$rc" "0" "exit 0"; assert "$(cat "$CANON/conv/inner")" "inner" "directory materialised"; assert "$(git -C "$CANON" rev-parse HEAD)" "$(git -C "$CANON" rev-parse origin/main)" "HEAD == origin/main"
+
+echo "scenario 17: refs/replace forgery makes an undelivered commit look patch-equivalent -> refused by the delivery proof itself"
+# Origin holds BASE -> Q -> P. The local commit U squashes Q and P onto BASE: same
+# tree as P, but its patch is neither Q's nor P's, so the honest `git cherry` says
+# "+". The forgery replaces U with F (same tree, parent Q = exactly P's patch), so a
+# forged `git cherry` says "-". Real and forged U have the same tree, hence the
+# "tracked tree is clean" preflight passes in both worlds and cannot refuse first:
+# the refusal reason asserted below proves the delivery proof decided.
+fresh s17
+pub="$SANDBOX/pub-forge"; git clone -q "$ORIGIN" "$pub"
+echo mine > "$pub/y.txt"; commit_in "$pub" "origin publishes y"; Q=$(git -C "$pub" rev-parse HEAD)
+echo pub > "$pub/x.txt"; commit_in "$pub" "origin publishes x"; git -C "$pub" push -q origin main
+echo mine > "$CANON/y.txt"; echo pub > "$CANON/x.txt"; commit_in "$CANON" "undelivered squash of y and x"; U=$(git -C "$CANON" rev-parse HEAD)
+git -C "$CANON" fetch -q origin
+FORGED=$(git -C "$CANON" -c user.name=t -c user.email=t@t commit-tree "$(git -C "$CANON" rev-parse 'origin/main^{tree}')" -p "$Q" -m forged)
+git -C "$CANON" replace "$U" "$FORGED"
+assert "$(git -C "$CANON" status --porcelain --untracked-files=no | wc -l | tr -d ' ')" "0" "precondition: tracked tree clean in the forged world"
+assert "$(GIT_NO_REPLACE_OBJECTS=1 git -C "$CANON" status --porcelain --untracked-files=no | wc -l | tr -d ' ')" "0" "precondition: tracked tree clean in the real world too"
+assert "$(git -C "$CANON" cherry origin/main "$U" | cut -c1)" "-" "precondition: the forgery fools an unguarded git cherry"
+assert "$(GIT_NO_REPLACE_OBJECTS=1 git -C "$CANON" cherry origin/main "$U" | cut -c1)" "+" "precondition: the real commit is not on the target"
+out=$(bash "$SCRIPT" "$CANON" main 2>&1); rc=$?
+assert "$rc" "1" "exit 1: a forged equivalence is not proof of delivery"
+assert "$(git -C "$CANON" rev-parse refs/heads/main)" "$U" "branch still points at the undelivered commit"
+assert "$(printf '%s' "$out" | grep -c 'local-only commits not on target')" "1" "refused by the delivery proof (git cherry), not by another preflight"
+
+echo "scenario 18 (static): exact hardening exports precede the first ancestry-sensitive call"
+assert "$(hardening_violations "$SCRIPT" 'is-ancestor|git cherry')" "" "canon-reconcile-published.sh is hardened against refs/replace and grafts"
 
 [ "$fails" = 0 ] && echo "PASS: all scenarios" || { echo "FAIL: $fails assertion(s)"; exit 1; }
