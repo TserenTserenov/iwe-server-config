@@ -14,6 +14,18 @@
 #                                                      # blocked-witness-unavailable И push уже
 #                                                      # подтверждён (all_pushed: true)
 #   close --housekeeping <reason> [--agent ...]       # закрыть housekeeping-сессию
+#   close --abandon-prepared --i-understand-loss-risk # manual recovery (WP-484, peer-session
+#         --source-commit <oid> [--source-commit ...] # with Codex): PREPARED tree-proof cannot
+#                                                      # pass when a later legitimate REPLACE lands
+#                                                      # on the same paths the snapshot touched —
+#                                                      # this swaps the cryptographic proof for an
+#                                                      # explicit, audited human attestation. Every
+#                                                      # commit in close_delivery_source_commits
+#                                                      # must be named via --source-commit, exactly
+#                                                      # (partial confirmation refused); recorded
+#                                                      # forever as close_publish_proof=
+#                                                      # manual-abandon-attestation/v1, never as the
+#                                                      # normal isolate-push proof.
 #   audit [--since YYYY-MM-DD] [--cleanup-orphans [--quarantine-dead-interactive]]
 #                                                      # --quarantine-dead-interactive (WP-530 Ф53):
 #                                                      # opt-in terminal path for ordinary semaphores
@@ -23,6 +35,10 @@
 #   renew [--wp WP-N] [--slug "..."] [--agent ...]    # продлить право на коммит
 #   pre-commit-check
 #   note-file <path> [--agent ...]
+#   note-file --forget <path> [--agent ...]           # снять заявку на путь, которого нигде нет
+#                                                      # (файл создан и удалён/переименован до
+#                                                      # коммита); отказ, если путь есть на диске,
+#                                                      # в HEAD/индексе или в заявленном коммите
 #   note-commit <sha> [--repo <name>] [--agent ...]   # заявить коммит сессии: даёт commit-push.sh
 #                                                      # проверять доставку по СВОИМ коммитам,
 #                                                      # а не по состоянию всей ветки (WP-537).
@@ -82,6 +98,18 @@
 #   6 — scope gate block (staged файл вне активных сессий)
 
 set -euo pipefail
+
+# Peer session 2026-09-21-04-wp537-wp7-fmt-decisions-followup (Claude+Codex),
+# WP-7 Ф161: every ancestry check this script's publish-proof path runs --
+# `merge-base --is-ancestor` and friends (rev-list, cherry, patch-id) -- must
+# be blind to local replacement refs and legacy grafts, or a prepared copy
+# with a locally-replaced tip can make an undelivered commit look published.
+# These two exports cover every plain `git` call below (the four subprocess
+# blocks further down that explicitly rebuild os.environ already set
+# GIT_NO_REPLACE_OBJECTS themselves and are unaffected by this; they still
+# need GIT_GRAFT_FILE added individually, see those blocks).
+export GIT_NO_REPLACE_OBJECTS=1
+export GIT_GRAFT_FILE=/dev/null/iwe-no-grafts
 
 # P1(b), WP-484 п.19: several unsynced copies of this script exist on a given
 # host at once (canonical, FMT-exocortex-template, iwe-local-config); when
@@ -1615,6 +1643,86 @@ if scheduled == "1":
         if wp == wanted_wp.upper() and (agent, session) != (caller_agent, caller_session):
             print("same-WP active semaphore: " + path, file=sys.stderr)
             raise SystemExit(1)
+PY
+}
+
+_runtime_harness_session_id() {  # <agent>; guard UUID and harness UUID are distinct identities
+  local native="${CLAUDE_CODE_SESSION_ID:-}"
+  [ "$1" != "codex" ] || native="${CODEX_THREAD_ID:-$native}"
+  [ -n "$native" ] || return 0
+  [[ "$native" =~ ^[a-zA-Z0-9][a-zA-Z0-9._-]{0,255}$ ]] || return 1
+  printf '%s\n' "$native"
+}
+
+_legacy_codex_harness_session_id() {  # <semaphore>; scoped compatibility for pre-native-ID opens
+  python3 - "$1" <<'PY'
+import os
+from pathlib import Path
+import re
+import stat
+import subprocess
+import sys
+
+path = Path(sys.argv[1])
+try:
+    info = path.lstat()
+    if (not stat.S_ISREG(info.st_mode) or info.st_uid != os.geteuid()
+            or info.st_nlink != 1 or info.st_mode & 0o022 or info.st_size > 65536
+            or path.resolve() != path.absolute()):
+        raise ValueError("unsafe semaphore")
+    lines = path.read_text().splitlines()
+
+    def field(key):
+        values = [line[len(key) + 2:] for line in lines if line.startswith(key + ": ")]
+        if len(values) != 1 or not values[0]:
+            raise ValueError("missing or ambiguous " + key)
+        return values[0]
+
+    if any(line.startswith("harness_session_id:") for line in lines):
+        raise ValueError("stored harness identity cannot be replaced")
+    native = os.environ.get("CODEX_THREAD_ID", "")
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,255}", native):
+        raise ValueError("native Codex identity is absent or malformed")
+    if (field("agent") != "codex" or os.environ.get("IWE_AGENT") != "codex"
+            or field("session_id") != os.environ.get("IWE_SESSION_ID")):
+        raise ValueError("exact guard identity does not match caller")
+    worktree = Path(field("governance_worktree"))
+    actual = subprocess.run(["git", "rev-parse", "--show-toplevel"],
+                            check=True, capture_output=True, text=True, timeout=5).stdout.strip()
+    if not worktree.is_absolute() or worktree.resolve() != Path(actual).resolve():
+        raise ValueError("caller is outside the recorded worktree")
+    print(native)
+except (OSError, ValueError, subprocess.SubprocessError) as exc:
+    print("legacy Codex harness identity refused: " + str(exc), file=sys.stderr)
+    raise SystemExit(1)
+PY
+}
+
+_declared_governance_card_dir() {  # <declared worktree> <canonical governance repo>
+  python3 - "$1" "$2" <<'PY'
+from pathlib import Path
+import subprocess
+import sys
+
+def git(root, *args):
+    return subprocess.run(["git", "-C", str(root), *args], check=True,
+                          capture_output=True, text=True, timeout=5).stdout.strip()
+
+try:
+    candidate, canonical = map(Path, sys.argv[1:])
+    if not candidate.is_absolute() or candidate.resolve() != candidate:
+        raise ValueError("governance worktree must be an exact absolute path")
+    if Path(git(candidate, "rev-parse", "--show-toplevel")) != candidate:
+        raise ValueError("declared path is not a worktree root")
+    common = (candidate / git(candidate, "rev-parse", "--git-common-dir")).resolve()
+    expected = (canonical / git(canonical, "rev-parse", "--git-common-dir")).resolve()
+    entries = git(canonical, "worktree", "list", "--porcelain", "-z").split("\0")
+    if common != expected or entries.count("worktree " + str(candidate)) != 1:
+        raise ValueError("declared worktree is not registered in the governance repository")
+    print(candidate / "inbox" / "agent" / "tasks")
+except (OSError, ValueError, subprocess.SubprocessError) as exc:
+    print("governance card route refused: " + str(exc), file=sys.stderr)
+    raise SystemExit(1)
 PY
 }
 
@@ -3492,8 +3600,12 @@ QUARANTINE_DEAD_INTERACTIVE=0
 FORCE_NO_REFLECTION=""
 CANONICAL_OWNER=""
 FORCE_FLAG=0
+FORGET_FLAG=0
 UNFREEZE_REASON=""
 ISOLATE_FLAG=0
+ABANDON_PREPARED=0
+ABANDON_ACK=0
+ABANDON_SOURCE_COMMITS=()
 EXPECTED_HASH=""
 EXPECTED_ABSENT=0
 HOT_LOCK_TOKEN=""
@@ -3596,7 +3708,22 @@ while [[ $# -gt 0 ]]; do
     --cleanup-orphans) CLEANUP_ORPHANS=1; shift ;;
     --quarantine-dead-interactive) QUARANTINE_DEAD_INTERACTIVE=1; shift ;;
     --force)  FORCE_FLAG=1; shift ;;
+    --forget) FORGET_FLAG=1; shift ;;
     --isolate) ISOLATE_FLAG=1; shift ;;
+    # WP-484 (peer-session with Codex): manual recovery for a PREPARED close
+    # snapshot whose tree-proof can never pass (a later legitimate REPLACE on
+    # the same paths, not a lost commit) -- see header doc and
+    # _record_close_abandoned. Three separate flags, not one combined switch,
+    # so a caller cannot trigger the bypass by supplying only one of them
+    # (WP-7 Ф83: no flag silently ignored -- each is validated independently
+    # below).
+    --abandon-prepared) ABANDON_PREPARED=1; shift ;;
+    --i-understand-loss-risk) ABANDON_ACK=1; shift ;;
+    --source-commit)
+      if [[ $# -lt 2 || -z "$2" ]]; then
+        fail "--source-commit требует непустое значение (SHA из close_delivery_source_commits)" 1
+      fi
+      ABANDON_SOURCE_COMMITS+=("$2"); shift 2 ;;
     --force-no-reflection)
       # The reason is a required part of this flag's semantics (WP-484,
       # 08.08 -- FORCE_NO_REFLECTION is used downstream as a documented
@@ -3633,6 +3760,28 @@ fi
 # consensus turn 3 (Codex): reject both together explicitly.
 if [ "$ISOLATE_FLAG" = "1" ] && [ -n "$CANONICAL_OWNER" ]; then
   fail "--isolate и --canonical-owner взаимоисключающие: планировщик владеет каноническим чекаутом по расписанию (--canonical-owner), интерактивная сессия получает свою изолированную копию (--isolate) -- не оба сразу" 1
+fi
+
+# --abandon-prepared -- each of the three flags is meaningless alone, and the
+# combined effect (skip cryptographic delivery proof) is deliberately not
+# reachable by one flag on its own (see the flag's own comment above).
+if [ "$ABANDON_PREPARED" -eq 1 ] && [ "$CMD" != "close" ]; then
+  fail "--abandon-prepared применим только к close" 1
+fi
+if [ "$ABANDON_PREPARED" -eq 1 ] && [ "$ABANDON_ACK" -ne 1 ]; then
+  fail "--abandon-prepared требует --i-understand-loss-risk: команда закрывает PREPARED-снимок БЕЗ криптографического доказательства доставки, под ответственность вызывающего" 1
+fi
+if [ "$ABANDON_PREPARED" -eq 1 ] && [ "${#ABANDON_SOURCE_COMMITS[@]}" -eq 0 ]; then
+  fail "--abandon-prepared требует хотя бы один --source-commit <oid> -- список коммитов, доставку которых подтверждает оператор" 1
+fi
+if [ "$ABANDON_ACK" -eq 1 ] && [ "$ABANDON_PREPARED" -ne 1 ]; then
+  fail "--i-understand-loss-risk без --abandon-prepared не имеет смысла" 1
+fi
+if [ "${#ABANDON_SOURCE_COMMITS[@]}" -gt 0 ] && [ "$ABANDON_PREPARED" -ne 1 ]; then
+  fail "--source-commit применим только вместе с --abandon-prepared" 1
+fi
+if [ "$ABANDON_PREPARED" -eq 1 ] && [ -n "$HOUSEKEEPING" ]; then
+  fail "--abandon-prepared несовместим с --housekeeping (housekeeping-сессии не пишут PREPARED-снимок)" 1
 fi
 
 # --base-sha без --isolate не имеет смысла (canonical-owner режим не создаёт
@@ -4409,12 +4558,14 @@ $isolate_status_code $isolate_status_path"
   ORZ_FILE="$ORZ_SESSIONS_DIR/$ORZ_BASENAME"
   mkdir -p "$(dirname "$ORZ_FILE")"
   EFFECTIVE_OWNER_PID="${OWNER_PID:-${CLAUDE_PID:-}}"
+  OPEN_HARNESS_SESSION_ID=$(_runtime_harness_session_id "$AGENT") \
+    || fail "open: native harness session id is malformed" 1
   REUSE_EXISTING_SEMAPHORE=0
   if [ -e "$SEM_FILE" ] || [ -L "$SEM_FILE" ]; then
     _open_reentry_matches "$SEM_FILE" "$AGENT" "$SESSION_ID" "$WP" "${SLUG:-$WP}" \
       "$PERSONALITY" "${CLOSE_PATH:-unknown}" "${ISOLATED_WORKTREE_PATH:-$CURRENT_REPO_DIR}" \
       "${ISOLATED_WORKTREE_PATH:-}" "${ISOLATED_WORKTREE_BRANCH:-}" "$SCHEDULED_OWNER" \
-      "$SCHEDULED_RUN_ID" "$EFFECTIVE_OWNER_PID" "${CLAUDE_CODE_SESSION_ID:-}" \
+      "$SCHEDULED_RUN_ID" "$EFFECTIVE_OWNER_PID" "$OPEN_HARNESS_SESSION_ID" \
       "$ORZ_BASENAME" "$ORZ_SESSIONS_DIR" \
       || fail "open re-entry: existing semaphore identity/stage/sibling не совпадает; не перезаписываю" 1
     REUSE_EXISTING_SEMAPHORE=1
@@ -4444,7 +4595,7 @@ $isolate_status_code $isolate_status_path"
     # Recording it here lets the hook match its own semaphore by session
     # instead of a singleton current-<agent>.ptr that gets clobbered by a
     # second concurrent `open` of the same agent.
-    [ -n "${CLAUDE_CODE_SESSION_ID:-}" ] && echo "harness_session_id: $CLAUDE_CODE_SESSION_ID"
+    [ -n "$OPEN_HARNESS_SESSION_ID" ] && echo "harness_session_id: $OPEN_HARNESS_SESSION_ID"
     # WP-484 Ф118: read by close-runner-gate.sh/close-gate-reminder.sh to pick
     # the enforcement path instead of assuming quick-close for every session.
     echo "close_path: ${CLOSE_PATH:-unknown}"
@@ -4847,6 +4998,7 @@ is_append_safe_session_path() { # <repo-relative path>
 
 session_scope_dirty_paths() { # <semaphore> — prints only dirty registered paths
   local semaphore="$1" registered_path status scope_repo_dir sessions_repo_dir runner_card checked_dir
+  local runner_owner runner_wp runner_slug
   local canonical_fallback=0 canonical_fallback_warned=0
   # The ORZ snapshot names the worktree that owns this session's GOVERNANCE
   # work (WP cards, code). Checking the canonical checkout here makes
@@ -4886,6 +5038,17 @@ session_scope_dirty_paths() { # <semaphore> — prints only dirty registered pat
         if [ -f "$runner_card" ] \
            && grep -q '^process_id: quick-close$' "$runner_card" \
            && grep -q '^status: completed$' "$runner_card"; then
+          continue
+        fi
+        # The runner persists this step BEFORE invoking close. Its own journal
+        # cannot be clean yet; accept only the same owned release proof that
+        # the terminal gate below validates. Every ordinary artifact stays strict.
+        runner_owner=$(_unique_record_field "$semaphore" harness_session_id || true)
+        [ -n "$runner_owner" ] || runner_owner=$(_unique_record_field "$semaphore" session_id || true)
+        runner_wp=$(_unique_record_field "$semaphore" wp || true)
+        runner_slug=$(_unique_record_field "$semaphore" slug || true)
+        if _terminal_card_snapshot_sha "$runner_card" release-step \
+          "$runner_owner" "$runner_wp" "$runner_slug" >/dev/null; then
           continue
         fi
         ;;
@@ -4999,8 +5162,13 @@ _repo_scope_has_publish_proof() {  # <repo> <role> <exact semaphore> <fresh remo
   # testing this same phase's D scenario: fixing governance alone still
   # refused with "путь отсутствует или неоднозначен между репозиториями" on
   # the ORZ path.
-  python3 - "$@" "$IWE_ROOT" <<'PY'
+  # Pass definitions from this loaded guard, never source/execute the guard CLI
+  # recursively. Resolution is lazy: known scope paths keep their old checks.
+  local scope_resolver_functions
+  scope_resolver_functions=$(declare -f normalize_remote_url _resolve_repo_checkout 2>/dev/null) || scope_resolver_functions=""
+  python3 - "$@" "$IWE_ROOT" "$scope_resolver_functions" <<'PY'
 import difflib
+import hashlib
 import os
 from pathlib import Path, PurePosixPath
 import re
@@ -5008,7 +5176,7 @@ import stat
 import subprocess
 import sys
 
-repo, role, semaphore, remote, own_field, other_field, legacy_own, legacy_other, iwe_root = sys.argv[1:]
+repo, role, semaphore, remote, own_field, other_field, legacy_own, legacy_other, iwe_root, resolver_functions = sys.argv[1:]
 
 def refuse(message):
     raise SystemExit("Session CLOSE: scoped publish proof: " + message)
@@ -5055,8 +5223,16 @@ elif not own_matches and legacy_own:
         refuse("legacy " + role + " не совпадает с проверяемым checkout")
 else:
     refuse(role + " не связан с точным semaphore")
-if any(line.startswith("isolated_worktree:") for line in lines):
-    refuse("scoped fallback недопустим для isolated checkout")
+isolated = [line.partition(": ")[2] for line in lines if line.startswith("isolated_worktree:")]
+if isolated:
+    governance = [line.partition(": ")[2] for line in lines if line.startswith("governance_worktree:")]
+    # Isolation belongs to the governance checkout. A separate shared ORZ
+    # repository still needs exact scoped delivery proof, not foreign HEADs.
+    if (len(isolated) != 1 or not isolated[0] or len(governance) != 1
+            or own_field != "orz_sessions_dir"
+            or os.path.realpath(isolated[0]) != os.path.realpath(governance[0])
+            or os.path.realpath(isolated[0]) == os.path.realpath(repo)):
+        refuse("scoped fallback недопустим для isolated checkout")
 if not re.fullmatch(r"[0-9a-f]{40,64}", remote):
     refuse("нет зафиксированного remote OID")
 head = git("rev-parse", "--verify", "HEAD^{commit}").strip().decode()
@@ -5078,6 +5254,7 @@ if not scope:
 
 claimed_paths = set()
 claims = []
+other_claims = []
 for line in lines:
     if not line.startswith("commit: "):
         continue
@@ -5085,6 +5262,7 @@ for line in lines:
     if len(fields) != 2 or not re.fullmatch(r"[0-9a-fA-F]{40,64}", fields[1]):
         refuse("неоднозначный commit claim")
     if fields[0] != Path(repo).name:
+        other_claims.append(tuple(fields))
         continue
     commit = fields[1]
     parents = git("rev-list", "--parents", "-n", "1", commit).split()
@@ -5229,6 +5407,67 @@ def path_has_anchored_fallback_proof(raw_path):
         return False
     return anchored_insertions(base_blob, own_blob, published_blob)
 
+def published_untracked_session_file(path):
+    # A shared sessions checkout may stay on another writer's branch while
+    # our exact file was delivered from a separate clone. Never extend this
+    # proof to governance worktrees or staged/tracked local changes.
+    if (own_field != "orz_sessions_dir" or other_field != "governance_worktree"
+            or len(own_matches) != 1 or len(other_declared) != 1
+            or os.path.realpath(other_declared[0]) == os.path.realpath(repo)
+            or Path(repo).resolve().parent != Path(iwe_root).resolve()
+            or not (Path(repo) / ".git").is_dir()
+            or entry(head, path) or git("ls-files", "--stage", "-z", "--", path)
+            or git("status", "--porcelain", "-z", "--untracked-files=all", "--", path)
+               != b"?? " + os.fsencode(path) + b"\0"):
+        return False
+    remote_entry = entry(remote, path)
+    if not remote_entry:
+        return False
+    metadata, remote_path = remote_entry.rstrip(b"\0").split(b"\t", 1)
+    mode, kind, oid = metadata.split()
+    if kind != b"blob" or mode not in (b"100644", b"100755") or remote_path != os.fsencode(path):
+        return False
+    candidate = Path(repo) / path
+    directory = None
+    descriptor = None
+    try:
+        if candidate.resolve(strict=True) != candidate:
+            return False
+        directory = os.open(repo, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        for component in PurePosixPath(path).parts[:-1]:
+            child = os.open(component, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=directory)
+            os.close(directory)
+            directory = child
+        descriptor = os.open(PurePosixPath(path).name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK,
+                             dir_fd=directory)
+        before = os.fstat(descriptor)
+        if not stat.S_ISREG(before.st_mode):
+            return False
+        actual_mode = b"100755" if before.st_mode & stat.S_IXUSR else b"100644"
+        digest = hashlib.new("sha256" if len(oid) == 64 else "sha1")
+        digest.update(b"blob " + str(before.st_size).encode("ascii") + b"\0")
+        while chunk := os.read(descriptor, 65536):
+            digest.update(chunk)
+        if (actual_mode != mode or digest.hexdigest().encode("ascii") != oid
+                or git("ls-files", "--stage", "-z", "--", path)
+                or git("status", "--porcelain", "-z", "--untracked-files=all", "--", path)
+                   != b"?? " + os.fsencode(path) + b"\0"
+                or candidate.resolve(strict=True) != candidate):
+            return False
+        after = os.fstat(descriptor)
+        current = candidate.lstat()
+        fields = ("st_dev", "st_ino", "st_mode", "st_size", "st_mtime_ns", "st_ctime_ns")
+        return all(getattr(before, field) == getattr(after, field) == getattr(current, field)
+                   for field in fields)
+    except OSError as exc:
+        refuse("файл недоступен при проверке публикации: " + path + ": " + str(exc))
+    finally:
+        if descriptor is not None:
+            os.close(descriptor)
+        if directory is not None:
+            os.close(directory)
+
+
 relevant = set(claimed_paths)
 other_repos = [iwe_root, os.path.join(iwe_root, "memory")]
 other_prefix = other_field + ": "
@@ -5271,23 +5510,114 @@ other_repos = {os.path.realpath(path) for path in other_repos
                if os.path.lexists(Path(path) / ".git")}
 other_repos.discard(os.path.realpath(repo))
 
+def repository_identity(checkout):
+    common = os.fsdecode(git_at(checkout, "rev-parse", "--git-common-dir")).strip()
+    return os.path.realpath(os.path.join(checkout, common))
+
+own_identity = repository_identity(repo)
+other_repo_groups = {}
+for checkout in other_repos:
+    identity = repository_identity(checkout)
+    if identity != own_identity:
+        other_repo_groups.setdefault(identity, []).append(checkout)
+
 def known_path(checkout, path):
     return bool(git_at(checkout, "ls-tree", "-z", "HEAD", "--", path)
                 or git_at(checkout, "ls-files", "-z", "--", path)
                 or os.path.lexists(Path(checkout) / path))
 
+# A legacy file claim has no repository prefix. Only an otherwise unknown
+# path may use third-repository commit claims for attribution. Do not extend
+# other_repos globally: README.md in an unrelated code repo must not create a
+# new ambiguity for a path already owned by the declared governance checkout.
+resolved_other_claims = None
+
+def claimed_other_owners(path):
+    global resolved_other_claims
+    if resolved_other_claims is None:
+        if not resolver_functions:
+            refuse("разрешение заявленных репозиториев недоступно")
+        resolved_other_claims = {}
+        for name, commit in other_claims:
+            if Path(semaphore).read_bytes() != snapshot:
+                refuse("scope изменился во время разрешения репозиториев")
+            try:
+                result = subprocess.run(
+                    ["bash", "-c", resolver_functions
+                     + '\nIWE_ROOT="$1"\n_resolve_repo_checkout "$2" "$3"\n',
+                     "scope-claim-resolver", iwe_root, name, commit],
+                    stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=10,
+                )
+            except (OSError, subprocess.TimeoutExpired):
+                refuse("разрешение заявленного репозитория не выполнено: " + name)
+            if Path(semaphore).read_bytes() != snapshot:
+                refuse("scope изменился во время разрешения репозиториев")
+            if result.returncode:
+                refuse("заявленный репозиторий отсутствует или неоднозначен: " + name)
+            checkout = os.fsdecode(result.stdout).rstrip("\n")
+            if (not os.path.isabs(checkout) or "\n" in checkout
+                    or os.path.realpath(checkout) != checkout
+                    or os.fsdecode(git_at(checkout, "rev-parse", "--show-toplevel")).rstrip("\n") != checkout):
+                refuse("заявленный репозиторий не является точным checkout: " + name)
+            git_at(checkout, "cat-file", "-e", commit + "^{commit}")
+            # A genuine declared commit identifies its repository, not ownership
+            # of every path. The canonical checkout can be on another branch:
+            # exact declared trees also attribute paths absent from its HEAD.
+            # Historical attribution never replaces current MC delivery proof;
+            # publication of third-repo claims is checked separately at close.
+            # WP-484 (21.09, peer-session 2026-09-21-08): the root repository is one of
+            # other_repos, and used to be skipped here, so a NEW file published into it
+            # from an isolated copy (absent from the canonical checkout, which lags
+            # behind origin) had no owner and refused the close. This lookup runs only
+            # for a path that no repository claimed yet (owners == 0 above), so it
+            # cannot add a second owner to a path that already has one.
+            if checkout != os.path.realpath(repo):
+                resolved_other_claims.setdefault(checkout, set()).add(commit)
+    def declared_owner(checkout, commits):
+        if known_path(checkout, path):
+            return True
+        if checkout in other_repos:
+            # The root/sessions checkouts lag behind origin, so a path may be
+            # absent there yet legitimately delivered. Here the declared commit
+            # must itself ADD or CHANGE the path: a bare "the tree contains it"
+            # would let a stale or historical commit own a path it never touched.
+            return any(os.fsencode(path) in git_at(
+                checkout, "diff-tree", "-m", "--root", "--no-commit-id", "--name-only",
+                "--no-renames", "-r", "-z", commit).split(b"\0") for commit in commits)
+        return any(git_at(checkout, "ls-tree", "-z", commit, "--", path) for commit in commits)
+
+    return sum(declared_owner(checkout, commits)
+               for checkout, commits in resolved_other_claims.items())
+
 for path in scope:
     local = path in claimed_paths or known_path(repo, path) or bool(entry(remote, path))
-    owners = int(local) + sum(known_path(other, path) for other in other_repos)
-    if owners != 1:
-        refuse("путь отсутствует или неоднозначен между репозиториями: " + path)
+    owners = int(local) + sum(any(known_path(other, path) for other in checkouts)
+                              for checkouts in other_repo_groups.values())
+    if owners == 0:
+        owners = claimed_other_owners(path)
+    # WP-537 (19.09, peer session with Kimi+Codex): these two used to share one
+    # message ("путь отсутствует или неоднозначен"), and the reader could not
+    # tell which half had fired. A zero (path belongs to a repo this check does
+    # not enumerate -- DS-MCP/*, DS-IT-systems/*) then reads as an ambiguity
+    # between repos, which sends the diagnosis in exactly the wrong direction.
+    if owners == 0:
+        refuse("путь не найден ни в одном из проверяемых checkout — вероятно, "
+               "принадлежит репозиторию вне этой проверки: " + path)
+    if owners > 1:
+        refuse("путь найден в нескольких проверяемых checkout, принадлежность "
+               "неоднозначна: " + path)
     if local:
         relevant.add(path)
 material = False
+published_untracked = set()
 for path in sorted(relevant):
     flags = git("ls-files", "-v", "-z", "--", path).split(b"\0")
     if any(flag and (flag[:1].islower() or flag[:1] == b"S") for flag in flags):
         refuse("флаги индекса скрывают проверку файла: " + path)
+    if published_untracked_session_file(path):
+        published_untracked.add(path)
+        material = True
+        continue
     if git("status", "--porcelain", "-z", "--untracked-files=all", "--", path):
         refuse("собственные файлы не закоммичены: " + path)
     local_entry = entry(head, path)
@@ -5297,10 +5627,16 @@ for path in sorted(relevant):
     if not local_entry and os.path.lexists(Path(repo) / path):
         refuse("файл отсутствует в опубликованном дереве: " + path)
     material = material or bool(local_entry)
-if not material or git("rev-parse", "HEAD").strip().decode() != head:
-    refuse("пустой или изменившийся результат")
-if git("status", "--porcelain", "-z", "--untracked-files=all", "--", *sorted(relevant)):
-    refuse("собственные файлы изменились во время проверки")
+if not material:
+    refuse("пустой результат")
+for path in sorted(relevant):
+    if path in published_untracked:
+        if not published_untracked_session_file(path):
+            refuse("опубликованный файл изменился во время проверки: " + path)
+    elif git("status", "--porcelain", "-z", "--untracked-files=all", "--", path):
+        refuse("собственные файлы изменились во время проверки: " + path)
+if git("rev-parse", "HEAD").strip().decode() != head:
+    refuse("HEAD изменился во время проверки")
 if Path(semaphore).read_bytes() != snapshot:
     refuse("scope изменился во время проверки")
 PY
@@ -5392,8 +5728,8 @@ deadline = time.monotonic() + 12
 env = {key: value for key, value in os.environ.items() if not key.startswith("GIT_")}
 env.update(GIT_CONFIG_NOSYSTEM="1", GIT_CONFIG_GLOBAL=os.devnull,
            GIT_ATTR_NOSYSTEM="1", GIT_OPTIONAL_LOCKS="0",
-           GIT_NO_REPLACE_OBJECTS="1", GIT_NO_LAZY_FETCH="1",
-           GIT_TERMINAL_PROMPT="0")
+           GIT_NO_REPLACE_OBJECTS="1", GIT_GRAFT_FILE=os.devnull + "/iwe-no-grafts",
+           GIT_NO_LAZY_FETCH="1", GIT_TERMINAL_PROMPT="0")
 
 
 def git(directory, *args, allowed=(0,)):
@@ -5588,6 +5924,679 @@ except (ValueError, OSError, UnicodeError, subprocess.SubprocessError) as error:
 PY
 }
 
+# Resolve a repo NAME (as recorded in the semaphore) to its checkout root.
+# WP-537, peer session 2026-09-19-09-wp537-close-blocked-shared-checkout
+# (Claude+Kimi+Codex).
+#
+# The writer and the reader of a `commit:` claim disagreed about what a name
+# means. `note-commit` records `basename "$NC_REPO_DIR"` for anything that is
+# not the root, so a claim made from DS-MCP/mentorship-service is written as
+# `mentorship-service` -- and every reader then looked only under
+# "$IWE_ROOT/<name>", found nothing, and refused the session's own delivered
+# commit with "claimed commit не читается". Live case 19.09: five of the six
+# repos of one session were direct children of the root and resolved; two
+# (DS-MCP/mentorship-service, DS-IT-systems/neon-migrations) could not.
+#
+# The container list is deliberately fixed rather than a recursive scan. A
+# `find | head -1` would happily return a worktree under .iwe-runtime, an
+# archived copy under attic-*, or an arbitrary one of two same-named repos --
+# and a basename is not a global identity: this installation really does have
+# two `DS-ai-systems` checkouts (one at the root, one inside DS-IT-systems).
+# Ambiguity therefore refuses instead of guessing, with its own exit code so
+# callers can say WHICH failure happened -- the single blended message was
+# what cost an hour of wrong hypothesis in the session that found this.
+#
+# Two checkouts sharing one origin are one repository in two copies, not a
+# name collision -- the same identity rule `open` already uses to WARN rather
+# than block on a duplicate clone (peer session 2026-08-14-02-git-worktree-chaos,
+# consensus with Codex; regression scripts/tests/session-guard-duplicate-checkout-warn-smoke.sh).
+# This matters in practice, not in theory: all three duplicated names in this
+# installation -- DS-ai-systems, iwe-guide-web, neon-migrations -- are clones
+# of one upstream each, and neon-migrations is one of the repos this fix
+# exists for. Refusing them as "ambiguous" would have left the defect half
+# unfixed.
+#
+# Exit: 0 + root on stdout | 2 not found | 3 ambiguous (candidates on stderr).
+_resolve_repo_checkout() {  # <repo name> [<commit sha to pick the copy that has it>]
+  local name="$1" want_commit="${2:-}"
+  local container candidate toplevel physical remote identity common_dir
+  local paths="" identities="" chosen="" fallback="" count=0
+  case "$name" in
+    ""|*/*|*..*) return 2 ;;
+  esac
+  if [ "$name" = "iwe-root" ] || [ "$name" = "$(basename "$IWE_ROOT")" ]; then
+    (cd "$IWE_ROOT" 2>/dev/null && pwd -P) || return 2
+    return 0
+  fi
+  for container in "$IWE_ROOT" "$IWE_ROOT/DS-MCP" "$IWE_ROOT/DS-IT-systems" \
+                   "$IWE_ROOT/.iwe-runtime/isolated-worktrees"; do
+    candidate="$container/$name"
+    # `.git` is a directory in a normal clone and a file in a worktree/submodule.
+    [ -e "$candidate/.git" ] || continue
+    toplevel=$(git -C "$candidate" rev-parse --show-toplevel 2>/dev/null) || continue
+    physical=$(cd "$candidate" 2>/dev/null && pwd -P) || continue
+    # A plain subdirectory of a parent repo answers --show-toplevel with the
+    # PARENT's root; only a real checkout root answers with itself.
+    [ "$(cd "$toplevel" 2>/dev/null && pwd -P)" = "$physical" ] || continue
+    # An isolated session's worktree is named after the SESSION. Until the
+    # writer fix of this same phase, `note-commit` recorded that name as the
+    # repository, so every semaphore opened before it carries claims no reader
+    # could resolve -- and those semaphores belong to live sessions we must not
+    # rewrite. Normalising a linked worktree to its canonical root here is the
+    # reading half of the same rule: a worktree is a checkout of exactly one
+    # repository, and the claimed commit lives in the object database they
+    # share. For an ordinary clone the common dir's parent IS the root, so
+    # nothing changes.
+    common_dir=$(git -C "$physical" rev-parse --path-format=absolute \
+      --git-common-dir 2>/dev/null || true)
+    if [ -n "$common_dir" ] && [ -d "$(dirname "$common_dir")" ] \
+       && [ "$(dirname "$common_dir")" != "$physical" ]; then
+      physical=$(cd "$(dirname "$common_dir")" 2>/dev/null && pwd -P) || continue
+    fi
+    # Dedupe by physical root: `memory` is a symlink, and the same checkout
+    # must not count twice just because two containers reach it.
+    printf '%s' "$paths" | grep -qxF "$physical" && continue
+    remote=$(git -C "$physical" remote get-url origin 2>/dev/null) || remote=""
+    if [ -n "$remote" ]; then
+      identity=$(normalize_remote_url "$remote")
+    else
+      # Unknown identity is never evidence of sameness: keep such a candidate
+      # distinct by its own path, so it neither merges with a named repo nor
+      # with another origin-less one (Codex cold review, 19.09).
+      identity="path:$physical"
+    fi
+    paths="${paths}${physical}"$'\n'
+    identities="${identities}${identity}"$'\n'
+    count=$((count + 1))
+  done
+  [ "$count" -ne 0 ] || return 2
+  # Identity is settled BEFORE the commit is consulted. The other order would
+  # let a SHA that happens to exist in only one of two genuinely DIFFERENT
+  # repositories silently resolve a real collision.
+  if [ "$(printf '%s' "$identities" | sort -u | grep -c .)" -gt 1 ]; then
+    printf '%s' "$paths" >&2
+    return 3
+  fi
+  while IFS= read -r physical; do
+    [ -n "$physical" ] || continue
+    [ -n "$fallback" ] || fallback="$physical"
+    [ -n "$want_commit" ] || continue
+    git -C "$physical" cat-file -e "${want_commit}^{commit}" 2>/dev/null || continue
+    # Copies of one origin answer the delivery question identically -- except
+    # a shallow one, which can hold the object and still fail the ancestry
+    # proof at its shallow boundary. Prefer a full clone when there is one.
+    if [ "$(git -C "$physical" rev-parse --is-shallow-repository 2>/dev/null)" = "false" ]; then
+      chosen="$physical"
+      break
+    fi
+    [ -n "$chosen" ] || chosen="$physical"
+  done <<< "$paths"
+  printf '%s\n' "${chosen:-$fallback}"
+}
+
+_peer_metadata_claim_has_publish_proof() {  # <repo> <source> <fresh remote OID> <semaphore> <repo name>
+  # A peer session may publish one final packet instead of its intermediate
+  # metadata commits. This is deliberately narrower than generic supersession:
+  # peer evidence stays byte-identical; only verified lifecycle fields change.
+  timeout 15 python3 - "$@" <<'PY'
+import datetime
+import os
+from pathlib import Path, PurePosixPath
+import re
+import stat
+import subprocess
+import sys
+import time
+import yaml
+
+repo, source, remote, semaphore, repo_name = sys.argv[1:]
+deadline = time.monotonic() + 12
+env = {key: value for key, value in os.environ.items() if not key.startswith("GIT_")}
+env.update(GIT_CONFIG_NOSYSTEM="1", GIT_CONFIG_GLOBAL=os.devnull,
+           GIT_OPTIONAL_LOCKS="0", GIT_NO_REPLACE_OBJECTS="1",
+           GIT_GRAFT_FILE=os.devnull + "/iwe-no-grafts",
+           GIT_NO_LAZY_FETCH="1", GIT_TERMINAL_PROMPT="0")
+
+
+def git(*args, allowed=(0,)):
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        raise ValueError("proof deadline exceeded")
+    result = subprocess.run(["git", "--literal-pathspecs", "-C", repo, *args],
+                            env=env, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                            stderr=subprocess.PIPE, timeout=remaining)
+    if result.returncode not in allowed:
+        raise ValueError("Git proof failed: " + args[0])
+    return result
+
+
+class UniqueLoader(yaml.SafeLoader):
+    pass
+
+
+def unique_mapping(loader, node):
+    result = {}
+    for key_node, value_node in node.value:
+        key = loader.construct_object(key_node)
+        if not isinstance(key, str) or key in result or key == "<<":
+            raise ValueError("ambiguous metadata key")
+        result[key] = loader.construct_object(value_node)
+    return result
+
+
+UniqueLoader.add_constructor(yaml.resolver.BaseResolver.DEFAULT_MAPPING_TAG, unique_mapping)
+
+
+def mapping(raw):
+    if len(raw) > 65536 or b"\0" in raw:
+        raise ValueError("invalid metadata size")
+    if any(isinstance(token, (yaml.tokens.AliasToken, yaml.tokens.AnchorToken))
+           for token in yaml.scan(raw)):
+        raise ValueError("metadata aliases are not proof")
+    value = yaml.load(raw, Loader=UniqueLoader)
+    if not isinstance(value, dict):
+        raise ValueError("metadata is not a mapping")
+    return value
+
+
+def paths(commit):
+    return set(git("diff-tree", "--root", "--no-commit-id", "--name-only",
+                   "--no-renames", "-r", "-z", commit).stdout.split(b"\0")) - {b""}
+
+
+def linear(commit):
+    return len(git("rev-list", "--parents", "-n", "1", commit).stdout.split()) == 2
+
+
+def ancestor(older, newer):
+    return git("merge-base", "--is-ancestor", older, newer, allowed=(0, 1)).returncode == 0
+
+
+def entry(commit, path):
+    row = git("ls-tree", "-z", commit, "--", path).stdout
+    if not row or row.count(b"\0") != 1:
+        raise ValueError("missing or ambiguous artifact")
+    fields = row.split(b"\t", 1)[0].split()
+    if fields[0] not in (b"100644", b"100755") or fields[1] != b"blob":
+        raise ValueError("artifact is not a regular file")
+    return tuple(fields)
+
+
+def metadata(commit, path):
+    return mapping(git("cat-file", "blob", entry(commit, path)[2].decode()).stdout)
+
+
+def clean_files(revision, relevant):
+    if git("status", "--porcelain", "-z", "--untracked-files=all", "--", *sorted(relevant)).stdout:
+        return False
+    for path in relevant:
+        flags = git("ls-files", "-v", "-z", "--", path).stdout
+        if not flags or flags[:1].islower() or flags[:1] == b"S":
+            return False
+        local = Path(repo) / os.fsdecode(path)
+        if local.resolve() != local.absolute() or not local.is_file():
+            return False
+        expected = entry(revision, path)
+        if bool(local.lstat().st_mode & stat.S_IXUSR) != (expected[0] == b"100755"):
+            return False
+        if local.read_bytes() != git("cat-file", "blob", expected[2].decode()).stdout:
+            return False
+    return True
+
+
+def lifecycle(before, after, identity):
+    mutable = {"end_time", "status", "result_path", "publication_status"}
+    additions = {"closure_run_id", "closure_guard_session_id", "publication_target",
+                 "publication_method", "pilot_reflection", "main_publication_approved"}
+    if not set(before).issubset(after) or set(after) - set(before) - additions:
+        return False
+    if any(yaml.safe_dump(before[key], sort_keys=True) != yaml.safe_dump(after[key], sort_keys=True)
+           for key in before if key not in mutable):
+        return False
+    if (before.get("status") not in ("agreed", "completed") or after.get("status") != "completed"
+            or before.get("result_path") not in ("report-draft.md", "report.md")
+            or after.get("result_path") != "report.md"
+            or before.get("publication_status") not in ("awaiting_explicit_main_approval", "runner-managed")
+            or after.get("publication_status") != "runner-managed"):
+        return False
+    for key in ("session_id", "wp"):
+        if before.get(key) != identity[key]:
+            return False
+    start = datetime.datetime.fromisoformat(str(before.get("start_time", "")))
+    end = datetime.datetime.fromisoformat(str(after.get("end_time", "")))
+    if start.tzinfo is None or end.tzinfo is None or end < start:
+        return False
+    if before.get("end_time") not in ("", after["end_time"]):
+        return False
+    expected = {"closure_guard_session_id": identity["guard"], "publication_target": "main",
+                "publication_method": "runner-publication-recovery", "pilot_reflection": "рефлексии нет",
+                "main_publication_approved": True}
+    if any(key in after and (type(after[key]) is not type(value) or after[key] != value)
+           for key, value in expected.items()):
+        return False
+    return bool(re.fullmatch("quick-close-" + re.escape(identity["session_id"])
+                             + r"(?:-[0-9]{15,20})?", str(after.get("closure_run_id", ""))))
+
+
+try:
+    info = os.lstat(semaphore)
+    if not stat.S_ISREG(info.st_mode) or info.st_uid != os.geteuid() or info.st_nlink != 1:
+        raise ValueError("unsafe semaphore")
+    snapshot = Path(semaphore).read_bytes()
+    if len(snapshot) > 65536:
+        raise ValueError("oversized semaphore")
+    lines = snapshot.decode().splitlines()
+    def field(name):
+        values = [line[len(name) + 2:] for line in lines if line.startswith(name + ": ")]
+        if len(values) != 1 or not values[0]:
+            raise ValueError("ambiguous semaphore field: " + name)
+        return values[0]
+    slug, guard, wp = field("slug"), field("session_id"), field("wp")
+    if Path(field("orz_sessions_dir")).resolve() != Path(repo).resolve() or Path(repo).name != repo_name:
+        raise ValueError("not this session's content repository")
+    date = datetime.date.fromisoformat(slug[:10])
+    if not re.fullmatch(r"[A-Za-z0-9._-]+", slug + guard):
+        raise ValueError("unsafe identity")
+    folder = date.strftime("%Y-%m/%d/") + slug + "/"
+    meta, report = (folder + "meta.yaml").encode(), (folder + "report.md").encode()
+    scope = set()
+    for line in lines:
+        if line.startswith("file: "):
+            path = line[6:]
+            if (not path or str(PurePosixPath(path)) != path or path.startswith(("/", ":"))
+                    or ".." in PurePosixPath(path).parts or re.search(r"[\x00\r\n*?\[]", path)):
+                raise ValueError("unsafe registered path")
+            scope.add(path.encode())
+    claims = set()
+    for line in lines:
+        if line.startswith("commit: "):
+            parts = line[8:].split()
+            if len(parts) != 2 or not re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", parts[1]):
+                raise ValueError("invalid claim")
+            if parts[0] == repo_name:
+                claims.add(parts[1])
+    if source not in claims or len(claims) > 32 or not linear(source):
+        raise ValueError("missing or non-linear source claim")
+    if git("rev-parse", "refs/remotes/origin/main").stdout.strip().decode() != remote:
+        raise ValueError("remote snapshot changed")
+    original_paths = paths(source)
+    if meta not in original_paths or not original_paths.issubset(scope) or report not in scope:
+        raise ValueError("incomplete peer scope")
+    before = metadata(source, meta)
+    head = git("rev-parse", "HEAD").stdout.strip().decode()
+    publications = [claim for claim in claims if claim != source and linear(claim) and ancestor(claim, remote)]
+    revisions = [claim for claim in claims if claim != source and linear(claim)
+                 and ancestor(source, claim) and ancestor(claim, head)]
+    accepted = False
+    for revision in revisions:
+        chain = git("rev-list", "--ancestry-path", source + ".." + revision).stdout.decode().splitlines()
+        if len(chain) > 128:
+            continue
+        relevant = set(original_paths) | {report}
+        valid_chain = True
+        for commit in chain:
+            if not linear(commit):
+                valid_chain = False
+                break
+            changed = paths(commit)
+            if any(path.startswith(folder.encode()) for path in changed):
+                if commit not in claims or not linear(commit) or not changed.issubset(scope):
+                    valid_chain = False
+                    break
+                relevant.update(changed)
+        if not valid_chain or not lifecycle(before, metadata(revision, meta),
+                                           {"session_id": slug, "guard": guard, "wp": wp}):
+            continue
+        if any(entry(source, path) != entry(revision, path) for path in original_paths - {meta}):
+            continue
+        if entry(source, meta)[:2] != entry(revision, meta)[:2]:
+            continue
+        if not clean_files(revision, relevant):
+            continue
+        if any(entry(head, path) != entry(revision, path) for path in relevant):
+            continue
+        for publication in publications:
+            if not relevant.issubset(paths(publication)):
+                continue
+            if all(entry(revision, path) == entry(publication, path) == entry(remote, path)
+                   for path in relevant):
+                accepted = True
+                break
+        if accepted:
+            break
+    if not accepted:
+        raise ValueError("no exact claimed lifecycle publication")
+    if (Path(semaphore).read_bytes() != snapshot or git("rev-parse", "HEAD").stdout.strip().decode() != head
+            or git("rev-parse", "refs/remotes/origin/main").stdout.strip().decode() != remote
+            or not clean_files(revision, relevant)):
+        raise ValueError("proof inputs changed")
+    print("Session CLOSE: peer metadata lifecycle and unchanged evidence published: " + source, file=sys.stderr)
+except (ValueError, TypeError, KeyError, OSError, UnicodeError, yaml.YAMLError, subprocess.SubprocessError) as error:
+    print("Session CLOSE: peer lifecycle proof refused: " + str(error), file=sys.stderr)
+    raise SystemExit(1)
+PY
+}
+
+_code_branch_claim_has_publish_proof() {  # <semaphore> <resolved repo> <claimed commit> <repo name>
+  # Product delivery can stop at its session branch; governance/ORZ/root cannot.
+  # The frozen claim and slug choose the identity and ref. The existing runner
+  # receipt only locates the owned registered worktree; it never proves delivery.
+  python3 - "$IWE_ROOT" "$@" <<'PY'
+import os
+from pathlib import Path
+import re
+import subprocess
+import sys
+import yaml
+
+root, semaphore, repo, claimed, repo_name = sys.argv[1:]
+root, semaphore, repo = (Path(value).resolve(strict=True) for value in (root, semaphore, repo))
+
+
+def require(condition, message):
+    if not condition:
+        raise ValueError(message)
+
+
+def git(path, *args):
+    result = subprocess.run(
+        ["git", "-c", "diff.autoRefreshIndex=false", "-C", str(path), *args],
+        env={**os.environ, "GIT_OPTIONAL_LOCKS": "0", "GIT_TERMINAL_PROMPT": "0"},
+        capture_output=True, text=True, timeout=10,
+    )
+    require(result.returncode == 0, "git proof unavailable")
+    return result.stdout.strip()
+
+
+def common(path):
+    return Path(git(path, "rev-parse", "--path-format=absolute", "--git-common-dir")).resolve(strict=True)
+
+
+def origin(path):
+    value = git(path, "remote", "get-url", "origin")
+    value = re.sub(r"^[a-zA-Z][a-zA-Z0-9+.-]*://", "", value)
+    value = re.sub(r"^[^@/]*@", "", value).replace(":", "/")
+    return re.sub(r"\.git$", "", value)
+
+
+class UniqueLoader(yaml.SafeLoader):
+    pass
+
+
+def mapping(loader, node):
+    result = {}
+    for key_node, value_node in node.value:
+        key = loader.construct_object(key_node)
+        require(key not in result, "duplicate metadata key")
+        result[key] = loader.construct_object(value_node)
+    return result
+
+
+UniqueLoader.add_constructor(yaml.resolver.BaseResolver.DEFAULT_MAPPING_TAG, mapping)
+
+
+def parse_document(raw):
+    require(0 < len(raw) <= 1024 * 1024 and b"\0" not in raw, "invalid metadata size")
+    text = raw.decode()
+    match = re.match(r"^---\n(.*?)\n---(?:\n|$)", text, re.S)
+    require(match is not None, "frontmatter missing")
+    value = yaml.load(match.group(1), Loader=UniqueLoader)
+    require(isinstance(value, dict), "metadata must be a mapping")
+    return value, raw
+
+
+try:
+    require(semaphore.is_file() and not semaphore.is_symlink(), "regular semaphore required")
+    metadata, sem_snapshot = parse_document(semaphore.read_bytes())
+    slug, owner = metadata.get("slug"), metadata.get("session_id")
+    require(isinstance(slug, str) and re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,255}", slug), "invalid session slug")
+    require(isinstance(owner, str) and owner, "session owner missing")
+    require(f"commit: {repo_name} {claimed}" in sem_snapshot.decode().splitlines(), "claim is not session-owned")
+    repo_common, repo_origin = common(repo), origin(repo)
+    require(repo_common.name == ".git" and repo_common.parent.parent in {
+        root / "DS-MCP", root / "DS-IT-systems"
+    }, "not a product checkout")
+    protected = [root]
+    for field in ("governance_worktree", "orz_sessions_dir"):
+        value = metadata.get(field)
+        require(isinstance(value, str) and Path(value).is_absolute(), "protected identity missing")
+        protected.append(Path(value).resolve(strict=True))
+    for path in protected:
+        require(common(path) != repo_common and origin(path) != repo_origin, "protected repository requires main")
+
+    listing = git(repo, "worktree", "list", "--porcelain", "-z").split("\0")
+    registered = [Path(item[9:]) for item in listing if item.startswith("worktree ")]
+    candidates = []
+    governance = Path(metadata["governance_worktree"])
+    source_heads = re.findall(r"^close_delivery_source_head: ([0-9a-f]{40,64})$", sem_snapshot.decode(), re.M)
+    require(len(source_heads) == 1, "frozen source HEAD missing or ambiguous")
+    source_head = source_heads[0]
+    paths = git(governance, "ls-tree", "-r", "--name-only", source_head, "--", "inbox/agent/tasks").splitlines()
+    for card_name in paths:
+        if not re.fullmatch(r"inbox/agent/tasks/RUN-quick-close-" + re.escape(slug) + r"(?:-[0-9]{15,20})?\.md", card_name):
+            continue
+        blob = git(governance, "show", f"{source_head}:{card_name}")
+        card, snapshot = parse_document(blob.encode())
+        if (card.get("process_id") != "quick-close" or card.get("owner_session_id") != owner
+                or card.get("requested_slug") != slug):
+            continue
+        receipt = (card.get("results") or {}).get("commit-push") or {}
+        if receipt.get("all_pushed") is not True or receipt.get("failed"):
+            continue
+        for item in receipt.get("pushed", []):
+            name, sha = item.get("repo"), item.get("sha")
+            if not isinstance(name, str) or not isinstance(sha, str) or not re.fullmatch(r"[0-9a-f]{40,64}", sha):
+                continue
+            worktree = root / name
+            if (not worktree.is_absolute() or not worktree.exists()
+                    or worktree.resolve() != worktree or registered.count(worktree) != 1):
+                continue
+            if common(worktree) == repo_common:
+                candidates.append((worktree, sha))
+    require(len(candidates) == 1, "owned delivery worktree missing or ambiguous")
+    worktree, head = candidates[0]
+    branch_ref, remote_ref = f"refs/heads/{slug}", f"refs/remotes/origin/{slug}"
+
+    def source_snapshot():
+        require(origin(worktree) == repo_origin and common(worktree) == repo_common, "repository identity changed")
+        require(git(worktree, "symbolic-ref", "HEAD") == branch_ref, "not the exact session branch")
+        require(git(worktree, "rev-parse", "HEAD") == head, "receipt source HEAD changed")
+        require(git(worktree, "config", "--get", f"branch.{slug}.remote") == "origin", "foreign upstream remote")
+        require(git(worktree, "config", "--get", f"branch.{slug}.merge") == branch_ref, "foreign upstream ref")
+        require(not git(worktree, "status", "--porcelain", "--untracked-files=all"), "dirty source worktree")
+        flags = git(worktree, "ls-files", "-v", "-z").split("\0")
+        require(all(not line or line.startswith("H ") for line in flags), "hidden index flags")
+        require(semaphore.read_bytes() == sem_snapshot, "session snapshot changed")
+
+    source_snapshot()
+    git(worktree, "merge-base", "--is-ancestor", claimed, head)
+    git(worktree, "fetch", "--quiet", "--no-tags", "origin", f"+{branch_ref}:{remote_ref}")
+    remote_oid = git(worktree, "rev-parse", "--verify", f"{remote_ref}^{{commit}}")
+    git(worktree, "merge-base", "--is-ancestor", head, remote_oid)
+    git(worktree, "merge-base", "--is-ancestor", claimed, remote_oid)
+    source_snapshot()
+    print(f"Session CLOSE: exact code claim delivered to {branch_ref}: {claimed}", file=sys.stderr)
+except (OSError, ValueError, TypeError, KeyError, AttributeError, subprocess.SubprocessError, yaml.YAMLError) as exc:
+    print(f"Session CLOSE: code branch proof refused: {exc}", file=sys.stderr)
+    raise SystemExit(1)
+PY
+}
+
+_claimed_source_chain_has_publish_proof() {  # <repo> <source> <fresh main OID> <exact semaphore> <repo name>
+  # Explicitly claimed report corrections may supersede an earlier packet.
+  # Every commit, including intermediate edits, must already be frozen; this
+  # is not a lifecycle heuristic or permission to search arbitrary peer history.
+  timeout 15 python3 - "$@" <<'PY'
+import json
+import os
+from pathlib import Path, PurePosixPath
+import re
+import stat
+import subprocess
+import sys
+import time
+
+repo, source, remote, semaphore, repo_name = sys.argv[1:]
+deadline = time.monotonic() + 12
+env = {key: value for key, value in os.environ.items() if not key.startswith("GIT_")}
+env.update(GIT_CONFIG_NOSYSTEM="1", GIT_CONFIG_GLOBAL=os.devnull,
+           GIT_OPTIONAL_LOCKS="0", GIT_NO_REPLACE_OBJECTS="1",
+           GIT_GRAFT_FILE=os.devnull + "/iwe-no-grafts",
+           GIT_NO_LAZY_FETCH="1", GIT_TERMINAL_PROMPT="0")
+
+
+def git(*args, allowed=(0,)):
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        raise ValueError("proof deadline exceeded")
+    result = subprocess.run(["git", "--literal-pathspecs", "-C", repo, *args],
+                            env=env, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                            stderr=subprocess.PIPE, timeout=remaining)
+    if result.returncode not in allowed:
+        raise ValueError("Git proof failed: " + args[0])
+    return result
+
+
+def changed_paths(commit):
+    return set(git("diff-tree", "--no-commit-id", "--name-only", "--no-renames",
+                   "-r", "-z", commit).stdout.split(b"\0")) - {b""}
+
+
+def parents(commit):
+    return git("rev-list", "--parents", "-n", "1", commit).stdout.decode().split()[1:]
+
+
+def ancestor(older, newer):
+    return git("merge-base", "--is-ancestor", older, newer, allowed=(0, 1)).returncode == 0
+
+
+def entry(commit, path):
+    row = git("ls-tree", "-z", commit, "--", path).stdout
+    if not row or row.count(b"\0") != 1:
+        raise ValueError("missing or ambiguous final artifact")
+    fields = row.split(b"\t", 1)[0].split()
+    if fields[0] not in (b"100644", b"100755") or fields[1] != b"blob":
+        raise ValueError("final artifact is not a regular file")
+    return tuple(fields)
+
+
+def current_files_match(revision, relevant):
+    for path in relevant:
+        expected = entry(revision, path)
+        local = Path(repo) / os.fsdecode(path)
+        if local.resolve() != local.absolute() or not local.is_file():
+            return False
+        if bool(local.lstat().st_mode & stat.S_IXUSR) != (expected[0] == b"100755"):
+            return False
+        if local.read_bytes() != git("cat-file", "blob", expected[2].decode()).stdout:
+            return False
+        index = git("ls-files", "--stage", "-z", "--", path).stdout
+        if index:
+            if index.count(b"\0") != 1:
+                return False
+            mode, oid, stage = index.split(b"\t", 1)[0].split()
+            if (mode, b"blob", oid) != expected or stage != b"0":
+                return False
+            flags = git("ls-files", "-v", "-z", "--", path).stdout
+            if not flags or flags[:1].islower() or flags[:1] == b"S":
+                return False
+            if git("status", "--porcelain", "-z", "--untracked-files=all", "--", path).stdout:
+                return False
+        elif git("ls-tree", "-z", "HEAD", "--", path).stdout:
+            # A staged deletion must not masquerade as an untracked artifact.
+            return False
+        elif git("status", "--porcelain", "-z", "--untracked-files=all", "--", path).stdout != b"?? " + path + b"\0":
+            # Ignored files are not declared untracked delivery artifacts.
+            return False
+    return True
+
+
+try:
+    info = os.lstat(semaphore)
+    if not stat.S_ISREG(info.st_mode) or info.st_uid != os.geteuid() or info.st_nlink != 1:
+        raise ValueError("unsafe semaphore")
+    snapshot = Path(semaphore).read_bytes()
+    if len(snapshot) > 65536:
+        raise ValueError("oversized semaphore")
+    lines = snapshot.decode().splitlines()
+
+    def field(name):
+        values = [line[len(name) + 2:] for line in lines if line.startswith(name + ": ")]
+        if len(values) != 1 or not values[0]:
+            raise ValueError("ambiguous semaphore field: " + name)
+        return values[0]
+
+    if (Path(field("orz_sessions_dir")).resolve() != Path(repo).resolve()
+            or Path(repo).name != repo_name or field("close_path") != "peer-session"):
+        raise ValueError("not this peer session's content repository")
+    rows = [line[8:] for line in lines if line.startswith("commit: ")]
+    frozen = json.loads(field("close_delivery_claimed_commits"))
+    if (not isinstance(frozen, list) or any(not isinstance(row, str) for row in frozen)
+            or len(rows) > 32 or sorted(set(rows)) != sorted(frozen)):
+        raise ValueError("claims differ from frozen delivery")
+    claims = set()
+    for row in rows:
+        parts = row.split()
+        if len(parts) != 2 or not re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", parts[1]):
+            raise ValueError("invalid frozen claim")
+        if parts[0] == repo_name:
+            claims.add(parts[1])
+    if source not in claims or len(parents(source)) != 1:
+        raise ValueError("source is not a frozen linear claim")
+    scope = set()
+    for line in lines:
+        if line.startswith("file: "):
+            path = line[6:]
+            if (not path or str(PurePosixPath(path)) != path or path.startswith(("/", ":"))
+                    or ".." in PurePosixPath(path).parts or re.search(r"[\x00\r\n*?\[]", path)):
+                raise ValueError("unsafe registered path")
+            scope.add(path.encode())
+    if git("rev-parse", "refs/remotes/origin/main").stdout.strip().decode() != remote:
+        raise ValueError("remote snapshot changed")
+    head = git("rev-parse", "HEAD").stdout
+    publications = [claim for claim in sorted(claims)
+                    if len(parents(claim)) == 1 and ancestor(claim, remote)]
+    revisions = [claim for claim in sorted(claims) if claim != source and ancestor(source, claim)]
+    accepted = False
+    for revision in revisions:
+        chain = git("rev-list", "--reverse", source + ".." + revision).stdout.decode().splitlines()
+        if not chain or len(chain) > 32 or not set(chain).issubset(claims):
+            continue
+        relevant = changed_paths(source)
+        previous = source
+        valid = bool(relevant) and relevant.issubset(scope)
+        for commit in chain:
+            changed = changed_paths(commit)
+            if parents(commit) != [previous] or not changed or not changed.issubset(scope):
+                valid = False
+                break
+            relevant.update(changed)
+            previous = commit
+        if not valid or len(relevant) > 64 or not current_files_match(revision, relevant):
+            continue
+        for publication in publications:
+            if not relevant.issubset(changed_paths(publication)):
+                continue
+            if all(entry(revision, path) == entry(publication, path) == entry(remote, path)
+                   for path in relevant):
+                accepted = True
+                break
+        if accepted:
+            break
+    if not accepted:
+        raise ValueError("no exact published frozen source chain")
+    if (Path(semaphore).read_bytes() != snapshot or git("rev-parse", "HEAD").stdout != head
+            or git("rev-parse", "refs/remotes/origin/main").stdout.strip().decode() != remote
+            or not current_files_match(revision, relevant)):
+        raise ValueError("proof inputs changed")
+    print("Session CLOSE: frozen source chain published exactly: " + source + " -> " + revision,
+          file=sys.stderr)
+except (ValueError, TypeError, KeyError, OSError, UnicodeError, subprocess.SubprocessError) as error:
+    print("Session CLOSE: frozen source chain proof refused: " + str(error), file=sys.stderr)
+    raise SystemExit(1)
+PY
+}
+
 _claimed_commits_have_publish_proof() {  # <semaphore>
   local semaphore="$1" entry repo_name commit_sha repo_dir fetched=""
   while IFS= read -r entry; do
@@ -5598,11 +6607,13 @@ _claimed_commits_have_publish_proof() {  # <semaphore>
       && [[ "$repo_name" =~ ^[A-Za-z0-9._-]+$ ]] \
       && [[ "$commit_sha" =~ ^[0-9a-fA-F]{40,64}$ ]] \
       || { echo "Session CLOSE: malformed commit claim: $entry" >&2; return 1; }
-    if [ "$repo_name" = "iwe-root" ] || [ "$repo_name" = "$(basename "$IWE_ROOT")" ]; then
-      repo_dir="$IWE_ROOT"
-    else
-      repo_dir="$IWE_ROOT/$repo_name"
-    fi
+    repo_dir=$(_resolve_repo_checkout "$repo_name" "$commit_sha") || {
+      case $? in
+        3) echo "Session CLOSE: закрытие отклонено — имя '$repo_name' принадлежит нескольким checkout с РАЗНЫМИ origin, заявка не указывает, о каком из них речь (кандидаты выше): $repo_name $commit_sha" >&2 ;;
+        *) echo "Session CLOSE: закрытие отклонено — репозиторий заявки не найден среди известных checkout (корень, \$IWE_ROOT/*, DS-MCP/*, DS-IT-systems/*): $repo_name $commit_sha" >&2 ;;
+      esac
+      return 1
+    }
     git -C "$repo_dir" cat-file -e "$commit_sha^{commit}" 2>/dev/null \
       || { echo "Session CLOSE: claimed commit не читается: $repo_name $commit_sha" >&2; return 1; }
     if ! printf '%s\n' "$fetched" | grep -qxF "$repo_dir"; then
@@ -5614,6 +6625,9 @@ _claimed_commits_have_publish_proof() {  # <semaphore>
       fetched="${fetched}${repo_dir}"$'\n'
     fi
     if git -C "$repo_dir" merge-base --is-ancestor "$commit_sha" refs/remotes/origin/main 2>/dev/null; then
+      continue
+    fi
+    if _code_branch_claim_has_publish_proof "$semaphore" "$repo_dir" "$commit_sha" "$repo_name"; then
       continue
     fi
     # isolate-push delivers linear commits by cherry-picking them onto fresh
@@ -5634,6 +6648,8 @@ _claimed_commits_have_publish_proof() {  # <semaphore>
         || return 1
       _commit_current_tree_has_publish_proof "$repo_dir" "$commit_sha" "$current_remote" \
         || _commit_claim_supersession_has_publish_proof "$repo_dir" "$commit_sha" "$current_remote" "$semaphore" "$repo_name" \
+        || _peer_metadata_claim_has_publish_proof "$repo_dir" "$commit_sha" "$current_remote" "$semaphore" "$repo_name" \
+        || _claimed_source_chain_has_publish_proof "$repo_dir" "$commit_sha" "$current_remote" "$semaphore" "$repo_name" \
         || { echo "Session CLOSE: claimed commit не имеет OID, patch, точного текущего tree или проверенного supersession proof в origin/main: $repo_name $commit_sha" >&2; return 1; }
     else
       local wanted_patch candidate candidate_patch matched=0
@@ -5779,7 +6795,7 @@ if mode in {"completed", "marker-completed", "owner-completed"}:
 elif mode == "release-step":
     verify_result = results.get("verify-r23")
     verdict = verify_result.get("verdict") if isinstance(verify_result, dict) else None
-    if status != "running" or step != "session-guard-release" or verdict in (None, "", "null", "~"):
+    if status != "running" or step != "session-guard-release" or verdict != "pass":
         raise SystemExit(1)
 elif mode == "archive-cancelled":
     if status != "cancelled" or step != "wp-archive-run":
@@ -6074,13 +7090,11 @@ for key in publish_keys:
         raise SystemExit(1)
     published[key] = found[0]
 if (
-    published["close_publish_proof"] != "isolate-push-exit0/v1"
-    or published["close_publish_session_id"] != expected_session
+    published["close_publish_session_id"] != expected_session
     or published["close_publish_prepare_digest"] != digest
     or published["close_publish_source_head"] != fields["close_delivery_source_head"]
     or published["close_publish_source_status_sha256"] != fields["close_delivery_source_status_sha256"]
     or published["close_publish_terminal_sha256"] != fields["close_delivery_terminal_sha256"]
-    or not re.fullmatch(r"[0-9a-f]{40,64}", published["close_publish_remote_main_sha"])
 ):
     raise SystemExit(1)
 try:
@@ -6089,16 +7103,48 @@ except (TypeError, ValueError):
     raise SystemExit(1)
 if verified != expected:
     raise SystemExit(1)
-publish_payload = {
-    "proof": published["close_publish_proof"],
-    "session_id": published["close_publish_session_id"],
-    "prepare_digest": digest,
-    "source_head": published["close_publish_source_head"],
-    "source_status_sha256": published["close_publish_source_status_sha256"],
-    "terminal_sha256": published["close_publish_terminal_sha256"],
-    "remote_main_sha": published["close_publish_remote_main_sha"],
-    "verified_commits": verified,
-}
+proof = published["close_publish_proof"]
+if proof == "isolate-push-exit0/v1":
+    if not re.fullmatch(r"[0-9a-f]{40,64}", published["close_publish_remote_main_sha"]):
+        raise SystemExit(1)
+    publish_payload = {
+        "proof": proof,
+        "session_id": published["close_publish_session_id"],
+        "prepare_digest": digest,
+        "source_head": published["close_publish_source_head"],
+        "source_status_sha256": published["close_publish_source_status_sha256"],
+        "terminal_sha256": published["close_publish_terminal_sha256"],
+        "remote_main_sha": published["close_publish_remote_main_sha"],
+        "verified_commits": verified,
+    }
+elif proof == "manual-abandon-attestation/v1":
+    # WP-484 (peer-session with Codex): the cryptographic tree-proof this
+    # closes cannot succeed once a later legitimate REPLACE lands on the same
+    # paths the PREPARED snapshot touched. This branch validates the
+    # attestation record written by _record_close_abandoned instead -- it is
+    # deliberately a distinct proof identity, never mistaken for the
+    # cryptographic isolate-push path above (self-check below still binds it
+    # to this exact prepare_digest/source_head/terminal_sha).
+    if published["close_publish_remote_main_sha"] != "abandoned":
+        raise SystemExit(1)
+    abandoned_by_values = values("close_publish_abandoned_by")
+    abandoned_at_values = values("close_publish_abandoned_at")
+    if len(abandoned_by_values) != 1 or not abandoned_by_values[0]:
+        raise SystemExit(1)
+    if len(abandoned_at_values) != 1 or not abandoned_at_values[0]:
+        raise SystemExit(1)
+    publish_payload = {
+        "proof": proof,
+        "session_id": published["close_publish_session_id"],
+        "prepare_digest": digest,
+        "source_head": published["close_publish_source_head"],
+        "source_status_sha256": published["close_publish_source_status_sha256"],
+        "terminal_sha256": published["close_publish_terminal_sha256"],
+        "abandoned_commits": verified,
+        "abandoned_by": abandoned_by_values[0],
+    }
+else:
+    raise SystemExit(1)
 publish_digest = hashlib.sha256(
     json.dumps(publish_payload, sort_keys=True, separators=(",", ":")).encode()
 ).hexdigest()
@@ -6328,6 +7374,65 @@ print(json.dumps({
     "close_publish_remote_main_sha": remote,
     "close_publish_verified_commits": json.dumps(verified, separators=(",", ":")),
     "close_publish_digest": digest,
+}, separators=(",", ":")))
+PY
+  ) || return 1
+  _append_close_fields_atomic "$1" "$fields_json" || return 1
+  digest=$(_unique_record_field "$1" close_publish_digest || true)
+  [ -n "$digest" ] || return 1
+  printf '%s\n' "$digest"
+}
+
+_abandon_prepared_matches_source() {  # <semaphore> <source-commit>...
+  local semaphore="$1"; shift
+  local recorded_json
+  recorded_json=$(_unique_record_field "$semaphore" close_delivery_source_commits) || return 1
+  python3 - "$recorded_json" "$@" <<'PY' 2>/dev/null
+import json
+import sys
+
+recorded = json.loads(sys.argv[1])
+supplied = sys.argv[2:]
+if not isinstance(recorded, list) or len(supplied) != len(set(supplied)):
+    raise SystemExit(1)
+raise SystemExit(0 if sorted(c.lower() for c in recorded) == sorted(c.lower() for c in supplied) else 1)
+PY
+}
+
+_record_close_abandoned() {  # <semaphore> <session> <prepare-digest> <source-commits-json> <source-head> <source-status> <terminal-sha> <agent>
+  local fields_json digest
+  fields_json=$(python3 - "$2" "$3" "$4" "$5" "$6" "$7" "$8" <<'PY'
+import hashlib
+import json
+import sys
+import time
+
+session, prepare, commits_json, source_head, source_status, terminal_sha, agent = sys.argv[1:]
+commits = json.loads(commits_json)
+abandoned_at = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+payload = {
+    "proof": "manual-abandon-attestation/v1",
+    "session_id": session,
+    "prepare_digest": prepare,
+    "source_head": source_head,
+    "source_status_sha256": source_status,
+    "terminal_sha256": terminal_sha,
+    "abandoned_commits": commits,
+    "abandoned_by": agent,
+}
+digest = hashlib.sha256(json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+print(json.dumps({
+    "close_publish_proof": "manual-abandon-attestation/v1",
+    "close_publish_session_id": session,
+    "close_publish_prepare_digest": prepare,
+    "close_publish_source_head": source_head,
+    "close_publish_source_status_sha256": source_status,
+    "close_publish_terminal_sha256": terminal_sha,
+    "close_publish_remote_main_sha": "abandoned",
+    "close_publish_verified_commits": json.dumps(commits, separators=(",", ":")),
+    "close_publish_digest": digest,
+    "close_publish_abandoned_by": agent,
+    "close_publish_abandoned_at": abandoned_at,
 }, separators=(",", ":")))
 PY
   ) || return 1
@@ -6605,6 +7710,77 @@ finally:
 PY
 }
 
+_runner_release_retry_snapshot_sha() {  # <semaphore> <same frozen card path>
+  local semaphore="$1" card="$2" owner wp slug current_sha
+  owner=$(_unique_record_field "$semaphore" harness_session_id || true)
+  [ -n "$owner" ] || owner=$(_legacy_codex_harness_session_id "$semaphore" || true)
+  [ -n "$owner" ] || return 1
+  wp=$(_unique_record_field "$semaphore" wp) || return 1
+  slug=$(_unique_record_field "$semaphore" slug) || return 1
+  current_sha=$(_terminal_card_snapshot_sha "$card" release-step "$owner" "$wp" "$slug") || return 1
+  # A runner updates its release result and stage on every failed attempt.
+  # Accept that progress only from its own audited write, after validating
+  # the same owner/WP/slug/release gate again. PREPARED bytes stay immutable;
+  # source HEAD, scope, claims and fresh main proof remain separate gates.
+  python3 - "$card" "$IWE_ROOT/.iwe-runtime/run-card-audit" <<'PY' || return 1
+import hashlib
+import json
+import os
+from pathlib import Path
+import stat
+import sys
+import yaml
+
+card, audit_root = map(Path, sys.argv[1:])
+
+def owned_bytes(path, limit):
+    fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+    try:
+        info = os.fstat(fd)
+        if (not stat.S_ISREG(info.st_mode) or info.st_uid != os.geteuid()
+                or info.st_nlink != 1 or not 0 < info.st_size <= limit):
+            raise ValueError("not an owned bounded file")
+        with os.fdopen(fd, "rb", closefd=False) as stream:
+            raw = stream.read(limit + 1)
+        current = os.lstat(path)
+        if ((current.st_dev, current.st_ino) != (info.st_dev, info.st_ino)
+                or len(raw) != info.st_size or not raw.endswith(b"\n")):
+            raise ValueError("snapshot changed")
+        return raw
+    finally:
+        os.close(fd)
+
+try:
+    raw = owned_bytes(card, 1024 * 1024)
+    _, metadata, body = raw.decode().split("---\n", 2)
+    doc = yaml.safe_load(metadata)
+    expected_body = ("\n# Карточка запуска: quick-close\n\n"
+                     "Автоматически обновляется `process-runner.py`. Не редактировать руками -- "
+                     "карточка производная, source-of-truth = `~/.iwe/gate-decisions.jsonl` "
+                     "и сам раннер (DP.SC.054 инвариант 3).\n")
+    if body != expected_body or doc.get("kind") != "process-run":
+        raise ValueError("not a derived runner body")
+    if doc["results"]["commit-push"].get("all_pushed") is not True:
+        raise ValueError("publication did not succeed")
+    if not any(item.get("step") == "session-guard-release" and item.get("type") == "reflex"
+               for item in doc.get("history", [])):
+        raise ValueError("no previous release attempt")
+    run_id = doc["run_id"]
+    if card.name != "RUN-" + run_id + ".md" or audit_root.resolve() != audit_root:
+        raise ValueError("audit route changed")
+    event = json.loads(owned_bytes(audit_root / (run_id + ".jsonl"), 8 * 1024 * 1024).splitlines()[-1])
+    expected = dict(actor="process-runner", event="written", process_id="quick-close",
+                    run_id=run_id, status="running", card_path=str(card),
+                    sha256=hashlib.sha256(raw).hexdigest())
+    if any(event.get(key) != value for key, value in expected.items()):
+        raise ValueError("current card is not the runner's audited write")
+except (OSError, ValueError, KeyError, TypeError, AttributeError, yaml.YAMLError):
+    raise SystemExit(1)
+PY
+  [ "$(_terminal_card_snapshot_sha "$card" release-step "$owner" "$wp" "$slug" || true)" = "$current_sha" ] || return 1
+  printf '%s\n' "$current_sha"
+}
+
 _prepared_source_snapshot_matches() {  # <semaphore> <worktree>
   local semaphore="$1" worktree="$2" expected_head expected_common expected_status
   local expected_base expected_commits expected_claims terminal_kind terminal_ref terminal_sha
@@ -6638,7 +7814,12 @@ _prepared_source_snapshot_matches() {  # <semaphore> <worktree>
   actual_claims=$(_session_commit_claims_json "$semaphore" || true)
   [ "$actual_claims" = "$expected_claims" ] || return 1
   actual_terminal=$(_terminal_proof_snapshot_sha "$terminal_kind" "$terminal_ref" || true)
-  [ -n "$actual_terminal" ] && [ "$actual_terminal" = "$terminal_sha" ] || return 1
+  [ -n "$actual_terminal" ] || return 1
+  if [ "$actual_terminal" != "$terminal_sha" ]; then
+    [ "$terminal_kind" = "file" ] || return 1
+    [ "$(_runner_release_retry_snapshot_sha "$semaphore" "$terminal_ref" || true)" = "$actual_terminal" ] || return 1
+    printf 'Session CLOSE: повторный release подтверждён записью раннера; PREPARED сохранён, current terminal=%s\n' "$actual_terminal" >&2
+  fi
 }
 
 _publish_prepared_source() {  # <semaphore> <worktree> <isolate-push-script>
@@ -6654,12 +7835,19 @@ if not isinstance(value, list):
 print(len(value))
 PY
   ) || return 1
+  # A previous attempt may have delivered the final prepared snapshot with
+  # rewritten OIDs. Replaying its intermediate commits can then conflict
+  # with that same delivered result. Reuse the full-set proof on fresh main;
+  # the caller still checks the immutable snapshot, claims and receipt.
+  timeout 10 git -C "$worktree" fetch --quiet origin \
+    '+refs/heads/main:refs/remotes/origin/main' 2>/dev/null || return 1
+  if _prepared_source_set_has_publish_proof "$semaphore" "$worktree"; then
+    return 0
+  fi
   if [ "$commit_count" -eq 0 ]; then
     # An empty prepared set is already-delivered evidence, not permission to
     # recalculate a moving range.  Calling ordinary isolate-push here would
     # publish a commit created after PREPARED before the post-check noticed.
-    timeout 10 git -C "$worktree" fetch --quiet origin \
-      '+refs/heads/main:refs/remotes/origin/main' 2>/dev/null || return 1
     commit=$(_unique_record_field "$semaphore" close_delivery_source_head) || return 1
     git -C "$worktree" merge-base --is-ancestor "$commit" refs/remotes/origin/main 2>/dev/null
     return $?
@@ -6683,15 +7871,19 @@ _prepared_source_set_has_publish_proof() {  # <semaphore> <worktree>, fresh orig
 import difflib
 import json
 import os
+from pathlib import Path
+import re
 import subprocess
 import sys
+import tempfile
+import time
 
 semaphore, worktree = sys.argv[1:]
+snapshot = Path(semaphore).read_bytes()
 
 def field(key):
     prefix = (key + ": ").encode()
-    with open(semaphore, "rb") as source:
-        values = [line[len(prefix):].rstrip(b"\n") for line in source if line.startswith(prefix)]
+    values = [line[len(prefix):] for line in snapshot.splitlines() if line.startswith(prefix)]
     if len(values) != 1 or not values[0]:
         raise SystemExit(1)
     return values[0].decode("utf-8")
@@ -6849,10 +8041,173 @@ def path_has_anchored_fallback_proof(raw_path):
         return False
     return anchored_insertions(base_blob, own_blob, published_blob)
 
+def runtime_reap_superseded(raw_path):
+    # A stale local reaper must not roll back another run's published lifecycle.
+    import yaml
+
+    path = os.fsdecode(raw_path)
+    if not re.fullmatch(r"inbox/agent/tasks/RUN-[A-Za-z0-9._-]+\.md", path):
+        return False
+
+    class UniqueLoader(yaml.SafeLoader):
+        pass
+
+    def unique_mapping(loader, node):
+        result = {}
+        for key_node, value_node in node.value:
+            key = loader.construct_object(key_node)
+            if not isinstance(key, str) or key in result or key == "<<":
+                raise ValueError("ambiguous runtime metadata")
+            result[key] = loader.construct_object(value_node)
+        return result
+
+    UniqueLoader.add_constructor(yaml.resolver.BaseResolver.DEFAULT_MAPPING_TAG, unique_mapping)
+
+    def read_card(revision):
+        entry = blob_entry_fields(revision, raw_path)
+        if entry is None or entry[:2] != (b"100644", b"blob"):
+            raise ValueError("runtime card is not a regular file")
+        raw = blob_by_oid(entry[2])
+        if raw is None or len(raw) > 1048576 or not raw.startswith(b"---\n"):
+            raise ValueError("runtime card frontmatter is missing")
+        _, frontmatter, body = raw.split(b"---\n", 2)
+        if any(isinstance(token, (yaml.tokens.AliasToken, yaml.tokens.AnchorToken))
+               for token in yaml.scan(frontmatter)):
+            raise ValueError("runtime metadata aliases are not proof")
+        card = yaml.load(frontmatter, Loader=UniqueLoader)
+        if not isinstance(card, dict):
+            raise ValueError("runtime metadata is not a mapping")
+        return card, body
+
+    try:
+        source, source_body = read_card(source_head)
+        target, target_body = read_card(remote_head)
+        expected_file = "inbox/agent/tasks/RUN-" + str(source.get("run_id")) + ".md"
+        own_harness = [line.split(b": ", 1)[1].decode() for line in snapshot.splitlines()
+                       if line.startswith(b"harness_session_id: ")]
+        current_owner = (own_harness[0] if len(own_harness) == 1 else
+                         os.environ.get("CODEX_THREAD_ID") or field("session_id"))
+        if (source.get("kind") != "process-run" or source.get("process_id") != "quick-close"
+                or path != expected_file or source.get("status") != "cancelled"
+                or source.get("cancel_reason") != "auto_reaped_orphan"
+                or target.get("status") not in {"completed", "failed", "cancelled"}
+                or target.get("cancel_reason") == "auto_reaped_orphan"
+                or not source.get("requested_slug") or source["requested_slug"] == field("slug")
+                or source.get("owner_session_id") == current_owner or source_body != target_body):
+            return False
+        lifecycle = {"results", "stage_entered_at", "reaped_level", "cancel_reason",
+                     "completed_at", "reaped_at", "current_step", "history", "status"}
+        if any(source.get(key) != target.get(key) for key in (set(source) | set(target)) - lifecycle):
+            return False
+        history, published_history = source.get("history"), target.get("history")
+        results, published_results = source.get("results"), target.get("results")
+        return (isinstance(history, list) and bool(history) and isinstance(published_history, list)
+                and len(published_history) > len(history) and published_history[:len(history)] == history
+                and isinstance(results, dict) and isinstance(published_results, dict)
+                and set(results).issubset(published_results))
+    except (ValueError, TypeError, UnicodeError, yaml.YAMLError):
+        return False
+
+def path_absorbs_prepared_text(raw_path):
+    # Compose independent proofs: a shared text file may have later edits
+    # while unrelated runtime cards have separately verified lifecycle progress.
+    # merge-file has no repository attributes, hooks, or custom merge drivers.
+    entries = [blob_entry_fields(revision, raw_path)
+               for revision in (source_base, source_head, remote_head)]
+    if any(entry is None or entry[:2] != (b"100644", b"blob") for entry in entries):
+        return False
+    blobs = [blob_by_oid(entry[2]) for entry in entries]
+    if any(blob is None or len(blob) > 1048576 or b"\0" in blob for blob in blobs):
+        return False
+    base_blob, own_blob, published_blob = blobs
+    try:
+        with tempfile.TemporaryDirectory(prefix="iwe-prepared-text-proof-") as scratch:
+            files = [Path(scratch) / name for name in ("published", "base", "own")]
+            for path, blob in zip(files, (published_blob, base_blob, own_blob)):
+                path.write_bytes(blob)
+            result = subprocess.run(
+                ["git", "merge-file", "-p", *map(str, files)],
+                stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                check=False, timeout=3,
+            )
+            return result.returncode == 0 and result.stdout == published_blob
+    except (OSError, subprocess.SubprocessError):
+        return False
+
+def remote_absorbs_prepared_tree(compare_tree=True):
+    # Reuse the strict tree-absorption criterion of supersession proof, bound
+    # here to the immutable PREPARED range, not arbitrary caller merge bases.
+    # Patch-history equality alone would not establish this current result.
+    #
+    # WP-484 (21.09, peer-session 2026-09-21-12, Codex): with compare_tree=False only the
+    # integrity of the prepared set is verified (valid ids, unique commits, base..head equals the
+    # declared commits without merges, the worktree stands on source_head) plus the final
+    # snapshot recheck. Every per-path proof below depends on that integrity: a path proven
+    # absorbed by a text merge says nothing about a set that is duplicated, incomplete or
+    # not the range that was prepared.
+    deadline = time.monotonic() + 12
+    env = {key: value for key, value in os.environ.items() if not key.startswith("GIT_")}
+    env.update(GIT_CONFIG_NOSYSTEM="1", GIT_CONFIG_GLOBAL=os.devnull,
+               GIT_ATTR_NOSYSTEM="1", GIT_OPTIONAL_LOCKS="0",
+               GIT_NO_REPLACE_OBJECTS="1", GIT_GRAFT_FILE=os.devnull + "/iwe-no-grafts",
+               GIT_NO_LAZY_FETCH="1", GIT_TERMINAL_PROMPT="0")
+
+    def run(directory, *args):
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise ValueError("prepared absorption proof deadline exceeded")
+        return subprocess.run(
+            ["git", "--literal-pathspecs", "-c", "core.attributesFile=" + os.devnull,
+             "-C", str(directory), *args], env=env, stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True, timeout=remaining,
+        ).stdout
+
+    try:
+        if (not isinstance(commits, list) or not commits or len(commits) != len(set(commits))
+                or any(not isinstance(oid, str) or not re.fullmatch(r"[0-9a-fA-F]{40}|[0-9a-fA-F]{64}", oid)
+                       for oid in [source_base, source_head, remote_head, *commits])):
+            return False
+        if run(worktree, "rev-parse", "HEAD").strip().decode() != source_head:
+            return False
+        common = run(worktree, "rev-parse", "--git-common-dir").strip().decode()
+        objects = (Path(worktree) / common / "objects").resolve()
+        object_format = run(worktree, "rev-parse", "--show-object-format").strip().decode("ascii")
+        with tempfile.TemporaryDirectory(prefix="iwe-prepared-proof-") as scratch:
+            run(scratch, "init", "--bare", "--quiet", "--template=", "--object-format=" + object_format)
+            env["GIT_ALTERNATE_OBJECT_DIRECTORIES"] = json.dumps(str(objects))
+            # Never execute a repository merge driver or accept a built-in union
+            # driver from tracked attributes; all new objects stay in scratch.
+            env["GIT_ATTR_SOURCE"] = run(scratch, "mktree").strip().decode("ascii")
+            run(scratch, "merge-base", "--is-ancestor", source_base, source_head)
+            actual = run(scratch, "rev-list", "--reverse", source_base + ".." + source_head).decode().splitlines()
+            if actual != commits or run(scratch, "rev-list", "--merges", source_base + ".." + source_head).strip():
+                return False
+            if compare_tree:
+                expected = run(scratch, "rev-parse", remote_head + "^{tree}").strip()
+                merged = run(scratch, "merge-tree", "--write-tree", "--merge-base=" + source_base,
+                             remote_head, source_head).strip()
+                if merged != expected:
+                    return False
+        return (Path(semaphore).read_bytes() == snapshot
+                and run(worktree, "rev-parse", "HEAD").strip().decode() == source_head
+                and run(worktree, "rev-parse", "refs/remotes/origin/main").strip().decode() == remote_head)
+    except (ValueError, TypeError, OSError, UnicodeError, subprocess.SubprocessError):
+        return False
+
+
+# Integrity of the prepared set comes FIRST and is required for every per-path proof, not only for
+# the whole-tree one; and once all paths are proven the snapshot is rechecked (semaphore bytes,
+# HEAD, origin/main unchanged while the proofs ran).
+if not remote_absorbs_prepared_tree(compare_tree=False):
+    raise SystemExit(1)
 for raw_path in sorted(paths):
     if tree_entry(source_head, raw_path) != tree_entry(remote_head, raw_path):
-        if not path_has_anchored_fallback_proof(raw_path):
-            raise SystemExit(1)
+        if (not runtime_reap_superseded(raw_path)
+                and not path_has_anchored_fallback_proof(raw_path)
+                and not path_absorbs_prepared_text(raw_path)):
+            raise SystemExit(0 if remote_absorbs_prepared_tree() else 1)
+if not remote_absorbs_prepared_tree(compare_tree=False):
+    raise SystemExit(1)
 PY
 }
 
@@ -6949,34 +8304,69 @@ _close_delivery_and_transition() {
     if [ "$delivery_state" = "prepared" ]; then
       _prepared_source_snapshot_matches "$SEM_FILE" "$CLOSING_WORKTREE" \
         || fail "close retry: PREPARED source/head/scope/terminal snapshot изменился; push запрещён" 7
-      isolate_push_script="$IWE_ROOT/$GOV_REPO/scripts/isolate-push.sh"
-      [ -x "$isolate_push_script" ] \
-        || fail "close retry: isolate-push.sh недоступен; PREPARED сохранён" 7
-      push_status=0
-      _publish_prepared_source "$SEM_FILE" "$CLOSING_WORKTREE" "$isolate_push_script" \
-        || push_status=$?
-      [ "$push_status" -eq 0 ] \
-        || fail "close retry: exact prepared commit set не опубликован (код $push_status); PREPARED/worktree сохранены" 7
-      _prepared_source_snapshot_matches "$SEM_FILE" "$CLOSING_WORKTREE" \
-        || fail "close: source/head/scope/terminal изменился во время isolate-push; publish receipt не пишу" 7
-      timeout 10 git -C "$CLOSING_WORKTREE" fetch --quiet origin \
-        '+refs/heads/main:refs/remotes/origin/main' 2>/dev/null \
-        || fail "close: isolate-push завершился, но fresh origin/main proof не получен" 7
-      remote_main_sha=$(git -C "$CLOSING_WORKTREE" rev-parse --verify 'refs/remotes/origin/main^{commit}' 2>/dev/null) \
-        || fail "close: remote main SHA после isolate-push не читается" 7
-      _prepared_source_set_has_publish_proof "$SEM_FILE" "$CLOSING_WORKTREE" \
-        || fail "close: не каждый PREPARED source commit доказан fresh origin/main exact OID или итоговым tree proof" 7
-      _claimed_commits_have_publish_proof "$SEM_FILE" \
-        || fail "close: additional note-commit claim не имеет publish proof" 7
-      verified_json=$(_unique_record_field "$SEM_FILE" close_delivery_source_commits || true)
-      source_status=$(_unique_record_field "$SEM_FILE" close_delivery_source_status_sha256 || true)
-      terminal_sha=$(_unique_record_field "$SEM_FILE" close_delivery_terminal_sha256 || true)
-      publish_digest=$(_record_close_published "$SEM_FILE" "$SESSION_ID" "$prepare_digest" \
-        "$remote_main_sha" "$verified_json" "$source_head" "$source_status" "$terminal_sha") \
-        || fail "close: publish proof не записан durable; PREPARED/worktree сохранены" 7
-      [ "$(_close_delivery_state "$SEM_FILE" "$SESSION_ID" || true)" = "published" ] \
-        || fail "close: записанный PUBLISHED receipt не прошёл self-check" 7
-      delivery_state="published"
+      if [ "$ABANDON_PREPARED" -eq 1 ]; then
+        # Manual recovery (see header doc + _record_close_abandoned): the
+        # cryptographic proof below can never pass once a later, legitimate
+        # REPLACE lands on a path this PREPARED snapshot touched -- it only
+        # distinguishes byte-identical delivery from divergence, not "lost"
+        # from "delivered, then superseded". This branch swaps that proof for
+        # an explicit, audited human attestation naming the exact commit set.
+        #
+        # Cold-review Critical (Codex+Claude peer-session): note-commit (WP-537)
+        # can stage claims for commits in OTHER repos on this same semaphore
+        # (close_delivery_claimed_commits) independently of source_commits, and
+        # the normal path proves those too (_claimed_commits_have_publish_proof
+        # below). The operator's --source-commit list only ever names
+        # close_delivery_source_commits -- it says nothing about claimed
+        # commits elsewhere. Rather than widen the attestation UX to also cover
+        # an unbounded set of foreign-repo claims, refuse the manual path
+        # outright when any exist: that case needs its own, separately
+        # reasoned recovery, not a silent pass-through under this flag.
+        claimed_json=$(_unique_record_field "$SEM_FILE" close_delivery_claimed_commits || true)
+        [ "$claimed_json" = "[]" ] \
+          || fail "close --abandon-prepared: у сессии есть note-commit заявки на коммиты в других репозиториях (close_delivery_claimed_commits не пуст) -- ручная attestation покрывает только close_delivery_source_commits, для этого случая нужен отдельный разбор" 7
+        _abandon_prepared_matches_source "$SEM_FILE" "${ABANDON_SOURCE_COMMITS[@]}" \
+          || fail "close --abandon-prepared: --source-commit список не совпадает ТОЧНО с close_delivery_source_commits (частичное подтверждение запрещено)" 7
+        verified_json=$(_unique_record_field "$SEM_FILE" close_delivery_source_commits || true)
+        source_status=$(_unique_record_field "$SEM_FILE" close_delivery_source_status_sha256 || true)
+        terminal_sha=$(_unique_record_field "$SEM_FILE" close_delivery_terminal_sha256 || true)
+        publish_digest=$(_record_close_abandoned "$SEM_FILE" "$SESSION_ID" "$prepare_digest" \
+          "$verified_json" "$source_head" "$source_status" "$terminal_sha" "$AGENT") \
+          || fail "close --abandon-prepared: attestation receipt не записан durable; PREPARED/worktree сохранены" 7
+        [ "$(_close_delivery_state "$SEM_FILE" "$SESSION_ID" || true)" = "published" ] \
+          || fail "close --abandon-prepared: записанный receipt не прошёл self-check" 7
+        delivery_state="published"
+        echo "⚠️  session-guard: PREPARED-снимок закрыт ВРУЧНУЮ (--abandon-prepared), без криптографического proof доставки. Коммиты: ${ABANDON_SOURCE_COMMITS[*]}. close_publish_proof=manual-abandon-attestation/v1 в семафоре — постоянный видимый в аудите след." >&2
+      else
+        isolate_push_script="$IWE_ROOT/$GOV_REPO/scripts/isolate-push.sh"
+        [ -x "$isolate_push_script" ] \
+          || fail "close retry: isolate-push.sh недоступен; PREPARED сохранён" 7
+        push_status=0
+        _publish_prepared_source "$SEM_FILE" "$CLOSING_WORKTREE" "$isolate_push_script" \
+          || push_status=$?
+        [ "$push_status" -eq 0 ] \
+          || fail "close retry: exact prepared commit set не опубликован (код $push_status); PREPARED/worktree сохранены" 7
+        _prepared_source_snapshot_matches "$SEM_FILE" "$CLOSING_WORKTREE" \
+          || fail "close: source/head/scope/terminal изменился во время isolate-push; publish receipt не пишу" 7
+        timeout 10 git -C "$CLOSING_WORKTREE" fetch --quiet origin \
+          '+refs/heads/main:refs/remotes/origin/main' 2>/dev/null \
+          || fail "close: isolate-push завершился, но fresh origin/main proof не получен" 7
+        remote_main_sha=$(git -C "$CLOSING_WORKTREE" rev-parse --verify 'refs/remotes/origin/main^{commit}' 2>/dev/null) \
+          || fail "close: remote main SHA после isolate-push не читается" 7
+        _prepared_source_set_has_publish_proof "$SEM_FILE" "$CLOSING_WORKTREE" \
+          || fail "close: не каждый PREPARED source commit доказан fresh origin/main exact OID или итоговым tree proof (нет доказательства доставки -- если содержимое доставлено, а более поздняя легитимная замена тех же строк ломает byte-exact proof, разбери вручную и рассмотри close --abandon-prepared)" 7
+        _claimed_commits_have_publish_proof "$SEM_FILE" \
+          || fail "close: additional note-commit claim не имеет publish proof" 7
+        verified_json=$(_unique_record_field "$SEM_FILE" close_delivery_source_commits || true)
+        source_status=$(_unique_record_field "$SEM_FILE" close_delivery_source_status_sha256 || true)
+        terminal_sha=$(_unique_record_field "$SEM_FILE" close_delivery_terminal_sha256 || true)
+        publish_digest=$(_record_close_published "$SEM_FILE" "$SESSION_ID" "$prepare_digest" \
+          "$remote_main_sha" "$verified_json" "$source_head" "$source_status" "$terminal_sha") \
+          || fail "close: publish proof не записан durable; PREPARED/worktree сохранены" 7
+        [ "$(_close_delivery_state "$SEM_FILE" "$SESSION_ID" || true)" = "published" ] \
+          || fail "close: записанный PUBLISHED receipt не прошёл self-check" 7
+        delivery_state="published"
+      fi
       [ "${IWE_SESSION_GUARD_FAULT_POINT:-}" != "after-published" ] \
         || fail "close test fault: after-published" 99
     fi
@@ -7400,6 +8790,16 @@ if [ "$CMD" = "close" ]; then
   else
     fail "close: staged delivery state частичен/повреждён; mutation запрещена" 7
   fi
+  # WP-7 Ф83 (no flag silently ignored) applied to --abandon-prepared: without
+  # this check the flag would be accepted and then simply never read, because
+  # only a "prepared" delivery_state ever reaches the branch that consumes it
+  # (cold-review, Codex+Claude peer-session, found live: --housekeeping exits
+  # long before this point, and "none"/"published"/"cleaned" all skip the
+  # PREPARED branch too) -- an operator would believe the manual attestation
+  # ran when it silently did nothing.
+  if [ "$ABANDON_PREPARED" -eq 1 ] && [ "$CLOSE_RESUME_STATE" != "prepared" ]; then
+    fail "close --abandon-prepared: сессия не в состоянии PREPARED (сейчас: $CLOSE_RESUME_STATE) — флаг применим только к зависшему PREPARED-снимку, не к обычному закрытию" 7
+  fi
   WP_FROM_SEM=$(grep "^wp: " "$SEM_FILE" | cut -d' ' -f2- || true)
   WP="${WP:-$WP_FROM_SEM}"
   SLUG_FROM_SEM=$(grep "^slug: " "$SEM_FILE" | cut -d' ' -f2- || true)
@@ -7506,6 +8906,13 @@ if [ "$CMD" = "close" ]; then
   # RUN-quick-close card" despite the card sitting, committed and pushed,
   # exactly where `open --isolate` put it.
   RUNNER_CARD_DIRS=("$IWE_ROOT/$GOV_REPO/inbox/agent/tasks")
+  if [ -n "${IWE_GOVERNANCE_REPO_PATH:-}" ] \
+     && [ "$IWE_GOVERNANCE_REPO_PATH" != "$IWE_ROOT/$GOV_REPO" ] \
+     && [ "$IWE_GOVERNANCE_REPO_PATH" != "${SESSION_GOVERNANCE_WORKTREE:-}" ]; then
+    DECLARED_CARD_DIR=$(_declared_governance_card_dir "$IWE_GOVERNANCE_REPO_PATH" "$IWE_ROOT/$GOV_REPO") \
+      || fail "close: explicit governance worktree could not be verified" 7
+    RUNNER_CARD_DIRS+=("$DECLARED_CARD_DIR")
+  fi
   SESSION_GOVERNANCE_WORKTREE=$(semaphore_governance_worktree "$SEM_FILE" || true)
   if [ -n "$SESSION_GOVERNANCE_WORKTREE" ] \
      && [ "$SESSION_GOVERNANCE_WORKTREE" != "$IWE_ROOT/$GOV_REPO" ]; then
@@ -7534,6 +8941,10 @@ if [ "$CMD" = "close" ]; then
   # owner_session_id отбрасывается -- именно тот случай, где сравнение
   # реально возможно и должно быть строгим.
   HARNESS_SESSION_ID=$(grep "^harness_session_id: " "${SEM_FILE:-}" 2>/dev/null | cut -d' ' -f2- || true)
+  if [ -z "$HARNESS_SESSION_ID" ] && [ "${AGENT:-}" = "codex" ] && [ -n "${CODEX_THREAD_ID:-}" ]; then
+    HARNESS_SESSION_ID=$(_legacy_codex_harness_session_id "$SEM_FILE") \
+      || fail "close: native Codex owner could not be tied to this exact guard session/worktree" 7
+  fi
   if [ -n "$HARNESS_SESSION_ID" ] && [ ${#RUNNER_CARDS[@]} -gt 0 ]; then
     OWNED_CARDS=()
     for card in "${RUNNER_CARDS[@]}"; do
@@ -8152,6 +9563,235 @@ if [ "$CMD" = "note-file" ]; then
     || fail "note-file: semaphore изменился после resolve или уже закрывается" 1
   [ "$(_close_delivery_state "$SEM_FILE" "$LOCKED_NOTE_SESSION_ID" || true)" = "none" ] \
     || fail "note-file: close transition уже подготовлен; scope frozen" 1
+  # WP-484 (21.09, пир-сессия 2026-09-21-08): --forget снимает заявку на путь,
+  # которого больше нигде нет. Живой случай: `report-draft.md` создан хуком Write
+  # (заявка ставится сама), затем переименован в `report.md` до первого коммита;
+  # заявка осталась, проверка доставки при close считала путь «не найденным ни в
+  # одном checkout» и отказывала, а снять её было нечем. Снятие безопасно только
+  # когда доставлять нечего: путь отсутствует на диске, в HEAD и в индексе обоих
+  # checkout сессии (governance и репозиторий сессий) и не входит в diff ни одного
+  # заявленного коммита. Иначе заявка законна и остаётся. Содержимое коммитов
+  # проверяется отдельно по commit-заявкам, поэтому снятие file-заявки не ослабляет
+  # доказательство доставки того, что закоммичено.
+  # Гонки: замок acquire_session_transition_lock выше держится на FD 196 весь процесс,
+  # включая этот python-потомок; тот же замок берут open/close/note-file/note-commit,
+  # поэтому снимок семафора не расходится с записью (проверка-и-замена под замком).
+  if [ "$FORGET_FLAG" = "1" ]; then
+    python3 - "$SEM_FILE" "$FILE_PATH" <<'PY' || exit $?
+import datetime
+import fcntl
+import json
+import os
+import re
+import subprocess
+import sys
+import tempfile
+from pathlib import Path
+
+sem, raw = sys.argv[1], sys.argv[2]
+
+
+def refuse(message):
+    sys.stderr.write("note-file --forget: " + message + "\n")
+    sys.exit(1)
+
+
+snapshot = Path(sem).read_bytes()
+lines = snapshot.decode("utf-8").split("\n")
+
+
+def field(name):
+    values = [line.partition(": ")[2] for line in lines if line.startswith(name + ": ")]
+    return values[-1] if values else ""
+
+
+checkouts = []
+for name in ("governance_worktree", "orz_sessions_dir"):
+    path = field(name)
+    if path and path not in checkouts:
+        checkouts.append(path)
+if not checkouts:
+    refuse("в семафоре нет governance_worktree/orz_sessions_dir: не с чем сверять, заявка остаётся")
+
+def valid_claim_path(value):
+    # A recorded claim is a lexical repo-relative path: no absolute form, no
+    # empty/dot/dot-dot component, no control characters. Anything else is not
+    # something this command may reason about.
+    return (bool(value) and not value.startswith("/")
+            and not any(char in value for char in "\x00\r\n")
+            and all(part not in ("", ".", "..") for part in value.rstrip("/").split("/")))
+
+
+claims = {line[6:] for line in lines if line.startswith("file: ")}
+candidates = []
+if raw in claims and valid_claim_path(raw):
+    candidates.append(raw)
+if os.path.isabs(raw):
+    real_target = os.path.realpath(raw)
+    for checkout in checkouts:
+        real_checkout = os.path.realpath(checkout)
+        if os.path.commonpath([real_checkout, real_target]) != real_checkout:
+            continue
+        rel = os.path.relpath(real_target, real_checkout)
+        if rel in claims and valid_claim_path(rel) and rel not in candidates:
+            candidates.append(rel)
+if not candidates:
+    # A claim that only contains the path as one whitespace-separated part is withdrawn
+    # by passing that line whole; name it instead of leaving the operator to guess.
+    containing = sorted(claim for claim in claims if raw in claim.split())
+    refuse("заявки на '" + raw + "' в scope этой сессии нет"
+           + ("; есть заявка, содержащая этот путь как часть, для снятия передай её строку целиком: '"
+              + containing[0] + "'" if containing else ""))
+if any(char.isspace() for candidate in candidates for char in candidate):
+    # Grammar: a claim is ONE literal path everywhere (close proof, scope gate,
+    # note-file), spaces included -- `WeekPlan W39.md` is a legal name. A line that
+    # only LOOKS like several paths (an unsplit shell variable) never claimed the
+    # parts, so withdrawing it removes nothing from the scope; say so explicitly.
+    sys.stderr.write("note-file --forget: заявка содержит пробелы и снимается как ОДИН путь; "
+                     "отдельные части этой строкой не заявлялись\n")
+
+
+def head_exists(checkout):
+    return subprocess.run(["git", "-C", checkout, "rev-parse", "--verify", "-q", "HEAD^{commit}"],
+                          stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode == 0
+
+
+def git(checkout, *args):
+    result = subprocess.run(["git", "--literal-pathspecs", "-C", checkout, *args],
+                            stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    if result.returncode:
+        refuse("не удалось проверить '" + checkout + "' (git " + args[0] + "), заявка остаётся")
+    return result.stdout
+
+
+# Every checkout the close proof may consult: the two session checkouts plus the
+# repositories of the workspace. Each is checked for the path on disk, in HEAD, in the
+# index and in recent history: a claim that one of them still holds may be legitimate
+# for that repository, and withdrawing it would shrink the scope.
+iwe_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(sem))))
+workspace = [iwe_root]
+for parent in (iwe_root, os.path.join(iwe_root, "DS-IT-systems")):
+    try:
+        workspace.extend(os.path.join(parent, name) for name in sorted(os.listdir(parent))
+                         if os.path.isdir(os.path.join(parent, name)))
+    except OSError:
+        pass
+
+# A commit claim of an unknown format is not something to reason around: fail closed.
+claimed_commits = []
+for line in lines:
+    if not line.startswith("commit: "):
+        continue
+    fields = line[8:].split()
+    if len(fields) != 2 or not re.fullmatch(r"[0-9a-fA-F]{40,64}", fields[1]):
+        refuse("неоднозначная заявка коммита в семафоре ('" + line + "'): заявка остаётся")
+    claimed_commits.append(fields[1])
+
+# Every git checkout a declared commit may live in (the repo name in the claim is
+# not trusted to pick one). A claim found nowhere cannot be examined: fail closed.
+commit_homes = []
+for candidate_home in checkouts + workspace:
+    real_home = os.path.realpath(candidate_home)
+    if os.path.lexists(os.path.join(real_home, ".git")) and real_home not in commit_homes:
+        commit_homes.append(real_home)
+for sha in claimed_commits:
+    if not any(subprocess.run(["git", "-C", home, "cat-file", "-e", sha + "^{commit}"],
+                              stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode == 0
+               for home in commit_homes):
+        refuse("заявленный коммит " + sha[:9] + " не найден ни в одном checkout: не могу проверить, заявка остаётся")
+
+# A path that was ever committed on any branch or in the reflog of a workspace repo may
+# have its only copy there (committed, never declared with note-commit, then reset away).
+# No time window: `--since` filters by the committer date, which a clock skew or a
+# GIT_COMMITTER_DATE moves. Claimed paths carry the session directory (date and slug), so a
+# past touch of the very same path is a real signal, and a false refusal only keeps the claim.
+
+for path in candidates:
+    for checkout in checkouts:
+        if os.path.lexists(os.path.join(checkout, path)):
+            refuse("'" + path + "' есть на диске в " + checkout + ": доставить нужно, заявка законна")
+    for home in commit_homes:
+        # A repository without commits has an empty HEAD tree; any other git error stays fail-closed.
+        if head_exists(home) and git(home, "ls-tree", "-z", "HEAD", "--", path).strip(b"\0"):
+            refuse("'" + path + "' есть в HEAD " + home + ": заявка законна")
+        if git(home, "ls-files", "-z", "--", path).strip(b"\0"):
+            refuse("'" + path + "' есть в индексе " + home + ": заявка законна")
+        if git(home, "log", "--all", "--reflog", "-1", "--format=%H", "--", path).strip():
+            refuse("'" + path + "' встречается в истории (ветки/reflog) " + home + ": заявка может быть законной")
+    for other in workspace:
+        if os.path.lexists(os.path.join(other, path)):
+            refuse("'" + path + "' есть на диске в " + other + ": заявка может быть законной для этого репозитория")
+    for sha in claimed_commits:
+        for home in commit_homes:
+            if subprocess.run(["git", "-C", home, "cat-file", "-e", sha + "^{commit}"],
+                              stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode:
+                continue
+            # -m: a merge commit is compared with each parent, plain -r prints nothing for it
+            names = git(home, "diff-tree", "-m", "--root", "--no-commit-id", "--name-only",
+                        "--no-renames", "-r", "-z", sha).split(b"\0")
+            if path.encode() in names:
+                refuse("'" + path + "' входит в заявленный коммит " + sha[:9] + ": заявка законна")
+
+drop = {"file: " + path for path in candidates}
+kept = [line for line in lines if line not in drop]
+if Path(sem).read_bytes() != snapshot:
+    refuse("семафор изменился во время проверки, повтори")
+# Durable audit: withdrawing a claim weakens the close proof by design, so it
+# leaves a trace outside the semaphore (whose format stays unchanged) that
+# survives the session. Written BEFORE the change ("intent"), then confirmed
+# after it ("done"): a crash leaves an intent without completion, never a
+# removal without a trace.
+sem_dir = os.path.dirname(os.path.abspath(sem))
+audit = os.path.join(os.path.dirname(sem_dir), "note-file-forget.log")
+
+
+def audit_event(event):
+    record = json.dumps({
+        "at": datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "event": event,
+        "session_id": field("session_id"),
+        "slug": field("slug"),
+        "paths": candidates,
+        "checked_checkouts": checkouts,
+    }, ensure_ascii=False)
+    data = memoryview((record + "\n").encode("utf-8"))
+    fd = os.open(audit, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o644)
+    try:
+        # The audit log is shared by every session, and the per-session transition
+        # lock does not serialize them: a lock on the log itself plus a full-write
+        # loop keeps records whole (a plain O_APPEND write may be partial).
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        while data:
+            data = data[os.write(fd, data):]
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
+audit_event("forget-intent")
+mode = os.stat(sem).st_mode & 0o7777
+# mkstemp: O_EXCL, unpredictable name, never follows a planted symlink.
+fd, tmp = tempfile.mkstemp(dir=sem_dir, prefix=".forget-")
+try:
+    with os.fdopen(fd, "w", encoding="utf-8") as handle:
+        handle.write("\n".join(kept))
+        handle.flush()
+        os.fchmod(handle.fileno(), mode)
+        os.fsync(handle.fileno())
+    os.replace(tmp, sem)
+finally:
+    if os.path.exists(tmp):
+        os.unlink(tmp)
+dir_fd = os.open(sem_dir, os.O_RDONLY)
+try:
+    os.fsync(dir_fd)
+finally:
+    os.close(dir_fd)
+audit_event("forget-done")
+print("Forgot in scope: " + ", ".join(candidates))
+PY
+    exit 0
+  fi
   # Normalize to git-root-relative (resolve symlinks/macOS /tmp vs /private/tmp)
   if [ -f "$FILE_PATH" ] || [ -d "$FILE_PATH" ]; then
     REPO_ROOT=$(git -C "$(dirname "$FILE_PATH")" rev-parse --show-toplevel 2>/dev/null || true)
@@ -8301,22 +9941,25 @@ if [ "$CMD" = "note-commit" ]; then
   # flag and call from the root). `iwe-root` is the name the READERS of this
   # claim already use for it (commit-push.sh / gather-session-facts.sh
   # resolve_repo_dir, WP-525 Ф4), so it is the spelling recorded below --
-  # the root's basename is accepted as an alias for the same directory.
+  # the root's basename is accepted as an alias for the same directory
+  # (_resolve_repo_checkout owns both spellings now).
   NC_ROOT_ALIAS="iwe-root"
-  NC_ROOT_BASENAME=$(basename "$IWE_ROOT")
   if [ -n "$REPO_ARG" ]; then
     # cold review: ".." or a leading "/" would resolve outside $IWE_ROOT while
     # the failure message below still (falsely) claims the check happened.
     case "$REPO_ARG" in
       */*|*..*) fail "note-commit: --repo '$REPO_ARG' должен быть именем каталога внутри $IWE_ROOT без '/' и '..'" 1 ;;
     esac
-    if [ "$REPO_ARG" = "$NC_ROOT_ALIAS" ] || [ "$REPO_ARG" = "$NC_ROOT_BASENAME" ]; then
-      NC_REPO_DIR="$IWE_ROOT"
-    else
-      NC_REPO_DIR="$IWE_ROOT/$REPO_ARG"
-    fi
-    git -C "$NC_REPO_DIR" rev-parse --git-dir >/dev/null 2>&1 \
-      || fail "note-commit: '$REPO_ARG' не git-репозиторий внутри $IWE_ROOT (сам корневой репозиторий заявляется как --repo $NC_ROOT_ALIAS)" 1
+    # Same resolver the READER of this claim uses (_resolve_repo_checkout):
+    # a name this writer accepts but the reader cannot resolve is exactly the
+    # defect WP-537 found on 19.09 -- nested checkouts (DS-MCP/*,
+    # DS-IT-systems/*) were recorded and then rejected at close.
+    NC_REPO_DIR=$(_resolve_repo_checkout "$REPO_ARG" "$COMMIT_SHA") || {
+      case $? in
+        3) fail "note-commit: '$REPO_ARG' — имя нескольких checkout с РАЗНЫМИ origin; формат заявки 'commit: <репозиторий> <sha>' их не различает, поэтому такой коммит заявить нельзя (вызов из каталога без --repo запишет то же самое имя и упрётся в то же самое)" 1 ;;
+        *) fail "note-commit: '$REPO_ARG' не найден среди известных checkout (корень, \$IWE_ROOT/*, DS-MCP/*, DS-IT-systems/*); сам корневой репозиторий заявляется как --repo $NC_ROOT_ALIAS" 1 ;;
+      esac
+    }
   else
     NC_REPO_DIR=$(git rev-parse --show-toplevel 2>/dev/null || true)
     [ -n "$NC_REPO_DIR" ] \
@@ -8324,8 +9967,43 @@ if [ "$CMD" = "note-commit" ]; then
   fi
   if [ "$(realpath "$NC_REPO_DIR" 2>/dev/null || echo "$NC_REPO_DIR")" = "$(realpath "$IWE_ROOT" 2>/dev/null || echo "$IWE_ROOT")" ]; then
     NC_REPO_NAME="$NC_ROOT_ALIAS"
+  elif [ -n "$REPO_ARG" ]; then
+    # Record the name the caller ASKED for, not the basename of the resolved
+    # directory. _resolve_repo_checkout returns a physical path, so for a
+    # symlink whose own name differs from its target's ($IWE_ROOT/service ->
+    # /external/service-checkout) the basename would silently rename the claim
+    # to one the reader then looks for in the wrong place (Codex cold review,
+    # 19.09). The resolver already proved this name maps to exactly one
+    # checkout, so it is the safe spelling to store.
+    NC_REPO_NAME="$REPO_ARG"
   else
-    NC_REPO_NAME=$(basename "$NC_REPO_DIR")
+    # A LINKED WORKTREE's own basename is meaningless to every reader: an
+    # isolated session's worktree is named after the session id and lives
+    # under .iwe-runtime/, so a claim recorded as
+    # "commit: claude-code-1789831272-656a <sha>" can never be resolved back
+    # to a repository. Record the CANONICAL repo's name instead -- the same
+    # "the writer must record a name the reader can resolve" rule this phase
+    # fixed for nested checkouts, caught live while closing the very session
+    # that fixed the first half (WP-537 Ф32).
+    #
+    # For an ordinary checkout --git-common-dir is "<root>/.git", so its
+    # parent IS the root and this branch changes nothing.
+    NC_COMMON_DIR=$(git -C "$NC_REPO_DIR" rev-parse --path-format=absolute \
+      --git-common-dir 2>/dev/null || true)
+    NC_CANONICAL_ROOT=""
+    [ -n "$NC_COMMON_DIR" ] && NC_CANONICAL_ROOT=$(dirname "$NC_COMMON_DIR")
+    if [ -n "$NC_CANONICAL_ROOT" ] && [ -d "$NC_CANONICAL_ROOT" ] \
+       && [ "$NC_CANONICAL_ROOT" != "$NC_REPO_DIR" ]; then
+      NC_REPO_DIR="$NC_CANONICAL_ROOT"
+      if [ "$(realpath "$NC_REPO_DIR" 2>/dev/null || echo "$NC_REPO_DIR")" \
+           = "$(realpath "$IWE_ROOT" 2>/dev/null || echo "$IWE_ROOT")" ]; then
+        NC_REPO_NAME="$NC_ROOT_ALIAS"
+      else
+        NC_REPO_NAME=$(basename "$NC_REPO_DIR")
+      fi
+    else
+      NC_REPO_NAME=$(basename "$NC_REPO_DIR")
+    fi
   fi
   # The semaphore line is "commit: <repo> <sha>", split by the reader on the
   # first space (commit-push.sh: c_entry%%' '*). A space in the name would
