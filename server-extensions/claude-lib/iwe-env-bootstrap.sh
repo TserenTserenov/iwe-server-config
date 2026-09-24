@@ -29,14 +29,7 @@ if [ -z "${WORKSPACE_DIR:-}" ]; then
     WORKSPACE_DIR="$(cd "$SCRIPT_DIR/../../.." && pwd)"
   elif [[ "$SCRIPT_DIR" =~ /\.claude/ ]]; then
     # We're in .claude/hooks, .claude/lib, .claude/detectors, or .claude/skills
-    # When bootstrap is sourced from inside FMT-exocortex-template/.claude/,
-    # going up two levels lands inside FMT, not in the real workspace root.
-    _candidate="$(cd "$SCRIPT_DIR/../.." && pwd)"
-    if [[ "$(basename "$_candidate")" == "FMT-exocortex-template" ]]; then
-      WORKSPACE_DIR="$(cd "$_candidate/.." && pwd)"
-    else
-      WORKSPACE_DIR="$_candidate"
-    fi
+    WORKSPACE_DIR="$(cd "$SCRIPT_DIR/../.." && pwd)"
   elif [[ "$SCRIPT_DIR" =~ /.iwe-runtime/ ]]; then
     # Runtime-generated scripts
     WORKSPACE_DIR="$(cd "$SCRIPT_DIR/../../.." && pwd)"
@@ -83,14 +76,20 @@ export IWE_GOVERNANCE_REPO="${IWE_GOVERNANCE_REPO:-DS-strategy}"
 export IWE_DS_MY_STRATEGY="${IWE_DS_MY_STRATEGY:-${WORKSPACE_DIR}/${IWE_GOVERNANCE_REPO}}"
 export IWE_TEMPLATE="${IWE_TEMPLATE:-${WORKSPACE_DIR}/FMT-exocortex-template}"
 export IWE_RUNTIME="${IWE_RUNTIME:-${WORKSPACE_DIR}/.iwe-runtime}"
-export IWE_SCRIPTS="${IWE_SCRIPTS:-${WORKSPACE_DIR}/FMT-exocortex-template/scripts}"
+# WP-484 (01.08): живые скрипты workspace — каноничные (агенты коммитят в ~/IWE/scripts);
+# FMT-копия — артефакт промоции в шаблон и отстаёт (замерено: 25 расхождений, до 2 мес).
+# Дефолт — живые; FMT — fallback для потребителей шаблона вне основного workspace.
+if [ -z "${IWE_SCRIPTS:-}" ]; then
+  if [ -d "${WORKSPACE_DIR}/scripts" ]; then
+    export IWE_SCRIPTS="${WORKSPACE_DIR}/scripts"
+  else
+    export IWE_SCRIPTS="${WORKSPACE_DIR}/FMT-exocortex-template/scripts"
+  fi
+fi
 
 # Export to child processes
 export WORKSPACE_DIR
 export IWE_ROOT
-# IWE_WORKSPACE: alias for WORKSPACE_DIR, referenced by SPF/Pack CLAUDE.md paths.
-# Fallback only — keeps any value already set by the user's shell profile.
-export IWE_WORKSPACE="${IWE_WORKSPACE:-$WORKSPACE_DIR}"
 
 # Validation: ensure WORKSPACE_DIR exists
 if [ ! -d "$WORKSPACE_DIR" ]; then
