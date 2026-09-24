@@ -12,6 +12,7 @@
 #   ~/IWE/.claude/skills/                                     → server-extensions/claude-skills/        (все скиллы)
 #   ~/IWE/.claude/hooks/                                      → server-extensions/claude-hooks/
 #   ~/IWE/.claude/scripts/                                    → server-extensions/claude-scripts/
+#   ~/IWE/.claude/lib/                                        → server-extensions/claude-lib/
 #   memory/*.md с explicit delivery: managed + delivery_authority: root-repository
 #                                                              → server-extensions/memory/ (см. classify-memory.py)
 #
@@ -30,7 +31,7 @@ fi
 
 echo "Синхронизация в $DST/..."
 
-mkdir -p "$DST"/{scripts,extensions,claude-skills,claude-scripts,claude-hooks,memory}
+mkdir -p "$DST"/{scripts,extensions,claude-skills,claude-scripts,claude-hooks,claude-lib,memory}
 
 # ROOT_COMMIT_SHA — читается iwe-extensions-sync.nix activation script для
 # iwe-release.json (version-handshake, WP-484). Пишется здесь, не в Nix,
@@ -66,6 +67,11 @@ rsync -a --delete "$SOURCE_ROOT/extensions/"              "$DST/extensions/"
 rsync -a --delete "$SOURCE_ROOT/.claude/skills/"          "$DST/claude-skills/"
 rsync -a --delete "$SOURCE_ROOT/.claude/hooks/"           "$DST/claude-hooks/"
 rsync -a --delete "$SOURCE_ROOT/.claude/scripts/"         "$DST/claude-scripts/"
+# WP-484 (24.09.2026, пир-сессия 2026-09-24-08): эта пара отсутствовала —
+# server-extensions/claude-lib отставал от источника (1 файл вместо 8),
+# скрипты в server-extensions/scripts ссылались на несуществующие
+# .claude/lib/frontmatter.sh, iwe_event_emit.sh, behaviour-report.sh.
+rsync -a --delete "$SOURCE_ROOT/.claude/lib/"              "$DST/claude-lib/"
 
 # Memory: classify-memory.py решает, что managed (см. модуль для критерия
 # и обоснования — hardcoded-список из 9 имён был тем же классом дыры, что
