@@ -8,6 +8,9 @@
 #   "sync_drift":"ok|fail|disabled|unknown","sync_drift_reason":"..."}
 # "disabled" = источник намеренно не настроен на этой машине (Scout/triage репо отсутствуют).
 # "fail" = источник настроен, но данные не собрались (диагностика нужна).
+# Контракт (WP-7 DOC4, 24.09): render_scout() в day-open-scaffold.sh читает $SCOUT_PF
+# и ветвится по значениям ok/disabled/fail/unknown буквально — новое значение здесь
+# без парной правки той функции молча откатится в её ветку "unknown".
 #
 # sync_drift (WP-484, 14.09, пир-сессия с Kimi+Codex): независимый от
 # алертинга sync-extensions-auto.sh канал — тот 3-суточный сбой доставки
