@@ -42,6 +42,23 @@ PHASE_DIGEST_SCRIPT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/wp-phase-dige
 REGISTRY_FILE="$STRATEGY_DIR/docs/WP-REGISTRY.md"
 GIT_LOG_DAYS="${WP_SYNC_GIT_DAYS:-14}"
 
+# WP-561 Ф20: git-vs-origin sync gate. Read-only (ls-remote, no fetch) — see
+# lib header for why a full fetch is wrong on a checkout dozens of worktrees
+# share. Missing lib is not fatal here (checked at call site below).
+#
+# Resolved from this file's own location (same pattern as PHASE_DIGEST_SCRIPT
+# above), NOT from $IWE_WORKSPACE: callers legitimately override IWE_WORKSPACE
+# to point bundle at a fixture/probe root (wp-sync-bundle-batch.sh,
+# wp-pipeline-checks-runner.sh) while the library itself always lives in the
+# real root next to this script -- resolving it via $IWE_WORKSPACE silently
+# broke every fixture-based test run (caught by wp-pipeline-checks-runner.sh).
+GIT_SYNC_TIMEOUT="${WP_SYNC_GIT_TIMEOUT:-15}"
+GIT_SYNC_LIB="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)/scripts/lib/git-sync-status.sh"
+if [[ -r "$GIT_SYNC_LIB" ]]; then
+  # shellcheck source=/dev/null
+  source "$GIT_SYNC_LIB"
+fi
+
 # ---------------------------------------------------------------------------
 # Audit log
 # ---------------------------------------------------------------------------
@@ -531,8 +548,22 @@ extract_structured_open_phases() {
 # Main
 # ---------------------------------------------------------------------------
 main() {
+  # --force-sync can appear anywhere in argv; strip it before the existing
+  # positional-arg logic (including --self-test) sees argv at all.
+  local force_sync=false
+  local positional=()
+  local arg
+  for arg in "$@"; do
+    if [[ "$arg" == "--force-sync" ]]; then
+      force_sync=true
+    else
+      positional+=("$arg")
+    fi
+  done
+  set -- "${positional[@]}"
+
   if [[ $# -lt 1 ]]; then
-    log_err "Usage: wp-sync-bundle.sh WP-N (или просто N) [--self-test]"
+    log_err "Usage: wp-sync-bundle.sh WP-N (или просто N) [--self-test] [--force-sync]"
     exit 1
   fi
 
@@ -603,6 +634,41 @@ main() {
     exit 2
   fi
 
+  # WP-561 Ф20: classify STRATEGY_DIR against its own origin before reading
+  # anything from it — a shared checkout under 20+ concurrent sessions is
+  # routinely behind, and every consumer of this bundle (protocol-open.md,
+  # wp-sync-actualizer, the nightly batch/secretary runners) needs to know
+  # that up front, not discover it later as an unexplained false "0 drift".
+  if declare -F check_git_sync_status >/dev/null 2>&1; then
+    check_git_sync_status "$STRATEGY_DIR" "" "$GIT_SYNC_TIMEOUT"
+  else
+    GIT_SYNC_STATUS="checker_unavailable"
+    GIT_SYNC_DETAIL="reason=library_missing"
+    GIT_SYNC_REMOTE_OID=""
+    GIT_SYNC_HEAD_OID=""
+  fi
+  local git_sync_blocking=false
+  case "$GIT_SYNC_STATUS" in
+    STALE|DIVERGED|fetch_failed|checker_unavailable) git_sync_blocking=true ;;
+  esac
+  local git_sync_checked_at
+  git_sync_checked_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+  echo "GIT_SYNC_STATUS: ${GIT_SYNC_STATUS}"
+  echo "GIT_SYNC_DETAIL: ${GIT_SYNC_DETAIL} remote=${GIT_SYNC_REMOTE_OID:0:10} head=${GIT_SYNC_HEAD_OID:0:10} checked_at=${git_sync_checked_at}"
+  if [[ "$force_sync" == "true" ]]; then
+    echo "GIT_SYNC_OVERRIDE: true"
+  fi
+  if [[ "$git_sync_blocking" == "true" ]]; then
+    {
+      echo "[GIT-SYNC] рабочая копия ${STRATEGY_DIR}: ${GIT_SYNC_STATUS} (${GIT_SYNC_DETAIL})"
+      if [[ "$force_sync" == "true" ]]; then
+        echo "[GIT-SYNC] --force-sync передан — bundle продолжает, но статус выше остаётся ${GIT_SYNC_STATUS}"
+      else
+        echo "[GIT-SYNC] Sync Gate заблокирован (exit 3). Изолированная сессия → повторить на своём worktree. Канон → session-guard open --isolate, либо --force-sync с явным сообщением пилоту."
+      fi
+    } >&2
+  fi
+
   local wp_path
   wp_path=$(wp_path_label "$wp_file")
 
@@ -665,6 +731,15 @@ main() {
   echo "- Spawned: ${spawned}"
   [[ -n "${updated:-}" ]] && echo "- Updated: ${updated}"
   echo "- Открытых фаз: ${open_phases_count}"
+  echo ""
+
+  echo "## Git-sync рабочей копии"
+  echo "- Статус: ${GIT_SYNC_STATUS} (${GIT_SYNC_DETAIL})"
+  if [[ "$git_sync_blocking" == "true" && "$force_sync" != "true" ]]; then
+    echo "- ⚠️ Bundle собран по несинхронной/непроверенной копии — остальное содержимое ниже может быть неактуальным."
+  elif [[ "$force_sync" == "true" ]]; then
+    echo "- Обход через --force-sync: данные ниже читались вопреки статусу выше."
+  fi
   echo ""
 
   if [[ "$open_phases_count" -gt 0 ]]; then
@@ -830,7 +905,12 @@ main() {
     fi
   fi
 
-  log_sync "$wp_num" "SUCCESS" "related=${related_count} drift=${drift_count}"
+  if [[ "$git_sync_blocking" == "true" && "$force_sync" != "true" ]]; then
+    log_sync "$wp_num" "BLOCKED" "git_sync=${GIT_SYNC_STATUS} related=${related_count} drift=${drift_count}"
+    exit 3
+  fi
+
+  log_sync "$wp_num" "SUCCESS" "related=${related_count} drift=${drift_count} git_sync=${GIT_SYNC_STATUS}"
 }
 
 main "$@"
