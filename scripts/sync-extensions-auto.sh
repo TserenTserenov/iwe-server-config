@@ -16,6 +16,24 @@
 
 set -uo pipefail
 
+# Re-exec under a modern bash if one is installed (WP-7 Ф174, 24.09.2026):
+# the launchd plist's restricted PATH resolves plain `bash` to /bin/bash,
+# Apple's stock 3.2.57 — its brace-expansion scanner does not skip $(...),
+# so `eval "$(sed -n "/^f() {/,/^}/p" "$1")"` (used by session-guard's own
+# tests) silently splits into two broken sed invocations and every such
+# test reports its target function "not found". That stalled this script's
+# own commits for 5 days (test gate below, "GATE FAIL" on every tick) with
+# no way to tell from the log that the interpreter, not the code, was at
+# fault. Prepending a Homebrew bash to PATH fixes every subsequent bare
+# `bash` call in this script too (the test gate's `test_runner=(bash ...)`).
+if [ "${BASH_VERSINFO[0]}" -lt 5 ] && [ -z "${SYNC_EXTENSIONS_REEXEC:-}" ]; then
+  for candidate in /opt/homebrew/bin/bash /usr/local/bin/bash; do
+    [ -x "$candidate" ] || continue
+    export SYNC_EXTENSIONS_REEXEC=1 PATH="$(dirname "$candidate"):$PATH"
+    exec "$candidate" "$0" "$@"
+  done
+fi
+
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 LOG_PREFIX="[sync-extensions-auto]"
 LOCK_KEY="repo:iwe-server-config"
@@ -23,6 +41,15 @@ GATEWAY_LOCK_PY="$HOME/IWE/DS-my-strategy/scripts/lib/gateway-lock.py"
 
 AIST_ENV="$HOME/.config/aist/env"
 if [ -f "$AIST_ENV" ]; then
+  # A syntax error partway through this file (WP-7 Ф174, 24.09.2026: an
+  # unquoted value on line 17 broke on `<`/`>`) makes `source` run every
+  # line before the error and silently stop -- variables declared after
+  # it, including TELEGRAM_BOT_TOKEN/TELEGRAM_CHAT_ID, never get set, and
+  # alert()/send_telegram() then fail open with no message at all instead
+  # of a warning. bash -n catches that before source runs anything.
+  if ! bash -n "$AIST_ENV" 2>/dev/null; then
+    echo "$LOG_PREFIX WARN: $AIST_ENV has a syntax error -- variables past the bad line will not load"
+  fi
   set -a
   source "$AIST_ENV"
   set +a
@@ -47,11 +74,25 @@ fi
 
 send_telegram() {
   local text="$1"
-  if [ -n "${TELEGRAM_BOT_TOKEN:-}" ] && [ -n "${TELEGRAM_CHAT_ID:-}" ]; then
-    curl -s --max-time 10 -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
-      -d "chat_id=${TELEGRAM_CHAT_ID}" \
-      --data-urlencode "text=$text" > /dev/null || true
+  if [ -z "${TELEGRAM_BOT_TOKEN:-}" ] || [ -z "${TELEGRAM_CHAT_ID:-}" ]; then
+    # Previously silent (WP-7 Ф174, 24.09.2026): a broken $AIST_ENV upstream
+    # (see the bash -n check above) left these unset for 5 days, and every
+    # alert()/alert_ok() call after that did nothing with no trace in the
+    # log -- indistinguishable from "the dedup throttle suppressed it".
+    echo "$LOG_PREFIX WARN: TELEGRAM_BOT_TOKEN/TELEGRAM_CHAT_ID not set -- message not sent: $text"
+    return 0
   fi
+  local response
+  response=$(curl -s --max-time 10 -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+    -d "chat_id=${TELEGRAM_CHAT_ID}" \
+    --data-urlencode "text=$text") || {
+    echo "$LOG_PREFIX WARN: Telegram send failed (curl error) -- message not delivered"
+    return 0
+  }
+  case "$response" in
+    *'"ok":true'*) : ;;
+    *) echo "$LOG_PREFIX WARN: Telegram send rejected: ${response:0:200}" ;;
+  esac
 }
 
 # alert <class> <text>: сбой класса <class>. Первый раз — сразу; повтор того
@@ -251,6 +292,19 @@ FILE_LIST=$(echo "$CHANGED" | awk '{print $2}' | head -5 | tr '\n' ', ')
 # Рекомендуется при следующем ревизии рассмотреть обязательность тестового
 # покрытия для всех файлов в server-extensions/ либо альтернативный
 # механизм стимула (например, блокировка merge при снижении покрытия)».
+# The re-exec at the top of this script already tried to get a bash >= 5
+# onto PATH; if none was installed, every `test_runner=(bash "$test_file")`
+# call below still runs under Apple's stock 3.2 and can reproduce the
+# false-failure class this fixes (WP-7 Ф174) again. Fail loud instead of
+# silently testing under the interpreter that caused the 5-day stall.
+GATE_BASH_VERSION=$(bash -c 'echo "$BASH_VERSION"')
+case "$GATE_BASH_VERSION" in
+  [0-4].*)
+    alert test-env "🚨 sync-extensions-auto: только bash $GATE_BASH_VERSION найден -- тестовый гейт не запускаю, нужен bash >= 5 (например, brew install bash)"
+    exit 1
+    ;;
+esac
+
 if ! setup_test_env; then
   alert test-env "🚨 sync-extensions-auto: тестовое окружение (.claude/lib и соседи) не удалось подготовить — auto-sync отменён, подробности в логе на Маке"
   exit 1

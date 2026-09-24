@@ -48,12 +48,15 @@ mkdir -p "$FIX_BIN"
 cat > "$FIX_BIN/curl" <<STUB
 #!/bin/bash
 # захватываем именно --data-urlencode "text=..." — тот же аргумент, что
-# реальный send_telegram передаёт curl
+# реальный send_telegram передаёт curl; отвечаем правдоподобным успехом
+# Telegram API, иначе send_telegram()'s "ok":true check (WP-7 Ф174,
+# 24.09.2026) логировал бы WARN на каждый сценарий этого теста.
 for a in "\$@"; do
   case "\$a" in
     text=*) printf '%s\n' "\${a#text=}" >> "$TG_LOG" ;;
   esac
 done
+echo '{"ok":true,"result":{}}'
 STUB
 chmod +x "$FIX_BIN/curl"
 
@@ -85,9 +88,18 @@ LINES=$(wc -l < "$TG_LOG" | tr -d ' ')
 [ "$LINES" = "1" ] && ok "другой класс не разделяет подавление с 'pull'" || bad "другой класс шлёт независимо" "$LINES строк"
 
 # --- Сценарий 4: окно истекло — повтор уходит с пометкой "повторяется N раз" -
+# NOTIFY_ESCALATION_URGENT_AFTER_SEC переопределён на время сценария (WP-7
+# Ф174, 24.09.2026): дефолт urgent-after-sec (21600) и repeat-after-min*60
+# (360*60=21600) — одно и то же число, поэтому любой возраст инцидента,
+# достаточный, чтобы миновать окно подавления, ОДНОВРЕМЕННО пересекает и
+# urgent-порог — фактический текст всегда получался "🆘 ... нужно ручное
+# вмешательство" (urgent), а не проверяемое здесь "повторяется" (ongoing).
+# Сценарий 4 проверяет именно фазу ongoing — отодвигаем urgent далеко, чтобы
+# два условия снова не совпадали случайно.
+NOTIFY_ESCALATION_URGENT_AFTER_SEC=999999
 STATE_FILE="$DS_PUBLISH_ADMISSION_DIR/incidents/sync-extensions-auto-pull.state"
 [ -f "$STATE_FILE" ] || bad "state-файл класса pull существует" "не найден $STATE_FILE"
-OLD_TS=$(( $(date -u +%s) - 25000 ))  # > 360 мин
+OLD_TS=$(( $(date -u +%s) - 25000 ))  # > 360 мин (окно подавления), но < urgent выше
 COUNT_NOW=$(cut -d: -f3 "$STATE_FILE")
 printf '%s:%s:%s' "$OLD_TS" "$OLD_TS" "$COUNT_NOW" > "$STATE_FILE"
 : > "$TG_LOG"
@@ -115,6 +127,24 @@ if grep -q "восстановилось" "$TG_LOG"; then
 else
     ok "чистый успех: не упоминает 'восстановилось' (нечего восстанавливать)"
 fi
+
+# --- Сценарий 7: нет токена/чата — send_telegram предупреждает, не молчит ---
+# WP-7 Ф174, 24.09.2026: до этой правки send_telegram() без токена просто
+# ничего не делала — 5-дневный простой автосинка на Маке (сломанный
+# ~/.config/aist/env оставлял TELEGRAM_* неопределёнными) был неотличим в
+# логе от штатного подавления повтора.
+(
+  unset TELEGRAM_BOT_TOKEN TELEGRAM_CHAT_ID
+  : > "$TG_LOG"
+  send_telegram "test: нет токена"
+) >"$WORKDIR/scenario7.log" 2>&1
+if grep -qi "not set" "$WORKDIR/scenario7.log"; then
+  ok "нет токена: предупреждение в логе"
+else
+  bad "нет токена: предупреждение в логе" "$(cat "$WORKDIR/scenario7.log")"
+fi
+LINES=$(wc -l < "$TG_LOG" | tr -d ' ')
+[ "$LINES" = "0" ] && ok "нет токена: curl не вызван" || bad "нет токена: curl не вызван" "$LINES строк"
 
 echo "---"
 echo "PASS=$PASS FAIL=$FAIL"
