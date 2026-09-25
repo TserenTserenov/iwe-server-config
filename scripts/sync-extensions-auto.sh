@@ -64,6 +64,11 @@ fi
 # отдельную реализацию. Все известные классы сбоя этого скрипта, для alert_ok
 # (перечислять новый класс сюда при добавлении нового failure-branch):
 ALERT_CLASSES=(cd pull source-behind source-snapshot sync-script test-env test-gate add commit push)
+# test-gate-partial is deliberately NOT here (cold review 25.09): unlike
+# every other class, it can fire and still reach a successful alert_ok() in
+# the SAME run, so this blanket sweep would immediately erase its own alert
+# and defeat the 6h/24h escalation backoff. It gets its own recovery check
+# further down instead.
 NOTIFY_LIB="${SYNC_EXTENSIONS_NOTIFY_LIB:-$HOME/IWE/DS-my-strategy/scripts/lib/notification-render.sh}"
 NOTIFY_LIB_AVAILABLE=false
 if [ -f "$NOTIFY_LIB" ]; then
@@ -277,7 +282,8 @@ FILE_LIST=$(echo "$CHANGED" | awk '{print $2}' | head -5 | tr '\n' ', ')
 # раньше первого ревью — это тик, который его бы синхронизировал). Для
 # каждого изменённого файла ищем соседний tests/-каталог и любой тест,
 # чьё имя содержит имя файла (обе конвенции этого репо: test-<name>.sh и
-# <name>-<scenario>-smoke.sh), запускаем; провал — тик отменяется целиком.
+# <name>-<scenario>-smoke.sh), запускаем; провал исключает из тика только
+# сам этот файл (WP-530, bug-2026-09-16), остальные едут как обычно.
 #
 # Честная граница (peer-review с Kimi, 06.09): гейт снижает вероятность
 # ПОВТОРА уже известной регрессии — он не ловит то, для чего теста ещё не
@@ -312,6 +318,9 @@ fi
 
 GATE_LOG=$(mktemp)
 GATE_FAILED=false
+# Paths whose own test failed (WP-530, bug-2026-09-16): excluded from this
+# tick's commit below instead of cancelling the whole batch for everyone else.
+FAILED_PATHS=()
 delivery_source_path() {
   local delivered_path="$1"
   case "$delivered_path" in
@@ -357,6 +366,7 @@ while IFS= read -r changed_line; do
     if ! "${test_runner[@]}" >> "$GATE_LOG" 2>&1; then
       echo "GATE FAIL: $test_file (для $rel_path)" >> "$GATE_LOG"
       GATE_FAILED=true
+      FAILED_PATHS+=("$rel_path")
     fi
   done <<< "$found_tests"
 done <<< "$CHANGED"
@@ -371,9 +381,32 @@ if [ "$GATE_FAILED" = true ]; then
   echo "$LOG_PREFIX test-gate failed: $(grep '^GATE FAIL:' "$GATE_LOG" | tr '\n' ' ')"
   echo "$LOG_PREFIX test-gate full output follows:"
   cat "$GATE_LOG"
-  alert test-gate "🚨 sync-extensions-auto: тестовый гейт нашёл провал — auto-sync отменён, коммит не создан ни для одного из ${FILE_COUNT} файлов (${FILE_LIST}...), подробности в логе на Маке"
-  rm -f "$GATE_LOG"
-  exit 1
+  # Revert only the failed paths to their last-committed state (WP-530,
+  # bug-2026-09-16: one flaky test used to block every unrelated file for
+  # 2-58+ hours). They get regenerated from source and retried next tick.
+  #
+  # Cold review 25.09: `git checkout -- <path>` restores from the INDEX, not
+  # HEAD -- if a prior tick's `git add` succeeded but `git commit` then failed
+  # (crash, disk hiccup; both already-alerted paths above), stale staged
+  # content from that dead run would win here instead of the real last-good
+  # commit, and the file would stay staged afterward and slip into the
+  # commit below despite having just failed its test. `git cat-file -e
+  # HEAD:<path>` (not the working-tree status code) is the reliable test for
+  # "does this path have a committed version at all" -- a path staged-but-
+  # never-committed reads as untracked-from-HEAD's perspective too.
+  while IFS= read -r failed_path; do
+    [ -n "$failed_path" ] || continue
+    if git cat-file -e "HEAD:$failed_path" 2>/dev/null; then
+      git checkout --quiet HEAD -- "$failed_path" 2>/dev/null || true
+    else
+      git reset --quiet -- "$failed_path" 2>/dev/null || true
+      rm -f "$failed_path"
+    fi
+  done < <(printf '%s\n' "${FAILED_PATHS[@]}" | sort -u)
+elif $NOTIFY_LIB_AVAILABLE; then
+  # The gate ran clean this tick -- test-gate-partial's own cross-tick
+  # recovery point (see why it's excluded from ALERT_CLASSES above).
+  notify_escalation_update "sync-extensions-auto/test-gate-partial" ok >/dev/null
 fi
 rm -f "$GATE_LOG"
 
@@ -384,6 +417,22 @@ rm -f "$GATE_LOG"
 # .claude/{lib,skills,hooks,scripts}), нарушая ровно то, ради чего они
 # сделаны временными (см. комментарий у setup_test_env выше).
 cleanup_test_env
+
+# Пересчитываем diff уже ПОСЛЕ отката провалившихся файлов выше — FILE_COUNT/
+# FILE_LIST ниже (коммит, алерты) должны описывать то, что реально едет, а не
+# исходный, ещё не просеянный гейтом список.
+CHANGED=$(git status --porcelain server-extensions/)
+if [ -z "$CHANGED" ]; then
+  alert test-gate "🚨 sync-extensions-auto: тестовый гейт нашёл провал во всех ${FILE_COUNT} изменённых файлах (${FILE_LIST}...) — доставлять на этом тике нечего, подробности в логе на Маке"
+  exit 0
+fi
+FILE_COUNT=$(echo "$CHANGED" | wc -l | tr -d ' ')
+FILE_LIST=$(echo "$CHANGED" | awk '{print $2}' | head -5 | tr '\n' ', ')
+
+if [ "$GATE_FAILED" = true ]; then
+  EXCLUDED_LIST=$(printf '%s\n' "${FAILED_PATHS[@]}" | sort -u | tr '\n' ', ')
+  alert test-gate-partial "⚠️ sync-extensions-auto: тестовый гейт исключил часть файлов (${EXCLUDED_LIST%, }) — они пересоберутся на следующем тике; остальные ${FILE_COUNT} файлов (${FILE_LIST}...) доставляются как обычно"
+fi
 
 # Pathspec на commit (не только на add) — если параллельная сессия уже держит
 # в индексе свою незакоммиченную правку вне server-extensions/, она сюда не
