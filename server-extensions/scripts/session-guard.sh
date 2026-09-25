@@ -2211,6 +2211,48 @@ lease_valid() {
   [ "$(date +%s)" -lt "$deadline" ]
 }
 
+# WP-530 Ф61 (2026-09-25): `pid:` is written once, at `open`, and never again
+# -- a `--resume`d conversation runs under a brand-new OS process, but no code
+# path ever calls `open` a second time to correct the record. Found live: a
+# quarantine sweep classifies "PID dead" purely from this stale field
+# (_classify_dead_semaphore, `_quarantine_dead_interactive`), so a session
+# resumed hours ago looks exactly like an abandoned one -- 2 of 3 active
+# tsekh-1 sessions would have been quarantined by this alone on 2026-09-25.
+# `renew`/`note-file`/`note-commit` already hold the caller's
+# session-transition-lock and already prove *this* process is the live owner
+# just by being the one invoking them -- the natural, lock-safe moment to
+# correct `pid:`/`pid_start:` to match. Deliberately a no-op for semaphores
+# that never carried a `pid:` at all (kimi/codex adapters): those use a
+# different, escalate-only liveness model and are not this fix's target.
+_refresh_owner_pid() {  # <semaphore file>, called under an already-held session-transition-lock
+  local semaphore="$1" current_pid="${OWNER_PID:-${CLAUDE_PID:-}}" recorded_pid pid_start has_pid_start tmp
+  [[ "$current_pid" =~ ^[1-9][0-9]*$ ]] || return 0
+  recorded_pid=$(grep '^pid: ' "$semaphore" 2>/dev/null | head -1 | cut -d' ' -f2- || true)
+  [ -n "$recorded_pid" ] || return 0
+  [ "$recorded_pid" = "$current_pid" ] && return 0
+  pid_start=$(ps -p "$current_pid" -o lstart= 2>/dev/null | sed 's/^ *//; s/ *$//' || true)
+  [ -n "$pid_start" ] || return 0
+  # `grep -c` already prints "0" on a clean no-match; `|| echo 0` here would
+  # concatenate a SECOND "0" onto that output instead of replacing it
+  # (`||` doesn't discard cmd1's stdout on failure) -- `|| true` is silent.
+  has_pid_start=$(grep -c '^pid_start: ' "$semaphore" 2>/dev/null || true)
+  tmp="${semaphore}.tmp.$$"
+  if awk -v pid="$current_pid" -v start="$pid_start" -v has_start="$has_pid_start" '
+    /^pid: / { print "pid: " pid; if (has_start == "0") print "pid_start: " start; next }
+    /^pid_start: / { print "pid_start: " start; next }
+    { print }
+  ' "$semaphore" > "$tmp" 2>/dev/null && [ -s "$tmp" ]; then
+    mv "$tmp" "$semaphore"
+  else
+    # Best-effort, same convention as note-file's own lease auto-renewal
+    # (WP-484 Ф133): a failed refresh must not block the caller's actual
+    # command, but silence here would let the stale-pid bug this exists to
+    # fix come back unnoticed.
+    echo "WARNING: could not refresh pid:/pid_start: on $(basename -- "$semaphore")" >&2
+    rm -f "$tmp"
+  fi
+}
+
 # WP-484 (2026-08-18-02-wp484-witness-implementation, ArchGate + peer-session
 # with Codex): zombie-semaphore registry, separate from card-audit-findings.jsonl
 # -- those are externally-actionable findings on FOREIGN cards requiring a
@@ -9890,6 +9932,7 @@ print(os.path.relpath(f, r))
   # без нового отдельного вызова. Best-effort: неудача не блокирует note-file
   # (та же атомарная запись, что renew -- temp-файл + mv, проверка что семафор
   # ещё жив на случай гонки с параллельным close).
+  _refresh_owner_pid "$SEM_FILE"
   _LEASE_TMP="${SEM_FILE}.lease.tmp.$$"
   {
     echo "renewed_at: $(now_iso)"
@@ -9950,6 +9993,9 @@ if [ "$CMD" = "note-commit" ]; then
     || fail "note-commit: semaphore изменился после resolve или уже закрывается" 1
   [ "$(_close_delivery_state "$SEM_FILE" "$LOCKED_NOTE_SESSION_ID" || true)" = "none" ] \
     || fail "note-commit: close transition уже подготовлен; commit claims frozen" 1
+  # WP-530 Ф61: a commit is at least as strong a liveness signal as note-file
+  # -- same fix, same already-held lock, see _refresh_owner_pid above.
+  _refresh_owner_pid "$SEM_FILE"
   # $IWE_ROOT is itself a git repository, but it is not a directory INSIDE
   # $IWE_ROOT -- `--repo IWE` therefore resolved to $IWE_ROOT/IWE and was
   # refused with "не git-репозиторий", which reads as "no such repo" for a
@@ -10522,6 +10568,15 @@ if [ "$CMD" = "renew" ]; then
       fi
     fi
   fi
+  # WP-530 Ф61 cold-review Critical (2026-09-25): `--foreign` (WP-545,
+  # 05.09) is a documented, already-used-in-prod escape hatch for renewing
+  # SOMEONE ELSE'S semaphore -- unconditionally refreshing pid:/pid_start:
+  # here would stamp the CALLER's own pid onto the FOREIGN session it is
+  # renewing, not the pid of that session's actual owner. That reintroduces
+  # exactly the bug this phase fixes, through a different door: when the
+  # calling session's process later dies, the foreign semaphore now shows a
+  # dead pid even though its real owner is still alive.
+  [ "$RENEW_FOREIGN" = "1" ] || _refresh_owner_pid "$SEM_FILE"
   LEASE_TMP="${SEM_FILE}.lease.tmp.$$"
   {
     echo "renewed_at: $(now_iso)"
