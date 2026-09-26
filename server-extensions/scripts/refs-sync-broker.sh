@@ -53,7 +53,18 @@ mkdir -p "$STATE_DIR"
 # must go through the same resolution.
 IWE_ROOT_RESOLVED=$(cd "$IWE_ROOT" 2>/dev/null && pwd -P) || IWE_ROOT_RESOLVED="$IWE_ROOT"
 
-log() { printf '%s %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$*" >> "$LOG_FILE"; }
+# Both the log file AND stderr (cold review's own tsekh-1 incident,
+# 2026-09-26): systemd's journal only ever sees this process's stderr, not
+# broker.log -- a FATAL written only to the file is invisible to
+# `systemctl status`/journalctl, exactly the gap that let the missing-flock
+# failure look silent from the operator's side even though the log file
+# itself was accurate the whole time.
+log() {
+  local line
+  line="$(date -u +%Y-%m-%dT%H:%M:%SZ) $*"
+  printf '%s\n' "$line" >> "$LOG_FILE"
+  printf '%s\n' "$line" >&2
+}
 
 require_registry() {
   [ -f "$REGISTRY" ] || { echo "refs-sync-broker: registry not found: $REGISTRY" >&2; exit 1; }
@@ -171,6 +182,15 @@ run_once() {
 }
 
 cmd_run() {
+  # Not "SKIP: lock held" -- a missing flock binary looks EXACTLY like a
+  # held lock to the check below (bash reports "command not found", exit
+  # 127, which the `if ! flock ...` negation happily treats as "contended"),
+  # and every run since would log a plausible-sounding SKIP forever while
+  # never fetching anything -- silence that looks identical to healthy.
+  # Live incident, 2026-09-26: tsekh-1's systemd unit PATH (commonPath in
+  # modules/systemd-timers.nix) didn't include util-linux, so THIS exact
+  # failure mode fired on every single invocation post-deploy.
+  command -v flock >/dev/null 2>&1 || { log "FATAL: flock binary not found in PATH -- cannot take the run lock"; exit 1; }
   exec 9>"$LOCK_FILE"
   if ! flock -n 9; then
     log "SKIP: another broker instance holds the lock"

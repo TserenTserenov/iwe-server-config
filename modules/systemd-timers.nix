@@ -708,7 +708,13 @@ in
       serviceConfig = commonServiceConfig // {
         ExecStart = "${pkgs.bash}/bin/bash ${iwe}/scripts/refs-sync-broker.sh run";
       };
-      path = commonPath;
+      # util-linux (flock) is NOT in commonPath -- live incident, 2026-09-26:
+      # every invocation post-first-deploy logged a plausible "SKIP: another
+      # broker instance holds the lock" (the missing-binary case the script
+      # itself now also fails loudly on, see refs-sync-broker.sh's own
+      # comment at cmd_run) while never actually fetching anything, and
+      # systemd still reported exit 0/SUCCESS the whole time.
+      path = commonPath ++ [ pkgs.util-linux ];
       environment = commonEnv // {
         IWE_ROOT = iwe;
       };

@@ -89,6 +89,35 @@ out=$(REFS_SYNC_STALE_AFTER=0 bash "$BROKER" status)
 echo "$out" | grep -q "state=stale" || fail "status с REFS_SYNC_STALE_AFTER=0 должен вернуть state=stale: $out"
 pass "status: stale, когда heartbeat старше порога"
 
+# 4b. flock missing from PATH must fail LOUDLY, not silently look like "lock
+#    already held" -- live incident, tsekh-1, 2026-09-26: the systemd unit's
+#    PATH lacked util-linux, so every single invocation logged a plausible
+#    "SKIP: another broker instance holds the lock" forever, no heartbeat
+#    ever written, and systemd still reported exit 0/SUCCESS -- silence
+#    that looked exactly like a healthy, contended broker.
+rm -f "$IWE_RUNTIME/refs-sync-broker/heartbeat.json" "$IWE_RUNTIME/refs-sync-broker/broker.log"
+BASH_ABS=$(command -v bash)
+NO_FLOCK_BIN=$(mktemp -d)
+for tool in git python3 mkdir mv date cat timeout mktemp rm printf grep; do
+  real=$(command -v "$tool") || continue
+  ln -s "$real" "$NO_FLOCK_BIN/$tool"
+done
+set +e
+out=$("$BASH_ABS" -c 'export PATH="$1"; exec "$2" "$3" "$4"' _ "$NO_FLOCK_BIN" "$BASH_ABS" "$BROKER" run 2>&1)
+rc=$?
+set -e
+rm -rf "$NO_FLOCK_BIN"
+[ "$rc" -ne 0 ] || fail "run() без flock в PATH должен провалиться (exit != 0), вернул 0"
+# log() now tees to stderr too (cold review's own tsekh-1 incident,
+# 2026-09-26: it used to write ONLY to broker.log, invisible to systemd's
+# journal -- the file was accurate the whole time, but nothing an operator
+# actually looks at first showed it), so this is what the journal would see.
+echo "$out" | grep -q "flock binary not found" || fail "вывод не называет отсутствие flock как причину: $out"
+grep -q "flock binary not found" "$IWE_RUNTIME/refs-sync-broker/broker.log" \
+  || fail "лог-файл тоже должен содержать эту причину, не только stderr"
+[ ! -f "$IWE_RUNTIME/refs-sync-broker/heartbeat.json" ] || fail "heartbeat не должен быть записан при отсутствии flock"
+pass "отсутствие flock в PATH -> явный отказ (FATAL), не молчаливое 'lock уже занят'"
+
 # 5. concurrent run(): the second invocation must not block or error --
 #    it observes the lock held and exits 0 quietly (own state space, non-
 #    blocking flock, not a session-guard semaphore -- Codex, round 3).
