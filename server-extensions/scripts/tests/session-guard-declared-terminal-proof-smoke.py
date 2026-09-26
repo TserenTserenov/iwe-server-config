@@ -1198,9 +1198,9 @@ class ClaimedSupersessionTests(unittest.TestCase):
         self.refuses()
 
     def test_oversized_conflict_blob_refused(self):
-        self.seed_base(self.prefix + "Z" * 262145 + "\n" + self.suffix)
-        old = self.prefix + self.own_line + "Z" * 262145 + "\n" + self.suffix
-        published = self.prefix + self.header + self.own_line + "Z" * 262145 + "\n" + self.suffix
+        self.seed_base(self.prefix + "Z" * (4 * 1024 * 1024 + 1) + "\n" + self.suffix)
+        old = self.prefix + self.own_line + "Z" * (4 * 1024 * 1024 + 1) + "\n" + self.suffix
+        published = self.prefix + self.header + self.own_line + "Z" * (4 * 1024 * 1024 + 1) + "\n" + self.suffix
         self.pair(old, published)
         self.refuses()
 
