@@ -2,7 +2,7 @@
 name: peer-conversation
 description: Многотуровый диалог писателя (Claude) с одним или несколькими напарниками (любой набор из kimi/codex/hermes/claude-headless/grok) по задаче пилота (DP.SC.154). Ведёт turn-loop (2 участника) или round-loop (3+, WP-509), обнаруживает CONSENSUS/ESCALATE, после консенсуса — Decision Gate (зафиксировать vs реализовать → ревью → проверить → задеплоить), синтезирует report.md через Agent tool.
 argument-hint: "<описание задачи> [--peer kimi|codex|hermes|claude|grok[,vendor2,...]] | --list | --interrupt <session_id> | --finalize <session_id>"
-version: 1.7.0
+version: 1.7.1
 layer: L1
 status: active
 browser_safe: false
@@ -466,8 +466,15 @@ fi
 # session-guard его не увидит и заблокирует коммит на Шаге 4.5.1 (найдено
 # 2026-08-10, сессия 2026-08-10-08-wp7-update-fatigue-community: блокировка
 # сразу на обоих peer-файлах сессии). Регистрируем сразу, не дожидаясь блока.
-bash "${IWE_SCRIPTS:-$HOME/IWE/scripts}/session-guard.sh" note-file "$PEER_FILE" \
-  --wp "<WP-NNN из Шага 0б>" --slug "$SESSION_ID" 2>/dev/null || true
+# Отказ регистрации — громкий (WP-530 Ф67, 25.09): три сессии за день молча
+# потеряли заявки на файлы напарников (прежнее `2>/dev/null || true`), scope-proof
+# при закрытии не сошёлся, семафоры остались открытыми. Раунд не роняем, но
+# писатель ОБЯЗАН увидеть WARN и повторить note-file до Шага 4.5.
+if ! note_err=$(bash "${IWE_SCRIPTS:-$HOME/IWE/scripts}/session-guard.sh" note-file "$PEER_FILE" \
+    --wp "<WP-NNN из Шага 0б>" --slug "$SESSION_ID" 2>&1); then
+  printf 'WARN: note-file failed for %s: %s\n' "$PEER_FILE" "$note_err" >&2
+  printf 'NOTE_FILE_WARN %s\n' "$PEER_FILE"
+fi
 ```
 
 Если файл пустой или exit ≠ 0 → сообщить пилоту: «<PEER_VENDOR> не ответил. Повторить или прервать?»
@@ -628,8 +635,15 @@ fi
 rm -f "$PROMPT_FILE"
 # Тот же разрыв, что в турн-loop Шага 3.1 (найдено 2026-08-10) — $PEER_FILE
 # идёт через Bash-редирект, scope gate его не видит без явной регистрации.
-bash "${IWE_SCRIPTS:-$HOME/IWE/scripts}/session-guard.sh" note-file "$PEER_FILE" \
-  --wp "<WP-NNN из Шага 0б>" --slug "$SESSION_ID" 2>/dev/null || true
+# Отказ регистрации — громкий (WP-530 Ф67, 25.09): три сессии за день молча
+# потеряли заявки на файлы напарников (прежнее `2>/dev/null || true`), scope-proof
+# при закрытии не сошёлся, семафоры остались открытыми. Раунд не роняем, но
+# писатель ОБЯЗАН увидеть WARN и повторить note-file до Шага 4.5.
+if ! note_err=$(bash "${IWE_SCRIPTS:-$HOME/IWE/scripts}/session-guard.sh" note-file "$PEER_FILE" \
+    --wp "<WP-NNN из Шага 0б>" --slug "$SESSION_ID" 2>&1); then
+  printf 'WARN: note-file failed for %s: %s\n' "$PEER_FILE" "$note_err" >&2
+  printf 'NOTE_FILE_WARN %s\n' "$PEER_FILE"
+fi
 ```
 
 **3р.1а Валидация реплики (WP-509)**

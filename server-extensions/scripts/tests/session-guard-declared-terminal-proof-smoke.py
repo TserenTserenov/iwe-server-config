@@ -12,6 +12,8 @@ import subprocess
 import tempfile
 import unittest
 
+import yaml
+
 
 GUARD = Path(os.environ.get(
     "SESSION_GUARD_UNDER_TEST",
@@ -27,7 +29,9 @@ def function_source(name):
 
 
 SELECTION_START = SOURCE.index("  HARNESS_SESSION_ID=$(grep", SOURCE.index("  RUNNER_CARD_DIRS=("))
-SELECTION_END = SOURCE.index("  # WP-520 Ф4", SELECTION_START)
+SELECTION_END = SOURCE.index(
+    '  if [ -z "$RUNNER_OK" ]; then\n    # WP-537 (19.08', SELECTION_START,
+)
 SELECTION = SOURCE[SELECTION_START:SELECTION_END]
 
 
@@ -60,26 +64,95 @@ class DeclaredTerminalProofTests(unittest.TestCase):
     def invoke(self, name, *args):
         return self.shell(function_source(name) + "\n" + name + " " + shlex.join(args))
 
-    def card(self, owner="owner-A", slug="fixture"):
-        path = self.root / ("RUN-quick-close-" + slug + ".md")
-        path.write_text(
-            "---\nprocess_id: quick-close\nrun_id: quick-close-" + slug
-            + "\nrequested_slug: " + slug
-            + "\nstatus: completed\ncurrent_step: done\nowner_session_id: " + owner
-            + "\nresults:\n  gather-session-facts:\n    wp: WP-484\n---\n"
+    def owner_status(self, owner, files):
+        sessions = self.root / ".iwe-runtime/sessions"
+        sessions.mkdir(parents=True, mode=0o700)
+        for name, content in files.items():
+            (sessions / name).write_text(content)
+        env = dict(self.env)
+        env.update(IWE_ROOT=str(self.root), IWE_GOVERNANCE_REPO="DS-strategy",
+                   IWE_SCHEDULED_ADMISSION_WAIT_SEC="2")
+        result = subprocess.run(
+            ["/bin/bash", str(GUARD), "owner-status", "--owner-session-id", owner],
+            text=True, capture_output=True, cwd=self.root, env=env, timeout=15,
         )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        return json.loads(result.stdout)
+
+    def test_owner_status_present_outranks_unrelated_unknown_sibling(self):
+        active = ("---\nagent: fixture\nsession_id: guard-A\n"
+                  "harness_session_id: owner-A\n---\n")
+        status = self.owner_status("owner-A", {
+            "fixture-guard-A.open": active,
+            "foreign.open.lease.orphaned-peer-audit": "unclassified projection\n",
+        })
+        self.assertEqual(status["state"], "present")
+        self.assertEqual(status["proof"], "admission-locked-snapshot/v1")
+
+    def test_owner_status_unknown_sibling_still_blocks_absence(self):
+        status = self.owner_status("owner-A", {
+            "foreign.open.lease.orphaned-peer-audit": "unclassified projection\n",
+        })
+        self.assertEqual(status["state"], "unknown")
+        self.assertIn("unknown semaphore sibling state", status["reason"])
+
+    def test_heartbeat_preserves_declared_close_path(self):
+        semaphore = self.root / "fixture-session-A.open"
+        for route in ("peer-session", "publish-only", "machine-publish-only", "pipeline",
+                      "unknown", "quick-close", "day-close", "none", "custom-route"):
+            with self.subTest(route=route):
+                before = ("---\nagent: fixture\nsession_id: session-A\n"
+                          f"close_path: {route}\n---\nfile: result.md\n")
+                semaphore.write_text(before)
+                result = self.invoke("_append_heartbeat_atomic", str(semaphore), "fixture",
+                                     "session-A", "1234", "2026-09-25T19:00:00Z")
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(semaphore.read_text(), before +
+                                 "heartbeat_at: 2026-09-25T19:00:00Z\nheartbeat_pid: 1234\n")
+
+    def test_heartbeat_refuses_close_transition_or_ambiguous_route(self):
+        semaphore = self.root / "fixture-session-A.open"
+        for fields in ("close_delivery_state: PREPARED\n", "recovery_state: pending\n",
+                       "close_path: peer-session\nclose_path: pipeline\n",
+                       "close_path: \n", "close_path: bad route\n"):
+            with self.subTest(fields=fields):
+                before = "---\nagent: fixture\nsession_id: session-A\n" + fields + "---\n"
+                semaphore.write_text(before)
+                result = self.invoke("_append_heartbeat_atomic", str(semaphore), "fixture",
+                                     "session-A", "1234", "2026-09-25T19:00:00Z")
+                self.assertNotEqual(result.returncode, 0)
+                self.assertEqual(semaphore.read_text(), before)
+
+    def card(self, owner="owner-A", slug="fixture", *, run_suffix="", wp="WP-484",
+             status="completed", step="done", results=None):
+        run_id = "quick-close-" + slug + run_suffix
+        path = self.root / ("RUN-" + run_id + ".md")
+        card_results = {"gather-session-facts": {"wp": wp}}
+        card_results.update(results or {})
+        doc = dict(process_id="quick-close", run_id=run_id, requested_slug=slug,
+                   status=status, current_step=step, owner_session_id=owner,
+                   results=card_results)
+        path.write_text("---\n" + yaml.safe_dump(doc, sort_keys=False) + "---\n")
         return path
 
-    def select(self, close_path, cards=(), harness=""):
+    def select(self, close_path, cards=(), harness="", *, force_no_reflection="", card_dirs=None):
         sem = self.root / "fixture.open"
-        sem.write_text("close_path: " + close_path + "\n" + (
+        sem.write_text("close_path: " + close_path + "\nsession_id: owner-A\n" + (
             "harness_session_id: " + harness + "\n" if harness else ""
         ))
         setup = (
-            "SEM_FILE=" + shlex.quote(str(sem)) + "\nSLUG=fixture\n"
+            "SEM_FILE=" + shlex.quote(str(sem)) + "\nSLUG=fixture\nWP=WP-484\n"
+            + "AGENT=fixture\nSESSION_ID=owner-A\nGOV_REPO=absent-governance\n"
+            + "IWE_ROOT=" + shlex.quote(str(self.root)) + "\n"
+            + "FORCE_NO_REFLECTION=" + shlex.quote(force_no_reflection) + "\n"
             + "RUNNER_CARDS=(" + shlex.join(map(str, cards)) + ")\n"
+            + "RUNNER_CARD_DIRS=(" + shlex.join(map(str, card_dirs or [self.root])) + ")\n"
         )
-        result = self.shell(function_source("_card_field") + "\n" + setup + SELECTION
+        helpers = ["_card_field", "_quick_close_card_wp", "_unique_record_field",
+                   "_terminal_card_snapshot_sha"]
+        script = "\n".join(function_source(name) for name in helpers)
+        script += '\nfail() { printf "%s\\n" "$1" >&2; exit "$2"; }\n'
+        result = self.shell(script + setup + SELECTION
                             + '\nprintf "%s\\n" "$RUNNER_OK" "$TERMINAL_PROOF_MODE"\n')
         self.assertEqual(result.returncode, 0, result.stderr)
         return result.stdout.splitlines()
@@ -119,8 +192,85 @@ class DeclaredTerminalProofTests(unittest.TestCase):
 
     def test_ordinary_missing_harness_still_requires_exact_owner(self):
         card = self.card("owner-B")
-        self.assertEqual(self.select("quick-close", [card]), [str(card), "completed"])
+        self.assertEqual(self.select("quick-close", [card]), ["", ""])
         self.assertNotEqual(self.snapshot(card).returncode, 0)
+
+    def test_invalid_completed_candidate_does_not_hide_exact_release(self):
+        valid = self.card(status="running", step="session-guard-release",
+                          results={"verify-r23": {"verdict": "pass"}})
+        invalid = [
+            self.card(slug="fixture-earlier"),
+            self.card(run_suffix="-wrong-wp", wp="WP-7"),
+            self.card(run_suffix="-wrong-step", step="commit-push"),
+        ]
+        for candidate in invalid:
+            with self.subTest(candidate=candidate.name):
+                self.assertEqual(self.select("quick-close", [candidate, valid], "owner-A"),
+                                 [str(valid), "release-step"])
+
+    def test_invalid_completed_candidate_does_not_hide_exact_completed(self):
+        valid = self.card()
+        invalid = self.card(run_suffix="-wrong-wp", wp="WP-7")
+        self.assertEqual(self.select("quick-close", [invalid, valid], "owner-A"),
+                         [str(valid), "completed"])
+
+    def test_release_requires_its_own_positive_verdict_before_selection(self):
+        valid = self.card(status="running", step="session-guard-release",
+                          results={"verify-r23": {"verdict": "pass"}})
+        for verdict in (None, "fail", ""):
+            with self.subTest(verdict=verdict):
+                invalid = self.card(run_suffix="-invalid", status="running",
+                                    step="session-guard-release",
+                                    results={"unrelated": {"verdict": "pass"},
+                                             "verify-r23": {"verdict": verdict}})
+                self.assertEqual(self.select("quick-close", [invalid, valid], "owner-A"),
+                                 [str(valid), "release-step"])
+                self.assertEqual(self.select("quick-close", [invalid], "owner-A"), ["", ""])
+
+    def test_blocked_release_remains_nonterminal(self):
+        card = self.card(status="waiting", step="blocked-session-release",
+                         results={"verify-r23": {"verdict": "pass"},
+                                  "session-guard-release": {"status": "skipped"}})
+        self.assertEqual(self.select("quick-close", [card], "owner-A"), ["", ""])
+
+    def test_cancelled_archive_selection_skips_foreign_wp(self):
+        results = {"commit-push": {"all_pushed": True}}
+        valid = self.card(status="cancelled", step="wp-archive-run", results=results)
+        invalid = self.card(run_suffix="-wrong-wp", wp="WP-7", status="cancelled",
+                            step="wp-archive-run", results=results)
+        self.assertEqual(self.select("quick-close", [invalid, valid], "owner-A"),
+                         [str(valid), "archive-cancelled"])
+
+    def test_explicit_witness_selection_skips_foreign_wp(self):
+        results = {"commit-push": {"all_pushed": True}}
+        valid = self.card(status="waiting", step="blocked-witness-unavailable", results=results)
+        invalid = self.card(run_suffix="-wrong-wp", wp="WP-7", status="waiting",
+                            step="blocked-witness-unavailable", results=results)
+        self.assertEqual(self.select("quick-close", [invalid, valid], "owner-A",
+                                     force_no_reflection="fixture approval"),
+                         [str(valid), "blocked-witness"])
+
+    def test_marker_selection_skips_invalid_checkout_copy(self):
+        earlier = self.root / "earlier"
+        later = self.root / "later"
+        earlier.mkdir()
+        later.mkdir()
+        card = self.card(slug="other")
+        valid = later / card.name
+        card.rename(valid)
+        invalid = earlier / valid.name
+        invalid.write_text(valid.read_text().replace("current_step: done", "current_step: commit-push"))
+        marker = self.root / ".iwe-runtime/quick-close-slug-satisfied/quick-close-fixture.satisfied_by"
+        marker.parent.mkdir(parents=True)
+        marker.write_text("quick-close-other")
+        self.assertEqual(self.select("quick-close", harness="owner-A", card_dirs=[earlier, later]),
+                         [str(valid), "marker-completed"])
+
+    def test_owner_selection_skips_invalid_completed_card(self):
+        self.card(slug="another-a", step="commit-push")
+        valid = self.card(slug="another-b")
+        self.assertEqual(self.select("quick-close", harness="owner-A"),
+                         [str(valid), "owner-completed"])
 
     def test_strict_wp_and_slug(self):
         card = self.card()
@@ -779,7 +929,7 @@ class ClaimedSupersessionTests(unittest.TestCase):
     def setUpClass(cls):
         source = GUARD.read_text()
         cls.functions = "\n".join(extract_function(source, name) for name in (
-            COMMIT_TARGET, SUPERSESSION_TARGET, "_peer_metadata_claim_has_publish_proof",
+            COMMIT_TARGET, SUPERSESSION_TARGET, "_commit_automerge_has_publish_proof", "_peer_metadata_claim_has_publish_proof",
             "_claimed_source_chain_has_publish_proof", "_code_branch_claim_has_publish_proof",
             "normalize_remote_url", "_resolve_repo_checkout", CLAIMS_TARGET,
         ))
@@ -1125,7 +1275,7 @@ class PeerMetadataPublicationTests(unittest.TestCase):
         before = self.immutable_state()
         function_names = [self.target]
         if caller:
-            function_names += [COMMIT_TARGET, SUPERSESSION_TARGET,
+            function_names += [COMMIT_TARGET, SUPERSESSION_TARGET, "_commit_automerge_has_publish_proof",
                                "_claimed_source_chain_has_publish_proof", "_code_branch_claim_has_publish_proof",
                                "normalize_remote_url",
                                "_resolve_repo_checkout", CLAIMS_TARGET]
@@ -1310,6 +1460,43 @@ class PreparedDeliveryRetryTests(unittest.TestCase):
         self.assertNotEqual(self.deliver().returncode, 0)
         self.assertFalse(self.replay_log.exists())
 
+    def publish_rewritten_commits(self, count):
+        self.git("-C", str(self.origin), "update-ref", "refs/heads/main", self.base)
+        self.git("-C", str(self.repo), "checkout", "-q", "--detach", self.base)
+        self.write("other-session.txt", "Independent publication\n")
+        self.commit("independent publication", "other-session.txt")
+        for commit in self.source_commits[:count]:
+            self.git("-C", str(self.repo), "cherry-pick", commit)
+        self.write("owned/result.txt", "A later legitimate revision\n")
+        self.published = self.commit("later revision", "owned/result.txt")
+        self.publish_current_branch()
+        self.git("-C", str(self.repo), "checkout", "-q", "--detach", self.source_head)
+
+    def test_rewritten_published_sequence_survives_later_remote_edit(self):
+        self.publish_rewritten_commits(2)
+        for _ in range(2):
+            result = self.deliver()
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertFalse(self.replay_log.exists())
+
+    def test_partial_rewritten_publication_replays_only_missing_commit(self):
+        self.publish_rewritten_commits(1)
+        result = self.deliver()
+        self.assertEqual(result.returncode, 73, result.stderr)
+        self.assertEqual(self.replay_log.read_text().splitlines(),
+                         [str(self.repo), "main", "--exact-commit", self.source_commits[1]])
+
+    def test_unpublished_empty_commit_is_not_patch_delivery(self):
+        self.git("-C", str(self.repo), "commit", "--allow-empty", "-m", "metadata only")
+        empty = self.git("-C", str(self.repo), "rev-parse", "HEAD").stdout.strip()
+        self.sem.write_text(
+            "close_delivery_source_base: " + self.source_head
+            + "\nclose_delivery_source_head: " + empty
+            + "\nclose_delivery_source_commits: " + json.dumps([empty]) + "\n"
+        )
+        self.assertEqual(self.deliver().returncode, 73)
+        self.assertIn(empty, self.replay_log.read_text())
+
     def test_only_superseded_foreign_reaper_snapshots_skip_replay(self):
         import copy
         import yaml
@@ -1419,7 +1606,7 @@ class ClaimedSourceChainPublicationTests(unittest.TestCase):
         before = self.immutable_state()
         names = [self.target]
         if caller:
-            names += [COMMIT_TARGET, SUPERSESSION_TARGET, "_peer_metadata_claim_has_publish_proof",
+            names += [COMMIT_TARGET, SUPERSESSION_TARGET, "_commit_automerge_has_publish_proof", "_peer_metadata_claim_has_publish_proof",
                       "_code_branch_claim_has_publish_proof",
                       "normalize_remote_url", "_resolve_repo_checkout", CLAIMS_TARGET]
         functions = "\n".join(extract_function(GUARD.read_text(), name) for name in names)
@@ -1525,6 +1712,263 @@ class ClaimedSourceChainPublicationTests(unittest.TestCase):
         self.claims.remove(self.final)
         self.claims.append(merge)
         self.assertNotEqual(self.proof().returncode, 0)
+
+
+AUTOMERGE_TARGET = "_commit_automerge_has_publish_proof"
+
+
+class HistoricalAutomergePublicationTests(unittest.TestCase):
+    git = ScopePublicationProofTests.git
+    write = ScopePublicationProofTests.write
+    commit = ScopePublicationProofTests.commit
+    publish = ScopePublicationProofTests.publish
+    semaphore = ScopePublicationProofTests.semaphore
+    publish_current_branch = CommitCurrentTreeTests.publish_current_branch
+    immutable_state = ClaimedSupersessionTests.immutable_state
+    path = "current/shared.md"
+
+    def setUp(self):
+        ScopePublicationProofTests.setUp(self)
+        self.env.update(GIT_ALLOW_PROTOCOL="file", GIT_OPTIONAL_LOCKS="0",
+                        GIT_NO_REPLACE_OBJECTS="1")
+        self.make_publication()
+
+    def make_publication(self, variant="clean"):
+        # Start each variant from the original published baseline.
+        self.git("-C", str(self.repo), "checkout", "-q", "--detach", self.own_commit)
+        self.base_text = ("import: old\n" + "".join("left %02d\n" % n for n in range(12))
+                          + "owned: old\n" + "".join("right %02d\n" % n for n in range(12))
+                          + "context: old\n")
+        self.write(self.path, self.base_text)
+        paths = [self.path]
+        if variant == "tracked-union":
+            self.write(".gitattributes", "current/*.md merge=union\n")
+            paths.append(".gitattributes")
+        self.base = self.commit("common base", *paths)
+        self.write("parent-context.txt", "same context under distinct OIDs\n")
+        self.source_base = self.commit("private source parent", "parent-context.txt")
+        own = self.base_text.replace("import: old", "import: ours").replace("owned: old", "owned: ours")
+        self.write(self.path, own)
+        self.write("owned/second.txt", "second result must survive\n")
+        self.source = self.commit("private claimed change", self.path, "owned/second.txt")
+        self.git("-C", str(self.repo), "checkout", "-q", "--detach", self.base)
+        self.write("parent-context.txt", "same context under distinct OIDs\n")
+        target = self.base_text.replace("import: old", "import: ours").replace("context: old", "context: theirs")
+        if variant in ("conflict", "tracked-union"):
+            target = target.replace("owned: old", "owned: conflict")
+        self.write(self.path, target)
+        self.target = self.commit("concurrent published context", self.path, "parent-context.txt")
+        if variant == "conflict":
+            self.write(self.path, target.replace("owned: conflict", "owned: ours"))
+            self.write("owned/second.txt", "second result must survive\n")
+            self.published = self.commit("manual conflicting resolution", self.path, "owned/second.txt")
+        else:
+            result = self.git("-C", str(self.repo), "cherry-pick", self.source)
+            self.assertIn("Auto-merging", result.stdout)
+            if variant == "wrong-location":
+                self.write(self.path, target + "owned: ours\n")
+                self.git("-C", str(self.repo), "add", self.path)
+                self.git("-C", str(self.repo), "commit", "--amend", "-qm", "wrong insertion location")
+            elif variant == "lost-change":
+                self.git("-C", str(self.repo), "rm", "owned/second.txt")
+                self.git("-C", str(self.repo), "commit", "--amend", "-qm", "lost second result")
+            elif variant == "extra-change":
+                self.write("unrelated-extra.txt", "not part of the exact replay\n")
+                self.git("-C", str(self.repo), "add", "unrelated-extra.txt")
+                self.git("-C", str(self.repo), "commit", "--amend", "-qm", "extra unpublished provenance")
+            self.published = self.git("-C", str(self.repo), "rev-parse", "HEAD").stdout.strip()
+        if variant == "publication-merge":
+            tree = self.git("-C", str(self.repo), "rev-parse", self.published + "^{tree}").stdout.strip()
+            self.published = self.git("-C", str(self.repo), "commit-tree", tree,
+                                      "-p", self.target, "-p", self.base, "-m", "merge publication").stdout.strip()
+            self.git("-C", str(self.repo), "checkout", "-q", "--detach", self.published)
+        self.write(self.path, (self.repo / self.path).read_text().replace("owned: ours", "owned: later"))
+        self.commit("later legitimate edit", self.path)
+        self.git("-C", str(self.repo), "push", "-q", "--force", "origin", "HEAD:refs/heads/main")
+        self.git("-C", str(self.repo), "fetch", "-q", "origin")
+        self.remote = self.git("-C", str(self.repo), "rev-parse", "origin/main").stdout.strip()
+        self.git("-C", str(self.repo), "checkout", "-q", "--detach", self.source)
+        self.files = [self.path, "owned/second.txt"]
+        self.commits = [self.repo.name + " " + self.source]
+        names = [COMMIT_TARGET, SUPERSESSION_TARGET, "_peer_metadata_claim_has_publish_proof",
+                 "_claimed_source_chain_has_publish_proof", "_code_branch_claim_has_publish_proof",
+                 "normalize_remote_url", "_resolve_repo_checkout", CLAIMS_TARGET]
+        source = GUARD.read_text()
+        if AUTOMERGE_TARGET + "() {" in source:
+            names.append(AUTOMERGE_TARGET)
+        self.functions = "\n".join(extract_function(source, name) for name in names)
+
+    def invoke(self, caller=False):
+        target = CLAIMS_TARGET if caller else AUTOMERGE_TARGET
+        args = [str(self.sem)] if caller else [str(self.repo), self.source, self.remote,
+                                             str(self.sem), self.repo.name]
+        return subprocess.run(["/bin/bash"], input="set -euo pipefail\n" + self.functions
+                              + "\n" + target + " " + shlex.join(args),
+                              env=self.env, text=True, capture_output=True, timeout=30)
+
+    def proof(self, caller=False):
+        self.semaphore()
+        before = self.immutable_state()
+        result = self.invoke(caller)
+        self.assertEqual(self.immutable_state(), before, "Proof changed source, objects, refs or claims")
+        self.assertNotIn("command not found", result.stderr)
+        return result
+
+    def test_automerge_survives_later_edit_full_claim_gate(self):
+        cherry = self.git("-C", str(self.repo), "cherry", self.remote, self.source, self.source + "^")
+        self.assertEqual(cherry.stdout.strip(), "+ " + self.source)
+        base = self.git("-C", str(self.repo), "merge-base", self.source, self.target).stdout.strip()
+        self.assertNotEqual(base, self.source_base)
+        result = self.proof(caller=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("exact historical replay", result.stderr)
+
+    def test_exact_historical_replay_needs_no_claim_on_publisher_oid(self):
+        result = self.proof()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn(self.published, result.stderr)
+
+    def test_same_text_at_wrong_location_is_not_delivery(self):
+        self.make_publication("wrong-location")
+        self.assertNotEqual(self.proof().returncode, 0)
+        self.assertNotEqual(self.proof(caller=True).returncode, 0)
+
+    def test_lost_second_file_is_not_delivery(self):
+        self.make_publication("lost-change")
+        self.assertNotEqual(self.proof().returncode, 0)
+        self.assertNotEqual(self.proof(caller=True).returncode, 0)
+
+    def test_extra_changes_are_not_exact_whole_tree_replay(self):
+        self.make_publication("extra-change")
+        self.assertNotEqual(self.proof().returncode, 0)
+
+    def test_manual_conflict_resolution_is_not_clean_replay(self):
+        self.make_publication("conflict")
+        self.assertNotEqual(self.proof().returncode, 0)
+
+    def test_merge_publication_is_not_linear_replay(self):
+        self.make_publication("publication-merge")
+        self.assertNotEqual(self.proof().returncode, 0)
+
+    def test_source_merge_is_refused(self):
+        tree = self.git("-C", str(self.repo), "rev-parse", self.source + "^{tree}").stdout.strip()
+        self.source = self.git("-C", str(self.repo), "commit-tree", tree, "-p", self.source,
+                               "-p", self.base, "-m", "source merge").stdout.strip()
+        self.commits = [self.repo.name + " " + self.source]
+        self.assertNotEqual(self.proof().returncode, 0)
+
+    def test_empty_source_is_refused(self):
+        self.git("-C", str(self.repo), "commit", "--allow-empty", "-qm", "empty source")
+        self.source = self.git("-C", str(self.repo), "rev-parse", "HEAD").stdout.strip()
+        self.commits = [self.repo.name + " " + self.source]
+        self.assertNotEqual(self.proof().returncode, 0)
+
+    def test_source_must_be_frozen_in_exact_repository(self):
+        self.commits = ["other-repository " + self.source]
+        self.assertNotEqual(self.proof().returncode, 0)
+
+    def test_stale_remote_argument_is_refused(self):
+        self.remote = self.published
+        self.assertNotEqual(self.proof().returncode, 0)
+
+    def test_repository_merge_driver_cannot_run(self):
+        self.make_publication("conflict")
+        marker = self.root / "untrusted-driver-called"
+        attributes = self.root / "attributes"
+        attributes.write_text("*.md merge=untrusted\n")
+        self.git("-C", str(self.repo), "config", "core.attributesFile", str(attributes))
+        self.git("-C", str(self.repo), "config", "merge.untrusted.driver", "touch " + shlex.quote(str(marker)))
+        self.assertNotEqual(self.proof().returncode, 0)
+        self.assertFalse(marker.exists())
+
+    def test_tracked_union_attribute_is_ignored(self):
+        self.make_publication("tracked-union")
+        # Real tracked attributes resolve this conflict to the exact historical
+        # tree. The proof must require the clean default merge instead.
+        empty_tree = subprocess.run(
+            ["/usr/bin/git", "-C", str(self.repo), "mktree"], input="",
+            env=self.env, text=True, capture_output=True, check=True,
+        ).stdout.strip()
+        wanted = self.git("-C", str(self.repo), "rev-parse", self.published + "^{tree}").stdout.strip()
+        for attribute_source, expected in ((self.base, 0), (empty_tree, 1)):
+            with self.subTest(attributes=attribute_source):
+                control = subprocess.run(
+                    ["/usr/bin/git", "-C", str(self.repo), "merge-tree", "--write-tree",
+                     "--merge-base=" + self.source_base, self.target, self.source],
+                    env={**self.env, "GIT_ATTR_SOURCE": attribute_source},
+                    text=True, capture_output=True, timeout=20,
+                )
+                self.assertEqual(control.returncode, expected, control.stderr)
+                if expected == 0:
+                    self.assertEqual(control.stdout.strip(), wanted)
+        self.assertNotEqual(self.proof().returncode, 0)
+
+    def test_checkout_beneath_unicode_parent_has_exact_replay_proof(self):
+        parent = self.root / "проверка"
+        parent.mkdir()
+        self.repo = self.repo.rename(parent / self.repo.name)
+        result = self.proof()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn(self.published, result.stderr)
+
+    def test_no_published_commit_touches_the_claimed_path(self):
+        path = "never-published/result.txt"
+        self.write(path, "undelivered result\n")
+        self.source = self.commit("unpublished new path", path)
+        self.commits = [self.repo.name + " " + self.source]
+        self.files = [path]
+        candidates = self.git("-C", str(self.repo), "rev-list", self.remote, "--", path)
+        self.assertEqual(candidates.stdout, "")
+        self.assertNotEqual(self.proof().returncode, 0)
+        self.assertNotEqual(self.proof(caller=True).returncode, 0)
+
+    def test_remote_head_and_claim_races_cannot_authorize_delivery(self):
+        import shutil
+
+        real_git = shutil.which("git", path=self.env["PATH"])
+        commands = self.root / "commands"
+        commands.mkdir()
+        marker = self.root / "race-fired"
+        wrapper = commands / "git"
+        wrapper.write_text(
+            "#!/usr/bin/env python3\nimport os, subprocess, sys\nfrom pathlib import Path\n"
+            "marker = Path(os.environ['FIXTURE_RACE_MARKER'])\n"
+            "if 'merge-tree' in sys.argv[1:] and not marker.exists():\n"
+            "    marker.write_text('fired')\n"
+            "    mode = os.environ['FIXTURE_RACE_MODE']\n"
+            "    if mode == 'claims':\n"
+            "        with Path(os.environ['FIXTURE_SEMAPHORE']).open('a') as handle:\n"
+            "            handle.write('file: changed-during-proof.txt\\n')\n"
+            "    else:\n"
+            "        ref = 'HEAD' if mode == 'head' else 'refs/remotes/origin/main'\n"
+            "        subprocess.run([os.environ['FIXTURE_REAL_GIT'], '-C', os.environ['FIXTURE_REPO'],\n"
+            "                        'update-ref', ref, os.environ['FIXTURE_RACE_OID']], check=True)\n"
+            "os.execv(os.environ['FIXTURE_REAL_GIT'], [os.environ['FIXTURE_REAL_GIT'], *sys.argv[1:]])\n"
+        )
+        wrapper.chmod(0o755)
+        original_path = self.env["PATH"]
+        self.env.update(FIXTURE_REAL_GIT=real_git, FIXTURE_RACE_MARKER=str(marker),
+                        FIXTURE_REPO=str(self.repo), FIXTURE_RACE_OID=self.base,
+                        FIXTURE_SEMAPHORE=str(self.sem))
+        for mode in ("remote", "head", "claims"):
+            with self.subTest(changed=mode):
+                self.semaphore()
+                before = self.immutable_state()
+                marker.unlink(missing_ok=True)
+                self.env.update(PATH=str(commands) + os.pathsep + original_path,
+                                FIXTURE_RACE_MODE=mode)
+                try:
+                    result = self.invoke()
+                finally:
+                    self.env["PATH"] = original_path
+                    self.git("-C", str(self.repo), "update-ref", "HEAD", self.source)
+                    self.git("-C", str(self.repo), "update-ref", "refs/remotes/origin/main", self.remote)
+                    self.sem.write_bytes(before["semaphore"])
+                self.assertTrue(marker.exists(), "The fixture must change inputs during a real merge proof")
+                self.assertNotEqual(result.returncode, 0, result.stderr)
+                self.assertIn("snapshot changed", result.stderr)
+                self.assertEqual(self.immutable_state(), before)
+
 
 
 if __name__ == "__main__":

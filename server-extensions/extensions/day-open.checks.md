@@ -71,7 +71,11 @@ for w in (d.get('today') or []):
   MISSING=0
   while IFS= read -r wp; do
     [ -z "$wp" ] && continue
+    # priorities.yaml entries may carry a title suffix ("WP-385: ..." since 25.09);
+    # keep the digits only, otherwise the column-3 match never hits.
     num="${wp#WP-}"
+    num="${num%%[^0-9]*}"
+    [ -z "$num" ] && continue
     FOUND=0
     while IFS= read -r row; do
       case "$row" in \|*) ;; *) continue ;; esac
@@ -488,7 +492,8 @@ fi
 
 # 3. Smoke-тесты бота (если pytest есть)
 HEALTH=$(awk '/<summary><b>Здоровье платформы/,/<\/details>/' "$FILE")
-if echo "$HEALTH" | grep -qiE "Smoke-тесты|smoke tests"; then
+# scaffold writes «**Smoke-tests:**» (hyphen); accept both spellings.
+if echo "$HEALTH" | grep -qiE "Smoke-тесты|smoke[ -]tests"; then
   echo "  ✅ Smoke-тесты: упомянуты в «Здоровье платформы»"
 else
   echo "  ⚠️ Smoke-тесты бота не упомянуты — WARN (не блокирует, может быть pytest не запущен)"
@@ -713,8 +718,12 @@ if [ -n "$H_PHYS" ]; then
   OVER=$(awk -v h="$H_PHYS" 'BEGIN{print (h>14)?1:0}')
   [ "$OVER" = "1" ] && PHYS_ISSUE=1
 fi
-if [ "$PHYS_ISSUE" -eq 0 ]; then
-  echo "  ✅ «физ» = ${H_PHYS:-?}h — в пределах разумного, phys_hours задан"
+if [ "$PHYS_ISSUE" -eq 0 ] && [ -n "$H_PHYS" ]; then
+  echo "  ✅ «физ» = ${H_PHYS}h — в пределах разумного, phys_hours задан"
+elif [ "$PHYS_ISSUE" -eq 0 ]; then
+  # phys_hours is set, but the plan has no «~Nh физ» line at all: budget-patch
+  # skipped the recalculation (non-numeric «h» cells). Not a pass — say so.
+  echo "  ⚠️ строка «~Nh физ» в плане не найдена — budget-patch не пересчитал бюджет дня (см. «Требует внимания»), не блокирует"
 elif grep -qE "phys_hours.*(не задан|превышает потолок)" "$FILE"; then
   echo "  ⚠️ phys_hours-проблема есть, уже отмечена в «Требует внимания» (не блокирует)"
 else
@@ -722,7 +731,7 @@ else
 fi
 ```
 
-- [ ] `priorities.yaml` содержит `phys_hours:` (не fallback-дефолт), «физ» в DayPlan ≤14ч, либо расхождение отмечено в «Требует внимания». Больше не блокирует commit.
+- [ ] `priorities.yaml` содержит `phys_hours:` (не fallback-дефолт), строка «~Nh физ» в DayPlan присутствует и ≤14ч, либо расхождение отмечено в «Требует внимания». Больше не блокирует commit.
 
 ### Проверка (не блокирующая): ссылка на персональное руководство — ровно один раз (bug-2026-09-09, WP-561 Ф11 продолжение)
 
