@@ -6077,6 +6077,31 @@ for path in paths:
 PY
 }
 
+_manual_abandon_cleanup_has_publish_proof() {  # <worktree> <attested source head>
+  local worktree="$1" source_head="$2" remote commit count=0
+  [ -d "$worktree" ] && [ ! -L "$worktree" ] || return 1
+  [ -n "$source_head" ] || return 1
+  [ -z "$(git -C "$worktree" status --porcelain=v1 --untracked-files=all 2>/dev/null)" ] \
+    || return 1
+  git -C "$worktree" merge-base --is-ancestor "$source_head" HEAD 2>/dev/null \
+    || return 1
+  timeout 10 git -C "$worktree" fetch --quiet origin \
+    '+refs/heads/main:refs/remotes/origin/main' 2>/dev/null \
+    || return 1
+  remote=$(git -C "$worktree" rev-parse --verify 'refs/remotes/origin/main^{commit}' 2>/dev/null) \
+    || return 1
+  while IFS= read -r commit; do
+    [ -n "$commit" ] || continue
+    count=$((count + 1))
+    [ "$count" -le 32 ] || return 1
+    git -C "$worktree" merge-base --is-ancestor "$commit" "$remote" 2>/dev/null \
+      || _commit_current_tree_has_publish_proof "$worktree" "$commit" "$remote" \
+      || return 1
+  done < <(git -C "$worktree" rev-list --reverse "$source_head..HEAD" 2>/dev/null) \
+    || return 1
+  return 0
+}
+
 _commit_claim_supersession_has_publish_proof() {  # <repo> <source> <remote OID> <semaphore> <repo name>
   # Prove preservation in an already claimed, OID-published successor.  Neither
   # a declaration of supersession nor patch-id transitivity is sufficient.
@@ -7069,10 +7094,15 @@ PY
 }
 
 
-_claimed_commits_have_publish_proof() {  # <semaphore>
-  local semaphore="$1" entry repo_name commit_sha repo_dir fetched=""
+_claimed_commits_have_publish_proof() {  # <semaphore> [exact claim strings JSON to exclude]
+  local semaphore="$1" excluded_json="${2:-[]}" entry repo_name commit_sha repo_dir fetched=""
+  jq -e 'type == "array" and all(.[]; type == "string")' <<<"$excluded_json" >/dev/null 2>&1 \
+    || { echo "Session CLOSE: invalid excluded commit claims" >&2; return 1; }
   while IFS= read -r entry; do
     [ -n "$entry" ] || continue
+    if jq -e --arg entry "$entry" 'index($entry) != null' <<<"$excluded_json" >/dev/null 2>&1; then
+      continue
+    fi
     repo_name=${entry%% *}
     commit_sha=${entry#* }
     [ "$repo_name" != "$entry" ] \
@@ -8803,8 +8833,6 @@ _close_delivery_and_transition() {
     CLOSING_WORKTREE="$isolated_worktree"
 
     if [ "$delivery_state" = "prepared" ]; then
-      _prepared_source_snapshot_matches "$SEM_FILE" "$CLOSING_WORKTREE" \
-        || fail "close retry: PREPARED source/head/scope/terminal snapshot изменился; push запрещён" 7
       if [ "$ABANDON_PREPARED" -eq 1 ]; then
         # Manual recovery (see header doc + _record_close_abandoned): the
         # cryptographic proof below can never pass once a later, legitimate
@@ -8813,22 +8841,19 @@ _close_delivery_and_transition() {
         # from "delivered, then superseded". This branch swaps that proof for
         # an explicit, audited human attestation naming the exact commit set.
         #
-        # Cold-review Critical (Codex+Claude peer-session): note-commit (WP-537)
-        # can stage claims for commits in OTHER repos on this same semaphore
-        # (close_delivery_claimed_commits) independently of source_commits, and
-        # the normal path proves those too (_claimed_commits_have_publish_proof
-        # below). The operator's --source-commit list only ever names
-        # close_delivery_source_commits -- it says nothing about claimed
-        # commits elsewhere. Rather than widen the attestation UX to also cover
-        # an unbounded set of foreign-repo claims, refuse the manual path
-        # outright when any exist: that case needs its own, separately
-        # reasoned recovery, not a silent pass-through under this flag.
-        claimed_json=$(_unique_record_field "$SEM_FILE" close_delivery_claimed_commits || true)
-        [ "$claimed_json" = "[]" ] \
-          || fail "close --abandon-prepared: у сессии есть note-commit заявки на коммиты в других репозиториях (close_delivery_claimed_commits не пуст) -- ручная attestation покрывает только close_delivery_source_commits, для этого случая нужен отдельный разбор" 7
+        # The manual attestation covers only the immutable PREPARED source set.
+        # Every additional note-commit claim still needs ordinary fresh-origin
+        # proof; exclude only the exact governance source claims named by that
+        # set, never an entire repository or an unbounded foreign scope.
+        verified_json=$(_unique_record_field "$SEM_FILE" close_delivery_source_commits || true)
+        local excluded_source_claims
+        excluded_source_claims=$(jq -cn --arg repo "$GOV_REPO" --argjson commits "$verified_json" \
+          '$commits | map($repo + " " + .)') \
+          || fail "close --abandon-prepared: source commit claims повреждены" 7
+        _claimed_commits_have_publish_proof "$SEM_FILE" "$excluded_source_claims" \
+          || fail "close --abandon-prepared: дополнительная note-commit заявка не имеет независимого publish proof" 7
         _abandon_prepared_matches_source "$SEM_FILE" "${ABANDON_SOURCE_COMMITS[@]}" \
           || fail "close --abandon-prepared: --source-commit список не совпадает ТОЧНО с close_delivery_source_commits (частичное подтверждение запрещено)" 7
-        verified_json=$(_unique_record_field "$SEM_FILE" close_delivery_source_commits || true)
         source_status=$(_unique_record_field "$SEM_FILE" close_delivery_source_status_sha256 || true)
         terminal_sha=$(_unique_record_field "$SEM_FILE" close_delivery_terminal_sha256 || true)
         publish_digest=$(_record_close_abandoned "$SEM_FILE" "$SESSION_ID" "$prepare_digest" \
@@ -8839,6 +8864,8 @@ _close_delivery_and_transition() {
         delivery_state="published"
         echo "⚠️  session-guard: PREPARED-снимок закрыт ВРУЧНУЮ (--abandon-prepared), без криптографического proof доставки. Коммиты: ${ABANDON_SOURCE_COMMITS[*]}. close_publish_proof=manual-abandon-attestation/v1 в семафоре — постоянный видимый в аудите след." >&2
       else
+        _prepared_source_snapshot_matches "$SEM_FILE" "$CLOSING_WORKTREE" \
+          || fail "close retry: PREPARED source/head/scope/terminal snapshot изменился; push запрещён" 7
         isolate_push_script="$IWE_ROOT/$GOV_REPO/scripts/isolate-push.sh"
         [ -x "$isolate_push_script" ] \
           || fail "close retry: isolate-push.sh недоступен; PREPARED сохранён" 7
@@ -8876,8 +8903,14 @@ _close_delivery_and_transition() {
       publish_digest=$(_unique_record_field "$SEM_FILE" close_publish_digest || true)
       [ -n "$publish_digest" ] || fail "close retry: publish digest отсутствует" 7
       if [ -d "$CLOSING_WORKTREE" ] && [ ! -L "$CLOSING_WORKTREE" ]; then
-        _prepared_source_snapshot_matches "$SEM_FILE" "$CLOSING_WORKTREE" \
-          || fail "close retry: worktree/source/terminal изменился после PUBLISHED; не удаляю" 7
+        if [ "$(_unique_record_field "$SEM_FILE" close_publish_proof || true)" = \
+             "manual-abandon-attestation/v1" ]; then
+          _manual_abandon_cleanup_has_publish_proof "$CLOSING_WORKTREE" "$source_head" \
+            || fail "close retry: manual-abandon worktree содержит грязь или недоказанные более поздние коммиты; не удаляю" 7
+        else
+          _prepared_source_snapshot_matches "$SEM_FILE" "$CLOSING_WORKTREE" \
+            || fail "close retry: worktree/source/terminal изменился после PUBLISHED; не удаляю" 7
+        fi
         timeout 60 git -C "$CLOSING_WORKTREE" worktree remove "$CLOSING_WORKTREE" 2>/dev/null \
           || fail "close retry: published worktree не удалён; .open сохранён" 7
       fi

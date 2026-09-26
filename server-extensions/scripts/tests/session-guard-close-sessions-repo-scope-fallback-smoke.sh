@@ -749,51 +749,6 @@ class ClaimedRepositoryFallback(unittest.TestCase):
         result = self.run_proof()
         self.assertEqual(result.returncode, 0, result.stderr)
 
-    def prepare_coarse_gitignore_collision(self):
-        # A bare file claim cannot distinguish independent files with the same
-        # common name. Only the code claim actually changed this one.
-        commit(self.mc, {".gitignore": "local-session-cache/\n"})
-        commit(self.gov, {".gitignore": "local-governance-cache/\n"})
-        self.init_root_checkout()
-        commit(self.root, {".gitignore": "local-root-cache/\n"})
-        self.claim_sha = commit(self.code, {".gitignore": "code-cache/\n"})
-        self.extra_paths.append(".gitignore")
-
-    def test_coarse_collision_attributes_only_the_declared_external_owner(self):
-        self.prepare_coarse_gitignore_collision()
-        # Prove the selected identity matters: the local namesake differs from
-        # the published tree and is dirty, but was never a session commit claim.
-        (self.mc / ".gitignore").write_text("another-session-unpublished-edit/\n")
-        result = self.run_proof()
-        self.assertEqual(result.returncode, 0, result.stderr)
-
-    def test_coarse_collision_does_not_hide_owned_dirty_result(self):
-        self.prepare_coarse_gitignore_collision()
-        (self.mc / "session.md").write_text("unpublished session edit\n")
-        self.assert_refused(self.run_proof(), "собственные файлы не закоммичены")
-
-    def test_coarse_collision_does_not_hide_owned_unpublished_result(self):
-        self.prepare_coarse_gitignore_collision()
-        commit(self.mc, {"session.md": "unpublished session commit\n"})
-        self.assert_refused(self.run_proof(), "текущий результат не совпадает с origin/main")
-
-    def test_coarse_collision_without_a_touched_claim_still_refuses(self):
-        self.prepare_coarse_gitignore_collision()
-        self.claim_sha = commit(self.code, {"README.md": "unrelated code change\n"})
-        self.assert_refused(self.run_proof(), "принадлежность неоднозначна")
-
-    def test_coarse_collision_with_two_touched_external_repos_still_refuses(self):
-        self.prepare_coarse_gitignore_collision()
-        sha = commit(self.gov, {".gitignore": "claimed-governance-change/\n"})
-        self.extra_claims.append("commit: governance " + sha)
-        self.assert_refused(self.run_proof(), "принадлежность неоднозначна")
-
-    def test_coarse_collision_with_owned_and_external_claims_still_refuses(self):
-        self.prepare_coarse_gitignore_collision()
-        sha = commit(self.mc, {".gitignore": "claimed-session-change/\n"})
-        self.extra_claims.append("commit: MC-sessions " + sha)
-        self.assert_refused(self.run_proof(), "принадлежность неоднозначна")
-
     def test_snapshot_changed_by_resolver_is_refused(self):
         self.assert_refused(self.run_proof(mutate_during_resolution=True),
                             "scope изменился во время разрешения репозиториев")

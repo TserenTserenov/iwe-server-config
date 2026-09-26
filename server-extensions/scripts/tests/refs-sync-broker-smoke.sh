@@ -3,7 +3,7 @@
 # sandbox repos and registry only -- never touches a real IWE_ROOT.
 set -euo pipefail
 
-BROKER="$HOME/IWE/scripts/refs-sync-broker.sh"
+BROKER="${BROKER_UNDER_TEST:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/refs-sync-broker.sh}"
 SANDBOX=$(mktemp -d)
 trap 'rm -rf "$SANDBOX"' EXIT
 
@@ -75,7 +75,7 @@ pass "run() на грязном/замороженном дереве обнов
 
 # 3. status: never_run before first run (fresh sandbox), fresh after.
 FRESH_SANDBOX=$(mktemp -d)
-IWE_ROOT="$FRESH_SANDBOX" bash "$BROKER" status | grep -q "never_run" \
+{ IWE_ROOT="$FRESH_SANDBOX" bash "$BROKER" status || true; } | grep -q "never_run" \
   || fail "status на чистом sandbox должен вернуть never_run"
 rm -rf "$FRESH_SANDBOX"
 out=$(bash "$BROKER" status)
@@ -85,7 +85,7 @@ pass "status: never_run на чистом sandbox, fresh сразу после r
 # 4. status: stale after the heartbeat ages past STALE_AFTER.
 REFS_SYNC_STALE_AFTER=0 bash "$BROKER" run
 sleep 1
-out=$(REFS_SYNC_STALE_AFTER=0 bash "$BROKER" status)
+out=$(REFS_SYNC_STALE_AFTER=0 bash "$BROKER" status || true)
 echo "$out" | grep -q "state=stale" || fail "status с REFS_SYNC_STALE_AFTER=0 должен вернуть state=stale: $out"
 pass "status: stale, когда heartbeat старше порога"
 
@@ -103,6 +103,7 @@ for tool in git python3 mkdir mv date cat timeout mktemp rm printf grep; do
   ln -s "$real" "$NO_FLOCK_BIN/$tool"
 done
 set +e
+# shellcheck disable=SC2016 # Expand positional parameters in the child shell.
 out=$("$BASH_ABS" -c 'export PATH="$1"; exec "$2" "$3" "$4"' _ "$NO_FLOCK_BIN" "$BASH_ABS" "$BROKER" run 2>&1)
 rc=$?
 set -e
@@ -135,11 +136,12 @@ wait "$HOLDER_PID"
 [ "$elapsed" -lt 2 ] || fail "run() должен выйти немедленно при занятом локе (non-blocking flock), занял ${elapsed}с"
 pass "run() при занятом локе выходит немедленно, не блокируется и не проваливается с ошибкой"
 
-# 6. a missing/unreachable repo in the registry is skipped, not fatal --
+# 6. an explicitly optional missing repo is skipped, not fatal --
 #    the rest of the registry still runs.
 cat > "$REGISTRY" <<EOF
 repos:
   - path: does-not-exist
+    optional: true
     remote: origin
     refspec: "+refs/heads/main:refs/remotes/origin/main"
   - path: gov-repo
@@ -222,5 +224,58 @@ repos:
     remote: origin
     refspec: "+refs/heads/main:refs/remotes/origin/main"
 EOF
+
+# A failed fetch must reach the scheduler and health reader as a failure.
+git -C "$REPO" remote set-url origin "$SANDBOX/absent-origin.git"
+if bash "$BROKER" run >"$SANDBOX/failed-run.log" 2>&1; then
+  fail "fetch failure must return nonzero to the scheduler"
+fi
+if bash "$BROKER" status >"$SANDBOX/failed-status.log"; then
+  fail "a recent failed fetch must not be reported as healthy"
+fi
+grep -q 'state=failed' "$SANDBOX/failed-status.log" || fail "status must name failed synchronization"
+grep -q '"failed": 1' "$IWE_RUNTIME/refs-sync-broker/heartbeat.json" || fail "heartbeat must count the failed repository"
+git -C "$REPO" remote set-url origin "$BARE"
+bash "$BROKER" run
+# Redirect to a file, not a direct pipe into grep -q (SIGPIPE race, found
+# running this suite for real, 2026-09-26): grep -q exits the instant it
+# matches the FIRST line ("state=fresh"), which can signal the still-writing
+# producer before it emits its second line (the JSON snapshot) -- under
+# `set -o pipefail` bash then reports the pipeline as failed even though
+# grep matched, because it scans right-to-left for the last non-zero exit
+# and finds the SIGPIPE'd producer, not grep's own success. The two direct
+# `>file` redirects a few lines above this one don't have this race.
+bash "$BROKER" status > "$SANDBOX/retry-status.log"
+grep -q 'state=fresh' "$SANDBOX/retry-status.log" || fail "successful retry must restore healthy status"
+pass "fetch failure is visible to scheduler/status; successful retry restores health"
+
+# Explicit refspecs must not also honor a configured local-branch mapping or tags.
+git -C "$REPO" config --add remote.origin.fetch '+refs/heads/main:refs/heads/unwanted'
+git -C "$BARE_CLONE_FOR_PUSH" tag broker-test-tag
+git -C "$BARE_CLONE_FOR_PUSH" push -q origin refs/tags/broker-test-tag
+printf 'unchanged fetch-head sentinel\n' > "$REPO/.git/FETCH_HEAD"
+cp "$REPO/.git/FETCH_HEAD" "$SANDBOX/fetch-head-before"
+bash "$BROKER" run >/dev/null
+if git -C "$REPO" show-ref --verify --quiet refs/heads/unwanted; then fail "fetch changed a local branch through configured refmap"; fi
+if git -C "$REPO" show-ref --verify --quiet refs/tags/broker-test-tag; then fail "fetch imported a tag"; fi
+cmp "$REPO/.git/FETCH_HEAD" "$SANDBOX/fetch-head-before" || fail "fetch rewrote FETCH_HEAD"
+git -C "$REPO" config --unset-all remote.origin.fetch 'refs/heads/unwanted'
+pass "fetch ignores extra refmaps, tags and preserves FETCH_HEAD"
+
+# Missing required repositories and an empty registry are not successful syncs.
+cat > "$REGISTRY" <<EOF
+repos:
+  - path: missing-required
+    remote: origin
+    refspec: "+refs/heads/main:refs/remotes/origin/main"
+EOF
+if bash "$BROKER" run >"$SANDBOX/missing.log" 2>&1; then
+  fail "missing required repository must fail"
+fi
+printf 'repos: []\n' > "$REGISTRY"
+if bash "$BROKER" run >"$SANDBOX/empty.log" 2>&1; then
+  fail "empty registry must not report successful synchronization"
+fi
+pass "missing required repositories and empty registry fail visibly"
 
 echo "ALL PASS"

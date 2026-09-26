@@ -2,29 +2,20 @@
 # WP-530 Ф66: mandatory actualization gate for WP reopen (DP.SC.154 peer-session
 # 2026-09-25-16-wp530-instant-sync-mandatory-reopen, ArchGate-approved design).
 #
-# Replaces protocol-open.md's old SS3.5 soft ritual ("summary + pilot says yes,
-# nothing enforced") with a machine-checked state machine:
+# Provides the state checks intended to replace protocol-open.md's SS3.5 ritual:
 #   reopened -> actualization_required -> actualized -> editing_allowed
+# Callers must still enforce check-edit at the write boundary. This script
+# alone cannot block an editor or bind a later write to its random token.
 #
 # A lease is valid only for the exact origin revision of the WP card it was
 # taken against (digest-bound, not a bare boolean) -- an unrelated WP's commit
 # on origin cannot invalidate this WP's lease, because the digest is scoped to
 # this WP's own card file only.
 #
-# Break-glass (closure-pending-sync) is a two-call challenge/response, not a
-# bare role check -- ArchGate condition #1 (ArchGate WP-530 Ф66, pilot ack
-# 2026-09-25, see MC-sessions/.../04-pilot-archgate-acknowledgement.md).
-# Honest limit (cold review, 2026-09-26): it does NOT prove a human read the
-# code -- the calling agent's own process can read its own stdout and confirm
-# immediately, with zero human involvement. What it DOES guarantee: a second,
-# explicit, deliberate call with the exact code (not a single flag), a
-# rate-limited window, and an immutable audit trail of when/why/who-claimed.
-# Actual human involvement is a PROCEDURAL discipline on the calling agent
-# (relay the code through a channel the pilot reads, e.g. chat or Telegram,
-# not just echo it back to itself) -- the same trust model every other
-# pilot-decision point in this codebase already relies on (AskUserQuestion
-# included: nothing here is cryptographically stronger, and nothing else in
-# the platform is either).
+# closure-pending-sync uses an agent-readable challenge and a writable local
+# audit file. Neither proves pilot identity nor provides immutable evidence.
+# ArchGate condition #1 remains open until independent authorization and
+# protected audit storage are connected; do not advertise this as fulfilled.
 set -euo pipefail
 
 IWE_ROOT="${IWE_ROOT:-$HOME/IWE}"
@@ -42,6 +33,7 @@ LEASE_DIR="$IWE_ROOT/.iwe-runtime/wp-reopen-leases"
 LEASE_TTL_SECONDS="${WP_REOPEN_LEASE_TTL:-28800}"   # 8h, matches the old wp-sync-N.done window but is a separate mechanism
 CHALLENGE_TTL_SECONDS=300                            # 5 min to type back the challenge
 MAX_CHALLENGE_ATTEMPTS=5                             # caps brute-force of the 6-digit code within the TTL window
+FETCH_TIMEOUT_SECONDS="${WP_REOPEN_FETCH_TIMEOUT:-30}"
 
 usage() {
   cat >&2 <<'EOF'
@@ -73,6 +65,32 @@ require_numeric_wp() {
   case "$1" in
     ''|*[!0-9]*) log_err "СТОП: --wp должен быть числом, получено: '$1'"; exit 1 ;;
   esac
+}
+
+# Serialize lease/challenge transitions for one WP, including network checks.
+# This does not replace fencing at the eventual card-write boundary.
+lock_wp() {
+  mkdir -p "$LEASE_DIR"
+  command -v flock >/dev/null 2>&1 || { log_err "СТОП: установи flock для блокировки лицензии"; exit 2; }
+  exec 9>"$LEASE_DIR/WP-$1.lock"
+  flock -n 9 || { log_err "СТОП: лицензия РП-$1 занята или блокировка недоступна; повтори после текущей операции"; exit 2; }
+}
+
+reject_pending_closure() {
+  local pending
+  pending=$(json_get "$(lease_file_for "$1")" closure_pending_sync)
+  if [ "$pending" = true ]; then
+    log_err "СТОП: РП-$1 ожидает решения пилота по отложенному закрытию; обычная актуализация не отменяет это решение."
+    return 1
+  fi
+}
+
+fetch_branch() {
+  local repo="$1" branch="$2"
+  git check-ref-format "refs/heads/$branch" >/dev/null 2>&1 || return 1
+  GIT_TERMINAL_PROMPT=0 timeout --kill-after=5s "$FETCH_TIMEOUT_SECONDS" git -C "$repo" fetch -q \
+    --no-tags --no-recurse-submodules --no-auto-maintenance --no-write-fetch-head --refmap= \
+    origin "+refs/heads/$branch:refs/remotes/origin/$branch"
 }
 
 card_path_for() { echo "inbox/WP-$1/WP-$1.md"; }
@@ -130,7 +148,7 @@ except Exception:
 # while a concurrent actualize() could be mid atomic_write (cold review,
 # 2026-09-26). Line-separated, not space-separated: every field here is
 # either script-generated (digest, token, timestamp) or a git ref/path that
-# cannot contain a newline, so `mapfile` on stdout is exact and doesn't
+# cannot contain a newline, so line-wise reading doesn't
 # require escaping. A field's own value is never empty-vs-missing ambiguous
 # here since json_get-style '' default already means "missing" throughout
 # this script.
@@ -157,12 +175,8 @@ for k in ('session_id', 'card_path', 'card_digest', 'actualized_at', 'ttl_second
 # with git's own suppressed exit code (128) instead of the documented
 # fallback message. Callers must use `if ! digest=$(origin_card_digest ...)`.
 origin_card_digest() {
-  local repo="$1" branch="$2" path="$3"
-  local out
-  if ! out=$(git -C "$repo" show "origin/$branch:$path" 2>/dev/null); then
-    return 1
-  fi
-  printf '%s' "$out" | shasum -a 256 | awk '{print $1}'
+  local repo="$1" revision="$2" path="$3"
+  git -C "$repo" show "$revision:$path" 2>/dev/null | shasum -a 256 | awk '{print $1}'
 }
 
 cmd_actualize() {
@@ -178,6 +192,8 @@ cmd_actualize() {
   done
   [ -n "$wp" ] || usage
   require_numeric_wp "$wp"
+  lock_wp "$wp"
+  reject_pending_closure "$wp" || exit 2
   session_id="${session_id:-${CLAUDE_CODE_SESSION_ID:-}}"
   [ -n "$session_id" ] || { log_err "СТОП: не удалось определить session_id (нет --session-id, нет CLAUDE_CODE_SESSION_ID в окружении — например, вызов от Kimi/Codex). Передай --session-id явно."; exit 1; }
 
@@ -187,11 +203,17 @@ cmd_actualize() {
   card="$repo/$path"
   [ -f "$card" ] || { log_err "карточка $path не найдена в $repo — актуализация невозможна"; exit 1; }
 
-  git -C "$repo" fetch -q origin "$branch" || { log_err "git fetch origin $branch не удался — актуализация невозможна без сети"; exit 1; }
+  fetch_branch "$repo" "$branch" || { log_err "git fetch origin $branch не удался — актуализация невозможна без сети"; exit 1; }
   origin_commit=$(git -C "$repo" rev-parse "origin/$branch")
-  if ! digest=$(origin_card_digest "$repo" "$branch" "$path"); then
+  if ! digest=$(origin_card_digest "$repo" "$origin_commit" "$path"); then
     log_err "не удалось прочитать $path на origin/$branch — карточка там не найдена?"
     exit 1
+  fi
+  local local_digest
+  local_digest=$(shasum -a 256 "$card" | awk '{print $1}')
+  if [ "$local_digest" != "$digest" ]; then
+    log_err "СТОП: локальная карточка РП-$wp отличается от origin/$branch. Сохрани свои правки и согласуй карточку с сервером в чистой или изолированной копии, прочитай актуальную версию, затем повтори actualize. Файл не изменён."
+    exit 2
   fi
   token=$(gen_token)
 
@@ -221,6 +243,7 @@ cmd_check_edit() {
   done
   [ -n "$wp" ] || usage
   require_numeric_wp "$wp"
+  lock_wp "$wp"
   session_id="${session_id:-${CLAUDE_CODE_SESSION_ID:-}}"
   [ -n "$session_id" ] || { log_err "СТОП: не удалось определить session_id (нет --session-id, нет CLAUDE_CODE_SESSION_ID в окружении — например, вызов от Kimi/Codex). Без него владение лицензией не проверяется — передай --session-id явно, отказано fail-closed."; exit 2; }
 
@@ -236,7 +259,10 @@ cmd_check_edit() {
   # atomic_write (rename) could land between reads and mix old/new field
   # values (cold review, 2026-09-26).
   local lease_fields lease_session lease_path lease_digest lease_ts lease_ttl lease_closure lease_branch
-  mapfile -t lease_fields < <(read_lease_fields "$lease_f")
+  local field
+  lease_fields=()
+  while IFS= read -r field; do lease_fields+=("$field"); done < <(read_lease_fields "$lease_f")
+  [ "${#lease_fields[@]}" -eq 7 ] || { log_err "СТОП: лицензия повреждена; выполни actualize заново"; exit 2; }
   lease_session="${lease_fields[0]}"; lease_path="${lease_fields[1]}"; lease_digest="${lease_fields[2]}"
   lease_ts="${lease_fields[3]}"; lease_ttl="${lease_fields[4]}"; lease_closure="${lease_fields[5]}"
   lease_branch="${lease_fields[6]}"
@@ -264,11 +290,13 @@ cmd_check_edit() {
   repo=$(resolve_gov_repo "$gov_override")
   path="${lease_path:-$(card_path_for "$wp")}"
   branch="${lease_branch:-main}"
-  if ! git -C "$repo" fetch -q origin "$branch"; then
+  if ! fetch_branch "$repo" "$branch"; then
     log_err "СТОП: git fetch origin $branch не удался — без сети нельзя доказать, что карточка РП-$wp не изменилась с момента актуализации. Повтори при восстановлении сети, либо wp-reopen-gate.sh closure-pending-sync при длительном отказе."
     exit 2
   fi
-  if ! current_digest=$(origin_card_digest "$repo" "$branch" "$path"); then
+  local origin_commit
+  origin_commit=$(git -C "$repo" rev-parse "origin/$branch")
+  if ! current_digest=$(origin_card_digest "$repo" "$origin_commit" "$path"); then
     log_err "СТОП: не удалось прочитать $path на origin/$branch сейчас — карточка удалена или переименована с момента актуализации? Выполни actualize заново."
     exit 2
   fi
@@ -291,6 +319,7 @@ cmd_status() {
     esac
   done
   [ -n "$wp" ] || usage
+  require_numeric_wp "$wp"
   local lease_f
   lease_f=$(lease_file_for "$wp")
   if [ ! -f "$lease_f" ]; then
@@ -311,6 +340,8 @@ cmd_closure_request() {
     esac
   done
   [ -n "$wp" ] || usage
+  require_numeric_wp "$wp"
+  lock_wp "$wp"
   [ -n "$reason" ] || { log_err "--reason обязателен для closure-pending-sync request"; exit 1; }
 
   local code cf
@@ -331,6 +362,8 @@ cmd_closure_confirm() {
     esac
   done
   [ -n "$wp" ] || usage
+  require_numeric_wp "$wp"
+  lock_wp "$wp"
   [ -n "$response" ] || { log_err "--challenge-response обязателен для closure-pending-sync confirm"; exit 1; }
 
   # Atomic claim (mv is a single rename syscall) before reading/validating --

@@ -12,5 +12,6 @@ repos:
     remote: origin
     refspec: "+refs/heads/main:refs/remotes/origin/main"
   - path: .
+    optional: true  # On tsekh-1 the root is a Nix-managed mirror, not a Git repo.
     remote: origin
     refspec: "+refs/heads/main:refs/remotes/origin/main"

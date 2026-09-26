@@ -70,7 +70,7 @@ require_registry() {
   [ -f "$REGISTRY" ] || { echo "refs-sync-broker: registry not found: $REGISTRY" >&2; exit 1; }
 }
 
-# Validates and prints "path<TAB>remote<TAB>refspec" per registered repo, one
+# Validates and prints "path<TAB>remote<TAB>refspec<TAB>optional" per repo, one
 # repo per line, to stdout -- but ONLY if every entry in the registry is
 # valid. Any invalid entry (missing key, refspec not targeting
 # refs/remotes/*, path escaping IWE_ROOT) fails the WHOLE call loudly (exit
@@ -80,7 +80,7 @@ require_registry() {
 # substitution used to swallow this kind of parse failure entirely).
 read_registry() {
   python3 -c "
-import sys
+import re, sys
 try:
     import yaml
 except ImportError:
@@ -91,8 +91,8 @@ with open(sys.argv[1]) as f:
     data = yaml.safe_load(f) or {}
 
 repos = data.get('repos')
-if not isinstance(repos, list):
-    print('ERROR: registry top-level \"repos\" must be a list', file=sys.stderr)
+if not isinstance(repos, list) or not repos:
+    print('ERROR: registry top-level \"repos\" must be a nonempty list', file=sys.stderr)
     sys.exit(1)
 
 errors = []
@@ -104,20 +104,27 @@ for i, repo in enumerate(repos):
     path = repo.get('path')
     refspec = repo.get('refspec')
     remote = repo.get('remote', 'origin')
+    optional = repo.get('optional', False)
+    if not isinstance(optional, bool):
+        errors.append(f'entry {i}: optional must be a boolean')
+        continue
+    if not isinstance(remote, str) or not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9._/-]*', remote):
+        errors.append(f'entry {i}: invalid remote name')
+        continue
     if not path or not isinstance(path, str):
         errors.append(f'entry {i}: missing or non-string \"path\"')
         continue
-    if '..' in path.split('/'):
+    if path.startswith('/') or any(c in path for c in '\\t\\r\\n') or '..' in path.split('/'):
         errors.append(f'entry {i} ({path}): \"path\" must not contain \"..\" segments')
         continue
     if not refspec or not isinstance(refspec, str):
         errors.append(f'entry {i} ({path}): missing or non-string \"refspec\"')
         continue
     dest = refspec.split(':', 1)[-1] if ':' in refspec else ''
-    if not dest.lstrip('+').startswith('refs/remotes/'):
+    if any(c.isspace() for c in refspec) or not dest.startswith('refs/remotes/'):
         errors.append(f'entry {i} ({path}): refspec destination must target refs/remotes/*, got {refspec!r}')
         continue
-    lines.append(f'{path}\t{remote}\t{refspec}')
+    lines.append(f'{path}\t{remote}\t{refspec}\t{str(optional).lower()}')
 
 if errors:
     for e in errors:
@@ -150,8 +157,8 @@ run_once() {
     exit 1
   fi
 
-  local path remote refspec full_path resolved
-  while IFS=$'\t' read -r path remote refspec; do
+  local path remote refspec optional full_path resolved
+  while IFS=$'\t' read -r path remote refspec optional; do
     [ -n "$path" ] || continue
     full_path="$IWE_ROOT/$path"
     # Belt-and-suspenders against the registry's own ".." guard: resolve the
@@ -164,11 +171,18 @@ run_once() {
       esac
     fi
     if [ ! -e "$full_path/.git" ]; then
-      log "SKIP $path: no .git at $full_path"
+      if [ "$optional" = true ]; then
+        log "SKIP $path: optional repository absent at $full_path"
+      else
+        log "FAIL $path: required repository absent at $full_path"
+        failed=$((failed + 1))
+      fi
       continue
     fi
     local fetch_rc=0
-    GIT_TERMINAL_PROMPT=0 timeout "$FETCH_TIMEOUT_SECONDS" git -C "$full_path" fetch --no-tags "$remote" "$refspec" >>"$LOG_FILE" 2>&1 || fetch_rc=$?
+    GIT_TERMINAL_PROMPT=0 timeout --kill-after=5s "$FETCH_TIMEOUT_SECONDS" git -C "$full_path" fetch \
+      --no-tags --no-recurse-submodules --no-auto-maintenance --no-write-fetch-head \
+      --refmap= "$remote" "$refspec" >>"$LOG_FILE" 2>&1 || fetch_rc=$?
     if [ "$fetch_rc" -eq 0 ]; then
       fetched=$((fetched + 1))
       log "OK $path <- $remote $refspec"
@@ -178,6 +192,15 @@ run_once() {
     fi
   done < "$registry_out"
   rm -f "$registry_out"
+  if [ "$failed" -gt 0 ]; then
+    write_heartbeat "$fetched" "$failed" "failed"
+    return 1
+  fi
+  if [ "$fetched" -eq 0 ]; then
+    log "FAIL: no repositories were fetched"
+    write_heartbeat 0 0 "no_repositories"
+    return 1
+  fi
   write_heartbeat "$fetched" "$failed" "ok"
 }
 
@@ -192,9 +215,14 @@ cmd_run() {
   # failure mode fired on every single invocation post-deploy.
   command -v flock >/dev/null 2>&1 || { log "FATAL: flock binary not found in PATH -- cannot take the run lock"; exit 1; }
   exec 9>"$LOCK_FILE"
-  if ! flock -n 9; then
+  local lock_rc=0
+  flock -n 9 || lock_rc=$?
+  if [ "$lock_rc" -eq 1 ]; then
     log "SKIP: another broker instance holds the lock"
-    exit 0
+    return 0
+  elif [ "$lock_rc" -ne 0 ]; then
+    log "FATAL: flock failed (exit $lock_rc)"
+    return "$lock_rc"
   fi
   run_once
 }
@@ -202,17 +230,34 @@ cmd_run() {
 cmd_status() {
   if [ ! -f "$HEARTBEAT_FILE" ]; then
     echo "state=never_run"
-    return
+    return 1
   fi
-  local ts age
-  ts=$(python3 -c "import json,sys; print(json.load(open(sys.argv[1])).get('ts', 0))" "$HEARTBEAT_FILE")
+  local heartbeat_fields ts age status failed snapshot
+  snapshot=$(cat "$HEARTBEAT_FILE")
+  if ! heartbeat_fields=$(python3 -c '
+import json, sys
+data = json.loads(sys.argv[1])
+assert isinstance(data.get("ts"), int) and data["ts"] > 0
+assert isinstance(data.get("failed"), int) and data["failed"] >= 0
+assert isinstance(data.get("status"), str)
+print(data["ts"], data["failed"], data["status"])
+' "$snapshot" 2>/dev/null); then
+    echo "state=invalid_heartbeat"
+    return 1
+  fi
+  read -r ts failed status <<< "$heartbeat_fields"
   age=$(( $(date -u +%s) - ts ))
-  if [ "$age" -gt "$STALE_AFTER_SECONDS" ]; then
+  if [ "$age" -lt 0 ] || [ "$age" -gt "$STALE_AFTER_SECONDS" ]; then
     echo "state=stale age_seconds=$age"
-  else
-    echo "state=fresh age_seconds=$age"
+    printf '%s\n' "$snapshot"
+    return 1
+  elif [ "$status" != ok ] || [ "$failed" -gt 0 ]; then
+    echo "state=failed age_seconds=$age reason=$status"
+    printf '%s\n' "$snapshot"
+    return 1
   fi
-  cat "$HEARTBEAT_FILE"
+  echo "state=fresh age_seconds=$age"
+  printf '%s\n' "$snapshot"
 }
 
 main() {

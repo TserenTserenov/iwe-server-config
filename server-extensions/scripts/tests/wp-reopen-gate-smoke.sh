@@ -3,7 +3,7 @@
 # never touches a real governance repo or its card.
 set -euo pipefail
 
-GATE="$HOME/IWE/scripts/wp-reopen-gate.sh"
+GATE="${GATE_UNDER_TEST:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/wp-reopen-gate.sh}"
 SANDBOX=$(mktemp -d)
 trap 'rm -rf "$SANDBOX"' EXIT
 
@@ -152,11 +152,11 @@ echo "feature content" > "$REPO/inbox/WP-333/WP-333.md"
 git -C "$REPO" add inbox/WP-333/WP-333.md
 git -C "$REPO" -c user.email=t@t -c user.name=t commit -q -m "wp333 on feature branch"
 git -C "$REPO" push -q origin feature-branch
-git -C "$REPO" checkout -q main
 (cd "$REPO" && "$GATE" actualize --wp 333 --governance-repo "$REPO" --session-id s4 --branch feature-branch >/dev/null)
 out=$(cd "$REPO" && "$GATE" check-edit --wp 333 --governance-repo "$REPO" --session-id s4)
 [ "$out" = "editing_allowed" ] || fail "check-edit должен проверять по ветке, записанной в лицензии (feature-branch), а не по захардкоженному main: $out"
 pass "check-edit проверяет по ветке из лицензии (actualize --branch), не по захардкоженному main"
+git -C "$REPO" checkout -q main
 
 # 14. missing card at origin must fail cleanly (High finding #3: git show's
 #     exit status used to be swallowed by pipefail + set -e, aborting with
@@ -191,5 +191,62 @@ set -e
 [ "$rc" -ne 0 ] || fail "5-я неверная попытка должна провалиться как и предыдущие"
 echo "$out" | grep -q "попытки исчерпаны" || fail "сообщение не называет исчерпание попыток: $out"
 pass "closure-pending-sync confirm: попытки исчерпываются после нескольких неверных кодов подряд"
+
+# Fresh remote refs must not license a stale local card.
+mkdir -p "$REPO/inbox/WP-444"
+printf 'old\n' > "$REPO/inbox/WP-444/WP-444.md"
+git -C "$REPO" add inbox/WP-444/WP-444.md
+git -C "$REPO" -c user.email=t@t -c user.name=t commit -q -m "wp444"
+git -C "$REPO" push -q origin main
+PUBLISHER="$SANDBOX/publisher"
+git clone -q "$BARE" "$PUBLISHER"
+printf 'new\n' > "$PUBLISHER/inbox/WP-444/WP-444.md"
+git -C "$PUBLISHER" add inbox/WP-444/WP-444.md
+git -C "$PUBLISHER" -c user.email=t@t -c user.name=t commit -q -m "wp444 changed remotely"
+git -C "$PUBLISHER" push -q origin main
+if "$GATE" actualize --wp 444 --governance-repo "$REPO" --session-id s4 >"$SANDBOX/stale.log" 2>&1; then
+  fail "actualize must refuse an old local card even after fetching new origin"
+fi
+[ ! -e "$IWE_RUNTIME/wp-reopen-leases/WP-444.json" ] || fail "stale actualization must not create a lease"
+[ "$(cat "$REPO/inbox/WP-444/WP-444.md")" = old ] || fail "actualize must preserve the old working file"
+git -C "$REPO" merge -q --ff-only origin/main
+"$GATE" actualize --wp 444 --governance-repo "$REPO" --session-id s4 >/dev/null
+[ "$("$GATE" check-edit --wp 444 --governance-repo "$REPO" --session-id s4)" = editing_allowed ] || fail "fresh card should be allowed"
+pass "a stale local card cannot receive a lease; a fresh copy can"
+
+# Normal actualization must not silently cancel a pending pilot decision.
+cp "$IWE_RUNTIME/wp-reopen-leases/WP-999.json" "$SANDBOX/pending-before.json"
+if "$GATE" actualize --wp 999 --governance-repo "$REPO" --session-id s1 >"$SANDBOX/pending.log" 2>&1; then
+  fail "actualize must not cancel closure_pending_sync"
+fi
+cmp "$SANDBOX/pending-before.json" "$IWE_RUNTIME/wp-reopen-leases/WP-999.json" || fail "pending closure must remain intact"
+pass "ordinary actualization preserves closure_pending_sync"
+
+# The documented bash entry point must also work with macOS system Bash 3.2.
+if [ -x /bin/bash ]; then
+  out=$(/bin/bash "$GATE" check-edit --wp 444 --governance-repo "$REPO" --session-id s4)
+  [ "$out" = editing_allowed ] || fail "system Bash must support check-edit"
+fi
+pass "check-edit works with system Bash"
+
+# A transport ignoring TERM must not hold the per-WP lock indefinitely.
+mkdir "$SANDBOX/hung-git"
+export REAL_GIT
+REAL_GIT=$(command -v git)
+cat > "$SANDBOX/hung-git/git" <<'EOF'
+#!/bin/bash
+for arg in "$@"; do
+  if [ "$arg" = fetch ]; then trap '' TERM; sleep 30; exit 0; fi
+done
+exec "$REAL_GIT" "$@"
+EOF
+chmod +x "$SANDBOX/hung-git/git"
+started=$(date +%s)
+if PATH="$SANDBOX/hung-git:$PATH" WP_REOPEN_FETCH_TIMEOUT=0.2 "$GATE" check-edit --wp 444 --governance-repo "$REPO" --session-id s4 >"$SANDBOX/timeout.log" 2>&1; then
+  fail "hung fetch must refuse editing"
+fi
+[ "$(( $(date +%s) - started ))" -lt 10 ] || fail "fetch ignored its deadline"
+[ "$("$GATE" check-edit --wp 444 --governance-repo "$REPO" --session-id s4)" = editing_allowed ] || fail "timed out fetch must release WP lock"
+pass "unresponsive transport is killed and WP lock is released"
 
 echo "ALL PASS"
