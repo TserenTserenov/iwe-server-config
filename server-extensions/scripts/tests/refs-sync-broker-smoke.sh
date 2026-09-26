@@ -278,4 +278,26 @@ if bash "$BROKER" run >"$SANDBOX/empty.log" 2>&1; then
 fi
 pass "missing required repositories and empty registry fail visibly"
 
+# --- notify-peer (WP-530, peer-session 2026-09-26-05-wp530-instant-sync-cleanup) ---
+
+# No configured peer -> silent no-op, never an error the caller has to handle.
+unset REFS_SYNC_PEER_HOST
+if ! bash "$BROKER" notify-peer >"$SANDBOX/notify-noop.log" 2>&1; then
+  fail "notify-peer without REFS_SYNC_PEER_HOST must succeed as a no-op"
+fi
+grep -q 'notify-peer: SKIP' "$SANDBOX/notify-noop.log" || fail "notify-peer no-op must log why it skipped"
+pass "notify-peer without a configured peer is a silent no-op, not an error"
+
+# Unreachable peer -> fails visibly, bounded by its own timeout (never hangs
+# the caller). 192.0.2.1 is TEST-NET-1 (RFC 5737): guaranteed non-routable,
+# so this fails on ConnectTimeout, not on a slow/flaky real DNS lookup.
+export REFS_SYNC_PEER_HOST="192.0.2.1"
+export REFS_SYNC_NOTIFY_TIMEOUT_SECONDS=8
+if timeout 15 bash "$BROKER" notify-peer >"$SANDBOX/notify-unreachable.log" 2>&1; then
+  fail "notify-peer against an unreachable peer must fail, not report success"
+fi
+grep -q 'notify-peer: FAIL' "$SANDBOX/notify-unreachable.log" || fail "notify-peer failure must be logged with a reason"
+unset REFS_SYNC_PEER_HOST REFS_SYNC_NOTIFY_TIMEOUT_SECONDS
+pass "notify-peer against an unreachable peer fails visibly within its own timeout, never hangs the caller"
+
 echo "ALL PASS"

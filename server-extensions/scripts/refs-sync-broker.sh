@@ -227,6 +227,61 @@ cmd_run() {
   run_once
 }
 
+cmd_notify_peer() {
+  # WP-530 (Codex, peer-session 2026-09-26-05-wp530-instant-sync-cleanup):
+  # point improvement on top of the 60s poll -- fire-and-forget SSH nudge so
+  # a fresh push is visible on the OTHER host in seconds instead of waiting
+  # for its next poll tick. Deliberately NOT wired into ds-publish.sh/
+  # isolate-push.sh here (those scripts are used everywhere -- Codex/Kimi,
+  # same session: "wiring a new side-effect into them deserves its own
+  # reviewed change, not a rider on this one", echoing the same call already
+  # made for THIS script's own creation in Ф66). This subcommand exists so
+  # that follow-up wiring has something ready to call; until then it is a
+  # standalone, manually-invokable accelerator.
+  #
+  # No configured peer -- silent no-op, not an error. Most invocations of
+  # this script (the 60s timer on either host) never call this subcommand at
+  # all; this only matters for the rarer manual/future-wired call path, and
+  # an unconfigured peer must never turn into a failure the caller has to
+  # handle.
+  local peer_host="${REFS_SYNC_PEER_HOST:-}"
+  if [ -z "$peer_host" ]; then
+    log "notify-peer: SKIP (REFS_SYNC_PEER_HOST not set -- feature not enabled on this host)"
+    return 0
+  fi
+  if ! command -v ssh >/dev/null 2>&1; then
+    log "notify-peer: FAIL peer=$peer_host reason=no_ssh_binary"
+    return 1
+  fi
+  # BatchMode: never prompt for a password/passphrase -- a hung prompt on a
+  # broken connection would block whatever just triggered this notify.
+  # ConnectTimeout+outer timeout(+--kill-after, matching the fetch timeout's
+  # own pattern above): this is a best-effort accelerator, not a dependency
+  # -- it must give up fast, never hang the caller.
+  #
+  # The remote side backgrounds the actual `run` (nohup ... & disown; exit 0)
+  # and returns immediately -- ssh here only confirms the nudge was
+  # DELIVERED, not that the peer's full multi-repo fetch cycle finished
+  # (cold review, 2026-09-26: waiting for completion would need a timeout
+  # comfortably longer than the peer's own worst-case fetch budget, which
+  # defeats the "fire-and-forget accelerator" this exists to be). `--` before
+  # the host stops a value starting with `-` from being parsed as an ssh
+  # option (e.g. `-oProxyCommand=...`).
+  # Single-quoted on purpose: these expand on the REMOTE shell, not here.
+  # shellcheck disable=SC2016
+  local remote_cmd='IWE_ROOT="${IWE_ROOT:-$HOME/IWE}"; nohup bash "$IWE_ROOT/scripts/refs-sync-broker.sh" run >/dev/null 2>&1 & disown; exit 0'
+  if timeout --kill-after=5s "${REFS_SYNC_NOTIFY_TIMEOUT_SECONDS:-10}" \
+      ssh -o BatchMode=yes -o ConnectTimeout=5 -- "$peer_host" "$remote_cmd" \
+      >/dev/null 2>&1; then
+    log "notify-peer: OK peer=$peer_host (nudge delivered, peer's own run completes async)"
+    return 0
+  else
+    local rc=$?
+    log "notify-peer: FAIL peer=$peer_host exit=$rc (60s poll on the peer remains the fallback)"
+    return 1
+  fi
+}
+
 cmd_status() {
   if [ ! -f "$HEARTBEAT_FILE" ]; then
     echo "state=never_run"
@@ -264,7 +319,8 @@ main() {
   case "${1:-}" in
     run) cmd_run ;;
     status) cmd_status ;;
-    *) echo "Usage: refs-sync-broker.sh run|status" >&2; exit 1 ;;
+    notify-peer) cmd_notify_peer ;;
+    *) echo "Usage: refs-sync-broker.sh run|status|notify-peer" >&2; exit 1 ;;
   esac
 }
 
