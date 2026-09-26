@@ -1,0 +1,16 @@
+# WP-530 Ф66 Требование А: явный реестр репозиториев для refs-sync-broker.sh.
+# Не autodiscovery — Codex (implementation-architect, пир-сессия 2026-09-25-16,
+# раунд 3): autodiscovery подбирает кандидатов, но не даёт права автоматически
+# делать fetch в любом найденном репозитории. path — относительно IWE_ROOT.
+# refspec обновляет только refs/remotes/<remote>/* (--no-tags флагом в самом
+# скрипте, не здесь), рабочее дерево и индекс не трогаются никогда.
+repos:
+  - path: DS-my-strategy
+    remote: origin
+    refspec: "+refs/heads/main:refs/remotes/origin/main"
+  - path: MC-sessions
+    remote: origin
+    refspec: "+refs/heads/main:refs/remotes/origin/main"
+  - path: .
+    remote: origin
+    refspec: "+refs/heads/main:refs/remotes/origin/main"

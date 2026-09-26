@@ -26,6 +26,7 @@
 #                                                      # forever as close_publish_proof=
 #                                                      # manual-abandon-attestation/v1, never as the
 #                                                      # normal isolate-push proof.
+#   owner-status --owner-session-id <id> # read-only admission-locked snapshot
 #   audit [--since YYYY-MM-DD] [--cleanup-orphans [--quarantine-dead-interactive]]
 #                                                      # --quarantine-dead-interactive (WP-530 Ф53):
 #                                                      # opt-in terminal path for ordinary semaphores
@@ -245,7 +246,9 @@ frozen_checkout_match() {
 # the fail-closed check inside `open` never actually fired). Creating it
 # is now `resolve_orz_sessions_dir`'s job, at the point a subcommand
 # actually needs it, over the real pre-existing state.
-mkdir -p "$SESSION_DIR" "$(dirname "$OPEN_LOG")" "$(dirname "$OPEN_LOG_RUNTIME")"
+if [ "${1:-}" != "owner-status" ]; then
+  mkdir -p "$SESSION_DIR" "$(dirname "$OPEN_LOG")" "$(dirname "$OPEN_LOG_RUNTIME")"
+fi
 
 CMD="${1:-}"
 shift || true
@@ -255,6 +258,12 @@ now_iso() { date -u +"%Y-%m-%dT%H:%M:%SZ"; }
 now_date() { date +"%Y-%m-%d"; }
 now_month() { date +"%Y-%m"; }
 fail() { echo "session-guard: $1" >&2; exit "${2:-1}"; }
+
+# A tiny read-only API: reject every extra argument before the shared parser.
+if [ "$CMD" = "owner-status" ]; then
+  [[ $# -eq 2 && "$1" = "--owner-session-id" && "$2" =~ ^[a-zA-Z0-9][a-zA-Z0-9._-]{0,255}$ ]] \
+    || fail "owner-status: ожидается ровно --owner-session-id <safe-id>" 1
+fi
 
 # yaml_task_line <value> -- render a "task: <value>" YAML line, quoting the
 # value only when PyYAML's own writer decides it needs quoting. session-guard
@@ -1304,6 +1313,7 @@ _append_heartbeat_atomic() {  # <sem> <agent> <session> <heartbeat-pid> <at>
   python3 - "$@" <<'PY'
 import datetime
 import os
+import re
 import stat
 import sys
 import uuid
@@ -1355,7 +1365,12 @@ try:
         or values("session_id") != [expected_session]
         or os.path.basename(path) != "%s-%s.open" % (expected_agent, expected_session)
         or values("housekeeping")
-        or any(line.startswith(("close_", "recovery_")) for line in text.splitlines())
+        or len(values("close_path")) > 1
+        or any(not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,255}", value)
+               for value in values("close_path"))
+        # close_path declares routing at open; it is not a close transition.
+        or any(line.startswith(("close_", "recovery_"))
+               and not line.startswith("close_path: ") for line in text.splitlines())
     ):
         raise SystemExit(1)
 
@@ -3636,6 +3651,7 @@ OWNER_PID=""
 SCHEDULED_OWNER=""
 SCHEDULED_RUN_ID=""
 SESSION_ID_ARG=""
+OWNER_SESSION_ID_ARG=""
 REPO_ARG=""
 CLEANUP_ORPHANS=0
 QUARANTINE_DEAD_INTERACTIVE=0
@@ -3708,6 +3724,9 @@ while [[ $# -gt 0 ]]; do
       fi
       SCHEDULED_RUN_ID="$2"; shift 2 ;;
     --session-id) SESSION_ID_ARG="$2"; shift 2 ;;
+    --owner-session-id)
+      [[ $# -ge 2 && -n "$2" ]] || fail "--owner-session-id требует значение" 1
+      OWNER_SESSION_ID_ARG="$2"; shift 2 ;;
     --repo)
       if [[ $# -lt 2 || -z "$2" ]]; then
         fail "--repo требует непустое значение (имя репозитория внутри \$IWE_ROOT)" 1
@@ -3787,6 +3806,10 @@ done
 
 if [ -z "$AGENT" ] && { [ "$CMD" = "open" ] || [ "$CMD" = "close" ] || [ "$CMD" = "note-scheduled-drain" ] || [ "$CMD" = "heartbeat" ] || [ "$CMD" = "machine-close" ]; }; then
   fail "--agent обязателен для open/close/machine-close/note-scheduled-drain/heartbeat (или переменная IWE_AGENT)" 1
+fi
+
+if [ -n "$OWNER_SESSION_ID_ARG" ] && [ "$CMD" != "owner-status" ]; then
+  fail "--owner-session-id применим только к owner-status" 1
 fi
 
 # WP-530 Ф53: the quarantine flag is meaningless anywhere else; refusing keeps
@@ -3937,6 +3960,138 @@ if value.version != 4 or str(value) != sys.argv[1]:
 PY
 fi
 
+# --- OWNER-STATUS (read-only absence evidence, never a close) ---
+if [ "$CMD" = "owner-status" ]; then
+  [[ "$OWNER_SESSION_ID_ARG" =~ ^[a-zA-Z0-9][a-zA-Z0-9._-]{0,255}$ ]] \
+    || fail "owner-status требует безопасный --owner-session-id" 1
+  # Every ordinary and housekeeping open holds this same admission lock.
+  # This is a linearizable snapshot, not a promise that a later open cannot
+  # create another session after the probe releases the lock. No semaphore,
+  # receipt, lease or run card is modified by the probe.
+  acquire_scheduled_admission_lock
+  python3 - "$SESSION_DIR" "$OWNER_SESSION_ID_ARG" <<'PY_OWNER_STATUS'
+import json
+import os
+from pathlib import Path
+import re
+import stat
+import sys
+
+import yaml
+
+sessions = Path(sys.argv[1])
+owner = sys.argv[2]
+token = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,255}\Z")
+
+
+def emit(state, reason):
+    print(json.dumps({"schema_version": 1, "owner_session_id": owner,
+                      "state": state, "reason": reason,
+                      "proof": "admission-locked-snapshot/v1"}))
+
+
+def identity(path, basename):
+    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    with os.fdopen(fd, "rb") as stream:
+        before = os.fstat(stream.fileno())
+        if (not stat.S_ISREG(before.st_mode) or before.st_uid != os.geteuid()
+                or before.st_nlink != 1 or before.st_mode & 0o022
+                or not 0 < before.st_size <= 1024 * 1024):
+            raise ValueError("unsafe semaphore")
+        raw = stream.read(1024 * 1024 + 1)
+        after = path.stat(follow_symlinks=False)
+    fields = ("st_dev", "st_ino", "st_size", "st_mtime_ns", "st_ctime_ns")
+    if (any(getattr(before, key) != getattr(after, key) for key in fields)
+            or len(raw) != before.st_size or b"\0" in raw or not raw.endswith(b"\n")):
+        raise ValueError("semaphore changed during read")
+    lines = raw.decode("utf-8").splitlines()
+    if not lines or lines[0] != "---":
+        raise ValueError("missing semaphore frontmatter")
+    end = lines.index("---", 1)
+    node = yaml.compose("\n".join(lines[1:end]), Loader=yaml.SafeLoader)
+    if not isinstance(node, yaml.MappingNode):
+        raise ValueError("invalid semaphore mapping")
+    identities = {}
+    for key, value in node.value:
+        if not isinstance(key, yaml.ScalarNode) or key.value == "<<":
+            raise ValueError("ambiguous semaphore mapping")
+        if key.value in ("agent", "session_id", "harness_session_id", "housekeeping"):
+            if (key.value in identities or not isinstance(value, yaml.ScalarNode)
+                    or not token.fullmatch(value.value)):
+                raise ValueError("ambiguous semaphore identity")
+            identities[key.value] = value.value
+    # Other guard readers inspect literal fields across the entire semaphore.
+    # YAML alone must not hide a second owner in the body or reinterpret a
+    # quoted/aliased identity that those readers would see differently.
+    for key in ("agent", "session_id", "harness_session_id", "housekeeping"):
+        occurrences = [(index, line) for index, line in enumerate(lines)
+                       if line.startswith(key + ":")]
+        if key not in identities:
+            if occurrences:
+                raise ValueError("identity field outside semaphore frontmatter")
+            continue
+        if (len(occurrences) != 1 or not 0 < occurrences[0][0] < end
+                or occurrences[0][1] != f"{key}: {identities[key]}"):
+            raise ValueError("ambiguous whole-file semaphore identity")
+    if not all(key in identities for key in ("agent", "session_id")):
+        raise ValueError("incomplete semaphore identity")
+    expected = f"{identities['agent']}-{identities['session_id']}.open"
+    if "housekeeping" in identities:
+        expected = f"{identities['agent']}-housekeeping-{identities['housekeeping']}.open"
+    if basename != expected:
+        raise ValueError("semaphore filename disagrees with identity")
+    return identities
+
+
+try:
+    info = sessions.lstat()
+    if (sessions.resolve(strict=True) != sessions or not stat.S_ISDIR(info.st_mode)
+            or info.st_uid != os.geteuid() or info.st_mode & 0o022):
+        raise ValueError("unsafe sessions directory")
+    matches = []
+    ambiguities = []
+    for path in sorted(sessions.iterdir()):
+        try:
+            stem, marker, suffix = path.name.rpartition(".open")
+            if not marker:
+                continue
+            if suffix == ".lease" or suffix == ".closed" or suffix.startswith(".closed."):
+                continue  # Projections and terminal receipts cannot be active sessions.
+            if suffix and not suffix.startswith(".orphaned-"):
+                raise ValueError("unknown semaphore sibling state")
+            fields = identity(path, stem + marker)
+            if owner in (fields["session_id"], fields.get("harness_session_id")):
+                if suffix.endswith(".recovered"):
+                    # A filename alone cannot prove the recovery_id's durable
+                    # terminal ledger event. Keep this path explicit and closed
+                    # until the recovery proof reader is shared with owner-status.
+                    raise ValueError("matching recovered quarantine needs terminal recovery_id ledger proof")
+                matches.append(path.name)
+            elif "harness_session_id" not in fields:
+                # Guard IDs and harness IDs are different namespaces. A legacy or
+                # housekeeping record without its harness cannot prove that this
+                # conversation is foreign just because its guard UUID differs.
+                raise ValueError("semaphore has no harness identity; owner may match")
+        except (OSError, UnicodeError, ValueError, yaml.YAMLError) as error:
+            # A proven matching session is already enough to answer `present`.
+            # Keep unrelated malformed/quarantined siblings fail-closed only
+            # for the absence case, where they could still hide this owner.
+            ambiguities.append(str(error))
+    if matches:
+        emit("present", "matching active or nonterminal semaphore exists")
+    elif ambiguities:
+        emit("unknown", sorted(set(ambiguities))[0])
+    else:
+        emit("absent", "no matching owner semaphore at the admission-locked snapshot")
+except (OSError, UnicodeError, ValueError, yaml.YAMLError) as error:
+    emit("unknown", str(error))
+PY_OWNER_STATUS
+  OWNER_STATUS_RC=$?
+  release_scheduled_admission_lock \
+    || fail "owner-status: admission lock не освободился" 1
+  exit "$OWNER_STATUS_RC"
+fi
+
 # --- OPEN ---
 if [ "$CMD" = "open" ]; then
   # WP-510 Патч 4: personality — маршрутизирующая метка "какая ИИ-личность вела
@@ -3946,6 +4101,22 @@ if [ "$CMD" = "open" ]; then
   PERSONALITY="${PERSONALITY:-unassigned}"
   if [ "$PERSONALITY" != "unassigned" ] && ! [[ "$PERSONALITY" =~ ^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$ ]]; then
     fail "--personality: ожидается 'unassigned' либо UUID вида 8-4-4-4-12 (получено: '$PERSONALITY')" 1
+  fi
+
+  # WP-530 Ф67 (25.09): $HOME/.iwe-automation/* are service-owned clones
+  # (ledger-publish.sh drains into one; it never opens sessions itself). A
+  # quick-close opened with cwd inside such a clone wrote a session-guard
+  # event into its ledger file and left the clone dirty, which jammed every
+  # ledger publish for four days (742 failed ticks, 21-25.09). Applies to
+  # housekeeping and regular opens alike: no session may own a service clone.
+  AUTOMATION_ROOT_REAL=$(realpath "$HOME/.iwe-automation" 2>/dev/null || echo "$HOME/.iwe-automation")
+  OPEN_CWD_TOPLEVEL=$(git rev-parse --show-toplevel 2>/dev/null || true)
+  if [ -n "$OPEN_CWD_TOPLEVEL" ]; then
+    OPEN_CWD_REAL=$(realpath "$OPEN_CWD_TOPLEVEL" 2>/dev/null || echo "$OPEN_CWD_TOPLEVEL")
+    case "$OPEN_CWD_REAL" in
+      "$AUTOMATION_ROOT_REAL"/*)
+        fail "open: cwd ($OPEN_CWD_TOPLEVEL) внутри служебной копии $HOME/.iwe-automation — сессии там не открываются (WP-530 Ф67: грязь в этой копии блокирует публикацию журнала). Перейди (cd) в рабочий чекаут и открой оттуда (при необходимости с --isolate — он снимает копию с текущего cwd, из служебной копии тоже откажет)." 1 ;;
+    esac
   fi
 
   if [ -n "$HOUSEKEEPING" ]; then
@@ -5205,7 +5376,7 @@ _repo_scope_has_publish_proof() {  # <repo> <role> <exact semaphore> <fresh remo
   # refused with "путь отсутствует или неоднозначен между репозиториями" on
   # the ORZ path.
   # Pass definitions from this loaded guard, never source/execute the guard CLI
-  # recursively. Resolution is lazy: known scope paths keep their old checks.
+  # recursively. Resolution is lazy: unambiguous scope paths keep their old checks.
   local scope_resolver_functions
   scope_resolver_functions=$(declare -f normalize_remote_url _resolve_repo_checkout 2>/dev/null) || scope_resolver_functions=""
   python3 - "$@" "$IWE_ROOT" "$scope_resolver_functions" <<'PY'
@@ -5219,6 +5390,7 @@ import subprocess
 import sys
 
 repo, role, semaphore, remote, own_field, other_field, legacy_own, legacy_other, iwe_root, resolver_functions = sys.argv[1:]
+governance_name = os.environ.get("IWE_GOVERNANCE_REPO", "")
 
 def refuse(message):
     raise SystemExit("Session CLOSE: scoped publish proof: " + message)
@@ -5568,16 +5740,96 @@ def known_path(checkout, path):
                 or git_at(checkout, "ls-files", "-z", "--", path)
                 or os.path.lexists(Path(checkout) / path))
 
-# A legacy file claim has no repository prefix. Only an otherwise unknown
-# path may use third-repository commit claims for attribution. Do not extend
-# other_repos globally: README.md in an unrelated code repo must not create a
-# new ambiguity for a path already owned by the declared governance checkout.
+foreign_card_snapshots = {}
+
+def completed_foreign_runner_card(canonical, path):
+    import yaml
+
+    owners = [line.partition(": ")[2] for line in lines if line.startswith("harness_session_id: ")]
+    guard_owners = [line.partition(": ")[2] for line in lines if line.startswith("session_id: ")]
+    if (len(owners) != 1 or not owners[0] or len(guard_owners) > 1
+            or any(not value for value in guard_owners)):
+        return False
+    candidate = canonical / path
+    try:
+        if candidate.resolve(strict=True) != candidate:
+            return False
+        descriptor = os.open(candidate, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+        with os.fdopen(descriptor, "rb") as stream:
+            before = os.fstat(stream.fileno())
+            if (not stat.S_ISREG(before.st_mode) or before.st_nlink != 1
+                    or before.st_uid != os.geteuid() or before.st_size > 1048576):
+                return False
+            content = stream.read(1048577)
+            after = os.fstat(stream.fileno())
+        current = candidate.lstat()
+        fields = ("st_dev", "st_ino", "st_mode", "st_size", "st_mtime_ns", "st_ctime_ns")
+        if (candidate.resolve(strict=True) != candidate or len(content) > 1048576
+                or any(getattr(before, field) != getattr(after, field)
+                       or getattr(before, field) != getattr(current, field) for field in fields)):
+            return False
+        frontmatter = re.match(r"\A---\r?\n(.*?)\r?\n---(?:\r?\n|\Z)", content.decode("utf-8"), re.S)
+        if not frontmatter:
+            return False
+        node = yaml.compose(frontmatter.group(1), Loader=yaml.SafeLoader)
+        if not isinstance(node, yaml.MappingNode):
+            return False
+        metadata = {}
+        for key, value in node.value:
+            if (not isinstance(key, yaml.ScalarNode) or key.tag != "tag:yaml.org,2002:str"
+                    or key.value in metadata):
+                return False
+            metadata[key.value] = value
+        expected_run = PurePosixPath(path).name.removeprefix("RUN-").removesuffix(".md")
+        expected = {"kind": "process-run", "process_id": "quick-close", "run_id": expected_run,
+                    "id": "RUN-" + expected_run, "status": "completed", "current_step": "done"}
+        for key, value in expected.items():
+            actual = metadata.get(key)
+            if not isinstance(actual, yaml.ScalarNode) or actual.tag != "tag:yaml.org,2002:str" or actual.value != value:
+                return False
+        owner = metadata.get("owner_session_id")
+        if (not isinstance(owner, yaml.ScalarNode) or owner.tag != "tag:yaml.org,2002:str"
+                or not owner.value.strip() or owner.value != owner.value.strip()
+                or owner.value in owners + guard_owners):
+            return False
+    except (OSError, UnicodeError, yaml.YAMLError) as exc:
+        refuse("служебная карточка не прошла проверку: " + path + ": " + str(exc))
+    digest = hashlib.sha256(content).hexdigest()
+    if path in foreign_card_snapshots and foreign_card_snapshots[path] != digest:
+        return False
+    foreign_card_snapshots[path] = digest
+    return True
+
+def canonical_governance_owns_foreign_runner_card(path):
+    # Only a completed foreign Quick Close journal can outlive its isolate.
+    # Ordinary canonical-only deliverables must still fail, not disappear from
+    # the authoritative isolate's cleanliness and publication checks.
+    if (own_field != "orz_sessions_dir" or other_field != "governance_worktree"
+            or len(other_declared) != 1 or not governance_name
+            or not re.fullmatch(r"inbox/agent/tasks/RUN-quick-close-[A-Za-z0-9][A-Za-z0-9_.-]*\.md", path)):
+        return False
+    canonical = (Path(iwe_root) / governance_name).resolve()
+    declared = os.path.realpath(other_declared[0])
+    if (canonical.parent != Path(iwe_root).resolve()
+            or str(canonical) == declared or declared not in other_repos
+            or not os.path.lexists(canonical / ".git")):
+        return False
+    canonical_root = os.fsdecode(git_at(str(canonical), "rev-parse", "--show-toplevel")).strip()
+    if os.path.realpath(canonical_root) != str(canonical):
+        return False
+    return (repository_identity(str(canonical)) == repository_identity(declared)
+            and os.path.lexists(canonical / path)
+            and completed_foreign_runner_card(canonical, path))
+
+# A legacy file claim has no repository prefix. Resolve declared repositories
+# only for unknown or ambiguous paths; an unrelated code README.md must not
+# create a new ambiguity for an otherwise uniquely attributed governance path.
 resolved_other_claims = None
 
-def claimed_other_owners(path):
+def resolve_other_claims():
     global resolved_other_claims
     if resolved_other_claims is None:
-        if not resolver_functions:
+        if other_claims and not resolver_functions:
             refuse("разрешение заявленных репозиториев недоступно")
         resolved_other_claims = {}
         for name, commit in other_claims:
@@ -5607,19 +5859,26 @@ def claimed_other_owners(path):
             # exact declared trees also attribute paths absent from its HEAD.
             # Historical attribution never replaces current MC delivery proof;
             # publication of third-repo claims is checked separately at close.
-            # WP-484 (21.09, peer-session 2026-09-21-08): the root repository is one of
-            # other_repos, and used to be skipped here, so a NEW file published into it
-            # from an isolated copy (absent from the canonical checkout, which lags
-            # behind origin) had no owner and refused the close. This lookup runs only
-            # for a path that no repository claimed yet (owners == 0 above), so it
-            # cannot add a second owner to a path that already has one.
-            if checkout != os.path.realpath(repo):
+            # Include declared root commits: a new published path may be absent
+            # from the lagging canonical checkout. Identity also deduplicates
+            # linked worktrees of the repository currently being verified.
+            if repository_identity(checkout) != own_identity:
                 resolved_other_claims.setdefault(checkout, set()).add(commit)
-    def commit_touched_path(checkout, commits):
-        return any(os.fsencode(path) in git_at(
-            checkout, "diff-tree", "-m", "--root", "--no-commit-id", "--name-only",
-            "--no-renames", "-r", "-z", commit).split(b"\0") for commit in commits)
+    return resolved_other_claims
 
+
+def commit_touched_path(checkout, commits, path):
+    return any(os.fsencode(path) in git_at(
+        checkout, "diff-tree", "-m", "--root", "--no-commit-id", "--name-only",
+        "--no-renames", "-r", "-z", commit).split(b"\0") for commit in commits)
+
+
+def touched_owners(path, repository_claims):
+    return {repository_identity(checkout) for checkout, commits in repository_claims.items()
+            if commit_touched_path(checkout, commits, path)}
+
+
+def claimed_other_owners(path):
     def declared_owner(checkout, commits):
         if known_path(checkout, path):
             return True
@@ -5628,43 +5887,50 @@ def claimed_other_owners(path):
             # absent there yet legitimately delivered. Here the declared commit
             # must itself ADD or CHANGE the path: a bare "the tree contains it"
             # would let a stale or historical commit own a path it never touched.
-            return commit_touched_path(checkout, commits)
+            return commit_touched_path(checkout, commits, path)
         return any(git_at(checkout, "ls-tree", "-z", commit, "--", path) for commit in commits)
 
-    owning = [(checkout, commits) for checkout, commits in resolved_other_claims.items()
-              if declared_owner(checkout, commits)]
-    if len(owning) > 1:
-        # Two claimed repositories can each legitimately hold their own, unrelated file
-        # at the same relative path (WP-7 Ф173, 2026-09-24: gateway-mcp and knowledge-mcp
-        # each have a src/scope.test.ts; only gateway-mcp's declared commit touched it).
-        # Narrow to whichever candidate's own declared commit(s) actually added or
-        # changed the path, when that narrows to exactly one — otherwise the original
-        # tree-presence count stands (fail closed, unchanged from before this narrowing;
-        # this also covers test_two_third_repo_claims_for_unknown_path_refuse, where both
-        # candidates' commits genuinely touch the path and the ambiguity is real).
-        touched = [checkout for checkout, commits in owning if commit_touched_path(checkout, commits)]
+    owning = {checkout: commits for checkout, commits in resolve_other_claims().items()
+              if declared_owner(checkout, commits)}
+    identities = {repository_identity(checkout) for checkout in owning}
+    if len(identities) > 1:
+        # Preserve tree-based historical attribution, using a declared diff
+        # only to break a collision between distinct repositories.
+        touched = touched_owners(path, owning)
         if len(touched) == 1:
-            return 1
-    return len(owning)
+            return touched
+    return identities
 
 for path in scope:
     local = path in claimed_paths or known_path(repo, path) or bool(entry(remote, path))
-    owners = int(local) + sum(any(known_path(other, path) for other in checkouts)
-                              for checkouts in other_repo_groups.values())
-    if owners == 0:
+    owners = {identity for identity, checkouts in other_repo_groups.items()
+              if any(known_path(other, path) for other in checkouts)}
+    if local:
+        owners.add(own_identity)
+    if not owners and canonical_governance_owns_foreign_runner_card(path):
+        owners.add(repository_identity(str((Path(iwe_root) / governance_name).resolve())))
+    if not owners:
         owners = claimed_other_owners(path)
+    elif len(owners) > 1 and path not in claimed_paths:
+        # Common names can collide in unrelated root/session/governance files
+        # before a third repository's claim is consulted. A unique declared
+        # external diff attributes the file to that repository, not this local
+        # namesake. Explicit own commit paths remain fail-closed on collisions.
+        touched = touched_owners(path, resolve_other_claims())
+        if len(touched) == 1:
+            owners = touched
     # WP-537 (19.09, peer session with Kimi+Codex): these two used to share one
     # message ("путь отсутствует или неоднозначен"), and the reader could not
     # tell which half had fired. A zero (path belongs to a repo this check does
     # not enumerate -- DS-MCP/*, DS-IT-systems/*) then reads as an ambiguity
     # between repos, which sends the diagnosis in exactly the wrong direction.
-    if owners == 0:
+    if not owners:
         refuse("путь не найден ни в одном из проверяемых checkout — вероятно, "
                "принадлежит репозиторию вне этой проверки: " + path)
-    if owners > 1:
+    if len(owners) > 1:
         refuse("путь найден в нескольких проверяемых checkout, принадлежность "
                "неоднозначна: " + path)
-    if local:
+    if own_identity in owners:
         relevant.add(path)
 material = False
 published_untracked = set()
@@ -5695,9 +5961,49 @@ for path in sorted(relevant):
         refuse("собственные файлы изменились во время проверки: " + path)
 if git("rev-parse", "HEAD").strip().decode() != head:
     refuse("HEAD изменился во время проверки")
+for path in sorted(foreign_card_snapshots):
+    if not canonical_governance_owns_foreign_runner_card(path):
+        refuse("чужая служебная карточка изменилась во время проверки: " + path)
 if Path(semaphore).read_bytes() != snapshot:
     refuse("scope изменился во время проверки")
 PY
+}
+
+# WP-530 Ф67 (peer-session 2026-09-25-16-wp530-close-hygiene-systemic,
+# Claude+Kimi+Codex, 25.09.2026): the shared MC-sessions checkout is delivered
+# by `ds-publish.sh --exact-commit` -- every session's commit lands on
+# origin/main as a cherry-pick under a DIFFERENT SHA, so between two rebases
+# this checkout is by construction NOT an ancestor of origin/main. The strict
+# ancestry proof therefore refused honest closes whenever the per-file scope
+# claims were incomplete (live 25.09: three finished sessions had unregistered
+# peer-reply files and kept their semaphores open all day). Accept the checkout
+# as delivered when every commit in origin/main..HEAD has a patch-equivalent
+# commit on the fresh origin/main -- the same remote-first patch-equivalence
+# proof _claimed_commits_have_publish_proof already applies per claimed commit.
+# Fail-closed cases: any merge commit in the range (no reliable patch-id,
+# mirrors the claimed-commit rule), a `git cherry` failure (a broken repo must
+# never read as delivered), and any `+` line (a local commit with no equivalent
+# upstream; a squash N->1 upstream also shows `+`, i.e. a false refusal, never
+# a false pass). Inherited limit: patch-id ignores whitespace-only differences,
+# same as the claim proof. The governance checkout keeps the strict ancestry
+# proof -- the caller gates this fallback to the sessions-checkout role.
+_repo_head_is_patch_equivalent() {  # <root> <fresh origin OID>
+  local root="$1" origin_ref="$2" merges cherry_out
+  merges=$(git -C "$root" rev-list --merges "${origin_ref}..HEAD" 2>/dev/null) || return 1
+  if [ -n "$merges" ]; then
+    echo "Session CLOSE: publish proof: merge commits in origin/main..HEAD are not allowed: $root" >&2
+    return 1
+  fi
+  # timeout: a long-unrebased shared checkout means patch-ids for hundreds of
+  # commits in origin/main...HEAD; a hang here would stall close silently
+  # (the fetch above is capped the same way). Timeout reads as refusal.
+  cherry_out=$(timeout 30 git -C "$root" cherry "$origin_ref" HEAD 2>/dev/null) || return 1
+  # No `printf | grep -q` here: under pipefail a SIGPIPE'd printf could turn a
+  # `+` match into a non-zero pipeline status and, negated, into a false pass.
+  case "$cherry_out" in
+    +*|*$'\n'+*) return 1 ;;
+  esac
+  return 0
 }
 
 _repo_head_has_publish_proof() {  # <repo> <role> [exact semaphore] [own field] [other field] [legacy own] [legacy other]
@@ -5724,6 +6030,10 @@ _repo_head_has_publish_proof() {  # <repo> <role> [exact semaphore] [own field] 
     return 1
   }
   if ! git -C "$root" merge-base --is-ancestor HEAD "$origin_ref" 2>/dev/null; then
+    if [ "$role" = "sessions checkout" ] && _repo_head_is_patch_equivalent "$root" "$origin_ref"; then
+      echo "Session CLOSE: HEAD $role не предок origin/main, но все локальные коммиты patch-эквивалентны свежему origin/main (cherry-pick delivery fallback): $root" >&2
+      return 0
+    fi
     if [ -n "${3:-}" ] && [ -n "${4:-}" ] && [ -n "${5:-}" ] \
        && _repo_scope_has_publish_proof "$root" "$role" "$3" "$origin_ref" "$4" "$5" "${6:-}" "${7:-}"; then
       echo "Session CLOSE: текущие файлы и commit scope этой сессии подтверждены свежим origin/main: $root" >&2
@@ -5944,7 +6254,7 @@ try:
     object_format = git(repo, "rev-parse", "--show-object-format").stdout.strip().decode("ascii")
     with tempfile.TemporaryDirectory(prefix="iwe-claim-proof-") as scratch:
         git(scratch, "init", "--bare", "--quiet", "--template=", "--object-format=" + object_format)
-        env["GIT_ALTERNATE_OBJECT_DIRECTORIES"] = json.dumps(str(objects))
+        env["GIT_ALTERNATE_OBJECT_DIRECTORIES"] = json.dumps(str(objects), ensure_ascii=False)
         # Tracked attributes must not select even a built-in union driver.
         env["GIT_ATTR_SOURCE"] = git(scratch, "mktree").stdout.strip().decode("ascii")
         parents = git(scratch, "rev-list", "--parents", "-n", "1", source).stdout.split()
@@ -6655,6 +6965,110 @@ except (ValueError, TypeError, KeyError, OSError, UnicodeError, subprocess.Subpr
 PY
 }
 
+_commit_automerge_has_publish_proof() {  # <repo> <source> <fresh remote OID> <semaphore> <repo name>
+  # Reproduce a historical cherry-pick exactly. An OID-published single-parent
+  # commit must equal the whole clean merge tree of its parent with source,
+  # using source's immediate parent as the explicit cherry-pick base.
+  timeout 15 python3 - "$@" <<'PY'
+import json
+import os
+from pathlib import Path
+import re
+import subprocess
+import sys
+import tempfile
+import time
+
+repo, source, remote, semaphore, repo_name = sys.argv[1:]
+deadline = time.monotonic() + 12
+env = {key: value for key, value in os.environ.items() if not key.startswith("GIT_")}
+env.update(GIT_CONFIG_NOSYSTEM="1", GIT_CONFIG_GLOBAL=os.devnull,
+           GIT_ATTR_NOSYSTEM="1", GIT_OPTIONAL_LOCKS="0",
+           GIT_NO_REPLACE_OBJECTS="1", GIT_GRAFT_FILE=os.devnull + "/iwe-no-grafts",
+           GIT_NO_LAZY_FETCH="1", GIT_TERMINAL_PROMPT="0")
+
+
+def git(directory, *args, allowed=(0,)):
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        raise ValueError("proof deadline exceeded")
+    result = subprocess.run(
+        ["git", "--literal-pathspecs", "-c", "core.attributesFile=" + os.devnull,
+         "-C", str(directory), *args], env=env, stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=remaining,
+    )
+    if result.returncode not in allowed:
+        raise ValueError("Git proof failed: " + args[0])
+    return result
+
+
+try:
+    if not all(re.fullmatch(r"[0-9a-fA-F]{40}|[0-9a-fA-F]{64}", oid) for oid in (source, remote)):
+        raise ValueError("invalid source or pinned remote")
+    snapshot = Path(semaphore).read_bytes()
+    if len(snapshot) > 65536:
+        raise ValueError("claim snapshot exceeds proof budget")
+    claims = [line[8:].decode("ascii").split() for line in snapshot.splitlines()
+              if line.startswith(b"commit: ")]
+    if (len(claims) > 32 or any(len(claim) != 2 for claim in claims)
+            or [repo_name, source] not in claims):
+        raise ValueError("source is not an exact frozen claim")
+    head = git(repo, "rev-parse", "--verify", "HEAD^{commit}").stdout.strip()
+    if git(repo, "rev-parse", "--verify", "refs/remotes/origin/main^{commit}").stdout.strip().decode() != remote:
+        raise ValueError("remote snapshot changed")
+    common = git(repo, "rev-parse", "--git-common-dir").stdout.strip().decode()
+    objects = (Path(repo) / common / "objects").resolve()
+    object_format = git(repo, "rev-parse", "--show-object-format").stdout.strip().decode("ascii")
+    with tempfile.TemporaryDirectory(prefix="iwe-replay-proof-") as scratch:
+        git(scratch, "init", "--bare", "--quiet", "--template=", "--object-format=" + object_format)
+        env["GIT_ALTERNATE_OBJECT_DIRECTORIES"] = json.dumps(str(objects), ensure_ascii=False)
+        # Ignore tracked attributes and all repository merge drivers. New Git
+        # objects, including unsuccessful merge results, stay in scratch.
+        env["GIT_ATTR_SOURCE"] = git(scratch, "mktree").stdout.strip().decode("ascii")
+        parents = git(scratch, "rev-list", "--parents", "-n", "1", source).stdout.split()
+        if len(parents) != 2:
+            raise ValueError("source must be a single-parent commit")
+        base = parents[1].decode("ascii")
+        paths = [path for path in git(scratch, "diff-tree", "--no-commit-id", "--name-only",
+                                     "--no-renames", "-r", "-z", source).stdout.split(b"\0") if path]
+        if not paths or len(paths) > 64:
+            raise ValueError("empty or excessive source scope")
+        # Bound the search to 128 published commits touching source paths.
+        # A publication outside this window keeps the claim unproven.
+        candidates = git(scratch, "rev-list", "--max-count=128", remote, "--",
+                         *map(os.fsdecode, paths)).stdout.split()
+        for raw in candidates:
+            published = raw.decode("ascii")
+            history = git(scratch, "rev-list", "--parents", "-n", "1", published).stdout.split()
+            if len(history) != 2:
+                continue
+            target = history[1].decode("ascii")
+            if git(scratch, "merge-base", "--is-ancestor", published, remote, allowed=(0, 1)).returncode:
+                continue
+            if not git(scratch, "merge-base", source, target, allowed=(0, 1)).stdout.strip():
+                continue
+            expected = git(scratch, "rev-parse", published + "^{tree}").stdout.strip()
+            if expected == git(scratch, "rev-parse", target + "^{tree}").stdout.strip():
+                continue
+            replay = git(scratch, "merge-tree", "--write-tree", "--merge-base=" + base,
+                         target, source, allowed=(0, 1))
+            if replay.returncode or replay.stdout.strip() != expected:
+                continue
+            if (Path(semaphore).read_bytes() != snapshot
+                    or git(repo, "rev-parse", "--verify", "HEAD^{commit}").stdout.strip() != head
+                    or git(repo, "rev-parse", "--verify", "refs/remotes/origin/main^{commit}").stdout.strip().decode() != remote):
+                raise ValueError("proof snapshot changed")
+            print("Session CLOSE: exact historical replay: " + repo_name + " " + source
+                  + " -> " + published, file=sys.stderr)
+            raise SystemExit(0)
+    raise ValueError("no exact historical publication found within proof budget")
+except (ValueError, OSError, UnicodeError, subprocess.SubprocessError) as error:
+    print("Session CLOSE: historical replay proof refused: " + str(error), file=sys.stderr)
+    raise SystemExit(1)
+PY
+}
+
+
 _claimed_commits_have_publish_proof() {  # <semaphore>
   local semaphore="$1" entry repo_name commit_sha repo_dir fetched=""
   while IFS= read -r entry; do
@@ -6708,7 +7122,8 @@ _claimed_commits_have_publish_proof() {  # <semaphore>
         || _commit_claim_supersession_has_publish_proof "$repo_dir" "$commit_sha" "$current_remote" "$semaphore" "$repo_name" \
         || _peer_metadata_claim_has_publish_proof "$repo_dir" "$commit_sha" "$current_remote" "$semaphore" "$repo_name" \
         || _claimed_source_chain_has_publish_proof "$repo_dir" "$commit_sha" "$current_remote" "$semaphore" "$repo_name" \
-        || { echo "Session CLOSE: claimed commit не имеет OID, patch, точного текущего tree или проверенного supersession proof в origin/main: $repo_name $commit_sha" >&2; return 1; }
+        || _commit_automerge_has_publish_proof "$repo_dir" "$commit_sha" "$current_remote" "$semaphore" "$repo_name" \
+        || { echo "Session CLOSE: claimed commit не имеет OID, patch, точного текущего tree, supersession или точного исторического replay proof в origin/main: $repo_name $commit_sha" >&2; return 1; }
     else
       local wanted_patch candidate candidate_patch matched=0
       wanted_patch=$(git -C "$repo_dir" diff-tree -p --root "$commit_sha" 2>/dev/null \
@@ -7882,7 +8297,7 @@ _prepared_source_snapshot_matches() {  # <semaphore> <worktree>
 
 _publish_prepared_source() {  # <semaphore> <worktree> <isolate-push-script>
   local semaphore="$1" worktree="$2" isolate_push_script="$3"
-  local commits_json commit_count commit push_rc=0
+  local commits_json commit_count commit push_rc=0 remote_head parents changed cherry_line
   commits_json=$(_unique_record_field "$semaphore" close_delivery_source_commits) || return 1
   commit_count=$(python3 - "$commits_json" <<'PY' 2>/dev/null
 import json
@@ -7899,6 +8314,7 @@ PY
   # the caller still checks the immutable snapshot, claims and receipt.
   timeout 10 git -C "$worktree" fetch --quiet origin \
     '+refs/heads/main:refs/remotes/origin/main' 2>/dev/null || return 1
+  remote_head=$(git -C "$worktree" rev-parse --verify 'refs/remotes/origin/main^{commit}') || return 1
   if _prepared_source_set_has_publish_proof "$semaphore" "$worktree"; then
     return 0
   fi
@@ -7912,6 +8328,18 @@ PY
   fi
   while IFS= read -r commit; do
     [ -n "$commit" ] || continue
+    # Resume a partially delivered sequence without replaying its published
+    # prefix. Use the same direct patch proof as commit claims; empty and
+    # merge commits require their original OID to be published.
+    if git -C "$worktree" merge-base --is-ancestor "$commit" "$remote_head" 2>/dev/null; then
+      continue
+    fi
+    parents=$(git -C "$worktree" rev-list --parents -n 1 "$commit") || return 1
+    changed=$(git -C "$worktree" diff-tree --no-commit-id --name-only -r "$commit") || return 1
+    if [ "$(printf '%s\n' "$parents" | awk '{print NF}')" -eq 2 ] && [ -n "$changed" ]; then
+      cherry_line=$(git -C "$worktree" cherry "$remote_head" "$commit" "$commit^") || return 1
+      [ "$cherry_line" != "- $commit" ] || continue
+    fi
     push_rc=0
     timeout 300 "$isolate_push_script" "$worktree" main --exact-commit "$commit" || push_rc=$?
     [ "$push_rc" -eq 0 ] || return "$push_rc"
@@ -7925,7 +8353,7 @@ PY
 }
 
 _prepared_source_set_has_publish_proof() {  # <semaphore> <worktree>, fresh origin/main required
-  python3 - "$1" "$2" <<'PY' 2>/dev/null
+  timeout 15 python3 - "$1" "$2" <<'PY' 2>/dev/null
 import difflib
 import json
 import os
@@ -7969,15 +8397,30 @@ if not commits:
         check=False,
     )
     raise SystemExit(0 if result.returncode == 0 else 1)
-if all(
-    subprocess.run(
+def directly_published(commit):
+    if subprocess.run(
         ["git", "-C", worktree, "merge-base", "--is-ancestor", commit, remote_head],
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
         check=False,
-    ).returncode == 0
-    for commit in commits
-):
+    ).returncode == 0:
+        return True
+    parents = git("rev-list", "--parents", "-n", "1", commit).split()
+    if len(parents) != 2 or not git("diff-tree", "--no-commit-id", "--name-only", "-r", "-z", commit):
+        return False
+    return git("cherry", remote_head, commit, parents[1].decode()).strip() == ("- " + commit).encode()
+
+
+# Delivery is historical, just as for the OID ancestry branch: a later
+# legitimate edit does not make an already delivered patch unpublished.
+# Require direct equivalence for EVERY frozen commit, never a transitive
+# claim through a local successor or an empty/merge patch.
+if all(directly_published(commit) for commit in commits):
+    expected = git("rev-list", "--reverse", source_base + ".." + source_head).decode().splitlines()
+    if (expected != commits or git("rev-parse", "HEAD").strip().decode() != source_head
+            or git("rev-parse", "refs/remotes/origin/main").strip().decode() != remote_head
+            or Path(semaphore).read_bytes() != snapshot):
+        raise SystemExit(1)
     raise SystemExit(0)
 
 # Cherry-pick/retry may rewrite OIDs.  In that case bind delivery to the
@@ -8232,7 +8675,7 @@ def remote_absorbs_prepared_tree(compare_tree=True):
         object_format = run(worktree, "rev-parse", "--show-object-format").strip().decode("ascii")
         with tempfile.TemporaryDirectory(prefix="iwe-prepared-proof-") as scratch:
             run(scratch, "init", "--bare", "--quiet", "--template=", "--object-format=" + object_format)
-            env["GIT_ALTERNATE_OBJECT_DIRECTORIES"] = json.dumps(str(objects))
+            env["GIT_ALTERNATE_OBJECT_DIRECTORIES"] = json.dumps(str(objects), ensure_ascii=False)
             # Never execute a repository merge driver or accept a built-in union
             # driver from tracked attributes; all new objects stay in scratch.
             env["GIT_ATTR_SOURCE"] = run(scratch, "mktree").strip().decode("ascii")
@@ -8526,7 +8969,10 @@ _close_delivery_and_transition() {
 
   # A shared governance checkout may have foreign unpublished history.  Its
   # alternative proof covers this session's current exact output and declared
-  # commits.  The independent sessions checkout keeps the strict HEAD proof.
+  # commits.  The shared sessions checkout (MC-sessions) is delivered by
+  # cherry-pick and may instead prove itself by patch-equivalence of every
+  # local commit (_repo_head_is_patch_equivalent, WP-530 Ф67); the strict
+  # ancestry proof remains the target state for the governance checkout only.
   # Missing origin or a tracking ref is never implicit `clean`.
   #
   # WP-484 (16.09, peer-session 2026-09-16-13-wp484-close-drift-fix,
@@ -9071,10 +9517,15 @@ if [ "$CMD" = "close" ]; then
   # bash32-empty-array-unbound.md, DS-my-strategy/inbox/bugs, live-crashed
   # 2026-08-16-08-wp521-fragment-provenance-schema).
   # Preserve terminal proof selected by the session's declared close path.
+  # A glob candidate can belong to another WP/slug or contain invalid proof.
+  # Validate before selecting it, so an earlier bad card cannot hide a valid
+  # later one. The final snapshot below still rechecks proof before mutation.
   if [ -z "$RUNNER_OK" ]; then
     for card in "${RUNNER_CARDS[@]+"${RUNNER_CARDS[@]}"}"; do
       grep -q '^process_id: quick-close$' "$card" || continue
       grep -q '^status: completed$' "$card" || continue
+      _terminal_card_snapshot_sha "$card" completed \
+        "${HARNESS_SESSION_ID:-$SESSION_ID}" "$WP" "$SLUG" >/dev/null || continue
       RUNNER_OK="$card"
       TERMINAL_PROOF_MODE="completed"
       break
@@ -9086,15 +9537,14 @@ if [ "$CMD" = "close" ]; then
   # исполняется до того, как карточка физически может стать completed. Узкий
   # carve-out той же формы, что force-no-reflection ниже: карточка доказывает,
   # что прогон именно quick-close дошёл до самого release-шага (current_step) и
-  # прошёл верификацию чеклиста (непустой verdict) — любое другое промежуточное
+  # прошёл верификацию чеклиста (verify-r23.verdict = pass) — любое другое промежуточное
   # состояние по-прежнему отказ.
   if [ -z "$RUNNER_OK" ]; then
     for card in "${RUNNER_CARDS[@]+"${RUNNER_CARDS[@]}"}"; do
       grep -q '^process_id: quick-close$' "$card" || continue
       grep -q '^current_step: session-guard-release$' "$card" || continue
-      grep -qE '^[[:space:]]*verdict:[[:space:]]*[^[:space:]]' "$card" || continue
-      # yaml-пустышки (null/~/'') матчатся паттерном выше — отсечь отдельно
-      grep -qE '^[[:space:]]*verdict:[[:space:]]*(null|~|""|'\'\'')[[:space:]]*$' "$card" && continue
+      _terminal_card_snapshot_sha "$card" release-step \
+        "${HARNESS_SESSION_ID:-$SESSION_ID}" "$WP" "$SLUG" >/dev/null || continue
       RUNNER_OK="$card"
       TERMINAL_PROOF_MODE="release-step"
       break
@@ -9126,6 +9576,8 @@ if [ "$CMD" = "close" ]; then
       grep -q '^current_step: wp-archive-run$' "$card" || continue
       grep -q '^status: cancelled$' "$card" || continue
       grep -qE '^[[:space:]]*(all_pushed: true|commit_needed: false)$' "$card" || continue
+      _terminal_card_snapshot_sha "$card" archive-cancelled \
+        "${HARNESS_SESSION_ID:-$SESSION_ID}" "$WP" "$SLUG" >/dev/null || continue
       RUNNER_OK="$card"
       TERMINAL_PROOF_MODE="archive-cancelled"
       FORCED_CARD="$card"
@@ -9178,6 +9630,8 @@ print(json.dumps({"wp": sys.argv[1], "slug": sys.argv[2], "agent": sys.argv[3], 
       # card, same single interpreter of git state (the gather handler), so the
       # "work is not lost" invariant this bypass guards stays intact.
       grep -qE '^[[:space:]]*(all_pushed: true|commit_needed: false)$' "$card" || continue
+      _terminal_card_snapshot_sha "$card" blocked-witness \
+        "${HARNESS_SESSION_ID:-$SESSION_ID}" "$WP" "$SLUG" >/dev/null || continue
       RUNNER_OK="$card"
       TERMINAL_PROOF_MODE="blocked-witness"
       FORCED_CARD="$card"
@@ -9287,6 +9741,8 @@ print(json.dumps({"wp": sys.argv[1], "slug": sys.argv[2], "agent": sys.argv[3], 
           grep -q '^status: completed$' "$MARKER_CARD" || continue
           [ "$(_card_field "$MARKER_CARD" owner_session_id)" = "$HARNESS_SESSION_ID" ] || continue
           [ -n "$MARKER_WP_NUM" ] && [ "$(_quick_close_card_wp "$MARKER_CARD")" = "$MARKER_WP_NUM" ] || continue
+          _terminal_card_snapshot_sha "$MARKER_CARD" marker-completed \
+            "${HARNESS_SESSION_ID:-$SESSION_ID}" "$WP" "$SLUG" >/dev/null || continue
           RUNNER_OK="$MARKER_CARD"
           TERMINAL_PROOF_MODE="marker-completed"
           echo "Session CLOSE: у slug '$SLUG' нет своей карточки, но раннер отметил её обязательство удовлетворённым прогоном $MARKER_RUN_ID ($MARKER_CARD) -- признаю терминальным (WP-537 Ф29, slug-satisfied marker)." >&2
@@ -9327,6 +9783,8 @@ print(json.dumps({"wp": sys.argv[1], "slug": sys.argv[2], "agent": sys.argv[3], 
           [ "$(_card_field "$card" owner_session_id)" = "$HARNESS_SESSION_ID" ] || continue
           CARD_WP_NUM=$(_quick_close_card_wp "$card")
           [ -n "$CARD_WP_NUM" ] && [ "$CARD_WP_NUM" = "$WP_NUM" ] || continue
+          _terminal_card_snapshot_sha "$card" owner-completed \
+            "${HARNESS_SESSION_ID:-$SESSION_ID}" "$WP" "$SLUG" >/dev/null || continue
           RUNNER_OK="$card"
           TERMINAL_PROOF_MODE="owner-completed"
           echo "Session CLOSE: у slug '$SLUG' нет своей карточки, но обязательство этого разговора для WP-$WP_NUM уже выполнено completed-прогоном под другим слагом ($card) -- признаю терминальным (WP-537 Ф28, owner-terminality)." >&2
@@ -9764,9 +10222,25 @@ for sha in claimed_commits:
 # GIT_COMMITTER_DATE moves. Claimed paths carry the session directory (date and slug), so a
 # past touch of the very same path is a real signal, and a false refusal only keeps the claim.
 
+separate_checkout_roots = set()
+
+
+def is_separate_checkout_root(home, path):
+    # A directory prefix naming an independent checkout does not cover that
+    # checkout's repo-relative files. Ignore only this exact disk collision;
+    # the parent may still own the path in its index, trees or history below.
+    target = os.path.abspath(os.path.join(home, path))
+    if (path.endswith("/") and target in commit_homes
+            and target != os.path.realpath(home) and target == os.path.realpath(target)):
+        separate_checkout_roots.add(target)
+        return True
+    return False
+
+
 for path in candidates:
     for checkout in checkouts:
-        if os.path.lexists(os.path.join(checkout, path)):
+        if (os.path.lexists(os.path.join(checkout, path))
+                and not is_separate_checkout_root(checkout, path)):
             refuse("'" + path + "' есть на диске в " + checkout + ": доставить нужно, заявка законна")
     for home in commit_homes:
         # A repository without commits has an empty HEAD tree; any other git error stays fail-closed.
@@ -9777,7 +10251,8 @@ for path in candidates:
         if git(home, "log", "--all", "--reflog", "-1", "--format=%H", "--", path).strip():
             refuse("'" + path + "' встречается в истории (ветки/reflog) " + home + ": заявка может быть законной")
     for other in workspace:
-        if os.path.lexists(os.path.join(other, path)):
+        if (os.path.lexists(os.path.join(other, path))
+                and not is_separate_checkout_root(other, path)):
             refuse("'" + path + "' есть на диске в " + other + ": заявка может быть законной для этого репозитория")
     for sha in claimed_commits:
         for home in commit_homes:
@@ -9787,7 +10262,9 @@ for path in candidates:
             # -m: a merge commit is compared with each parent, plain -r prints nothing for it
             names = git(home, "diff-tree", "-m", "--root", "--no-commit-id", "--name-only",
                         "--no-renames", "-r", "-z", sha).split(b"\0")
-            if path.encode() in names:
+            raw_path = path.encode()
+            if any(name == raw_path.rstrip(b"/") or (path.endswith("/") and name.startswith(raw_path))
+                   for name in names if name):
                 refuse("'" + path + "' входит в заявленный коммит " + sha[:9] + ": заявка законна")
 
 drop = {"file: " + path for path in candidates}
@@ -9811,6 +10288,7 @@ def audit_event(event):
         "slug": field("slug"),
         "paths": candidates,
         "checked_checkouts": checkouts,
+        "separate_checkout_roots": sorted(separate_checkout_roots),
     }, ensure_ascii=False)
     data = memoryview((record + "\n").encode("utf-8"))
     fd = os.open(audit, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o644)
@@ -9851,7 +10329,11 @@ PY
     exit 0
   fi
   # Normalize to git-root-relative (resolve symlinks/macOS /tmp vs /private/tmp)
-  if [ -f "$FILE_PATH" ] || [ -d "$FILE_PATH" ]; then
+  if [ -d "$FILE_PATH" ]; then
+    # Resolve a directory in its own Git context. Asking its parent mistakes
+    # a nested checkout root for a directory owned by the workspace repo.
+    REPO_ROOT=$(git -C "$FILE_PATH" rev-parse --show-toplevel 2>/dev/null || true)
+  elif [ -f "$FILE_PATH" ]; then
     REPO_ROOT=$(git -C "$(dirname "$FILE_PATH")" rev-parse --show-toplevel 2>/dev/null || true)
   else
     REPO_ROOT=$(git rev-parse --show-toplevel 2>/dev/null || true)
@@ -9872,6 +10354,9 @@ print(os.path.relpath(f, r))
   fi
   [ -n "$REL_PATH" ] || fail "note-file: cannot determine relative path for '$FILE_PATH'" 1
   case "$REL_PATH" in
+    .)
+      fail "note-file: корень репозитория '$REPO_ROOT' не является scope-файлом или внутренним каталогом — укажи конкретный путь внутри репозитория" 1
+      ;;
     /*|../*|..)
       # Same Д2а rule for the computed form: an entry escaping the repo root can
       # never byte-match a `git diff --cached` path -- it only breaks the scoped

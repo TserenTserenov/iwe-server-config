@@ -57,22 +57,6 @@ OBLIGATION_CLI="$IWE_ROOT/${IWE_GOVERNANCE_REPO:-DS-my-strategy}/scripts/close_o
 SENTINEL_DIR="/tmp/iwe-close-intent"
 REASON=$(printf '%s' "$PROMPT" | cut -c1-200)
 
-# WP-484 Ф118 (19.08, пир-сессия с Codex): сессия, открытая с "session-guard
-# open --close-path peer-session", закрывается по DP.SC.154 Шаг 3.8/4.5, не
-# через /run-protocol close — у этого протокола свой Close-Trigger Gate внутри
-# самого диалога. Инструкция ниже "вызови /run-protocol close" для такой
-# сессии не просто бесполезна, а прямо вредна: заставляет писателя прервать
-# пир-протокол и вызвать чужой скилл. Обязательство (armed) тоже не взводим —
-# Stop-гейт ждал бы RUN-quick-close карточку, которую пир-протокол никогда не
-# создаёт (тот самый живой симптом, из-за которого писалась эта фаза: закрытие
-# пир-сессии каждый раз требовало cancel-close + --no-verify).
-CLOSE_PATH_MATCH=$(grep -l "harness_session_id: $SESSION_ID" \
-  "$IWE_ROOT"/.iwe-runtime/sessions/*.open 2>/dev/null | head -1)
-if [ -n "$CLOSE_PATH_MATCH" ] && grep -q '^close_path: peer-session$' "$CLOSE_PATH_MATCH" 2>/dev/null; then
-  echo '{"additionalContext": "Сессия объявлена как пир-сессия (close_path=peer-session) — закрытие идёт по её собственному протоколу (DP.SC.154 Шаг 3.8/4.5), не через /run-protocol close. Этот гейт не вмешивается."}'
-  exit 0
-fi
-
 # WP-520 (тридцать вторая находка, 14.08.2026, пир-сессия с Codex): pending-
 # reflection state. Читается ЗДЕСЬ, до любых arm/record-intent вызовов этого
 # исполнения — иначе pending, поставленный этим же вызовом (см. ниже), тут же
@@ -90,13 +74,20 @@ _run_obligation() {
   python3 "$OBLIGATION_CLI" "$@" 2>&1
 }
 
+# WP-520 (14.08.2026): фразы отказа от рефлексии — единый паттерн для обеих
+# точек детекции (внутри intent-записи и standalone-ветки в конце файла).
+SKIP_REFLECTION_RE='(без *рефлекс|не спрашивай.{0,20}рефлекс|пропусти.{0,20}рефлекс|нет *рефлекс|рефлекс[^ ]* *(нет|не нуж|не надо|отсутствует|пропу))'
+
 # --- Ф74б: явная отмена обязательства пилотом (аудируемый cancel-close) ---
 # Голое «нет» (+ опционально одно слово) добавлено 11.08: полноценное
 # распознавание «это команда закрыть vs цитата/упоминание» регэкспом на
 # свободном тексте уже обсуждалось и отклонено (пир-сессия 2026-08-11-05,
 # см. комментарий в _record_close_intent ниже) — не переоткрывать. Это
 # точечное расширение самого частого случая отмены, не попытка решить класс.
-if echo "$PROMPT" | grep -qE '(не закрывай|не надо закрывать|отмена закрытия|отмени закрытие|отставить закрытие|^нет[,.!]?( [а-яё]+)?[,.!]?$)'; then
+if echo "$PROMPT" | grep -qE '(не закрывай|не надо закрывать|отмена закрытия|отмени закрытие|отставить закрытие)' || {
+  echo "$PROMPT" | grep -qE '^нет[,.!]?( [а-яё]+)?[,.!]?$' &&
+    ! echo "$PROMPT" | grep -qE "$SKIP_REFLECTION_RE"
+}; then
   if _obligation_available; then
     OUT=$(_run_obligation cancel --session-id "$SESSION_ID" \
       --action cancel-close --actor pilot --reason "$REASON")
@@ -191,10 +182,6 @@ _arm_and_sentinel() {
 # сразу к «ты свободен»" — команда пропуска, не содержание для записи.
 # Проверяется НЕЗАВИСИМО от tail_present: команда может стоять где угодно
 # в хвосте фразы, не обязательно быть всем хвостом целиком.
-# WP-520 (14.08.2026): фразы отказа от рефлексии — единый паттерн для обеих
-# точек детекции (внутри intent-записи и standalone-ветки в конце файла).
-SKIP_REFLECTION_RE='(без *рефлекс|не спрашивай.{0,20}рефлекс|пропусти.{0,20}рефлекс|нет *рефлекс|рефлекс[^ ]* *(нет|не нуж|не надо|отсутствует|пропу))'
-
 # WP-520 (тридцать вторая находка, 14.08.2026, пир-сессия с Codex, consensus
 # ход 4): явный маркер начала рефлексии. Без него хвост триггерной фразы —
 # ненадёжный источник (живой инцидент: "заливай и закрывай сессию. рефлексия
@@ -330,10 +317,57 @@ _record_close_intent() {
     echo "[close-gate-reminder] session=$SESSION_ID record-intent failed (non-fatal — render falls back to interactive path)" >&2
 }
 
+_consume_pending_reflection() {
+  if [ "$PENDING_EXISTED_BEFORE_THIS_RUN" = "true" ]; then
+    if echo "$PROMPT_ORIGINAL_CASE" | grep -qE "$REFLECTION_MARKER_RE"; then
+      _record_close_intent "$REFLECTION_MARKER_RE" "true"
+      echo "[close-gate-reminder] session=$SESSION_ID pending_reflection consumed with marker" >&2
+    else
+      echo "[close-gate-reminder] session=$SESSION_ID pending_reflection dropped — no marker in follow-up prompt" >&2
+    fi
+    rm -f "$PENDING_FILE" 2>/dev/null
+  fi
+}
+
+# WP-484 Ф156: record peer close intent after cancellation/day routing,
+# while keeping its own close protocol: no runner obligation or sentinel.
+CLOSE_PATH_MATCH=$(grep -Flx -- "harness_session_id: $SESSION_ID" \
+  "$IWE_ROOT"/.iwe-runtime/sessions/*.open 2>/dev/null | head -1)
+if [ -n "$CLOSE_PATH_MATCH" ] && grep -q '^close_path: peer-session$' "$CLOSE_PATH_MATCH" 2>/dev/null; then
+  if echo "$PROMPT" | grep -qE "($CLOSE_TRIGGER_RE)"; then
+    PREFIX_LEN=$(_prefix_char_len_before_trigger "$CLOSE_TRIGGER_RE")
+    if [ -n "$PREFIX_LEN" ] && [ "$PREFIX_LEN" -gt "$CLOSE_TRIGGER_PREFIX_THRESHOLD" ] 2>/dev/null; then
+      echo "[close-gate-reminder] session=$SESSION_ID peer close-trigger ignored: prefix_len=$PREFIX_LEN > $CLOSE_TRIGGER_PREFIX_THRESHOLD" >&2
+      # A rejected quote ends the previous follow-up window without reading its marker.
+      if [ "$PENDING_EXISTED_BEFORE_THIS_RUN" = "true" ]; then
+        rm -f "$PENDING_FILE" 2>/dev/null
+      fi
+    else
+      _record_close_intent
+    fi
+  elif echo "$PROMPT" | grep -qE '(заливай|запуши|запушь)'; then
+    _record_close_intent '[Зз]алива[йю]|[Зз]апуш[иь]'
+  else
+    if echo "$PROMPT" | grep -qE "$SKIP_REFLECTION_RE"; then
+      _record_close_intent '[Рр]ефлекс'
+    fi
+    _consume_pending_reflection
+  fi
+  echo '{"additionalContext": "Сессия объявлена как пир-сессия (close_path=peer-session) — закрытие идёт по её собственному протоколу (DP.SC.154 Шаг 3.8/4.5), не через /run-protocol close. Этот гейт не вмешивается."}'
+  exit 0
+fi
+
 if echo "$PROMPT" | grep -qE "($CLOSE_TRIGGER_RE)"; then
   PREFIX_LEN=$(_prefix_char_len_before_trigger "$CLOSE_TRIGGER_RE")
   if [ -n "$PREFIX_LEN" ] && [ "$PREFIX_LEN" -gt "$CLOSE_TRIGGER_PREFIX_THRESHOLD" ] 2>/dev/null; then
     echo "[close-gate-reminder] session=$SESSION_ID close-trigger matched but prefix_len=$PREFIX_LEN > $CLOSE_TRIGGER_PREFIX_THRESHOLD chars — treated as quoted/pasted text, not armed" >&2
+    # Do not let push/skip/pending fallthrough record text from this rejected quote.
+    if [ "$PENDING_EXISTED_BEFORE_THIS_RUN" = "true" ]; then
+      rm -f "$PENDING_FILE" 2>/dev/null
+    fi
+    rm -f "$SENTINEL_DIR/$SESSION_ID.flag" 2>/dev/null
+    echo '{}'
+    exit 0
   else
     _arm_and_sentinel block ""
     _record_close_intent
@@ -373,15 +407,7 @@ fi
 # не обрабатывается здесь же (self-consuming edge case, Codex ход 4).
 # Детерминированный контракт: маркер есть → перезаписать intent, снять
 # pending; маркера нет → снять pending без записи. Никакой эвристики темы.
-if [ "$PENDING_EXISTED_BEFORE_THIS_RUN" = "true" ]; then
-  if echo "$PROMPT_ORIGINAL_CASE" | grep -qE "$REFLECTION_MARKER_RE"; then
-    _record_close_intent "$REFLECTION_MARKER_RE" "true"
-    echo "[close-gate-reminder] session=$SESSION_ID pending_reflection consumed with marker" >&2
-  else
-    echo "[close-gate-reminder] session=$SESSION_ID pending_reflection dropped — no marker in follow-up prompt" >&2
-  fi
-  rm -f "$PENDING_FILE" 2>/dev/null
-fi
+_consume_pending_reflection
 
 # Пилот перешёл к другой теме → «намерение закрыть» больше не действует для
 # неё; ждать TTL блокировало не связанные с закрытием commit'ы (найдено

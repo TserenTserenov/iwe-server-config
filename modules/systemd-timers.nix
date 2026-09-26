@@ -689,6 +689,41 @@ in
     };
 
     # =========================================================
+    # 2a-2. REFS-SYNC-BROKER — WP-530 Ф66 Требование А (26.09.2026, peer-session
+    # 2026-09-25-16-wp530-instant-sync-mandatory-reopen, Claude+Codex)
+    # =========================================================
+    # Mirrors the Mac launchd job (com.iwe.refs-sync-broker.plist) on the same
+    # 60s interval. Fetch-only into refs/remotes/* per the explicit registry
+    # (scripts/refs-sync-broker.repos.yaml) -- never touches the working tree
+    # or index, so it cannot collide with iwe-sync-strategy-files/iwe-tsekh1-sync
+    # the way two working-tree writers did (see the WP-538 note above this
+    # block: staged-mirage deadlock between two commit-capable services). This
+    # job never stages or commits anything -- it only keeps GIT_SYNC_STATUS
+    # checks elsewhere from lagging behind reality for hours while the
+    # canonical checkout stays dirty/frozen. Honest scope limit, stated in the
+    # script itself: short poll, not a real push-webhook.
+    systemd.services."iwe-refs-sync-broker" = {
+      description = "IWE — refs-only sync broker (WP-530 F66, fetch into refs/remotes/* only)";
+      unitConfig   = commonUnitConfig;
+      serviceConfig = commonServiceConfig // {
+        ExecStart = "${pkgs.bash}/bin/bash ${iwe}/scripts/refs-sync-broker.sh run";
+      };
+      path = commonPath;
+      environment = commonEnv // {
+        IWE_ROOT = iwe;
+      };
+    };
+
+    systemd.timers."iwe-refs-sync-broker" = {
+      wantedBy    = [ "timers.target" ];
+      description = "IWE refs-sync-broker — каждые 60с";
+      timerConfig = {
+        OnBootSec       = "1min";
+        OnUnitActiveSec = "60s";
+      };
+    };
+
+    # =========================================================
     # 2b. SYNC STRATEGY FILES — WP-WP-files + current/* + MEMORY.md
     # =========================================================
     # WP-7 S-C (7 мая 2026). Точечный pull WP-карточек и плана недели для DS-my-strategy.

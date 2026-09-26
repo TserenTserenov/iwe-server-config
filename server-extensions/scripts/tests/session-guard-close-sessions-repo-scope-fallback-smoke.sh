@@ -500,12 +500,13 @@ class ClaimedRepositoryFallback(unittest.TestCase):
         self.claim_sha = self.code_sha
         self.extra_paths = []
         self.extra_claims = []
+        self.extra_headers = []
         self.semaphore = self.root / "fixture.open"
 
     def write_semaphore(self):
         self.semaphore.write_text("\n".join([
             "---", f"orz_sessions_dir: {self.mc}",
-            f"governance_worktree: {self.gov}", "---",
+            f"governance_worktree: {self.gov}", *self.extra_headers, "---",
             "file: session.md", "file: README.md", "file: src/layers/reindex.ts",
             *["file: " + path for path in self.extra_paths],
             "commit: MC-sessions " + self.mc_sha,
@@ -523,7 +524,8 @@ class ClaimedRepositoryFallback(unittest.TestCase):
         ])
         helper = self.root / "proof.sh"
         helper.write_text(helpers + '\n_repo_scope_has_publish_proof "$@"\n')
-        environment = {**os.environ, "IWE_ROOT": str(self.root)}
+        environment = {**os.environ, "IWE_ROOT": str(self.root),
+                       "IWE_GOVERNANCE_REPO": "governance"}
         environment.pop("IWE_SESSION_GUARD_ANCHORED_FALLBACK", None)
         if mutate_during_resolution:
             # Intercept only the resolver's command for the third repo. The
@@ -566,6 +568,88 @@ class ClaimedRepositoryFallback(unittest.TestCase):
         self.assertTrue((self.code / "README.md").is_file())
         result = self.run_proof()
         self.assertEqual(result.returncode, 0, result.stderr)
+
+    def prepare_governance_isolate(self):
+        canonical = self.gov
+        self.gov = self.root / "governance-isolate"
+        git(canonical, "worktree", "add", "-q", "--detach", str(self.gov), "HEAD")
+        self.extra_headers = [f"isolated_worktree: {self.gov}", "harness_session_id: own-session",
+                              "session_id: own-guard-session"]
+        path = "inbox/agent/tasks/RUN-quick-close-other-session.md"
+        target = canonical / path
+        target.parent.mkdir(parents=True)
+        target.write_text("---\nid: RUN-quick-close-other-session\nkind: process-run\n"
+                          "process_id: quick-close\nrun_id: quick-close-other-session\n"
+                          "owner_session_id: foreign-session\nstatus: completed\ncurrent_step: done\n---\n")
+        self.extra_paths.append(path)
+        self.assertFalse((self.gov / path).exists())
+        return canonical, path
+
+    def test_canonical_same_repository_attributes_path_absent_from_isolate(self):
+        canonical, path = self.prepare_governance_isolate()
+        before = (canonical / path).read_bytes()
+        result = self.run_proof()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual((canonical / path).read_bytes(), before)
+
+    def test_canonical_same_origin_but_different_repository_does_not_attribute(self):
+        canonical, path = self.prepare_governance_isolate()
+        unrelated = self.root / "unrelated-governance"
+        init(unrelated, "https://example.invalid/governance.git")
+        commit(unrelated, {"README.md": "unrelated governance\n"})
+        self.gov = unrelated
+        self.extra_headers = [f"isolated_worktree: {self.gov}", "harness_session_id: own-session",
+                              "session_id: own-guard-session"]
+        self.assertTrue((canonical / path).is_file())
+        self.assert_refused(self.run_proof(), "путь не найден")
+
+    def test_canonical_attribution_does_not_accept_unpublished_own_result(self):
+        self.prepare_governance_isolate()
+        commit(self.mc, {"session.md": "committed but unpublished session\n"})
+        self.assert_refused(self.run_proof(), "текущий результат не совпадает")
+
+    def test_canonical_presence_does_not_change_an_existing_mc_owner(self):
+        canonical, _ = self.prepare_governance_isolate()
+        (canonical / "session.md").write_text("unrelated canonical governance file\n")
+        result = self.run_proof()
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_canonical_only_unpublished_deliverable_is_refused(self):
+        canonical, _ = self.prepare_governance_isolate()
+        path = "unpublished-deliverable.md"
+        (canonical / path).write_text("own unpublished deliverable\n")
+        self.extra_paths.append(path)
+        self.assert_refused(self.run_proof(), "путь не найден")
+
+    def test_canonical_runner_requires_foreign_completed_identity(self):
+        canonical, path = self.prepare_governance_isolate()
+        card = canonical / path
+        original = card.read_text()
+        cases = [
+            ("kind: process-run", "kind: deliverable"),
+            ("process_id: quick-close", "process_id: other-process"),
+            ("run_id: quick-close-other-session", "run_id: quick-close-different-session"),
+            ("id: RUN-quick-close-other-session", "id: wrong-card"),
+            ("owner_session_id: foreign-session", "owner_session_id: own-session"),
+            ("owner_session_id: foreign-session", "owner_session_id: own-guard-session"),
+            ("owner_session_id: foreign-session", "owner_session_id: ''"),
+            ("status: completed", "status: waiting"),
+            ("current_step: done", "current_step: session-guard-release"),
+            ("status: completed", "status: waiting\nstatus: completed"),
+        ]
+        for expected, invalid in cases:
+            with self.subTest(invalid=invalid):
+                card.write_text(original.replace(expected, invalid))
+                self.assert_refused(self.run_proof(), "путь не найден")
+        card.write_text(original)
+
+    def test_canonical_runner_symlink_is_refused(self):
+        canonical, path = self.prepare_governance_isolate()
+        card = canonical / path
+        moved = canonical / "actual-card.md"
+        card.rename(moved)
+        card.symlink_to(moved)
+        self.assert_refused(self.run_proof(), "путь не найден")
 
     def test_missing_repo_claim_does_not_attribute_unknown_path(self):
         self.claim_name = None
