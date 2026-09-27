@@ -1,6 +1,10 @@
 #!/usr/bin/env bash
 # wp-sync-bundle.sh — детерминированный bundler контекста РП для sync-фазы WP Gate
-# Контракт: вход WP-N или N → stdout markdown bundle, exit 0/1/2
+# Контракт: вход WP-N или N → stdout markdown bundle, exit 0/1/2/3
+#   Первые машинные строки stdout: GIT_SYNC_STATUS / GIT_SYNC_DETAIL /
+#   [GIT_SYNC_OVERRIDE] / CARD_SOURCE (worktree | origin-pinned oid=<40hex>
+#   behind=N ahead=M | worktree-forced). WP-561 Ф24: при STALE/DIVERGED и
+#   свежем remote-tracking ref карточки читаются со снимка origin (exit 0).
 # see WP-294
 # Compatible: bash 3.2+
 
@@ -34,6 +38,23 @@ fi
 STRATEGY_DIR="$IWE_WORKSPACE/$GOV_REPO"
 INBOX_DIR="$STRATEGY_DIR/inbox"
 ARCHIVE_DIR="$STRATEGY_DIR/archive/wp-contexts"
+# WP-561 Ф24 (peer-session 2026-09-27-09, Claude+Kimi+Codex): where the cards
+# are actually read from. Normally the working copy ($STRATEGY_DIR). When the
+# working copy is STALE/DIVERGED from origin and the remote-tracking ref is
+# provably fresh, the cards are read from a full snapshot of ONE pinned origin
+# commit instead (see materialize_origin_tree) -- the shared canonical checkout
+# on this machine is routinely behind under 20+ concurrent sessions, and
+# blocking the gate (exit 3) punished the opening agent for someone else's
+# unclosed session. CARD_ROOT/INBOX_DIR/ARCHIVE_DIR/REGISTRY_FILE all switch
+# together; GIT_LOG_REV pins git-log lookups to the same commit so history and
+# content come from the same point in time. ORIGIN_WS is the temp workspace
+# that holds "$ORIGIN_WS/$GOV_REPO" (same shape as a real IWE_WORKSPACE, so
+# wp-phase-digest.sh can be pointed at it unchanged).
+CARD_ROOT="$STRATEGY_DIR"
+CARD_SOURCE="worktree"
+GIT_LOG_REV=""
+ORIGIN_WS=""
+DRIFT_FILE=""   # global on purpose: the EXIT trap runs after main() returned, a `local` would be out of scope (cold review 27.09: 569 leaked /tmp/wp-sync-drift.* files)
 
 # Sibling helper — единственный источник дайджеста фаз (см. его собственный
 # заголовок: WP-561 2026-09-03-19, Codex "один и тот же парсер на обоих
@@ -99,9 +120,48 @@ normalize_wp_num() {
 wp_path_label() {
   local filepath="$1"
   case "$filepath" in
+    "$CARD_ROOT"/*) echo "${filepath#"$CARD_ROOT"/}" ;;
     "$STRATEGY_DIR"/*) echo "${filepath#"$STRATEGY_DIR"/}" ;;
     *) echo "$filepath" ;;
   esac
+}
+
+# materialize_origin_tree <repo> <remote_oid_from_ls_remote> -> 0 and sets
+# ORIGIN_WS, or 1 (fail closed) on ANY doubt. Codex, round 1 (2026-09-27-09):
+# equality of the remote-tracking ref with the ls-remote OID of the SAME check
+# is the linearisation point -- an ancestor check would legalise a stale ref;
+# `cat-file -e` proves the object is here but not that it is current. After
+# the check everything is read by the full OID, never by the symbolic
+# `origin/<branch>`, which may move underneath us (the refs-sync-broker
+# advances it every minute). Never fetches: same invariant as
+# scripts/lib/git-sync-status.sh (shared .git across dozens of worktrees).
+# The snapshot is the FULL card universe (inbox/, archive/wp-contexts/,
+# docs/WP-REGISTRY.md) at one OID -- a partial tree of "known" cards would
+# make the glob/reverse-lookup paths of find_wp_file report false
+# "not found" (Codex, round 1). Measured 27.09: 3.8k files / 65 MB in 0.6 s.
+materialize_origin_tree() {
+  local repo="$1" remote_oid="$2" branch local_ref_oid
+  [[ "$remote_oid" =~ ^[0-9a-f]{40}$ ]] || return 1
+  branch=$(git -C "$repo" symbolic-ref --quiet --short HEAD 2>/dev/null) || return 1
+  [[ -n "$branch" ]] || return 1
+  local_ref_oid=$(git -C "$repo" rev-parse --verify --quiet "refs/remotes/origin/${branch}^{commit}" 2>/dev/null) || return 1
+  [[ "$local_ref_oid" == "$remote_oid" ]] || return 1
+  git -C "$repo" cat-file -e "${remote_oid}^{commit}" 2>/dev/null || return 1
+  ORIGIN_WS=$(mktemp -d "${TMPDIR:-/tmp}/wp-sync-origin.XXXXXX") || { ORIGIN_WS=""; return 1; }
+  mkdir -p "$ORIGIN_WS/$GOV_REPO" || { rm -rf "$ORIGIN_WS"; ORIGIN_WS=""; return 1; }
+  if ! git -C "$repo" archive --format=tar "$remote_oid" -- inbox archive/wp-contexts docs/WP-REGISTRY.md 2>/dev/null \
+      | tar -x -C "$ORIGIN_WS/$GOV_REPO" 2>/dev/null; then
+    rm -rf "$ORIGIN_WS"; ORIGIN_WS=""
+    return 1
+  fi
+  [[ -f "$ORIGIN_WS/$GOV_REPO/docs/WP-REGISTRY.md" ]] || { rm -rf "$ORIGIN_WS"; ORIGIN_WS=""; return 1; }
+  return 0
+}
+
+cleanup_tmp() {
+  [[ -n "${DRIFT_FILE:-}" ]] && rm -f "$DRIFT_FILE"
+  [[ -n "${ORIGIN_WS:-}" && -d "${ORIGIN_WS:-/nonexistent}" ]] && rm -rf "$ORIGIN_WS"
+  return 0
 }
 
 find_wp_file() {
@@ -462,11 +522,12 @@ git_log_for_file() {
     return
   fi
   local relpath
-  relpath=$(python3 -c "import os; print(os.path.relpath('$filepath', '$STRATEGY_DIR'))" 2>/dev/null || echo "$filepath")
+  relpath=$(python3 -c "import os; print(os.path.relpath('$filepath', '$CARD_ROOT'))" 2>/dev/null || echo "$filepath")
   local commits
+  # GIT_LOG_REV (origin-pinned mode) keeps history and content on the same commit.
   commits=$(
     cd "$STRATEGY_DIR" && \
-    git log -5 --oneline --since="${GIT_LOG_DAYS} days ago" -- "$relpath" 2>/dev/null || true
+    git log -5 --oneline --since="${GIT_LOG_DAYS} days ago" ${GIT_LOG_REV:+"$GIT_LOG_REV"} -- "$relpath" 2>/dev/null || true
   )
   if [[ -z "$commits" ]]; then
     echo "_нет коммитов за ${GIT_LOG_DAYS}д_"
@@ -619,21 +680,6 @@ main() {
 
   log_sync "$wp_num" "START" ""
 
-  local wp_file
-  wp_file=$(find_wp_file "$wp_num")
-
-  if [[ -z "$wp_file" ]]; then
-    log_err "WP-${wp_num}: файл не найден в inbox/ или archive/wp-contexts/"
-    log_sync "$wp_num" "FAIL" "file_not_found"
-    exit 1
-  fi
-
-  # Exit 2: parsing error (frontmatter не валиден)
-  if ! validate_frontmatter "$wp_file"; then
-    log_sync "$wp_num" "FAIL" "parse_error"
-    exit 2
-  fi
-
   # WP-561 Ф20: classify STRATEGY_DIR against its own origin before reading
   # anything from it — a shared checkout under 20+ concurrent sessions is
   # routinely behind, and every consumer of this bundle (protocol-open.md,
@@ -653,20 +699,72 @@ main() {
   esac
   local git_sync_checked_at
   git_sync_checked_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+
+  # WP-561 Ф24: STALE/DIVERGED working copy + provably fresh remote-tracking
+  # ref -> read the cards from a snapshot of that ONE origin commit and stop
+  # blocking. fetch_failed/checker_unavailable/lagging ref stay fail-closed
+  # (exit 3). --force-sync keeps its old meaning: read the working copy
+  # regardless of the status, and say so in CARD_SOURCE.
+  if [[ "$git_sync_blocking" == "true" && "$force_sync" != "true" ]]; then
+    case "$GIT_SYNC_STATUS" in
+      STALE|DIVERGED)
+        if materialize_origin_tree "$STRATEGY_DIR" "${GIT_SYNC_REMOTE_OID:-}"; then
+          CARD_ROOT="$ORIGIN_WS/$GOV_REPO"
+          INBOX_DIR="$CARD_ROOT/inbox"
+          ARCHIVE_DIR="$CARD_ROOT/archive/wp-contexts"
+          REGISTRY_FILE="$CARD_ROOT/docs/WP-REGISTRY.md"
+          GIT_LOG_REV="$GIT_SYNC_REMOTE_OID"
+          CARD_SOURCE="origin-pinned"
+          git_sync_blocking=false
+        fi
+        ;;
+    esac
+  elif [[ "$git_sync_blocking" == "true" && "$force_sync" == "true" ]]; then
+    CARD_SOURCE="worktree-forced"
+  fi
+
   echo "GIT_SYNC_STATUS: ${GIT_SYNC_STATUS}"
   echo "GIT_SYNC_DETAIL: ${GIT_SYNC_DETAIL} remote=${GIT_SYNC_REMOTE_OID:0:10} head=${GIT_SYNC_HEAD_OID:0:10} checked_at=${git_sync_checked_at}"
   if [[ "$force_sync" == "true" ]]; then
     echo "GIT_SYNC_OVERRIDE: true"
   fi
-  if [[ "$git_sync_blocking" == "true" ]]; then
+  if [[ "$CARD_SOURCE" == "origin-pinned" ]]; then
+    echo "CARD_SOURCE: origin-pinned oid=${GIT_SYNC_REMOTE_OID} behind=${GIT_SYNC_BEHIND:-?} ahead=${GIT_SYNC_AHEAD:-?}"
+  else
+    echo "CARD_SOURCE: ${CARD_SOURCE}"
+  fi
+  if [[ "$CARD_SOURCE" == "origin-pinned" ]]; then
+    {
+      echo "[GIT-SYNC] ВНИМАНИЕ: карточки прочитаны с origin/main@${GIT_SYNC_REMOTE_OID:0:12} (актуально)."
+      echo "[GIT-SYNC] Рабочая копия ${STRATEGY_DIR} отстаёт на ${GIT_SYNC_BEHIND:-?} коммитов (${GIT_SYNC_STATUS}) — ВСЕ файлы в ней потенциально устарели, не только эта карточка."
+      echo "[GIT-SYNC] Любые записи — только через изолированную копию + wp-reopen-gate actualize. Чтение других файлов рабочей копии — на свой риск устаревшего контекста."
+    } >&2
+  elif [[ "$git_sync_blocking" == "true" || "$force_sync" == "true" ]]; then
     {
       echo "[GIT-SYNC] рабочая копия ${STRATEGY_DIR}: ${GIT_SYNC_STATUS} (${GIT_SYNC_DETAIL})"
       if [[ "$force_sync" == "true" ]]; then
         echo "[GIT-SYNC] --force-sync передан — bundle продолжает, но статус выше остаётся ${GIT_SYNC_STATUS}"
       else
-        echo "[GIT-SYNC] Sync Gate заблокирован (exit 3). Изолированная сессия → повторить на своём worktree. Канон → session-guard open --isolate, либо --force-sync с явным сообщением пилоту."
+        echo "[GIT-SYNC] Sync Gate заблокирован (exit 3): чтение с origin невозможно (remote-tracking ref отстаёт от origin, сеть или библиотека недоступны). Изолированная сессия → повторить на своём worktree. Канон → session-guard open --isolate, либо --force-sync с явным сообщением пилоту."
       fi
     } >&2
+  fi
+
+  local wp_file
+  wp_file=$(find_wp_file "$wp_num")
+
+  if [[ -z "$wp_file" ]]; then
+    log_err "WP-${wp_num}: файл не найден в inbox/ или archive/wp-contexts/ (источник: ${CARD_SOURCE})"
+    log_sync "$wp_num" "FAIL" "file_not_found card_source=${CARD_SOURCE}"
+    cleanup_tmp
+    exit 1
+  fi
+
+  # Exit 2: parsing error (frontmatter не валиден)
+  if ! validate_frontmatter "$wp_file"; then
+    log_sync "$wp_num" "FAIL" "parse_error card_source=${CARD_SOURCE}"
+    cleanup_tmp
+    exit 2
   fi
 
   local wp_path
@@ -705,11 +803,9 @@ main() {
   )
 
   # Drift accumulator (use temp file for bash 3.2 compatibility)
-  local drift_file
-  drift_file=$(mktemp /tmp/wp-sync-drift.XXXXXX)
-  # Use ${drift_file:-} in trap to avoid unbound variable with set -u
-  local _df="$drift_file"
-  trap 'rm -f "${_df:-}"' EXIT
+  DRIFT_FILE=$(mktemp /tmp/wp-sync-drift.XXXXXX)
+  local drift_file="$DRIFT_FILE"
+  trap cleanup_tmp EXIT
 
   local ref_date="${updated:-$spawned}"
 
@@ -735,6 +831,11 @@ main() {
 
   echo "## Git-sync рабочей копии"
   echo "- Статус: ${GIT_SYNC_STATUS} (${GIT_SYNC_DETAIL})"
+  if [[ "$CARD_SOURCE" == "origin-pinned" ]]; then
+    echo "- Источник карточек: origin-pinned oid=${GIT_SYNC_REMOTE_OID} — рабочая копия отстаёт на ${GIT_SYNC_BEHIND:-?} коммитов и НЕ является источником истины (ВСЕ её файлы потенциально устарели); карточки ниже прочитаны с origin."
+  else
+    echo "- Источник карточек: ${CARD_SOURCE}"
+  fi
   if [[ "$git_sync_blocking" == "true" && "$force_sync" != "true" ]]; then
     echo "- ⚠️ Bundle собран по несинхронной/непроверенной копии — остальное содержимое ниже может быть неактуальным."
   elif [[ "$force_sync" == "true" ]]; then
@@ -827,11 +928,11 @@ main() {
         # Drift: significant commits after ref_date
         if [[ -n "$ref_date" ]] && echo "$ref_date" | grep -qE '^[0-9]{4}-[0-9]{2}-[0-9]{2}$'; then
           local relpath_r
-          relpath_r=$(python3 -c "import os; print(os.path.relpath('$rfile', '$STRATEGY_DIR'))" 2>/dev/null || echo "$rfile")
+          relpath_r=$(python3 -c "import os; print(os.path.relpath('$rfile', '$CARD_ROOT'))" 2>/dev/null || echo "$rfile")
           local sig_commits
           sig_commits=$(
             cd "$STRATEGY_DIR" 2>/dev/null && \
-            git log --oneline --after="${ref_date}" -- "$relpath_r" 2>/dev/null \
+            git log --oneline --after="${ref_date}" ${GIT_LOG_REV:+"$GIT_LOG_REV"} -- "$relpath_r" 2>/dev/null \
             | grep -iE '\b(LIVE|deployed|merged|DROPPED|done|complete|closed)\b' \
             | head -1 \
             || true
@@ -853,7 +954,11 @@ main() {
             local snap_status snap_digest current_digest_out current_status current_digest
             snap_status=$(echo "$snap_line" | cut -d'|' -f2)
             snap_digest=$(echo "$snap_line" | cut -d'|' -f3)
-            current_digest_out=$(bash "$PHASE_DIGEST_SCRIPT" "$rnum" 2>/dev/null || true)
+            if [[ -n "$ORIGIN_WS" ]]; then
+              current_digest_out=$(IWE_WORKSPACE="$ORIGIN_WS" bash "$PHASE_DIGEST_SCRIPT" "$rnum" 2>/dev/null || true)
+            else
+              current_digest_out=$(bash "$PHASE_DIGEST_SCRIPT" "$rnum" 2>/dev/null || true)
+            fi
             current_status=$(echo "$current_digest_out" | grep '^status=' | sed 's/^status=//')
             current_digest=$(echo "$current_digest_out" | grep '^phase_digest=' | sed 's/^phase_digest=//')
             if [[ -n "$current_digest" ]] && { [[ "$current_status" != "$snap_status" ]] || [[ "$current_digest" != "$snap_digest" ]]; }; then
@@ -906,11 +1011,11 @@ main() {
   fi
 
   if [[ "$git_sync_blocking" == "true" && "$force_sync" != "true" ]]; then
-    log_sync "$wp_num" "BLOCKED" "git_sync=${GIT_SYNC_STATUS} related=${related_count} drift=${drift_count}"
+    log_sync "$wp_num" "BLOCKED" "git_sync=${GIT_SYNC_STATUS} related=${related_count} drift=${drift_count} card_source=${CARD_SOURCE}"
     exit 3
   fi
 
-  log_sync "$wp_num" "SUCCESS" "related=${related_count} drift=${drift_count} git_sync=${GIT_SYNC_STATUS}"
+  log_sync "$wp_num" "SUCCESS" "related=${related_count} drift=${drift_count} git_sync=${GIT_SYNC_STATUS} card_source=${CARD_SOURCE}"
 }
 
 main "$@"

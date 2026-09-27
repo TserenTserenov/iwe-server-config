@@ -2,7 +2,7 @@
 name: peer-conversation
 description: Многотуровый диалог писателя (Claude) с одним или несколькими напарниками (любой набор из kimi/codex/hermes/claude-headless/grok) по задаче пилота (DP.SC.154). Ведёт turn-loop (2 участника) или round-loop (3+, WP-509), обнаруживает CONSENSUS/ESCALATE, после консенсуса — Decision Gate (зафиксировать vs реализовать → ревью → проверить → задеплоить), синтезирует report.md через Agent tool.
 argument-hint: "<описание задачи> [--peer kimi|codex|hermes|claude|grok[,vendor2,...]] | --list | --interrupt <session_id> | --finalize <session_id>"
-version: 1.7.1
+version: 1.7.2
 layer: L1
 status: active
 browser_safe: false
@@ -215,14 +215,16 @@ printf '%s\n' "$OPEN_OUTPUT"
 
 > **Не хардкодить `~/IWE/scripts/session-guard.sh`.** Пир-сессия 2026-07-31-16-wp484-new-order-cutover сначала внесла такой хардкод по образцу `day-close/SKILL.md`, но холодный ревью нашёл: у обычного пользователя шаблона `setup.sh` НЕ копирует корневую `scripts/` — существует только каталог скриптов внутри шаблона, и `${IWE_SCRIPTS:-...}` резолвится именно туда намеренно (issue #266, commit `835d5ea` — тот же хардкод уже один раз чинили этим фоллбэком). Хардкод в `day-close/SKILL.md` — недокументированный долг, ждущий той же поломки при промоции, не образец для копирования. Для author-mode расхождение реальное (FMT-копия `session-guard.sh` отстаёт от корневой на фиксы WP-484 Нить1) — но лечится синком `template-sync.sh` (с отдельного разрешения пилота, S-33) или личной правкой `~/.iwe-paths`, не хардкодом в файле, который промотируется всем пользователям шаблона.
 
-**Freeze-fallback (WP-484 Ф133, 24.08 — живой инцидент Ф132 п.3: freeze-гейт блокировал интерактивную пир-сессию без штатного пути закрыться).** `open` без `--isolate` — быстрый путь, достаточный вне freeze (большинство сессий). Если `OPEN_STATUS != 0` И `$OPEN_OUTPUT` содержит `под freeze` (`grep -q 'под freeze' <<<"$OPEN_OUTPUT"`) — canonical checkout заморожен (WP-520/WP-484 Ф104), сам гейт рекомендует `--isolate`, он для этого и существует (найдено этой же фазой — Класс 2, `--isolate` уже решает проблему, просто не был подключён здесь). Повторить с флагом:
+**Freeze-fallback (WP-484 Ф133, 24.08 — живой инцидент Ф132 п.3: freeze-гейт блокировал интерактивную пир-сессию без штатного пути закрыться).** `open` без `--isolate` — быстрый путь, достаточный вне freeze (большинство сессий). Если `OPEN_STATUS != 0` И `$OPEN_OUTPUT` содержит `под freeze` (`printf '%s\n' "$OPEN_OUTPUT" | grep -q 'под freeze'` — без here-string, см. пометку ниже) — canonical checkout заморожен (WP-520/WP-484 Ф104), сам гейт рекомендует `--isolate`, он для этого и существует (найдено этой же фазой — Класс 2, `--isolate` уже решает проблему, просто не был подключён здесь). Повторить с флагом:
 ```bash
 ISOLATE_OUTPUT=$(cd "$GOV_REPO_ROOT" && IWE_AGENT=claude-code bash "${IWE_SCRIPTS:-$HOME/IWE/scripts}/session-guard.sh" open \
   --wp "<WP-NNN из Шага 0б>" --agent claude-code --close-path peer-session \
   --task "<задача одной строкой>" --slug "$SESSION_ID" --isolate)
 ```
 > Тот же `cd "$GOV_REPO_ROOT" &&`, что и выше, и по той же причине: `--isolate` без него снимает копию каталога, откуда физически стартовала сессия (обычно корень `~/IWE`), а не governance-репо, для которого только что сработал freeze. `$GOV_REPO_ROOT` в этой точке — ещё канонический путь (переопределение на `worktree_path` идёт строкой ниже, после этого вызова).
-Успех → `$ISOLATE_OUTPUT` содержит строку JSON `{"worktree_path": "...", "branch": "...", "session_id": "..."}`. Извлечь `worktree_path` (`python3 -c 'import json,sys; print(json.loads(sys.argv[1])["worktree_path"])' "$(grep -o '{.*}' <<<"$ISOLATE_OUTPUT")"`) и переопределить корень репозитория на оставшуюся часть скилла:
+Успех → `$ISOLATE_OUTPUT` содержит строку JSON `{"worktree_path": "...", "branch": "...", "session_id": "..."}`. Извлечь `worktree_path` (`python3 -c 'import json,sys; print(json.loads(sys.argv[1])["worktree_path"])' "$(printf '%s\n' "$ISOLATE_OUTPUT" | grep -o '{.*}' | tail -1)"`) и переопределить корень репозитория на оставшуюся часть скилла:
+
+> **Без here-string `<<<"$VAR"` (WP-484 Ф161 / bug-2026-09-27-secret-guard-analyzer-fails-on-here-string, найдено живьём 27.09, пир-сессия 2026-09-27-09).** Анализатор стража секретов (`secret_patterns.py analyze-bash`) читает `<<<"$VAR"` как незакрытый heredoc и падает; хук трактует это как отказ самого стража и блокирует ВЕСЬ Bash-вызов с текстом «анализатор не отработал». Прежняя формулировка этого шага с `grep -o '{.*}' <<<"$ISOLATE_OUTPUT"` блокировала открытие изолированной сессии у любого писателя на хосте с этим стражем; `printf | grep` даёт тот же результат. Фикс анализатора — РП-544; сюда — не возвращать here-string и после него.
 ```bash
 GOV_REPO_ROOT="<извлечённый worktree_path>"
 ```

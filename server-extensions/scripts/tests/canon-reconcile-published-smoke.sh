@@ -226,30 +226,101 @@ git -C "$CANON" fetch -q origin
 assert "$rc" "0" "exit 0"; assert "$(cat "$CANON/conv/inner")" "inner" "directory materialised"; assert "$(git -C "$CANON" rev-parse HEAD)" "$(git -C "$CANON" rev-parse origin/main)" "HEAD == origin/main"
 
 echo "scenario 17: refs/replace forgery makes an undelivered commit look patch-equivalent -> refused by the delivery proof itself"
-# Origin holds BASE -> Q -> P. The local commit U squashes Q and P onto BASE: same
-# tree as P, but its patch is neither Q's nor P's, so the honest `git cherry` says
-# "+". The forgery replaces U with F (same tree, parent Q = exactly P's patch), so a
-# forged `git cherry` says "-". Real and forged U have the same tree, hence the
-# "tracked tree is clean" preflight passes in both worlds and cannot refuse first:
-# the refusal reason asserted below proves the delivery proof decided.
+# Origin holds BASE -> Q -> P. The local commit U is undelivered AND its end state
+# differs from origin (x.txt says "different", origin says "pub"). The forgery
+# replaces U with F (origin's tree, parent Q = exactly P's patch), so an unguarded
+# `git cherry` says "-"; the guarded one says "+". WP-561 Ф24 added a second,
+# content-based proof (same tree entries in HEAD and target) -- it must not be
+# fooled either: it reads the REAL tree of U (GIT_NO_REPLACE_OBJECTS exported by
+# the script), where x.txt differs, and refuses.
 fresh s17
 pub="$SANDBOX/pub-forge"; git clone -q "$ORIGIN" "$pub"
 echo mine > "$pub/y.txt"; commit_in "$pub" "origin publishes y"; Q=$(git -C "$pub" rev-parse HEAD)
 echo pub > "$pub/x.txt"; commit_in "$pub" "origin publishes x"; git -C "$pub" push -q origin main
-echo mine > "$CANON/y.txt"; echo pub > "$CANON/x.txt"; commit_in "$CANON" "undelivered squash of y and x"; U=$(git -C "$CANON" rev-parse HEAD)
+echo mine > "$CANON/y.txt"; echo different > "$CANON/x.txt"; commit_in "$CANON" "undelivered local edit of x"; U=$(git -C "$CANON" rev-parse HEAD)
 git -C "$CANON" fetch -q origin
 FORGED=$(git -C "$CANON" -c user.name=t -c user.email=t@t commit-tree "$(git -C "$CANON" rev-parse 'origin/main^{tree}')" -p "$Q" -m forged)
 git -C "$CANON" replace "$U" "$FORGED"
-assert "$(git -C "$CANON" status --porcelain --untracked-files=no | wc -l | tr -d ' ')" "0" "precondition: tracked tree clean in the forged world"
-assert "$(GIT_NO_REPLACE_OBJECTS=1 git -C "$CANON" status --porcelain --untracked-files=no | wc -l | tr -d ' ')" "0" "precondition: tracked tree clean in the real world too"
+assert "$(GIT_NO_REPLACE_OBJECTS=1 git -C "$CANON" status --porcelain --untracked-files=no | wc -l | tr -d ' ')" "0" "precondition: tracked tree clean in the real world"
 assert "$(git -C "$CANON" cherry origin/main "$U" | cut -c1)" "-" "precondition: the forgery fools an unguarded git cherry"
 assert "$(GIT_NO_REPLACE_OBJECTS=1 git -C "$CANON" cherry origin/main "$U" | cut -c1)" "+" "precondition: the real commit is not on the target"
 out=$(bash "$SCRIPT" "$CANON" main 2>&1); rc=$?
 assert "$rc" "1" "exit 1: a forged equivalence is not proof of delivery"
 assert "$(git -C "$CANON" rev-parse refs/heads/main)" "$U" "branch still points at the undelivered commit"
-assert "$(printf '%s' "$out" | grep -c 'local-only commits not on target')" "1" "refused by the delivery proof (git cherry), not by another preflight"
+assert "$(printf '%s' "$out" | grep -c 'local-only commits not on target')" "1" "refused by the delivery proof, not by another preflight"
+assert "$(printf '%s' "$out" | grep -c 'end state differs from the target: x.txt')" "1" "the content proof names the real differing path (forgery ignored)"
 
 echo "scenario 18 (static): exact hardening exports precede the first ancestry-sensitive call"
 assert "$(hardening_violations "$SCRIPT" 'is-ancestor|git cherry')" "" "canon-reconcile-published.sh is hardened against refs/replace and grafts"
+
+echo "scenario 19 (WP-561 Ф24): honest squash with the SAME end state as origin -> content-superseded, replaced"
+fresh s19
+pub="$SANDBOX/pub-s19"; git clone -q "$ORIGIN" "$pub"
+echo mine > "$pub/y.txt"; commit_in "$pub" "origin y"; echo pub > "$pub/x.txt"; commit_in "$pub" "origin x"; git -C "$pub" push -q origin main
+echo mine > "$CANON/y.txt"; echo pub > "$CANON/x.txt"; commit_in "$CANON" "local squash of y and x"; U=$(git -C "$CANON" rev-parse HEAD)
+git -C "$CANON" fetch -q origin
+assert "$(GIT_NO_REPLACE_OBJECTS=1 git -C "$CANON" cherry origin/main "$U" | cut -c1)" "+" "precondition: patch-id cannot see the squash"
+out=$(bash "$SCRIPT" "$CANON" main 2>&1); rc=$?
+assert "$rc" "0" "exit 0: end state provably on the target"
+assert "$(git -C "$CANON" rev-parse HEAD)" "$(git -C "$CANON" rev-parse origin/main)" "HEAD replaced by origin tip"
+assert "$(printf '%s' "$out" | grep -c 'content-superseded=1')" "1" "report counts the superseded commit"
+assert "$(git -C "$CANON" status --porcelain --untracked-files=no | wc -l | tr -d ' ')" "0" "tree clean afterwards"
+
+echo "scenario 20 (WP-561 Ф24): tracked dirt that already equals the target byte-for-byte (point-installed fix) -> replaced"
+fresh s20; echo one > "$CANON/b.txt"; commit_in "$CANON" "local"; C=$(git -C "$CANON" rev-parse HEAD)
+republish_on_origin "$CANON" "$C"
+pub="$SANDBOX/pub-s20"; git clone -q "$ORIGIN" "$pub"; echo fixed > "$pub/a.txt"; commit_in "$pub" "origin fixes a"; git -C "$pub" push -q origin main
+echo fixed > "$CANON/a.txt"                                   # someone copied the published bytes into the frozen canon
+assert "$(git -C "$CANON" status --porcelain --untracked-files=no | wc -l | tr -d ' ')" "1" "precondition: canon is dirty in git's eyes"
+out=$(bash "$SCRIPT" "$CANON" main 2>&1); rc=$?
+assert "$rc" "0" "exit 0: identical dirt is not a reason to stay frozen"
+assert "$(git -C "$CANON" rev-parse HEAD)" "$(git -C "$CANON" rev-parse origin/main)" "HEAD replaced"
+assert "$(cat "$CANON/a.txt")" "fixed" "bytes unchanged on disk"
+assert "$(git -C "$CANON" status --porcelain --untracked-files=no | wc -l | tr -d ' ')" "0" "tree clean afterwards"
+assert "$(printf '%s' "$out" | grep -c 'tolerated identical dirty paths=1')" "1" "report counts the tolerated path"
+
+echo "scenario 21 (WP-561 Ф24): tracked dirt that DIFFERS from the target -> still fail closed, named"
+fresh s21; echo one > "$CANON/b.txt"; commit_in "$CANON" "local"; C=$(git -C "$CANON" rev-parse HEAD)
+republish_on_origin "$CANON" "$C"; echo mine > "$CANON/a.txt"; H=$(git -C "$CANON" rev-parse HEAD)
+out=$(bash "$SCRIPT" "$CANON" main 2>&1); rc=$?
+assert "$rc" "1" "exit 1"; assert "$(git -C "$CANON" rev-parse HEAD)" "$H" "HEAD unchanged"
+assert "$(printf '%s' "$out" | grep -c 'tracked changes differ from target: a.txt')" "1" "refusal names the differing path"
+
+echo "scenario 22 (WP-561 Ф24): STAGED change, even if identical to the target -> fail closed (index is intent, not bytes)"
+fresh s22; echo one > "$CANON/b.txt"; commit_in "$CANON" "local"; C=$(git -C "$CANON" rev-parse HEAD)
+republish_on_origin "$CANON" "$C"
+pub="$SANDBOX/pub-s22"; git clone -q "$ORIGIN" "$pub"; echo fixed > "$pub/a.txt"; commit_in "$pub" "origin fixes a"; git -C "$pub" push -q origin main
+echo fixed > "$CANON/a.txt"; git -C "$CANON" add a.txt; H=$(git -C "$CANON" rev-parse HEAD)
+out=$(bash "$SCRIPT" "$CANON" main 2>&1); rc=$?
+assert "$rc" "1" "exit 1"; assert "$(git -C "$CANON" rev-parse HEAD)" "$H" "HEAD unchanged"
+assert "$(printf '%s' "$out" | grep -c 'staged changes present in index: a.txt')" "1" "refusal names the staged path"
+
+echo "scenario 23 (WP-561 Ф24): same blob but executable bit differs from the target -> fail closed (mode is part of the entry)"
+fresh s23; echo one > "$CANON/b.txt"; commit_in "$CANON" "local"; C=$(git -C "$CANON" rev-parse HEAD)
+republish_on_origin "$CANON" "$C"
+pub="$SANDBOX/pub-s23"; git clone -q "$ORIGIN" "$pub"; echo fixed > "$pub/a.txt"; commit_in "$pub" "origin fixes a"; git -C "$pub" push -q origin main
+echo fixed > "$CANON/a.txt"; chmod +x "$CANON/a.txt"; H=$(git -C "$CANON" rev-parse HEAD)
+out=$(bash "$SCRIPT" "$CANON" main 2>&1); rc=$?
+assert "$rc" "1" "exit 1"; assert "$(git -C "$CANON" rev-parse HEAD)" "$H" "HEAD unchanged"
+assert "$(printf '%s' "$out" | grep -c 'tracked changes differ from target: a.txt')" "1" "mode mismatch is a difference"
+
+echo "scenario 24 (WP-561 Ф24): unique local commit only PARTIALLY superseded -> fail closed, first differing path named"
+fresh s24
+pub="$SANDBOX/pub-s24"; git clone -q "$ORIGIN" "$pub"; echo mine > "$pub/y.txt"; commit_in "$pub" "origin y"; git -C "$pub" push -q origin main
+echo mine > "$CANON/y.txt"; echo extra > "$CANON/z.txt"; commit_in "$CANON" "local y plus z"; H=$(git -C "$CANON" rev-parse HEAD)
+git -C "$CANON" fetch -q origin
+out=$(bash "$SCRIPT" "$CANON" main 2>&1); rc=$?
+assert "$rc" "1" "exit 1"; assert "$(git -C "$CANON" rev-parse HEAD)" "$H" "HEAD unchanged"
+assert "$(printf '%s' "$out" | grep -c 'end state differs from the target: z.txt')" "1" "z.txt (not on origin) is the named difference"
+
+echo "scenario 25 (WP-561 Ф24): tracked file deleted on disk and absent on the target -> tolerated, replaced"
+fresh s25; echo one > "$CANON/b.txt"; commit_in "$CANON" "local"; C=$(git -C "$CANON" rev-parse HEAD)
+republish_on_origin "$CANON" "$C"
+pub="$SANDBOX/pub-s25"; git clone -q "$ORIGIN" "$pub"; git -C "$pub" rm -q b.txt; commit_in "$pub" "origin removes b"; git -C "$pub" push -q origin main
+rm "$CANON/b.txt"
+out=$(bash "$SCRIPT" "$CANON" main 2>&1); rc=$?
+assert "$rc" "0" "exit 0"
+assert "$(git -C "$CANON" rev-parse HEAD)" "$(git -C "$CANON" rev-parse origin/main)" "HEAD replaced"
+assert "$(test -e "$CANON/b.txt" && echo present || echo absent)" "absent" "b.txt stays absent"
 
 [ "$fails" = 0 ] && echo "PASS: all scenarios" || { echo "FAIL: $fails assertion(s)"; exit 1; }

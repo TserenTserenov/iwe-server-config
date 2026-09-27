@@ -21,6 +21,9 @@
 #   line_count=<N>
 #   archive_declined_recent=<true|false>
 #   over_threshold=<true|false>
+#   auto_archive=<licensed|declined|n/a>   (WP-561 Ф24: licensed = protocol
+#                §5c auto-archival applies; declined = fresh archive_declined
+#                wins; n/a = under threshold)
 # exit 1 только при ошибке использования/файл не найден.
 #
 # Совместимость: bash 3.2+ (macOS), bash 4+ (Linux)
@@ -90,7 +93,22 @@ if [[ "$age_days" != "unknown" ]] \
   over_threshold="true"
 fi
 
+# WP-561 Ф24 (peer-session 2026-09-27-09, Kimi's condition, Codex's shape):
+# the closing agent must not guess whether archival is allowed. The licence is
+# the protocol version (protocol-close.md §5c, standing pilot directive of
+# 27.09.2026) plus the ABSENCE of a fresh archive_declined -- a fresh decline
+# always wins. The per-card `auto_archive_policy:` field is an audit trail of
+# an already executed decision, never the licence itself (otherwise the first
+# run could never happen). Consumer: scripts/wp-archive-closed-phases.py.
+auto_archive="n/a"
+if [[ "$archive_declined_recent" == "true" ]]; then
+  auto_archive="declined"
+elif [[ "$over_threshold" == "true" ]]; then
+  auto_archive="licensed"
+fi
+
 echo "age_days=${age_days}"
 echo "line_count=${line_count}"
 echo "archive_declined_recent=${archive_declined_recent}"
 echo "over_threshold=${over_threshold}"
+echo "auto_archive=${auto_archive}"

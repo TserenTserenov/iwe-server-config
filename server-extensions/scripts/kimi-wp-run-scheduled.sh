@@ -2572,7 +2572,14 @@ set_status running
 # cleanup between runs. This runner already fires once per queued WP through
 # the night, which makes it the natural periodic trigger -- no separate cron
 # needed. Best-effort: a sweep failure must not abort this WP's own run.
-bash "$IWE_ROOT/scripts/session-guard.sh" audit --cleanup-orphans >>"$LOG" 2>&1 || \
+# --quarantine-dead-interactive (DRR-f55) was deny-by-default for the first
+# two weeks (review_date 2026-10-03); pilot decision 2026-09-27 (peer-session
+# 2026-09-27-09-wp561-open-close-pipeline) turned it on ahead of that date --
+# 43 of 45 open semaphores that day had a dead pid and the default was still
+# blocking their cleanup. The four-part liveness proof this flag relies on
+# (dead pid on this host + host match + expired lease + stale/absent
+# heartbeat) is unchanged; only the deny switch moved.
+bash "$IWE_ROOT/scripts/session-guard.sh" audit --cleanup-orphans --quarantine-dead-interactive >>"$LOG" 2>&1 || \
   log "WARN: orphan semaphore sweep failed (non-fatal, continuing)"
 
 # --- dry-run (тестовый режим: не запускает LLM, проверяет launchd+plumbing) ---
