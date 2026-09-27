@@ -33,6 +33,8 @@ class QuarantineScopeTest(unittest.TestCase):
         guard = Path(__file__).parents[1] / 'session-guard.sh'
         code = guard.read_text().split('_frozen_quarantine_commit_barrier() {', 1)[1]
         self.function = '_frozen_quarantine_commit_barrier() {' + code.split('\nscope_has_path()', 1)[0]
+        identity = guard.read_text().split('_runtime_harness_session_id() {', 1)[1].split('\n}', 1)[0]
+        self.function = '_runtime_harness_session_id() {' + identity + '\n}\n' + self.function
 
     def git(self, *args):
         return subprocess.run(['git', '-C', str(self.repo), *args], check=True,
@@ -76,6 +78,19 @@ class QuarantineScopeTest(unittest.TestCase):
                                           'CLAUDE_CODE_SESSION_ID': 'frozen-harness'}), 1)
         self.assertEqual(self.run_barrier({'IWE_AGENT': 'foreign',
                                           'CLAUDE_CODE_SESSION_ID': 'other-harness'}), 0)
+
+    def test_codex_legacy_harness_and_explicit_agent_stay_frozen(self):
+        self.header = self.header.replace('agent: foreign', 'agent: codex')
+        self.quarantine = self.sessions / 'codex-old.open.orphaned-dead-interactive.recovery-pending'
+        self.header += 'harness_session_id: frozen-harness\n'
+        self.write()
+        for identity in (
+            {'IWE_AGENT': 'codex', 'CODEX_THREAD_ID': '',
+             'CLAUDE_CODE_SESSION_ID': 'frozen-harness'},
+            {'AGENT': 'codex', 'IWE_AGENT': '', 'CODEX_THREAD_ID': 'frozen-harness'},
+        ):
+            with self.subTest(identity=identity):
+                self.assertEqual(self.run_barrier(identity), 1)
 
     def test_legacy_overlap_still_blocks(self):
         self.write('own.txt')

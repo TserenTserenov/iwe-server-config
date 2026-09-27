@@ -17,7 +17,11 @@ GUARD="$ROOT_DIR/scripts/session-guard.sh"
 START=$(grep -n '^_frozen_quarantine_commit_barrier()' "$GUARD" | head -1 | cut -d: -f1)
 END=$(awk -v start="$START" 'NR>=start && /^}/{print NR; exit}' "$GUARD")
 [ -n "$START" ] && [ -n "$END" ] || { echo "FAIL: could not locate _frozen_quarantine_commit_barrier in $GUARD" >&2; exit 1; }
-FUNC_SRC=$(sed -n "${START},${END}p" "$GUARD")
+IDENTITY_START=$(grep -n '^_runtime_harness_session_id()' "$GUARD" | head -1 | cut -d: -f1)
+IDENTITY_END=$(awk -v start="$IDENTITY_START" 'NR>=start && /^}/{print NR; exit}' "$GUARD")
+[ -n "$IDENTITY_START" ] && [ -n "$IDENTITY_END" ] || { echo "FAIL: identity resolver missing" >&2; exit 1; }
+FUNC_SRC="$(sed -n "${IDENTITY_START},${IDENTITY_END}p" "$GUARD")
+$(sed -n "${START},${END}p" "$GUARD")"
 
 TEST_ROOT=$(mktemp -d /private/tmp/session-guard-frozen-quarantine-sentinel.XXXXXX 2>/dev/null || mktemp -d)
 trap 'rm -rf "$TEST_ROOT"' EXIT

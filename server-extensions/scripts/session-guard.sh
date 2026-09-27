@@ -11608,7 +11608,10 @@ fi
 # already claimed that exact directory. A directory entry is stored with a
 # trailing slash, so it can never be confused with a file of the same name.
 _frozen_quarantine_commit_barrier() {  # <newline-separated ACTIVE semaphores>
-  ACTIVE_SEMAPHORES="$1" python3 - "$SESSION_DIR" <<'PY'
+  local barrier_agent="${AGENT:-${IWE_AGENT:-}}" barrier_harness
+  barrier_harness=$(_runtime_harness_session_id "$barrier_agent") || return 2
+  QUARANTINE_AGENT="$barrier_agent" QUARANTINE_HARNESS_SESSION_ID="$barrier_harness" \
+    ACTIVE_SEMAPHORES="$1" python3 - "$SESSION_DIR" <<'PY'
 import glob
 import hashlib
 import json
@@ -11631,9 +11634,8 @@ git_checkout = subprocess.run(['git', 'rev-parse', '--show-toplevel'],
 if git_checkout.returncode:
     raise SystemExit(2)
 current_checkout = os.path.realpath(git_checkout.stdout.strip())
-current_agent = os.environ.get('IWE_AGENT', '')
-current_harness = (os.environ.get('CODEX_THREAD_ID', '') if current_agent == 'codex'
-                   else os.environ.get('CLAUDE_CODE_SESSION_ID', ''))
+current_agent = os.environ.get('QUARANTINE_AGENT', '')
+current_harness = os.environ.get('QUARANTINE_HARNESS_SESSION_ID', '')
 
 def claimed_scope(text):
     lines = text.splitlines()
