@@ -326,6 +326,49 @@ def check(label, expected, extra_env=None):
 
 
 check('published untracked file accepted on foreign branch', True)
+# A trailing slash claims all leaves, including output not explicitly listed.
+base = base.replace(f'file: {relative}\n', 'file: notes/\n')
+sem.write_text(base)
+check('directory claim covers published untracked leaf', True)
+# A deleted leaf is absent from HEAD, remote, index and disk, but remains
+# covered through the recorded commit diff.
+retired = publisher / 'notes' / 'retired.md'
+retired.write_text('retired output\n')
+git(publisher, 'add', 'notes/retired.md')
+git(publisher, 'commit', '-qm', 'add retired output')
+retired.unlink()
+git(publisher, 'add', 'notes/retired.md')
+git(publisher, 'commit', '-qm', 'delete retired output')
+git(publisher, 'push', '-q', 'origin', 'main')
+git(sessions, 'fetch', '-q', 'origin', 'main')
+published = git(publisher, 'rev-parse', 'HEAD')
+args[5] = published
+base += f'commit: MC-sessions {published}\n'
+sem.write_text(base)
+check('directory covers a claimed deletion absent from current trees', True)
+
+(sessions / 'notes-other').mkdir()
+(sessions / 'notes-other' / 'unpublished.md').write_text('outside the directory\n')
+check('directory claim preserves slash boundary', True)
+(sessions / 'notes' / 'nested').mkdir()
+extra_leaf = sessions / 'notes' / 'nested' / 'unpublished.md'
+extra_leaf.write_text('not delivered\n')
+check('directory includes nested unpublished leaf', False)
+(sessions / '.git' / 'info').mkdir(exist_ok=True)
+(sessions / '.git' / 'info' / 'exclude').write_text('notes/nested/\n')
+check('directory includes ignored unpublished leaf', False)
+extra_leaf.unlink()
+(sessions / 'notes' / 'nested').rmdir()
+(sessions / 'notes' / 'foreign-link').symlink_to(governance, target_is_directory=True)
+check('directory refuses nested symlink', False)
+(sessions / 'notes' / 'foreign-link').unlink()
+git(sessions, 'update-index', '--add', '--cacheinfo', '160000', published, 'notes/submodule')
+check('directory refuses index gitlink', False)
+git(sessions, 'update-index', '--force-remove', 'notes/submodule')
+sem.write_text(base.replace('file: notes/', 'file: notes//'))
+check('repeated trailing slash remains invalid', False)
+sem.write_text(base)
+
 sem.write_text(base + f'isolated_worktree: {governance}\n')
 check('separate shared sessions accepted with isolated governance', True)
 sem.write_text(base)
@@ -363,6 +406,7 @@ for flag in ('assume-unchanged', 'skip-worktree'):
 (governance / relative).write_bytes(original)
 check('ambiguous ownership rejected', False)
 (governance / relative).unlink()
+(governance / relative).parent.rmdir()
 # Intercept the last status check to mutate content/index DURING the second pass.
 # The wrapper never changes production tools or processes.
 bin_dir = root / 'bin'
@@ -385,7 +429,7 @@ if os.environ['PROOF_MUTATION'] == 'parent-symlink' and 'hash-object' in argumen
     sys.stdout.buffer.write(result.stdout)
     sys.stderr.buffer.write(result.stderr)
     raise SystemExit(result.returncode)
-if (os.environ['PROOF_MUTATION'] in ('content', 'index') and 'status' in arguments
+if (os.environ['PROOF_MUTATION'] in ('content', 'index', 'directory') and 'status' in arguments
         and os.environ['PROOF_RELATIVE'] in arguments):
     counter = Path(os.environ['PROOF_COUNTER'])
     count = int(counter.read_text()) + 1 if counter.exists() else 1
@@ -394,12 +438,14 @@ if (os.environ['PROOF_MUTATION'] in ('content', 'index') and 'status' in argumen
         if os.environ['PROOF_MUTATION'] == 'content':
             with open(os.environ['PROOF_NOTE'], 'ab') as stream:
                 stream.write(b'raced change\\n')
+        elif os.environ['PROOF_MUTATION'] == 'directory':
+            Path(os.environ['PROOF_NOTE']).with_name('late-output.md').write_text('not published')
         else:
             subprocess.run([os.environ['REAL_GIT'], '-C', os.environ['PROOF_REPO'], 'add', '--', os.environ['PROOF_RELATIVE']], check=True)
 os.execv(os.environ['REAL_GIT'], [os.environ['REAL_GIT'], *arguments])
 ''')
 wrapper.chmod(0o755)
-for mutation in ('content', 'index'):
+for mutation in ('content', 'index', 'directory'):
     counter = root / ('counter-' + mutation)
     check('second-pass ' + mutation + ' race rejected', False, {
         'PATH': str(bin_dir) + os.pathsep + os.environ['PATH'],
@@ -410,6 +456,7 @@ for mutation in ('content', 'index'):
     if git(sessions, 'ls-files', '--stage', '--', relative):
         git(sessions, 'restore', '--staged', '--', relative)
     note.write_bytes(original)
+    note.with_name('late-output.md').unlink(missing_ok=True)
 # This attack made the old pathname-based hash accept unpublished content:
 # swap in a symlink only during Git's reopen, then restore the original inode.
 note.write_bytes(original + b'unpublished result\n')
