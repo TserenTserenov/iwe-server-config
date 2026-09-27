@@ -79,10 +79,13 @@ python3 "${IWE_SCRIPTS:-$HOME/IWE/scripts}/artifactor.py" "$REQUEST"
 
    | Exit | Значение | Действие |
    |------|----------|----------|
-   | 0 | РП найден, `GIT_SYNC_STATUS: OK` или `NO_UPSTREAM` | читать вывод как обычно |
+   | 0 | РП найден, `GIT_SYNC_STATUS: OK` или `NO_UPSTREAM` — третья строка `CARD_SOURCE: worktree` | читать вывод как обычно |
+   | 0 | `GIT_SYNC_STATUS: STALE\|DIVERGED`, но третья строка `CARD_SOURCE: origin-pinned oid=<40hex> behind=N ahead=M` (WP-561 Ф24, 27.09) — карточки (целевая и связанные) прочитаны со снимка ЭТОЙ ревизии origin, рабочая копия не читалась | читать вывод как обычно — данные актуальнее рабочей копии; но ЛЮБАЯ запись — только в изолированной копии (`session-guard.sh open --isolate`) после `wp-reopen-gate.sh actualize`; stderr bundle несёт предупреждение «ВСЕ файлы рабочей копии потенциально устарели» — процитировать пилоту одной строкой; маркер `wp-sync-<N>.done` НЕ ставить |
    | 1 | РП не найден | перейти к Ритуалу с пометкой «контекст не найден» |
    | 2 | ошибка парсинга frontmatter | перейти к Ритуалу, поднять stderr в «Требует внимания» |
-   | 3 | `GIT_SYNC_STATUS: STALE\|DIVERGED\|fetch_failed\|checker_unavailable` (WP-561 Ф20) — рабочая копия governance-репо не синхронизирована с origin или сверка не подтверждена | см. ниже, НЕ переходить к 3b/3c молча |
+   | 3 | `GIT_SYNC_STATUS: fetch_failed\|checker_unavailable`, ЛИБО `STALE\|DIVERGED` при отстающем remote-tracking ref (`refs/remotes/origin/<branch>` ≠ OID ls-remote — брокер Ф66 РП-530 ещё не подтянул) — свежесть данных не доказана, bundle читать нечего (WP-561 Ф20/Ф24) | см. ниже, НЕ переходить к 3b/3c молча |
+
+   **`CARD_SOURCE` (третья машинная строка, WP-561 Ф24):** `worktree` — читалась рабочая копия (статус OK/NO_UPSTREAM); `origin-pinned oid=…` — читался снимок origin (рабочая копия STALE/DIVERGED, ref свежий); `worktree-forced` — `--force-sync`, читалась заведомо устаревшая копия. Sub-agent `wp-sync-actualizer` при `origin-pinned` работает как обычно (данные легитимны), diff применяется только в изолированной копии.
 
    **Exit 3 — рецепт по среде:** изолированная сессия (свой worktree, `session-guard.sh open --isolate`) → повторить Шаг 3a с `IWE_WORKSPACE` на этот worktree, он обычно свежий от `origin/main`. Канонический чекаут → не форсировать pull (AR.006, Pull-on-Touch); либо `session-guard.sh open --isolate` и повтор оттуда, либо, если пилот явно согласился работать по неполным данным, добавить `--force-sync` к вызову bundle и process дальше — статус `GIT_SYNC_STATUS`/`GIT_SYNC_OVERRIDE` из первых двух строк вывода обязательно процитировать пилоту одной строкой ДО решения, не молчать о нём.
 

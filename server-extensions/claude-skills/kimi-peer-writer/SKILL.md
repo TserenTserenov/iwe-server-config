@@ -169,13 +169,15 @@ python3 ~/IWE/DS-my-strategy/scripts/resolve-personality-by-host.py \
 | `claude` | `scripts/claude-peer-adapter.sh` | `claude-code` | `claude-peer-adapter` | sonnet |
 | `codex` | `scripts/codex-peer-adapter.sh` | `codex` | `codex-peer-adapter` | — (дефолт CLI) |
 | `hermes` | `scripts/hermes-peer-adapter.sh` | `hermes` | `hermes-peer-adapter` | — |
+| `grok` | `scripts/grok-peer-adapter.sh` | `grok` | `grok-peer-adapter` | — (дефолт CLI) |
 
-Неизвестный vendor → СТОП до создания сессии: «Напарник `<vendor>` не зарегистрирован. Известные: claude, codex, hermes.» Добавление вендора = правка реестра §0в peer-conversation + этой таблицы одним коммитом (OwnerIntegrity, §0в.1).
+Неизвестный vendor → СТОП до создания сессии: «Напарник `<vendor>` не зарегистрирован. Известные: claude, codex, hermes, grok.» Добавление вендора = правка реестра §0в peer-conversation + этой таблицы одним коммитом (OwnerIntegrity, §0в.1).
 
 Особенности по вендору (учитывать в turn-loop и промптах):
 - `claude`: усиленный text-only контракт WP-458 — `--add-dir` запрещён адаптером; контекст только текстовой проекцией в stdin.
 - `codex`: read-only sandbox всегда (§0в.1); `--add-dir` даёт чтение отфильтрованной копии, не запись.
 - `hermes`: не поддерживает `--model`/`--add-dir`; лимит промпта 4000 символов — адаптер откажет с диагностикой (§0в.1, сохранность промпта): сокращай текстовую проекцию заранее. Поддерживает `--session-id`.
+- `grok`: только read-only участник (АрхГейт WP-530 Ф51): `--sandbox read-only`+`--tools ""` зашиты адаптером; `--add-dir` — отфильтрованная копия (PII/.agentigore). Реплики помечать пилоту как «непроверенный критик» на первых сессиях.
 
 Дальше по скиллу `$PEER_VENDOR` / `$PEER_AGENT_ID` / `$ADAPTER` / модель напарника подставляются из этой таблицы вместо прежних упоминаний Claude.
 
