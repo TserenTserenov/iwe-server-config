@@ -159,6 +159,7 @@ fi
 [ ! -e "$WORKTREE_PATH" ] || { echo "FAIL: successful close left isolated worktree on disk" >&2; exit 1; }
 grep -q '^checklist_status: closed$' "$SEM.closed" || { echo "FAIL: closed receipt lacks terminal checklist" >&2; exit 1; }
 grep -q '^checklist_publish_state: clean$' "$SEM.closed" || { echo "FAIL: closed receipt lacks publish proof" >&2; exit 1; }
+grep -q '^publication_receipt_v2: ' "$SEM.closed" || { echo "FAIL: PREPARED source inventory lacks historical publication receipt v2" >&2; exit 1; }
 
 idle_count() {
   grep -c ' fixture idle ' "$TEST_ROOT/status-calls" 2>/dev/null || true

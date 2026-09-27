@@ -6030,6 +6030,10 @@ _repo_head_has_publish_proof() {  # <repo> <role> [exact semaphore] [own field] 
     return 1
   }
   if ! git -C "$root" merge-base --is-ancestor HEAD "$origin_ref" 2>/dev/null; then
+    if [ -n "${3:-}" ] && _receipt_checkout_has_publish_proof "$3" "$root" "$origin_ref"; then
+      echo "Session CLOSE: historical publication receipts v2 cover checkout: $root" >&2
+      return 0
+    fi
     if [ "$role" = "sessions checkout" ] && _repo_head_is_patch_equivalent "$root" "$origin_ref"; then
       echo "Session CLOSE: HEAD $role не предок origin/main, но все локальные коммиты patch-эквивалентны свежему origin/main (cherry-pick delivery fallback): $root" >&2
       return 0
@@ -7094,6 +7098,26 @@ PY
 }
 
 
+_publication_receipt_tool() {
+  python3 "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/publication_receipt.py" "$@"
+}
+
+_record_publication_receipts() {  # caller owns this session transition lock
+  _publication_receipt_tool record "$1" "$2" "$3" "$4"
+}
+
+_receipt_checkout_has_publish_proof() {  # <semaphore> <checkout> <fresh remote>
+  local common name declared declared_common
+  common=$(git -C "$2" rev-parse --path-format=absolute --git-common-dir 2>/dev/null) || return 1
+  while IFS= read -r name; do
+    declared=$(_resolve_repo_checkout "$name" 2>/dev/null) || continue
+    declared_common=$(git -C "$declared" rev-parse --path-format=absolute --git-common-dir 2>/dev/null) || continue
+    [ "$declared_common" = "$common" ] || continue
+    _publication_receipt_tool verify-checkout "$1" "$2" "$name" "$3" && return 0
+  done < <({ sed -n 's/^commit: \([^ ]*\) .*/\1/p' "$1"; printf '%s\n' "$GOV_REPO"; } | sort -u)
+  return 1
+}
+
 _claimed_commits_have_publish_proof() {  # <semaphore> [exact claim strings JSON to exclude]
   local semaphore="$1" excluded_json="${2:-[]}" entry repo_name commit_sha repo_dir fetched=""
   jq -e 'type == "array" and all(.[]; type == "string")' <<<"$excluded_json" >/dev/null 2>&1 \
@@ -7125,6 +7149,10 @@ _claimed_commits_have_publish_proof() {  # <semaphore> [exact claim strings JSON
         '+refs/heads/main:refs/remotes/origin/main' 2>/dev/null \
         || { echo "Session CLOSE: свежий origin/main не получен для claimed repo: $repo_name" >&2; return 1; }
       fetched="${fetched}${repo_dir}"$'\n'
+    fi
+    if _publication_receipt_tool verify "$semaphore" "$repo_dir" "$repo_name" "$commit_sha" \
+        "$(git -C "$repo_dir" rev-parse refs/remotes/origin/main)"; then
+      continue
     fi
     if git -C "$repo_dir" merge-base --is-ancestor "$commit_sha" refs/remotes/origin/main 2>/dev/null; then
       continue
@@ -8345,6 +8373,15 @@ PY
   timeout 10 git -C "$worktree" fetch --quiet origin \
     '+refs/heads/main:refs/remotes/origin/main' 2>/dev/null || return 1
   remote_head=$(git -C "$worktree" rev-parse --verify 'refs/remotes/origin/main^{commit}') || return 1
+  # A three-way delivery can omit changes already upstream, so its patch-id
+  # differs from the source. Recover historical receipts before attempting a
+  # replay that could conflict with a later legitimate replacement. The caller
+  # keeps the PREPARED identity/range/snapshot checks around this helper.
+  _record_publication_receipts "$semaphore" "$worktree" "$GOV_REPO" "$remote_head" \
+    || echo "WARN: prepared receipt v2 unavailable; retaining legacy publication proof" >&2
+  if _receipt_checkout_has_publish_proof "$semaphore" "$worktree" "$remote_head"; then
+    return 0
+  fi
   if _prepared_source_set_has_publish_proof "$semaphore" "$worktree"; then
     return 0
   fi
@@ -8359,8 +8396,12 @@ PY
   while IFS= read -r commit; do
     [ -n "$commit" ] || continue
     # Resume a partially delivered sequence without replaying its published
-    # prefix. Use the same direct patch proof as commit claims; empty and
-    # merge commits require their original OID to be published.
+    # prefix. A partial receipt set cannot prove the whole checkout, but each
+    # independently verified source must still be skipped. Empty and merge
+    # commits retain the legacy requirement that their original OID is public.
+    if _publication_receipt_tool verify "$semaphore" "$worktree" "$GOV_REPO" "$commit" "$remote_head"; then
+      continue
+    fi
     if git -C "$worktree" merge-base --is-ancestor "$commit" "$remote_head" 2>/dev/null; then
       continue
     fi
@@ -8371,7 +8412,7 @@ PY
       [ "$cherry_line" != "- $commit" ] || continue
     fi
     push_rc=0
-    timeout 300 "$isolate_push_script" "$worktree" main --exact-commit "$commit" || push_rc=$?
+    IWE_PUBLICATION_PARENT_LOCK=1 timeout 300 "$isolate_push_script" "$worktree" main --exact-commit "$commit" || push_rc=$?
     [ "$push_rc" -eq 0 ] || return "$push_rc"
   done < <(python3 - "$commits_json" <<'PY'
 import json
@@ -8881,7 +8922,10 @@ _close_delivery_and_transition() {
           || fail "close: isolate-push завершился, но fresh origin/main proof не получен" 7
         remote_main_sha=$(git -C "$CLOSING_WORKTREE" rev-parse --verify 'refs/remotes/origin/main^{commit}' 2>/dev/null) \
           || fail "close: remote main SHA после isolate-push не читается" 7
-        _prepared_source_set_has_publish_proof "$SEM_FILE" "$CLOSING_WORKTREE" \
+        _record_publication_receipts "$SEM_FILE" "$CLOSING_WORKTREE" "$GOV_REPO" "$remote_main_sha" \
+          || echo "WARN: receipt v2 unavailable; retaining legacy publication proof" >&2
+        _receipt_checkout_has_publish_proof "$SEM_FILE" "$CLOSING_WORKTREE" "$remote_main_sha" \
+          || _prepared_source_set_has_publish_proof "$SEM_FILE" "$CLOSING_WORKTREE" \
           || fail "close: не каждый PREPARED source commit доказан fresh origin/main exact OID или итоговым tree proof (нет доказательства доставки -- если содержимое доставлено, а более поздняя легитимная замена тех же строк ломает byte-exact proof, разбери вручную и рассмотри close --abandon-prepared)" 7
         _claimed_commits_have_publish_proof "$SEM_FILE" \
           || fail "close: additional note-commit claim не имеет publish proof" 7
@@ -10301,6 +10345,13 @@ for path in candidates:
                 refuse("'" + path + "' входит в заявленный коммит " + sha[:9] + ": заявка законна")
 
 drop = {"file: " + path for path in candidates}
+for line in lines:
+    if line.startswith('file_v2: '):
+        try:
+            if json.loads(line[9:])['path'] in candidates:
+                drop.add(line)
+        except (ValueError, KeyError, TypeError):
+            refuse('malformed repository-qualified scope')
 kept = [line for line in lines if line not in drop]
 if Path(sem).read_bytes() != snapshot:
     refuse("семафор изменился во время проверки, повтори")
@@ -10434,11 +10485,13 @@ print(os.path.relpath(f, r))
       *) REL_PATH="${REL_PATH}/" ;;
     esac
   fi
-  # Avoid duplicate consecutive entries
-  LAST=$(tail -1 "$SEM_FILE" 2>/dev/null || true)
-  if [ "$LAST" != "file: $REL_PATH" ]; then
-    echo "file: $REL_PATH" >> "$SEM_FILE"
-  fi
+  # Repository-qualified scope survives quarantine and disambiguates identical
+  # relative names in independent repositories. Common-dir unifies worktrees.
+  NOTE_COMMON=$(git -C "$REPO_ROOT" rev-parse --path-format=absolute --git-common-dir) || exit 1
+  NOTE_V2=$(python3 -c 'import json,os,sys; print("file_v2: " + json.dumps({"repo":os.path.realpath(sys.argv[1]),"path":sys.argv[2]},sort_keys=True))' "$NOTE_COMMON" "$REL_PATH") || exit 1
+  # Pair only this new legacy-compatible line with its following v2 record.
+  # Never reinterpret an older unqualified claim of the same name.
+  grep -qxF "$NOTE_V2" "$SEM_FILE" || printf '%s\n%s\n' "file: $REL_PATH" "$NOTE_V2" >> "$SEM_FILE"
 
   # WP-484 Ф133 (24.08, пир-сессия с Codex): авто-продление аренды при
   # реальной активности. Живой инцидент Ф132 п.5 -- многораундовая пир-сессия
@@ -10606,6 +10659,29 @@ if [ "$CMD" = "note-commit" ]; then
   exit 0
 fi
 
+# Receipts derive content only from this session's existing commit claims.
+if [ "$CMD" = "note-publication" ]; then
+  PUBLISHED_SHA="${POSITIONAL[0]:-}"
+  [[ "$PUBLISHED_SHA" =~ ^[0-9a-f]{40,64}$ ]] || fail "note-publication: exact published SHA required" 1
+  [ -n "$REPO_ARG" ] || fail "note-publication: --repo required" 1
+  NOTE_AGENT="${AGENT:-${IWE_AGENT:-claude-code}}"
+  if [ -n "$SESSION_ID_ARG" ]; then
+    SEM_FILE=$(resolve_semaphore_by_session_id "$NOTE_AGENT" "$SESSION_ID_ARG" "${WP:-}" "${SLUG:-}") || exit 1
+  else
+    SEM_FILE=$(select_semaphore "$NOTE_AGENT" "${WP:-}" "${SLUG:-}") || exit 1
+  fi
+  acquire_session_transition_lock "$SEM_FILE"
+  LOCKED_NOTE_SESSION_ID=$(_locked_open_identity "$SEM_FILE" "$NOTE_AGENT" "${SESSION_ID_ARG:-}") || exit 1
+  [ "$(_close_delivery_state "$SEM_FILE" "$LOCKED_NOTE_SESSION_ID" || true)" = "none" ] \
+    || fail "note-publication: prepared close records its receipt under its own lock" 1
+  [ "$REPO_ARG" != IWE ] || REPO_ARG=iwe-root
+  RECEIPT_REPO=$(_resolve_repo_checkout "$REPO_ARG" "$PUBLISHED_SHA") || exit 1
+  timeout 10 git -C "$RECEIPT_REPO" fetch --quiet origin '+refs/heads/main:refs/remotes/origin/main' \
+    || fail "note-publication: fresh origin/main required" 1
+  _record_publication_receipts "$SEM_FILE" "$RECEIPT_REPO" "$REPO_ARG" "$PUBLISHED_SHA" || exit 1
+  exit 0
+fi
+
 # --- HOT-FILE LOCK (WP-7 SessionGitRaceIsolation, 09.08) ---
 #
 # ArchGate verdict (09.08.2026): a git worktree per session was proposed to stop
@@ -10633,7 +10709,7 @@ HOT_LOCK_DIR="$IWE_ROOT/.iwe-runtime/hot-file-locks"
 HOT_LOCK_TTL_SEC="${IWE_HOT_LOCK_TTL_SEC:-600}"  # 10 min -- long enough for a real edit+commit, short enough that a crashed holder doesn't block the file for a whole session
 
 _hot_lock_slug() {  # _hot_lock_slug <repo-relative-path> -- filesystem-safe lock dirname
-  echo "$1" | tr '/' '_'
+  python3 -c 'import os,sys; print(os.path.realpath(sys.argv[1]).replace("/", "_"))' "$1"
 }
 
 # --- FENCING TOKEN (WP-530 Ф24 п.5, ArchGate 06.09) ---
@@ -11535,6 +11611,7 @@ _frozen_quarantine_commit_barrier() {  # <newline-separated ACTIVE semaphores>
   ACTIVE_SEMAPHORES="$1" python3 - "$SESSION_DIR" <<'PY'
 import glob
 import hashlib
+import json
 import os
 import re
 import stat
@@ -11544,6 +11621,44 @@ import uuid
 
 directory = sys.argv[1]
 active_paths = [item for item in os.environ.get("ACTIVE_SEMAPHORES", "").splitlines() if item]
+git_scope = subprocess.run(['git', 'rev-parse', '--path-format=absolute', '--git-common-dir'],
+                           capture_output=True, text=True, timeout=10)
+if git_scope.returncode:
+    raise SystemExit(2)
+current_repo = os.path.realpath(git_scope.stdout.strip())
+git_checkout = subprocess.run(['git', 'rev-parse', '--show-toplevel'],
+                              capture_output=True, text=True, timeout=10)
+if git_checkout.returncode:
+    raise SystemExit(2)
+current_checkout = os.path.realpath(git_checkout.stdout.strip())
+current_agent = os.environ.get('IWE_AGENT', '')
+current_harness = (os.environ.get('CODEX_THREAD_ID', '') if current_agent == 'codex'
+                   else os.environ.get('CLAUDE_CODE_SESSION_ID', ''))
+
+def claimed_scope(text):
+    lines = text.splitlines()
+    scope = []
+    for index, line in enumerate(lines):
+        if not line.startswith('file: '):
+            continue
+        value = line[6:]
+        if index + 1 < len(lines) and lines[index + 1].startswith('file_v2: '):
+            entry = json.loads(lines[index + 1][9:])
+            if (not isinstance(entry, dict) or set(entry) != {'repo', 'path'}
+                    or not isinstance(entry['repo'], str) or not os.path.isabs(entry['repo'])
+                    or entry['path'] != value):
+                raise ValueError('bad repository-qualified scope')
+            if os.path.realpath(entry['repo']) != current_repo:
+                continue
+        scope.append(value)
+    for value in scope:
+        if not value or value.startswith('/') or '..' in value.split('/') or '\n' in value:
+            raise ValueError('unsafe scope')
+    return scope
+
+def intersects(staged, scope):
+    return any(path == entry or (entry.endswith('/') and path.startswith(entry))
+               for path in staged for entry in scope)
 
 def snapshot(path):
     fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
@@ -11604,6 +11719,16 @@ def unique(text, key, optional=False):
         raise ValueError("missing/duplicate " + key)
     return values[0]
 
+staged_result = subprocess.run(
+    ["git", "diff", "--cached", "--name-only", "-z", "--no-renames"],
+    stdout=subprocess.PIPE,
+    stderr=subprocess.DEVNULL,
+    check=False,
+)
+if staged_result.returncode != 0:
+    raise SystemExit(2)
+staged = [item.decode("utf-8") for item in staged_result.stdout.split(b"\0") if item]
+
 # WP-484 2026-09-14: "unknown"/"day-close" are the two literal wp: values
 # peer-conversation/SKILL.md prescribes for a session with no work product.
 # They're a separate legitimate category, checked before -- not instead of --
@@ -11617,6 +11742,8 @@ active_wps = set()
 for path in active_paths:
     try:
         text = snapshot(path)
+        if staged and not intersects(staged, claimed_scope(text)):
+            continue
         housekeeping_lines = [line for line in text.splitlines() if line.startswith("housekeeping:")]
         if housekeeping_lines:
             agent = unique(text, "agent")
@@ -11661,7 +11788,7 @@ for path in active_paths:
             if any(
                 re.search(r"\bWP-[1-9][0-9]*\b", line, re.I)
                 for line in text.splitlines()
-                if not line.startswith("file: ") and not line.startswith("task: ")
+                if not line.startswith(("file: ", "file_v2: ", "task: "))
             ):
                 raise ValueError("non-product wp sentinel references a real WP")
             continue
@@ -11672,21 +11799,28 @@ for path in active_paths:
         print("cannot classify active semaphore while enforcing quarantine: " + path, file=sys.stderr)
         raise SystemExit(2)
 
-staged_result = subprocess.run(
-    ["git", "diff", "--cached", "--name-only", "-z", "--no-renames"],
-    stdout=subprocess.PIPE,
-    stderr=subprocess.DEVNULL,
-    check=False,
-)
-if staged_result.returncode != 0:
-    raise SystemExit(2)
-staged = [item.decode("utf-8") for item in staged_result.stdout.split(b"\0") if item]
 
 paths = set(glob.glob(os.path.join(directory, "*.open.orphaned-scheduled-drained")))
 paths.update(glob.glob(os.path.join(directory, "*.open.orphaned-*.recovery-pending")))
 for path in sorted(paths):
     try:
         text = snapshot(path)
+        # Resource holds restrict other sessions only at intersecting paths.
+        # The quarantined owner itself must remain frozen even with no claims;
+        # it cannot borrow a different ACTIVE semaphore's commit authority.
+        owner_lines = text.splitlines()
+        isolated_paths = [line.partition(': ')[2] for line in owner_lines
+                          if line.startswith('isolated_worktree: ')]
+        own_checkout = any(os.path.isabs(value) and os.path.realpath(value) == current_checkout
+                           for value in isolated_paths)
+        own_harness = bool(current_harness
+                           and 'harness_session_id: ' + current_harness in owner_lines
+                           and 'agent: ' + current_agent in owner_lines)
+        if own_checkout or own_harness:
+            print("quarantined owner cannot commit: " + path, file=sys.stderr)
+            raise SystemExit(1)
+        if not intersects(staged, claimed_scope(text)):
+            continue
         agent = unique(text, "agent")
         session = unique(text, "session_id")
         wp = unique(text, "wp").upper()
@@ -11710,25 +11844,15 @@ for path in sorted(paths):
                 raise ValueError("bad recovery id")
             if not re.fullmatch(r"[0-9a-f]{64}", unique(text, "recovery_terminal_sha256")):
                 raise ValueError("bad terminal digest")
-        scope = []
-        for line in text.splitlines():
-            if not line.startswith("file: "):
-                continue
-            value = line[len("file: "):]
-            if not value or value.startswith("/") or value == ".." or value.startswith("../"):
-                raise ValueError("unsafe scope")
-            scope.append(value)
+        scope = claimed_scope(text)
     except (OSError, UnicodeError, ValueError):
         print("malformed frozen/pending quarantine blocks commit: " + path, file=sys.stderr)
         raise SystemExit(2)
 
-    same_wp = wp in active_wps
-    overlaps = any(
-        staged_path == entry or (entry.endswith("/") and staged_path.startswith(entry))
-        for staged_path in staged
-        for entry in scope
-    )
-    if same_wp or overlaps or (staged and not scope):
+    # Quarantine freezes its owner and claimed resources, never a whole WP or
+    # every repository. Empty scope grants no file locks and does not grant
+    # recovery/publication/close authority to the frozen owner.
+    if intersects(staged, scope):
         print("quarantine hold blocks commit: %s (WP=%s)" % (path, wp), file=sys.stderr)
         raise SystemExit(1)
 PY
