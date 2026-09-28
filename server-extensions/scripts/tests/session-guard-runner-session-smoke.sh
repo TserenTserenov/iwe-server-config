@@ -77,4 +77,26 @@ RC=0; model_check || RC=$?
 [ "$RC" != "0" ] || fail "after close the same commit must be refused"
 echo "OK: after close the commit is refused again"
 
+# 7. Two live sessions of the same runner (a run that overlapped midnight next to a leftover whose
+# pid is alive): the agent-only selector is ambiguous and must refuse; the run's own reason, stored
+# as the slug, selects exactly its session -- the scope lands there and nowhere else.
+SEM2="$TEST_ROOT/.iwe-runtime/sessions/${RUNNER}-housekeeping-week-review-2.open"
+open_runner >/dev/null || fail "first of two sessions must open"
+runner open --housekeeping week-review-2 --agent "$RUNNER" --canonical-owner week-review --owner-pid $$ >/dev/null \
+    || fail "a second session under another reason must open (unique name per run)"
+if OUT=$(runner note-file "current/" --agent "$RUNNER"); then
+    fail "note-file by agent alone must refuse with two live sessions, got: $OUT"
+fi
+printf '%s' "$OUT" | grep -q 'несколько открытых семафоров' || fail "the refusal must say several sessions are open, got: $OUT"
+runner note-file "current/" --agent "$RUNNER" --slug week-review-2 >/dev/null || fail "note-file selected by slug must succeed"
+grep -qx 'file: current/' "$SEM2" || fail "the scope must be recorded in the session selected by slug"
+grep -qx 'file: current/' "$SEM" && fail "the other live session must stay untouched"
+git -C "$GOV" add -A
+model_check || fail "the commit inside the slug-selected session's scope must pass: $(tail -3 "$TEST_ROOT/check.out")"
+runner close --housekeeping week-review-2 --agent "$RUNNER" >/dev/null || fail "close by reason must pick the right one of two"
+[ ! -e "$SEM2" ] || fail "close must remove the slug-selected session"
+[ -e "$SEM" ] || fail "close must leave the other live session alone"
+runner close --housekeeping week-review --agent "$RUNNER" >/dev/null
+echo "OK: with two live sessions the slug selects the run's own one; scope, commit and close land there only"
+
 echo "PASS: a runner-owned housekeeping session authorises another agent's commit inside its scope only"
