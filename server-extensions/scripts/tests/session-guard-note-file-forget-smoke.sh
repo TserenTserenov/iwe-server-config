@@ -26,8 +26,8 @@ check() {  # check <name> <expected> <actual>
 
 GOV="$TEST_ROOT/DS-strategy"
 SES="$TEST_ROOT/MC-sessions"
-mkdir -p "$GOV/inbox/WP-001" "$SES"
-printf '%s\n' 'hypothesis_relation: "tests"' > "$GOV/inbox/WP-001/WP-001.md"
+mkdir -p "$GOV/inbox/WP-999" "$SES"
+printf '%s\n' 'hypothesis_relation: "tests"' > "$GOV/inbox/WP-999/WP-999.md"
 for repo in "$GOV" "$SES"; do
   git -C "$repo" init -q
   git -C "$repo" config user.email test@test.local
@@ -42,7 +42,7 @@ guard() {  # guard <subcommand> [args...]; runs from inside the sessions checkou
     IWE_SESSIONS_ROOT="$SES" bash "$GUARD" "$@")
 }
 
-guard open --wp WP-001 --agent fixture --slug forget --task forget >/dev/null 2>&1
+guard open --wp WP-999 --agent fixture --slug forget --task forget >/dev/null 2>&1
 SEM=$(find "$TEST_ROOT/.iwe-runtime/sessions" -name 'fixture-*.open' | head -1)
 [ -n "$SEM" ] || { echo "FAIL: fixture session did not open"; exit 1; }
 # `open` self-claims its own ORZ scaffold under today's date (now_date() in

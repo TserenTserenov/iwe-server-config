@@ -48,7 +48,9 @@ cmd_add() {
     esac
   done
 
-  [[ "$wp" =~ ^WP-[0-9]+$ ]] || [[ "$wp" =~ ^TASK-[a-z0-9-]+$ ]] || fail "wp must look like WP-NNN or TASK-<slug>, got: $wp"
+  # Same shape session-guard `open` accepts (no leading zero): a WP-007 row would queue fine and
+  # then die at `open`, hours later, when the scheduled run starts.
+  [[ "$wp" =~ ^WP-[1-9][0-9]*$ ]] || [[ "$wp" =~ ^TASK-[a-z0-9-]+$ ]] || fail "wp must look like WP-NNN (no leading zero) or TASK-<slug>, got: $wp"
   case "$agent" in kimi|claude|codex) ;; *) fail "agent must be kimi, claude or codex, got: $agent" ;; esac
   [[ "$timeout_min" =~ ^[0-9]+$ ]] || fail "--timeout must be minutes (integer)"
   if [[ "$wp" =~ ^TASK- ]]; then

@@ -20,7 +20,12 @@ END=$(awk -v start="$START" 'NR>=start && /^}/{print NR; exit}' "$GUARD")
 IDENTITY_START=$(grep -n '^_runtime_harness_session_id()' "$GUARD" | head -1 | cut -d: -f1)
 IDENTITY_END=$(awk -v start="$IDENTITY_START" 'NR>=start && /^}/{print NR; exit}' "$GUARD")
 [ -n "$IDENTITY_START" ] && [ -n "$IDENTITY_END" ] || { echo "FAIL: identity resolver missing" >&2; exit 1; }
-FUNC_SRC="$(sed -n "${IDENTITY_START},${IDENTITY_END}p" "$GUARD")
+# WP-561 Ф25: the classifier takes its sentinel set from SG_WP_SENTINELS, defined
+# once at the top of the script; extract that line too instead of restating it.
+SENTINEL_DEF=$(grep -m1 '^readonly SG_WP_SENTINELS=' "$GUARD")
+[ -n "$SENTINEL_DEF" ] || { echo "FAIL: SG_WP_SENTINELS definition missing in $GUARD" >&2; exit 1; }
+FUNC_SRC="$SENTINEL_DEF
+$(sed -n "${IDENTITY_START},${IDENTITY_END}p" "$GUARD")
 $(sed -n "${START},${END}p" "$GUARD")"
 
 TEST_ROOT=$(mktemp -d /private/tmp/session-guard-frozen-quarantine-sentinel.XXXXXX 2>/dev/null || mktemp -d)

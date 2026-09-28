@@ -9,8 +9,8 @@ GUARD="$ROOT_DIR/scripts/session-guard.sh"
 TEST_ROOT=$(mktemp -d /private/tmp/session-guard-unknown-flag.XXXXXX)
 trap 'rm -rf "$TEST_ROOT"' EXIT
 
-mkdir -p "$TEST_ROOT/DS-strategy/inbox/WP-001"
-printf '%s\n' 'hypothesis_relation: "tests"' > "$TEST_ROOT/DS-strategy/inbox/WP-001/WP-001.md"
+mkdir -p "$TEST_ROOT/DS-strategy/inbox/WP-999"
+printf '%s\n' 'hypothesis_relation: "tests"' > "$TEST_ROOT/DS-strategy/inbox/WP-999/WP-999.md"
 
 open_with() {
     # This fixture's DS-strategy is a plain directory, not a git repo (this
@@ -19,7 +19,7 @@ open_with() {
     # candidate always equals the frozen path string verbatim -- disarm freeze
     # explicitly so this suite keeps testing only the unknown-flag contract.
     IWE_ROOT="$TEST_ROOT" IWE_GOVERNANCE_REPO="DS-strategy" IWE_FROZEN_CANONICAL_PATH="" \
-        bash "$GUARD" open --wp WP-001 --agent fixture "$@"
+        bash "$GUARD" open --wp WP-999 --agent fixture "$@"
 }
 
 no_semaphore_left() {
