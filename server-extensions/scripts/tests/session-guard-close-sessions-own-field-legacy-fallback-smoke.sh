@@ -139,6 +139,15 @@ grep -q '^orz_sessions_dir: ' "$SEM_H" \
 ORZ_BASENAME_H=$(grep '^orz_file: ' "$SEM_H" | cut -d' ' -f2-)
 
 diverge_sessions_origin h
+# An EARLIER local commit that the semaphore does not claim. Since WP-530 Ф67 an exact republish (same
+# content, another sha) is accepted by the patch-equivalence proof, which needs EVERY local commit to be
+# equivalent to something on origin, before the scoped own-field proof is even consulted. This unrelated
+# commit breaks that equivalence, so only the scoped proof -- the code this scenario is about -- can
+# accept or refuse the claimed commit. (It must be a separate commit: the scoped proof requires every
+# path of the CLAIMED commit to be covered by a file claim.)
+echo "unclaimed local-only change (H)" > "$SESSIONS/local-only-h.txt"
+git -C "$SESSIONS" add local-only-h.txt
+git -C "$SESSIONS" commit -qm "unrelated local-only commit, not claimed by the semaphore (H)"
 write_orz "$SESSIONS/$ORZ_BASENAME_H"
 git -C "$SESSIONS" add "$ORZ_BASENAME_H"
 git -C "$SESSIONS" commit -qm "own ORZ content, not yet fast-forwarded onto foreign history (H)"
@@ -185,6 +194,11 @@ SEM_I=$(grep -l '^slug: own-field-i$' "$TEST_ROOT"/.iwe-runtime/sessions/fixture
 ORZ_BASENAME_I=$(grep '^orz_file: ' "$SEM_I" | cut -d' ' -f2-)
 
 diverge_sessions_origin i
+# Same earlier unclaimed commit as in H, for the same reason: without it the patch-equivalence proof
+# accepts the exact republish and the duplicated field is never looked at.
+echo "unclaimed local-only change (I)" > "$SESSIONS/local-only-i.txt"
+git -C "$SESSIONS" add local-only-i.txt
+git -C "$SESSIONS" commit -qm "unrelated local-only commit, not claimed by the semaphore (I)"
 write_orz "$SESSIONS/$ORZ_BASENAME_I"
 git -C "$SESSIONS" add "$ORZ_BASENAME_I"
 git -C "$SESSIONS" commit -qm "own ORZ content, not yet fast-forwarded onto foreign history (I)"
