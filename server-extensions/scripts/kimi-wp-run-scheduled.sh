@@ -70,6 +70,35 @@ resolve_scheduler_python() {
 # the exact v4 handles; Kimi cannot pass its launch gate until both have adopted
 # its isolated PGID.  Either survivor of one SIGKILL drains the whole group;
 # the vendor inherits the flock as the double-fault backstop.
+# Where the peer lock root (and with it the immutable OAuth v4 fence) lives.
+# A fixed /tmp path lost the fence whenever macOS wiped /tmp (reboot, 3-day
+# sweep), and every Kimi call then failed with "cutover required" (bug
+# 2026-09-17, recurrences 23.09, 24.09, 29.09). Resolution order:
+#   1. IWE_PEER_LOCK_DIR, explicit;
+#   2. the durable dir (per USER, ~/.iwe: the lock guards the user's shared Kimi
+#      OAuth data, so it must not depend on which workspace or runtime started
+#      the call), when it already carries a fence;
+#   3. the legacy /tmp dir, when only it carries a fence (transition: hosts that
+#      already ran the cutover keep working until the first wipe);
+#   4. the durable dir (new installs; the one cutover after a wipe lands here
+#      and never has to be repeated).
+# Duplicated verbatim in kimi-wp-run-scheduled.sh; kimi-lock-root-resolution-smoke.sh
+# fails if the two ever disagree.
+kimi_lock_root() {
+  local durable legacy
+  if [ -n "${IWE_PEER_LOCK_DIR:-}" ]; then
+    printf '%s\n' "$IWE_PEER_LOCK_DIR"
+    return 0
+  fi
+  durable="${IWE_STATE_DIR:-$HOME/.iwe}/kimi-peer-locks"
+  legacy="${IWE_PEER_LEGACY_LOCK_DIR:-/tmp/kimi-peer-locks}"
+  if [ ! -e "$durable/kimi-oauth-refresh.lockdir" ] && [ -e "$legacy/kimi-oauth-refresh.lockdir" ]; then
+    printf '%s\n' "$legacy"
+  else
+    printf '%s\n' "$durable"
+  fi
+}
+
 run_oauth_lineage_python() {
   local operation="${1:?operation required}"
   shift
@@ -78,7 +107,8 @@ run_oauth_lineage_python() {
   local log_file="${3:?log file required}"
   shift 3
   local oauth_wait_seconds="${IWE_PEER_OAUTH_LOCK_TIMEOUT_SECONDS:-90}"
-  local lock_root="${IWE_PEER_LOCK_DIR:-/tmp/kimi-peer-locks}"
+  local lock_root
+  lock_root=$(kimi_lock_root)
   local python_bin
 
   case "$timeout_seconds" in

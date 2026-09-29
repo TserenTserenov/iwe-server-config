@@ -148,6 +148,15 @@ fi
 B1_MATCH=$(printf '%s\n' "$RESPONSE" | grep -iE '(нужно сделать (это )?вручную|сделай(те)? (это )?вручную|да(й|йте)( мне| тебе)? доступ к |да(й|йте)( мне| тебе)? права на |авторизуйся в|пройди(те)? авторизаци|тебе (надо|нужно) (авторизова|войти)|ты можешь зайти в .* и (сделай|сделать|нажми|нажать)|это нужно сделать через (UI|интерфейс|админ))' | head -1 || true)
 [ -n "$B1_MATCH" ] && log_violation "B1" "asks-pilot-before-checking-tools" "$B1_MATCH"
 
+# --- A12_UNSOLICITED_CLOSE_CANDIDATE (WP-561, 29.09.2026): непрошеное предложение закрыть сессию ---
+# Кандидат, не факт: warn-only (в BLOCKABLE не входит). Условия и матрица примеров —
+# a12-unsolicited-close.py и tests/test-a12-unsolicited-close.sh. Сбой детектора
+# не ломает ход: пустой вывод = нет сигнала.
+A12_CLOSE_MATCH=$(python3 "$(dirname "${BASH_SOURCE[0]}")/a12-unsolicited-close.py" "$TRANSCRIPT_PATH" 2>/dev/null || true)
+# Пишем строку лога напрямую, не через log_violation: кандидат не нарушение, он не должен
+# наращивать счётчик сессии и «3+ нарушений». Хвост строки, а не голова: триггер обычно в конце.
+[ -n "$A12_CLOSE_MATCH" ] && echo "$TIMESTAMP | $AGENT | A12_UNSOLICITED_CLOSE_CANDIDATE | close-proposed-without-pilot-intent | $(redact "${A12_CLOSE_MATCH: -100}")" >> "$LOG_FILE"
+
 # --- A7.1 (стиль): технический журнал в чат под видом <details> ---
 # A7.1 запрещает журнал (SHA, коммиты, итоги peer, пути отчёта) в чате — он идёт
 # в report.md/sessions. Распознаём по ДВУМ независимым признакам внутри спойлера:

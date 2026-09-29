@@ -26,7 +26,8 @@
 #                                                      # forever as close_publish_proof=
 #                                                      # manual-abandon-attestation/v1, never as the
 #                                                      # normal isolate-push proof.
-#   owner-status --owner-session-id <id> # read-only admission-locked snapshot
+#   owner-status --owner-session-id <id> [--owner-agent <agent>]
+#                                      # read-only admission-locked snapshot
 #   audit [--since YYYY-MM-DD] [--cleanup-orphans [--quarantine-dead-interactive]]
 #                                                      # --quarantine-dead-interactive (WP-530 Ф53):
 #                                                      # opt-in terminal path for ordinary semaphores
@@ -282,8 +283,16 @@ validate_open_wp() {  # <wp> -- exit 2 unless it is WP-<n> or a sentinel, exact 
 
 # A tiny read-only API: reject every extra argument before the shared parser.
 if [ "$CMD" = "owner-status" ]; then
-  [[ $# -eq 2 && "$1" = "--owner-session-id" && "$2" =~ ^[a-zA-Z0-9][a-zA-Z0-9._-]{0,255}$ ]] \
-    || fail "owner-status: ожидается ровно --owner-session-id <safe-id>" 1
+  if [[ $# -eq 2 ]]; then
+    [[ "$1" = "--owner-session-id" && "$2" =~ ^[a-zA-Z0-9][a-zA-Z0-9._-]{0,255}$ ]] \
+      || fail "owner-status: ожидается --owner-session-id <safe-id> [--owner-agent <safe-agent>]" 1
+  elif [[ $# -eq 4 ]]; then
+    [[ "$1" = "--owner-session-id" && "$2" =~ ^[a-zA-Z0-9][a-zA-Z0-9._-]{0,255}$ \
+      && "$3" = "--owner-agent" && "$4" =~ ^[a-zA-Z0-9][a-zA-Z0-9._-]{0,255}$ ]] \
+      || fail "owner-status: ожидается --owner-session-id <safe-id> [--owner-agent <safe-agent>]" 1
+  else
+    fail "owner-status: ожидается --owner-session-id <safe-id> [--owner-agent <safe-agent>]" 1
+  fi
 fi
 
 # yaml_task_line <value> -- render a "task: <value>" YAML line, quoting the
@@ -1849,13 +1858,28 @@ PY
 }
 
 _new_open_has_no_prior_state() {  # <future .open path>
-  python3 - "$1" <<'PY' 2>/dev/null
+  python3 - "$1" "${DEAD_INTERACTIVE_SUFFIX:-.orphaned-dead-interactive}" <<'PY' 2>/dev/null
 import glob
 import os
+import re
+import stat
 import sys
 
-path = sys.argv[1]
-if os.path.lexists(path) or glob.glob(path + ".*"):
+path, terminal_suffix = sys.argv[1:]
+# `<sem>.orphaned-dead-interactive` or, for a repeated death of the same fixed
+# name, `<sem>.orphaned-dead-interactive-<epoch>` (the `.open.orphaned-` prefix
+# is what owner-status and recover-orphaned key on).
+terminal_name = re.compile(re.escape(terminal_suffix) + r"(-[0-9]+)?\Z")
+
+
+def is_terminal_quarantine(sibling):
+    # A dead-interactive quarantine (WP-530 F53) is terminal evidence: the
+    # fence is already lifted and the file is kept only for review. It must not
+    # lock a fixed-name semaphore (housekeeping day-close/day-open) forever.
+    return bool(terminal_name.search(sibling)) and stat.S_ISREG(os.lstat(sibling).st_mode)
+
+
+if os.path.lexists(path) or any(not is_terminal_quarantine(s) for s in glob.glob(path + ".*")):
     raise SystemExit(1)
 parent = os.path.dirname(path)
 current = os.lstat(parent)
@@ -2629,6 +2653,13 @@ _quarantine_dead_interactive() {  # <semaphore> <observed dead pid>
   snapshot=$(_owned_semaphore_snapshot_sha "$semaphore" 0) \
     || { _dead_interactive_refusal "$semaphore" "no exclusive owned snapshot (close in progress or foreign file)"; return 1; }
   destination="${semaphore}${DEAD_INTERACTIVE_SUFFIX}"
+  # A fixed-name semaphore can die more than once. The earlier quarantine file
+  # is evidence and the CAS rename never overwrites it, so a second death would
+  # stay fenced forever. The epoch goes AFTER the suffix: every parser of these
+  # names (owner-status, recover-orphaned, sweep) keys on `.open.orphaned-`.
+  if [ -e "$destination" ] || [ -L "$destination" ]; then
+    destination="${destination}-${now}"
+  fi
   _rename_owned_semaphore_cas "$semaphore" "$destination" "$snapshot" \
     || { _dead_interactive_refusal "$semaphore" "CAS rename refused, file changed underneath"; return 1; }
   epoch=$(semaphore_epoch "$destination" || echo 0)
@@ -3673,6 +3704,7 @@ SCHEDULED_OWNER=""
 SCHEDULED_RUN_ID=""
 SESSION_ID_ARG=""
 OWNER_SESSION_ID_ARG=""
+OWNER_AGENT_ARG=""
 REPO_ARG=""
 CLEANUP_ORPHANS=0
 QUARANTINE_DEAD_INTERACTIVE=0
@@ -3748,6 +3780,9 @@ while [[ $# -gt 0 ]]; do
     --owner-session-id)
       [[ $# -ge 2 && -n "$2" ]] || fail "--owner-session-id требует значение" 1
       OWNER_SESSION_ID_ARG="$2"; shift 2 ;;
+    --owner-agent)
+      [[ $# -ge 2 && -n "$2" ]] || fail "--owner-agent требует значение" 1
+      OWNER_AGENT_ARG="$2"; shift 2 ;;
     --repo)
       if [[ $# -lt 2 || -z "$2" ]]; then
         fail "--repo требует непустое значение (имя репозитория внутри \$IWE_ROOT)" 1
@@ -3831,6 +3866,9 @@ fi
 
 if [ -n "$OWNER_SESSION_ID_ARG" ] && [ "$CMD" != "owner-status" ]; then
   fail "--owner-session-id применим только к owner-status" 1
+fi
+if [ -n "$OWNER_AGENT_ARG" ] && [ "$CMD" != "owner-status" ]; then
+  fail "--owner-agent применим только к owner-status" 1
 fi
 
 # WP-530 Ф53: the quarantine flag is meaningless anywhere else; refusing keeps
@@ -3985,12 +4023,16 @@ fi
 if [ "$CMD" = "owner-status" ]; then
   [[ "$OWNER_SESSION_ID_ARG" =~ ^[a-zA-Z0-9][a-zA-Z0-9._-]{0,255}$ ]] \
     || fail "owner-status требует безопасный --owner-session-id" 1
+  if [ -n "$OWNER_AGENT_ARG" ]; then
+    [[ "$OWNER_AGENT_ARG" =~ ^[a-zA-Z0-9][a-zA-Z0-9._-]{0,255}$ ]] \
+      || fail "owner-status требует безопасный --owner-agent" 1
+  fi
   # Every ordinary and housekeeping open holds this same admission lock.
   # This is a linearizable snapshot, not a promise that a later open cannot
   # create another session after the probe releases the lock. No semaphore,
   # receipt, lease or run card is modified by the probe.
   acquire_scheduled_admission_lock
-  python3 - "$SESSION_DIR" "$OWNER_SESSION_ID_ARG" <<'PY_OWNER_STATUS'
+  python3 - "$SESSION_DIR" "$OWNER_SESSION_ID_ARG" "$OWNER_AGENT_ARG" <<'PY_OWNER_STATUS'
 import json
 import os
 from pathlib import Path
@@ -4002,7 +4044,18 @@ import yaml
 
 sessions = Path(sys.argv[1])
 owner = sys.argv[2]
+owner_agent = sys.argv[3]
 token = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,255}\Z")
+
+
+def started_millis(value):
+    """Return a comparable start time only for guard IDs with encoded time."""
+    compact = value.replace("-", "")
+    if (re.fullmatch(r"[0-9a-fA-F]{32}", compact)
+            and compact[12].lower() == "7"):
+        return int(compact[:12], 16)
+    epoch = re.fullmatch(r"([1-9][0-9]{9})(?:-[A-Za-z0-9._-]+)?", value)
+    return int(epoch.group(1)) * 1000 if epoch else None
 
 
 def emit(state, reason):
@@ -4076,7 +4129,10 @@ try:
             stem, marker, suffix = path.name.rpartition(".open")
             if not marker:
                 continue
-            if suffix == ".lease" or suffix == ".closed" or suffix.startswith(".closed."):
+            if (suffix == ".lease" or suffix.startswith(".lease.orphaned-")
+                    or suffix == ".lock" or suffix == ".closed"
+                    or suffix.startswith((".closed.", ".closed-"))
+                    or re.fullmatch(r"\.backup-before-manual-close-[0-9]{10}", suffix)):
                 continue  # Projections and terminal receipts cannot be active sessions.
             if suffix and not suffix.startswith(".orphaned-"):
                 raise ValueError("unknown semaphore sibling state")
@@ -4092,6 +4148,22 @@ try:
                 # Guard IDs and harness IDs are different namespaces. A legacy or
                 # housekeeping record without its harness cannot prove that this
                 # conversation is foreign just because its guard UUID differs.
+                # The runner can, however, bind the owner to an exact agent. A
+                # semaphore from another agent is then provably foreign even when
+                # its older producer never recorded a harness identity.
+                if owner_agent and fields["agent"] != owner_agent:
+                    continue
+                # Native Codex UUIDv7 and legacy guard IDs both encode their start
+                # time. When both sides are comparable, an older semaphore cannot
+                # belong to a conversation that did not exist yet. Unknown ID
+                # shapes retain the historical fail-closed verdict.
+                owner_started = started_millis(owner)
+                candidate_started = started_millis(fields["session_id"])
+                if (owner_agent and fields["agent"] == owner_agent
+                        and owner_started is not None
+                        and candidate_started is not None
+                        and candidate_started < owner_started):
+                    continue
                 raise ValueError("semaphore has no harness identity; owner may match")
         except (OSError, UnicodeError, ValueError, yaml.YAMLError) as error:
             # A proven matching session is already enough to answer `present`.

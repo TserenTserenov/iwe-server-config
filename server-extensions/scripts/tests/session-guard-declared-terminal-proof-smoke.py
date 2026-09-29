@@ -64,7 +64,7 @@ class DeclaredTerminalProofTests(unittest.TestCase):
     def invoke(self, name, *args):
         return self.shell(function_source(name) + "\n" + name + " " + shlex.join(args))
 
-    def owner_status(self, owner, files):
+    def owner_status(self, owner, files, owner_agent=None):
         sessions = self.root / ".iwe-runtime/sessions"
         sessions.mkdir(parents=True, mode=0o700)
         for name, content in files.items():
@@ -72,8 +72,11 @@ class DeclaredTerminalProofTests(unittest.TestCase):
         env = dict(self.env)
         env.update(IWE_ROOT=str(self.root), IWE_GOVERNANCE_REPO="DS-strategy",
                    IWE_SCHEDULED_ADMISSION_WAIT_SEC="2")
+        command = ["/bin/bash", str(GUARD), "owner-status", "--owner-session-id", owner]
+        if owner_agent is not None:
+            command.extend(["--owner-agent", owner_agent])
         result = subprocess.run(
-            ["/bin/bash", str(GUARD), "owner-status", "--owner-session-id", owner],
+            command,
             text=True, capture_output=True, cwd=self.root, env=env, timeout=15,
         )
         self.assertEqual(result.returncode, 0, result.stderr)
@@ -91,10 +94,48 @@ class DeclaredTerminalProofTests(unittest.TestCase):
 
     def test_owner_status_unknown_sibling_still_blocks_absence(self):
         status = self.owner_status("owner-A", {
-            "foreign.open.lease.orphaned-peer-audit": "unclassified projection\n",
+            "foreign.open.mystery": "unclassified sibling\n",
         })
         self.assertEqual(status["state"], "unknown")
         self.assertIn("unknown semaphore sibling state", status["reason"])
+
+    def test_owner_status_ignores_quarantined_lease_projection(self):
+        status = self.owner_status("owner-A", {
+            "foreign-a.open.lease.orphaned-peer-audit": "non-active projection\n",
+            "foreign-b.open.lock": "non-active projection\n",
+            "foreign-c.open.closed-manual-2026-09-21": "non-active projection\n",
+            "foreign-d.open.backup-before-manual-close-1790362374": "non-active projection\n",
+        })
+        self.assertEqual(status["state"], "absent")
+
+    def test_owner_status_foreign_agent_without_harness_does_not_block_absence(self):
+        legacy_kimi = "---\nagent: kimi\nsession_id: guard-K\n---\n"
+        status = self.owner_status(
+            "owner-A", {"kimi-guard-K.open": legacy_kimi}, owner_agent="codex",
+        )
+        self.assertEqual(status["state"], "absent")
+
+    def test_owner_status_same_agent_without_harness_stays_unknown(self):
+        legacy_codex = "---\nagent: codex\nsession_id: guard-C\n---\n"
+        status = self.owner_status(
+            "owner-A", {"codex-guard-C.open": legacy_codex}, owner_agent="codex",
+        )
+        self.assertEqual(status["state"], "unknown")
+        self.assertIn("semaphore has no harness identity", status["reason"])
+
+    def test_owner_status_older_same_agent_without_harness_is_foreign(self):
+        legacy_codex = "---\nagent: codex\nsession_id: 1789890433-9113\n---\n"
+        status = self.owner_status(
+            "01a0ebb1-7709-7593-85ea-171673ca16c4",
+            {"codex-1789890433-9113.open": legacy_codex},
+            owner_agent="codex",
+        )
+        self.assertEqual(status["state"], "absent")
+
+    def test_owner_status_without_agent_keeps_legacy_fail_closed_behavior(self):
+        legacy_kimi = "---\nagent: kimi\nsession_id: guard-K\n---\n"
+        status = self.owner_status("owner-A", {"kimi-guard-K.open": legacy_kimi})
+        self.assertEqual(status["state"], "unknown")
 
     def test_heartbeat_preserves_declared_close_path(self):
         semaphore = self.root / "fixture-session-A.open"

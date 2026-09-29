@@ -84,8 +84,16 @@ SKIP_REFLECTION_RE='(без *рефлекс|не спрашивай.{0,20}реф
 # свободном тексте уже обсуждалось и отклонено (пир-сессия 2026-08-11-05,
 # см. комментарий в _record_close_intent ниже) — не переоткрывать. Это
 # точечное расширение самого частого случая отмены, не попытка решить класс.
-if echo "$PROMPT" | grep -qE '(не закрывай|не надо закрывать|отмена закрытия|отмени закрытие|отставить закрытие)' || {
-  echo "$PROMPT" | grep -qE '^нет[,.!]?( [а-яё]+)?[,.!]?$' &&
+# WP-561 (29.09.2026, пир-сессия ...-wp561-close-proposal-bias): фразы отмены ищем в тексте с
+# замаскированными кавычками, иначе цитата «не закрывай» в чужом тексте или вопросе про саму
+# фразу снимает настоящее обязательство. Сбой маскировки = исходный текст (прежнее поведение).
+CANCEL_FILTER="$(dirname "${BASH_SOURCE[0]}")/a12-unsolicited-close.py"
+CANCEL_PROMPT="$PROMPT"
+if [ -f "$CANCEL_FILTER" ] && command -v python3 >/dev/null 2>&1; then
+  MASKED_PROMPT=$(printf '%s' "$PROMPT" | python3 "$CANCEL_FILTER" --mask-quotes 2>/dev/null) && [ -n "$MASKED_PROMPT" ] && CANCEL_PROMPT="$MASKED_PROMPT"
+fi
+if echo "$CANCEL_PROMPT" | grep -qE '(не закрывай|не надо закрывать|отмена закрытия|отмени закрытие|отставить закрытие)' || {
+  echo "$CANCEL_PROMPT" | grep -qE '^нет[,.!]?( [а-яё]+)?[,.!]?$' &&
     ! echo "$PROMPT" | grep -qE "$SKIP_REFLECTION_RE"
 }; then
   if _obligation_available; then
@@ -195,12 +203,42 @@ REFLECTION_MARKER_RE='[Рр]ефлекси[яю][[:space:]]*[:—–-]+'
 # триггера в символах, не байтах. Живые репро 02.09: триггер погребён в
 # многокилобайтном вставленном логе/цитате — реальная команда пилота в этом
 # файле везде короткая и стоит в начале фразы. НЕ полная quote-vs-command
-# классификация (отклонена пир-сессией 2026-08-11-05, не переоткрывать) —
-# узкий механический фильтр по одному сигналу (длина префикса).
+# классификация — узкий механический фильтр по одному сигналу (длина префикса);
+# «не переоткрывать» из пир-сессии 2026-08-11-05 относится к классификации
+# РЕФЛЕКСИИ (дана / явно нет / не сказано), не к цитатам. Цитаты и отрицания
+# перед триггером разбирает узкий фильтр ниже (WP-561, 29.09.2026).
 CLOSE_TRIGGER_RE='закрывай|закрываю|закрой'
 CLOSE_TRIGGER_PREFIX_THRESHOLD=600
 
+# WP-561 (29.09.2026, пир-сессия 2026-09-29-19-wp561-close-proposal-bias, решение
+# пилота «переоткрывай»): узкий фильтр «упоминание слова, а не команда» — те же
+# вырезание кавычек и отрицаний/вопросов, что в a12-unsolicited-close.py (единый
+# источник логики). Не переоткрывает отклонённое 11.08 (классификация РЕФЛЕКСИИ:
+# «дана / явно нет / не сказано»; она по-прежнему двухсостоянийная). Подавляет
+# взведение ТОЛЬКО при коде выхода 0 и выводе ровно "no"; всё остальное (нет
+# скрипта, сбой, пустой или посторонний вывод) = прежнее поведение (fail-open).
+CLOSE_INTENT_FILTER="$(dirname "${BASH_SOURCE[0]}")/a12-unsolicited-close.py"
+_close_filter_says_mention_only() {
+  local out
+  [ -f "$CLOSE_INTENT_FILTER" ] || return 1
+  out=$(printf '%s' "$PROMPT_ORIGINAL_CASE" | python3 "$CLOSE_INTENT_FILTER" --prompt-intends-close 2>/dev/null) || return 1
+  [ "$out" = "no" ]
+}
+FILTER_NO=false
+_close_filter_says_mention_only && FILTER_NO=true
+
 _prefix_char_len_before_trigger() {
+  # WP-561: first try the shared filter — offset of the first VALID trigger
+  # (a quoted or negated mention is not the trigger the threshold is about).
+  # Anything but a plain integer (no script, crash, empty) = the old measure below.
+  if [ -f "$CLOSE_INTENT_FILTER" ] && command -v python3 >/dev/null 2>&1; then
+    local valid
+    if valid=$(printf '%s' "$PROMPT_ORIGINAL_CASE" | python3 "$CLOSE_INTENT_FILTER" --valid-prefix "$1" 2>/dev/null) \
+       && [[ "$valid" =~ ^[0-9]+$ ]]; then
+      printf '%s\n' "$valid"
+      return 0
+    fi
+  fi
   # python3 — уже жёсткая зависимость этого хука (_obligation_available).
   # Unicode- и multiline-safe: sys.stdin.buffer.read().decode("utf-8") не
   # зависит от LC_ALL/LANG (снимает риск локали в CI/минимальных окружениях),
@@ -334,7 +372,7 @@ _consume_pending_reflection() {
 CLOSE_PATH_MATCH=$(grep -Flx -- "harness_session_id: $SESSION_ID" \
   "$IWE_ROOT"/.iwe-runtime/sessions/*.open 2>/dev/null | head -1)
 if [ -n "$CLOSE_PATH_MATCH" ] && grep -q '^close_path: peer-session$' "$CLOSE_PATH_MATCH" 2>/dev/null; then
-  if echo "$PROMPT" | grep -qE "($CLOSE_TRIGGER_RE)"; then
+  if [ "$FILTER_NO" != true ] && echo "$PROMPT" | grep -qE "($CLOSE_TRIGGER_RE)"; then
     PREFIX_LEN=$(_prefix_char_len_before_trigger "$CLOSE_TRIGGER_RE")
     if [ -n "$PREFIX_LEN" ] && [ "$PREFIX_LEN" -gt "$CLOSE_TRIGGER_PREFIX_THRESHOLD" ] 2>/dev/null; then
       echo "[close-gate-reminder] session=$SESSION_ID peer close-trigger ignored: prefix_len=$PREFIX_LEN > $CLOSE_TRIGGER_PREFIX_THRESHOLD" >&2
@@ -345,7 +383,7 @@ if [ -n "$CLOSE_PATH_MATCH" ] && grep -q '^close_path: peer-session$' "$CLOSE_PA
     else
       _record_close_intent
     fi
-  elif echo "$PROMPT" | grep -qE '(заливай|запуши|запушь)'; then
+  elif [ "$FILTER_NO" != true ] && echo "$PROMPT" | grep -qE '(заливай|запуши|запушь)'; then
     _record_close_intent '[Зз]алива[йю]|[Зз]апуш[иь]'
   else
     if echo "$PROMPT" | grep -qE "$SKIP_REFLECTION_RE"; then
@@ -357,7 +395,7 @@ if [ -n "$CLOSE_PATH_MATCH" ] && grep -q '^close_path: peer-session$' "$CLOSE_PA
   exit 0
 fi
 
-if echo "$PROMPT" | grep -qE "($CLOSE_TRIGGER_RE)"; then
+if [ "$FILTER_NO" != true ] && echo "$PROMPT" | grep -qE "($CLOSE_TRIGGER_RE)"; then
   PREFIX_LEN=$(_prefix_char_len_before_trigger "$CLOSE_TRIGGER_RE")
   if [ -n "$PREFIX_LEN" ] && [ "$PREFIX_LEN" -gt "$CLOSE_TRIGGER_PREFIX_THRESHOLD" ] 2>/dev/null; then
     echo "[close-gate-reminder] session=$SESSION_ID close-trigger matched but prefix_len=$PREFIX_LEN > $CLOSE_TRIGGER_PREFIX_THRESHOLD chars — treated as quoted/pasted text, not armed" >&2
@@ -379,7 +417,7 @@ EOF
   fi
 fi
 
-if echo "$PROMPT" | grep -qE '(заливай|запуши|запушь)'; then
+if [ "$FILTER_NO" != true ] && echo "$PROMPT" | grep -qE '(заливай|запуши|запушь)'; then
   _arm_and_sentinel warn "1"
   _record_close_intent '[Зз]алива[йю]|[Зз]апуш[иь]'
 
