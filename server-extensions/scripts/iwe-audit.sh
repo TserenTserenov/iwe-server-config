@@ -433,6 +433,26 @@ else
 fi
 echo ""
 
+# Личные настройки Claude: имена в disabledMcpjsonServers должны существовать в .mcp.json.
+# Устаревшая запись (сервер переименован) молча ничего не выключает (РП-7 Ф187, 29.09).
+_MCP_JSON="${IWE_ROOT:-$HOME/IWE}/.mcp.json"
+_LOCAL_SETTINGS="${IWE_ROOT:-$HOME/IWE}/.claude/settings.local.json"
+if [ -f "$_MCP_JSON" ] && [ -f "$_LOCAL_SETTINGS" ] && command -v python3 >/dev/null 2>&1; then
+    _stale=$(python3 - "$_MCP_JSON" "$_LOCAL_SETTINGS" <<'PY' 2>/dev/null
+import json, sys
+names = set(json.load(open(sys.argv[1])).get("mcpServers", {}))
+listed = json.load(open(sys.argv[2])).get("disabledMcpjsonServers", [])
+print(", ".join(sorted(n for n in listed if n not in names)))
+PY
+)
+    if [ -z "$_stale" ]; then
+        echo "✅ MCP: список disabledMcpjsonServers без устаревших имён"
+    else
+        echo "⚠️ MCP: в disabledMcpjsonServers имена, которых нет в .mcp.json (ничего не выключают): $_stale"
+    fi
+    echo ""
+fi
+
 # ---------- Раздел 5: Update prerequisites ----------
 #
 # Проверяем предусловия успешного запуска update.sh, не запуская его сам.
