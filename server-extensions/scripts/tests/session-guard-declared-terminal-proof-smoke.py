@@ -510,6 +510,40 @@ def extract_function(source, name):
     raise AssertionError("Cannot parse candidate function: " + name)
 
 
+# session-guard.sh 27.09 (2ac2e66, 4339ac8) routes publication receipts through
+# _publication_receipt_tool(), which locates lib/publication_receipt.py via
+# BASH_SOURCE[0]. Functions fed to bash on stdin have no BASH_SOURCE, so the
+# real helper cannot find the library here; this is the same one-line body
+# with the path made explicit, not a stub of any decision logic. The two
+# callers are extracted from the guard unchanged.
+RECEIPT_TOOL = GUARD.parent / "lib" / "publication_receipt.py"
+RECEIPT_TOOL_PRODUCTION_CALL = (
+    'python3 "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/publication_receipt.py" "$@"'
+)
+
+
+def receipt_helpers(source):
+    production = extract_function(source, "_publication_receipt_tool")
+    # The whole body must be the single expected command: extra statements,
+    # a commented-out call or a trailing "|| true" would change semantics
+    # while a plain substring check would still match.
+    body = production.split("{", 1)[1].rsplit("}", 1)[0]
+    if body.split() != RECEIPT_TOOL_PRODUCTION_CALL.split():
+        raise AssertionError(
+            "_publication_receipt_tool changed shape; update receipt_helpers to match:\n"
+            + production
+        )
+    if not RECEIPT_TOOL.is_file():
+        raise AssertionError("receipt library missing next to the guard under test: " + str(RECEIPT_TOOL))
+    return "\n".join((
+        # Extracted callers run under set -u; the guard defines GOV_REPO at top level.
+        'GOV_REPO="${GOV_REPO:-DS-my-strategy}"',
+        "_publication_receipt_tool() { python3 " + shlex.quote(str(RECEIPT_TOOL)) + ' "$@"; }',
+        extract_function(source, "_record_publication_receipts"),
+        extract_function(source, "_receipt_checkout_has_publish_proof"),
+    ))
+
+
 class ScopePublicationProofTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -536,7 +570,7 @@ class ScopePublicationProofTests(unittest.TestCase):
         self.sem = self.root / "codex-fixture-session.open"
         self.env = {
             key: value for key, value in os.environ.items()
-            if not key.startswith(("IWE_", "CLAUDE_", "GIT_"))
+            if not key.startswith(("IWE_", "CLAUDE_", "GIT_", "PYTHON"))
         }
         self.env.update({
             "GIT_CONFIG_NOSYSTEM": "1",
@@ -932,7 +966,7 @@ class ClaimedSupersessionTests(unittest.TestCase):
             COMMIT_TARGET, SUPERSESSION_TARGET, "_commit_automerge_has_publish_proof", "_peer_metadata_claim_has_publish_proof",
             "_claimed_source_chain_has_publish_proof", "_code_branch_claim_has_publish_proof",
             "normalize_remote_url", "_resolve_repo_checkout", CLAIMS_TARGET,
-        ))
+        )) + "\n" + receipt_helpers(source)
 
     def setUp(self):
         ScopePublicationProofTests.setUp(self)
@@ -1279,7 +1313,9 @@ class PeerMetadataPublicationTests(unittest.TestCase):
                                "_claimed_source_chain_has_publish_proof", "_code_branch_claim_has_publish_proof",
                                "normalize_remote_url",
                                "_resolve_repo_checkout", CLAIMS_TARGET]
-        source = "\n".join(extract_function(GUARD.read_text(), name) for name in function_names)
+        guard_source = GUARD.read_text()
+        source = "\n".join(extract_function(guard_source, name) for name in function_names)
+        source += "\n" + receipt_helpers(guard_source)
         target = CLAIMS_TARGET if caller else self.target
         arguments = ([str(self.sem)] if caller else
                      [str(self.repo), self.source, self.remote, str(self.sem), self.repo.name])
@@ -1369,7 +1405,11 @@ class PreparedDeliveryRetryTests(unittest.TestCase):
 
     def make_fixture(self, include_second=True, first_content="Final first result\n", shared_variant=None):
         ScopePublicationProofTests.setUp(self)
-        self.env.update(GIT_ALLOW_PROTOCOL="file", GIT_OPTIONAL_LOCKS="0")
+        # The extracted functions run without the guard's top-level
+        # GOV_REPO="${IWE_GOVERNANCE_REPO:?}" line, and _publish_prepared_source
+        # reads $GOV_REPO directly (4339ac8) -- provide it like proof() does.
+        self.env.update(GIT_ALLOW_PROTOCOL="file", GIT_OPTIONAL_LOCKS="0",
+                        GOV_REPO=self.env["IWE_GOVERNANCE_REPO"])
         self.env.pop("IWE_SESSION_GUARD_ANCHORED_FALLBACK", None)
         self.base = self.remote
         shared_base = "first: old\nkeep1\nkeep2\nkeep3\nother: old\n"
@@ -1421,7 +1461,7 @@ class PreparedDeliveryRetryTests(unittest.TestCase):
         source = GUARD.read_text()
         self.functions = "\n".join(extract_function(source, name) for name in (
             "_unique_record_field", "_prepared_source_set_has_publish_proof", "_publish_prepared_source",
-        ))
+        )) + "\n" + receipt_helpers(source)
 
     def deliver(self):
         before = self.sem.read_bytes()
@@ -1432,6 +1472,10 @@ class PreparedDeliveryRetryTests(unittest.TestCase):
             + "\n_publish_prepared_source " + shlex.join([str(self.sem), str(self.repo), str(self.replay)]),
             text=True, capture_output=True, cwd=self.root, env=self.env, timeout=30,
         )
+        # "prepared receipt v2 unavailable" is legitimate here (fixture has no
+        # commit claims); a missing library or helper is not.
+        for broken in ("can't open file", "command not found", "Traceback"):
+            self.assertNotIn(broken, result.stderr)
         self.assertEqual(self.sem.read_bytes(), before)
         self.assertEqual(self.git("-C", str(self.repo), "rev-parse", "HEAD").stdout, head)
         self.assertEqual(self.git("-C", str(self.repo), "status", "--porcelain").stdout, status)
@@ -1609,7 +1653,9 @@ class ClaimedSourceChainPublicationTests(unittest.TestCase):
             names += [COMMIT_TARGET, SUPERSESSION_TARGET, "_commit_automerge_has_publish_proof", "_peer_metadata_claim_has_publish_proof",
                       "_code_branch_claim_has_publish_proof",
                       "normalize_remote_url", "_resolve_repo_checkout", CLAIMS_TARGET]
-        functions = "\n".join(extract_function(GUARD.read_text(), name) for name in names)
+        source = GUARD.read_text()
+        functions = "\n".join(extract_function(source, name) for name in names)
+        functions += "\n" + receipt_helpers(source)
         target = CLAIMS_TARGET if caller else self.target
         args = [str(self.sem)] if caller else [
             str(self.repo), self.source, self.remote, str(self.sem), self.repo.name,
@@ -1797,6 +1843,7 @@ class HistoricalAutomergePublicationTests(unittest.TestCase):
         if AUTOMERGE_TARGET + "() {" in source:
             names.append(AUTOMERGE_TARGET)
         self.functions = "\n".join(extract_function(source, name) for name in names)
+        self.functions += "\n" + receipt_helpers(source)
 
     def invoke(self, caller=False):
         target = CLAIMS_TARGET if caller else AUTOMERGE_TARGET

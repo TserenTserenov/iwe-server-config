@@ -179,16 +179,25 @@ run_once() {
       fi
       continue
     fi
-    local fetch_rc=0
-    GIT_TERMINAL_PROMPT=0 timeout --kill-after=5s "$FETCH_TIMEOUT_SECONDS" git -C "$full_path" fetch \
-      --no-tags --no-recurse-submodules --no-auto-maintenance --no-write-fetch-head \
-      --refmap= "$remote" "$refspec" >>"$LOG_FILE" 2>&1 || fetch_rc=$?
+    # One retry after a short pause: transient GitHub/SSH drops (publickey
+    # denied, 30s hang) were clearing on the next attempt, and each single
+    # failure paged Telegram via OnFailure. Worst case 2*timeout+pause stays
+    # near one timer period; the run lock makes any overlap a quiet exit.
+    local fetch_rc=0 attempt
+    for attempt in 1 2; do
+      fetch_rc=0
+      GIT_TERMINAL_PROMPT=0 timeout --kill-after=5s "$FETCH_TIMEOUT_SECONDS" git -C "$full_path" fetch \
+        --no-tags --no-recurse-submodules --no-auto-maintenance --no-write-fetch-head \
+        --refmap= "$remote" "$refspec" >>"$LOG_FILE" 2>&1 || fetch_rc=$?
+      [ "$fetch_rc" -eq 0 ] && break
+      [ "$attempt" -eq 1 ] && { log "RETRY $path (attempt 1 exit $fetch_rc)"; sleep 3; }
+    done
     if [ "$fetch_rc" -eq 0 ]; then
       fetched=$((fetched + 1))
       log "OK $path <- $remote $refspec"
     else
       failed=$((failed + 1))
-      log "FAIL $path <- $remote $refspec (exit $fetch_rc, timeout ${FETCH_TIMEOUT_SECONDS}s)"
+      log "FAIL $path <- $remote $refspec (exit $fetch_rc after $attempt attempts, timeout ${FETCH_TIMEOUT_SECONDS}s)"
     fi
   done < "$registry_out"
   rm -f "$registry_out"

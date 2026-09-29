@@ -18,6 +18,10 @@ TEST_ROOT=$(mktemp -d /private/tmp/session-guard-expired-relevance.XXXXXX)
 trap 'rm -rf "$TEST_ROOT"' EXIT
 
 export IWE_ROOT="$TEST_ROOT/iwe"
+# Hermetic: the guard fails closed without this (session-guard.sh line ~136);
+# launchd runs the delivery test gate with only HOME/PATH, so the value must
+# not leak in from the author's shell (~/.iwe-paths). Name = fixture repo below.
+export IWE_GOVERNANCE_REPO="gov-repo"
 REPO="$IWE_ROOT/gov-repo"
 mkdir -p "$REPO/inbox/captures" "$REPO/some/unrelated"
 git init -q "$REPO"

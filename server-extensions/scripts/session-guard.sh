@@ -259,6 +259,27 @@ now_date() { date +"%Y-%m-%d"; }
 now_month() { date +"%Y-%m"; }
 fail() { echo "session-guard: $1" >&2; exit "${2:-1}"; }
 
+# WP-561 Ф25: the only values a session may record in `wp:` besides WP-<n>.
+# `open` validates against this list and the commit-barrier classifier
+# (_frozen_quarantine_commit_barrier) reads the SAME variable, handed over
+# inline at its call site so an ambient variable of the same name cannot widen
+# the set. Before this, `open` checked only that --wp was non-empty, so a value
+# like `week-review-w39` opened fine and then failed every commit whose files
+# intersect the session's scope, 17 minutes into the work. Lower-case spelling
+# is the one peer-conversation/SKILL.md prescribes; the classifier upper-cases.
+# Selectors (close/renew/note-*) deliberately do NOT use this check: an old
+# semaphore with a now-invalid wp must stay closable.
+readonly SG_WP_SENTINELS="unknown day-close"
+
+validate_open_wp() {  # <wp> -- exit 2 unless it is WP-<n> or a sentinel, exact spelling
+  local wp="$1" sentinel
+  [[ "$wp" =~ ^WP-[1-9][0-9]*$ ]] && return 0
+  for sentinel in $SG_WP_SENTINELS; do
+    [ "$wp" = "$sentinel" ] && return 0
+  done
+  fail "open: --wp '$wp' недопустим. Допустимо: WP-<число> (например WP-561) или ${SG_WP_SENTINELS// /, } (точное написание). Для недельной или нередакторской сессии возьми РП, к которому относится находка; закрытие и открытие сессий — WP-561, канон и публикация — WP-530." 2
+}
+
 # A tiny read-only API: reject every extra argument before the shared parser.
 if [ "$CMD" = "owner-status" ]; then
   [[ $# -eq 2 && "$1" = "--owner-session-id" && "$2" =~ ^[a-zA-Z0-9][a-zA-Z0-9._-]{0,255}$ ]] \
@@ -4188,6 +4209,7 @@ if [ "$CMD" = "open" ]; then
   fi
 
   [ -z "$WP" ] && fail "--wp обязателен для open" 2
+  validate_open_wp "$WP"
 
   acquire_scheduled_admission_lock
   SCHEDULED_ADMISSION=0
@@ -5390,6 +5412,13 @@ import subprocess
 import sys
 
 repo, role, semaphore, remote, own_field, other_field, legacy_own, legacy_other, iwe_root, resolver_functions = sys.argv[1:]
+# Anti-DoS proof budget, identical in every heredoc that diffs blobs (drift is
+# checked by scripts/tests/session-guard-supersession-large-blob-smoke.sh).
+# Sized 26.09 from the largest tracked Markdown in DS-my-strategy: 2366247
+# bytes (inbox/WP-484/WP-484-archive.md), 12481 lines (inbox/WP-7/WP-7-archive.md).
+# SequenceMatcher is ~quadratic in lines: 12481 lines = 2.6s per call measured.
+MAX_BLOB_BYTES = 4 * 1024 * 1024
+MAX_BLOB_LINES = 16384
 governance_name = os.environ.get("IWE_GOVERNANCE_REPO", "")
 
 def refuse(message):
@@ -5456,8 +5485,9 @@ for line in lines:
     if not line.startswith("file: "):
         continue
     path = line[6:]
-    parts = PurePosixPath(path).parts
-    if (not parts or path != str(PurePosixPath(path)) or path.startswith(("/", ":"))
+    normalized = path[:-1] if path.endswith("/") else path
+    parts = PurePosixPath(normalized).parts
+    if (not parts or normalized != str(PurePosixPath(normalized)) or path.startswith(("/", ":"))
             or ".." in parts or any(char in path for char in "\x00\r\n*?[")):
         refuse("неоднозначный file claim")
     # The open-session log is a runtime projection, never a Git deliverable.
@@ -5486,7 +5516,11 @@ for line in lines:
     changed = git("diff-tree", "--root", "--no-commit-id", "--name-only",
                   "--no-renames", "-r", "-z", commit)
     claimed_paths.update(os.fsdecode(path) for path in changed.split(b"\0") if path)
-if not claims or not claimed_paths or not claimed_paths.issubset(scope):
+def covers(claim, path):
+    return path.startswith(claim) if claim.endswith("/") else path == claim
+
+if not claims or not claimed_paths or not all(
+        any(covers(claim, path) for claim in scope) for path in claimed_paths):
     refuse("нет полного repo-qualified commit scope")
 
 def entry(revision, path):
@@ -5524,10 +5558,10 @@ def unique_position(seq, needle):
     return positions[0] if len(positions) == 1 else None
 
 def anchored_insertions(base, own, published):
-    if any(b"\0" in blob or len(blob) > 262144 for blob in (base, own, published)):
+    if any(b"\0" in blob or len(blob) > MAX_BLOB_BYTES for blob in (base, own, published)):
         return False
     base, own, published = (blob.splitlines(keepends=True) for blob in (base, own, published))
-    if max(map(len, (base, own, published))) > 4096:
+    if max(map(len, (base, own, published))) > MAX_BLOB_LINES:
         return False
     own_ops = difflib.SequenceMatcher(None, base, own, autojunk=False).get_opcodes()
     target_ops = difflib.SequenceMatcher(None, base, published, autojunk=False).get_opcodes()
@@ -5868,9 +5902,10 @@ def resolve_other_claims():
 
 
 def commit_touched_path(checkout, commits, path):
-    return any(os.fsencode(path) in git_at(
-        checkout, "diff-tree", "-m", "--root", "--no-commit-id", "--name-only",
-        "--no-renames", "-r", "-z", commit).split(b"\0") for commit in commits)
+    return any(covers(path, os.fsdecode(changed)) for commit in commits
+               for changed in git_at(
+                   checkout, "diff-tree", "-m", "--root", "--no-commit-id", "--name-only",
+                   "--no-renames", "-r", "-z", commit).split(b"\0") if changed)
 
 
 def touched_owners(path, repository_claims):
@@ -5901,8 +5936,54 @@ def claimed_other_owners(path):
             return touched
     return identities
 
+def directory_leaves(claim):
+    """Keep every claimed leaf, including deletions and ignored local output."""
+    directory = claim[:-1]
+    leaves = {path for path in claimed_paths if covers(claim, path)}
+    for revision in (head, remote):
+        rows = git("ls-tree", "-rz", "--full-tree", revision, "--", directory)
+        for row in rows.split(b"\0"):
+            if not row:
+                continue
+            metadata, raw_path = row.split(b"\t", 1)
+            mode, kind, _ = metadata.split()
+            path = os.fsdecode(raw_path)
+            if not covers(claim, path) or kind != b"blob" or mode not in (b"100644", b"100755"):
+                refuse("необычный объект в заявленном каталоге: " + path)
+            leaves.add(path)
+    for row in git("ls-files", "--stage", "-z", "--", directory).split(b"\0"):
+        if not row:
+            continue
+        metadata, raw_path = row.split(b"\t", 1)
+        mode, _, stage = metadata.split()
+        path = os.fsdecode(raw_path)
+        if not covers(claim, path) or mode not in (b"100644", b"100755") or stage != b"0":
+            refuse("необычный индекс в заявленном каталоге: " + path)
+        leaves.add(path)
+    current = Path(repo)
+    for component in PurePosixPath(directory).parts:
+        current = current / component
+        if os.path.lexists(current) and not stat.S_ISDIR(current.lstat().st_mode):
+            refuse("заявленный каталог заменён файлом или ссылкой: " + claim)
+    def walk_error(error):
+        refuse("не удалось прочитать заявленный каталог: " + str(error))
+    for parent, directories, files in os.walk(current, followlinks=False, onerror=walk_error):
+        if ".git" in directories or ".git" in files:
+            refuse("вложенный репозиторий в заявленном каталоге: " + claim)
+        for name in directories + files:
+            child = Path(parent) / name
+            mode = child.lstat().st_mode
+            if not (stat.S_ISDIR(mode) if name in directories else stat.S_ISREG(mode)):
+                refuse("необычный файл в заявленном каталоге: " + str(child))
+            if name in files:
+                leaves.add(child.relative_to(repo).as_posix())
+    return leaves
+
+
+directory_snapshots = {}
 for path in scope:
-    local = path in claimed_paths or known_path(repo, path) or bool(entry(remote, path))
+    own_claim = any(covers(path, changed) for changed in claimed_paths)
+    local = own_claim or known_path(repo, path) or bool(entry(remote, path))
     owners = {identity for identity, checkouts in other_repo_groups.items()
               if any(known_path(other, path) for other in checkouts)}
     if local:
@@ -5911,7 +5992,7 @@ for path in scope:
         owners.add(repository_identity(str((Path(iwe_root) / governance_name).resolve())))
     if not owners:
         owners = claimed_other_owners(path)
-    elif len(owners) > 1 and path not in claimed_paths:
+    elif len(owners) > 1 and not own_claim:
         # Common names can collide in unrelated root/session/governance files
         # before a third repository's claim is consulted. A unique declared
         # external diff attributes the file to that repository, not this local
@@ -5931,7 +6012,11 @@ for path in scope:
         refuse("путь найден в нескольких проверяемых checkout, принадлежность "
                "неоднозначна: " + path)
     if own_identity in owners:
-        relevant.add(path)
+        if path.endswith("/"):
+            directory_snapshots[path] = directory_leaves(path)
+            relevant.update(directory_snapshots[path])
+        else:
+            relevant.add(path)
 material = False
 published_untracked = set()
 for path in sorted(relevant):
@@ -5959,6 +6044,9 @@ for path in sorted(relevant):
             refuse("опубликованный файл изменился во время проверки: " + path)
     elif git("status", "--porcelain", "-z", "--untracked-files=all", "--", path):
         refuse("собственные файлы изменились во время проверки: " + path)
+for directory, previous in directory_snapshots.items():
+    if directory_leaves(directory) != previous:
+        refuse("состав заявленного каталога изменился во время проверки: " + directory)
 if git("rev-parse", "HEAD").strip().decode() != head:
     refuse("HEAD изменился во время проверки")
 for path in sorted(foreign_card_snapshots):
@@ -6109,7 +6197,10 @@ _manual_abandon_cleanup_has_publish_proof() {  # <worktree> <attested source hea
 _commit_claim_supersession_has_publish_proof() {  # <repo> <source> <remote OID> <semaphore> <repo name>
   # Prove preservation in an already claimed, OID-published successor.  Neither
   # a declaration of supersession nor patch-id transitivity is sufficient.
-  timeout 15 python3 - "$@" <<'PY'
+  # Deadline 40s / kill 45s: measured 26.09 on DS-my-strategy (12 successor
+  # claims, 700 KB current/hypotheses-log.md conflicts) the full candidate
+  # loop takes ~9.5s; the 32-claim cap makes ~30s the realistic ceiling.
+  timeout 45 python3 - "$@" <<'PY'
 import difflib
 import json
 import os
@@ -6121,7 +6212,14 @@ import tempfile
 import time
 
 repo, source, remote, semaphore, repo_name = sys.argv[1:]
-deadline = time.monotonic() + 12
+deadline = time.monotonic() + 40
+# Anti-DoS proof budget, identical in every heredoc that diffs blobs (drift is
+# checked by scripts/tests/session-guard-supersession-large-blob-smoke.sh).
+# Sized 26.09 from the largest tracked Markdown in DS-my-strategy: 2366247
+# bytes (inbox/WP-484/WP-484-archive.md), 12481 lines (inbox/WP-7/WP-7-archive.md).
+# SequenceMatcher is ~quadratic in lines: 12481 lines = 2.6s per call measured.
+MAX_BLOB_BYTES = 4 * 1024 * 1024
+MAX_BLOB_LINES = 16384
 env = {key: value for key, value in os.environ.items() if not key.startswith("GIT_")}
 env.update(GIT_CONFIG_NOSYSTEM="1", GIT_CONFIG_GLOBAL=os.devnull,
            GIT_ATTR_NOSYSTEM="1", GIT_OPTIONAL_LOCKS="0",
@@ -6150,10 +6248,10 @@ def unique_position(lines, needle):
 
 
 def anchored_insertions(base, own, published):
-    if any(b"\0" in blob or len(blob) > 262144 for blob in (base, own, published)):
+    if any(b"\0" in blob or len(blob) > MAX_BLOB_BYTES for blob in (base, own, published)):
         return False
     base, own, published = (blob.splitlines(keepends=True) for blob in (base, own, published))
-    if max(map(len, (base, own, published))) > 4096:
+    if max(map(len, (base, own, published))) > MAX_BLOB_LINES:
         return False
     own_ops = difflib.SequenceMatcher(None, base, own, autojunk=False).get_opcodes()
     target_ops = difflib.SequenceMatcher(None, base, published, autojunk=False).get_opcodes()
@@ -6203,8 +6301,11 @@ def proof(store, candidate, parent, changed):
         return tuple(row.split(b"\t", 1)[0].split()) if row else None
 
     def blob(oid):
-        if int(read("cat-file", "-s", oid)) > 262144:
-            raise ValueError("conflict blob exceeds proof budget")
+        # None = over budget: unprovable for THIS candidate only.  Raising here
+        # used to abort the whole candidate loop, so an oversized conflict on an
+        # unrelated claim hid a successor that could still be proven.
+        if int(read("cat-file", "-s", oid)) > MAX_BLOB_BYTES:
+            return None
         return read("cat-file", "blob", oid)
 
     result = git(store, "merge-tree", "--write-tree", "-z", "--messages",
@@ -6259,7 +6360,8 @@ def proof(store, candidate, parent, changed):
             return False
         if source_paths[0] != path and entry(candidate, source_paths[0]) is not None:
             return False
-        if not anchored_insertions(blob(base[2]), blob(own[2]), blob(published[2])):
+        blobs = [blob(stage[2]) for stage in (base, own, published)]
+        if None in blobs or not anchored_insertions(*blobs):
             return False
     return True
 
@@ -6998,7 +7100,10 @@ _commit_automerge_has_publish_proof() {  # <repo> <source> <fresh remote OID> <s
   # Reproduce a historical cherry-pick exactly. An OID-published single-parent
   # commit must equal the whole clean merge tree of its parent with source,
   # using source's immediate parent as the explicit cherry-pick base.
-  timeout 15 python3 - "$@" <<'PY'
+  # Deadline 40s / kill 45s: the 128-candidate window measured 24s on
+  # DS-my-strategy (26.09); at 12s the loop always died mid-window with a
+  # misleading "timed out after 0.01 seconds" instead of a verdict.
+  timeout 45 python3 - "$@" <<'PY'
 import json
 import os
 from pathlib import Path
@@ -7009,7 +7114,7 @@ import tempfile
 import time
 
 repo, source, remote, semaphore, repo_name = sys.argv[1:]
-deadline = time.monotonic() + 12
+deadline = time.monotonic() + 40
 env = {key: value for key, value in os.environ.items() if not key.startswith("GIT_")}
 env.update(GIT_CONFIG_NOSYSTEM="1", GIT_CONFIG_GLOBAL=os.devnull,
            GIT_ATTR_NOSYSTEM="1", GIT_OPTIONAL_LOCKS="0",
@@ -8436,6 +8541,13 @@ import tempfile
 import time
 
 semaphore, worktree = sys.argv[1:]
+# Anti-DoS proof budget, identical in every heredoc that diffs blobs (drift is
+# checked by scripts/tests/session-guard-supersession-large-blob-smoke.sh).
+# Sized 26.09 from the largest tracked Markdown in DS-my-strategy: 2366247
+# bytes (inbox/WP-484/WP-484-archive.md), 12481 lines (inbox/WP-7/WP-7-archive.md).
+# SequenceMatcher is ~quadratic in lines: 12481 lines = 2.6s per call measured.
+MAX_BLOB_BYTES = 4 * 1024 * 1024
+MAX_BLOB_LINES = 16384
 snapshot = Path(semaphore).read_bytes()
 
 def field(key):
@@ -8552,10 +8664,10 @@ def unique_position(lines, needle):
     return positions[0] if len(positions) == 1 else None
 
 def anchored_insertions(base, own, published):
-    if any(b"\0" in blob or len(blob) > 262144 for blob in (base, own, published)):
+    if any(b"\0" in blob or len(blob) > MAX_BLOB_BYTES for blob in (base, own, published)):
         return False
     base, own, published = (blob.splitlines(keepends=True) for blob in (base, own, published))
-    if max(map(len, (base, own, published))) > 4096:
+    if max(map(len, (base, own, published))) > MAX_BLOB_LINES:
         return False
     own_ops = difflib.SequenceMatcher(None, base, own, autojunk=False).get_opcodes()
     target_ops = difflib.SequenceMatcher(None, base, published, autojunk=False).get_opcodes()
@@ -11611,6 +11723,7 @@ _frozen_quarantine_commit_barrier() {  # <newline-separated ACTIVE semaphores>
   local barrier_agent="${AGENT:-${IWE_AGENT:-}}" barrier_harness
   barrier_harness=$(_runtime_harness_session_id "$barrier_agent") || return 2
   QUARANTINE_AGENT="$barrier_agent" QUARANTINE_HARNESS_SESSION_ID="$barrier_harness" \
+    NON_PRODUCT_WP_SENTINELS="${SG_WP_SENTINELS:-}" \
     ACTIVE_SEMAPHORES="$1" python3 - "$SESSION_DIR" <<'PY'
 import glob
 import hashlib
@@ -11737,8 +11850,43 @@ staged = [item.decode("utf-8") for item in staged_result.stdout.split(b"\0") if 
 # the WP-N format check below: real WP-N values still must match it exactly.
 # Scoped to this loop only: validate_identity() and the orphaned-scheduled/
 # recovery-pending loop below always expect a real WP-N by design. New
-# sentinel -> extend this set, don't fork a second list.
-NON_PRODUCT_WP_SENTINELS = {"UNKNOWN", "DAY-CLOSE"}
+# sentinel -> extend SG_WP_SENTINELS in session-guard.sh, don't fork a second
+# list: WP-561 Ф25 made this set come from the very list `open` validates
+# against (handed over on this command only). Empty means the caller lost it:
+# fail closed instead of silently reclassifying sentinel sessions as invalid.
+NON_PRODUCT_WP_SENTINELS = {value.upper() for value in os.environ.get("NON_PRODUCT_WP_SENTINELS", "").split()}
+if not NON_PRODUCT_WP_SENTINELS:
+    print("session-guard: the sentinel wp set was not handed to the commit-barrier classifier", file=sys.stderr)
+    raise SystemExit(2)
+
+
+class BadActiveWp(ValueError):
+    """The semaphore parsed fine (its scope is known) but its wp: value is not classifiable."""
+
+
+class SentinelEvasion(ValueError):
+    """A sentinel-wp session names a real WP-N outside file:/task: -- looks like dodging that WP's freeze."""
+
+
+class MalformedHousekeeping(ValueError):
+    """A housekeeping semaphore whose own shape is wrong; its scope was read fine."""
+
+
+def owner_flag(text):
+    """` --agent <owner>` for a cure command: close/renew select by the owner's agent, not the committer's."""
+    try:
+        agent = unique(text, "agent", optional=True)
+    except ValueError:
+        return ""
+    return " --agent %s" % agent if agent else ""
+
+
+def refuse_unclassifiable(path, reason, remedy):
+    print("cannot classify active semaphore while enforcing quarantine: " + path, file=sys.stderr)
+    print("  причина: " + reason, file=sys.stderr)
+    print("  лечение: " + remedy, file=sys.stderr)
+    raise SystemExit(2)
+
 
 active_wps = set()
 for path in active_paths:
@@ -11759,9 +11907,13 @@ for path in active_paths:
                 or len(session_lines) > 1
                 or (session_lines and (not session_lines[0].startswith("session_id: ") or not session_lines[0][len("session_id: "):]))
             ):
-                raise ValueError("malformed housekeeping")
+                raise MalformedHousekeeping(os.path.basename(path))
             continue
-        wp = unique(text, "wp").upper()
+        try:
+            raw_wp = unique(text, "wp")
+        except ValueError:
+            raise BadActiveWp("") from None   # absent, empty or repeated: no value to name
+        wp = raw_wp.upper()
         # WP-7 Ф154 (2026-09-17, live production incident): a bare-number --wp
         # (e.g. `--wp 578`, no "WP-" prefix) is documented, real historical
         # usage (cold-review finding, same phase: `--wp 149`/`--wp 289` in
@@ -11787,19 +11939,53 @@ for path in active_paths:
             # without touching that WP's scope at all. Scanning it the same
             # way as any other line turned an ordinary parallel session into
             # a repo-wide commit barrier for every agent, not just itself.
-            if any(
-                re.search(r"\bWP-[1-9][0-9]*\b", line, re.I)
-                for line in text.splitlines()
-                if not line.startswith(("file: ", "file_v2: ", "task: "))
-            ):
-                raise ValueError("non-product wp sentinel references a real WP")
+            evidence = next((line for line in text.splitlines()
+                             if not line.startswith(("file: ", "file_v2: ", "task: "))
+                             and re.search(r"\bWP-[1-9][0-9]*\b", line, re.I)), None)
+            if evidence is not None:
+                raise SentinelEvasion(evidence)
             continue
         if not re.fullmatch(r"WP-[1-9][0-9]*", wp):
-            raise ValueError("bad active wp")
+            raise BadActiveWp(raw_wp)
         active_wps.add(wp)
-    except (OSError, UnicodeError, ValueError):
-        print("cannot classify active semaphore while enforcing quarantine: " + path, file=sys.stderr)
-        raise SystemExit(2)
+    except BadActiveWp as exc:
+        # WP-561 Ф25: the 28.09 week-review semaphore (wp: week-review-w39) blocked every
+        # intersecting commit and the message named only the path, which sent the
+        # investigation to the lease instead of to the wp: field.
+        allowed = "WP-<число>, %s" % ", ".join(sorted(v.lower() for v in NON_PRODUCT_WP_SENTINELS))
+        if not str(exc):
+            refuse_unclassifiable(
+                path,
+                "в семафоре поле wp: отсутствует, пусто или задано дважды; допустимо %s" % allowed,
+                "закрой или убери эту сессию (session-guard.sh audit --cleanup-orphans "
+                "--quarantine-dead-interactive, после истечения аренды); новую открывай с допустимым --wp")
+        refuse_unclassifiable(
+            path,
+            "в семафоре wp: %r; допустимо %s" % (str(exc), allowed),
+            "закрой эту сессию (session-guard.sh close --wp %r%s); если её владелец мёртв, "
+            "session-guard.sh audit --cleanup-orphans --quarantine-dead-interactive (после истечения аренды); "
+            "новую сессию открывай с допустимым --wp" % (str(exc), owner_flag(text)))
+    except SentinelEvasion as exc:
+        refuse_unclassifiable(
+            path,
+            "сессия с служебным wp ссылается на реальный РП вне полей file:/task: в строке %r; "
+            "это считается обходом заморозки этого РП" % str(exc),
+            "переименуй или убери это поле (если РП упомянут случайно, например в slug:), "
+            "либо открой сессию с реальным --wp WP-<число> нужного РП")
+    except MalformedHousekeeping as exc:
+        refuse_unclassifiable(
+            path,
+            "housekeeping-семафор %s нарушает свой формат (имя файла, лишние поля wp:/scheduled_owner:, "
+            "повторный или пустой session_id:)" % str(exc),
+            "убери этот семафор (session-guard.sh audit --cleanup-orphans "
+            "--quarantine-dead-interactive), затем повтори коммит")
+    except (OSError, UnicodeError, ValueError) as exc:
+        refuse_unclassifiable(
+            path,
+            "область семафора неизвестна (файл нечитаем или повреждён: %s); доказать, что он не пересекается "
+            "с индексом, нельзя, поэтому коммит блокируется" % exc,
+            "разобрать или убрать этот семафор (session-guard.sh audit --cleanup-orphans "
+            "--quarantine-dead-interactive), затем повторить коммит")
 
 
 paths = set(glob.glob(os.path.join(directory, "*.open.orphaned-scheduled-drained")))
@@ -12251,7 +12437,7 @@ if [ "$CMD" = "pre-commit-check" ]; then
     QUARANTINE_RC=$?
     case "$QUARANTINE_RC" in
       1) echo "🚫 SESSION-GUARD: коммит пересекает замороженную/ожидающую recovery сессию; formal recovery обязателен." >&2 ;;
-      *) echo "🚫 SESSION-GUARD: quarantine hold неоднозначен или изменился во время проверки; fail closed." >&2 ;;
+      *) echo "🚫 SESSION-GUARD: коммит заблокирован (fail closed). Причина названа строками «причина»/«лечение» выше; если их нет, состояние семафоров неоднозначно или изменилось во время проверки." >&2 ;;
     esac
     exit 6
   fi
@@ -12334,17 +12520,48 @@ print(json.dumps({
 
   if [ -z "$ACTIVE" ]; then
     if [ -n "$EXPIRED" ]; then
-      echo "🚫 SESSION-GUARD: коммит заблокирован — у открытых сессий истёк срок полномочий." >&2
-      echo "" >&2
+      # WP-530 Ф62/Ф68 (пилот, 26.09, вариант А выбран после разбора с двух
+      # сторон, Ф61/Ф62): раньше блокировало по одному ЛЮБОМУ просроченному
+      # семафору в системе, даже если он не имеет отношения к тому, что
+      # коммитится сейчас -- живой инцидент: housekeeping-сессия экстрактора
+      # (git-diff-feed) сама успешно открывает сессию и note-file'ит СВОЙ
+      # путь, но коммит всё равно падал этим сообщением, перечисляя ЧУЖИЕ,
+      # не относящиеся WP (bug-2026-09-{10,11,18,21,25}-git-diff-feed*.md).
+      # Теперь блокирует только если хотя бы один просроченный семафор сам
+      # заявлял (note-file) путь, который реально коммитится сейчас --
+      # нерелевантная просрочка падает молча, и коммит всё равно блокируется
+      # (ACTIVE пусто -- разрешать здесь нечему), но уже дальше, общим
+      # сообщением "сессия не открыта" ниже, а не этим -- не называя чужие,
+      # ни при чём не бывшие WP. Это не открывает новую дырку: exit 4 стоит
+      # на обоих путях этого if -- меняется только текст, что именно
+      # сообщается, не сам факт блокировки (cold review, 2026-09-26).
+      STAGED_PATHS_FOR_RELEVANCE=()
+      while IFS= read -r -d '' f; do
+        STAGED_PATHS_FOR_RELEVANCE+=("$f")
+      done < <(git diff --cached --name-only -z --no-renames 2>/dev/null)
+      RELEVANT_EXPIRED=""
       for sem in $EXPIRED; do
-        sem_wp=$(grep "^wp: " "$sem" | cut -d' ' -f2- || echo "?")
-        echo "  · $(basename "$sem") (WP: $sem_wp)" >&2
+        for f in "${STAGED_PATHS_FOR_RELEVANCE[@]+"${STAGED_PATHS_FOR_RELEVANCE[@]}"}"; do
+          if scope_has_path "$sem" "$f"; then
+            RELEVANT_EXPIRED="${RELEVANT_EXPIRED}${sem}"$'\n'
+            break
+          fi
+        done
       done
-      echo "" >&2
-      echo "Сессия по-прежнему существует и закрывается штатно. Выбери:" >&2
-      echo "  продлить:  bash ~/IWE/scripts/session-guard.sh renew --wp WP-N" >&2
-      echo "  закрыть:   bash ~/IWE/scripts/session-guard.sh close --wp WP-N" >&2
-      exit 4
+      RELEVANT_EXPIRED="${RELEVANT_EXPIRED%$'\n'}"
+      if [ -n "$RELEVANT_EXPIRED" ]; then
+        echo "🚫 SESSION-GUARD: коммит заблокирован — у открытых сессий истёк срок полномочий." >&2
+        echo "" >&2
+        for sem in $RELEVANT_EXPIRED; do
+          sem_wp=$(grep "^wp: " "$sem" | cut -d' ' -f2- || echo "?")
+          echo "  · $(basename "$sem") (WP: $sem_wp)" >&2
+        done
+        echo "" >&2
+        echo "Сессия по-прежнему существует и закрывается штатно. Выбери:" >&2
+        echo "  продлить:  bash ~/IWE/scripts/session-guard.sh renew --wp WP-N" >&2
+        echo "  закрыть:   bash ~/IWE/scripts/session-guard.sh close --wp WP-N" >&2
+        exit 4
+      fi
     fi
     cat >&2 <<'EOF'
 🚫 SESSION-GUARD: коммит заблокирован.
