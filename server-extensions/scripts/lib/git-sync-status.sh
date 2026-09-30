@@ -30,6 +30,7 @@
 # before calling; an invalid value is treated as checker_unavailable (fail
 # closed on a broken integration, not a silent re-check that defeats the
 # point of precomputing once).
+_GIT_SYNC_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 check_git_sync_status() {
   local repo_dir="$1"
   local branch="${2:-}"
@@ -240,11 +241,12 @@ _git_sync_run_with_timeout() {
       return 1
       ;;
     *)
-      command -v python3 >/dev/null 2>&1 || {
+      local py
+      py="$("$_GIT_SYNC_LIB_DIR/find-python3.sh" 2>/dev/null)" || {
         echo "git-sync-status: timeout requested but python3 is unavailable" >&2
         return 1
       }
-      python3 -c '
+      "$py" -c '
 import os
 import signal
 import subprocess

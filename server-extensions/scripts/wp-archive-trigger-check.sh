@@ -32,7 +32,14 @@ set -uo pipefail
 
 WP_NUM="${1:-}"
 IWE="${2:-${IWE_ROOT:-$HOME/IWE}}"
-GOV_REPO="${IWE_GOVERNANCE_REPO:-DS-my-strategy}"
+# Governance repo: $IWE_GOVERNANCE_REPO, else the first known name that holds
+# docs/WP-REGISTRY.md (same candidates as .claude/scripts/wp-sync-bundle.sh).
+GOV_REPO="${IWE_GOVERNANCE_REPO:-}"
+if [[ ! -f "$IWE/$GOV_REPO/docs/WP-REGISTRY.md" ]]; then
+  for cand in DS-my-strategy DS-strategy strategy; do
+    if [[ -f "$IWE/$cand/docs/WP-REGISTRY.md" ]]; then GOV_REPO="$cand"; break; fi
+  done
+fi
 INBOX="$IWE/$GOV_REPO/inbox"
 
 AGE_THRESHOLD_DAYS=14

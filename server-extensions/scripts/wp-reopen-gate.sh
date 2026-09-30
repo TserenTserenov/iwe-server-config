@@ -19,7 +19,16 @@
 set -euo pipefail
 
 IWE_ROOT="${IWE_ROOT:-$HOME/IWE}"
-GOV_REPO="${IWE_GOVERNANCE_REPO:-DS-my-strategy}"
+# Governance repo: $IWE_GOVERNANCE_REPO, else the first known name that holds
+# docs/WP-REGISTRY.md (same candidates as .claude/scripts/wp-sync-bundle.sh).
+GOV_REPO="${IWE_GOVERNANCE_REPO:-}"
+if [ ! -f "$IWE_ROOT/$GOV_REPO/docs/WP-REGISTRY.md" ]; then
+  for cand in DS-my-strategy DS-strategy strategy; do
+    if [ -f "$IWE_ROOT/$cand/docs/WP-REGISTRY.md" ]; then GOV_REPO="$cand"; break; fi
+  done
+fi
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PYTHON3="$("$SCRIPT_DIR/lib/find-python3.sh")" || { echo "WP-REOPEN-GATE: python3 with PyYAML not found" >&2; exit 1; }
 # NOT $IWE_RUNTIME -- that env var is already claimed platform-wide (see
 # .claude/settings.json) as an agent-runtime IDENTIFIER ("claude-code"), not
 # a path. Every Claude Code session has it set, so the original ${IWE_RUNTIME:-...}
@@ -57,6 +66,10 @@ resolve_gov_repo() {
   if [ -n "$candidate" ] && [ "$(basename "$candidate")" = "$GOV_REPO" ]; then
     echo "$candidate"
     return
+  fi
+  if [ -z "$GOV_REPO" ]; then
+    log_err "СТОП: governance-репо с docs/WP-REGISTRY.md не найдено в $IWE_ROOT (задайте IWE_GOVERNANCE_REPO или --governance-repo)"
+    exit 1
   fi
   echo "$IWE_ROOT/$GOV_REPO"
 }
@@ -131,7 +144,7 @@ atomic_write() {
 json_get() {
   # json_get <file> <key>  -- single-level string/number field, good enough for
   # this script's own flat lease schema (not a general JSON parser).
-  python3 -c "
+  "$PYTHON3" -c "
 import json, sys
 try:
     with open(sys.argv[1]) as f:
@@ -154,7 +167,7 @@ except Exception:
 # this script.
 read_lease_fields() {
   local lease_f="$1"
-  python3 -c "
+  "$PYTHON3" -c "
 import json, sys
 try:
     with open(sys.argv[1]) as f:
@@ -217,7 +230,7 @@ cmd_actualize() {
   fi
   token=$(gen_token)
 
-  lease=$(python3 -c "
+  lease=$("$PYTHON3" -c "
 import json, sys
 print(json.dumps({
     'wp': sys.argv[1], 'session_id': sys.argv[2], 'origin_commit': sys.argv[3],
@@ -347,7 +360,7 @@ cmd_closure_request() {
   local code cf
   code=$(gen_challenge_code)
   cf=$(challenge_file_for "$wp")
-  atomic_write "$cf" "$(python3 -c "import json,sys; print(json.dumps({'code': sys.argv[1], 'reason': sys.argv[2], 'actor': sys.argv[3], 'issued_at': int(sys.argv[4]), 'attempts': 0}))" "$code" "$reason" "$actor" "$(now_epoch)")"
+  atomic_write "$cf" "$("$PYTHON3" -c "import json,sys; print(json.dumps({'code': sys.argv[1], 'reason': sys.argv[2], 'actor': sys.argv[3], 'issued_at': int(sys.argv[4]), 'attempts': 0}))" "$code" "$reason" "$actor" "$(now_epoch)")"
   echo "Код подтверждения: $code"
   log_err "Передай этот код пилоту через отдельный канал (чат/голос) и попроси назвать его обратно -- это не криптографическая проверка личности, только вынужденный второй явный шаг, не одиночный флаг; затем вызови: wp-reopen-gate.sh closure-pending-sync confirm --wp $wp --challenge-response <код от пилота> (действует ${CHALLENGE_TTL_SECONDS}с, максимум $MAX_CHALLENGE_ATTEMPTS попыток)"
 }
@@ -404,7 +417,7 @@ cmd_closure_confirm() {
     fi
     reason=$(json_get "$claimed" reason)
     actor=$(json_get "$claimed" actor)
-    atomic_write "$cf" "$(python3 -c "import json,sys; print(json.dumps({'code': sys.argv[1], 'reason': sys.argv[2], 'actor': sys.argv[3], 'issued_at': int(sys.argv[4]), 'attempts': int(sys.argv[5])}))" "$code_expected" "$reason" "$actor" "$issued" "$attempts")"
+    atomic_write "$cf" "$("$PYTHON3" -c "import json,sys; print(json.dumps({'code': sys.argv[1], 'reason': sys.argv[2], 'actor': sys.argv[3], 'issued_at': int(sys.argv[4]), 'attempts': int(sys.argv[5])}))" "$code_expected" "$reason" "$actor" "$issued" "$attempts")"
     rm -f "$claimed"
     log_err "код подтверждения не совпадает — closure-pending-sync отклонён (попытка $attempts/$MAX_CHALLENGE_ATTEMPTS)"
     exit 1
@@ -415,7 +428,7 @@ cmd_closure_confirm() {
   cf="$claimed"
 
   local audit_line lease_f
-  audit_line=$(python3 -c "
+  audit_line=$("$PYTHON3" -c "
 import json, sys
 print(json.dumps({
     'wp': sys.argv[1], 'ts': int(sys.argv[2]), 'reason': sys.argv[3], 'actor': sys.argv[4],
@@ -426,7 +439,7 @@ print(json.dumps({
   printf '%s\n' "$audit_line" >> "$LEASE_DIR/closure-pending-sync-audit.jsonl"
 
   lease_f=$(lease_file_for "$wp")
-  atomic_write "$lease_f" "$(python3 -c "
+  atomic_write "$lease_f" "$("$PYTHON3" -c "
 import json, sys
 print(json.dumps({
     'wp': sys.argv[1], 'session_id': 'closure-pending-sync', 'origin_commit': 'unknown',

@@ -644,6 +644,18 @@ def apply(card: Card, wp: str, cands: list[dict], gov: str, inbox: str, runtime:
 
 
 # ---------------------------------------------------------------------------
+def find_governance_repo(ws: str) -> str:
+    """$IWE_GOVERNANCE_REPO, else the first known name holding docs/WP-REGISTRY.md
+    (same candidates as .claude/scripts/wp-sync-bundle.sh)."""
+    name = os.environ.get("IWE_GOVERNANCE_REPO", "")
+    if not os.path.isfile(os.path.join(ws, name, "docs", "WP-REGISTRY.md")):
+        for cand in ("DS-my-strategy", "DS-strategy", "strategy"):
+            if os.path.isfile(os.path.join(ws, cand, "docs", "WP-REGISTRY.md")):
+                name = cand
+                break
+    return os.path.join(ws, name)
+
+
 def main(argv: list[str]) -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("wp", help="WP number (N or WP-N)")
@@ -663,7 +675,7 @@ def main(argv: list[str]) -> int:
         print(f"usage: WP number expected, got {a.wp!r}", file=sys.stderr)
         return 1
     ws = os.environ.get("IWE_WORKSPACE", os.path.expanduser("~/IWE"))
-    gov = a.governance_repo or os.path.join(ws, os.environ.get("IWE_GOVERNANCE_REPO", "DS-my-strategy"))
+    gov = a.governance_repo or find_governance_repo(ws)
     runtime = a.runtime_dir or os.environ.get("IWE_RUNTIME") or os.path.join(ws, ".iwe-runtime")
     inbox = os.path.join(gov, "inbox")
     card_path = os.path.join(inbox, f"WP-{wp}", f"WP-{wp}.md")

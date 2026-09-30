@@ -74,6 +74,7 @@ GIT_LOG_DAYS="${WP_SYNC_GIT_DAYS:-14}"
 # real root next to this script -- resolving it via $IWE_WORKSPACE silently
 # broke every fixture-based test run (caught by wp-pipeline-checks-runner.sh).
 GIT_SYNC_TIMEOUT="${WP_SYNC_GIT_TIMEOUT:-15}"
+FIND_PYTHON3="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)/scripts/lib/find-python3.sh"
 GIT_SYNC_LIB="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)/scripts/lib/git-sync-status.sh"
 if [[ -r "$GIT_SYNC_LIB" ]]; then
   # shellcheck source=/dev/null
@@ -110,6 +111,16 @@ validate_frontmatter() {
     return 1
   fi
   return 0
+}
+
+# Path relative to CARD_ROOT; falls back to the input when no python3 resolves.
+card_relpath() {
+  local py
+  if py="$("$FIND_PYTHON3" 2>/dev/null)"; then
+    "$py" -c "import os, sys; print(os.path.relpath(sys.argv[1], sys.argv[2]))" "$1" "$CARD_ROOT" 2>/dev/null || echo "$1"
+  else
+    echo "$1"
+  fi
 }
 
 normalize_wp_num() {
@@ -522,7 +533,7 @@ git_log_for_file() {
     return
   fi
   local relpath
-  relpath=$(python3 -c "import os; print(os.path.relpath('$filepath', '$CARD_ROOT'))" 2>/dev/null || echo "$filepath")
+  relpath=$(card_relpath "$filepath")
   local commits
   # GIT_LOG_REV (origin-pinned mode) keeps history and content on the same commit.
   commits=$(
@@ -693,16 +704,26 @@ main() {
     GIT_SYNC_REMOTE_OID=""
     GIT_SYNC_HEAD_OID=""
   fi
-  local git_sync_blocking=false
+  local git_sync_blocking=false git_sync_degraded=false
   case "$GIT_SYNC_STATUS" in
-    STALE|DIVERGED|fetch_failed|checker_unavailable) git_sync_blocking=true ;;
+    STALE|DIVERGED|fetch_failed) git_sync_blocking=true ;;
+    # Portability: a template install without scripts/lib/git-sync-status.sh
+    # cannot be checked at all -- warn instead of blocking the whole gate. Any
+    # other checker_unavailable (broken integration) stays fail-closed.
+    checker_unavailable)
+      if [[ "$GIT_SYNC_DETAIL" == "reason=library_missing" ]]; then
+        git_sync_degraded=true
+      else
+        git_sync_blocking=true
+      fi
+      ;;
   esac
   local git_sync_checked_at
   git_sync_checked_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 
   # WP-561 Ф24: STALE/DIVERGED working copy + provably fresh remote-tracking
   # ref -> read the cards from a snapshot of that ONE origin commit and stop
-  # blocking. fetch_failed/checker_unavailable/lagging ref stay fail-closed
+  # blocking. fetch_failed/lagging ref/broken checker stay fail-closed
   # (exit 3). --force-sync keeps its old meaning: read the working copy
   # regardless of the status, and say so in CARD_SOURCE.
   if [[ "$git_sync_blocking" == "true" && "$force_sync" != "true" ]]; then
@@ -733,6 +754,10 @@ main() {
   else
     echo "CARD_SOURCE: ${CARD_SOURCE}"
   fi
+  if [[ "$git_sync_degraded" == "true" ]]; then
+    echo "GIT_SYNC_GATE: degraded (checker_unavailable, not blocking)"
+    echo "[GIT-SYNC] ВНИМАНИЕ: scripts/lib/git-sync-status.sh не найден — синхронность ${STRATEGY_DIR} с origin не проверена, Sync Gate пропущен (exit 0)." >&2
+  fi
   if [[ "$CARD_SOURCE" == "origin-pinned" ]]; then
     {
       echo "[GIT-SYNC] ВНИМАНИЕ: карточки прочитаны с origin/main@${GIT_SYNC_REMOTE_OID:0:12} (актуально)."
@@ -745,7 +770,7 @@ main() {
       if [[ "$force_sync" == "true" ]]; then
         echo "[GIT-SYNC] --force-sync передан — bundle продолжает, но статус выше остаётся ${GIT_SYNC_STATUS}"
       else
-        echo "[GIT-SYNC] Sync Gate заблокирован (exit 3): чтение с origin невозможно (remote-tracking ref отстаёт от origin, сеть или библиотека недоступны). Изолированная сессия → повторить на своём worktree. Канон → session-guard open --isolate, либо --force-sync с явным сообщением пилоту."
+        echo "[GIT-SYNC] Sync Gate заблокирован (exit 3): чтение с origin невозможно (remote-tracking ref отстаёт от origin, сеть недоступна). Изолированная сессия → повторить на своём worktree. Канон → session-guard open --isolate, либо --force-sync с явным сообщением пилоту."
       fi
     } >&2
   fi
@@ -928,7 +953,7 @@ main() {
         # Drift: significant commits after ref_date
         if [[ -n "$ref_date" ]] && echo "$ref_date" | grep -qE '^[0-9]{4}-[0-9]{2}-[0-9]{2}$'; then
           local relpath_r
-          relpath_r=$(python3 -c "import os; print(os.path.relpath('$rfile', '$CARD_ROOT'))" 2>/dev/null || echo "$rfile")
+          relpath_r=$(card_relpath "$rfile")
           local sig_commits
           sig_commits=$(
             cd "$STRATEGY_DIR" 2>/dev/null && \
