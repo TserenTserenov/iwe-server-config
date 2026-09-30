@@ -4,7 +4,9 @@
 # the classifier itself, only of the network for fetch_failed.
 set -uo pipefail
 
-LIB="$HOME/IWE/scripts/lib/git-sync-status.sh"
+# The copy under test, not the live ~/IWE (a live path would make this smoke pass
+# or fail regardless of the change being reviewed).
+LIB="$(cd "$(dirname "$0")/../.." && pwd)/scripts/lib/git-sync-status.sh"
 [ -f "$LIB" ] || { echo "FAIL: $LIB not found"; exit 1; }
 # shellcheck source=../lib/git-sync-status.sh
 . "$LIB"
@@ -166,6 +168,12 @@ END=$(date +%s)
 check "status" "fetch_failed" "$GIT_SYNC_STATUS"
 ELAPSED=$((END - START))
 check "bounded by timeout (<=5s for a 2s deadline)" "1" "$([ "$ELAPSED" -le 5 ] && echo 1 || echo 0)"
+
+echo "=== timeout helper needs only the standard library: works without PyYAML ==="
+NOYAML="$TMP/noyaml"; mkdir -p "$NOYAML"
+printf 'raise ImportError("fixture: PyYAML is not installed")\n' > "$NOYAML/yaml.py"
+PYTHONPATH="$NOYAML" _git_sync_run_with_timeout 3 true
+check "deadline helper runs a command without PyYAML" "0" "$?"
 
 echo ""
 if [ "$FAILURES" -eq 0 ]; then

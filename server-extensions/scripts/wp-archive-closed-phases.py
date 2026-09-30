@@ -645,10 +645,11 @@ def apply(card: Card, wp: str, cands: list[dict], gov: str, inbox: str, runtime:
 
 # ---------------------------------------------------------------------------
 def find_governance_repo(ws: str) -> str:
-    """$IWE_GOVERNANCE_REPO, else the first known name holding docs/WP-REGISTRY.md
+    """An explicit $IWE_GOVERNANCE_REPO always wins (never replaced by a guess); when it
+    is unset, the first known name holding docs/WP-REGISTRY.md
     (same candidates as .claude/scripts/wp-sync-bundle.sh)."""
     name = os.environ.get("IWE_GOVERNANCE_REPO", "")
-    if not os.path.isfile(os.path.join(ws, name, "docs", "WP-REGISTRY.md")):
+    if not name:
         for cand in ("DS-my-strategy", "DS-strategy", "strategy"):
             if os.path.isfile(os.path.join(ws, cand, "docs", "WP-REGISTRY.md")):
                 name = cand

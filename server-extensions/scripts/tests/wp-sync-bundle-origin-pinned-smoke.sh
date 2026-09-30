@@ -69,6 +69,14 @@ assert "$rc" "0" "card that exists only on origin is found (full-universe snapsh
 assert "$(grep -c 'origin-only card 9103' "$OUT")" "1" "its content comes from origin"
 assert "$(ls -d "${TMPDIR:-/tmp}"/wp-sync-origin.* 2>/dev/null | wc -l | tr -d ' ')" "0" "temp snapshot cleaned up"
 
+echo "scenario B2: no PyYAML -> the card path stays repo-relative (stdlib-only resolver), card history is found"
+NOYAML="$SANDBOX/noyaml"; mkdir -p "$NOYAML"
+printf 'raise ImportError("fixture: PyYAML is not installed")\n' > "$NOYAML/yaml.py"
+PYTHONPATH="$NOYAML" IWE_WORKSPACE="$WS" IWE_GOVERNANCE_REPO="$GOV" WP_SYNC_GIT_TIMEOUT=5 bash "$BUNDLE" WP-9101 > "$OUT" 2> "$ERR"; rc=$?
+assert "$rc" "0" "exit 0 without PyYAML"
+assert "$(line 3 | cut -d' ' -f1-2)" "CARD_SOURCE: origin-pinned" "still origin-pinned without PyYAML"
+assert "$(grep -Ec '^  - [0-9a-f]+ seed$' "$OUT")" "1" "history of the related card is listed (repo-relative path), not '_нет коммитов_'"
+
 echo "scenario C: origin advanced again, ref NOT fetched (lagging) -> fail closed, exit 3"
 printf -- '- [ ] SECOND-ORIGIN-TASK\n' >> "$PUB/inbox/WP-9101/WP-9101.md"
 gcommit "$PUB" "origin advances again"; git -C "$PUB" push -q origin main
@@ -98,5 +106,23 @@ echo "scenario F: unknown WP under origin-pinned -> exit 1, names the source"
 rc=$(run_bundle WP-9999)
 assert "$rc" "1" "exit 1 for a missing card"
 assert "$(grep -c 'источник: origin-pinned' "$ERR")" "1" "error names the card source"
+
+echo "scenario G: governance repo without archive/ (fresh template install) -> origin-pinned still works"
+ORIGIN2="$SANDBOX/origin2.git"; git init -q --bare -b main "$ORIGIN2"
+SEED2="$SANDBOX/seed2"; git init -q "$SEED2"; git -C "$SEED2" checkout -q -b main
+mkdir -p "$SEED2/docs"
+printf '| WP | P | Название | Статус |\n|---|---|---|---|\n| 9201 | P1 | **Fixture 9201** | 🔄 |\n' > "$SEED2/docs/WP-REGISTRY.md"
+card "$SEED2" 9201 "" "seed task 9201"
+gcommit "$SEED2" seed
+git -C "$SEED2" remote add origin "$ORIGIN2"; git -C "$SEED2" push -q origin main
+WS2="$SANDBOX/ws2"; mkdir -p "$WS2"; git clone -q "$ORIGIN2" "$WS2/$GOV"
+PUB2="$SANDBOX/pub2"; git clone -q "$ORIGIN2" "$PUB2"
+printf -- '- [ ] ORIGIN-ONLY-TASK-9201\n' >> "$PUB2/inbox/WP-9201/WP-9201.md"
+gcommit "$PUB2" "origin advances 2"; git -C "$PUB2" push -q origin main
+git -C "$WS2/$GOV" fetch -q origin
+IWE_WORKSPACE="$WS2" IWE_GOVERNANCE_REPO="$GOV" WP_SYNC_GIT_TIMEOUT=5 bash "$BUNDLE" WP-9201 > "$OUT" 2> "$ERR"; rc=$?
+assert "$rc" "0" "exit 0 (a missing archive/ does not break the snapshot)"
+assert "$(line 3 | cut -d' ' -f1-2)" "CARD_SOURCE: origin-pinned" "CARD_SOURCE is origin-pinned"
+assert "$(grep -c 'ORIGIN-ONLY-TASK-9201' "$OUT")" "1" "origin-side edit of the card is visible"
 
 [ "$fails" = 0 ] && echo "PASS: all scenarios" || { echo "FAIL: $fails assertion(s)"; exit 1; }

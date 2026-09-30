@@ -242,7 +242,8 @@ _git_sync_run_with_timeout() {
       ;;
     *)
       local py
-      py="$("$_GIT_SYNC_LIB_DIR/find-python3.sh" 2>/dev/null)" || {
+      # The timeout wrapper below needs only the standard library.
+      py="$("$_GIT_SYNC_LIB_DIR/find-python3.sh" --stdlib-only 2>/dev/null)" || {
         echo "git-sync-status: timeout requested but python3 is unavailable" >&2
         return 1
       }

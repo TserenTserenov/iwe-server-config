@@ -160,11 +160,19 @@ else
     echo "FAIL: close blocked on an append-safe index or misattributed canonical dirt: $CLOSE_OUT" >&2
     exit 1
 fi
-if ! grep -Fq "незапушенных коммита в $(basename "$TEST_ROOT")" <<<"$CLOSE_OUT"; then
+# Since WP-561 Ч2 only commits this session claimed (note-commit) raise the warning.
+# The root-repo commit above is not claimed, so close must still inspect that
+# repository (registered through the legacy `file:` registry) but report the
+# commit as foreign (info line), not as this session's unpushed work.
+if ! grep -Fq "$(basename "$TEST_ROOT"): ещё 1 чужих локальных коммитов" <<<"$CLOSE_OUT"; then
     echo "FAIL: close did not inspect the third/root repository registered by this session: $CLOSE_OUT" >&2
     exit 1
 fi
-echo "PASS: close still warns about an unpushed third repository on a current-schema semaphore"
+if grep -Fq "незапушенных коммита этой сессии в $(basename "$TEST_ROOT")" <<<"$CLOSE_OUT"; then
+    echo "FAIL: an unclaimed commit was reported as this session's unpushed work: $CLOSE_OUT" >&2
+    exit 1
+fi
+echo "PASS: close still inspects an unpushed third repository on a current-schema semaphore and reports the unclaimed commit as foreign"
 
 # Control: a non-append-safe registered file left genuinely dirty must still
 # block close -- the exclusion is scoped to 00-index.md, not a blanket bypass.

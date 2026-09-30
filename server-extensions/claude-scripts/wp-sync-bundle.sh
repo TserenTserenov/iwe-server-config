@@ -114,9 +114,11 @@ validate_frontmatter() {
 }
 
 # Path relative to CARD_ROOT; falls back to the input when no python3 resolves.
+# Only the standard library is needed here, so PyYAML must not be required
+# (without it origin-pinned mode would log a snapshot path outside the repo).
 card_relpath() {
   local py
-  if py="$("$FIND_PYTHON3" 2>/dev/null)"; then
+  if py="$("$FIND_PYTHON3" --stdlib-only 2>/dev/null)"; then
     "$py" -c "import os, sys; print(os.path.relpath(sys.argv[1], sys.argv[2]))" "$1" "$CARD_ROOT" 2>/dev/null || echo "$1"
   else
     echo "$1"
@@ -160,7 +162,15 @@ materialize_origin_tree() {
   git -C "$repo" cat-file -e "${remote_oid}^{commit}" 2>/dev/null || return 1
   ORIGIN_WS=$(mktemp -d "${TMPDIR:-/tmp}/wp-sync-origin.XXXXXX") || { ORIGIN_WS=""; return 1; }
   mkdir -p "$ORIGIN_WS/$GOV_REPO" || { rm -rf "$ORIGIN_WS"; ORIGIN_WS=""; return 1; }
-  if ! git -C "$repo" archive --format=tar "$remote_oid" -- inbox archive/wp-contexts docs/WP-REGISTRY.md 2>/dev/null \
+  # Template installs may lack archive/ or inbox/ (fresh DS-strategy): a
+  # missing pathspec makes `git archive` fail outright, so pass only paths
+  # that exist in this commit. The registry stays mandatory (checked below).
+  local tree_paths=() tp
+  for tp in inbox archive/wp-contexts docs/WP-REGISTRY.md; do
+    git -C "$repo" cat-file -e "${remote_oid}:${tp}" 2>/dev/null && tree_paths+=("$tp")
+  done
+  [[ ${#tree_paths[@]} -gt 0 ]] || { rm -rf "$ORIGIN_WS"; ORIGIN_WS=""; return 1; }
+  if ! git -C "$repo" archive --format=tar "$remote_oid" -- "${tree_paths[@]}" 2>/dev/null \
       | tar -x -C "$ORIGIN_WS/$GOV_REPO" 2>/dev/null; then
     rm -rf "$ORIGIN_WS"; ORIGIN_WS=""
     return 1

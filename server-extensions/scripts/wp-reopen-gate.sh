@@ -19,16 +19,17 @@
 set -euo pipefail
 
 IWE_ROOT="${IWE_ROOT:-$HOME/IWE}"
-# Governance repo: $IWE_GOVERNANCE_REPO, else the first known name that holds
+# Governance repo: an explicit $IWE_GOVERNANCE_REPO always wins (never replaced
+# by a guess); only when it is unset, the first known name that holds
 # docs/WP-REGISTRY.md (same candidates as .claude/scripts/wp-sync-bundle.sh).
 GOV_REPO="${IWE_GOVERNANCE_REPO:-}"
-if [ ! -f "$IWE_ROOT/$GOV_REPO/docs/WP-REGISTRY.md" ]; then
+if [ -z "$GOV_REPO" ]; then
   for cand in DS-my-strategy DS-strategy strategy; do
     if [ -f "$IWE_ROOT/$cand/docs/WP-REGISTRY.md" ]; then GOV_REPO="$cand"; break; fi
   done
 fi
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-PYTHON3="$("$SCRIPT_DIR/lib/find-python3.sh")" || { echo "WP-REOPEN-GATE: python3 with PyYAML not found" >&2; exit 1; }
+PYTHON3="$("$SCRIPT_DIR/lib/find-python3.sh" --stdlib-only)" || { echo "WP-REOPEN-GATE: python3 (3.10+) not found" >&2; exit 1; }
 # NOT $IWE_RUNTIME -- that env var is already claimed platform-wide (see
 # .claude/settings.json) as an agent-runtime IDENTIFIER ("claude-code"), not
 # a path. Every Claude Code session has it set, so the original ${IWE_RUNTIME:-...}

@@ -14,7 +14,7 @@
 #                                                      # blocked-witness-unavailable И push уже
 #                                                      # подтверждён (all_pushed: true)
 #   close --housekeeping <reason> [--agent ...]       # закрыть housekeeping-сессию
-#   close --abandon-prepared --i-understand-loss-risk # manual recovery (WP-484, peer-session
+#   close --abandon-prepared --i-understand-loss-risk --reason "<why>" # manual recovery (WP-484, peer-session
 #         --source-commit <oid> [--source-commit ...] # with Codex): PREPARED tree-proof cannot
 #                                                      # pass when a later legitimate REPLACE lands
 #                                                      # on the same paths the snapshot touched —
@@ -23,7 +23,8 @@
 #                                                      # commit in close_delivery_source_commits
 #                                                      # must be named via --source-commit, exactly
 #                                                      # (partial confirmation refused); recorded
-#                                                      # forever as close_publish_proof=
+#                                                      # forever (with the mandatory --reason) as
+#                                                      # close_publish_proof=
 #                                                      # manual-abandon-attestation/v1, never as the
 #                                                      # normal isolate-push proof.
 #   owner-status --owner-session-id <id> [--owner-agent <agent>]
@@ -98,6 +99,7 @@
 #   4 — git pre-commit блок (семафор не найден)
 #   5 — ORZ не прошёл валидацию
 #   6 — scope gate block (staged файл вне активных сессий)
+#   7 — close отказан, состояние сохранено (.open и копия как были, PREPARED не записан либо сохранён)
 
 set -euo pipefail
 
@@ -3919,6 +3921,11 @@ if [ "$ABANDON_PREPARED" -eq 1 ] && [ "$ABANDON_ACK" -ne 1 ]; then
 fi
 if [ "$ABANDON_PREPARED" -eq 1 ] && [ "${#ABANDON_SOURCE_COMMITS[@]}" -eq 0 ]; then
   fail "--abandon-prepared требует хотя бы один --source-commit <oid> -- список коммитов, доставку которых подтверждает оператор" 1
+fi
+# --reason is optional for --abandon-prepared (the automatic release handler
+# calls it without one); when given it must be a single line.
+if [ "$ABANDON_PREPARED" -eq 1 ] && [[ "$UNFREEZE_REASON" == *$'\n'* ]]; then
+  fail "--abandon-prepared: --reason должна быть одной строкой (она пишется в неизменяемую запись заверения manual-abandon-attestation/v1)" 1
 fi
 if [ "$ABANDON_ACK" -eq 1 ] && [ "$ABANDON_PREPARED" -ne 1 ]; then
   fail "--i-understand-loss-risk без --abandon-prepared не имеет смысла" 1
@@ -7883,6 +7890,13 @@ elif proof == "manual-abandon-attestation/v1":
         "abandoned_commits": verified,
         "abandoned_by": abandoned_by_values[0],
     }
+    # Records written before --reason became mandatory carry no reason line;
+    # a present reason is bound into the digest so it cannot be edited later.
+    abandon_reason_values = values("close_publish_abandoned_reason")
+    if len(abandon_reason_values) > 1:
+        raise SystemExit(1)
+    if abandon_reason_values:
+        publish_payload["abandon_reason"] = abandon_reason_values[0]
 else:
     raise SystemExit(1)
 publish_digest = hashlib.sha256(
@@ -8139,15 +8153,20 @@ raise SystemExit(0 if sorted(c.lower() for c in recorded) == sorted(c.lower() fo
 PY
 }
 
-_record_close_abandoned() {  # <semaphore> <session> <prepare-digest> <source-commits-json> <source-head> <source-status> <terminal-sha> <agent>
+_record_close_abandoned() {  # <semaphore> <session> <prepare-digest> <source-commits-json> <source-head> <source-status> <terminal-sha> <agent> <reason>
   local fields_json digest
-  fields_json=$(python3 - "$2" "$3" "$4" "$5" "$6" "$7" "$8" <<'PY'
+  fields_json=$(python3 - "$2" "$3" "$4" "$5" "$6" "$7" "$8" "$9" <<'PY'
 import hashlib
 import json
 import sys
 import time
 
-session, prepare, commits_json, source_head, source_status, terminal_sha, agent = sys.argv[1:]
+session, prepare, commits_json, source_head, source_status, terminal_sha, agent, reason = sys.argv[1:]
+# The reason is optional (the automatic release handler passes none); a
+# present one must be a single line and is bound into the digest below.
+if "\n" in reason:
+    raise SystemExit(1)
+reason = reason.strip()
 commits = json.loads(commits_json)
 abandoned_at = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
 payload = {
@@ -8160,8 +8179,10 @@ payload = {
     "abandoned_commits": commits,
     "abandoned_by": agent,
 }
+if reason:
+    payload["abandon_reason"] = reason
 digest = hashlib.sha256(json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
-print(json.dumps({
+fields = {
     "close_publish_proof": "manual-abandon-attestation/v1",
     "close_publish_session_id": session,
     "close_publish_prepare_digest": prepare,
@@ -8173,7 +8194,10 @@ print(json.dumps({
     "close_publish_digest": digest,
     "close_publish_abandoned_by": agent,
     "close_publish_abandoned_at": abandoned_at,
-}, separators=(",", ":")))
+}
+if reason:
+    fields["close_publish_abandoned_reason"] = reason
+print(json.dumps(fields, separators=(",", ":")))
 PY
   ) || return 1
   _append_close_fields_atomic "$1" "$fields_json" || return 1
@@ -8999,6 +9023,260 @@ if not remote_absorbs_prepared_tree(compare_tree=False):
 PY
 }
 
+# WP-561 Ч3: hot shared files (hot_publish_cas.py) are published as a whole
+# document, so once origin moved one after the session read it isolate-push
+# rejects the commit for good -- even when the foreign edit touches other
+# lines -- and close used to write PREPARED first and get stuck behind it.
+_undelivered_source_commits() {  # <semaphore> <worktree> <fresh remote> <commit>...
+  # Same skip rules as _publish_prepared_source (keep in sync): a commit that
+  # is already represented on origin is not delivered again, so not re-checked.
+  local semaphore="$1" worktree="$2" remote_head="$3" commit parents changed cherry_line
+  shift 3
+  for commit in "$@"; do
+    if _publication_receipt_tool verify "$semaphore" "$worktree" "$GOV_REPO" "$commit" "$remote_head" 2>/dev/null; then
+      continue
+    fi
+    if git -C "$worktree" merge-base --is-ancestor "$commit" "$remote_head" 2>/dev/null; then
+      continue
+    fi
+    parents=$(git -C "$worktree" rev-list --parents -n 1 "$commit") || return 1
+    changed=$(git -C "$worktree" diff-tree --no-commit-id --name-only -r "$commit") || return 1
+    if [ "$(printf '%s\n' "$parents" | awk '{print NF}')" -eq 2 ] && [ -n "$changed" ]; then
+      cherry_line=$(git -C "$worktree" cherry "$remote_head" "$commit" "$commit^") || return 1
+      [ "$cherry_line" != "- $commit" ] || continue
+    fi
+    printf '%s\n' "$commit"
+  done
+}
+
+_hot_source_sets_equivalent() {  # <hot_publish_cas.py> <worktree> <old commits> <new commits>
+  # Newline-separated lists, oldest first: same count and order, and every pair
+  # adds and removes the same lines in the hot paths. Hunk headers and blob ids
+  # legitimately change when a commit is replayed on a moved base.
+  python3 - "$@" <<'PY'
+import importlib.util
+import subprocess
+import sys
+
+cas_script, worktree, old_text, new_text = sys.argv[1:]
+spec = importlib.util.spec_from_file_location("hot_publish_cas", cas_script)
+cas = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(cas)
+
+
+def hot_changes(commit):
+    names = cas.git(worktree, "diff-tree", "--no-commit-id", "--no-renames",
+                    "--name-only", "-r", "-z", commit).decode().split("\0")
+    paths = [":(literal)" + name for name in names if name and cas.hot(name)]
+    if not paths:
+        return []
+    diff = cas.git(worktree, "diff-tree", "-p", "-U0", "--no-commit-id",
+                   "--no-renames", "-r", commit, "--", *paths)
+    return [line for line in diff.split(b"\n") if line[:1] in (b"+", b"-")]
+
+
+old, new = old_text.split(), new_text.split()
+try:
+    same = len(old) == len(new) and all(
+        hot_changes(before) == hot_changes(after) for before, after in zip(old, new))
+except subprocess.SubprocessError as error:
+    print("hot-file equivalence check failed: " + str(error), file=sys.stderr)
+    raise SystemExit(1)
+raise SystemExit(0 if same else 1)
+PY
+}
+
+_rebase_in_progress() {  # <worktree>
+  [ -e "$(git -C "$1" rev-parse --path-format=absolute --git-path rebase-merge 2>/dev/null)" ] \
+    || [ -e "$(git -C "$1" rev-parse --path-format=absolute --git-path rebase-apply 2>/dev/null)" ]
+}
+
+_copy_is_on_tip() {  # <worktree> <tip>: on its branch at <tip>, no rebase in progress
+  ! _rebase_in_progress "$1" \
+    && git -C "$1" symbolic-ref -q HEAD >/dev/null 2>&1 \
+    && [ "$(git -C "$1" rev-parse --verify 'HEAD^{commit}' 2>/dev/null)" = "$2" ]
+}
+
+_restore_copy_tip() {  # <worktree> <tip> <what failed>: abort a rebase in progress and put the branch back on <tip>, else exit 7
+  if _rebase_in_progress "$1"; then
+    git -C "$1" rebase --abort >/dev/null 2>&1 || true
+  fi
+  if [ "$(git -C "$1" rev-parse --verify 'HEAD^{commit}' 2>/dev/null)" != "$2" ]; then
+    git -C "$1" reset --hard --quiet "$2" 2>/dev/null || true
+  fi
+  _copy_is_on_tip "$1" "$2" \
+    || fail "close: $3, а копия не вернулась на вершину $2 — разбери git -C $1 status; PREPARED не записан" 7
+}
+
+_isolated_copy_is_linked() {  # <worktree>: under the runtime store and a linked worktree, never the canonical checkout
+  local git_dir common_dir
+  case "$1" in
+    */.iwe-runtime/isolated-worktrees/*) ;;
+    *) return 1 ;;
+  esac
+  git_dir=$(git -C "$1" rev-parse --path-format=absolute --git-dir 2>/dev/null) || return 1
+  common_dir=$(git -C "$1" rev-parse --path-format=absolute --git-common-dir 2>/dev/null) || return 1
+  [ -n "$git_dir" ] && [ "$git_dir" != "$common_dir" ]
+}
+
+_rebuild_interrupted() {  # <worktree> <previous tip>: INT/TERM/HUP while the rebase in _rebuild_source_for_hot_files runs
+  _restore_copy_tip "$1" "$2" "пересборка прервана сигналом"
+  fail "close: пересборка прервана сигналом; копия возвращена на прежнюю вершину $2, PREPARED не записан" 7
+}
+
+_rewrite_commit_claims_atomic() {  # <semaphore> <repo> <old shas> <new shas>; caller holds the transition lock
+  # Newline-separated lists paired by position: "commit: <repo> <old>" lines
+  # become claims on the rebuilt commits, every other byte is kept. Same
+  # replace-through-fsynced-temporary discipline as _append_close_fields_atomic.
+  # Prints the number of rewritten lines.
+  python3 - "$1" "$2" "$3" "$4" <<'PY'
+import os
+import stat
+import sys
+
+path, repo, old_text, new_text = sys.argv[1:]
+old, new = old_text.split(), new_text.split()
+if len(old) != len(new) or len(set(old)) != len(old):
+    raise SystemExit(1)
+replacement = {}
+for before, after in zip(old, new):
+    replacement[("commit: %s %s" % (repo, before)).encode("utf-8")] = (
+        "commit: %s %s" % (repo, after)).encode("utf-8")
+fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+temporary = path + ".stage.%d" % os.getpid()
+temp_fd = -1
+try:
+    info = os.fstat(fd)
+    current = os.lstat(path)
+    if (
+        not stat.S_ISREG(info.st_mode)
+        or info.st_uid != os.geteuid()
+        or info.st_nlink != 1
+        or info.st_size <= 0
+        or info.st_size > 1024 * 1024
+        or stat.S_ISLNK(current.st_mode)
+        or (current.st_dev, current.st_ino) != (info.st_dev, info.st_ino)
+    ):
+        raise SystemExit(1)
+    chunks = []
+    while True:
+        chunk = os.read(fd, 65536)
+        if not chunk:
+            break
+        chunks.append(chunk)
+    raw = b"".join(chunks)
+    if len(raw) != info.st_size or b"\0" in raw or not raw.endswith(b"\n"):
+        raise SystemExit(1)
+    lines = raw.split(b"\n")
+    rewritten = [replacement.get(line, line) for line in lines]
+    payload = b"\n".join(rewritten)
+    temp_fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, stat.S_IMODE(info.st_mode))
+    view = memoryview(payload)
+    while view:
+        written = os.write(temp_fd, view)
+        if written <= 0:
+            raise RuntimeError("short stage write")
+        view = view[written:]
+    os.fsync(temp_fd)
+    os.close(temp_fd)
+    temp_fd = -1
+    current = os.lstat(path)
+    if (current.st_dev, current.st_ino, current.st_size) != (info.st_dev, info.st_ino, info.st_size):
+        raise RuntimeError("semaphore changed during claim rewrite")
+    os.replace(temporary, path)
+    directory_fd = os.open(os.path.dirname(path), os.O_RDONLY)
+    try:
+        os.fsync(directory_fd)
+    finally:
+        os.close(directory_fd)
+    print(sum(1 for before, after in zip(lines, rewritten) if before != after))
+finally:
+    if temp_fd >= 0:
+        os.close(temp_fd)
+    try:
+        os.unlink(temporary)
+    except FileNotFoundError:
+        pass
+    os.close(fd)
+PY
+}
+
+_rebuild_source_for_hot_files() {  # <semaphore> <worktree> <hot_publish_cas.py>; fresh origin/main and a clean copy required
+  local semaphore="$1" worktree="$2" cas_script="$3"
+  local remote_head old_head old_base old_commits new_head new_commits cas_reason
+  local rebase_rc=0 rebase_out conflicts saved_traps rewritten
+  # A governance copy shipped without the check has nothing to pre-check here;
+  # isolate-push stays the enforcing point either way.
+  [ -f "$cas_script" ] || return 0
+  remote_head=$(git -C "$worktree" rev-parse --verify 'refs/remotes/origin/main^{commit}' 2>/dev/null) \
+    || fail "close: fresh origin/main для проверки горячих файлов не читается; PREPARED не пишу" 7
+  old_head=$(git -C "$worktree" rev-parse --verify 'HEAD^{commit}' 2>/dev/null) \
+    || fail "close: source HEAD isolated worktree не читается" 7
+  old_base=$(git -C "$worktree" merge-base "$old_head" "$remote_head" 2>/dev/null) \
+    || fail "close: source base для проверки горячих файлов не вычислен" 7
+  old_commits=$(git -C "$worktree" rev-list --reverse "$old_base..$old_head" 2>/dev/null) \
+    || fail "close: source commit set для проверки горячих файлов не прочитан" 7
+  # The commit lists below are newline-separated SHAs; word splitting is intended.
+  old_commits=$(_undelivered_source_commits "$semaphore" "$worktree" "$remote_head" $old_commits) \
+    || fail "close: недоставленные source commits не определены; PREPARED не пишу" 7
+  if cas_reason=$(python3 "$cas_script" "$worktree" "$remote_head" - $old_commits 2>&1); then
+    return 0
+  fi
+  # Only a moved hot document is rebuilt here. A merge commit cannot be
+  # published at all, and a check that did not run (git timeout, unreadable
+  # objects) proves nothing -- both refuse before any rebase.
+  case "$cas_reason" in
+    *"hot-file version conflict"*) ;;
+    *"single-parent source commits"*)
+      fail "close: среди недоставленных коммитов сессии есть merge-коммит (или коммит без родителя), а публикация переносит только однородительские коммиты — линеаризуй историю копии вручную и повтори; rebase не запускался, PREPARED не записан, копия не тронута" 7 ;;
+    *)
+      fail "close: проверка горячих файлов не отработала: ${cas_reason}; rebase не запускался, PREPARED не записан, копия не тронута" 7 ;;
+  esac
+  # Only a linked copy under the runtime store may be rewritten: a corrupted
+  # semaphore naming the canonical checkout would otherwise get its branch
+  # rebased and reset here.
+  _isolated_copy_is_linked "$worktree" \
+    || fail "close: $worktree не является связанной копией под .iwe-runtime/isolated-worktrees — rebase и reset запрещены, PREPARED не записан" 7
+  echo "Session CLOSE: $cas_reason; пересобираю коммиты сессии поверх свежего origin/main (git rebase --onto, без -X)" >&2
+  # No autostash: the caller proved the copy clean, and a stash replayed onto
+  # a rebuilt set that is then reset away would be lost with it. A signal
+  # during the rebase aborts it and puts the copy back on its previous tip;
+  # the previous handlers are restored afterwards.
+  saved_traps=$(trap -p INT TERM HUP)
+  trap '_rebuild_interrupted "$worktree" "$old_head"' INT TERM HUP
+  rebase_out=$(timeout 120 git -C "$worktree" -c rebase.autoStash=false rebase --onto "$remote_head" "$old_base" 2>&1) \
+    || rebase_rc=$?
+  trap - INT TERM HUP
+  [ -z "$saved_traps" ] || eval "$saved_traps"
+  if [ "$rebase_rc" -ne 0 ]; then
+    conflicts=$(git -C "$worktree" diff --name-only --diff-filter=U 2>/dev/null | tr '\n' ' ')
+    conflicts="${conflicts% }"
+    printf '%s\n' "$rebase_out" | tail -5 >&2
+    _restore_copy_tip "$worktree" "$old_head" "rebase не прошёл"
+    fail "close: горячий файл сдвинут на origin/main, а rebase коммитов сессии поверх него не прошёл: конфликт в ${conflicts:-<см. вывод git выше>} — перечитай документ и повтори правку; PREPARED не записан, копия на прежней вершине" 7
+  fi
+  new_head=$(git -C "$worktree" rev-parse --verify 'HEAD^{commit}' 2>/dev/null) || new_head="$old_head"
+  new_commits=$(git -C "$worktree" rev-list --reverse "$remote_head..$new_head" 2>/dev/null) || new_commits=""
+  if ! _hot_source_sets_equivalent "$cas_script" "$worktree" "$old_commits" "$new_commits"; then
+    _restore_copy_tip "$worktree" "$old_head" "пересобранный набор не эквивалентен исходному"
+    fail "close: пересобранный набор коммитов не эквивалентен исходному в горячих файлах (другое число или порядок коммитов — например, та же правка уже есть на origin — либо другие строки); копия возвращена на прежнюю вершину, PREPARED не записан" 7
+  fi
+  if ! cas_reason=$(python3 "$cas_script" "$worktree" "$remote_head" - $new_commits 2>&1); then
+    _restore_copy_tip "$worktree" "$old_head" "пересобранный набор не прошёл проверку горячих файлов"
+    fail "close: пересобранный набор коммитов не прошёл проверку горячих файлов: ${cas_reason}; копия возвращена на прежнюю вершину, PREPARED не записан" 7
+  fi
+  # The note-commit claims must name the commits PREPARED is about to publish:
+  # left on the replaced SHAs they have no publish proof once the rebuilt set
+  # gets stuck, and --abandon-prepared (the documented way out) refuses them.
+  rewritten=$(_rewrite_commit_claims_atomic "$semaphore" "$GOV_REPO" "$old_commits" "$new_commits") || {
+    _restore_copy_tip "$worktree" "$old_head" "заявки note-commit не перезаписаны"
+    fail "close: заявки note-commit не перезаписаны на пересобранные коммиты; копия возвращена на прежнюю вершину, PREPARED не записан" 7
+  }
+  echo "Session CLOSE: набор коммитов сессии пересобран поверх origin/main $remote_head (заявок note-commit переписано: $rewritten)" >&2
+  echo "  было:  $(printf '%s ' $old_commits)" >&2
+  echo "  стало: $(printf '%s ' $new_commits)" >&2
+}
+
 _close_delivery_and_transition() {
   local governance_repo sessions_repo isolated_worktree isolate_push_script
   local sem_basename close_receipt delivery_state publish_digest="" prepare_digest=""
@@ -9114,7 +9392,7 @@ _close_delivery_and_transition() {
         source_status=$(_unique_record_field "$SEM_FILE" close_delivery_source_status_sha256 || true)
         terminal_sha=$(_unique_record_field "$SEM_FILE" close_delivery_terminal_sha256 || true)
         publish_digest=$(_record_close_abandoned "$SEM_FILE" "$SESSION_ID" "$prepare_digest" \
-          "$verified_json" "$source_head" "$source_status" "$terminal_sha" "$AGENT") \
+          "$verified_json" "$source_head" "$source_status" "$terminal_sha" "$AGENT" "$UNFREEZE_REASON") \
           || fail "close --abandon-prepared: attestation receipt не записан durable; PREPARED/worktree сохранены" 7
         [ "$(_close_delivery_state "$SEM_FILE" "$SESSION_ID" || true)" = "published" ] \
           || fail "close --abandon-prepared: записанный receipt не прошёл self-check" 7
@@ -9347,6 +9625,38 @@ _close_delivery_and_transition() {
     timeout 10 git -C "$CLOSING_WORKTREE" fetch --quiet origin \
       '+refs/heads/main:refs/remotes/origin/main' 2>/dev/null \
       || fail "close: PREPARED требует fresh origin/main; .open/worktree сохранены" 7
+    # A copy left mid-rebase (killed close, manual rebase) has a detached HEAD
+    # and a partial commit set: a PREPARED taken from it can never be published
+    # and the session gets stuck behind it (WP-561 Ч3).
+    if _rebase_in_progress "$CLOSING_WORKTREE" \
+        || ! git -C "$CLOSING_WORKTREE" symbolic-ref -q HEAD >/dev/null 2>&1; then
+      fail "close: копия $CLOSING_WORKTREE в состоянии rebase или с оторванным HEAD — заверши или отмени его: git -C $CLOSING_WORKTREE rebase --abort; PREPARED не записан" 7
+    fi
+    # bug-2026-09-16-quick-close-session-release-circular-terminal-check.md,
+    # peer-session 2026-09-17-14 (Kimi cold-review, conditional consensus):
+    # _worktree_clean_status_sha treats ANY ignored path (scripts/__pycache__/,
+    # lock files a pipeline step left behind) as unclean -- the same
+    # false-positive class already fixed for night-cycle's own worktree
+    # (clean_day_open_ignored_debris, commit 70225e28a), but this PREPARE-write
+    # path had no equivalent call. -X only: never touches tracked or
+    # untracked-but-not-ignored content, so it cannot discard real work.
+    # Residual risk (Kimi): a deliberately-gitignored file that is NOT pipeline
+    # debris (e.g. an uncommitted .env dropped into this isolated worktree)
+    # would also be removed here -- but close already refused unconditionally
+    # whenever such a file was present, so this can only unblock a session,
+    # never silently discard something that used to close cleanly.
+    # Best-effort by design (matches clean_day_open_ignored_debris) -- a clean
+    # failure here just means the check below fails with its normal message.
+    git -C "$CLOSING_WORKTREE" clean -fdX --quiet 2>/dev/null || true
+    # Proved clean BEFORE the rebuild below (WP-561 Ч3): a dirty copy is refused
+    # here, so the rebase never runs over uncommitted work and never stashes it.
+    source_status=$(_worktree_clean_status_sha "$CLOSING_WORKTREE" || true)
+    [ -n "$source_status" ] \
+      || fail "close: isolated worktree не полностью clean (включая ignored/untracked); PREPARED не пишу" 7
+    # WP-561 Ч3: rebuild BEFORE the snapshot below, so PREPARED records the set
+    # that isolate-push can actually publish (head/base/commits are read after).
+    _rebuild_source_for_hot_files "$SEM_FILE" "$CLOSING_WORKTREE" \
+      "$(dirname "$isolate_push_script")/hot_publish_cas.py"
     source_head=$(git -C "$CLOSING_WORKTREE" rev-parse --verify 'HEAD^{commit}' 2>/dev/null) \
       || fail "close: source HEAD isolated worktree не читается" 7
     source_base=$(git -C "$CLOSING_WORKTREE" merge-base "$source_head" refs/remotes/origin/main 2>/dev/null) \
@@ -9365,25 +9675,11 @@ _close_delivery_and_transition() {
     [ "$actual_origin" = "$source_origin" ] \
       || fail "close: source origin изменился во время PREPARED snapshot" 7
     target_ref="refs/heads/main"
-    # bug-2026-09-16-quick-close-session-release-circular-terminal-check.md,
-    # peer-session 2026-09-17-14 (Kimi cold-review, conditional consensus):
-    # _worktree_clean_status_sha treats ANY ignored path (scripts/__pycache__/,
-    # lock files a pipeline step left behind) as unclean -- the same
-    # false-positive class already fixed for night-cycle's own worktree
-    # (clean_day_open_ignored_debris, commit 70225e28a), but this PREPARE-write
-    # path had no equivalent call. -X only: never touches tracked or
-    # untracked-but-not-ignored content, so it cannot discard real work.
-    # Residual risk (Kimi): a deliberately-gitignored file that is NOT pipeline
-    # debris (e.g. an uncommitted .env dropped into this isolated worktree)
-    # would also be removed here -- but close already refused unconditionally
-    # whenever such a file was present, so this can only unblock a session,
-    # never silently discard something that used to close cleanly.
-    # Best-effort by design (matches clean_day_open_ignored_debris) -- a clean
-    # failure here just means the check below fails with its normal message.
-    git -C "$CLOSING_WORKTREE" clean -fdX --quiet 2>/dev/null || true
+    # The rebuild above may have moved the copy; PREPARED binds the status of
+    # the tree it snapshots (a completed rebase leaves it clean).
     source_status=$(_worktree_clean_status_sha "$CLOSING_WORKTREE" || true)
     [ -n "$source_status" ] \
-      || fail "close: isolated worktree не полностью clean (включая ignored/untracked); PREPARED не пишу" 7
+      || fail "close: isolated worktree не clean после пересборки; PREPARED не пишу" 7
     source_commits=$(_isolated_source_commits_json "$CLOSING_WORKTREE" "$source_base" "$source_head" || true)
     [ -n "$source_commits" ] \
       || fail "close: полный ordered source commit set не сериализуется" 7
@@ -10170,6 +10466,15 @@ print(json.dumps({"wp": sys.argv[1], "slug": sys.argv[2], "agent": sys.argv[3], 
     || fail "close: terminal proof не удалось снять как immutable owned snapshot; никаких terminal mutation не выполнено" 7
   else
     echo "Session CLOSE: продолжаю exact staged transition ($CLOSE_RESUME_STATE); mutable card/scope уже связаны delivery digest." >&2
+    # The declared-channel sentinels above are only set on a fresh close, so a
+    # resumed close (PREPARED -> --abandon-prepared) skipped the close events
+    # below. close_path is fixed at open, so it can be re-read from the
+    # semaphore; other bypass channels need a card and only exist on a fresh close.
+    if grep -q '^close_path: peer-session$' "${SEM_FILE:-}" 2>/dev/null; then
+      FORCED_CARD="declared-peer-session:$SLUG"
+    elif grep -q '^close_path: publish-only$' "${SEM_FILE:-}" 2>/dev/null; then
+      FORCED_CARD="declared-publish-only:$SLUG"
+    fi
   fi
 
   # cancel-session and audit above are retry-safe runner operations: their
@@ -10226,17 +10531,60 @@ print(json.dumps({"wp": sys.argv[1], "slug": sys.argv[2], "agent": sys.argv[3], 
   IWE_VERSION_SCRIPT="$IWE_ROOT/scripts/iwe-version.sh"
   [ -x "$IWE_VERSION_SCRIPT" ] && "$IWE_VERSION_SCRIPT" 2>/dev/null || true
 
-  # Warn if local commits are not pushed in repos touched by this session
-  _warn_unpushed() {
-    local repo="$1"
-    local ahead
-    ahead=$(git -C "$repo" rev-list --left-only --count HEAD...origin/main 2>/dev/null || echo "")
-    if [ -n "$ahead" ] && [ "$ahead" -gt 0 ]; then
-      echo "⚠️  $ahead незапушенных коммита в $(basename "$repo"). Выполни: git -C $repo push" >&2
-    fi
-  }
   # Terminal transition above guarantees this exact receipt exists.
   _sem_read="$SEM_FILE.closed"
+  # Commits this session claimed (note-commit claims + PREPARED source set).
+  # Repo-agnostic on purpose: a claim is matched to a checkout by the full OID
+  # existing there, so no repo-name resolution is needed.
+  _session_claimed_commits() {
+    sed -n 's/^commit: [^ ]* //p' "$_sem_read" 2>/dev/null || true
+    _unique_record_field "$_sem_read" close_delivery_source_commits 2>/dev/null \
+      | jq -r '.[]' 2>/dev/null || true
+  }
+  # Delivered = ancestor of origin/main, or patch-equivalent to a commit there
+  # (cherry-pick delivery gives a different OID; same `git cherry` primitive as
+  # _repo_head_is_patch_equivalent, applied per commit instead of per HEAD range).
+  _session_commit_is_delivered() {  # <repo> <sha>
+    local cherry_out cherry_rc=0
+    git -C "$1" merge-base --is-ancestor "$2" origin/main 2>/dev/null && return 0
+    # Same 30 s cap as _repo_head_is_patch_equivalent: patch-ids on a far-behind
+    # checkout must not stall close. A timeout means "not verified", reported as
+    # undelivered -- a warning beats a silent skip.
+    cherry_out=$(timeout 30 git -C "$1" cherry origin/main "$2" "$2~1" 2>/dev/null) || cherry_rc=$?
+    if [ "$cherry_rc" -eq 124 ]; then
+      echo "⚠️  git cherry не уложился в 30 с: коммит $2 в $(basename "$1") не проверен, считаю недоставленным" >&2
+      return 1
+    fi
+    case "$cherry_out" in
+      '- '*|*$'\n- '*) return 0 ;;
+    esac
+    return 1
+  }
+  # Warn only about THIS session's undelivered commits; other local commits in a
+  # shared checkout are not this session's to push, so they are an info line.
+  _warn_unpushed() {
+    local repo="$1" ahead local_only sha oid own_in_ahead=0 own_undelivered=0
+    ahead=$(git -C "$repo" rev-list --left-only --count HEAD...origin/main 2>/dev/null || echo "")
+    [ -n "$ahead" ] && [ "$ahead" -gt 0 ] || return 0
+    local_only=$(git -C "$repo" rev-list origin/main..HEAD 2>/dev/null || true)
+    while IFS= read -r sha; do
+      [ -n "$sha" ] || continue
+      git -C "$repo" cat-file -e "$sha^{commit}" 2>/dev/null || continue
+      oid=$(git -C "$repo" rev-parse "$sha^{commit}") || continue
+      # No `printf | grep -q` here: under pipefail grep's early exit can SIGPIPE
+      # printf on a long list, and the lost match understates the own count.
+      case $'\n'"$local_only"$'\n' in
+        *$'\n'"$oid"$'\n'*) own_in_ahead=$((own_in_ahead + 1)) ;;
+      esac
+      _session_commit_is_delivered "$repo" "$sha" || own_undelivered=$((own_undelivered + 1))
+    done < <(_session_claimed_commits | sort -u)
+    if [ "$own_undelivered" -gt 0 ]; then
+      echo "⚠️  $own_undelivered незапушенных коммита этой сессии в $(basename "$repo"). Выполни: git -C $repo push" >&2
+    fi
+    if [ "$((ahead - own_in_ahead))" -gt 0 ]; then
+      echo "ℹ️  $(basename "$repo"): ещё $((ahead - own_in_ahead)) чужих локальных коммитов (не этой сессии)." >&2
+    fi
+  }
   _seen_repos=""
   _warn_unpushed_once() {
     local repo="$1"

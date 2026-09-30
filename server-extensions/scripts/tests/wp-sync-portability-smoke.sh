@@ -51,5 +51,13 @@ contains "$out" "GIT_SYNC_STATUS: checker_unavailable" "status line names checke
 contains "$out" "GIT_SYNC_GATE: degraded" "explicit degraded gate line"
 contains "$(cat "$SANDBOX/err.txt")" "Sync Gate пропущен" "warning on stderr"
 
+echo "scenario F: an explicit IWE_GOVERNANCE_REPO without a registry is used as given, never replaced by a guess (DS-strategy)"
+out=$(IWE_GOVERNANCE_REPO=custom-gov bash "$ROOT/scripts/wp-archive-trigger-check.sh" 9201 "$WS" 2>&1)
+if printf '%s' "$out" | grep -qF "line_count="; then echo "  FAIL trigger-check read a DS-strategy card although the explicit repo has none"; fails=$((fails+1)); else echo "  ok   trigger-check did not fall back to DS-strategy"; fi
+out=$(IWE_WORKSPACE="$WS" IWE_GOVERNANCE_REPO=custom-gov python3 "$ROOT/scripts/wp-archive-closed-phases.py" 9201 --json 2>&1)
+if printf '%s' "$out" | grep -qF "$GOV/inbox/WP-9201/WP-9201.md"; then echo "  FAIL archive script read a DS-strategy card although the explicit repo has none"; fails=$((fails+1)); else echo "  ok   archive script did not fall back to DS-strategy"; fi
+out=$(cd "$SANDBOX" && IWE_ROOT="$WS" IWE_GOVERNANCE_REPO=custom-gov bash "$ROOT/scripts/wp-reopen-gate.sh" actualize --wp 9201 --session-id s1 2>&1)
+if printf '%s' "$out" | grep -qF "git fetch origin main"; then echo "  FAIL reopen gate found a card in DS-strategy although the explicit repo has none"; fails=$((fails+1)); else echo "  ok   reopen gate did not fall back to DS-strategy"; fi
+
 if [ "$fails" -ne 0 ]; then echo "FAIL: $fails check(s)"; exit 1; fi
 echo "PASS: all scenarios"

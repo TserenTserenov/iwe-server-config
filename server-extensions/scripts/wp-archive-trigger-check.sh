@@ -32,10 +32,11 @@ set -uo pipefail
 
 WP_NUM="${1:-}"
 IWE="${2:-${IWE_ROOT:-$HOME/IWE}}"
-# Governance repo: $IWE_GOVERNANCE_REPO, else the first known name that holds
+# Governance repo: an explicit $IWE_GOVERNANCE_REPO always wins (never replaced
+# by a guess); only when it is unset, the first known name that holds
 # docs/WP-REGISTRY.md (same candidates as .claude/scripts/wp-sync-bundle.sh).
 GOV_REPO="${IWE_GOVERNANCE_REPO:-}"
-if [[ ! -f "$IWE/$GOV_REPO/docs/WP-REGISTRY.md" ]]; then
+if [[ -z "$GOV_REPO" ]]; then
   for cand in DS-my-strategy DS-strategy strategy; do
     if [[ -f "$IWE/$cand/docs/WP-REGISTRY.md" ]]; then GOV_REPO="$cand"; break; fi
   done
