@@ -208,9 +208,22 @@ tg_alert() {
   case "$GIT_DIRTY_GUARD_TG_ALERTS" in
     0|false|no|off) return 0 ;;
   esac
-  [ -n "${TELEGRAM_BOT_TOKEN:-}" ] && [ -n "${TELEGRAM_CHAT_ID:-}" ] || return 0
-  curl -s --max-time 10 -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
-    -d "chat_id=${TELEGRAM_CHAT_ID}" --data-urlencode "text=$msg" >/dev/null || true
+  if [ -z "${TELEGRAM_BOT_TOKEN:-}" ] || [ -z "${TELEGRAM_CHAT_ID:-}" ]; then
+    echo "git-dirty-guard: Telegram credentials unavailable -- alert remains pending" >&2
+    return 1
+  fi
+  local response
+  # Never print the response or URL: either can expose notification credentials.
+  # Telegram may return HTTP 200 with ok=false, so transport success is insufficient.
+  if ! response=$(curl -fs --max-time 10 -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+    -d "chat_id=${TELEGRAM_CHAT_ID}" --data-urlencode "text=$msg"); then
+    echo "git-dirty-guard: Telegram transport failed -- alert remains pending" >&2
+    return 1
+  fi
+  if ! printf '%s' "$response" | python3 -c 'import json,sys; sys.exit(0 if json.load(sys.stdin).get("ok") is True else 1)' 2>/dev/null; then
+    echo "git-dirty-guard: Telegram did not acknowledge alert -- alert remains pending" >&2
+    return 1
+  fi
 }
 
 # --- Alert dedup (WP-538 Ф4, 2026-09-02). Ported onto this file from the 18.08/01.09
@@ -249,9 +262,10 @@ alert_dedup_send() {
       ;;
   esac
   local state_file="$GIT_DIR/dirty-guard-alert-state"
-  local now prev_type="" prev_sig="" prev_first="" prev_last=""
+  local now prev_type="" prev_sig="" prev_first="" prev_last="" prev_version=""
   now=$(date +%s)
   if [ -f "$state_file" ]; then
+    prev_version=$(awk -F= '$1=="version"{print $2}' "$state_file" 2>/dev/null)
     prev_type=$(awk -F= '$1=="type"{print $2}' "$state_file" 2>/dev/null)
     prev_sig=$(awk -F= '$1=="signature"{print $2}' "$state_file" 2>/dev/null)
     prev_first=$(awk -F= '$1=="first_alerted_at"{print $2}' "$state_file" 2>/dev/null)
@@ -260,11 +274,12 @@ alert_dedup_send() {
   case "$prev_first" in ''|*[!0-9]*) prev_first="" ;; esac
   case "$prev_last" in ''|*[!0-9]*) prev_last="" ;; esac
 
-  if [ "$prev_type" != "$type" ] || [ "$prev_sig" != "$signature" ] \
+  # v1 recorded attempted delivery; only v2 proves Telegram acknowledged it.
+  if [ "$prev_version" != "2" ] || [ "$prev_type" != "$type" ] || [ "$prev_sig" != "$signature" ] \
     || [ -z "$prev_first" ] || [ -z "$prev_last" ]; then
     echo "git-dirty-guard: new problem ($type) -- full alert" >&2
-    tg_alert "$full_msg"
-    printf 'version=1\ntype=%s\nsignature=%s\nfirst_alerted_at=%s\nlast_alerted_at=%s\n' \
+    tg_alert "$full_msg" || return 1
+    printf 'version=2\ntype=%s\nsignature=%s\nfirst_alerted_at=%s\nlast_alerted_at=%s\n' \
       "$type" "$signature" "$now" "$now" > "$state_file" 2>/dev/null || true
     return 0
   fi
@@ -277,8 +292,8 @@ alert_dedup_send() {
 
   local total_h=$(( (now - prev_first) / 3600 ))
   echo "git-dirty-guard: same problem ($type), escalating after ${GIT_DIRTY_GUARD_ALERT_TTL_MIN} min of silence" >&2
-  tg_alert "🚨 $REPO: всё ещё не исправлено (${total_h}ч с первого предупреждения). $cta"
-  printf 'version=1\ntype=%s\nsignature=%s\nfirst_alerted_at=%s\nlast_alerted_at=%s\n' \
+  tg_alert "🚨 $REPO: всё ещё не исправлено (${total_h}ч с первого предупреждения). $cta" || return 1
+  printf 'version=2\ntype=%s\nsignature=%s\nfirst_alerted_at=%s\nlast_alerted_at=%s\n' \
     "$type" "$signature" "$prev_first" "$now" > "$state_file" 2>/dev/null || true
 }
 

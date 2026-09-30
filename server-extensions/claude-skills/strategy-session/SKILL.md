@@ -1,9 +1,10 @@
 ---
 name: strategy-session
-description: Стратегическая сессия — диспетчер. День-0 (нет Strategy.md/WeekPlan) → initial flow (цели, неудовлетворённости, первый WeekPlan). День-1+ → weekly flow (требует черновик от session-prep). Триггеры — «проведём стратегическую сессию», «первая стратегическая сессия», «strategy session», «давай стратегировать».
+description: Стратегическая сессия — диспетчер. День-0 (нет Strategy.md/WeekPlan) → initial flow (цели, неудовлетворённости, первый WeekPlan). Первая сессия календарного месяца → полный monthly flow (стратегическая сверка + линза калибра). Остальные дни → короткий weekly flow (требует черновик от session-prep). Триггеры — «проведём стратегическую сессию», «первая стратегическая сессия», «strategy session», «давай стратегировать».
 version: 1.0.0
 layer: L1
 status: active
+browser_safe: false
 triggers:
   slash: [/strategy-session]
   phrases: []
@@ -19,28 +20,85 @@ gates_rationale: "операционный скилл; WP Gate применим 
 
 # Strategy Session — диспетчер
 
-> Один skill, два режима. Выбор по факту наличия артефактов в `{{GOVERNANCE_REPO}}/`.
+> Один skill, три режима. Выбор по факту наличия артефактов в `{{GOVERNANCE_REPO}}/` + календарной позиции сессии.
 
 ## When to use
 
-Стратегическая сессия — диспетчер. День-0 (нет Strategy.md/WeekPlan) → initial flow (цели, неудовлетворённости, первый WeekPlan). День-1+ → weekly flow (требует черновик от session-prep). Триггеры — «проведём стратегическую сессию», «первая стратегическая сессия», «strategy session», «давай стратегировать».
+Стратегическая сессия — диспетчер. День-0 (нет Strategy.md/WeekPlan) → initial flow (цели, неудовлетворённости, первый WeekPlan). Первая сессия календарного месяца → полный monthly flow (стратегическая сверка + линза калибра, ~45-60 мин). Остальные сессии → короткий weekly flow (требует черновик от session-prep, ~15-20 мин). Триггеры — «проведём стратегическую сессию», «первая стратегическая сессия», «strategy session», «давай стратегировать».
 
 ## Algorithm
 
-### Шаг 0. Extensions (before)
-`bash .claude/scripts/load-extensions.sh strategy-session before` → Exit 0: Read каждый файл, выполнить. Exit 1: пропустить.
+### Шаг 0. Рабочая копия governance-репозитория (БЛОКИРУЮЩЕЕ, ДО расширений и любой записи)
+
+> Если в установке есть `session-guard.sh` (канон под freeze), правка идёт только из изолированной копии и публикуется через `ds-publish.sh` (правило «Канон под freeze» в `{{GOVERNANCE_REPO}}/CLAUDE.md`). Если session-guard в установке нет, заморозки нет: работай как раньше в найденной рабочей копии и сохраняй штатным способом. Это две явные ветки ниже, не молчаливый пропуск. ВСЕ пути записи строятся от `GOV_WT`, не от канона.
+
+```bash
+CANON="{{WORKSPACE_DIR}}/{{GOVERNANCE_REPO}}"
+GUARD="${IWE_SCRIPTS:-}/session-guard.sh"
+[ -f "$GUARD" ] || GUARD="{{WORKSPACE_DIR}}/scripts/session-guard.sh"
+[ -f "$GUARD" ] || GUARD="$CANON/scripts/session-guard.sh"
+[ -f "$GUARD" ] && GUARD_MODE=required || GUARD_MODE=absent
+CANON_C=$(cd -- "$CANON" 2>/dev/null && pwd -P) || { echo "ERROR: канон $CANON недоступен" >&2; exit 1; }
+CANON_COMMON=$(git -C "$CANON_C" rev-parse --path-format=absolute --git-common-dir 2>/dev/null) \
+  || { echo "ERROR: $CANON_C не git-репозиторий" >&2; exit 1; }
+if [ -f "$CANON_C/scripts/lib/governance-repo-path.sh" ]; then
+  CAND=$(. "$CANON_C/scripts/lib/governance-repo-path.sh" && resolve_active_worktree) \
+    || { echo "ERROR: resolve_active_worktree завершился с ошибкой" >&2; exit 1; }
+else
+  CAND=$(git rev-parse --show-toplevel 2>/dev/null) || CAND=""
+fi
+CAND_C=""; CAND_COMMON=""
+if [ -n "$CAND" ]; then
+  CAND_C=$(cd -- "$CAND" 2>/dev/null && pwd -P) || { echo "ERROR: не удалось нормализовать путь $CAND" >&2; exit 1; }
+  CAND_COMMON=$(git -C "$CAND_C" rev-parse --path-format=absolute --git-common-dir 2>/dev/null) || CAND_COMMON=""
+fi
+# кандидат годится, только если его общий git-каталог совпадает с каноном (тот же governance-репозиторий)
+if [ -n "$CAND_C" ] && [ "$CAND_COMMON" = "$CANON_COMMON" ]; then GOV_WT="$CAND_C"; else GOV_WT=""; fi
+if [ "$GUARD_MODE" = required ]; then
+  if [ -z "$GOV_WT" ] || [ "$GOV_WT" = "$CANON_C" ]; then
+    echo "NOT ISOLATED: канон под freeze, запись запрещена. Открой копию: bash \"$GUARD\" open --isolate --wp <WP-N>, затем cd в worktree_path и повтори шаг" >&2; exit 2
+  fi
+  echo "GOV_WT=$GOV_WT mode=isolated"
+else
+  [ -n "$GOV_WT" ] || GOV_WT="$CANON_C"
+  echo "GOV_WT=$GOV_WT mode=legacy (session-guard не найден: заморозки нет, работа как раньше)"
+fi
+```
+
+- Код выхода 0 -> **запиши абсолютный путь `GOV_WT` в свой ответ пользователю** (контекст сессии): независимые вызовы Bash не разделяют переменные, а `cd` в подоболочке каталог не меняет.
+- Код выхода 2 (`NOT ISOLATED`) -> ничего не записывай. Выполни `session-guard.sh open --isolate ...`, возьми `worktree_path` из его вывода, `cd` в него и повтори блок. Не получилось -> сообщи пилоту и остановись (fail-closed), в канон не пиши. Код 1 -> ошибка резолвера или путей: покажи сообщение и остановись.
+- КАЖДЫЙ последующий блок записи начинается с явного задания и проверки: `GOV_WT="<записанный абсолютный путь>"; : "${GOV_WT:?}"; cd -- "$GOV_WT" || exit 1`.
+- Публикация в конце: `mode=isolated` -> коммит в `GOV_WT`, затем `bash "$GOV_WT/scripts/ds-publish.sh" "$GOV_WT" normal --reason "strategy-session"`, в канон не коммить. `mode=legacy` -> сохраняй штатным способом установки (коммит и push своими средствами); `ds-publish.sh` используй, только если он есть.
+
+### Шаг 0.1. Extensions (before)
+`GOV_WT="<записанный путь>" bash .claude/scripts/load-extensions.sh strategy-session before` -> Exit 0: Read каждый файл, выполнить; расширения работают с этим корнем `GOV_WT`. Exit 1: пропустить.
 
 ## Шаг 1. Определить режим
 
 Проверь наличие любого из:
 
-- `{{WORKSPACE_DIR}}/{{GOVERNANCE_REPO}}/docs/Strategy.md`
-- `{{WORKSPACE_DIR}}/{{GOVERNANCE_REPO}}/current/WeekPlan W*.md`
+- `$GOV_WT/docs/Strategy.md`
+- `$GOV_WT/current/WeekPlan W*.md`
+
+Если хотя бы один есть — проверь ВТОРЫМ шагом, первая ли это Strategy Session календарного месяца. Записи двух легальных раскладок (issue #608, тот же корень, что #545 в day-open-scaffold.sh): плоские файлы Strategy/Day-сессий (`sessions/YYYY-MM-DD.md`) и подпапка по месяцу для peer-сессий (`sessions/YYYY-MM/`) — искать нужно по обоим адресам, иначе плоская раскладка (дефолт по `memory/routing-vocab.md`) всегда даёт «не найдено» и месячная сверка не срабатывает ни разу:
+```bash
+GOV_WT="<записанный путь>"; : "${GOV_WT:?}"; cd -- "$GOV_WT" || exit 1
+SESSIONS_DIR=$(source "{{WORKSPACE_DIR}}/scripts/lib/common.sh" 2>/dev/null && iwe_sessions_dir 2>/dev/null) || SESSIONS_DIR="$GOV_WT/sessions"
+grep -rl "strategy-session\|Strategy Session" \
+  "$SESSIONS_DIR/$(date +%Y-%m)-"*.md \
+  "$SESSIONS_DIR/$(date +%Y-%m)/" 2>/dev/null
+```
+Первая сессия месяца = дата сессии ≤7 числа месяца И поиск выше пуст. Журнал сессий берётся из `iwe_sessions_dir` (общий журнал вне копии), при его отсутствии из `$GOV_WT/sessions`.
+
+> **Найдено платформенным аудитом 17.08.2026:** до этого исправления диспетчер знал только про initial/weekly — monthly-вариант (`strategy-session-monthly.md`) был реализован, но ничем не вызывался, кроме редкой ручной эскалации из weekly-stop-gate. Результат — шаги, привязанные только к monthly (стратегическая сверка, линза калибра/lifework-пакет, разбор inbox), фактически никогда не запускались ни у одного пользователя. Этот шаг — фикс маршрутизации, не новая функциональность.
+>
+> **Известное ограничение (policy, не баг, peer-review с Codex 17.08.2026):** триггер идемпотентен относительно УСПЕШНОГО запуска (файл сессии записан в `sessions/`), но не относительно прерванного/aborted запуска до записи файла — следующая попытка в том же месяце снова увидит «нет записей» и снова пойдёт в monthly. Осознанный компромисс: at-least-once per month лучше, чем zero-times (баг, который этот фикс и устраняет). Ужесточение до exactly-once — отдельный РП при появлении живого сигнала, что дублирование monthly реально мешает.
 
 | Состояние | Режим | Куда дальше |
 |-----------|-------|-------------|
 | Нет ни Strategy.md, ни WeekPlan | **initial** (день-0) | §2 этого файла |
-| Есть Strategy.md и/или WeekPlan со `status: draft` | **weekly** | `roles/strategist/prompts/strategy-session-weekly.md` |
+| Есть Strategy.md и/или WeekPlan, и это первая сессия календарного месяца | **monthly** (полный вариант) | `roles/strategist/prompts/strategy-session-monthly.md` |
+| Есть Strategy.md и/или WeekPlan со `status: draft`, не первая сессия месяца | **weekly** | `roles/strategist/prompts/strategy-session-weekly.md` |
 | Есть Strategy.md, но нет draft WeekPlan | weekly без draft | сообщи пользователю: «нет черновика, запустить session-prep?» |
 
 ---
@@ -60,7 +118,7 @@ gates_rationale: "операционный скилл; WP Gate применим 
 - «Чему хочешь научиться?»
 - «Какие 2-3 крупные цели на ближайшие 3-6 месяцев?»
 
-Запиши ответы в `{{WORKSPACE_DIR}}/{{GOVERNANCE_REPO}}/docs/Strategy.md` по структуре:
+Запиши ответы в `$GOV_WT/docs/Strategy.md` по структуре:
 - Видение (1 год)
 - Цели на горизонт (3-6 месяцев)
 - Принципы (что для меня важно)
@@ -71,7 +129,7 @@ gates_rationale: "операционный скилл; WP Gate применим 
 - «Что сейчас мешает? Где разрыв между текущим и желаемым?»
 - «Что регулярно раздражает или забирает энергию?»
 
-Запиши в `{{WORKSPACE_DIR}}/{{GOVERNANCE_REPO}}/docs/Dissatisfactions.md` списком: каждая неудовлетворённость = 1-2 строки.
+Запиши в `$GOV_WT/docs/Dissatisfactions.md` списком: каждая неудовлетворённость = 1-2 строки.
 
 ### 2.3. Первый WeekPlan (10 мин)
 
@@ -82,7 +140,7 @@ gates_rationale: "операционный скилл; WP Gate применим 
 
 **Ориентир 30/30/30 (WP-481 Ф24, пятый семинар FPF, 11.08).** Справочная эвристика темпа самой сессии, не чек-лист и не гейт: примерно треть времени — разбор фактов/состояния, треть — генерация вариантов, треть — решение. Не мерить строго; полезно как ориентир для калибровки, если сессия сильно перекошена в одну фазу.
 
-Запиши в `{{WORKSPACE_DIR}}/{{GOVERNANCE_REPO}}/current/WeekPlan W{N}.md` (где N — номер ISO-недели).
+Запиши в `$GOV_WT/current/WeekPlan W{N}.md` (где N — номер ISO-недели).
 
 ### 2.4. Обновление MEMORY.md (2 мин)
 
@@ -110,7 +168,7 @@ gates_rationale: "операционный скилл; WP Gate применим 
 
 ### 3.1 Обход Backlog (B-005, обязательно)
 
-Прочитай `{{WORKSPACE_DIR}}/{{GOVERNANCE_REPO}}/docs/Backlog.md`. Для каждой записи `B-NNN` в разделе `## Активные записи`:
+Прочитай `$GOV_WT/docs/Backlog.md`. Для каждой записи `B-NNN` в разделе `## Активные записи`:
 
 - Проверь триггеры открытия (`Триггер открытия:` блок в записи).
 - **Hard-trigger сработал?** (внешнее событие случилось — например, `первый user-deletion request получен`, `legal review запланирован на эту неделю`, `Honcho API timeout ≥48ч`) — поднять для обсуждения в стратегической повестке: «B-NNN активирован, открываем РП?»
@@ -159,3 +217,6 @@ WIP-лимит (8-15).
 подключается к недельному ритуалу только при триггере пересмотра; иначе — Плановик один.
 
 **Extensions (after):** `bash .claude/scripts/load-extensions.sh strategy-session after` → Exit 0: Read каждый файл, выполнить. Exit 1: пропустить.
+
+<!-- USER-SPACE -->
+<!-- /USER-SPACE -->

@@ -1183,6 +1183,16 @@ _owner_pid_is_live_ancestor() {  # <owner-pid>; accidental call-shape guard, not
   return 1
 }
 
+# The git wrapper must distinguish a scheduled writer from an unrelated live
+# session. Persist its exact checkout and process identity, not just an in-memory
+# freeze exception. Missing PID remains legacy/diagnostic state, never authority.
+_write_canonical_owner_identity() {
+  [ -n "$CANONICAL_OWNER" ] || return 0
+  local repo
+  repo=$(git rev-parse --show-toplevel 2>/dev/null) || return 0
+  printf 'canonical_owner: %s\ncanonical_repo: %s\n' "$CANONICAL_OWNER" "$repo"
+}
+
 _append_scheduled_drain_proof() {  # <sem> <agent> <session> <owner-pid> <run-id> <at>
   python3 - "$@" <<'PY'
 import datetime
@@ -3935,6 +3945,9 @@ fi
 if [ -n "$OWNER_PID" ] && ! [[ "$OWNER_PID" =~ ^[0-9]+$ ]]; then
   fail "--owner-pid должен быть числовым PID процесса-владельца" 1
 fi
+if [ -n "$CANONICAL_OWNER" ] && ! [[ "$CANONICAL_OWNER" =~ ^[a-zA-Z0-9][a-zA-Z0-9._-]{0,127}$ ]]; then
+  fail "--canonical-owner должен быть безопасным токеном длиной 1..128" 1
+fi
 
 # Scheduled ownership is a closed, versioned producer contract.  The exact
 # value prevents accidental/malformed producer drift; it is not an
@@ -4276,6 +4289,12 @@ if [ "$CMD" = "open" ]; then
       echo "created_at: $(now_iso)"
       echo "session_id: $HK_SID"
       [ -n "${OWNER_PID:-${CLAUDE_PID:-}}" ] && echo "pid: ${OWNER_PID:-$CLAUDE_PID}"
+      echo "host: $(hostname)"
+      if [ -n "${OWNER_PID:-${CLAUDE_PID:-}}" ]; then
+        OWNER_PID_START=$(ps -p "${OWNER_PID:-$CLAUDE_PID}" -o lstart= 2>/dev/null | sed 's/^ *//; s/ *$//' || true)
+        [ -n "$OWNER_PID_START" ] && echo "pid_start: $OWNER_PID_START"
+      fi
+      _write_canonical_owner_identity
       echo "---"
     } > "$SEM_TEMP"
     _publish_new_open_semaphore "$SEM_TEMP" "$HK_FILE" \
@@ -4941,6 +4960,7 @@ $isolate_status_code $isolate_status_path"
     # host's pid is gone" from "another host's pid" and, in the next phase, a
     # reused pid from the original owner. Informational for today's readers.
     echo "host: $(hostname)"
+    _write_canonical_owner_identity
     if [ -n "${OWNER_PID:-${CLAUDE_PID:-}}" ]; then
       OWNER_PID_START=$(ps -p "${OWNER_PID:-$CLAUDE_PID}" -o lstart= 2>/dev/null | sed 's/^ *//; s/ *$//' || true)
       [ -n "$OWNER_PID_START" ] && echo "pid_start: $OWNER_PID_START"
