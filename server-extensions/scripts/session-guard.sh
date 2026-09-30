@@ -3120,7 +3120,19 @@ _cancel_dead_session_quick_close_runs() {  # <semaphore>
   [ -n "$session_id" ] || return 0
   runner="$IWE_ROOT/$GOV_REPO/scripts/process-runner.py"
   [ -f "$runner" ] || return 0
-  (cd "$IWE_ROOT/$GOV_REPO" && python3 "$runner" cancel-session quick-close "$session_id") \
+  # WP-530 Ф72 (30.09): the sweep runs against the FROZEN canonical checkout
+  # (WP-520). process-runner's write_card() auto-commits every terminal card
+  # (_try_auto_commit_terminal_card), so a bare cancel-session moved canon HEAD
+  # on every sweep. IWE_CARD_AUTOCOMMIT=0 makes the runner write the cancelled
+  # card in place and commit nothing; the card is not lost (it stays on disk,
+  # terminal status, so a repeated cancel-session skips it -- idempotent).
+  # A runner that predates the flag would still commit: fail closed and skip
+  # (the orphan is reaped later by reap_orphan_cards) instead of touching canon.
+  if ! grep -Eq '^[^#]*environ[^#]*IWE_CARD_AUTOCOMMIT' "$runner" 2>/dev/null; then
+    echo "WARNING: process-runner без IWE_CARD_AUTOCOMMIT -- cancel-session для $session_id пропущен (автокоммит тронул бы замороженный канон)" >&2
+    return 0
+  fi
+  (cd "$IWE_ROOT/$GOV_REPO" && IWE_CARD_AUTOCOMMIT=0 python3 "$runner" cancel-session quick-close "$session_id") \
     2>&1 || echo "WARNING: cancel-session для мёртвой сессии $session_id не прошёл (не блокирует sweep)" >&2
 }
 

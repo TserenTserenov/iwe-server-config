@@ -323,4 +323,114 @@ assert "$rc" "0" "exit 0"
 assert "$(git -C "$CANON" rev-parse HEAD)" "$(git -C "$CANON" rev-parse origin/main)" "HEAD replaced"
 assert "$(test -e "$CANON/b.txt" && echo present || echo absent)" "absent" "b.txt stays absent"
 
+# --- WP-530 Ф72: ANCESTRAL_PATH criterion -------------------------------------
+origin_edit() {  # <tag> <file> <content> -- one commit on origin editing <file> (removing it when content is __RM__)
+  local pub="$SANDBOX/pub-$1-$RANDOM"; git clone -q "$ORIGIN" "$pub"
+  if [ "$3" = "__RM__" ]; then git -C "$pub" rm -q "$2"; else echo "$3" > "$pub/$2"; fi
+  commit_in "$pub" "origin $1 $2"; git -C "$pub" push -q origin main
+}
+diverged_base() {  # <name> -- canon with one local commit already republished on origin (diverged, otherwise clean)
+  fresh "$1"; echo one > "$CANON/b.txt"; commit_in "$CANON" "local"; republish_on_origin "$CANON" "$(git -C "$CANON" rev-parse HEAD)"
+}
+
+echo "scenario 26 (Ф72): dirty path holds an EARLIER origin version of the same live path -> ANCESTRAL_PATH, replaced"
+diverged_base s26; origin_edit s26a a.txt v2; origin_edit s26b a.txt v3
+echo v2 > "$CANON/a.txt"
+out=$(bash "$SCRIPT" "$CANON" main 2>&1); rc=$?
+git -C "$CANON" fetch -q origin
+assert "$rc" "0" "exit 0"; assert "$(git -C "$CANON" rev-parse HEAD)" "$(git -C "$CANON" rev-parse origin/main)" "HEAD replaced by origin tip"
+assert "$(cat "$CANON/a.txt")" "v3" "a.txt now carries the origin tip content"
+assert "$(printf '%s' "$out" | grep -c 'ancestral-path dirty=1 commit-paths=0')" "1" "report counts the ancestral dirty path"
+
+echo "scenario 27 (Ф72): local-only commit whose path end state is an EARLIER origin version -> ANCESTRAL_PATH, replaced"
+diverged_base s27
+pub="$SANDBOX/pub-s27"; git clone -q "$ORIGIN" "$pub"; echo v2 > "$pub/a.txt"; echo extra > "$pub/c.txt"; commit_in "$pub" "origin a v2 plus c"; git -C "$pub" push -q origin main
+origin_edit s27b a.txt v3
+echo v2 > "$CANON/a.txt"; commit_in "$CANON" "local a v2 only"; U=$(git -C "$CANON" rev-parse HEAD); git -C "$CANON" fetch -q origin
+assert "$(GIT_NO_REPLACE_OBJECTS=1 git -C "$CANON" cherry origin/main | grep -c "^+ $U")" "1" "precondition: patch-id cannot see it, so only the path proof can"
+out=$(bash "$SCRIPT" "$CANON" main 2>&1); rc=$?
+assert "$rc" "0" "exit 0"; assert "$(git -C "$CANON" rev-parse HEAD)" "$(git -C "$CANON" rev-parse origin/main)" "HEAD replaced by origin tip"
+assert "$(printf '%s' "$out" | grep -c 'ancestral-path dirty=0 commit-paths=1')" "1" "report counts the ancestral commit path"
+
+echo "scenario 28 (Ф72): the path was DELETED on origin -> the old version is not ancestral, fail closed (dirty)"
+diverged_base s28; origin_edit s28a a.txt v2; origin_edit s28b a.txt __RM__
+echo v2 > "$CANON/a.txt"; H=$(git -C "$CANON" rev-parse HEAD)
+out=$(bash "$SCRIPT" "$CANON" main 2>&1); rc=$?
+assert "$rc" "1" "exit 1"; assert "$(git -C "$CANON" rev-parse HEAD)" "$H" "HEAD unchanged"; assert "$(cat "$CANON/a.txt")" "v2" "dirt preserved"
+assert "$(printf '%s' "$out" | grep -c 'tracked changes differ from target: a.txt')" "1" "refusal names the dead path"
+
+echo "scenario 28b (Ф72): the path was deleted on origin -> fail closed (local-only commit)"
+diverged_base s28b
+pub="$SANDBOX/pub-s28b"; git clone -q "$ORIGIN" "$pub"; echo v2 > "$pub/a.txt"; echo extra > "$pub/c.txt"; commit_in "$pub" "origin a v2 plus c"; git -C "$pub" push -q origin main
+origin_edit s28bb a.txt __RM__
+echo v2 > "$CANON/a.txt"; commit_in "$CANON" "local a v2 only"; U=$(git -C "$CANON" rev-parse HEAD); H=$U; git -C "$CANON" fetch -q origin
+assert "$(GIT_NO_REPLACE_OBJECTS=1 git -C "$CANON" cherry origin/main | grep -c "^+ $U")" "1" "precondition: the commit is not patch-equivalent"
+out=$(bash "$SCRIPT" "$CANON" main 2>&1); rc=$?
+assert "$rc" "1" "exit 1"; assert "$(git -C "$CANON" rev-parse HEAD)" "$H" "HEAD unchanged"
+assert "$(printf '%s' "$out" | grep -c 'end state differs from the target: a.txt')" "1" "refusal names the dead path"
+
+echo "scenario 29 (Ф72): canon version never occurred in origin's history of the path -> fail closed (dirty and commit)"
+diverged_base s29; origin_edit s29a a.txt v2; origin_edit s29b a.txt v3
+echo never > "$CANON/a.txt"; H=$(git -C "$CANON" rev-parse HEAD)
+out=$(bash "$SCRIPT" "$CANON" main 2>&1); rc=$?
+assert "$rc" "1" "exit 1 (dirty)"; assert "$(git -C "$CANON" rev-parse HEAD)" "$H" "HEAD unchanged (dirty)"
+assert "$(printf '%s' "$out" | grep -c 'tracked changes differ from target: a.txt')" "1" "dirty refusal names a.txt"
+commit_in "$CANON" "local a never"; H=$(git -C "$CANON" rev-parse HEAD)
+out=$(bash "$SCRIPT" "$CANON" main 2>&1); rc=$?
+assert "$rc" "1" "exit 1 (commit)"; assert "$(git -C "$CANON" rev-parse HEAD)" "$H" "HEAD unchanged (commit)"
+assert "$(printf '%s' "$out" | grep -c 'end state differs from the target: a.txt')" "1" "commit refusal names a.txt"
+
+echo "scenario 30 (Ф72): admissible ancestral path mixed with ONE unique dirty path -> refused as a whole, nothing touched"
+diverged_base s30; origin_edit s30a a.txt v2; origin_edit s30b a.txt v3
+echo v2 > "$CANON/a.txt"; echo novel >> "$CANON/b.txt"; H=$(git -C "$CANON" rev-parse HEAD)
+out=$(bash "$SCRIPT" "$CANON" main 2>&1); rc=$?
+assert "$rc" "1" "exit 1"; assert "$(git -C "$CANON" rev-parse HEAD)" "$H" "HEAD unchanged"
+assert "$(cat "$CANON/a.txt")" "v2" "the admissible path was not rewritten either"
+assert "$(tail -1 "$CANON/b.txt")" "novel" "the unique dirt is preserved"
+assert "$(printf '%s' "$out" | grep -c 'tracked changes differ from target: b.txt')" "1" "refusal names exactly the unique path"
+
+echo "scenario 31 (Ф72): staged change stays a refusal even when its content is an ancestral version"
+diverged_base s31; origin_edit s31a a.txt v2; origin_edit s31b a.txt v3
+echo v2 > "$CANON/a.txt"; git -C "$CANON" add a.txt; H=$(git -C "$CANON" rev-parse HEAD)
+out=$(bash "$SCRIPT" "$CANON" main 2>&1); rc=$?
+assert "$rc" "1" "exit 1"; assert "$(git -C "$CANON" rev-parse HEAD)" "$H" "HEAD unchanged"
+assert "$(printf '%s' "$out" | grep -c 'staged changes present in index: a.txt')" "1" "staged refusal wins"
+
+# --- WP-530 Ф72 cold review: gitlinks and pathspec magic never count as ancestral ---
+GL1=1111111111111111111111111111111111111111; GL2=2222222222222222222222222222222222222222
+origin_gitlink() {  # <tag> <path> <sha> [extra-file] -- one origin commit pointing <path> at gitlink <sha> (replacing whatever was there)
+  local pub="$SANDBOX/pub-$1-$RANDOM"; git clone -q "$ORIGIN" "$pub"
+  git -C "$pub" rm -q --cached --ignore-unmatch "$2"; rm -rf "${pub:?}/$2"
+  git -C "$pub" update-index --add --cacheinfo "160000,$3,$2"
+  if [ -n "${4:-}" ]; then echo extra > "$pub/$4"; git -C "$pub" add "$4"; fi
+  git -C "$pub" -c user.name=o -c user.email=o@o commit -qm "origin gitlink $2 $1"; git -C "$pub" push -q origin main
+}
+
+echo "scenario 32a (Ф72): local commit moves a submodule pointer to a value origin once had -> gitlink is never ancestral, fail closed"
+diverged_base s32a; origin_gitlink s32aa sub "$GL1" c.txt; origin_gitlink s32ab sub "$GL2"
+mkdir "$CANON/sub"   # an empty directory is how git sees an unpopulated submodule: no dirt
+git -C "$CANON" update-index --add --cacheinfo "160000,$GL1,sub"; git -C "$CANON" -c user.name=t -c user.email=t@t commit -qm "local sub -> GL1"
+U=$(git -C "$CANON" rev-parse HEAD); git -C "$CANON" fetch -q origin
+assert "$(GIT_NO_REPLACE_OBJECTS=1 git -C "$CANON" cherry origin/main | grep -c "^+ $U")" "1" "precondition: not patch-equivalent"
+assert "$(GIT_NO_REPLACE_OBJECTS=1 git -C "$CANON" ls-tree origin/main sub | cut -c1-6)" "160000" "precondition: sub is a gitlink on the target"
+out=$(bash "$SCRIPT" "$CANON" main 2>&1); rc=$?
+assert "$rc" "1" "exit 1"; assert "$(git -C "$CANON" rev-parse HEAD)" "$U" "HEAD unchanged"
+assert "$(printf '%s' "$out" | grep -c 'end state differs from the target: sub')" "1" "refusal names the gitlink path"
+
+echo "scenario 32b (Ф72): path was a file with the canon's content, but is a gitlink on the target now -> fail closed"
+diverged_base s32b; origin_edit s32ba a.txt v2; origin_gitlink s32bb a.txt "$GL1"
+echo v2 > "$CANON/a.txt"; H=$(git -C "$CANON" rev-parse HEAD)
+out=$(bash "$SCRIPT" "$CANON" main 2>&1); rc=$?
+assert "$rc" "1" "exit 1"; assert "$(git -C "$CANON" rev-parse HEAD)" "$H" "HEAD unchanged"; assert "$(cat "$CANON/a.txt")" "v2" "dirt preserved"
+assert "$(printf '%s' "$out" | grep -c 'tracked changes differ from target: a.txt')" "1" "refusal names the path"
+
+echo "scenario 33 (Ф72): path named ':(top)victim' must not be resolved as pathspec magic onto the neighbour 'victim' -> fail closed"
+fresh s33; echo v2 > "$CANON/victim"; echo one > "$CANON/b.txt"; commit_in "$CANON" "local victim v2"; republish_on_origin "$CANON" "$(git -C "$CANON" rev-parse HEAD)"
+origin_edit s33b victim v3
+echo x > "$CANON/:(top)victim"; commit_in "$CANON" "local file literally named :(top)victim"; U=$(git -C "$CANON" rev-parse HEAD); git -C "$CANON" fetch -q origin
+assert "$(GIT_NO_REPLACE_OBJECTS=1 git -C "$CANON" ls-tree origin/main -- victim | wc -l | tr -d ' ')" "1" "precondition: the neighbour 'victim' exists on the target"
+out=$(bash "$SCRIPT" "$CANON" main 2>&1); rc=$?
+assert "$rc" "1" "exit 1"; assert "$(git -C "$CANON" rev-parse HEAD)" "$U" "HEAD unchanged"
+assert "$(printf '%s' "$out" | grep -c 'end state differs from the target')" "1" "refused by the end-state proof"
+
 [ "$fails" = 0 ] && echo "PASS: all scenarios" || { echo "FAIL: $fails assertion(s)"; exit 1; }

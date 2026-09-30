@@ -52,6 +52,8 @@ set -uo pipefail
 # grafts: a forged object can make an undelivered commit look published (WP-7 Ф161).
 export GIT_NO_REPLACE_OBJECTS=1
 export GIT_GRAFT_FILE=/dev/null/iwe-no-grafts
+# Every pathspec here is a literal path name, never a glob or ":(magic)" (WP-530 F72 review).
+export GIT_LITERAL_PATHSPECS=1
 
 usage() { echo "usage: canon-reconcile-published.sh <repo-path> <branch> [<pinned-oid>]" >&2; exit 2; }
 [ $# -ge 2 ] || usage
@@ -144,6 +146,30 @@ fi
 tracked_and_deleted_by_target() {  # <path> -- a blob in OLD_HEAD that the target removes (reset deletes it itself)
   [ -n "$(git ls-tree "$OLD_HEAD" -- "$1" | awk '$1!="040000"')" ] && [ -z "$(git ls-tree "$PINNED" -- "$1" | awk '$1!="040000"')" ]
 }
+ANCESTRAL_HISTORY_LIMIT=400
+# ANCESTRAL_PATH criterion (WP-530 Ф72, next to "entry equals the target's"): the
+# canon's version of <path> (`<mode> <oid>`) already occurred in the target's
+# history of the SAME path, and the path is still alive on the target (a blob,
+# not deleted, not renamed away, not a directory now). The canon then holds an
+# older state of origin -- nothing of it is unique. A path missing on the target,
+# a deletion on the canon side and any version origin never had all stay
+# refusals. History-based evidence ("nothing is lost"), not a compatibility
+# proof; no line-by-line subset mode (rejected in Ф71). Literal pathspecs: a
+# name with glob characters must not match its neighbours.
+ancestral_path() {  # <path> <"mode oid"> -- return 0 when the criterion holds
+  local p="$1" want="$2" alive sha
+  # Only regular files and symlinks count: a tree ("dir"), a gitlink (160000) or an
+  # unknown mode is never accepted as an ancestral version.
+  case "${want%% *}" in 100644|100755|120000) ;; *) return 1 ;; esac
+  # Literal pathspecs on every ls-tree too: ":(top)x" or "a*" must name that path only.
+  alive=$(GIT_LITERAL_PATHSPECS=1 git ls-tree "$PINNED" -- "$p" | awk 'NR==1 && $2=="blob" && $1!="160000"{print $1" "$3}')
+  [ -n "$alive" ] || return 1
+  while IFS= read -r sha; do
+    [ -n "$sha" ] || continue
+    [ "$(GIT_LITERAL_PATHSPECS=1 git ls-tree "$sha" -- "$p" | awk 'NR==1 && $2=="blob"{print $1" "$3}')" = "$want" ] && return 0
+  done < <(GIT_LITERAL_PATHSPECS=1 git log --full-history --max-count="$ANCESTRAL_HISTORY_LIMIT" --format=%H "$PINNED" -- "$p")
+  return 1
+}
 disk_entry() {  # <path> -> "<mode> <hash>" of what is on disk, or "" if absent
   if [ -L "$1" ]; then printf '120000 %s' "$(printf '%s' "$(readlink "$1")" | git hash-object --stdin)"
   elif [ -d "$1" ]; then printf 'dir'
@@ -169,13 +195,14 @@ dirty_signature() {  # "<path>\t<disk entry>" per dirty tracked path, sorted -- 
     printf '%s\t%s\n' "$p" "$(disk_entry "$p")"
   done | LC_ALL=C sort
 }
-DIRTY_BLOCKING=""; DIRTY_TOLERATED=0
+DIRTY_BLOCKING=""; DIRTY_TOLERATED=0; DIRTY_ANCESTRAL=0; COMMIT_ANCESTRAL=0
 while IFS= read -r -d '' p; do
   [ -n "$p" ] || continue
   t_entry=$(git ls-tree "$PINNED" -- "$p" | awk 'NR==1{print $1" "$3}')
   on_disk=$(disk_entry "$p")
   if [ -z "$on_disk" ] && [ -z "$t_entry" ]; then DIRTY_TOLERATED=$((DIRTY_TOLERATED+1)); continue; fi   # deleted here, absent on target
   if [ -n "$on_disk" ] && [ "$on_disk" != "dir" ] && [ "$on_disk" = "$t_entry" ]; then DIRTY_TOLERATED=$((DIRTY_TOLERATED+1)); continue; fi
+  if ancestral_path "$p" "$on_disk"; then DIRTY_ANCESTRAL=$((DIRTY_ANCESTRAL+1)); continue; fi
   DIRTY_BLOCKING="$DIRTY_BLOCKING $p"
 done < <(git diff --name-only -z 2>/dev/null)
 [ -z "$DIRTY_BLOCKING" ] || refuse "tracked changes differ from target:$DIRTY_BLOCKING"
@@ -199,7 +226,11 @@ if [ -n "$UNIQUE" ]; then
       [ -n "$p" ] || continue
       old_e=$(git ls-tree "$OLD_HEAD" -- "$p" | awk 'NR==1{print $1" "$2" "$3}')
       new_e=$(git ls-tree "$PINNED" -- "$p" | awk 'NR==1{print $1" "$2" "$3}')
-      if [ "$old_e" != "$new_e" ]; then DIFFERING="$p (commit ${c:0:12})"; break 2; fi
+      if [ "$old_e" != "$new_e" ]; then
+        # ANCESTRAL_PATH: the version this commit left at <p> occurred earlier on origin's <p>, and <p> is alive there
+        if ancestral_path "$p" "$(printf '%s' "$old_e" | awk '{print $1" "$3}')"; then COMMIT_ANCESTRAL=$((COMMIT_ANCESTRAL+1)); continue; fi
+        DIFFERING="$p (commit ${c:0:12})"; break 2
+      fi
     done < <(git diff-tree -r -z --root --no-renames --no-commit-id --name-only "$c" 2>/dev/null)
   done
   [ -z "$DIFFERING" ] || refuse "local-only commits not on target: $(printf '%s ' $UNIQUE)-- first path whose end state differs from the target: $DIFFERING"
@@ -274,6 +305,6 @@ done < "$UNTRACKED_BEFORE" > "$EXPECTED"
 DIFF=$(diff "$EXPECTED" "$UNTRACKED_AFTER" | grep '^[<>]' | head -3)
 [ -z "$DIFF" ] || fail_after_swap "untracked set changed during the operation (< expected / > actual): $(printf '%s' "$DIFF" | tr '\n' ';')"
 
-echo "canon-reconcile-published: $REPO refs/heads/$BRANCH ${OLD_HEAD:0:12} -> ${PINNED:0:12} (dropped commits: patch-equivalent or content-superseded=$CONTENT_SUPERSEDED; tolerated identical dirty paths=$DIRTY_TOLERATED; untracked intact)"
-log_line replaced "$OLD_HEAD -> $PINNED content_superseded=$CONTENT_SUPERSEDED dirty_tolerated=$DIRTY_TOLERATED"
+echo "canon-reconcile-published: $REPO refs/heads/$BRANCH ${OLD_HEAD:0:12} -> ${PINNED:0:12} (dropped commits: patch-equivalent or content-superseded=$CONTENT_SUPERSEDED; tolerated identical dirty paths=$DIRTY_TOLERATED; ancestral-path dirty=$DIRTY_ANCESTRAL commit-paths=$COMMIT_ANCESTRAL; untracked intact)"
+log_line replaced "$OLD_HEAD -> $PINNED content_superseded=$CONTENT_SUPERSEDED dirty_tolerated=$DIRTY_TOLERATED ancestral_dirty=$DIRTY_ANCESTRAL ancestral_commit_paths=$COMMIT_ANCESTRAL"
 exit 0
