@@ -63,7 +63,7 @@ analysis=$(printf '%s' "$input" | secret_pattern_process redact-envelope 2>/dev/
 printf '%s' "$analysis" | "$SECRET_BYPASS_JQ" -e '
   type == "object"
   and (.session_id | type == "string" and length > 0)
-  and (.tool_name == "Bash" or .tool_name == "Read" or (.tool_name | startswith("mcp__")))
+  and (.tool_name | type == "string" and length > 0)
   and has("updated_tool_output")
   and (.pattern_ids | type == "array")
   and (.redaction_count | type == "number")

@@ -483,6 +483,12 @@ def parse_heredoc_header(command, start):
             )
         if character == "\n":
             return index + 1, declarations
+        if command.startswith("<<<", index):
+            # A here-string is not a here-document: skip the whole operator,
+            # otherwise the cursor lands on the 2nd "<" and "<< word" is
+            # misread as a heredoc start (issue #874 in the template).
+            index += 3
+            continue
         if (
             command.startswith("<<", index)
             and not command.startswith("<<<", index)
@@ -1689,8 +1695,9 @@ def analyze_mcp(raw):
 
 def redact_envelope(raw):
     envelope, session_id, tool_name, tool_input = parse_envelope(raw, "PostToolUse")
-    if tool_name not in ("Bash", "Read") and not MCP_TOOL_NAME.fullmatch(tool_name):
-        fail("invalid PostToolUse hook envelope")
+    # Any tool name is accepted: a rejection here means the output reaches the
+    # model unredacted (PostToolUse exit 2 does not block), and redact_value()
+    # below is a generic walk keyed on value type, not on tool name.
     if "tool_response" not in envelope:
         fail("invalid PostToolUse hook envelope")
     response = envelope["tool_response"]
