@@ -8658,6 +8658,10 @@ PY
 
 _prepared_source_set_has_publish_proof() {  # <semaphore> <worktree>, fresh origin/main required
   timeout 15 python3 - "$1" "$2" <<'PY' 2>/dev/null
+import yaml
+
+import collections
+import datetime
 import difflib
 import json
 import os
@@ -8946,6 +8950,126 @@ def path_absorbs_prepared_text(raw_path):
     except (OSError, subprocess.SubprocessError):
         return False
 
+
+
+class _LedgerEventLoader(yaml.SafeLoader):
+    """Rejects a duplicate mapping key instead of PyYAML's silent last-wins."""
+
+
+def _ledger_mapping(loader, node):
+    result = {}
+    for key_node, value_node in node.value:
+        key = loader.construct_object(key_node, deep=True)
+        if key in result:
+            raise ValueError("duplicate YAML key")
+        result[key] = loader.construct_object(value_node, deep=True)
+    return result
+
+
+_LedgerEventLoader.add_constructor(yaml.resolver.BaseResolver.DEFAULT_MAPPING_TAG, _ledger_mapping)
+
+
+def _ledger_json_safe(value, _depth=0):
+    """True only for a value made entirely of plain JSON types: dict (str keys), list, str,
+    int, bool, None. Rejects anything PyYAML's implicit resolver can still hand back under
+    SafeLoader without an explicit tag -- date/datetime (an unquoted ISO-8601-looking scalar)
+    and bytes (!!binary) -- so the canonical form below never needs a lossy str()/isoformat()
+    fallback that could make two genuinely different values serialize identically (cold-review,
+    Codex, round 3: an unquoted date and its quoted string form collapsed to one JSON value).
+    """
+    if _depth > 64:
+        return False
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return True
+    if isinstance(value, dict):
+        return all(isinstance(k, str) and _ledger_json_safe(v, _depth + 1) for k, v in value.items())
+    if isinstance(value, list):
+        return all(_ledger_json_safe(v, _depth + 1) for v in value)
+    return False
+
+
+def _ledger_doc(blob):
+    """The ledger document (dict) from a blob, or None if it is not a well-formed one.
+
+    Self-contained reimplementation of the identity rule scripts/lib/ledger-event-diff.py
+    already uses (WP-484 F157): two events with identical full content are the same event.
+    Not a call into that script or any repository-configured merge driver -- this proof
+    never executes repository-provided code (remote_absorbs_prepared_tree enforces the same
+    rule by blanking GIT_ATTR_SOURCE): a committer who controls scripts/ or .git/config must
+    not also be able to make this gate trust whatever they put there.
+    """
+    if len(blob) > MAX_BLOB_BYTES or b"\0" in blob:
+        return None
+    try:
+        doc = yaml.load(blob, Loader=_LedgerEventLoader)
+    except (yaml.YAMLError, ValueError, RecursionError):
+        return None
+    if not isinstance(doc, dict) or not _ledger_json_safe(doc):
+        return None
+    events = doc.get("events")
+    if not isinstance(events, list) or len(events) > MAX_BLOB_LINES:
+        return None
+    if any(not isinstance(event, dict) for event in events):
+        return None
+    return doc
+
+
+def _ledger_event_counts(doc):
+    return collections.Counter(
+        json.dumps(event, sort_keys=True, ensure_ascii=False) for event in doc["events"]
+    )
+
+
+# WP-561 Ф30 (01.10.2026, живой инцидент night-cycle на Цехе, пир-сессия
+# 2026-10-01-08-wp561-verify-and-finish, Claude+Kimi+Codex): коммит перебазирован
+# (cherry-pick/rebase переписал OID), поэтому directly_published() не находит ни
+# предка, ни патч-эквивалент; path_absorbs_prepared_text тоже отказывает на append-only
+# журнале -- простое текстовое трёхстороннее слияние двух НЕЗАВИСИМЫХ добавлений в
+# конец одного списка событий всегда конфликт для diff3, хотя семантически это два
+# самостоятельных добавления (ровно та проблема, ради которой существует .gitattributes
+# merge=ledger-events). Проверка намеренно НЕ исполняет ни этот, ни любой другой
+# настроенный в репозитории merge-драйвер: доверяем только свежевоспроизведённому
+# здесь правилу "идентичные по содержимому события — одно событие", не коду, который
+# может переопределить тот же коммитер, что и сам факт доставки.
+def path_absorbs_prepared_ledger_events(raw_path):
+    # --source=source_head, никогда не голый worktree: что HEAD == source_head, уже доказал
+    # вызывающий, но несохранённая правка .gitattributes на диске (другой процесс,
+    # post-checkout хук) HEAD не двигает и иначе дала бы грязному дереву право выдать эту
+    # проверку для пути, которому сам source_head атрибут не присваивал (холодное ревью,
+    # Kimi, раунд 3).
+    attr = subprocess.run(
+        ["git", "--literal-pathspecs", "-C", worktree, "check-attr", "--source", source_head,
+         "merge", "--", os.fsdecode(raw_path)],
+        stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, check=False,
+    )
+    if attr.returncode != 0 or not attr.stdout.rstrip(b"\n").endswith(b": ledger-events"):
+        return False
+    entries = [blob_entry_fields(revision, raw_path) for revision in (source_base, source_head, remote_head)]
+    if any(entry is None or entry[:2] != (b"100644", b"blob") for entry in entries):
+        return False
+    blobs = [blob_by_oid(entry[2]) for entry in entries]
+    if any(blob is None for blob in blobs):
+        return False
+    base_doc, own_doc, published_doc = (_ledger_doc(b) for b in blobs)
+    if base_doc is None or own_doc is None or published_doc is None:
+        return False
+    # Всё вне events (schema/scale/period/...) должно быть ровно тем же, что держит own --
+    # посторонняя правка заголовка, не доехавшая до origin, это не чистое добавление события
+    # и не должна проходить молча (холодное ревью, Codex, раунд 3).
+    own_header = {k: v for k, v in own_doc.items() if k != "events"}
+    published_header = {k: v for k, v in published_doc.items() if k != "events"}
+    if own_header != published_header:
+        return False
+    base_events = _ledger_event_counts(base_doc)
+    own_events = _ledger_event_counts(own_doc)
+    published_events = _ledger_event_counts(published_doc)
+    # Доказательство для append-only: own не должен потерять то, что было в base
+    # (настоящая правка/удаление -- отдельное расхождение, вне охвата этой проверки),
+    # и каждое событие own (база плюс добавленное этой сессией) должно быть побайтово
+    # на origin сейчас.
+    return not (base_events - own_events) and not (own_events - published_events)
+
+
 def remote_absorbs_prepared_tree(compare_tree=True):
     # Reuse the strict tree-absorption criterion of supersession proof, bound
     # here to the immutable PREPARED range, not arbitrary caller merge bases.
@@ -9016,6 +9140,7 @@ for raw_path in sorted(paths):
     if tree_entry(source_head, raw_path) != tree_entry(remote_head, raw_path):
         if (not runtime_reap_superseded(raw_path)
                 and not path_has_anchored_fallback_proof(raw_path)
+                and not path_absorbs_prepared_ledger_events(raw_path)
                 and not path_absorbs_prepared_text(raw_path)):
             raise SystemExit(0 if remote_absorbs_prepared_tree() else 1)
 if not remote_absorbs_prepared_tree(compare_tree=False):
