@@ -138,14 +138,22 @@ GENERATED_AT="$(date -u "+%Y-%m-%dT%H:%M:%SZ")"
   # (последний существует, но содержит только старые майские отчёты — путь дрейфует,
   # см. WP-485). Ищем в обоих, чтобы не зависеть от того, куда переедет архивация.
   reports_found=0
+  undated_names=0
   for dir in "$REPO_DIR/archive/week-plans" "$REPO_DIR/archive/week-reports" "$REPO_DIR/current"; do
     [ -d "$dir" ] || continue
     while IFS= read -r f; do
       [ -n "$f" ] || continue
       fname="$(basename "$f")"
       # Дата в имени файла: "WeekReport WNN YYYY-MM-DD.md" — берём последнее поле как дату недели.
-      fdate="$(echo "$fname" | grep -oE '[0-9]{4}-[0-9]{2}-[0-9]{2}')"
-      [ -n "$fdate" ] || continue
+      # grep -o exits 1 when the name carries no date (older names like "WeekReport 2026-W31.md"). That is an
+      # expected "no match", not a failure: under `set -euo pipefail` it must not end the script mid-section
+      # (found live 30.09 and 01.10, WP-561). Any other non-zero status of the pipeline (grep error, rc >= 2)
+      # still aborts the script.
+      fdate="$(printf '%s\n' "$fname" | grep -oE '[0-9]{4}-[0-9]{2}-[0-9]{2}' || { pipeline_rc=$?; [ "$pipeline_rc" -eq 1 ] || exit "$pipeline_rc"; })"
+      if [ -z "$fdate" ]; then
+        undated_names=$((undated_names + 1))
+        continue
+      fi
       fmonth="${fdate%-*}"
       if [ "$fmonth" = "$AS_OF" ]; then
         echo "- $fname (${f#"$REPO_DIR"/})"
@@ -153,6 +161,7 @@ GENERATED_AT="$(date -u "+%Y-%m-%dT%H:%M:%SZ")"
       fi
     done < <(find "$dir" -maxdepth 1 -iname "WeekReport*.md" 2>/dev/null | sort)
   done
+  [ "$undated_names" -eq 0 ] || echo "PENDING: пропущено файлов WeekReport без даты YYYY-MM-DD в имени: $undated_names (имена вида YYYY-Www не разбираются, эти недели могут отсутствовать в списке выше)"
   [ "$reports_found" -eq 1 ] || echo "PENDING: нет данных (ни один WeekReport с датой недели в $AS_OF не найден в archive/week-plans, archive/week-reports, current)"
   echo
 

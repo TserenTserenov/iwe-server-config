@@ -12,6 +12,10 @@
 # on origin cannot invalidate this WP's lease, because the digest is scoped to
 # this WP's own card file only.
 #
+# The card is looked up in inbox/WP-N/ and, for a closed WP, in
+# archive/wp-contexts/WP-N/ (amending the closure record of a closed WP goes
+# through the same gate; the lease binds to whichever path actualize found).
+#
 # closure-pending-sync uses an agent-readable challenge and a writable local
 # audit file. Neither proves pilot identity nor provides immutable evidence.
 # ArchGate condition #1 remains open until independent authorization and
@@ -107,7 +111,24 @@ fetch_branch() {
     origin "+refs/heads/$branch:refs/remotes/origin/$branch"
 }
 
+# Where WP-N's card lives. An open WP keeps it in inbox/ (one folder per WP);
+# closing the WP moves the folder to archive/wp-contexts/. The gate guards edits
+# of the card wherever it is, including amendments to the closure record of a
+# closed WP, so it has to find both places. inbox/ wins when both exist (a
+# reopened WP has its live card there). When neither exists the inbox path is
+# returned, so "card not found" names the canonical location.
 card_path_for() { echo "inbox/WP-$1/WP-$1.md"; }
+
+resolve_card_path() {
+  local repo="$1" wp="$2" inbox archive
+  inbox=$(card_path_for "$wp")
+  archive="archive/wp-contexts/WP-$wp/WP-$wp.md"
+  if [ ! -f "$repo/$inbox" ] && [ -f "$repo/$archive" ]; then
+    echo "$archive"
+  else
+    echo "$inbox"
+  fi
+}
 
 lease_file_for() { mkdir -p "$LEASE_DIR"; echo "$LEASE_DIR/WP-$1.json"; }
 
@@ -213,9 +234,9 @@ cmd_actualize() {
 
   local repo card path digest origin_commit token lease
   repo=$(resolve_gov_repo "$gov_override")
-  path=$(card_path_for "$wp")
+  path=$(resolve_card_path "$repo" "$wp")
   card="$repo/$path"
-  [ -f "$card" ] || { log_err "карточка $path не найдена в $repo — актуализация невозможна"; exit 1; }
+  [ -f "$card" ] || { log_err "карточка $path не найдена в $repo (искали и в inbox/, и в archive/wp-contexts/) — актуализация невозможна"; exit 1; }
 
   fetch_branch "$repo" "$branch" || { log_err "git fetch origin $branch не удался — актуализация невозможна без сети"; exit 1; }
   origin_commit=$(git -C "$repo" rev-parse "origin/$branch")
@@ -302,7 +323,7 @@ cmd_check_edit() {
 
   local repo path branch current_digest
   repo=$(resolve_gov_repo "$gov_override")
-  path="${lease_path:-$(card_path_for "$wp")}"
+  path="${lease_path:-$(resolve_card_path "$repo" "$wp")}"
   branch="${lease_branch:-main}"
   if ! fetch_branch "$repo" "$branch"; then
     log_err "СТОП: git fetch origin $branch не удался — без сети нельзя доказать, что карточка РП-$wp не изменилась с момента актуализации. Повтори при восстановлении сети, либо wp-reopen-gate.sh closure-pending-sync при длительном отказе."

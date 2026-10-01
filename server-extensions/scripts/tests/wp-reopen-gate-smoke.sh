@@ -167,7 +167,64 @@ rc=$?
 set -e
 [ "$rc" -eq 1 ] || fail "actualize для несуществующей карточки должен вернуть exit 1 (документированный путь), вернул $rc"
 echo "$out" | grep -q "актуализация невозможна" || fail "сообщение не объясняет отсутствие карточки: $out"
-pass "actualize для несуществующего WP -> чистый exit 1, не сырой git-код 128"
+echo "$out" | grep -q "archive/wp-contexts" || fail "сообщение об отсутствии карточки должно называть и архив среди мест поиска: $out"
+pass "actualize для несуществующего WP -> чистый exit 1, не сырой git-код 128, сообщение называет оба места поиска"
+
+# 14a. closed WP: the card lives only in archive/wp-contexts/WP-N/ (inbox/ has
+#      none). The gate must find it, bind the lease to the archive path, and
+#      invalidate the lease when that file changes on origin (2026-10-01: before
+#      this, actualize answered "card not found" for every closed WP, so the
+#      protocol step could never be passed when amending a closure record).
+mkdir -p "$REPO/archive/wp-contexts/WP-777"
+echo "closed v1" > "$REPO/archive/wp-contexts/WP-777/WP-777.md"
+git -C "$REPO" add archive/wp-contexts/WP-777/WP-777.md
+git -C "$REPO" -c user.email=t@t -c user.name=t commit -q -m "wp777 closed and archived"
+git -C "$REPO" push -q origin main
+lease=$(cd "$REPO" && "$GATE" actualize --wp 777 --governance-repo "$REPO" --session-id s6 2>/dev/null)
+echo "$lease" | grep -q '"card_path": "archive/wp-contexts/WP-777/WP-777.md"' || fail "лицензия закрытого РП должна быть привязана к карточке в архиве: $lease"
+out=$(cd "$REPO" && "$GATE" check-edit --wp 777 --governance-repo "$REPO" --session-id s6)
+[ "$out" = "editing_allowed" ] || fail "check-edit для карточки в архиве после actualize должен вернуть editing_allowed, вернул: $out"
+echo "closed v2" > "$REPO/archive/wp-contexts/WP-777/WP-777.md"
+git -C "$REPO" add archive/wp-contexts/WP-777/WP-777.md
+git -C "$REPO" -c user.email=t@t -c user.name=t commit -q -m "wp777 closure amended"
+git -C "$REPO" push -q origin main
+set +e
+out=$(cd "$REPO" && "$GATE" check-edit --wp 777 --governance-repo "$REPO" --session-id s6 2>&1)
+rc=$?
+set -e
+[ "$rc" -eq 2 ] || fail "правка карточки в архиве на origin должна инвалидировать лицензию (exit 2), вернул $rc"
+echo "$out" | grep -q "изменилась на сервере" || fail "сообщение не называет причину (смена ревизии архивной карточки): $out"
+pass "закрытый РП: карточка найдена в archive/wp-contexts, лицензия привязана к ней и инвалидируется правкой на origin"
+
+# 14b. reopened WP: the live card is back in inbox/ while the archived copy
+#      still exists. inbox/ wins, so the lease follows the live card.
+mkdir -p "$REPO/inbox/WP-777"
+echo "reopened" > "$REPO/inbox/WP-777/WP-777.md"
+git -C "$REPO" add inbox/WP-777/WP-777.md
+git -C "$REPO" -c user.email=t@t -c user.name=t commit -q -m "wp777 reopened"
+git -C "$REPO" push -q origin main
+lease=$(cd "$REPO" && "$GATE" actualize --wp 777 --governance-repo "$REPO" --session-id s6 2>/dev/null)
+echo "$lease" | grep -q '"card_path": "inbox/WP-777/WP-777.md"' || fail "при наличии обеих карточек лицензия должна идти за рабочей (inbox/): $lease"
+pass "переоткрытый РП: при наличии обеих карточек побеждает рабочая папка inbox/"
+
+# 14c. the WP is closed again: the inbox/ card disappears from origin while the
+#      lease is still bound to the inbox path (peer review 2026-10-01: this edge
+#      case was claimed but not covered). check-edit must refuse and ask for a
+#      fresh actualize, which then finds the archived card.
+git -C "$REPO" rm -q inbox/WP-777/WP-777.md
+git -C "$REPO" -c user.email=t@t -c user.name=t commit -q -m "wp777 closed again: inbox card removed, archive copy remains"
+git -C "$REPO" push -q origin main
+set +e
+out=$(cd "$REPO" && "$GATE" check-edit --wp 777 --governance-repo "$REPO" --session-id s6 2>&1)
+rc=$?
+set -e
+[ "$rc" -eq 2 ] || fail "check-edit после ухода карточки из inbox/ на origin должен вернуть exit 2, вернул $rc"
+echo "$out" | grep -q "удалена или переименована" || fail "сообщение не называет причину (карточка пропала по старому пути): $out"
+lease=$(cd "$REPO" && "$GATE" actualize --wp 777 --governance-repo "$REPO" --session-id s6 2>/dev/null)
+echo "$lease" | grep -q '"card_path": "archive/wp-contexts/WP-777/WP-777.md"' || fail "повторная actualize должна найти карточку в архиве: $lease"
+out=$(cd "$REPO" && "$GATE" check-edit --wp 777 --governance-repo "$REPO" --session-id s6)
+[ "$out" = "editing_allowed" ] || fail "после повторной actualize по архивному пути check-edit должен разрешить правку, вернул: $out"
+pass "закрытие после лицензии: старый путь исчез -> exit 2, повторная actualize находит архивную карточку"
 
 # 15. confirm with no prior request must fail cleanly, not crash.
 set +e
