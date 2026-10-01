@@ -485,6 +485,21 @@ def append_journal_lines(lines: list[str], entries: list[str]) -> list[str]:
     return out
 
 
+def resolve_runtime_dir(arg, environ, ws: str) -> str:
+    """--runtime-dir, then IWE_RUNTIME_DIR, then a legacy ABSOLUTE IWE_RUNTIME directory, then <ws>/.iwe-runtime.
+    IWE_RUNTIME is the host NAME (claude-code|headless|hermes|bot, DP.IWE.011 §C): taken as a directory it became the
+    relative path "claude-code" and the lock and journal landed in the current directory (WP-530 F75)."""
+    if arg:
+        return arg
+    runtime_dir = environ.get("IWE_RUNTIME_DIR")
+    if runtime_dir:
+        return runtime_dir
+    legacy = environ.get("IWE_RUNTIME", "")
+    if legacy.startswith("/") and os.path.isdir(legacy):
+        return legacy
+    return os.path.join(ws, ".iwe-runtime")
+
+
 def apply(card: Card, wp: str, cands: list[dict], gov: str, inbox: str, runtime: str,
           guard_timeout: int, lock_wait: int) -> dict:
     archive_path = os.path.join(os.path.dirname(card.path), f"WP-{wp}-archive.md")
@@ -668,7 +683,7 @@ def main(argv: list[str]) -> int:
     ap.add_argument("--json", action="store_true", help="machine-readable output")
     ap.add_argument("--guard-timeout", type=int, default=30)
     ap.add_argument("--lock-wait", type=int, default=10)
-    ap.add_argument("--runtime-dir", default=None, help="default: $IWE_RUNTIME or $IWE_WORKSPACE/.iwe-runtime")
+    ap.add_argument("--runtime-dir", default=None, help="default: $IWE_RUNTIME_DIR, a legacy absolute $IWE_RUNTIME, or $IWE_WORKSPACE/.iwe-runtime")
     a = ap.parse_args(argv)
 
     wp = re.sub(r"^(?i:wp-)", "", a.wp.strip())
@@ -677,7 +692,7 @@ def main(argv: list[str]) -> int:
         return 1
     ws = os.environ.get("IWE_WORKSPACE", os.path.expanduser("~/IWE"))
     gov = a.governance_repo or find_governance_repo(ws)
-    runtime = a.runtime_dir or os.environ.get("IWE_RUNTIME") or os.path.join(ws, ".iwe-runtime")
+    runtime = resolve_runtime_dir(a.runtime_dir, os.environ, ws)
     inbox = os.path.join(gov, "inbox")
     card_path = os.path.join(inbox, f"WP-{wp}", f"WP-{wp}.md")
     if not os.path.isfile(card_path):

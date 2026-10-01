@@ -75,7 +75,20 @@ export IWE_ROOT="${IWE_ROOT:-$WORKSPACE_DIR}"
 export IWE_GOVERNANCE_REPO="${IWE_GOVERNANCE_REPO:-DS-strategy}"
 export IWE_DS_MY_STRATEGY="${IWE_DS_MY_STRATEGY:-${WORKSPACE_DIR}/${IWE_GOVERNANCE_REPO}}"
 export IWE_TEMPLATE="${IWE_TEMPLATE:-${WORKSPACE_DIR}/FMT-exocortex-template}"
-export IWE_RUNTIME="${IWE_RUNTIME:-${WORKSPACE_DIR}/.iwe-runtime}"
+# IWE_RUNTIME is the host NAME (DP.IWE.011 §C: claude-code, headless, ...); the runtime
+# DIRECTORY is IWE_RUNTIME_DIR (what process-runner.py / close_obligation.py read).
+# Legacy callers (launchd plists, old tests) export IWE_RUNTIME as an ABSOLUTE directory and know nothing
+# about IWE_RUNTIME_DIR: keep both names on the same directory instead of silently splitting them.
+_iwe_rt="${IWE_RUNTIME:-}"
+if [ -z "${IWE_RUNTIME_DIR:-}" ] && [ "${_iwe_rt#/}" != "$_iwe_rt" ] && [ -d "$_iwe_rt" ]; then
+  export IWE_RUNTIME_DIR="$_iwe_rt"
+fi
+unset _iwe_rt
+export IWE_RUNTIME_DIR="${IWE_RUNTIME_DIR:-${WORKSPACE_DIR}/.iwe-runtime}"
+# Transitional (remove once every consumer reads IWE_RUNTIME_DIR): legacy readers
+# still get a directory here ONLY when no host name is set -- never inside Claude
+# Code, where settings.json sets IWE_RUNTIME=claude-code.
+export IWE_RUNTIME="${IWE_RUNTIME:-$IWE_RUNTIME_DIR}"
 # WP-484 (01.08): живые скрипты workspace — каноничные (агенты коммитят в ~/IWE/scripts);
 # FMT-копия — артефакт промоции в шаблон и отстаёт (замерено: 25 расхождений, до 2 мес).
 # Дефолт — живые; FMT — fallback для потребителей шаблона вне основного workspace.

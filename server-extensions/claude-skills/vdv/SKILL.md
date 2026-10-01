@@ -164,7 +164,7 @@ gates_rationale: "операционный скилл; WP Gate применим 
 ```bash
 python3 "${IWE_SCRIPTS:-$HOME/IWE/DS-my-strategy/scripts}/post-culture-fact.py" \
   --element M8 --mode <build|audit> --evidence "<название процесса, одна строка>" \
-  >/dev/null 2>>"${IWE_RUNTIME:-$HOME/IWE/.iwe-runtime}/culture-fact-errors.log" || true
+  >/dev/null 2>>"${IWE_RUNTIME_DIR:-$HOME/IWE/.iwe-runtime}/culture-fact-errors.log" || true
 ```
 
 `<build|audit>` — режим исходного вызова `/vdv`, зафиксированный в самом начале ЭТОГО

@@ -498,6 +498,6 @@ feedback-log (Шаг 5в, в том числе ранний выход из Ша
 M9_GOV_DIR="${IWE_WORKSPACE:-$HOME/IWE}/${IWE_GOVERNANCE_REPO:-DS-my-strategy}"
 python3 "$M9_GOV_DIR/scripts/post-culture-fact.py" \
   --element M9 --mode record --evidence "<id> из <filename>" \
-  >/dev/null 2>>"${IWE_RUNTIME:-$HOME/IWE/.iwe-runtime}/culture-fact-errors.log" || true
+  >/dev/null 2>>"${IWE_RUNTIME_DIR:-$HOME/IWE/.iwe-runtime}/culture-fact-errors.log" || true
 ```
 <!-- /USER-SPACE -->

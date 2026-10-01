@@ -369,7 +369,7 @@ best-effort, ДО вывода пользователю:
 ```bash
 python3 "${IWE_SCRIPTS:-$HOME/IWE/DS-my-strategy/scripts}/post-culture-fact.py" \
   --element M13 --mode record --evidence "verdict: <PASS|FAIL|CONDITIONAL> — <артефакт>" \
-  >/dev/null 2>>"${IWE_RUNTIME:-$HOME/IWE/.iwe-runtime}/culture-fact-errors.log" || true
+  >/dev/null 2>>"${IWE_RUNTIME_DIR:-$HOME/IWE/.iwe-runtime}/culture-fact-errors.log" || true
 ```
 
 Вывести verdict. Пользователь решает:

@@ -87,7 +87,7 @@ gates_rationale: "операционный скилл; WP Gate применим 
 ```bash
 python3 "${IWE_SCRIPTS:-$HOME/IWE/DS-my-strategy/scripts}/post-culture-fact.py" \
   --element M17 --mode record --evidence "<N нарушений>/<M кандидатов> в ревью W<N>" \
-  >/dev/null 2>>"${IWE_RUNTIME:-$HOME/IWE/.iwe-runtime}/culture-fact-errors.log" || true
+  >/dev/null 2>>"${IWE_RUNTIME_DIR:-$HOME/IWE/.iwe-runtime}/culture-fact-errors.log" || true
 ```
 
 ### 4. Согласование

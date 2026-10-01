@@ -9,7 +9,8 @@ SCRIPT="${1:-$(dirname "$0")/../canon-reconcile-published.sh}"
 SANDBOX=$(mktemp -d)
 trap 'rm -rf "$SANDBOX"' EXIT
 export IWE_WORKSPACE="$SANDBOX/no-workspace"   # ledger-append absent -> ledger_note is a no-op
-export IWE_RUNTIME="$SANDBOX/runtime"; mkdir -p "$IWE_RUNTIME/sessions"   # no live writers unless a scenario adds one
+export IWE_RUNTIME_DIR="$SANDBOX/runtime"; mkdir -p "$IWE_RUNTIME_DIR/sessions"   # no live writers unless a scenario adds one
+export IWE_RUNTIME=claude-code   # host NAME (DP.IWE.011 §C) -- must never be read as a directory
 fails=0
 assert() { if [ "$1" = "$2" ]; then echo "  ok   $3"; else echo "  FAIL $3 (got '$1', want '$2')"; fails=$((fails+1)); fi; }
 # `md5` is macOS-only (BSD coreutils); GitHub's ubuntu-latest runner has neither
@@ -154,17 +155,18 @@ assert "$rc" "1" "exit 1"; assert "$(git -C "$CANON" rev-parse HEAD)" "$H" "HEAD
 
 echo "scenario 8: live canonical writer semaphore -> fail closed (strict barrier)"
 fresh s8; echo one > "$CANON/b.txt"; commit_in "$CANON" "local"; C=$(git -C "$CANON" rev-parse HEAD); republish_on_origin "$CANON" "$C"
-printf 'agent: claude-code\npid: %s\n' "$$" > "$IWE_RUNTIME/sessions/claude-code-writer.open"; H=$(git -C "$CANON" rev-parse HEAD)
+printf 'agent: claude-code\npid: %s\n' "$$" > "$IWE_RUNTIME_DIR/sessions/claude-code-writer.open"; H=$(git -C "$CANON" rev-parse HEAD)
 bash "$SCRIPT" "$CANON" main >/dev/null 2>&1; rc=$?
 assert "$rc" "1" "exit 1 with live writer"; assert "$(git -C "$CANON" rev-parse HEAD)" "$H" "HEAD unchanged"
-printf 'agent: codex\n' > "$IWE_RUNTIME/sessions/codex-nopid.open"; H=$(git -C "$CANON" rev-parse HEAD)
+rm -f "$IWE_RUNTIME_DIR/sessions/claude-code-writer.open"   # only the pid-less semaphore may count from here (otherwise the previous live one would satisfy the check)
+printf 'agent: codex\n' > "$IWE_RUNTIME_DIR/sessions/codex-nopid.open"; H=$(git -C "$CANON" rev-parse HEAD)
 bash "$SCRIPT" "$CANON" main >/dev/null 2>&1; rc=$?
-assert "$rc" "1" "semaphore without pid counts as a live writer"; assert "$(git -C "$CANON" rev-parse HEAD)" "$H" "HEAD unchanged"; rm -f "$IWE_RUNTIME/sessions/codex-nopid.open"
-printf 'agent: claude-code\npid: %s\nisolated_worktree: /tmp/x\n' "$$" > "$IWE_RUNTIME/sessions/claude-code-writer.open"
+assert "$rc" "1" "semaphore without pid counts as a live writer"; assert "$(git -C "$CANON" rev-parse HEAD)" "$H" "HEAD unchanged"; rm -f "$IWE_RUNTIME_DIR/sessions/codex-nopid.open"
+printf 'agent: claude-code\npid: %s\nisolated_worktree: /tmp/x\n' "$$" > "$IWE_RUNTIME_DIR/sessions/claude-code-writer.open"
 bash "$SCRIPT" "$CANON" main >/dev/null 2>&1; rc=$?
 git -C "$CANON" fetch -q origin
 assert "$rc" "0" "isolated session does not block"; assert "$(git -C "$CANON" rev-parse HEAD)" "$(git -C "$CANON" rev-parse origin/main)" "replaced once only isolated sessions are live"
-rm -f "$IWE_RUNTIME/sessions/claude-code-writer.open"
+rm -f "$IWE_RUNTIME_DIR/sessions/claude-code-writer.open"
 
 echo "scenario 9: origin advanced past the caller's pinned oid -> targets the live tip"
 fresh s9; echo one > "$CANON/b.txt"; commit_in "$CANON" "local"; C=$(git -C "$CANON" rev-parse HEAD); republish_on_origin "$CANON" "$C"
@@ -196,11 +198,11 @@ assert "$([ -d "$CANON/.git/dirty-guard.lock" ] && echo present)" "present" "for
 echo "scenario 13: refusal writes nothing inside the repository (log goes to runtime dir)"
 fresh s13; echo one > "$CANON/b.txt"; commit_in "$CANON" "local"; C=$(git -C "$CANON" rev-parse HEAD); republish_on_origin "$CANON" "$C"
 echo two > "$CANON/c.txt"; commit_in "$CANON" "unique"; BEFORE=$(git -C "$CANON" status --porcelain | hash_stdin); MARK=$(mktemp); sleep 1
-LOG_BEFORE=$(grep -c ' refused ' "$IWE_RUNTIME/canon-reconcile-published.log" 2>/dev/null || echo 0)
+LOG_BEFORE=$(grep -c ' refused ' "$IWE_RUNTIME_DIR/canon-reconcile-published.log" 2>/dev/null || echo 0)
 bash "$SCRIPT" "$CANON" main >/dev/null 2>&1
 assert "$(git -C "$CANON" status --porcelain | hash_stdin)" "$BEFORE" "repo status unchanged by the refusal"
 assert "$(find "$CANON" -newer "$MARK" -type f -not -path "$CANON/.git/*" | wc -l | tr -d ' ')" "0" "no working-tree file written by the refusal (git's own fetch bookkeeping under .git is expected)"
-assert "$(( $(grep -c ' refused ' "$IWE_RUNTIME/canon-reconcile-published.log") - LOG_BEFORE ))" "1" "refusal logged exactly once in the runtime log"
+assert "$(( $(grep -c ' refused ' "$IWE_RUNTIME_DIR/canon-reconcile-published.log") - LOG_BEFORE ))" "1" "refusal logged exactly once in the runtime log"
 
 echo "scenario 14 (static): isolate-push.sh defines post_publish_reconcile before its first use"
 IP="${ISOLATE_PUSH:-$HOME/IWE/DS-my-strategy/scripts/isolate-push.sh}"

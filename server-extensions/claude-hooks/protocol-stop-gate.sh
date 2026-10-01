@@ -78,7 +78,7 @@ if [ -n "$SESSION_ID" ] && [ -f "$OBLIGATION_CLI" ]; then
     # Fail-closed: CLI error/unparseable. Блокируем только если есть close-intent или obligation.
     CLOSE_INTENT_SENTINEL="/tmp/iwe-close-intent/${SESSION_ID}.flag"
     OBLIGATION_HASH=$(printf '%s' "$SESSION_ID" | python3 -c 'import hashlib,sys; print(hashlib.sha256(sys.stdin.read().encode()).hexdigest()[:32])' 2>/dev/null)
-    OBLIGATION_FILE="$IWE_RUNTIME/close-obligation/${OBLIGATION_HASH}.json"
+    OBLIGATION_FILE="${IWE_RUNTIME_DIR:-$IWE_ROOT/.iwe-runtime}/close-obligation/${OBLIGATION_HASH}.json"   # same dir close_obligation.py writes; IWE_RUNTIME is the host name
     if [ -f "$CLOSE_INTENT_SENTINEL" ] || [ -f "$OBLIGATION_FILE" ]; then
       OBLIGATION_ACTION="block"
       OBLIGATION_REASON="close_obligation.py unavailable, returned rc=$OBLIGATION_RC or invalid output while close intent/obligation exists"

@@ -13,7 +13,7 @@
 #
 # Contract (fail closed -- any doubt means "touch nothing, say why"):
 #   preflight  no live session is writing into this host's checkouts (semaphores
-#              under $IWE_RUNTIME/sessions without isolated_worktree and with a
+#              under $IWE_RUNTIME_DIR/sessions without isolated_worktree and with a
 #              live pid -- Codex, round 3: a re-check right before reset shrinks
 #              the race with a concurrent writer but cannot close it, and this
 #              script takes no snapshot of tracked dirt; until a barrier every
@@ -38,7 +38,7 @@
 #              tracks -- a changed hash, a missing path or a NEW path means
 #              someone wrote during the window: reported, never called success.
 # This script never writes inside the repository except through git itself:
-# its own log goes to $IWE_RUNTIME/canon-reconcile-published.log (a ledger
+# its own log goes to $IWE_RUNTIME_DIR/canon-reconcile-published.log (a ledger
 # event inside the canon would dirty the very tree it is reconciling -- cold
 # review 11.09 found the resulting 15-minute publish loop).
 #
@@ -61,8 +61,64 @@ REPO="$1"; BRANCH="$2"; PINNED_ARG="${3:-}"
 cd "$REPO" 2>/dev/null || { echo "canon-reconcile-published: cannot cd to $REPO" >&2; exit 2; }
 git rev-parse --is-inside-work-tree >/dev/null 2>&1 || { echo "canon-reconcile-published: $REPO is not a git repo" >&2; exit 2; }
 GIT_DIR=$(git rev-parse --git-dir)
-RUNTIME_DIR="${IWE_RUNTIME:-${IWE_WORKSPACE:-$HOME/IWE}/.iwe-runtime}"
-LOG_FILE="$RUNTIME_DIR/canon-reconcile-published.log"
+# Runtime directory (log, session semaphores). IWE_RUNTIME is the HOST NAME by contract
+# (DP.IWE.011 §C: claude-code|headless|hermes|bot), never a path -- the old
+# "${IWE_RUNTIME:-...}" fallback turned it into a directory RELATIVE to the checkout
+# being reconciled (after the cd above): the log landed in <repo>/claude-code/ and the
+# live-writer preflight looked for semaphores in <repo>/claude-code/sessions/, saw none
+# and went on (reproduced on a throwaway repo 01.10: reset --hard ran past a live writer).
+# Resolution order:
+#   1. IWE_RUNTIME_DIR
+#   2. a legacy ABSOLUTE IWE_RUNTIME naming an existing directory (launchd plists and old
+#      tests export the path this way) -- accepted with a notice
+#   3. ${IWE_WORKSPACE:-$HOME/IWE}/.iwe-runtime
+# The result must be an absolute path without '..' components. Inside this repository it must
+# be ignored by git and hold no tracked files; nothing is created or removed to find out.
+resolve_runtime_dir() {
+  if [ -n "${IWE_RUNTIME_DIR:-}" ]; then
+    printf '%s' "$IWE_RUNTIME_DIR"
+  elif [ -n "${IWE_RUNTIME:-}" ] && [ "${IWE_RUNTIME#/}" != "$IWE_RUNTIME" ] && [ -d "$IWE_RUNTIME" ]; then
+    echo "canon-reconcile-published: IWE_RUNTIME used as a directory (legacy caller); set IWE_RUNTIME_DIR instead" >&2
+    printf '%s' "$IWE_RUNTIME"
+  else
+    printf '%s' "${IWE_WORKSPACE:-$HOME/IWE}/.iwe-runtime"
+  fi
+}
+LOG_NAME="canon-reconcile-published.log"
+runtime_dir_fatal() { echo "canon-reconcile-published: $1" >&2; exit 2; }
+RUNTIME_DIR=$(resolve_runtime_dir)
+while [ "${#RUNTIME_DIR}" -gt 1 ] && [ "${RUNTIME_DIR%/}" != "$RUNTIME_DIR" ]; do RUNTIME_DIR="${RUNTIME_DIR%/}"; done   # a trailing '/' would hide a symlink from the checks below
+case "$RUNTIME_DIR" in
+  /*) ;;
+  *) runtime_dir_fatal "runtime dir must be absolute, got '$RUNTIME_DIR' (IWE_RUNTIME is a host name, not a path)" ;;
+esac
+case "$RUNTIME_DIR" in
+  */../*|*/..) runtime_dir_fatal "runtime dir must not contain '..' components (the part that does not exist yet is not normalized), got '$RUNTIME_DIR'" ;;
+esac
+REPO_TOP=$(git rev-parse --show-toplevel 2>/dev/null)   # physical path (symlinks resolved)
+physical_path() {  # <path> -> its longest existing prefix resolved through symlinks (macOS /var -> /private/var) plus the not-yet-existing rest; fails when the prefix cannot be entered or a symlink cannot be followed
+  local p="$1" rest="" base
+  while [ ! -d "$p" ] && [ "$p" != "/" ]; do
+    [ -L "$p" ] && return 1   # a dangling symlink (or one that points at a file) cannot tell where the log would land: refuse, do not guess
+    rest="/$(basename "$p")$rest"; p=$(dirname "$p")
+  done
+  base=$(cd "$p" 2>/dev/null && pwd -P) || return 1
+  printf '%s%s' "$base" "$rest"
+}
+RUNTIME_PHYS=$(physical_path "$RUNTIME_DIR") || runtime_dir_fatal "cannot resolve runtime dir '$RUNTIME_DIR'"
+case "$RUNTIME_PHYS/" in
+  "$REPO_TOP"/*)
+    RUNTIME_REL="${RUNTIME_PHYS#"$REPO_TOP"}"; RUNTIME_REL="${RUNTIME_REL#/}"   # repo-relative: literal pathspecs plus a symlinked /var make the absolute form unreliable
+    [ -n "$RUNTIME_REL" ] || runtime_dir_fatal "runtime dir is the repository root itself -- refusing"
+    # Ask about the very file this script writes there, so that no directory has to exist and an ignore
+    # rule for some other name (or a negated log rule) cannot vouch for it: git treats the leading components
+    # as directories and applies "dir/" patterns to them (a bare path of a missing directory is not matched).
+    GIT_LITERAL_PATHSPECS=0 git check-ignore -q -- "$RUNTIME_REL/$LOG_NAME" 2>/dev/null; ign=$?   # check-ignore rejects the 'literal' magic exported above
+    [ "$ign" -eq 0 ] || runtime_dir_fatal "runtime dir $RUNTIME_DIR lies inside the repository and its log $LOG_NAME is not ignored (git check-ignore exit $ign) -- refusing (the log would dirty the tree)"
+    [ -z "$(git ls-files -- "$RUNTIME_REL" 2>/dev/null)" ] || runtime_dir_fatal "runtime dir $RUNTIME_DIR lies inside the repository and holds tracked files -- refusing"
+    ;;
+esac
+LOG_FILE="$RUNTIME_DIR/$LOG_NAME"
 TMP_FILES=()
 cleanup() { rm -f "${TMP_FILES[@]+"${TMP_FILES[@]}"}"; }
 trap cleanup EXIT
