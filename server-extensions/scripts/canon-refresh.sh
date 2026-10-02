@@ -68,7 +68,7 @@ set -uo pipefail
 export GIT_NO_REPLACE_OBJECTS=1
 export GIT_GRAFT_FILE=/dev/null/iwe-no-grafts
 
-SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+SCRIPT_DIR="${BASH_SOURCE[0]}"; case "$SCRIPT_DIR" in */*) SCRIPT_DIR="${SCRIPT_DIR%/*}" ;; *) SCRIPT_DIR=. ;; esac; case "$SCRIPT_DIR" in /*) ;; *) SCRIPT_DIR="./$SCRIPT_DIR" ;; esac; SCRIPT_DIR=$(cd "$SCRIPT_DIR" >/dev/null 2>&1 && pwd && printf x); SCRIPT_DIR="${SCRIPT_DIR%x}"; SCRIPT_DIR="${SCRIPT_DIR%$'\n'}"   # computed before the cd below, without dirname (a minimal PATH has none) and without CDPATH; the marker x keeps a newline at the end of a directory name: the lock library is found next to this script
 # shellcheck source=lib/automation-contract.sh
 . "$SCRIPT_DIR/lib/automation-contract.sh"
 
@@ -82,7 +82,7 @@ BRANCH="${2:-}"
 cd "$REPO" 2>/dev/null || { echo "canon-refresh: cannot cd to $REPO" >&2; exit 2; }
 git rev-parse --is-inside-work-tree >/dev/null 2>&1 || { echo "canon-refresh: $REPO is not a git repo" >&2; exit 2; }
 
-GIT_DIR=$(git rev-parse --git-dir)
+GIT_DIR=$(git rev-parse --git-dir && printf x); GIT_DIR="${GIT_DIR%x}"; GIT_DIR="${GIT_DIR%$'\n'}"   # the marker x keeps a newline at the end of the name (the lock is made where the guard says)
 
 # Same class of hazard as git-dirty-guard.sh: resetting/merging through an
 # in-progress rebase or merge would compound the mess, not clean it up.
@@ -117,37 +117,23 @@ fi
 # here would still let both tools inspect/touch the same worktree at once
 # with no coordination between them (cold-review, Codex, 2026-09-01 —
 # Critical/High findings on an earlier draft that used a separate lock).
-LOCK_DIR="$GIT_DIR/dirty-guard.lock"
-LOCK_META="$LOCK_DIR/owner"
-HOSTNAME_NOW="${HOSTNAME:-$(hostname 2>/dev/null || echo unknown)}"
-# The exit of this run removes the lock only when no owner record of ANOTHER run stands in it (WP-530 Ф81, rounds 11 and 12 of the peer session with Kimi and Codex): a lock that
-# another run took over while this one was going, or a lock of the shared library (its record has node=, no host=), is not ours to delete. No record, or a record of this
-# very run, is ours as before. ONE read of the record decides (a second read would only move the gap): a shell has no compare-and-delete, so a lock that is taken over at the very
-# moment between that read and the rm is still removed, a window of about a millisecond when the run goes freely and without an upper bound when it is suspended there, that can only open when a run has taken over the LIVE lock of another (the old
-# takeover does that when its signal is refused); the shared library never does. Written first for the three guards whose exit removed the lock whatever stood in it; the library replaces this function.
-release_own_lock() {
-  local verdict
-  verdict=$(awk -F= -v h="$HOSTNAME_NOW" -v p="$$" '$1=="host"{oh=$2} $1=="pid"{op=$2} END { if (oh == "" && op == "") print "none"; else if (oh == h && op == p) print "ours"; else print "foreign" }' "$LOCK_META" 2>/dev/null) || :
-  if [ "$verdict" = foreign ]; then return 0; fi
-  rm -rf "$LOCK_DIR" 2>/dev/null || :
-  return 0
-}
-if ! mkdir "$LOCK_DIR" 2>/dev/null; then
-  if [ -f "$LOCK_META" ]; then
-    OTHER_HOST=$(awk -F= '$1=="host"{print $2}' "$LOCK_META" 2>/dev/null)
-    OTHER_PID=$(awk -F= '$1=="pid"{print $2}' "$LOCK_META" 2>/dev/null)
-    if [ "$OTHER_HOST" = "$HOSTNAME_NOW" ] && [ -n "$OTHER_PID" ] && ! kill -0 "$OTHER_PID" 2>/dev/null; then
-      echo "canon-refresh: reclaiming stale lock (pid=$OTHER_PID on $OTHER_HOST no longer running)" >&2
-      rm -rf "$LOCK_DIR" 2>/dev/null
-    fi
-  fi
-  if ! mkdir "$LOCK_DIR" 2>/dev/null; then
-    echo "canon-refresh: lock busy (another refresh in progress), skipping this cycle" >&2
-    exit 0
-  fi
+# The lock itself (the takeover rule: only when the owner is PROVEN gone; the owner record; the release: only a lock with our token) lives
+# in scripts/lib/dirty-guard-lock.sh, shared by the five guard scripts (WP-530 Ф81 remainder, peer session 2026-10-02-01). What THIS script
+# does when the lock is busy stays here.
+DGLOCK_LIB="$SCRIPT_DIR/lib/dirty-guard-lock.sh"
+unset DGLOCK_LIB_READY   # a marker inherited from the environment must not vouch for a library that was cut short
+# shellcheck source=lib/dirty-guard-lock.sh
+if [ -r "$DGLOCK_LIB" ] && . "$DGLOCK_LIB" && [ "${DGLOCK_LIB_READY:-}" = 1 ]; then :; else
+  echo "canon-refresh: the lock library is missing or unusable: $DGLOCK_LIB (scripts/ and scripts/lib/ are updated together); nothing was done" >&2
+  exit 1
 fi
-trap release_own_lock EXIT
-printf 'host=%s\npid=%s\n' "$HOSTNAME_NOW" "$$" > "$LOCK_META"
+trap 'dglock_release' EXIT   # set BEFORE the lock is asked for: a signal that arrives between the library's mkdir and its owner record must still remove the empty directory
+rc=0; dglock_acquire "$GIT_DIR" canon-refresh || rc=$?
+case "$rc" in
+  0) ;;
+  1) echo "canon-refresh: lock busy (another refresh in progress), skipping this cycle -- $DGLOCK_REASON" >&2; exit 0 ;;
+  *) echo "canon-refresh: $DGLOCK_REASON" >&2; exit 1 ;;
+esac
 
 if ! git fetch origin "$BRANCH" --quiet 2>/dev/null; then
   echo "canon-refresh: fetch failed (offline?) — nothing to check"

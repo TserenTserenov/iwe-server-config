@@ -13,6 +13,15 @@ SCRIPT="${SCRIPT_UNDER_TEST:-$ROOT_DIR/scripts/sync-strategy-files.sh}"
 REAL_GIT=$(command -v git)
 TEST_ROOT=$(mktemp -d "${TMPDIR:-/tmp}/sync-strategy-stale-mirror.XXXXXX")
 trap 'rm -rf "$TEST_ROOT"' EXIT
+# A script that is pointed at from elsewhere (a mutation run, an old version) finds the lock library next to itself, so it runs from a work
+# directory that holds the copy and its lib/: the one next to the copy, else the library of this repository.
+if [ -n "${SCRIPT_UNDER_TEST:-}" ]; then
+  WORK_DIR="$TEST_ROOT/under-test"; mkdir -p "$WORK_DIR/lib"
+  cp "$SCRIPT_UNDER_TEST" "$WORK_DIR/sync-strategy-files.sh"
+  if [ -f "$(dirname "$SCRIPT_UNDER_TEST")/lib/dirty-guard-lock.sh" ]; then cp "$(dirname "$SCRIPT_UNDER_TEST")/lib/dirty-guard-lock.sh" "$WORK_DIR/lib/"
+  elif [ -f "$ROOT_DIR/scripts/lib/dirty-guard-lock.sh" ]; then cp "$ROOT_DIR/scripts/lib/dirty-guard-lock.sh" "$WORK_DIR/lib/"; fi
+  SCRIPT="$WORK_DIR/sync-strategy-files.sh"
+fi
 
 fail() {
   echo "FAIL: $*" >&2

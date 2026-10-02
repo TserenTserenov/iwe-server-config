@@ -234,6 +234,8 @@ REAL_REPO="$INTEGRATION_ROOT/repo-real"
 mkdir -p "$INTEGRATION_ROOT/scripts" "$INTEGRATION_HOME"
 cp "$ROOT_DIR/scripts/iwe-safe-pull.sh" "$INTEGRATION_ROOT/scripts/iwe-safe-pull.sh"
 cp "$ROOT_DIR/scripts/git-dirty-guard.sh" "$INTEGRATION_ROOT/scripts/git-dirty-guard.sh"
+mkdir -p "$INTEGRATION_ROOT/scripts/lib"
+cp "$ROOT_DIR/scripts/lib/dirty-guard-lock.sh" "$INTEGRATION_ROOT/scripts/lib/dirty-guard-lock.sh"   # the guard sources its lock library from lib/ next to it
 chmod +x "$INTEGRATION_ROOT/scripts/iwe-safe-pull.sh" "$INTEGRATION_ROOT/scripts/git-dirty-guard.sh"
 
 # Audit every ordinary integration call. A mutate-then-restore implementation can
@@ -1283,7 +1285,7 @@ assert_ref_absent "submodule temporary-ref cleanup" "$SUPER_REPO"
 TIMEOUT_BIN="$TEST_ROOT/integration/timeout-bin"
 TIMEOUT_MARKER="$TEST_ROOT/integration/timeout-query-started"
 mkdir -p "$TIMEOUT_BIN"
-for command_name in bash python3 mkdir hostname awk rm mktemp; do
+for command_name in bash python3 mkdir hostname awk rm mktemp mv ln ls date rmdir; do   # mv ls date rmdir: the commands of the lock library (scripts/lib/dirty-guard-lock.sh)
     command_path=$(command -v "$command_name")
     ln -s "$command_path" "$TIMEOUT_BIN/$command_name"
 done

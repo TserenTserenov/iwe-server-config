@@ -87,9 +87,10 @@ export GIT_LITERAL_PATHSPECS=1
 usage() { echo "usage: canon-reconcile-published.sh <repo-path> <branch> [<pinned-oid>]" >&2; exit 2; }
 [ $# -ge 2 ] || usage
 REPO="$1"; BRANCH="$2"; PINNED_ARG="${3:-}"
+SCRIPT_DIR="${BASH_SOURCE[0]}"; case "$SCRIPT_DIR" in */*) SCRIPT_DIR="${SCRIPT_DIR%/*}" ;; *) SCRIPT_DIR=. ;; esac; case "$SCRIPT_DIR" in /*) ;; *) SCRIPT_DIR="./$SCRIPT_DIR" ;; esac; SCRIPT_DIR=$(cd "$SCRIPT_DIR" >/dev/null 2>&1 && pwd && printf x); SCRIPT_DIR="${SCRIPT_DIR%x}"; SCRIPT_DIR="${SCRIPT_DIR%$'\n'}"   # computed before the cd below, without dirname (a minimal PATH has none) and without CDPATH; the marker x keeps a newline at the end of a directory name: the lock library is found next to this script
 cd "$REPO" 2>/dev/null || { echo "canon-reconcile-published: cannot cd to $REPO" >&2; exit 2; }
 git rev-parse --is-inside-work-tree >/dev/null 2>&1 || { echo "canon-reconcile-published: $REPO is not a git repo" >&2; exit 2; }
-GIT_DIR=$(git rev-parse --git-dir)
+GIT_DIR=$(git rev-parse --git-dir && printf x); GIT_DIR="${GIT_DIR%x}"; GIT_DIR="${GIT_DIR%$'\n'}"   # the marker x keeps a newline at the end of the name (the lock is made where the guard says)
 # Runtime directory (log, session semaphores). IWE_RUNTIME is the HOST NAME by contract
 # (DP.IWE.011 §C: claude-code|headless|hermes|bot), never a path -- the old
 # "${IWE_RUNTIME:-...}" fallback turned it into a directory RELATIVE to the checkout
@@ -389,138 +390,39 @@ fi
 CURRENT_BRANCH=$(git rev-parse --abbrev-ref HEAD 2>/dev/null)
 [ "$CURRENT_BRANCH" = "$BRANCH" ] || refuse "checked-out branch is not the expected one: '$CURRENT_BRANCH' instead of '$BRANCH'"
 
-# Same lock as git-dirty-guard.sh / canon-refresh.sh / canon-reconcile.sh /
-# sync-strategy-files.sh: whoever holds it runs to completion first.
-# --- the repository lock ---------------------------------------------------------------------------------------------------------
-# Five guard scripts take $GIT_DIR/dirty-guard.lock with one protocol: mkdir the directory, then write the file "owner" (host=,
-# pid=). This script keeps that format (it only adds the fields epoch, token and script) and changes WHEN it takes a lock over
-# (WP-530 Ф81, peer-session 2026-10-02-01 with Kimi and Codex): only when the owner is PROVEN gone, that is when kill -0 answers
-# "No such process" AND one successful listing of all processes (ps -A) holds this very run and pid 1 and not the pid. NOT proof:
-# a missing, empty or damaged owner file, another host name, a pid whose state cannot be established (ps fails, kill answers
-# anything else), and a pid that is ALIVE (a number handed to another process looks exactly like that: the lock stays and the skip
-# says how old the lock is). In all of these the run is skipped (exit 0), and a lock that stays held is an ALERT of its own series;
-# a lock directory that cannot be created, a dead owner's lock that cannot be moved away, and a file or link in the place of the lock
-# are named as such. A zombie counts as alive. A lock that is always taken by DIFFERENT holders raises no alert (every skip is a
-# new class), but every skip is logged.
-# The lock journal: a skip is recorded under a class that names the lock INSTANCE (the owner pid or the state of the lock, and the
-# inode number of the lock directory), so the skips of one instance form a series and a record about another instance never joins
-# or ages it; a run that judged an instance writes its skip only while that instance is still the lock (a run that stalled in
-# between writes nothing, and says so in the log). A skipped cycle is printed and logged as "skipped". Taking the lock ends the
-# series. An ALERT needs three records of the same class AND an hour between the first and now (not a sliding window).
-# SCOPE of the instance identity: it needs a file system that keeps directory inode numbers stable (local APFS, HFS+, ext4, xfs,
-# btrfs, zfs, tmpfs: where the guarded repositories live). A skip whose lock number changed before it was written is not counted:
-# the reason goes to stderr and, when the log can be written, to the log. Where the numbers wander, the accumulation of the series
-# and the detection of the instability are NOT guaranteed (a series may fall apart into classes of different numbers): such file
-# systems are outside the supported scope (a reading of the number cannot prove that it is stable, so no check of it is made).
-# Limits of this protocol (documented): two runs that judge the same lock stale can still take each other's NEW lock (frequent
-# when four or more runs start at the same instant); the release checks the owner record and removes the directory in two steps,
-# and the check of the instance and the write of a skip are two steps as well; an inode number can be reused by a later lock
-# directory; a lock held by a live pid that is no guard run (a handed-over number) is removed by a human; the lock of the four
-# other guard scripts has no epoch and no token; without a working ps nothing is ever taken over; two namespaces of process
-# numbers under one host name are not told apart.
-LOCK_DIR="$GIT_DIR/dirty-guard.lock"
-LOCK_META="$LOCK_DIR/owner"
-HOST_NOW="${HOSTNAME:-$(hostname 2>/dev/null || echo unknown)}"
-LOCK_TOKEN="$$.$RANDOM.$RANDOM"
-pid_state() {  # <pid> -> alive | gone | unknown. The answer of the builtin kill -0 (no function of the environment can stand in for it) decides: "No such process" is absence, "not permitted" is a process that exists; any other message proves nothing. Absence also needs ONE successful listing of all processes that holds this very run and pid 1 and not the pid
-  local err snap
-  case "$1" in ''|0*|*[!0-9]*) echo unknown; return ;; esac
-  if err=$(export LC_ALL=C; builtin kill -0 "$1" 2>&1); then echo alive; return; fi
-  case "$err" in
-    *"No such process"*) ;;
-    *"not permitted"*) echo alive; return ;;
-    *) echo unknown; return ;;
-  esac
-  snap=$(LC_ALL=C ps -A -o pid= 2>/dev/null) || { echo unknown; return; }
-  printf '%s\n' "$snap" | awk -v me="$$" -v target="$1" '
-    { gsub(/[ \t]/, "") }
-    $0 == me { seen_me = 1 }
-    $0 == "1" { seen_init = 1 }
-    $0 == target { found = 1 }
-    END { if (found) print "alive"; else if (seen_me && seen_init) print "gone"; else print "unknown" }'
-}
-lock_field() {  # <key> -> the value of a key of the owner file; empty when the key is missing; "doubled-key" when it appears twice (a damaged file)
-  awk -F= -v k="$1" '$1 == k { n++; v = substr($0, length(k) + 2) } END { if (n == 1) print v; else if (n > 1) print "doubled-key" }' "$LOCK_META" 2>/dev/null
-}
-lock_instance() {  # the inode number of the lock directory: a new directory is a new instance, whatever its owner record says; empty when ls cannot say
-  ls -di "$LOCK_DIR" 2>/dev/null | awk 'NR == 1 { print $1 }'
-}
-lock_age() {  # <epoch of the owner record> -> whole minutes since then; empty when a time is unusable (awk, not shell arithmetic: nothing here may abort the run)
-  local now_s
-  now_s=$(fresh_now) || return 0
-  awk -v n="$now_s" -v e="$1" 'BEGIN { if (n ~ /^[0-9]+$/ && e ~ /^[0-9]+$/ && e >= 1000000000 && n >= e) printf "%d", (n - e) / 60 }'
-}
-lock_judge() {  # -> LOCK_VERDICT (takeover | held), LOCK_DETAIL (why, in words) and LOCK_LABEL (what the lock is)
-  local pid host st age
-  LOCK_VERDICT=held; LOCK_LABEL="not a directory"
-  [ -d "$LOCK_DIR" ] || { LOCK_DETAIL="$LOCK_DIR is not a directory (a file or a link stands in the place of the lock)"; return; }
-  LOCK_LABEL="no owner file"
-  if [ ! -f "$LOCK_META" ]; then LOCK_DETAIL="the owner file is missing (its creator may have died before it wrote it)"; return; fi
-  LOCK_LABEL="damaged owner file"
-  pid=$(lock_field pid); host=$(lock_field host)
-  case "$pid" in ''|0*|*[!0-9]*) LOCK_DETAIL="the owner file is damaged (pid '$(oneline "$pid")')"; return ;; esac
-  LOCK_LABEL="pid $pid"
-  case "$host" in ''|doubled-key) LOCK_DETAIL="the owner file is damaged (host '$(oneline "$host")')"; return ;; esac
-  if [ "$host" != "$HOST_NOW" ]; then LOCK_DETAIL="the owner host '$(oneline "$host")' is not this host '$HOST_NOW'"; return; fi
-  st=$(pid_state "$pid")
-  case "$st" in
-    gone) LOCK_VERDICT=takeover; LOCK_DETAIL="owner pid $pid is gone" ;;
-    alive) age=$(lock_age "$(lock_field epoch)"); LOCK_DETAIL="owner pid $pid is alive${age:+, the lock was taken $age min ago}" ;;
-    *) LOCK_DETAIL="it cannot be established whether owner pid $pid is alive" ;;
-  esac
-}
-lock_verdict() {  # -> the verdict of lock_judge, LOCK_INO (the lock instance) and LOCK_ID (the instance as it goes into the class of a skip, see busy_report)
-  LOCK_INO=$(lock_instance)
-  lock_judge
-  LOCK_ID="$LOCK_LABEL${LOCK_INO:+ dir $LOCK_INO}"
-}
-reclaim_lock() {  # move a stale lock aside in ONE step (a rename happens whole or not at all: a failing delete in place would leave a lock directory without its owner record), then delete it
-  local aside="$LOCK_DIR.stale.$LOCK_TOKEN"
-  mv "$LOCK_DIR" "$aside" 2>/dev/null || return 1
-  rm -rf "$aside" 2>/dev/null || echo "canon-reconcile-published: warning: the stale lock moved to $aside could not be removed" >&2
-  return 0
-}
-acquire_lock() {  # 0 = taken; 1 = not taken (LOCK_DETAIL and LOCK_ID say why)
-  mkdir "$LOCK_DIR" 2>/dev/null && return 0
-  if [ ! -e "$LOCK_DIR" ] && [ ! -L "$LOCK_DIR" ]; then   # nobody holds anything just now: the lock was released a moment ago (try once more), or the directory itself cannot be made
-    mkdir "$LOCK_DIR" 2>/dev/null && return 0
-    if [ ! -e "$LOCK_DIR" ] && [ ! -L "$LOCK_DIR" ]; then
-      LOCK_INO=""; LOCK_ID="no lock directory"; LOCK_DETAIL="the lock directory cannot be created (no write access to the git directory, a read-only or a full disk?)"; return 1
-    fi
-  fi
-  lock_verdict
-  if [ "$LOCK_VERDICT" = takeover ]; then
-    echo "canon-reconcile-published: reclaiming the lock: $LOCK_DETAIL" >&2
-    reclaim_lock && mkdir "$LOCK_DIR" 2>/dev/null && return 0
-    lock_verdict   # somebody was faster: say what is there now
-    if [ "$LOCK_VERDICT" = takeover ]; then LOCK_DETAIL="the lock could not be taken over ($LOCK_DETAIL)"; fi   # nobody was faster: the dead owner's lock cannot be moved away, and it is still whole
-  fi
-  return 1
-}
-publish_owner() {  # the owner record appears whole or not at all: written under another name, then renamed
-  local tmp="$LOCK_DIR/owner.tmp.$$" now_s
-  now_s=$(fresh_now) || now_s=0
-  { printf 'host=%s\npid=%s\nepoch=%s\ntoken=%s\nscript=canon-reconcile-published\n' "$HOST_NOW" "$$" "$now_s" "$LOCK_TOKEN" > "$tmp" && mv -f "$tmp" "$LOCK_META"; } 2>/dev/null
-}
-release_lock() {  # only a lock whose owner record is OURS is removed: a lock that was taken over while this run was still going belongs to somebody else
-  [ "$(lock_field token)" = "$LOCK_TOKEN" ] && rm -rf "$LOCK_DIR" 2>/dev/null
-  return 0
-}
+# The repository lock is the one the other guard scripts take ($GIT_DIR/dirty-guard.lock) and it lives in ONE place, scripts/lib/
+# dirty-guard-lock.sh (WP-530 Ф81 and its remainder, peer session 2026-10-02-01 with Kimi and Codex): the takeover rule (only when
+# the owner is PROVEN gone), the owner record, the release (only a lock with our token), the scope and the limits are described in
+# the header of that file. What stays HERE is what happens when the lock is busy: the skip is printed, logged as "skipped" and
+# recorded in its own journal (canon-reconcile-published.KEY.lockbusy: the series of skips because the lock is held, same law as the
+# refusal journal); one lock instance that stays held becomes an ALERT of its own (three records of the same class AND an hour
+# between the first and now, not a sliding window). The class of a skip names the lock INSTANCE (DGLOCK_ID: the owner pid or the
+# state of the lock, and the inode number of the lock directory), so the skips of one instance form a series and a record about
+# another instance does not join or age it (an inode number can be reused by a later lock directory: a limit of the library); a skip is written only while that instance is still the lock (a run that stalled in
+# between writes nothing, and says so in the log). Taking the lock ends the series.
+DGLOCK_LIB="$SCRIPT_DIR/lib/dirty-guard-lock.sh"
+unset DGLOCK_LIB_READY   # a marker inherited from the environment must not vouch for a library that was cut short
+# shellcheck source=lib/dirty-guard-lock.sh
+if [ -r "$DGLOCK_LIB" ] && . "$DGLOCK_LIB" && [ "${DGLOCK_LIB_READY:-}" = 1 ]; then :; else
+  echo "canon-reconcile-published: the lock library is missing or unusable: $DGLOCK_LIB (scripts/ and scripts/lib/ are updated together); nothing was done" >&2
+  exit 1
+fi
 busy_report() {  # the lock is held: say so, and let a lock that stays held become an ALERT of its own series (the refusal journal is not touched: a skip is neither a refusal nor a healthy run). The class of a refusal is the text before the first colon of its reason, so the lock INSTANCE is named THERE; the skip is written only while that instance is still the lock
   echo "canon-reconcile-published: lock busy, skipping this cycle -- $1" >&2
-  if [ -n "$LOCK_INO" ] && [ "$(lock_instance)" != "$LOCK_INO" ]; then
+  if [ -n "$DGLOCK_INSTANCE" ] && [ "$(dglock_instance)" != "$DGLOCK_INSTANCE" ]; then
     echo "canon-reconcile-published: the lock changed while this skip was being reported (or this file system does not keep directory numbers stable): not recorded" >&2
-    log_line skipped "dirty-guard lock cannot be taken [$LOCK_ID]: $1 (the lock changed meanwhile, or the directory number is not stable on this file system: not counted)"
+    log_line skipped "dirty-guard lock cannot be taken [$DGLOCK_ID]: $1 (the lock changed meanwhile, or the directory number is not stable on this file system: not counted)"
     return 0
   fi
-  ( STREAK_FILE="$RUNTIME_PHYS/$BUSY_NAME"; REPORT_WORD=skipped; refuse_report "dirty-guard lock cannot be taken [$LOCK_ID]: $1" ) || true
+  ( STREAK_FILE="$RUNTIME_PHYS/$BUSY_NAME"; REPORT_WORD=skipped; refuse_report "dirty-guard lock cannot be taken [$DGLOCK_ID]: $1" ) || true
 }
-if ! acquire_lock; then busy_report "$LOCK_DETAIL"; exit 0; fi
-trap 'cleanup; release_lock' EXIT
-if ! publish_owner; then
-  rm -f "$LOCK_DIR/owner.tmp.$$" 2>/dev/null; rmdir "$LOCK_DIR" 2>/dev/null   # our temporary file, and the directory only when it is EMPTY: a lock that another run took and published meanwhile stays (one that run made but has not yet published can still go: it then fails its own publication and refuses)
-  refuse "cannot record the owner of the lock $LOCK_DIR"
-fi
+trap 'cleanup || :; dglock_release' EXIT   # set BEFORE the lock is asked for: a signal that arrives between the library's mkdir and its owner record must still remove the empty directory
+rc=0; dglock_acquire "$GIT_DIR" canon-reconcile-published || rc=$?
+case "$rc" in
+  0) ;;
+  1) busy_report "$DGLOCK_REASON"; exit 0 ;;
+  *) refuse "$DGLOCK_REASON" ;;   # 2: the lock directory was made but its owner record could not be written; 3: misuse of the library (the reason says which)
+esac
 if [ -e "$RUNTIME_PHYS/$BUSY_NAME" ] || [ -L "$RUNTIME_PHYS/$BUSY_NAME" ]; then   # the lock is ours: a series of skips because it was held has ended (looked for first: a run without such a series asks the runtime directory nothing)
   end_series "$RUNTIME_PHYS/$BUSY_NAME" "the lock journal" "although the lock was taken"
 fi

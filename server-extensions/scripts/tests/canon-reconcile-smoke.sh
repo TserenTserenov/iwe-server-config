@@ -179,7 +179,7 @@ advance_seed "$SEED7" "second" "second commit"
 LIVE_LOCK_HEAD=$("$REAL_GIT" -C "$CLONE7" rev-parse HEAD)
 CLONE7_GIT_DIR=$("$REAL_GIT" -C "$CLONE7" rev-parse --absolute-git-dir)
 mkdir -p "$CLONE7_GIT_DIR/dirty-guard.lock"
-printf 'host=%s\npid=%s\n' "${HOSTNAME:-$(hostname)}" "$$" > "$CLONE7_GIT_DIR/dirty-guard.lock/owner"
+printf 'node=%s\npid=%s\n' "${HOSTNAME:-$(hostname)}" "$$" > "$CLONE7_GIT_DIR/dirty-guard.lock/owner"
 out7=$(bash "$SCRIPT" "$CLONE7" main 2>&1)
 rc7=$?
 assert_eq "case7 exit code" "0" "$rc7"
@@ -196,11 +196,12 @@ advance_seed "$SEED8" "second" "second commit"
 REMOTE_HEAD8=$("$REAL_GIT" -C "$SEED8" rev-parse HEAD)
 CLONE8_GIT_DIR=$("$REAL_GIT" -C "$CLONE8" rev-parse --absolute-git-dir)
 mkdir -p "$CLONE8_GIT_DIR/dirty-guard.lock"
-printf 'host=%s\npid=999999\n' "${HOSTNAME:-$(hostname)}" > "$CLONE8_GIT_DIR/dirty-guard.lock/owner"
+DEAD_PID8=$(( $(cat /proc/sys/kernel/pid_max 2>/dev/null || echo 999998) + 1 ))   # a pid that cannot exist: above pid_max (4194304 on Tsekh) and above every pid of macOS
+printf 'node=%s\npid=%s\n' "${HOSTNAME:-$(hostname)}" "$DEAD_PID8" > "$CLONE8_GIT_DIR/dirty-guard.lock/owner"
 out8=$(bash "$SCRIPT" "$CLONE8" main 2>&1)
 rc8=$?
 assert_eq "case8 exit code" "0" "$rc8"
-assert_contains "case8 diagnostic" "$out8" "reclaiming stale lock"
+assert_contains "case8 diagnostic" "$out8" "reclaiming the lock: owner pid $DEAD_PID8 is gone"
 assert_eq "case8 fast-forwarded after reclaim" "$REMOTE_HEAD8" "$("$REAL_GIT" -C "$CLONE8" rev-parse HEAD)"
 [ ! -d "$CLONE8_GIT_DIR/dirty-guard.lock" ] || fail "case8 lock directory left behind after success"
 

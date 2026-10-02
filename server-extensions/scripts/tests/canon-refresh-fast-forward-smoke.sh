@@ -130,11 +130,12 @@ advance_origin "$SEED6" "second"
 REMOTE_HEAD6=$("$REAL_GIT" -C "$SEED6" rev-parse HEAD)
 CLONE6_GIT_DIR=$("$REAL_GIT" -C "$CLONE6" rev-parse --absolute-git-dir)
 mkdir -p "$CLONE6_GIT_DIR/dirty-guard.lock"
-printf 'host=%s\npid=999999\n' "${HOSTNAME:-$(hostname)}" > "$CLONE6_GIT_DIR/dirty-guard.lock/owner"
+DEAD_PID6=$(( $(cat /proc/sys/kernel/pid_max 2>/dev/null || echo 999998) + 1 ))   # a pid that cannot exist: above pid_max (4194304 on Tsekh) and above every pid of macOS
+printf 'node=%s\npid=%s\n' "${HOSTNAME:-$(hostname)}" "$DEAD_PID6" > "$CLONE6_GIT_DIR/dirty-guard.lock/owner"
 out6=$(bash "$SCRIPT" "$CLONE6" main 2>&1)
 rc6=$?
 assert_eq "case6 stale-lock reclaim exit code" "0" "$rc6"
-assert_contains "case6 stale-lock reclaim diagnostic" "$out6" "reclaiming stale lock"
+assert_contains "case6 stale-lock reclaim diagnostic" "$out6" "reclaiming the lock: owner pid $DEAD_PID6 is gone"
 assert_eq "case6 fast-forwarded after reclaim" "$REMOTE_HEAD6" "$("$REAL_GIT" -C "$CLONE6" rev-parse HEAD)"
 [ ! -d "$CLONE6_GIT_DIR/dirty-guard.lock" ] || fail "case6 lock directory left behind after success"
 
@@ -147,7 +148,7 @@ LIVE_LOCK_HEAD=$("$REAL_GIT" -C "$CLONE7" rev-parse HEAD)
 CLONE7_GIT_DIR=$("$REAL_GIT" -C "$CLONE7" rev-parse --absolute-git-dir)
 mkdir -p "$CLONE7_GIT_DIR/dirty-guard.lock"
 # $$ (this test's own shell pid) is guaranteed alive for the duration of the run.
-printf 'host=%s\npid=%s\n' "${HOSTNAME:-$(hostname)}" "$$" > "$CLONE7_GIT_DIR/dirty-guard.lock/owner"
+printf 'node=%s\npid=%s\n' "${HOSTNAME:-$(hostname)}" "$$" > "$CLONE7_GIT_DIR/dirty-guard.lock/owner"
 out7=$(bash "$SCRIPT" "$CLONE7" main 2>&1)
 rc7=$?
 assert_eq "case7 live-lock exit code" "0" "$rc7"
@@ -194,13 +195,13 @@ new_origin_and_clone case10 >/dev/null
 CLONE10="$TEST_ROOT/case10-clone"
 CLONE10_GIT_DIR=$("$REAL_GIT" -C "$CLONE10" rev-parse --absolute-git-dir)
 mkdir -p "$CLONE10_GIT_DIR/dirty-guard.lock"
-printf 'host=%s\npid=%s\n' "${HOSTNAME:-$(hostname)}" "$$" > "$CLONE10_GIT_DIR/dirty-guard.lock/owner"
+printf 'node=%s\npid=%s\n' "${HOSTNAME:-$(hostname)}" "$$" > "$CLONE10_GIT_DIR/dirty-guard.lock/owner"
 canon_under_guard_lock=$(bash "$SCRIPT" "$CLONE10" main 2>&1)
 assert_contains "canon-refresh sees dirty-guard's live lock" "$canon_under_guard_lock" "lock busy"
 rm -rf "$CLONE10_GIT_DIR/dirty-guard.lock"
 
 mkdir -p "$CLONE10_GIT_DIR/dirty-guard.lock"
-printf 'host=%s\npid=%s\n' "${HOSTNAME:-$(hostname)}" "$$" > "$CLONE10_GIT_DIR/dirty-guard.lock/owner"
+printf 'node=%s\npid=%s\n' "${HOSTNAME:-$(hostname)}" "$$" > "$CLONE10_GIT_DIR/dirty-guard.lock/owner"
 # git-dirty-guard.sh's own contract exits 1 (not 0) for a busy lock — capture
 # under set +e like the other refusal scenarios above, or set -e would abort
 # this whole test script on that exit code before the assertion ever runs.

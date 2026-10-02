@@ -79,7 +79,7 @@ printf 'card v2\n' > "$SEED2/inbox/WP-1.md"
 "$REAL_GIT" -C "$SEED2" push -q
 GIT_DIR2=$("$REAL_GIT" -C "$CLONE2" rev-parse --absolute-git-dir)
 mkdir -p "$GIT_DIR2/dirty-guard.lock"
-printf 'host=%s\npid=%s\n' "${HOSTNAME:-$(hostname)}" "$$" > "$GIT_DIR2/dirty-guard.lock/owner"
+printf 'node=%s\npid=%s\n' "${HOSTNAME:-$(hostname)}" "$$" > "$GIT_DIR2/dirty-guard.lock/owner"
 out2=$(bash "$SCRIPT" "$CLONE2" 2>&1)
 rc2=$?
 assert_eq "case2 exit code" "0" "$rc2"
@@ -94,7 +94,7 @@ new_origin_and_clone case3
 CLONE3="$TEST_ROOT/case3-clone"
 GIT_DIR3=$("$REAL_GIT" -C "$CLONE3" rev-parse --absolute-git-dir)
 mkdir -p "$GIT_DIR3/dirty-guard.lock"
-printf 'host=%s\npid=%s\n' "${HOSTNAME:-$(hostname)}" "$$" > "$GIT_DIR3/dirty-guard.lock/owner"
+printf 'node=%s\npid=%s\n' "${HOSTNAME:-$(hostname)}" "$$" > "$GIT_DIR3/dirty-guard.lock/owner"
 canon_out=$(bash "$CANON_REFRESH" "$CLONE3" main 2>&1)
 assert_contains "canon-refresh sees sync-strategy-files' live lock" "$canon_out" "lock busy"
 rm -rf "$GIT_DIR3/dirty-guard.lock"

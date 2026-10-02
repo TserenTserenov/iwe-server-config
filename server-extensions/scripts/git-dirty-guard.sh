@@ -19,7 +19,7 @@
 #   GIT_DIRTY_GUARD_TG_ALERTS=false     suppress direct Telegram delivery.
 # Exit codes: 0 = tracked tree is clean (untracked-only is allowed).
 #             1 = dirty, mid-operation, lock-busy, query-refused, or unstable.
-#             2 = usage/repository error.
+#             2 = usage/repository/installation error (also: the lock library scripts/lib/dirty-guard-lock.sh is missing or cut short).
 set -uo pipefail
 
 REPO="${1:?usage: git-dirty-guard.sh <repo-path> [branch]}"
@@ -328,6 +328,7 @@ repo_has_operation() {
     || [ -f "$GIT_DIR/REVERT_HEAD" ]
 }
 
+SCRIPT_DIR="${BASH_SOURCE[0]}"; case "$SCRIPT_DIR" in */*) SCRIPT_DIR="${SCRIPT_DIR%/*}" ;; *) SCRIPT_DIR=. ;; esac; case "$SCRIPT_DIR" in /*) ;; *) SCRIPT_DIR="./$SCRIPT_DIR" ;; esac; SCRIPT_DIR=$(cd "$SCRIPT_DIR" >/dev/null 2>&1 && pwd && printf x); SCRIPT_DIR="${SCRIPT_DIR%x}"; SCRIPT_DIR="${SCRIPT_DIR%$'\n'}"   # computed before the cd below, without dirname (a minimal PATH has none) and without CDPATH; the marker x keeps a newline at the end of a directory name: the lock library is found next to this script
 cd "$REPO" 2>/dev/null || { echo "git-dirty-guard: cannot cd to $REPO" >&2; exit 2; }
 REPO="$(pwd)"
 if ! git_supports_no_lazy_fetch; then
@@ -354,7 +355,7 @@ if [ "$CURRENT_BRANCH" != "$BRANCH" ]; then
   exit 1
 fi
 
-GIT_DIR=$(git rev-parse --absolute-git-dir)
+GIT_DIR=$(git rev-parse --absolute-git-dir && printf x); GIT_DIR="${GIT_DIR%x}"; GIT_DIR="${GIT_DIR%$'\n'}"   # the marker x keeps a newline at the end of the name (the lock is made where the guard says)
 # A directory without its own repository (DS-MCP) resolves to the parent's Git
 # dir: on 02.09 that is how an older guard reset the IWE root instead of DS-MCP.
 # Refuse rather than inspect, alert or record state for the wrong repository.
@@ -374,42 +375,29 @@ fi
 
 # Serialize guard snapshots. This lock does not authorize mutation: ordinary editors
 # do not honor it, which is why automatic reset/self-heal is deliberately absent.
-LOCK_DIR="$GIT_DIR/dirty-guard.lock"
-LOCK_META="$LOCK_DIR/owner"
-HOSTNAME_NOW="${HOSTNAME:-$(hostname 2>/dev/null || echo unknown)}"
-if ! mkdir "$LOCK_DIR" 2>/dev/null; then
-  if [ -f "$LOCK_META" ]; then
-    OTHER_HOST=$(awk -F= '$1=="host"{print $2}' "$LOCK_META" 2>/dev/null)
-    OTHER_PID=$(awk -F= '$1=="pid"{print $2}' "$LOCK_META" 2>/dev/null)
-    if [ "$OTHER_HOST" = "$HOSTNAME_NOW" ] && [ -n "$OTHER_PID" ] \
-      && ! kill -0 "$OTHER_PID" 2>/dev/null; then
-      echo "git-dirty-guard: reclaiming stale lock (pid=$OTHER_PID on $OTHER_HOST)" >&2
-      rm -rf "$LOCK_DIR" 2>/dev/null
-    fi
-  fi
-  if ! mkdir "$LOCK_DIR" 2>/dev/null; then
-    echo "git-dirty-guard: lock busy (live owner or unproven), refusing" >&2
-    exit 1
-  fi
+# The lock itself (the takeover rule: only when the owner is PROVEN gone; the owner record; the release: only a lock with our token) lives
+# in scripts/lib/dirty-guard-lock.sh, shared by the five guard scripts (WP-530 Ф81 remainder, peer session 2026-10-02-01). What THIS script
+# does when the lock is busy stays here.
+DGLOCK_LIB="$SCRIPT_DIR/lib/dirty-guard-lock.sh"
+unset DGLOCK_LIB_READY   # a marker inherited from the environment must not vouch for a library that was cut short
+# shellcheck source=lib/dirty-guard-lock.sh
+if [ -r "$DGLOCK_LIB" ] && . "$DGLOCK_LIB" && [ "${DGLOCK_LIB_READY:-}" = 1 ]; then :; else
+  echo "git-dirty-guard: the lock library is missing or unusable: $DGLOCK_LIB (scripts/ and scripts/lib/ are updated together); nothing was done" >&2
+  exit 2
 fi
-echo "host=$HOSTNAME_NOW" > "$LOCK_META"
-echo "pid=$$" >> "$LOCK_META"
 STATUS_FILE=""
 # shellcheck disable=SC2329  # invoked by the EXIT trap
-release_guard_lock() {
-  local owner_host owner_pid
-  owner_host=$(awk -F= '$1=="host"{print $2}' "$LOCK_META" 2>/dev/null)
-  owner_pid=$(awk -F= '$1=="pid"{print $2}' "$LOCK_META" 2>/dev/null)
-  if [ "$owner_host" = "$HOSTNAME_NOW" ] && [ "$owner_pid" = "$$" ]; then
-    rm -rf "$LOCK_DIR" 2>/dev/null
-  fi
-}
-# shellcheck disable=SC2329  # invoked by the EXIT trap
 cleanup_guard() {
-  [ -z "$STATUS_FILE" ] || rm -f "$STATUS_FILE" 2>/dev/null
-  release_guard_lock
+  [ -z "$STATUS_FILE" ] || rm -f "$STATUS_FILE" 2>/dev/null || :
+  dglock_release
 }
-trap cleanup_guard EXIT
+trap cleanup_guard EXIT   # set BEFORE the lock is asked for: a signal that arrives between the library's mkdir and its owner record must still remove the empty directory
+rc=0; dglock_acquire "$GIT_DIR" git-dirty-guard || rc=$?
+case "$rc" in
+  0) ;;
+  1) echo "git-dirty-guard: lock busy (live owner or unproven), refusing -- $DGLOCK_REASON" >&2; exit 1 ;;
+  *) echo "git-dirty-guard: $DGLOCK_REASON" >&2; exit 1 ;;
+esac
 
 if ! query_origin; then
   echo "git-dirty-guard: remote query failed or timed out -- remote state unavailable" >&2

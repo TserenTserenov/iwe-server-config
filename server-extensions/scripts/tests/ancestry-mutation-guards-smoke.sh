@@ -156,6 +156,8 @@ REPO1=$(sed -n '1p' "$T/d1.out"); HEAD1=$(sed -n '2p' "$T/d1.out")
 OUT1=$(bash "$SCRIPTS_DIR/canon-refresh.sh" "$REPO1" main 2>&1)
 STATUS1=$?
 check "canon-refresh.sh против подделки: exit=0 (штатный отказ 'nothing to do', не сбой)" "0" "$STATUS1"
+check "canon-refresh.sh против подделки: библиотека замка нашлась (отказ не из-за её отсутствия)" "0" \
+  "$(printf '%s' "$OUT1" | grep -c 'the lock library is missing or unusable')"
 check "canon-refresh.sh против подделки: реальный отказ (не молчаливый 'nothing to do')" "1" \
   "$(printf '%s' "$OUT1" | grep -c 'not a pure staleness case')"
 check "canon-refresh.sh против подделки: ветка/индекс/дерево и исходный коммит целы" "0" \
@@ -168,6 +170,10 @@ REPO2=$(sed -n '1p' "$T/d2.out"); HEAD2=$(sed -n '2p' "$T/d2.out")
 OUT2=$(bash "$SCRIPTS_DIR/canon-reconcile.sh" "$REPO2" main 2>&1)
 STATUS2=$?
 check "canon-reconcile.sh против подделки: exit=1 (история разошлась, не эта задача)" "1" "$STATUS2"
+check "canon-reconcile.sh против подделки: отказ именно из-за расхождения истории (текст отказа)" "1" \
+  "$(printf '%s' "$OUT2" | grep -c 'history diverged')"
+check "canon-reconcile.sh против подделки: библиотека замка нашлась (exit=1 не из-за её отсутствия)" "0" \
+  "$(printf '%s' "$OUT2" | grep -c 'the lock library is missing or unusable')"
 check "canon-reconcile.sh против подделки: ветка/индекс/дерево и исходный коммит целы" "0" \
   "$(postcondition_intact "$REPO2" main "$HEAD2"; echo $?)"
 
@@ -214,8 +220,12 @@ FORGED4=$(git -C "$D4/local" commit-tree "$(git -C "$D4/local" rev-parse "$REAL_
 [ -n "$FORGED4" ] || { echo "FAIL: fixture setup failed: commit-tree produced no oid" >&2; exit 1; }
 must "install replace forgery" git -C "$D4/local" replace "$REAL_TIP4" "$FORGED4"
 
-bash "$SCRIPTS_DIR/sync-strategy-files.sh" "$D4/local" >/dev/null 2>&1
+OUT4=$(bash "$SCRIPTS_DIR/sync-strategy-files.sh" "$D4/local" 2>&1)
 AFTER4=$(cat "$D4/local/inbox/WP-9/WP-9.md")
+check "sync-strategy-files.sh против подделки: скрипт дошёл до конца (итоговая строка synced=)" "1" \
+  "$(printf '%s' "$OUT4" | grep -c 'synced=[0-9]')"
+check "sync-strategy-files.sh против подделки: библиотека замка нашлась (правка цела не потому, что скрипт не запустился)" "0" \
+  "$(printf '%s' "$OUT4" | grep -c 'the lock library is missing or unusable')"
 check "sync-strategy-files.sh против подделки: непубликованная правка WP-карточки не перезаписана" \
   "$BEFORE4" "$AFTER4"
 
