@@ -422,9 +422,25 @@ let
     # разговорный стиль (DP.SC.050). Агент ищет деталь через
     # `journalctl -u iwe-failure-alert@<unit>.service`.
     echo "unit=$unit journal_hint=journalctl -u $unit --since -1h"
-    msg=$(${pkgs.coreutils}/bin/printf \
-      "🚨 Не выполнилась запланированная задача IWE: %s\nСервер: %s\nВремя: %s" \
-      "$human_name" "$host" "$ts")
+    # Платёжный реестр (WP-538 Ф10, 02.10, пир-сессия 2026-10-02-04): за голым
+    # "payment registry sync payment" пилот не видел, что это за обмен, потеряны ли
+    # данные и когда следующая попытка. Обмен идёт по границе уже обработанного
+    # (sync_state), поэтому сбой задерживает данные, а не теряет их.
+    case "$unit" in
+      payment-registry-sync-payment.service)      pr_what="платежи" ;;
+      payment-registry-sync-subscription.service) pr_what="подписки" ;;
+      payment-registry-sync-contract.service)     pr_what="договоры" ;;
+      *) pr_what="" ;;
+    esac
+    if [ -n "$pr_what" ]; then
+      msg=$(${pkgs.coreutils}/bin/printf \
+        "🚨 Платёжный реестр: не прошёл обмен данными или проверка после него (%s).\nДанные, как правило, не теряются, а задерживаются: следующая плановая попытка их догонит. Если такие сообщения идут больше часа подряд, нужна проверка агентом.\nСервер: %s\nВремя: %s" \
+        "$pr_what" "$host" "$ts")
+    else
+      msg=$(${pkgs.coreutils}/bin/printf \
+        "🚨 Не выполнилась запланированная задача IWE: %s\nСервер: %s\nВремя: %s" \
+        "$human_name" "$host" "$ts")
+    fi
     send_tg() {
       ${pkgs.curl}/bin/curl -s --max-time 10 -X POST \
         "https://api.telegram.org/bot''${TELEGRAM_BOT_TOKEN}/sendMessage" \

@@ -72,9 +72,9 @@ echo local > "$SERVER/f"
 echo four > "$WORK/author/f"; git -C "$WORK/author" commit -qam c4; git -C "$WORK/author" push -q origin main
 sync_it 2>/dev/null; RC=$?
 if [ "$RC" = 1 ] && [ "$(state_get status)" = refused ] && [ "$(state_get last_success_ts)" = "$PREV_OK" ] && [ "$(git -C "$SERVER" rev-parse HEAD)" = "$EXPECT" ]; then ok "dirty → refused, provenance kept"; else bad "dirty → refused" "rc=$RC status=$(state_get status)"; fi
-if [ "$(alerts | grep -c '\[dirty\]')" = 1 ]; then ok "one dirty alert"; else bad "one dirty alert" "$(alerts)"; fi
+if [ "$(alerts | grep -c 'несохранённые правки')" = 1 ]; then ok "one dirty alert"; else bad "one dirty alert" "$(alerts)"; fi
 sync_it 2>/dev/null; RC2=$?
-if [ "$RC2" = 1 ] && [ "$(alerts | grep -c '\[dirty\]')" = 1 ]; then ok "second dirty tick refused again, alert deduplicated"; else bad "second dirty tick deduplicated" "rc=$RC2 $(alerts)"; fi
+if [ "$RC2" = 1 ] && [ "$(alerts | grep -c 'несохранённые правки')" = 1 ]; then ok "second dirty tick refused again, alert deduplicated"; else bad "second dirty tick deduplicated" "rc=$RC2 $(alerts)"; fi
 if [ "$(bash "$SUT" read --state demo 2>/dev/null | grep -c '^last_error=dirty: ')" = 1 ]; then ok "read returns the refusal reason"; else bad "read returns the refusal reason" "$(bash "$SUT" read --state demo 2>&1 | grep last_error)"; fi
 
 echo "5. fresh on a dirty tree → exit 1 class dirty; clean tree with refused state → passes on last-known-good"
@@ -84,7 +84,8 @@ if fresh_it 2>/dev/null && [ "$(state_get status)" = refused ]; then ok "clean +
 
 echo "6. clean again → sync recovers, recovery alert sent once"
 if sync_it 2>/dev/null && [ "$(state_get status)" = ok ]; then ok "recovered → status=ok"; else bad "recovered → status=ok"; fi
-if [ "$(alerts | grep -c '✅ verified-sync demo ')" = 1 ]; then ok "one recovery alert"; else bad "one recovery alert" "$(alerts)"; fi
+if [ "$(alerts | grep -c '✅ Копия репозитория «demo» ')" = 1 ]; then ok "one recovery alert"; else bad "one recovery alert" "$(alerts)"; fi
+if [ "$(alerts | grep -c '✅ Проверка свежести копии «demo» ')" = 1 ]; then ok "one gate recovery alert, repo name without plumbing suffix"; else bad "gate recovery alert" "$(alerts)"; fi
 
 echo "7. rewritten origin history → diverged, refused, HEAD unchanged"
 HEAD_BEFORE=$(git -C "$SERVER" rev-parse HEAD)

@@ -124,6 +124,53 @@ send_telegram() {
     --data-urlencode "text=$text" > /dev/null || log "telegram send failed"
 }
 
+# human_repo_name NAME — state names look like "idx-PACK-digital-platform" (index
+# copy of a repo) or "<name>.gate" (consumer gate); show the repo, not the plumbing.
+human_repo_name() {
+  local n="${1%.gate}"
+  n="${n#idx-}"
+  printf '%s' "$n"
+}
+
+# describe_failure CLASS — sets DESCRIBE_REASON / DESCRIBE_ACTION in plain Russian.
+# Unknown classes fall back to a generic line; the class itself stays in the journal.
+describe_failure() {
+  case "$1" in
+    dirty)               DESCRIBE_REASON="в рабочей копии лежат несохранённые правки"
+                         DESCRIBE_ACTION="Пока они там, копию не обновить: их нужно сохранить или убрать." ;;
+    diverged)            DESCRIBE_REASON="история копии разошлась с общей версией"
+                         DESCRIBE_ACTION="Часто это коммиты, которые уже есть в общей версии под другими номерами; нужна проверка агентом." ;;
+    fetch-failed)        DESCRIBE_REASON="не удалось получить обновления с GitHub"
+                         DESCRIBE_ACTION="Если это повторяется больше часа, нужно проверить связь сервера с GitHub." ;;
+    wrong-branch)        DESCRIBE_REASON="копия стоит не на основной ветке"
+                         DESCRIBE_ACTION="Нужно вернуть её на основную ветку." ;;
+    missing)             DESCRIBE_REASON="копии репозитория нет на сервере"
+                         DESCRIBE_ACTION="Нужно склонировать её заново." ;;
+    no-upstream)         DESCRIBE_REASON="на GitHub не нашлась нужная ветка"
+                         DESCRIBE_ACTION="Нужна проверка настроек репозитория." ;;
+    post-merge-mismatch) DESCRIBE_REASON="после обновления копия не совпала с общей версией"
+                         DESCRIBE_ACTION="Нужна проверка агентом." ;;
+    stale)               DESCRIBE_REASON="копия не обновлялась дольше допустимого срока"
+                         DESCRIBE_ACTION="Задачи, которым нужна свежая копия, не стартуют, пока она не обновится." ;;
+    identity)            DESCRIBE_REASON="копия не совпадает с последней проверенной версией"
+                         DESCRIBE_ACTION="Нужна проверка агентом." ;;
+    future)              DESCRIBE_REASON="в служебной отметке время из будущего"
+                         DESCRIBE_ACTION="Нужна проверка часов сервера и отметки." ;;
+    *)                   DESCRIBE_REASON="проверка не прошла"
+                         DESCRIBE_ACTION="Причина записана в журнал сервера; нужна проверка агентом." ;;
+  esac
+}
+
+# describe_recovery MESSAGE — the two recovery messages the script emits, in words.
+describe_recovery() {
+  case "$1" in
+    "clone healthy"*)  printf 'копия снова совпадает с общей версией' ;;
+    "clone advanced"*) printf 'копия обновлена до общей версии' ;;
+    "consumer gate"*)  printf 'проверка свежести снова проходит' ;;
+    *)                 printf 'проблема ушла' ;;
+  esac
+}
+
 # alert_fail NAME CLASS MESSAGE — first alert immediately, then at most one
 # reminder per ALERT_TTL_MIN for the same class; a different class alerts again.
 alert_fail() {
@@ -144,7 +191,17 @@ alert_fail() {
   fi
   mkdir -p "$STATE_DIR"
   printf 'class=%s\nts=%s\n' "$class" "$now" > "$apath"
-  send_telegram "⚠️ verified-sync ${name} ($HOST, $(date '+%Y-%m-%d %H:%M')) [${class}]: ${message}"
+  # The raw class and git message go to the journal for the agent; the chat gets
+  # words (WP-538 Ф10): what is wrong with which clone and what the next step is.
+  log "alert ${name} [${class}]: ${message}"
+  local reason action
+  describe_failure "$class"
+  reason="$DESCRIBE_REASON"; action="$DESCRIBE_ACTION"
+  if [[ "$name" == *.gate ]]; then
+    send_telegram "⚠️ На сервере ${HOST} не пройдена проверка свежести копии «$(human_repo_name "$name")»: ${reason}. ${action} ($(date '+%d.%m %H:%M'))"
+  else
+    send_telegram "⚠️ На сервере ${HOST} не обновилась копия репозитория «$(human_repo_name "$name")»: ${reason}. ${action} ($(date '+%d.%m %H:%M'))"
+  fi
 }
 
 # alert_recovered NAME MESSAGE — one message when a previously alerted state
@@ -155,7 +212,12 @@ alert_recovered() {
   apath=$(alert_path "$name")
   [ -f "$apath" ] || return 0
   rm -f "$apath"
-  send_telegram "✅ verified-sync ${name} ($HOST, $(date '+%Y-%m-%d %H:%M')): ${message}"
+  log "recovered ${name}: ${message}"
+  if [[ "$name" == *.gate ]]; then
+    send_telegram "✅ Проверка свежести копии «$(human_repo_name "$name")» на сервере ${HOST} снова проходит: $(describe_recovery "$message") ($(date '+%d.%m %H:%M'))"
+  else
+    send_telegram "✅ Копия репозитория «$(human_repo_name "$name")» на сервере ${HOST} снова обновляется: $(describe_recovery "$message") ($(date '+%d.%m %H:%M'))"
+  fi
 }
 
 # --- argument parsing ---------------------------------------------------------
