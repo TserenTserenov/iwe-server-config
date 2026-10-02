@@ -130,6 +130,12 @@ if [ -f "$GUARD" ]; then
   echo "scenario G12: directory contents ignored but the log un-ignored by a negated rule is refused"
   printf 'unignored-log/*\n!unignored-log/canon-reconcile-published.log\n' >> "$GR/.gitignore"
   out=$(guard IWE_RUNTIME_DIR="$GR/unignored-log"); assert "${out%%|*}" "2" "exit 2"; assert "$(has "$out" "is not ignored")" "yes" "message says: its log is not ignored"
+  echo "scenario G13 (Ф76): the log is ignored but the refusal-streak file is not -> refused (the streak file would dirty the tree)"
+  printf 'streak-gap/canon-reconcile-published.log\n' >> "$GR/.gitignore"
+  out=$(guard IWE_RUNTIME_DIR="$GR/streak-gap"); assert "${out%%|*}" "2" "exit 2"; assert "$(has "$out" "is not ignored")" "yes" "message says: not ignored"; assert "$(has "$out" ".streak")" "yes" "message names the streak file"
+  echo "scenario G14 (Ф76): one directory rule covers the log and the refusal journal -> the check passes and the guard goes on"
+  printf 'whole-dir/\n' >> "$GR/.gitignore"
+  out=$(guard IWE_RUNTIME_DIR="$GR/whole-dir"); assert "$(has "$out" "git fetch origin main failed")" "yes" "the directory check passed and the guard went on to its next stage (no origin in the sandbox)"
 else
   echo "scenario G*: skipped (no scripts/canon-reconcile-published.sh under $ROOT)"
 fi

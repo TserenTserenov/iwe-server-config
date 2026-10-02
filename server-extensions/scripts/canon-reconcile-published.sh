@@ -42,6 +42,34 @@
 # event inside the canon would dirty the very tree it is reconciling -- cold
 # review 11.09 found the resulting 15-minute publish loop).
 #
+# Loudness (WP-530 Ф76): a refusal is silent by design, so a canon that cannot be reconciled used to look exactly like a
+# healthy one. Every refusal prints how many times in a row this same class (the text before the first ':') has
+# refused, over how many minutes, and how many tracked paths are dirty; when the class has lasted
+# CANON_RECONCILE_ALERT_AFTER_SEC (default 3600) and at least CANON_RECONCILE_ALERT_MIN_COUNT times (default 3), one
+# `ALERT` line is printed for the caller to forward, repeated no more often than CANON_RECONCILE_ALERT_REPEAT_SEC
+# (default 14400). Any healthy exit clears the streak. The streak state lives next to the log, outside the repository.
+# State handling (Codex review, peer-session 2026-10-01-20): the streak is an append-only JOURNAL (one O_APPEND write per
+# refusal and per alert claim), so there is no read-change-write cycle to race, no lock to take or reclaim and no file to
+# replace: parallel runs cannot lose a count, and the first alert claim of a window in file order is the only one that
+# prints the ALERT. Every number is derived inside awk and reaches the shell as 1-12 digits (a damaged record is skipped, a
+# damaged journal is a fresh streak, never an arithmetic error); an alert is printed only after its claim is on disk and
+# only if the series is still valid when the claim is read back (within 120 s of writing it: a run that stalled longer
+# prints nothing, since a later run may already have used the next window), and a journal that cannot be appended to (or a runtime
+# directory that is not private to this user, or a path that is a symlink, a directory, a FIFO or somebody else's file)
+# gives a warning and no alert at all -- an alert that cannot be rate-limited would repeat on every run. The journal is
+# never cut, rotated or capped (any of those is a read-change-write again, or freezes a new series behind an old one): it
+# grows by about 100 bytes per refusal until the first healthy exit removes it (through the same trusted chain as every
+# other change of it; otherwise it stays and a warning says why).
+# The contract of the repeat interval (accepted wording, peer-session 2026-10-01-20): with a continuous series and clocks that
+# do not run backwards, the interval holds between the TIMES OF THE CONFIRMED ALERT CLAIMS. It is not promised between the
+# ALERT lines or the deliveries: a run suspended for a long time between its last check and the print prints late (a duplicate
+# line, never a lost one), and no shell script can close that without a serialized section. A claim that is never followed by a
+# print can silence the alert until the end of the interval.
+# Trust assumptions, stated once: processes of the same user are trusted; the runtime directory, the journal and every
+# directory above them are not writable by anybody else (no write for group or others unless the sticky bit protects the
+# entry), and are owned by this user or by root. If that cannot be shown, the streak is switched off LOUDLY. Times from the future are clamped (refusals) or ignored (claims stamped more than ten minutes
+# ahead), so a clock set back mutes nothing for longer than the repeat interval.
+#
 # Exit: 0 = replaced, or nothing to do (already ancestor -> canon-refresh's job)
 #       1 = refused (canon untouched) or post-check failed (ref already replaced
 #           -- the message says which; both are logged)
@@ -96,6 +124,8 @@ case "$RUNTIME_DIR" in
   */../*|*/..) runtime_dir_fatal "runtime dir must not contain '..' components (the part that does not exist yet is not normalized), got '$RUNTIME_DIR'" ;;
 esac
 REPO_TOP=$(git rev-parse --show-toplevel 2>/dev/null)   # physical path (symlinks resolved)
+STREAK_KEY=$(printf '%s\n%s\n' "$REPO_TOP" "$BRANCH" | cksum | cut -d' ' -f1)   # one streak per repository and branch: two canons must not share counts
+STREAK_NAME="canon-reconcile-published.$STREAK_KEY.streak"
 physical_path() {  # <path> -> its longest existing prefix resolved through symlinks (macOS /var -> /private/var) plus the not-yet-existing rest; fails when the prefix cannot be entered or a symlink cannot be followed
   local p="$1" rest="" base
   while [ ! -d "$p" ] && [ "$p" != "/" ]; do
@@ -113,24 +143,232 @@ case "$RUNTIME_PHYS/" in
     # Ask about the very file this script writes there, so that no directory has to exist and an ignore
     # rule for some other name (or a negated log rule) cannot vouch for it: git treats the leading components
     # as directories and applies "dir/" patterns to them (a bare path of a missing directory is not matched).
-    GIT_LITERAL_PATHSPECS=0 git check-ignore -q -- "$RUNTIME_REL/$LOG_NAME" 2>/dev/null; ign=$?   # check-ignore rejects the 'literal' magic exported above
-    [ "$ign" -eq 0 ] || runtime_dir_fatal "runtime dir $RUNTIME_DIR lies inside the repository and its log $LOG_NAME is not ignored (git check-ignore exit $ign) -- refusing (the log would dirty the tree)"
+    for state_name in "$LOG_NAME" "$STREAK_NAME"; do
+      GIT_LITERAL_PATHSPECS=0 git check-ignore -q -- "$RUNTIME_REL/$state_name" 2>/dev/null; ign=$?   # check-ignore rejects the 'literal' magic exported above
+      [ "$ign" -eq 0 ] || runtime_dir_fatal "runtime dir $RUNTIME_DIR lies inside the repository and its file $state_name is not ignored (git check-ignore exit $ign) -- refusing (it would dirty the tree)"
+    done
     [ -z "$(git ls-files -- "$RUNTIME_REL" 2>/dev/null)" ] || runtime_dir_fatal "runtime dir $RUNTIME_DIR lies inside the repository and holds tracked files -- refusing"
     ;;
 esac
-LOG_FILE="$RUNTIME_DIR/$LOG_NAME"
+# Everything this script WRITES goes to the physical path resolved above (RUNTIME_PHYS), the one whose chain of directories is
+# checked below: a link in the logical path could be pointed elsewhere between the check and the write (Codex round 5).
+LOG_FILE="$RUNTIME_PHYS/$LOG_NAME"
+STREAK_FILE="$RUNTIME_PHYS/$STREAK_NAME"   # append-only journal, one O_APPEND write per record: R<TAB>epoch<TAB>class<TAB>id (a refusal), A<TAB>epoch<TAB>class<TAB>id (an alert claim)
+fresh_now() { local n; n=$(date -u +%s); epoch_field "$n" || return 1; printf '%s' "$((10#$n))"; }   # the clock, as 1-12 plain digits taken as decimal; fails when it cannot be read
+epoch_field() { case "$1" in ''|*[!0-9]*) return 1 ;; esac; [ "${#1}" -le 12 ]; }   # 1-12 digits: no sign, point, exponent or overflow reaches shell arithmetic
+num_or_default() {  # <value> <default>: a non-numeric or oversized override falls back to the default (base 10: "08" is not an octal error; more than 12 digits would wrap around)
+  if epoch_field "$1"; then printf '%s' "$((10#$1))"; else printf '%s' "$2"; fi
+}
+ALERT_AFTER_SEC=$(num_or_default "${CANON_RECONCILE_ALERT_AFTER_SEC:-}" 3600)
+ALERT_REPEAT_SEC=$(num_or_default "${CANON_RECONCILE_ALERT_REPEAT_SEC:-}" 14400)
+ALERT_MIN_COUNT=$(num_or_default "${CANON_RECONCILE_ALERT_MIN_COUNT:-}" 3)
 TMP_FILES=()
 cleanup() { rm -f "${TMP_FILES[@]+"${TMP_FILES[@]}"}"; }
 trap cleanup EXIT
 
-log_line() {  # <status> <text> -- append-only log outside the repository
-  mkdir -p "$RUNTIME_DIR" 2>/dev/null || return 0
-  printf '%s %s repo=%s branch=%s %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$1" "$REPO" "$BRANCH" "$2" >> "$LOG_FILE" 2>/dev/null || true
+log_line() {  # <status> <text> -- append-only log outside the repository; written only when the directory chain and the log file are trusted (the message is on stderr anyway)
+  if [ -z "${LOG_TRUST:-}" ]; then if runtime_chain_ok && plain_file_ok "$LOG_FILE"; then LOG_TRUST=yes; else LOG_TRUST=no; fi; fi
+  [ "$LOG_TRUST" = yes ] || return 0
+  ( umask 077; printf '%s %s repo=%s branch=%s %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$1" "$(oneline "$REPO")" "$(oneline "$BRANCH")" "$(oneline "$2")" >> "$LOG_FILE" ) 2>/dev/null || true   # a new log is private like the journal: it names repositories and dirty paths
+}
+oneline() { printf '%s' "$1" | tr '\t\r\n' '   '; }   # a journal field, a log line and an alert line must stay one line: a path name with a newline must not forge a line
+
+# The refusal streak is a JOURNAL, not a record that is read, changed and written back: appending one short line is
+# atomic (O_APPEND), so parallel runs cannot lose a count, and nothing is ever replaced, locked or reclaimed. Every
+# number in it is derived inside awk, which never aborts the shell; the shell only sees digits that awk printed.
+# An alert is a CLAIM record appended before anything is printed; of the claims of one window the first one in FILE order
+# wins, so exactly one of several parallel runs prints the ALERT, and a run whose claim could not be written prints none.
+acl_entries() {  # <path> -- the ACL entries of <path>, one per line (macOS only: `ls -e`; there the "+" of the mode string is HIDDEN by "@" when the path also has extended attributes, so the mode string cannot be relied on). FAILS when the listing itself fails: an error is not "no ACL".
+  local out
+  [ "$(uname -s 2>/dev/null)" = Darwin ] || return 0
+  out=$(ls -lde -- "$1" 2>/dev/null) || return 1
+  printf '%s\n' "$out" | grep -E '^ *[0-9]+: ' || true
+}
+acl_none() { local acl; acl=$(acl_entries "$1") || return 1; [ -z "$acl" ]; }   # <path> -- no ACL entry at all (an unreadable ACL counts as an entry)
+acl_deny_only() {  # <path> -- 0 when <path> has no ACL entries or only deny entries (macOS: the default "group:everyone deny delete" of home directories); an ACL on another platform, or one that cannot be read, is not trusted
+  local acl
+  acl=$(acl_entries "$1") || return 1
+  [ -z "$acl" ] || ! printf '%s\n' "$acl" | grep -qv ' deny '
+}
+mode_ok() {  # <path> <strict:1|0> -- owned by this user or root and not writable by group or others. strict (the runtime directory and the journal): also no ACL entry at all and no sticky exception. Not strict (the directories above): a deny-only ACL is fine, and so is a sticky directory such as /tmp, where others cannot touch our entries.
+  local perm owner
+  perm=$(ls -ldL -- "$1" 2>/dev/null | cut -c1-11); owner=$(ls -ldnL -- "$1" 2>/dev/null | awk '{print $3}')
+  [ "${#perm}" -ge 10 ] || return 1
+  case "$owner" in "$(id -u)"|0) ;; *) return 1 ;; esac
+  if [ "$2" = 1 ]; then
+    [ "${perm:5:1}" = "-" ] && [ "${perm:8:1}" = "-" ] && [ "${perm:10:1}" != "+" ] && acl_none "$1" || return 1
+  else
+    [ "${perm:10:1}" != "+" ] || [ "$(uname -s 2>/dev/null)" = Darwin ] || return 1
+    acl_deny_only "$1" || return 1
+    case "${perm:9:1}" in t|T) return 0 ;; esac
+    [ "${perm:5:1}" = "-" ] && [ "${perm:8:1}" = "-" ] || return 1
+  fi
+  return 0
+}
+make_tail() {  # <existing-dir> <target-dir>: makes the missing components below <existing-dir> ONE AT A TIME with a plain mkdir, which never follows an entry that appeared in the meantime (a link, a directory of somebody else): it fails, and the component must then be a real directory of this user
+  local cur="${1%/}" rest="${2#"${1%/}"}" comp
+  rest="${rest#/}"
+  while [ -n "$rest" ]; do
+    comp="${rest%%/*}"; rest="${rest#"$comp"}"; rest="${rest#/}"
+    cur="$cur/$comp"
+    ( umask 077; mkdir "$cur" ) 2>/dev/null
+    if [ -L "$cur" ] || [ ! -d "$cur" ] || [ ! -O "$cur" ]; then
+      STREAK_WHY="runtime directory component $cur is not a real directory of this user (a link or somebody else's entry appeared while it was being made)"; return 1
+    fi
+  done
+  return 0
+}
+dirs_above_ok() {  # <dir> -- 0 when <dir> and every directory above it are owned by this user or root and cannot be written by group or others (sticky directories and deny-only ACLs excepted); the reason in STREAK_WHY
+  local up="$1"
+  while [ "$up" != "/" ] && [ "$up" != "." ]; do
+    [ ! -L "$up" ] || { STREAK_WHY="directory $up above the runtime directory is a link (the runtime path was resolved to a physical one, so a link appeared in it afterwards)"; return 1; }
+    mode_ok "$up" 0 || { STREAK_WHY="directory $up above the runtime directory can be changed by somebody else (write for group or others, or another owner)"; return 1; }
+    up=$(dirname "$up")
+  done
+  return 0
+}
+runtime_chain_ok() {  # 0 = the runtime directory and every directory above it are private (see the trust assumptions); the reason in STREAK_WHY
+  local near="$RUNTIME_PHYS"
+  # Nothing is created before the way to the runtime directory is judged: new directories below one that others can
+  # write to are a change outside the law as well.
+  while [ "$near" != "/" ] && [ "$near" != "." ]; do
+    [ ! -L "$near" ] || { STREAK_WHY="$near is a link (the runtime path was resolved to a physical one, so a link appeared in it afterwards)"; return 1; }
+    [ -d "$near" ] && break
+    near=$(dirname "$near")
+  done
+  if [ "$near" != "$RUNTIME_PHYS" ]; then
+    dirs_above_ok "$near" || return 1
+    make_tail "$near" "$RUNTIME_PHYS" || return 1
+  fi
+  # The check of the path and the write that follows are two steps; what closes the gap is that nobody else can touch
+  # the directory, the file or the way to them. A group is no proof of privacy (the primary group on Tsekh is the shared
+  # "users"), a permission string or an ACL listing that cannot be read is no trust either.
+  if [ ! -d "$RUNTIME_PHYS" ] || [ ! -O "$RUNTIME_PHYS" ] || ! mode_ok "$RUNTIME_PHYS" 1; then
+    STREAK_WHY="runtime directory $RUNTIME_PHYS is not a private directory of this user (owner only: no write for group or others, no ACL)"; return 1
+  fi
+  dirs_above_ok "$(dirname "$RUNTIME_PHYS")"
+}
+plain_file_ok() {  # <path> -- 0 when it does not exist, or is a regular file (no symlink, no FIFO) of this user that nobody else can write
+  { [ ! -e "$1" ] && [ ! -L "$1" ]; } && return 0
+  [ -f "$1" ] && [ ! -L "$1" ] && [ -O "$1" ] && mode_ok "$1" 1
+}
+streak_usable() {  # 0 = the journal can be appended to and read; 1 = it cannot (reason in STREAK_WHY)
+  STREAK_WHY=""
+  runtime_chain_ok || return 1
+  plain_file_ok "$STREAK_FILE" || { STREAK_WHY="$STREAK_FILE is not a plain file of this user without write for group or others, left untouched"; return 1; }
+  return 0
+}
+append_streak() {  # <R|A> <epoch> <class> <id>: 0 only when the record is in the file
+  ( umask 077; printf '%s\t%s\t%s\t%s\n' "$1" "$2" "$3" "$4" >> "$STREAK_FILE" ) 2>/dev/null
+}
+streak_state() {  # <class> <now> [<stop-id>] -> "<found> <first> <count> <last-alert>" of the run of <class> that ends the journal (or ends just before the claim <stop-id>; found=1 when that claim was seen)
+  LC_ALL=C CLS="$1" NOW="$2" STOP="${3:-}" awk -F'\t' '
+    function epoch(s) { return (s ~ /^[0-9]+$/ && length(s) <= 12 && s + 0 >= 1000000000) }   # 1-12 digits and not before September 2001: a smaller number is damage, not a time
+    BEGIN { cls = ENVIRON["CLS"]; now = ENVIRON["NOW"] + 0; stop = ENVIRON["STOP"]; cc = ""; first = 0; count = 0; la = 0; found = 0 }
+    ($1 == "R" || $1 == "A") && epoch($2) && $3 != "" {
+      e = $2 + 0
+      if ($1 == "A") {
+        if (stop != "" && ($4 "") == (stop "")) { found = 1; exit }   # string comparison: "123.45" and "123.450" are different ids
+        if (e > now + 600) next              # a claim stamped far ahead (the clock was set back since) must not mute the alerts
+        if (($3 "") != cc) next              # a claim of another class than the current run (a rejected one, say) changes nothing: only a REFUSAL starts a run
+        if (e > now) e = now
+        if (e > la) la = e   # the latest, not the last in file order: a claim of a delayed run carries an earlier time and must not shorten the interval
+        next
+      }
+      if (e > now) e = now                   # a time from the future is no evidence of age
+      if (($3 "") != cc) { cc = $3 ""; first = e; count = 0; la = 0 }   # a refusal of another class starts a new run (string comparison: a class that looks like a number is still a class)
+      count++
+    }
+    END { if (cc == (cls "")) printf "%d %.0f %d %.0f\n", found, first, count, la; else printf "%d 0 0 0\n", found }   # %.0f: an epoch past 2^31 must not be clipped by the %d of an old awk
+  ' "$STREAK_FILE" 2>/dev/null
+}
+healthy() {  # a healthy exit ends the refusal streak; a refusal appended at the same instant belongs to the streak that just ended. The journal is removed only when the chain of directories and the file are trusted, like every other change of it.
+  if [ -e "$STREAK_FILE" ] || [ -L "$STREAK_FILE" ]; then
+    if streak_usable; then rm -f "$STREAK_FILE" 2>/dev/null
+    else echo "canon-reconcile-published: warning: the refusal journal $STREAK_FILE is left in place on this healthy exit -- $STREAK_WHY" >&2; fi
+  fi
+  return 0
 }
 
-refuse() {  # <reason> -- nothing was changed
-  echo "canon-reconcile-published: refused -- $1 (canon untouched, publish not rolled back)" >&2
-  log_line refused "$1"
+# A refusal must stop the script, and bash gives no guarantee for it: a FAILED ARITHMETIC EXPANSION discards the whole
+# top-level command that is running -- the function that failed, its callers and their exit 1 included -- and the script
+# goes on to the next line. Round 1 of Ф76 had exactly that: a state field "12.3" broke `$((10#$first))` inside
+# refuse(), the refusal was dropped and the run went on to reset the canon over a local-only commit. The hazard is
+# structural (anything in a report that aborts has this effect; origin/main's refuse() has nothing abort-prone, so no
+# trigger is known there). So: (1) the whole report runs in a SUBSHELL, where an abort ends only the subshell, and the
+# exit 1 sits in the parent; (2) no shell arithmetic in the report on a value that was not just checked to be digits
+# and taken as decimal ("only digits" is not enough: "0999" is an octal error); (3) defense in depth: a flag set before
+# the report, checked at the point of no return (the ref swap), and the one refusal AFTER that check is followed by its
+# own unconditional exit (see step 5).
+REFUSAL_STARTED=""
+refuse_report() {  # <reason> -- the whole report of one refusal: message, streak, alert; runs in a subshell (see refuse())
+  local reason class now age=0 count=1 last=0 dirty note="" warn="" due=0 id first s_first s_count s_last c_found c_first c_count c_last c_now claim_at a_count=1 a_age=0
+  reason=$(oneline "$1")
+  class="${reason%%:*}"; class="${class:0:120}"
+  now=$(date -u +%s); if epoch_field "$now"; then now=$((10#$now)); else now=""; fi
+  dirty=$(GIT_OPTIONAL_LOCKS=0 git status --porcelain --untracked-files=no 2>/dev/null | wc -l | tr -d ' ')
+  if [ -z "$now" ]; then
+    note="streak state skipped: the clock could not be read"   # a time of 0 in the journal would later read as an age of decades
+  elif ! streak_usable; then
+    note="streak state unusable: $STREAK_WHY"
+  elif ! append_streak R "$now" "$class" "$$.$RANDOM"; then
+    note="streak state could not be saved"
+    warn="canon-reconcile-published: warning: cannot append to the refusal streak $STREAK_FILE -- a repeated alert could not be rate-limited, so none is raised"
+  else
+    read -r _ s_first s_count s_last <<< "$(streak_state "$class" "$now")"
+    if epoch_field "${s_first:-}" && epoch_field "${s_count:-}" && epoch_field "${s_last:-}" && [ "$s_count" -ge 1 ]; then
+      first=$((10#$s_first)); count=$((10#$s_count)); last=$((10#$s_last)); age=$((now - first))
+      if [ "$count" -ge "$ALERT_MIN_COUNT" ] && [ "$age" -ge "$ALERT_AFTER_SEC" ] && [ $((now - last)) -ge "$ALERT_REPEAT_SEC" ]; then
+        id="$$.$RANDOM"
+        id="$id.$now"   # pid, random number and the second this run started: a reused pid with the same random number must not stop the read-back at an older claim
+        c_now=$(fresh_now) || c_now=""   # the clock is read AGAIN: after a long stall the time taken at the start is stale, and a claim another run wrote meanwhile would look like one from the far future
+        if [ -z "$c_now" ]; then
+          warn="canon-reconcile-published: warning: the clock cannot be read for the alert claim -- no alert is raised"
+        elif append_streak A "$c_now" "$class" "$id"; then
+          claim_at=$c_now
+          c_now=$(fresh_now) || c_now=""   # and once more for the read-back
+          if [ -z "$c_now" ] || [ $((c_now - claim_at)) -gt 120 ]; then
+            # A run that stalled between writing its claim and reading it back (more than 120 s) must not print: the window of
+            # that claim may long be over and another run may have printed the alert of the next one. With a repeat interval
+            # longer than this patience (the default is 4 hours) two alerts of one window can then not happen.
+            warn="canon-reconcile-published: warning: the alert claim was read back more than 120 s after it was written, or the clock cannot be read (the run stalled) -- no alert is raised"
+          else
+            read -r c_found c_first c_count c_last <<< "$(streak_state "$class" "$c_now" "$id")"
+            # The claim is the state that is on disk BEFORE the ALERT is printed; the first claim of the window wins. The
+            # series is judged again at the claim: another class that began in between ends it (the state then reads 0 0 0),
+            # and a series that is no longer past its thresholds raises nothing.
+            if [ "${c_found:-0}" = 1 ] && epoch_field "${c_first:-}" && epoch_field "${c_count:-}" && epoch_field "${c_last:-}"; then
+              a_count=$((10#$c_count)); a_age=$((c_now - 10#$c_first))   # the numbers of the ALERT; the refusal line keeps those of the first reading (they differ only after a run of another class came in)
+              if [ "$a_count" -ge "$ALERT_MIN_COUNT" ] && [ "$a_age" -ge "$ALERT_AFTER_SEC" ] && [ $((claim_at - 10#$c_last)) -ge "$ALERT_REPEAT_SEC" ]; then due=1; fi   # the claim's own time, not the time of the re-read: a run that stalled before its clock reading must not look old enough
+            fi
+          fi
+        else
+          warn="canon-reconcile-published: warning: cannot append the alert claim to $STREAK_FILE -- no alert is raised"
+        fi
+      fi
+    elif [ "${s_first:-}" = 0 ] && [ "${s_count:-}" = 0 ]; then   # the journal ends with a run of ANOTHER class: a parallel run recorded its refusal after ours; nothing is wrong with the journal
+      note="a refusal of another class was recorded in between, counted from one"
+    else   # the record was appended but nothing could be derived from the journal (unreadable, or no awk): say so, never count silently from one
+      note="streak state could not be read"
+      warn="canon-reconcile-published: warning: cannot read the refusal streak $STREAK_FILE -- no alert can be raised"
+    fi
+  fi
+  if [ -z "$note" ]; then
+    echo "canon-reconcile-published: refused -- $reason (canon untouched, publish not rolled back; this reason $count time(s) over $((age / 60)) min; dirty tracked paths now: $dirty)" >&2
+  else
+    echo "canon-reconcile-published: refused -- $reason (canon untouched, publish not rolled back; $note; dirty tracked paths now: $dirty)" >&2
+  fi
+  [ -z "$warn" ] || echo "$warn" >&2
+  log_line refused "$reason"
+  if [ "$due" -eq 1 ]; then
+    echo "canon-reconcile-published: ALERT canon $(oneline "$REPO") not reconciled for $((a_age / 60)) min: $a_count refusals '$class', $dirty dirty tracked path(s) -- an owner must clear the blocking state; next alert in $((ALERT_REPEAT_SEC / 60)) min" >&2
+    log_line alert "class=$class count=$a_count age_s=$a_age dirty=$dirty"
+  fi
+  return 0
+}
+refuse() {  # <reason> -- nothing was changed; ALWAYS ends the script, with status 1, whatever happens in the report
+  REFUSAL_STARTED=1
+  ( refuse_report "$1" ) || echo "canon-reconcile-published: refused -- $(oneline "$1") (canon untouched, publish not rolled back; the report of this refusal failed)" >&2
   exit 1
 }
 
@@ -144,7 +382,7 @@ if [ -d "$GIT_DIR/rebase-merge" ] || [ -d "$GIT_DIR/rebase-apply" ] || [ -f "$GI
   refuse "repo is mid-rebase/merge/cherry-pick"
 fi
 CURRENT_BRANCH=$(git rev-parse --abbrev-ref HEAD 2>/dev/null)
-[ "$CURRENT_BRANCH" = "$BRANCH" ] || refuse "checked-out branch is '$CURRENT_BRANCH', expected '$BRANCH'"
+[ "$CURRENT_BRANCH" = "$BRANCH" ] || refuse "checked-out branch is not the expected one: '$CURRENT_BRANCH' instead of '$BRANCH'"
 
 # Same lock as git-dirty-guard.sh / canon-refresh.sh / canon-reconcile.sh /
 # sync-strategy-files.sh: whoever holds it runs to completion first.
@@ -186,15 +424,16 @@ git fetch origin "+refs/heads/$BRANCH:refs/remotes/origin/$BRANCH" --quiet 2>/de
 OLD_HEAD=$(git rev-parse HEAD)
 REMOTE_TIP=$(git rev-parse "origin/$BRANCH")
 if [ -n "$PINNED_ARG" ]; then
-  PINNED=$(git rev-parse --verify "${PINNED_ARG}^{commit}" 2>/dev/null) || refuse "pinned oid $PINNED_ARG is not a commit here"
+  PINNED=$(git rev-parse --verify "${PINNED_ARG}^{commit}" 2>/dev/null) || refuse "pinned oid is not a commit here: $PINNED_ARG"
   git merge-base --is-ancestor "$PINNED" "$REMOTE_TIP" || refuse "pinned oid is not on origin/$BRANCH"
   # origin moved past the caller's pin: re-evaluate against the live tip, never replace with a stale one
   [ "$PINNED" = "$REMOTE_TIP" ] || echo "canon-reconcile-published: origin/$BRANCH advanced past pinned ${PINNED:0:12}, targeting live tip ${REMOTE_TIP:0:12}"
 fi
 PINNED="$REMOTE_TIP"
 
-if [ "$OLD_HEAD" = "$PINNED" ]; then echo "canon-reconcile-published: already at $PINNED"; exit 0; fi
+if [ "$OLD_HEAD" = "$PINNED" ]; then healthy; echo "canon-reconcile-published: already at $PINNED"; exit 0; fi
 if git merge-base --is-ancestor "$OLD_HEAD" "$PINNED"; then
+  healthy
   echo "canon-reconcile-published: HEAD is a plain ancestor of the target -- canon-refresh.sh owns that shape, nothing to do"
   exit 0
 fi
@@ -343,8 +582,10 @@ LIVE_WRITERS=$(live_canonical_writers)
 [ -z "$LIVE_WRITERS" ] || refuse "live canonical writer(s) appeared during preflight:$LIVE_WRITERS"
 
 # 5. compare-and-swap on the ref, then bring index + tracked tree along.
-git update-ref -m "canon-reconcile-published: $OLD_HEAD -> $PINNED" "refs/heads/$BRANCH" "$PINNED" "$OLD_HEAD" \
-  || refuse "compare-and-swap on refs/heads/$BRANCH lost (HEAD moved)"
+[ -z "$REFUSAL_STARTED" ] || { echo "canon-reconcile-published: a refusal started earlier and its report was cut short -- stopping before the swap, canon untouched" >&2; exit 1; }   # tripwire, see refuse()
+git update-ref -m "canon-reconcile-published: $OLD_HEAD -> $PINNED" "refs/heads/$BRANCH" "$PINNED" "$OLD_HEAD"; CAS_RC=$?
+[ "$CAS_RC" -eq 0 ] || refuse "compare-and-swap on refs/heads/$BRANCH lost (HEAD moved)"
+[ "$CAS_RC" -eq 0 ] || exit 1   # a SEPARATE top-level command: reached only when the report above died halfway (see refuse()), so the reset below never runs after a lost swap
 git reset --hard --quiet || fail_after_swap "git reset --hard failed -- index/tree need manual sync to $PINNED"
 
 # 6. post-check.
@@ -363,4 +604,5 @@ DIFF=$(diff "$EXPECTED" "$UNTRACKED_AFTER" | grep '^[<>]' | head -3)
 
 echo "canon-reconcile-published: $REPO refs/heads/$BRANCH ${OLD_HEAD:0:12} -> ${PINNED:0:12} (dropped commits: patch-equivalent or content-superseded=$CONTENT_SUPERSEDED; tolerated identical dirty paths=$DIRTY_TOLERATED; ancestral-path dirty=$DIRTY_ANCESTRAL commit-paths=$COMMIT_ANCESTRAL; untracked intact)"
 log_line replaced "$OLD_HEAD -> $PINNED content_superseded=$CONTENT_SUPERSEDED dirty_tolerated=$DIRTY_TOLERATED ancestral_dirty=$DIRTY_ANCESTRAL ancestral_commit_paths=$COMMIT_ANCESTRAL"
+healthy
 exit 0

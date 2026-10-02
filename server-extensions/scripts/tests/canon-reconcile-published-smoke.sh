@@ -435,4 +435,543 @@ out=$(bash "$SCRIPT" "$CANON" main 2>&1); rc=$?
 assert "$rc" "1" "exit 1"; assert "$(git -C "$CANON" rev-parse HEAD)" "$U" "HEAD unchanged"
 assert "$(printf '%s' "$out" | grep -c 'end state differs from the target')" "1" "refused by the end-state proof"
 
+refusing_canon() {  # <name> -- a canon whose reconcile always refuses with the class "local-only commits not on target"; sets ORIGIN, CANON
+  fresh "$1"; echo one > "$CANON/b.txt"; commit_in "$CANON" "local"; republish_on_origin "$CANON" "$(git -C "$CANON" rev-parse HEAD)"
+  echo two > "$CANON/c.txt"; commit_in "$CANON" "unique"
+}
+alerts_in() { printf '%s' "$1" | grep -c 'canon-reconcile-published: ALERT'; }   # <output> -> number of ALERT lines
+streak_file() { ls "$IWE_RUNTIME_DIR"/canon-reconcile-published.*.streak 2>/dev/null | head -1; }   # only valid right after `rm -f` of all streak files and one run
+
+# --- Codex review of Ф76 rounds 1-2 (peer-session 2026-10-01-20): the refusal streak is an append-only journal ---
+FAKEBIN="$SANDBOX/fakebin"; mkdir -p "$FAKEBIN"; REAL_DATE=$(command -v date); REAL_GIT=$(command -v git); REAL_LS=$(command -v ls)
+cat > "$FAKEBIN/date" <<EOF
+#!/usr/bin/env bash
+if [ -n "\${FAKE_DATE_BROKEN:-}" ] && [ "\$*" = "-u +%s" ]; then exit 1; fi
+if [ -n "\${FAKE_NOW_FILE:-}" ] && [ "\$*" = "-u +%s" ]; then cat "\$FAKE_NOW_FILE"; exit 0; fi
+if [ -n "\${FAKE_NOW:-}" ] && [ "\$*" = "-u +%s" ]; then echo "\$FAKE_NOW"; exit 0; fi
+exec "$REAL_DATE" "\$@"
+EOF
+cat > "$FAKEBIN/git" <<EOF
+#!/usr/bin/env bash
+if [ -n "\${FAIL_UPDATE_REF:-}" ]; then for a in "\$@"; do [ "\$a" = update-ref ] && exit 1; done; fi
+exec "$REAL_GIT" "\$@"
+EOF
+cat > "$FAKEBIN/ls" <<EOF
+#!/usr/bin/env bash
+if [ -n "\${FAIL_LS:-}" ]; then exit 1; fi
+if [ -n "\${FAIL_LS_E:-}" ]; then case "\$*" in *-lde*) exit 1 ;; esac; fi
+exec "$REAL_LS" "\$@"
+EOF
+chmod +x "$FAKEBIN/date" "$FAKEBIN/git" "$FAKEBIN/ls"
+at() { local t="$1"; shift; env PATH="$FAKEBIN:$PATH" FAKE_NOW="$t" "$@"; }   # <epoch> <command...>: the command reads this time from `date -u +%s`
+T=2000000000; CLASS_U="local-only commits not on target"
+put_journal() {  # <file> <class> <first> <count> [<claim-epoch>...]: <count> refusals of <class> (the first stamped <first>, the others one second apart), then one alert claim per extra argument
+  local f="$1" cls="$2" first="$3" n="$4" i=0 c; shift 4
+  : > "$f"
+  while [ "$i" -lt "$n" ]; do printf 'R\t%s\t%s\tseed.%s\n' $((first + i)) "$cls" "$i" >> "$f"; i=$((i + 1)); done
+  for c in "$@"; do printf 'A\t%s\t%s\tseed.claim.%s\n' "$c" "$cls" "$c" >> "$f"; done
+}
+prime() { refusing_canon "$1"; rm -rf "$IWE_RUNTIME_DIR"/canon-reconcile-published.*.streak*; bash "$SCRIPT" "$CANON" main >/dev/null 2>&1; F=$(streak_file); }   # a refusing canon with exactly one journal F
+records() { grep -c "^$2" "$1"; }   # <file> <R|A> -> number of records of that kind
+run_limited() {  # <seconds> <command...> -> LIMITED_RC (124 = still running at the limit, killed) and LIMITED_OUT
+  local limit="$1" pid i=0; shift
+  "$@" > "$SANDBOX/limited.out" 2>&1 & pid=$!
+  while kill -0 "$pid" 2>/dev/null; do
+    i=$((i + 1))
+    if [ "$i" -gt $((limit * 10)) ]; then kill -9 "$pid" 2>/dev/null; wait "$pid" 2>/dev/null; LIMITED_RC=124; LIMITED_OUT=$(cat "$SANDBOX/limited.out"); return 0; fi
+    sleep 0.1
+  done
+  wait "$pid"; LIMITED_RC=$?; LIMITED_OUT=$(cat "$SANDBOX/limited.out")
+}
+ARITH_ERR='syntax error|invalid arithmetic|value too great|unbound variable|operand expected|bad substitution'
+
+echo "scenario 34 (Ф76): a refusal says how often and for how long this class repeated, and how many tracked paths are dirty; no state file lands in the repository"
+refusing_canon s34; H=$(git -C "$CANON" rev-parse HEAD)
+out1=$(bash "$SCRIPT" "$CANON" main 2>&1); rc=$?; out2=$(bash "$SCRIPT" "$CANON" main 2>&1)
+assert "$rc" "1" "exit 1"; assert "$(git -C "$CANON" rev-parse HEAD)" "$H" "HEAD unchanged"
+assert "$(printf '%s' "$out1" | grep -c 'this reason 1 time(s) over 0 min; dirty tracked paths now: 0')" "1" "first refusal: 1 time, 0 min, 0 dirty"
+assert "$(printf '%s' "$out2" | grep -c 'this reason 2 time(s) over 0 min')" "1" "second refusal of the same class: 2 times"
+assert "$(alerts_in "$out2")" "0" "no ALERT below the defaults (3 times and 60 min)"
+assert "$(ls -A "$CANON" | grep -c 'streak')" "0" "no state file inside the repository"
+assert "$(git -C "$CANON" status --porcelain | wc -l | tr -d ' ')" "0" "the canon tree stays clean"
+
+echo "scenario 35 (Ф76): the third refusal past both thresholds prints exactly one ALERT with count, class and dirty count; the fourth stays quiet; after the repeat interval it speaks again"
+refusing_canon s35; rm -f "$IWE_RUNTIME_DIR"/canon-reconcile-published.*.streak
+LOUD="CANON_RECONCILE_ALERT_AFTER_SEC=0 CANON_RECONCILE_ALERT_MIN_COUNT=3 CANON_RECONCILE_ALERT_REPEAT_SEC=3600"
+o1=$(env $LOUD bash "$SCRIPT" "$CANON" main 2>&1); o2=$(env $LOUD bash "$SCRIPT" "$CANON" main 2>&1); o3=$(env $LOUD bash "$SCRIPT" "$CANON" main 2>&1); o4=$(env $LOUD bash "$SCRIPT" "$CANON" main 2>&1)
+assert "$(alerts_in "$o1")$(alerts_in "$o2")$(alerts_in "$o3")$(alerts_in "$o4")" "0010" "ALERT only on the third refusal"
+assert "$(printf '%s' "$o3" | grep -c "ALERT canon .* not reconciled for 0 min: 3 refusals 'local-only commits not on target', 0 dirty tracked path(s)")" "1" "the ALERT carries age, count, class and dirty count"
+o5=$(env CANON_RECONCILE_ALERT_AFTER_SEC=0 CANON_RECONCILE_ALERT_MIN_COUNT=3 CANON_RECONCILE_ALERT_REPEAT_SEC=0 bash "$SCRIPT" "$CANON" main 2>&1)
+assert "$(alerts_in "$o5")" "1" "once the repeat interval has passed the ALERT comes again"
+
+echo "scenario 36 (Ф76): the age threshold holds the alert back even when the count is reached"
+refusing_canon s36; rm -f "$IWE_RUNTIME_DIR"/canon-reconcile-published.*.streak
+o1=$(CANON_RECONCILE_ALERT_MIN_COUNT=1 bash "$SCRIPT" "$CANON" main 2>&1)
+assert "$(alerts_in "$o1")" "0" "count reached, 60 minutes not -> no ALERT"
+
+echo "scenario 37 (Ф76): a streak that began two hours ago alerts with the real age on the next refusal"
+refusing_canon s37; rm -rf "$IWE_RUNTIME_DIR"/canon-reconcile-published.*.streak*
+bash "$SCRIPT" "$CANON" main >/dev/null 2>&1; f=$(streak_file)
+put_journal "$f" "local-only commits not on target" $(( $(date -u +%s) - 7200 )) 5
+o1=$(bash "$SCRIPT" "$CANON" main 2>&1)
+assert "$(alerts_in "$o1")" "1" "ALERT on the next refusal"
+assert "$(printf '%s' "$o1" | grep -c 'not reconciled for 120 min: 6 refusals')" "1" "age 120 min, 6 refusals"
+
+echo "scenario 38 (Ф76): a healthy run clears the streak, the next refusal counts from one"
+fresh s38; echo one > "$CANON/b.txt"; commit_in "$CANON" "local"; republish_on_origin "$CANON" "$(git -C "$CANON" rev-parse HEAD)"
+rm -f "$IWE_RUNTIME_DIR"/canon-reconcile-published.*.streak
+echo dirty >> "$CANON/a.txt"; bash "$SCRIPT" "$CANON" main >/dev/null 2>&1; bash "$SCRIPT" "$CANON" main >/dev/null 2>&1
+assert "$(streak_file | wc -l | tr -d ' ')" "1" "precondition: a streak exists"
+git -C "$CANON" checkout -q -- a.txt
+bash "$SCRIPT" "$CANON" main >/dev/null 2>&1; rc=$?
+assert "$rc" "0" "exit 0 (replaced)"; assert "$(streak_file | wc -l | tr -d ' ')" "0" "the streak file is gone"
+git -C "$CANON" fetch -q origin; echo two > "$CANON/c.txt"; commit_in "$CANON" "unique"
+o1=$(bash "$SCRIPT" "$CANON" main 2>&1)
+assert "$(printf '%s' "$o1" | grep -c 'this reason 1 time(s)')" "1" "the next refusal counts from one"
+
+echo "scenario 38b (Codex 7, J7/J11 residual): a healthy exit removes the journal only through a trusted chain, and says why when it does not"
+fresh s38b; echo one > "$CANON/b.txt"; commit_in "$CANON" "local"; republish_on_origin "$CANON" "$(git -C "$CANON" rev-parse HEAD)"
+mkdir -p "$SANDBOX/h38-rt" && chmod 755 "$SANDBOX/h38-rt"
+echo dirty >> "$CANON/a.txt"; env IWE_RUNTIME_DIR="$SANDBOX/h38-rt" bash "$SCRIPT" "$CANON" main >/dev/null 2>&1; HJ=$(ls "$SANDBOX/h38-rt"/canon-reconcile-published.*.streak | head -1)
+git -C "$CANON" checkout -q -- a.txt; chmod 777 "$SANDBOX/h38-rt"
+o1=$(env IWE_RUNTIME_DIR="$SANDBOX/h38-rt" bash "$SCRIPT" "$CANON" main 2>&1); rc=$?
+assert "$rc/$([ -f "$HJ" ] && echo kept || echo removed)" "0/kept" "healthy exit (replaced) with a runtime directory others can write to: the journal is NOT removed through the untrusted chain"
+assert "$(printf '%s' "$o1" | grep -c 'is left in place on this healthy exit')" "1" "the warning says that the journal was left, and why"
+chmod 755 "$SANDBOX/h38-rt"
+env IWE_RUNTIME_DIR="$SANDBOX/h38-rt" bash "$SCRIPT" "$CANON" main >/dev/null 2>&1
+assert "$([ -f "$HJ" ] && echo kept || echo removed)" "removed" "control: once the directory is private again the next healthy exit removes the journal"
+
+echo "scenario 38c (Codex 7, J7/J11 residual): a healthy exit with a directory ABOVE the runtime directory that others can write to (no sticky bit) leaves the journal alone"
+fresh s38c; echo one > "$CANON/b.txt"; commit_in "$CANON" "local"; republish_on_origin "$CANON" "$(git -C "$CANON" rev-parse HEAD)"
+mkdir -p "$SANDBOX/h38c-up/rt" && chmod 755 "$SANDBOX/h38c-up" "$SANDBOX/h38c-up/rt"
+echo dirty >> "$CANON/a.txt"; env IWE_RUNTIME_DIR="$SANDBOX/h38c-up/rt" bash "$SCRIPT" "$CANON" main >/dev/null 2>&1; HJ=$(ls "$SANDBOX/h38c-up/rt"/canon-reconcile-published.*.streak | head -1)
+git -C "$CANON" checkout -q -- a.txt; chmod 777 "$SANDBOX/h38c-up"
+o1=$(env IWE_RUNTIME_DIR="$SANDBOX/h38c-up/rt" bash "$SCRIPT" "$CANON" main 2>&1); rc=$?
+assert "$rc/$([ -f "$HJ" ] && echo kept || echo removed)" "0/kept" "healthy exit with a directory above the runtime directory that others can write to: the journal is NOT removed"
+assert "$(printf '%s' "$o1" | grep -c 'above the runtime directory can be changed by somebody else')" "1" "the warning names the directory above"
+chmod 755 "$SANDBOX/h38c-up"
+env IWE_RUNTIME_DIR="$SANDBOX/h38c-up/rt" bash "$SCRIPT" "$CANON" main >/dev/null 2>&1
+assert "$([ -f "$HJ" ] && echo kept || echo removed)" "removed" "control: the same layout with a private directory above removes the journal"
+
+echo "scenario 39 (Ф76): a refusal of another class starts a new streak"
+fresh s39; echo one > "$CANON/b.txt"; commit_in "$CANON" "local"; republish_on_origin "$CANON" "$(git -C "$CANON" rev-parse HEAD)"
+rm -f "$IWE_RUNTIME_DIR"/canon-reconcile-published.*.streak
+echo dirty >> "$CANON/a.txt"; bash "$SCRIPT" "$CANON" main >/dev/null 2>&1; bash "$SCRIPT" "$CANON" main >/dev/null 2>&1
+git -C "$CANON" checkout -q -- a.txt; echo two > "$CANON/c.txt"; commit_in "$CANON" "unique"
+o1=$(bash "$SCRIPT" "$CANON" main 2>&1)
+assert "$(printf '%s' "$o1" | grep -c 'local-only commits not on target')" "1" "precondition: the class is now the unique-commit one"
+assert "$(printf '%s' "$o1" | grep -c 'this reason 1 time(s)')" "1" "a new class counts from one"
+
+echo "scenario 40 (Ф76): a damaged journal is a fresh streak: its damaged lines are skipped, never an error"
+refusing_canon s40; rm -rf "$IWE_RUNTIME_DIR"/canon-reconcile-published.*.streak*
+bash "$SCRIPT" "$CANON" main >/dev/null 2>&1; f=$(streak_file); printf 'garbage without tabs\n' > "$f"
+o1=$(bash "$SCRIPT" "$CANON" main 2>&1); rc=$?
+assert "$rc" "1" "exit 1"; assert "$(printf '%s' "$o1" | grep -c 'this reason 1 time(s)')" "1" "counted from one"
+assert "$(tail -1 "$f" | awk -F'\t' '{print NF ":" $1}')" "4:R" "the journal ends with the new four-field record"
+printf 'local-only commits not on target\t12x\t3\t0\n' > "$f"   # the four-field state of the first draft of this change: not a journal record
+o1=$(bash "$SCRIPT" "$CANON" main 2>&1)
+assert "$(printf '%s' "$o1" | grep -c 'this reason 1 time(s)')" "1" "a line that is not a journal record is skipped too"
+
+echo "scenario 41 (Ф76): a non-numeric threshold override falls back to the default and does not break the refusal"
+refusing_canon s41; rm -f "$IWE_RUNTIME_DIR"/canon-reconcile-published.*.streak
+o1=$(CANON_RECONCILE_ALERT_AFTER_SEC=abc CANON_RECONCILE_ALERT_MIN_COUNT=08 bash "$SCRIPT" "$CANON" main 2>&1); rc=$?
+assert "$rc" "1" "exit 1"; assert "$(printf '%s' "$o1" | grep -c 'this reason 1 time(s)')" "1" "refusal reported"
+assert "$(printf '%s' "$o1" | grep -ci 'syntax error\|value too great\|invalid arithmetic')" "0" "no arithmetic error from 'abc' or '08'"
+
+echo "scenario 42 (Ф76): two canons do not share a streak"
+refusing_canon s42a; CA="$CANON"; refusing_canon s42b; CB="$CANON"; rm -f "$IWE_RUNTIME_DIR"/canon-reconcile-published.*.streak
+bash "$SCRIPT" "$CA" main >/dev/null 2>&1; bash "$SCRIPT" "$CA" main >/dev/null 2>&1; o1=$(bash "$SCRIPT" "$CB" main 2>&1)
+assert "$(printf '%s' "$o1" | grep -c 'this reason 1 time(s)')" "1" "the second canon starts from one"
+assert "$(ls "$IWE_RUNTIME_DIR"/canon-reconcile-published.*.streak | wc -l | tr -d ' ')" "2" "one state file per canon"
+
+echo "scenario 43 (Ф76): a lock-busy skip is neither a refusal nor a healthy run: the streak is untouched"
+refusing_canon s43; rm -f "$IWE_RUNTIME_DIR"/canon-reconcile-published.*.streak
+bash "$SCRIPT" "$CANON" main >/dev/null 2>&1; f=$(streak_file); before=$(cat "$f")
+GD=$(git -C "$CANON" rev-parse --absolute-git-dir)
+mkdir "$GD/dirty-guard.lock" && printf 'host=%s\npid=%s\n' "${HOSTNAME:-$(hostname 2>/dev/null || echo unknown)}" "$$" > "$GD/dirty-guard.lock/owner"   # a live owner: this shell
+o1=$(bash "$SCRIPT" "$CANON" main 2>&1); rc=$?
+rm -rf "$GD/dirty-guard.lock"
+assert "$(printf '%s' "$o1" | grep -c 'lock busy')" "1" "precondition: the run was skipped because of the lock"
+assert "$rc" "0" "exit 0"; assert "$(cat "$f")" "$before" "the streak file is unchanged"
+
+
+echo "scenario 44 (Codex 1): every damaged shape of a journal record is skipped, never an arithmetic error"
+prime s44
+for spec in "R|12.3|$CLASS_U|x" "R|-5|$CLASS_U|x" "R|1e3|$CLASS_U|x" "R|1234567890123|$CLASS_U|x" "R|0x10|$CLASS_U|x" "R| 5|$CLASS_U|x" "R||$CLASS_U|x" "R|5 |$CLASS_U|x" "A|12.3|$CLASS_U|x" "R|100||x" "r|100|$CLASS_U|x" "R|100"; do
+  printf '%s\n' "$(printf '%s' "$spec" | tr '|' '\t')" > "$F"
+  o=$(bash "$SCRIPT" "$CANON" main 2>&1); rc=$?
+  assert "$rc$(printf '%s' "$o" | grep -c 'this reason 1 time(s)')$(printf '%s' "$o" | grep -Eic "$ARITH_ERR")" "110" "[$spec] exit 1, counted from one, no arithmetic error"
+done
+printf 'R\t%s\t%s\tx\n' "00$((T - 7200))" "$CLASS_U" > "$F"   # twelve digits with leading zeros: a plain decimal number
+o=$(at "$T" bash "$SCRIPT" "$CANON" main 2>&1)
+assert "$(printf '%s' "$o" | grep -c 'this reason 2 time(s) over 120 min')" "1" "leading zeros are decimal (no octal error): 2 refusals over 120 min"
+
+echo "scenario 45 (Codex 1): the real boundaries under a fixed clock: 3599/3600 s age, 14399/14400 s repeat, 2/3 refusals; the claim is on disk before the alert"
+prime s45
+chk() {  # <label> <want-alerts> <first> <count-before> [<claim-epoch>...]
+  local label="$1" want="$2"; shift 2; put_journal "$F" "$CLASS_U" "$@"; o=$(at "$T" bash "$SCRIPT" "$CANON" main 2>&1)
+  assert "$(alerts_in "$o")" "$want" "$label"
+}
+chk "age 3599 s with the count reached: quiet" 0 $((T - 3599)) 2
+chk "age 3600 s: ALERT" 1 $((T - 3600)) 2
+assert "$(awk -F'\t' '$1=="A"{e=$2} END{print e}' "$F")" "$T" "the claim stamped now is in the journal"
+chk "count 2 of 3 at a large age: quiet" 0 $((T - 9000)) 1
+chk "count 3 of 3: ALERT" 1 $((T - 9000)) 2
+chk "last alert 14399 s ago: quiet" 0 $((T - 20000)) 5 $((T - 14399))
+chk "last alert 14400 s ago: ALERT" 1 $((T - 20000)) 5 $((T - 14400))
+chk "a claim from the same second: quiet" 0 $((T - 20000)) 5 "$T"
+put_journal "$F" "$CLASS_U" $((T - 20000)) 5 "$T" $((T - 100))   # Codex 5, J9: the delayed run claimed LATER in file order but with an EARLIER time
+o=$(at $((T + 14399)) bash "$SCRIPT" "$CANON" main 2>&1); assert "$(alerts_in "$o")" "0" "J9: claims at T and (later in the file) T-100: 14399 s after T the alert interval has not passed: quiet"
+put_journal "$F" "$CLASS_U" $((T - 20000)) 5 "$T" $((T - 100))
+o=$(at $((T + 14400)) bash "$SCRIPT" "$CANON" main 2>&1); assert "$(alerts_in "$o")" "1" "J9: 14400 s after the LATEST claim the ALERT comes"
+
+echo "scenario 46 (Codex 1): a clock set back neither breaks the arithmetic nor mutes the alert"
+prime s46
+put_journal "$F" "$CLASS_U" $((T + 5000)) 5
+o=$(at "$T" bash "$SCRIPT" "$CANON" main 2>&1); rc=$?
+assert "$rc" "1" "exit 1"; assert "$(printf '%s' "$o" | grep -c 'this reason 6 time(s) over 0 min')" "1" "46a: refusals stamped in the future count as now: 6 refusals, 0 min"
+assert "$(printf '%s' "$o" | grep -Eic "$ARITH_ERR")" "0" "46a: no arithmetic error"; assert "$(alerts_in "$o")" "0" "46a: no alert at once: the age restarted"
+put_journal "$F" "$CLASS_U" $((T - 7200)) 5 $((T + 9000))
+o=$(at "$T" bash "$SCRIPT" "$CANON" main 2>&1)
+assert "$(alerts_in "$o")" "1" "46b: a claim stamped far in the future does not mute the alert"
+put_journal "$F" "$CLASS_U" $((T - 7200)) 5 $((T + 300))
+o=$(at "$T" bash "$SCRIPT" "$CANON" main 2>&1)
+assert "$(alerts_in "$o")" "0" "46c: a claim a few minutes ahead (a small step of the clock) counts as just made: quiet"
+
+echo "scenario 47 (Codex 1): a journal that cannot be appended to gives a warning and no alert, however often the refusal repeats"
+prime s47
+if [ "$(id -u)" != "0" ]; then
+  put_journal "$F" "$CLASS_U" $((T - 9000)) 5; chmod 444 "$F"; cp "$F" "$SANDBOX/s47.before"
+  res=""; for i in 1 2 3; do
+    o=$(at "$T" bash "$SCRIPT" "$CANON" main 2>&1); rc=$?
+    res="$res$rc/$(alerts_in "$o")/$(printf '%s' "$o" | grep -c 'warning: cannot append to the refusal streak')/$(printf '%s' "$o" | grep -c 'streak state could not be saved') "
+  done
+  assert "$res" "1/0/1/1 1/0/1/1 1/0/1/1 " "three runs: exit 1, no ALERT, one warning, the refusal line says why"
+  assert "$(cat "$F")" "$(cat "$SANDBOX/s47.before")" "the journal is untouched"
+  chmod 644 "$F"; o=$(at "$T" bash "$SCRIPT" "$CANON" main 2>&1)
+  assert "$(alerts_in "$o")" "1" "precondition of the test: with a writable journal the same state raises the ALERT"
+  put_journal "$F" "$CLASS_U" $((T - 9000)) 5; chmod 200 "$F"   # write-only: the record can be appended, nothing can be derived
+  o=$(at "$T" bash "$SCRIPT" "$CANON" main 2>&1); chmod 644 "$F"
+  assert "$(alerts_in "$o")/$(printf '%s' "$o" | grep -c 'streak state could not be read')/$(printf '%s' "$o" | grep -c 'warning: cannot read the refusal streak')" "0/1/1" "an unreadable journal is reported, never counted silently from one; no alert"
+  rm -f "$F"; chmod 555 "$IWE_RUNTIME_DIR"; o=$(at "$T" bash "$SCRIPT" "$CANON" main 2>&1); chmod 755 "$IWE_RUNTIME_DIR"
+  assert "$(alerts_in "$o")/$(printf '%s' "$o" | grep -c 'streak state could not be saved')" "0/1" "a journal that cannot even be created (read-only directory): no ALERT, reported"
+fi
+
+echo "scenario 48 (Codex 1): a journal path that is a symlink, a directory or a FIFO is neither read nor replaced; a world-writable runtime directory is not trusted"
+prime s48; printf 'precious\n' > "$SANDBOX/victim.txt"
+rm -f "$F"; ln -s "$SANDBOX/victim.txt" "$F"
+o=$(at "$T" bash "$SCRIPT" "$CANON" main 2>&1); rc=$?
+assert "$rc" "1" "symlink: exit 1"; assert "$(cat "$SANDBOX/victim.txt")" "precious" "symlink: the file it points to is not written"
+assert "$([ -L "$F" ] && echo link)" "link" "symlink: still a symlink"
+assert "$(printf '%s' "$o" | grep -c 'is not a plain file of this user')" "1" "symlink: the refusal line says the state is unusable"
+assert "$(alerts_in "$(env CANON_RECONCILE_ALERT_AFTER_SEC=0 CANON_RECONCILE_ALERT_MIN_COUNT=1 PATH="$FAKEBIN:$PATH" FAKE_NOW=$T bash "$SCRIPT" "$CANON" main 2>&1)")" "0" "symlink: no ALERT even with the thresholds at zero"
+rm -f "$F"; mkdir "$F"
+o=$(at "$T" bash "$SCRIPT" "$CANON" main 2>&1); rc=$?
+assert "$rc$([ -d "$F" ] && echo dir)$(printf '%s' "$o" | grep -c 'is not a plain file of this user')" "1dir1" "directory: exit 1, left in place, reported"
+rmdir "$F"
+if command -v mkfifo >/dev/null 2>&1; then
+  mkfifo "$F"; run_limited 8 env PATH="$FAKEBIN:$PATH" FAKE_NOW="$T" bash "$SCRIPT" "$CANON" main
+  assert "$LIMITED_RC$([ -p "$F" ] && echo fifo)" "1fifo" "FIFO: exit 1 (124 would mean the read blocked), left in place"
+  rm -f "$F"
+fi
+put_journal "$F" "$CLASS_U" $((T - 9000)) 5; cp "$F" "$SANDBOX/s48.before"
+for mode in 777 775 770 757; do
+  chmod "$mode" "$IWE_RUNTIME_DIR"; o=$(at "$T" bash "$SCRIPT" "$CANON" main 2>&1); chmod 755 "$IWE_RUNTIME_DIR"
+  assert "$(printf '%s' "$o" | grep -c 'not a private directory of this user')/$(alerts_in "$o")/$(cmp -s "$F" "$SANDBOX/s48.before" && echo same)" "1/0/same" "runtime directory mode $mode (a group or others may write): not trusted, reported, no ALERT, journal untouched"
+done
+o=$(at "$T" env FAIL_LS=1 bash "$SCRIPT" "$CANON" main 2>&1)
+assert "$(printf '%s' "$o" | grep -c 'not a private directory of this user')/$(alerts_in "$o")/$(cmp -s "$F" "$SANDBOX/s48.before" && echo same)" "1/0/same" "a permission string that cannot be read is no trust either"
+o=$(at "$T" bash "$SCRIPT" "$CANON" main 2>&1)
+assert "$(alerts_in "$o")" "1" "control: the owner-only mode 755 is trusted and the same journal raises the ALERT"
+mkdir "$SANDBOX/rt-open" && chmod 777 "$SANDBOX/rt-open" && ln -s "$SANDBOX/rt-open" "$SANDBOX/rt-link"
+o=$(env IWE_RUNTIME_DIR="$SANDBOX/rt-link" PATH="$FAKEBIN:$PATH" FAKE_NOW="$T" bash "$SCRIPT" "$CANON" main 2>&1)
+assert "$(printf '%s' "$o" | grep -c 'not a private directory of this user')/$(alerts_in "$o")" "1/0" "a runtime directory that is a SYMLINK to a world-writable directory is judged by its target: not trusted, reported, no ALERT"
+for fmode in 666 664 622 620; do
+  put_journal "$F" "$CLASS_U" $((T - 9000)) 5; chmod "$fmode" "$F"; cp "$F" "$SANDBOX/s48.file.before"
+  o=$(at "$T" bash "$SCRIPT" "$CANON" main 2>&1)
+  assert "$(printf '%s' "$o" | grep -c 'without write for group or others')/$(alerts_in "$o")/$(cmp -s "$F" "$SANDBOX/s48.file.before" && echo same)" "1/0/same" "journal file mode $fmode inside a private directory: not trusted, reported, no ALERT, journal untouched"
+done
+for fmode in 600 644; do
+  put_journal "$F" "$CLASS_U" $((T - 9000)) 5; chmod "$fmode" "$F"
+  o=$(at "$T" bash "$SCRIPT" "$CANON" main 2>&1)
+  assert "$(alerts_in "$o")" "1" "control: journal file mode $fmode (nobody else can write) is trusted and raises the ALERT"
+done
+ANC="$SANDBOX/anc"; mkdir -p "$ANC/rt"; chmod 755 "$ANC" "$ANC/rt"
+env IWE_RUNTIME_DIR="$ANC/rt" bash "$SCRIPT" "$CANON" main >/dev/null 2>&1; F2=$(ls "$ANC/rt"/canon-reconcile-published.*.streak | head -1)
+run2() { env IWE_RUNTIME_DIR="$ANC/rt" PATH="$FAKEBIN:$PATH" FAKE_NOW="$T" bash "$SCRIPT" "$CANON" main 2>&1; }
+put_journal "$F2" "$CLASS_U" $((T - 9000)) 5; o=$(run2)
+assert "$(alerts_in "$o")" "1" "control: the directory above the runtime directory is 755: trusted, the ALERT is raised"
+put_journal "$F2" "$CLASS_U" $((T - 9000)) 5; chmod 777 "$ANC"; o=$(run2); chmod 755 "$ANC"
+assert "$(printf '%s' "$o" | grep -c 'above the runtime directory can be changed by somebody else')/$(alerts_in "$o")" "1/0" "a directory ABOVE the runtime directory that others may write to (777, not sticky): not trusted, reported, no ALERT"
+put_journal "$F2" "$CLASS_U" $((T - 9000)) 5; chmod 1777 "$ANC"; o=$(run2); chmod 755 "$ANC"
+assert "$(alerts_in "$o")" "1" "the same directory made sticky (like /tmp): others cannot touch our entries there, trusted"
+mkdir -p "$SANDBOX/real-top/sub/rt" && chmod 755 "$SANDBOX/real-top/sub" "$SANDBOX/real-top/sub/rt" && chmod 777 "$SANDBOX/real-top" && ln -s "$SANDBOX/real-top/sub" "$SANDBOX/link-top"
+o=$(env IWE_RUNTIME_DIR="$SANDBOX/link-top/rt" PATH="$FAKEBIN:$PATH" FAKE_NOW="$T" bash "$SCRIPT" "$CANON" main 2>&1); chmod 755 "$SANDBOX/real-top"
+assert "$(printf '%s' "$o" | grep -c 'above the runtime directory can be changed by somebody else')" "1" "the runtime directory is reached through a symlink to real-top/sub whose PARENT real-top is 777: the walk follows the physical path and does not trust it"
+# Codex 5, J7: the journal is written to the physical path that was CHECKED, even if a link in the logical path is re-pointed after the check
+mkdir -p "$SANDBOX/safe/rt" "$SANDBOX/evil/rt" && chmod 755 "$SANDBOX/safe" "$SANDBOX/safe/rt" "$SANDBOX/evil" "$SANDBOX/evil/rt" && ln -sfn "$SANDBOX/safe/rt" "$SANDBOX/swaplink"
+sed 's@^  reason=$(oneline "\$1")$@  ln -sfn "'"$SANDBOX"'/evil/rt" "'"$SANDBOX"'/swaplink"; reason=$(oneline "$1")   # injected: the link is re-pointed after the runtime directory was resolved and before the report writes@' "$SCRIPT" > "$SANDBOX/script-swap.sh"
+assert "$(grep -c 'injected: the link is re-pointed' "$SANDBOX/script-swap.sh")" "1" "precondition: the re-pointing of the link is injected into the copy"
+o=$(env IWE_RUNTIME_DIR="$SANDBOX/swaplink" PATH="$FAKEBIN:$PATH" FAKE_NOW="$T" bash "$SANDBOX/script-swap.sh" "$CANON" main 2>&1)
+assert "$(ls "$SANDBOX/safe/rt" | grep -c 'canon-reconcile-published.*streak')/$(ls "$SANDBOX/evil/rt" | grep -c 'canon-reconcile-published')" "1/0" "the journal and the log went into the CHECKED physical directory; nothing reached the directory the link was re-pointed to"
+# Codex 5, J8: an ACL on a directory above is trusted only if it can only deny (macOS: the default of home directories)
+if [ "$(uname -s)" = Darwin ]; then
+  mkdir -p "$ANC/acl-dir/rt" && chmod 755 "$ANC/acl-dir" "$ANC/acl-dir/rt"; run3() { env IWE_RUNTIME_DIR="$ANC/acl-dir/rt" PATH="$FAKEBIN:$PATH" FAKE_NOW="$T" bash "$SCRIPT" "$CANON" main 2>&1; }
+  run3 >/dev/null; F3=$(ls "$ANC/acl-dir/rt"/canon-reconcile-published.*.streak | head -1)
+  chmod +a "group:everyone deny delete" "$ANC/acl-dir"; put_journal "$F3" "$CLASS_U" $((T - 9000)) 5; o=$(run3)
+  assert "$(alerts_in "$o")" "1" "an ACL with a deny entry only on a directory above (the macOS home default) is trusted: the ALERT is raised"
+  chmod +a "user:nobody allow add_file,delete_child" "$ANC/acl-dir"; put_journal "$F3" "$CLASS_U" $((T - 9000)) 5; o=$(run3)
+  assert "$(printf '%s' "$o" | grep -c 'above the runtime directory can be changed by somebody else')/$(alerts_in "$o")" "1/0" "an ACL that ALLOWS somebody to add files or delete children of a directory above: not trusted, reported, no ALERT"
+  chmod -N "$ANC/acl-dir"
+  mkdir -p "$ANC/acl-rt/rt" && chmod 755 "$ANC/acl-rt" "$ANC/acl-rt/rt"; run4() { env IWE_RUNTIME_DIR="$ANC/acl-rt/rt" PATH="$FAKEBIN:$PATH" FAKE_NOW="$T" bash "$SCRIPT" "$CANON" main 2>&1; }
+  run4 >/dev/null; F4=$(ls "$ANC/acl-rt/rt"/canon-reconcile-published.*.streak | head -1)
+  chmod +a "group:everyone deny delete" "$ANC/acl-rt/rt"; put_journal "$F4" "$CLASS_U" $((T - 9000)) 5; o=$(run4)
+  assert "$(printf '%s' "$o" | grep -c 'not a private directory of this user')/$(alerts_in "$o")" "1/0" "the runtime directory itself with ANY ACL entry (even a deny one): not trusted (strict), reported, no ALERT"
+  chmod -N "$ANC/acl-rt/rt"
+fi
+# Codex 6, J11: with an untrusted directory chain nothing is written to the log either (a planted link would redirect the line), and a FIFO in its place does not hang
+mkdir -p "$SANDBOX/open-rt" && chmod 777 "$SANDBOX/open-rt"; printf 'victim\n' > "$SANDBOX/victim-log.txt"; ln -s "$SANDBOX/victim-log.txt" "$SANDBOX/open-rt/canon-reconcile-published.log"
+o=$(env IWE_RUNTIME_DIR="$SANDBOX/open-rt" PATH="$FAKEBIN:$PATH" FAKE_NOW="$T" bash "$SCRIPT" "$CANON" main 2>&1)
+assert "$(cat "$SANDBOX/victim-log.txt")/$(printf '%s' "$o" | grep -c 'not a private directory of this user')" "victim/1" "runtime directory 777 with a planted link as the log: the file behind the link is NOT written, the reason is on stderr"
+rm -f "$SANDBOX/open-rt/canon-reconcile-published.log"; mkfifo "$SANDBOX/open-rt/canon-reconcile-published.log"
+run_limited 8 env IWE_RUNTIME_DIR="$SANDBOX/open-rt" PATH="$FAKEBIN:$PATH" FAKE_NOW="$T" bash "$SCRIPT" "$CANON" main
+assert "$LIMITED_RC" "1" "a FIFO in place of the log in an untrusted directory: no hang (124 would mean the open blocked), exit 1"
+mkdir -p "$SANDBOX/priv-rt" && chmod 755 "$SANDBOX/priv-rt"; ln -s "$SANDBOX/victim-log.txt" "$SANDBOX/priv-rt/canon-reconcile-published.log"
+o=$(env IWE_RUNTIME_DIR="$SANDBOX/priv-rt" PATH="$FAKEBIN:$PATH" FAKE_NOW="$T" bash "$SCRIPT" "$CANON" main 2>&1)
+assert "$(cat "$SANDBOX/victim-log.txt")" "victim" "a private directory but a LINK in place of the log file: not followed, the file behind it is not written"
+if [ "$(uname -s)" = Darwin ]; then
+  put_journal "$F" "$CLASS_U" $((T - 9000)) 5; cp "$F" "$SANDBOX/s48.acl.before"
+  o=$(at "$T" env FAIL_LS_E=1 bash "$SCRIPT" "$CANON" main 2>&1)
+  assert "$(printf '%s' "$o" | grep -c 'not a private directory of this user')/$(alerts_in "$o")/$(cmp -s "$F" "$SANDBOX/s48.acl.before" && echo same)" "1/0/same" "Codex 6, J12: only the ACL listing (ls -e) fails: that is no 'no ACL', the directory is not trusted, no ALERT, journal untouched"
+fi
+if [ "$(id -u)" != "0" ] && [ -d /usr/bin ]; then
+  o=$(env IWE_RUNTIME_DIR=/usr/bin PATH="$FAKEBIN:$PATH" FAKE_NOW="$T" bash "$SCRIPT" "$CANON" main 2>&1)
+  assert "$(printf '%s' "$o" | grep -c 'not a private directory of this user')/$(alerts_in "$o")" "1/0" "a runtime directory owned by somebody else (/usr/bin: no write for us, mode 755): not trusted by OWNERSHIP, reported, no ALERT"
+fi
+
+echo "scenario 49 (Codex 1): ten parallel early refusals (before the repository lock) lose no count and raise exactly one alert"
+fresh s49; rm -rf "$IWE_RUNTIME_DIR"/canon-reconcile-published.*.streak*
+bash "$SCRIPT" "$CANON" other >/dev/null 2>&1; F=$(streak_file)
+assert "$(awk -F'\t' '{print $3}' "$F" | grep -c 'checked-out branch')" "1" "precondition: an early refusal (wrong branch name) made the journal"
+put_journal "$F" "$(awk -F'\t' '{print $3}' "$F" | head -1)" $(( $(date -u +%s) - 7200 )) 5
+for i in 1 2 3 4 5 6 7 8 9 10; do ( bash "$SCRIPT" "$CANON" other > "$SANDBOX/par-$i.out" 2>&1 ) & done; wait
+total=0; for i in 1 2 3 4 5 6 7 8 9 10; do total=$((total + $(alerts_in "$(cat "$SANDBOX/par-$i.out")"))); done
+assert "$total" "1" "exactly one ALERT among the ten runs"
+assert "$(records "$F" R)" "15" "no refusal lost: 5 + 10 records"
+assert "$(cat "$SANDBOX"/par-*.out | grep -c 'warning')" "0" "nobody had to give up"
+
+echo "scenario 50 (Codex 1): of several claims the first in file order prints the alert; a claim that cannot be written or found prints none"
+prime s50
+put_journal "$F" "$CLASS_U" $((T - 9000)) 5
+sed 's/^        id="\$\$.\$RANDOM"$/        printf "A\\t%s\\t%s\\tforeign\\n" "$now" "$class" >> "$STREAK_FILE"; id="$$.$RANDOM"   # injected: another run claims first/' "$SCRIPT" > "$SANDBOX/script-claim-first.sh"
+assert "$(grep -c 'injected: another run claims first' "$SANDBOX/script-claim-first.sh")" "1" "precondition: the foreign claim is injected into the copy"
+o=$(at "$T" bash "$SANDBOX/script-claim-first.sh" "$CANON" main 2>&1)
+assert "$(alerts_in "$o")/$(records "$F" A)" "0/2" "50a: another claim landed first: no alert here, two claims in the journal"
+put_journal "$F" "$CLASS_U" $((T - 9000)) 5
+o=$(at "$T" bash "$SCRIPT" "$CANON" main 2>&1)
+assert "$(alerts_in "$o")/$(records "$F" A)" "1/1" "50a control: without the foreign claim the same journal gives the ALERT and one claim"
+put_journal "$F" "$CLASS_U" $((T - 9000)) 5; cp "$F" "$SANDBOX/s50b.seed"
+sed 's@^        elif append_streak A "\$c_now" "\$class" "\$id"; then$@        elif append_streak A "$c_now" "$class" "$id"; then cp "'"$SANDBOX"'/s50b.seed" "$STREAK_FILE"   # injected: the journal is restored without our claim (a healthy run and an equally old streak)@' "$SCRIPT" > "$SANDBOX/script-claim-lost.sh"
+assert "$(grep -c 'injected: the journal is restored without our claim' "$SANDBOX/script-claim-lost.sh")" "1" "precondition: the restoring of the journal without our claim is injected into the copy"
+o=$(at "$T" bash "$SANDBOX/script-claim-lost.sh" "$CANON" main 2>&1)
+assert "$(alerts_in "$o")" "0" "50b: the claim is not in the journal after the re-read although the series still looks due: inconclusive, no alert"
+put_journal "$F" "$CLASS_U" $((T - 9000)) 5
+sed 's/^        id="\$\$.\$RANDOM"$/        printf "R\\t%s\\t%s\\tz\\n" "$now" "another class" >> "$STREAK_FILE"; id="$$.$RANDOM"   # injected: another class begins before the claim/' "$SCRIPT" > "$SANDBOX/script-class-changed.sh"
+assert "$(grep -c 'injected: another class begins' "$SANDBOX/script-class-changed.sh")" "1" "precondition: a refusal of another class is injected between the decision and the claim"
+o=$(at "$T" bash "$SANDBOX/script-class-changed.sh" "$CANON" main 2>&1)
+assert "$(alerts_in "$o")" "0" "50d: another class began between the decision and the claim: the series is over, the claim is not confirmed, no alert"
+assert "$(printf '%s' "$o" | grep -c 'this reason 6 time(s) over 150 min')" "1" "50d: the refusal line keeps the numbers of the first reading (6 refusals, 150 min), not the empty state of the claim time"
+if [ "$(id -u)" != "0" ]; then
+  put_journal "$F" "$CLASS_U" $((T - 9000)) 5
+  sed 's/^        id="\$\$.\$RANDOM"$/        chmod 444 "$STREAK_FILE"; id="$$.$RANDOM"   # injected: the journal turns read-only after the refusal was recorded/' "$SCRIPT" > "$SANDBOX/script-claim-unwritable.sh"
+  o=$(at "$T" bash "$SANDBOX/script-claim-unwritable.sh" "$CANON" main 2>&1)
+  assert "$(alerts_in "$o")/$(printf '%s' "$o" | grep -c 'cannot append the alert claim')" "0/1" "50c: the claim could not be written: no alert, a warning"
+  chmod 644 "$F"
+fi
+
+echo "scenario 50e (Codex 4, J5): a claim of another class between two refusals does not split the series"
+prime s50e
+put_journal "$F" "$CLASS_U" $((T - 9000)) 2
+printf 'A\t%s\t%s\tforeign.rejected\n' $((T - 100)) "another class" >> "$F"
+o=$(at "$T" bash "$SCRIPT" "$CANON" main 2>&1)
+assert "$(printf '%s' "$o" | grep -c 'this reason 3 time(s) over 150 min')/$(alerts_in "$o")" "1/1" "2 refusals, a claim of ANOTHER class, 1 more refusal: one series of 3 over 150 min, the ALERT is raised"
+assert "$(awk -F'\t' '$1=="A" && $4 !~ /foreign/ {print $4}' "$F" | awk -F. '{print NF}')" "3" "the id of our claim carries the pid, a random number and the second the run started"
+
+echo "scenario 50f (Codex 6, J10): a run whose clock reading is stale (it stalled for 601+ s) must not ignore the claim a faster run wrote meanwhile"
+prime s50f
+put_journal "$F" "$CLASS_U" $((T - 9000)) 5; printf '%s\n' "$T" > "$SANDBOX/clock.file"
+sed 's@^        id="\$\$.\$RANDOM"$@        printf "A\\t%s\\t%s\\tq.first\\n" 2000000601 "$class" >> "$STREAK_FILE"; printf "%s\\n" 2000000700 > "'"$SANDBOX"'/clock.file"; id="$$.$RANDOM"   # injected: a faster run claimed at its time T+601 and our clock has moved on to T+700@' "$SCRIPT" > "$SANDBOX/script-stale-clock.sh"
+assert "$(grep -c 'injected: a faster run claimed' "$SANDBOX/script-stale-clock.sh")" "1" "precondition: the faster run and the clock movement are injected into the copy"
+o=$(env PATH="$FAKEBIN:$PATH" FAKE_NOW_FILE="$SANDBOX/clock.file" bash "$SANDBOX/script-stale-clock.sh" "$CANON" main 2>&1)
+assert "$(alerts_in "$o")/$(records "$F" A)" "0/2" "50f: the faster run's claim (601 s ahead of the stale reading) is not discarded as 'the far future': no second alert, two claims in the journal"
+
+echo "scenario 50g (Codex 7, J10 residual): a run that stalls between writing its claim and reading it back does not print a late alert"
+prime s50g
+put_journal "$F" "$CLASS_U" $((T - 20000)) 5; printf '%s\n' "$T" > "$SANDBOX/clock.file"
+sed 's@^          claim_at=\$c_now$@          claim_at=$c_now; printf "A\\t%s\\t%s\\tq.later\\n" 2000014400 "$class" >> "$STREAK_FILE"; printf "%s\\n" 2000014401 > "'"$SANDBOX"'/clock.file"   # injected: the run stalls 14401 s after its claim; another run claimed at T+14400 and printed@' "$SCRIPT" > "$SANDBOX/script-stalled.sh"
+assert "$(grep -c 'injected: the run stalls' "$SANDBOX/script-stalled.sh")" "1" "precondition: the stall and the later claim are injected into the copy"
+o=$(env PATH="$FAKEBIN:$PATH" FAKE_NOW_FILE="$SANDBOX/clock.file" bash "$SANDBOX/script-stalled.sh" "$CANON" main 2>&1)
+assert "$(alerts_in "$o")/$(printf '%s' "$o" | grep -c 'read back more than 120 s after')" "0/1" "the claim was read back 14401 s late: no alert (the later run owns the next window), a warning says why"
+
+echo "scenario 50h (cold review): a refusal of another class recorded right after ours is no unreadable journal"
+prime s50h
+put_journal "$F" "$CLASS_U" $((T - 9000)) 5
+sed 's/^    read -r _ s_first s_count s_last <<</    printf "R\\t%s\\t%s\\tz\\n" "$now" "another class" >> "$STREAK_FILE"; read -r _ s_first s_count s_last <<</' "$SCRIPT" > "$SANDBOX/script-class-after-ours.sh"
+assert "$(grep -c 'another class" >> "$STREAK_FILE"; read -r _ s_first' "$SANDBOX/script-class-after-ours.sh")" "1" "precondition: a refusal of another class is injected right after our own record"
+o=$(at "$T" bash "$SANDBOX/script-class-after-ours.sh" "$CANON" main 2>&1); rc=$?
+assert "$rc/$(alerts_in "$o")/$(printf '%s' "$o" | grep -c 'cannot read the refusal streak')/$(printf '%s' "$o" | grep -c 'a refusal of another class was recorded in between, counted from one')" "1/0/0/1" "exit 1, no alert, no false warning about an unreadable journal, the refusal says what happened"
+
+echo "scenario 50i (Codex 8, J10 residual): the interval is judged by the time of the claim, not by the time of the re-read"
+# A run read the journal before another run claimed, then stalled before its own clock reading: its claim is stamped T+14399 and
+# it re-reads one second later. The earlier claim is stamped T; between the two claims 14399 s lie, less than the interval.
+prime s50i
+put_journal "$F" "$CLASS_U" $((T - 9000)) 5; printf '%s\n' "$T" > "$SANDBOX/clock.file"
+sed 's@^        id="\$\$.\$RANDOM"$@        printf "A\\t%s\\t%s\\tq.first\\n" 2000000000 "$class" >> "$STREAK_FILE"; printf "%s\\n" 2000014399 > "'"$SANDBOX"'/clock.file"; id="$$.$RANDOM"   # injected: another run claimed at T and our clock reads T+14399@' "$SCRIPT" > "$SANDBOX/script-late-claim-1.sh"
+sed 's@^          claim_at=\$c_now$@          claim_at=$c_now; printf "%s\\n" 2000014400 > "'"$SANDBOX"'/clock.file"   # injected: one second passes after the claim@' "$SANDBOX/script-late-claim-1.sh" > "$SANDBOX/script-late-claim.sh"
+assert "$(grep -c 'injected: another run claimed at T' "$SANDBOX/script-late-claim.sh")/$(grep -c 'injected: one second passes' "$SANDBOX/script-late-claim.sh")" "1/1" "precondition: both injections are in the copy"
+o=$(env PATH="$FAKEBIN:$PATH" FAKE_NOW_FILE="$SANDBOX/clock.file" bash "$SANDBOX/script-late-claim.sh" "$CANON" main 2>&1)
+assert "$(alerts_in "$o")/$(records "$F" A)" "0/2" "our claim stamped T+14399 is 14399 s after the earlier claim (T): no alert, although the re-read came at T+14400"
+put_journal "$F" "$CLASS_U" $((T - 9000)) 5; printf '%s\n' "$T" > "$SANDBOX/clock.file"
+sed 's@^        id="\$\$.\$RANDOM"$@        printf "A\\t%s\\t%s\\tq.first\\n" 2000000000 "$class" >> "$STREAK_FILE"; printf "%s\\n" 2000014400 > "'"$SANDBOX"'/clock.file"; id="$$.$RANDOM"   # injected: another run claimed at T and our clock reads T+14400@' "$SCRIPT" > "$SANDBOX/script-late-claim-c.sh"
+o=$(env PATH="$FAKEBIN:$PATH" FAKE_NOW_FILE="$SANDBOX/clock.file" bash "$SANDBOX/script-late-claim-c.sh" "$CANON" main 2>&1)
+assert "$(alerts_in "$o")/$(records "$F" A)" "1/2" "control: a claim stamped exactly T+14400 (the interval after the earlier claim) is confirmed and prints"
+
+echo "scenario 51 (Codex 1, found while checking scenario 44 on the round-1 code): a refusal whose own report dies halfway must still stop before the swap"
+# A failed arithmetic expansion discards the whole top-level command, refuse() and its exit 1 included, and the script goes on.
+# The fault is injected into a copy; the control copy has no tripwire and shows the hazard is real (it resets the canon).
+refusing_canon s51; H=$(git -C "$CANON" rev-parse HEAD)
+sed 's/^  REFUSAL_STARTED=1$/  REFUSAL_STARTED=1; : $((10#1.5))   # injected fault/' "$SCRIPT" > "$SANDBOX/script-abort.sh"
+assert "$(grep -c 'injected fault' "$SANDBOX/script-abort.sh")" "1" "precondition: the fault is injected into the copy"
+o=$(bash "$SANDBOX/script-abort.sh" "$CANON" main 2>&1); rc=$?
+assert "$rc" "1" "exit 1"; assert "$(git -C "$CANON" rev-parse HEAD)" "$H" "HEAD unchanged: the canon was not reset"
+assert "$(printf '%s' "$o" | grep -Eic 'syntax error|invalid arithmetic')" "1" "the injected fault really fired"
+assert "$(printf '%s' "$o" | grep -c 'report was cut short')" "1" "the tripwire says why it stopped"
+refusing_canon s51c; H=$(git -C "$CANON" rev-parse HEAD)
+grep -v 'tripwire, see refuse()' "$SANDBOX/script-abort.sh" > "$SANDBOX/script-abort-notrip.sh"
+o=$(bash "$SANDBOX/script-abort-notrip.sh" "$CANON" main 2>&1); rc=$?
+assert "$([ "$(git -C "$CANON" rev-parse HEAD)" != "$H" ] && echo moved || echo same)" "moved" "control: without the tripwire the same fault lets the canon be reset over the unique local commit"
+
+echo "scenario 52 (Codex 2): a LOST swap whose report also dies must not reach the reset (it would discard tolerated dirt under an unchanged HEAD)"
+sed 's/^  REFUSAL_STARTED=1$/  REFUSAL_STARTED=1; : $((10#1.5))   # injected fault/' "$SCRIPT" > "$SANDBOX/script-abort-52.sh"   # self-contained: the same injection as in scenario 51
+assert "$(grep -c 'injected fault' "$SANDBOX/script-abort-52.sh")" "1" "precondition: the fault is injected into the copy"
+fresh s52; echo one > "$CANON/b.txt"; commit_in "$CANON" "local"; C=$(git -C "$CANON" rev-parse HEAD)
+republish_on_origin "$CANON" "$C"
+pub="$SANDBOX/pub-s52"; git clone -q "$ORIGIN" "$pub"; echo fixed > "$pub/a.txt"; commit_in "$pub" "origin fixes a"; git -C "$pub" push -q origin main
+echo fixed > "$CANON/a.txt"; H=$(git -C "$CANON" rev-parse HEAD)   # tolerated dirt: the published bytes; a reset to the OLD head would turn it back into "base"
+o=$(at "$T" env FAIL_UPDATE_REF=1 bash "$SANDBOX/script-abort-52.sh" "$CANON" main 2>&1); rc=$?
+assert "$rc" "1" "exit 1"; assert "$(git -C "$CANON" rev-parse HEAD)" "$H" "HEAD unchanged"; assert "$(cat "$CANON/a.txt")" "fixed" "the tolerated dirt is intact: no reset ran"
+assert "$(printf '%s' "$o" | grep -Eic 'syntax error|invalid arithmetic')" "1" "the injected fault really fired in the refusal of the lost swap"
+fresh s52c; echo one > "$CANON/b.txt"; commit_in "$CANON" "local"; C=$(git -C "$CANON" rev-parse HEAD); republish_on_origin "$CANON" "$C"
+pub="$SANDBOX/pub-s52c"; git clone -q "$ORIGIN" "$pub"; echo fixed > "$pub/a.txt"; commit_in "$pub" "origin fixes a"; git -C "$pub" push -q origin main
+echo fixed > "$CANON/a.txt"
+grep -v 'a SEPARATE top-level command' "$SANDBOX/script-abort-52.sh" > "$SANDBOX/script-abort-nocas.sh"
+o=$(at "$T" env FAIL_UPDATE_REF=1 bash "$SANDBOX/script-abort-nocas.sh" "$CANON" main 2>&1); rc=$?
+assert "$(cat "$CANON/a.txt")" "base" "control: without the re-check the reset runs after the lost swap and turns the tolerated dirt back into the old bytes"
+
+
+echo "scenario 53 (Codex 4, J4): a big journal is neither cut nor capped: a new class after a long old one is recorded and can alert"
+prime s53
+awk -v t="$T" 'BEGIN { for (i = 0; i < 12000; i++) printf "R\t%d\tsome other class\tseed.%d.padpadpadpadpadpadpadpadpadpadpadpadpadpadpadpad\n", t - 9000 + (i % 100), i }' > "$F"
+for i in 0 1 2 3 4; do printf 'R\t%d\t%s\tseed.u.%d\n' $((T - 9000 + i)) "$CLASS_U" "$i" >> "$F"; done
+assert "$([ "$(wc -c < "$F" | tr -d ' ')" -gt 1048576 ] && echo big)" "big" "precondition: the journal is larger than 1 MiB and ends with five refusals of the class the script refuses with"
+inode_before=$(ls -i "$F" | awk '{print $1}'); lines_before=$(wc -l < "$F" | tr -d ' ')
+o=$(at "$T" bash "$SCRIPT" "$CANON" main 2>&1)
+assert "$(wc -l < "$F" | tr -d ' ')" "$((lines_before + 2))" "the refusal AND the alert claim were appended (nothing skipped, nothing cut)"
+assert "$(printf '%s' "$o" | grep -c 'this reason 6 time(s)')/$(alerts_in "$o")/$(ls -i "$F" | awk '{print $1}')" "1/1/$inode_before" "the new class counts from its own records (6), the ALERT is raised, the file is the same inode"
+assert "$(ls "$IWE_RUNTIME_DIR" | grep -c '\.rot\.\|\.tmp\.')" "0" "no temp file exists"
+
+echo "scenario 51d (Codex 2 / cold review): the whole report runs in a subshell: a fault inside it ends only the report, the refusal still stops the script and says so"
+refusing_canon s51d; H=$(git -C "$CANON" rev-parse HEAD)
+sed 's/^  class="${reason%%:\*}"; class="${class:0:120}"$/&; : $((10#1.5))   # injected fault in the report/' "$SCRIPT" > "$SANDBOX/script-report-fault.sh"
+assert "$(grep -c 'injected fault in the report' "$SANDBOX/script-report-fault.sh")" "1" "precondition: the fault is injected into the report of the copy"
+o=$(bash "$SANDBOX/script-report-fault.sh" "$CANON" main 2>&1); rc=$?
+assert "$rc" "1" "exit 1"; assert "$(git -C "$CANON" rev-parse HEAD)" "$H" "HEAD unchanged"
+assert "$(printf '%s' "$o" | grep -c 'the report of this refusal failed')/$(printf '%s' "$o" | grep -c 'report was cut short')" "1/0" "the parent says the report failed; the tripwire was not even needed"
+refusing_canon s51e; H=$(git -C "$CANON" rev-parse HEAD)
+sed 's/^  ( refuse_report "\$1" ) ||/  refuse_report "$1" ||/' "$SANDBOX/script-report-fault.sh" > "$SANDBOX/script-report-fault-nosub.sh"
+assert "$(grep -c '^  refuse_report "\$1" ||' "$SANDBOX/script-report-fault-nosub.sh")" "1" "precondition: the subshell is removed from the copy"
+o=$(bash "$SANDBOX/script-report-fault-nosub.sh" "$CANON" main 2>&1); rc=$?
+assert "$(printf '%s' "$o" | grep -c 'report was cut short')" "1" "control: without the subshell the same fault drops the refusal and only the tripwire at the ref swap stops the run"
+
+echo "scenario 54 (cold review): a path name with a newline cannot forge an ALERT line in the output the forwarder reads"
+name=$'notes\ncanon-reconcile-published: ALERT canon FORGED x'
+fresh s54; printf 'v1\n' > "$CANON/$name"; echo one > "$CANON/b.txt"; commit_in "$CANON" "local"; republish_on_origin "$CANON" "$(git -C "$CANON" rev-parse HEAD)"
+echo mine >> "$CANON/$name"
+o=$(bash "$SCRIPT" "$CANON" main 2>&1)
+assert "$(printf '%s' "$o" | grep -c 'tracked changes differ from target: notes canon-reconcile-published: ALERT canon FORGED x')" "1" "precondition: the refusal names the path, on one line"
+assert "$(printf '%s\n' "$o" | sed 's/^/isolate-push: /' | grep -c '^isolate-push: canon-reconcile-published: ALERT')" "0" "no line of the output (after the isolate-push prefix) is an ALERT"
+assert "$(grep -c 'FORGED' "$IWE_RUNTIME_DIR/canon-reconcile-published.log" | tr -d ' ')" "$(grep 'FORGED' "$IWE_RUNTIME_DIR/canon-reconcile-published.log" | wc -l | tr -d ' ')" "the log keeps the same text on one line each"
+assert "$(grep -c '^canon-reconcile-published: ALERT\|^[0-9TZ:-]* alert ' "$IWE_RUNTIME_DIR/canon-reconcile-published.log" | tr -d ' ')" "$(grep -c ' alert repo=' "$IWE_RUNTIME_DIR/canon-reconcile-published.log" | tr -d ' ')" "no forged ALERT line in the log either"
+
+echo "scenario 55 (cold review): an oversized threshold override falls back to the default instead of wrapping around"
+prime s55; put_journal "$F" "$CLASS_U" $((T - 9000)) 5
+o=$(at "$T" env CANON_RECONCILE_ALERT_REPEAT_SEC=9223372036854775808 bash "$SCRIPT" "$CANON" main 2>&1)
+assert "$(alerts_in "$o")/$(printf '%s' "$o" | grep -c 'next alert in 240 min')" "1/1" "REPEAT_SEC with 19 digits: the default 14400 s is used (next alert in 240 min)"
+put_journal "$F" "$CLASS_U" $((T - 9000)) 5
+o=$(at "$T" env CANON_RECONCILE_ALERT_AFTER_SEC=0123456789012345 CANON_RECONCILE_ALERT_MIN_COUNT=99999999999999 bash "$SCRIPT" "$CANON" main 2>&1)
+assert "$(alerts_in "$o")" "1" "AFTER_SEC and MIN_COUNT with more than 12 digits: the defaults (3600 s, 3 refusals) are used"
+
+echo "scenario 56 (cold review): a clock that cannot be read writes nothing to the journal; a zero-padded time is decimal"
+prime s56; put_journal "$F" "$CLASS_U" $((T - 9000)) 5; cp "$F" "$SANDBOX/s56.before"
+o=$(env PATH="$FAKEBIN:$PATH" FAKE_DATE_BROKEN=1 bash "$SCRIPT" "$CANON" main 2>&1); rc=$?
+assert "$rc/$(printf '%s' "$o" | grep -c 'streak state skipped: the clock could not be read')/$(alerts_in "$o")/$(cmp -s "$F" "$SANDBOX/s56.before" && echo same)" "1/1/0/same" "exit 1, the refusal says why nothing was counted, no alert, journal untouched"
+put_journal "$F" "$CLASS_U" 1799990000 2
+o=$(at "01800000009" bash "$SCRIPT" "$CANON" main 2>&1); rc=$?
+assert "$rc/$(printf '%s' "$o" | grep -Eic "$ARITH_ERR")/$(printf '%s' "$o" | grep -c 'this reason 3 time(s) over 166 min')" "1/0/1" "FAKE time 01800000009 (a leading zero and a 9: octal would be an error): no arithmetic error, taken as decimal: 3 refusals over 166 min"
+
+echo "scenario 57 (cold review): a refusal class carries no variable data: two different bogus pinned oids are one streak"
+refusing_canon s57; rm -rf "$IWE_RUNTIME_DIR"/canon-reconcile-published.*.streak*
+o1=$(bash "$SCRIPT" "$CANON" main deadbeefdeadbeefdeadbeefdeadbeefdeadbeef 2>&1); o2=$(bash "$SCRIPT" "$CANON" main cafebabecafebabecafebabecafebabecafebabe 2>&1)
+assert "$(printf '%s' "$o1" | grep -c 'refused -- pinned oid is not a commit here: deadbeef')" "1" "the first refusal names the bogus oid after the colon"
+assert "$(printf '%s' "$o2" | grep -c 'this reason 2 time(s)')" "1" "the second refusal, with another oid, continues the same streak: 2 times"
+
+echo "scenario 58 (cold review): nothing is created below a directory that others can write to"
+refusing_canon s58
+mkdir -p "$SANDBOX/open58" && chmod 777 "$SANDBOX/open58"
+o=$(env IWE_RUNTIME_DIR="$SANDBOX/open58/a/b/rt" bash "$SCRIPT" "$CANON" main 2>&1); rc=$?
+assert "$rc/$([ -e "$SANDBOX/open58/a" ] && echo created || echo untouched)" "1/untouched" "the way to the runtime directory is judged before anything is created: below a directory that others can write to nothing appears, the refusal still stops the script"
+assert "$(printf '%s' "$o" | grep -c 'above the runtime directory can be changed by somebody else')" "1" "the refusal names the directory"
+chmod 755 "$SANDBOX/open58"
+env IWE_RUNTIME_DIR="$SANDBOX/open58/a/b/rt" bash "$SCRIPT" "$CANON" main >/dev/null 2>&1
+assert "$([ -d "$SANDBOX/open58/a/b/rt" ] && echo made || echo missing)/$(ls -ld "$SANDBOX/open58/a/b/rt" | cut -c1-10)" "made/drwx------" "control: below a private directory the missing chain is created, private (0700)"
+
+echo "scenario 58b (Codex 8, J7/J11 residual): a link that appears where a missing component is about to be made is never followed"
+refusing_canon s58b
+mkdir -p "$SANDBOX/sticky58" "$SANDBOX/victim58" && chmod 1777 "$SANDBOX/sticky58" && chmod 700 "$SANDBOX/victim58"
+sed 's@^    ( umask 077; mkdir "\$cur" ) 2>/dev/null$@    ln -s "'"$SANDBOX"'/victim58" "$cur" 2>/dev/null; ( umask 077; mkdir "$cur" ) 2>/dev/null   # injected: a link appears where the component is about to be made@' "$SCRIPT" > "$SANDBOX/script-planted-link.sh"
+assert "$(grep -c 'injected: a link appears' "$SANDBOX/script-planted-link.sh")" "1" "precondition: the planted link is injected into the copy"
+o=$(env IWE_RUNTIME_DIR="$SANDBOX/sticky58/new/a/rt" bash "$SANDBOX/script-planted-link.sh" "$CANON" main 2>&1); rc=$?
+assert "$rc/$(ls -A "$SANDBOX/victim58" | wc -l | tr -d ' ')/$(printf '%s' "$o" | grep -c 'is not a real directory of this user')" "1/0/1" "below a directory with the sticky bit a link planted at the first missing component is not followed: nothing appears in its target, the refusal says why and still stops the script"
+rm -f "$SANDBOX/sticky58/new"
+env IWE_RUNTIME_DIR="$SANDBOX/sticky58/new/a/rt" bash "$SCRIPT" "$CANON" main >/dev/null 2>&1
+assert "$([ -d "$SANDBOX/sticky58/new/a/rt" ] && [ ! -L "$SANDBOX/sticky58/new" ] && echo made || echo missing)/$(ls -ld "$SANDBOX/sticky58/new/a/rt" | cut -c1-10)" "made/drwx------" "control: without the planted link the missing chain below the sticky directory is made, private (0700)"
+
+echo "scenario 58c (Codex 8, J7/J11 residual): a link that replaces a directory ABOVE the runtime directory after the path was resolved is not trusted"
+refusing_canon s58c
+mkdir -p "$SANDBOX/anc58/mid/rt" && chmod 700 "$SANDBOX/anc58" "$SANDBOX/anc58/mid" "$SANDBOX/anc58/mid/rt"
+sed 's@^LOG_FILE=@mv "'"$SANDBOX"'/anc58/mid" "'"$SANDBOX"'/anc58/mid.real" \&\& ln -s mid.real "'"$SANDBOX"'/anc58/mid"   # injected: a directory above the runtime directory is replaced by a link after the path was resolved\nLOG_FILE=@' "$SCRIPT" > "$SANDBOX/script-ancestor-link.sh"
+assert "$(grep -c 'injected: a directory above the runtime directory is replaced' "$SANDBOX/script-ancestor-link.sh")" "1" "precondition: the replacement by a link is injected into the copy"
+o=$(env IWE_RUNTIME_DIR="$SANDBOX/anc58/mid/rt" bash "$SANDBOX/script-ancestor-link.sh" "$CANON" main 2>&1); rc=$?
+assert "$rc/$(ls -A "$SANDBOX/anc58/mid.real/rt" | wc -l | tr -d ' ')/$(printf '%s' "$o" | grep -c 'above the runtime directory is a link')" "1/0/1" "a directory above the runtime directory turned into a link after the path was resolved: nothing is written through it, the refusal says why and still stops the script"
+
+echo "scenario 58d (Codex 8, J7/J11 residual): the runtime directory ITSELF turned into a link after the path was resolved is not trusted"
+refusing_canon s58d
+mkdir -p "$SANDBOX/rt58d/rt" && chmod 700 "$SANDBOX/rt58d" "$SANDBOX/rt58d/rt"
+sed 's@^LOG_FILE=@mv "'"$SANDBOX"'/rt58d/rt" "'"$SANDBOX"'/rt58d/rt.real" \&\& ln -s rt.real "'"$SANDBOX"'/rt58d/rt"   # injected: the runtime directory is replaced by a link after the path was resolved\nLOG_FILE=@' "$SCRIPT" > "$SANDBOX/script-runtime-link.sh"
+assert "$(grep -c 'injected: the runtime directory is replaced by a link' "$SANDBOX/script-runtime-link.sh")" "1" "precondition: the replacement by a link is injected into the copy"
+o=$(env IWE_RUNTIME_DIR="$SANDBOX/rt58d/rt" bash "$SANDBOX/script-runtime-link.sh" "$CANON" main 2>&1); rc=$?
+assert "$rc/$(ls -A "$SANDBOX/rt58d/rt.real" | wc -l | tr -d ' ')/$(printf '%s' "$o" | grep -c 'is a link')" "1/0/1" "the runtime directory turned into a link after the path was resolved: nothing is written through it, the refusal says why and still stops the script"
+
+echo "scenario 59 (cold review): a record with an epoch before September 2001 is damage, not a time"
+refusing_canon s59; rm -rf "$IWE_RUNTIME_DIR"/canon-reconcile-published.*.streak*
+bash "$SCRIPT" "$CANON" main >/dev/null 2>&1; f=$(streak_file)
+printf 'R\t0\t%s\ta\nR\t0\t%s\tb\nR\t999999999\t%s\tc\n' "$CLASS_U" "$CLASS_U" "$CLASS_U" > "$f"
+o=$(bash "$SCRIPT" "$CANON" main 2>&1); rc=$?
+assert "$rc/$(alerts_in "$o")/$(printf '%s' "$o" | grep -c 'this reason 1 time(s)')" "1/0/1" "records of epoch 0 and 999999999 are skipped: this refusal counts from one, no alert (they would have meant an age of decades)"
+
+echo "scenario 60 (cold review): a new log is private, whatever the umask"
+refusing_canon s60; rm -f "$IWE_RUNTIME_DIR/canon-reconcile-published.log"
+( umask 022; bash "$SCRIPT" "$CANON" main >/dev/null 2>&1 )
+assert "$(ls -l "$IWE_RUNTIME_DIR/canon-reconcile-published.log" | cut -c1-10)" "-rw-------" "a new log is created with mode 0600 although the umask is 022"
+
 [ "$fails" = 0 ] && echo "PASS: all scenarios" || { echo "FAIL: $fails assertion(s)"; exit 1; }
