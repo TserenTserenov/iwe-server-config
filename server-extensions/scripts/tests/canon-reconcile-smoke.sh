@@ -204,4 +204,53 @@ assert_contains "case8 diagnostic" "$out8" "reclaiming stale lock"
 assert_eq "case8 fast-forwarded after reclaim" "$REMOTE_HEAD8" "$("$REAL_GIT" -C "$CLONE8" rev-parse HEAD)"
 [ ! -d "$CLONE8_GIT_DIR/dirty-guard.lock" ] || fail "case8 lock directory left behind after success"
 
-echo "PASS: canon-reconcile-smoke.sh (8 scenarios)"
+# --- Scenario 9: an UNTRACKED file blocks the fast-forward (the 02.10.2026
+# ledger incident). Origin's next commit adds the same path the clone holds as
+# an untracked file with real content. The tool must refuse, leave the file
+# byte-for-byte, create NO stash (stash -u would hide it in stash^3, invisible
+# to the superseded check), and not move HEAD.
+new_origin_and_clone case9
+CLONE9="$TEST_ROOT/case9-clone"
+SEED9="$TEST_ROOT/case9-seed"
+printf 'unpublished ledger events\n' > "$CLONE9/ledger.yaml"
+printf 'origin version of the ledger\n' > "$SEED9/ledger.yaml"
+"$REAL_GIT" -C "$SEED9" add ledger.yaml
+"$REAL_GIT" -C "$SEED9" commit -qm "origin adds the file the clone holds untracked"
+"$REAL_GIT" -C "$SEED9" push -q
+LOCAL_HEAD9=$("$REAL_GIT" -C "$CLONE9" rev-parse HEAD)
+set +e
+out9=$(bash "$SCRIPT" "$CLONE9" main 2>&1)
+rc9=$?
+set -e
+assert_eq "case9 exit code" "1" "$rc9"
+assert_contains "case9 diagnostic" "$out9" "untracked file(s) would be overwritten"
+assert_contains "case9 names the path" "$out9" "ledger.yaml"
+assert_eq "case9 untracked file untouched" "unpublished ledger events" "$(cat "$CLONE9/ledger.yaml")"
+assert_eq "case9 HEAD unchanged" "$LOCAL_HEAD9" "$("$REAL_GIT" -C "$CLONE9" rev-parse HEAD)"
+assert_eq "case9 no stash created" "" "$("$REAL_GIT" -C "$CLONE9" stash list)"
+
+# --- Scenario 10: a tracked dirty file AND an untracked blocker together.
+# Refuse as a whole: the tracked edit must not be stashed alone while the
+# untracked file blocks, and nothing may move.
+new_origin_and_clone case10
+CLONE10="$TEST_ROOT/case10-clone"
+SEED10="$TEST_ROOT/case10-seed"
+printf 'dirty tracked edit\n' > "$CLONE10/file.md"
+printf 'untracked real content\n' > "$CLONE10/extra.yaml"
+printf 'changed on origin\n' > "$SEED10/file.md"
+printf 'origin extra\n' > "$SEED10/extra.yaml"
+"$REAL_GIT" -C "$SEED10" add file.md extra.yaml
+"$REAL_GIT" -C "$SEED10" commit -qm "origin touches both"
+"$REAL_GIT" -C "$SEED10" push -q
+LOCAL_HEAD10=$("$REAL_GIT" -C "$CLONE10" rev-parse HEAD)
+set +e
+out10=$(bash "$SCRIPT" "$CLONE10" main 2>&1)
+rc10=$?
+set -e
+assert_eq "case10 exit code" "1" "$rc10"
+assert_eq "case10 tracked edit untouched" "dirty tracked edit" "$(cat "$CLONE10/file.md")"
+assert_eq "case10 untracked file untouched" "untracked real content" "$(cat "$CLONE10/extra.yaml")"
+assert_eq "case10 HEAD unchanged" "$LOCAL_HEAD10" "$("$REAL_GIT" -C "$CLONE10" rev-parse HEAD)"
+assert_eq "case10 no stash created" "" "$("$REAL_GIT" -C "$CLONE10" stash list)"
+
+echo "PASS: canon-reconcile-smoke.sh (10 scenarios)"

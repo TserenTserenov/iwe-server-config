@@ -113,20 +113,52 @@ fi
 # than re-deriving them from `git status` — that's the authoritative list of
 # what's actually blocking, nothing more, nothing less.
 CONFLICT_OUT=$(git merge --ff-only "origin/$BRANCH" 2>&1)
-CONFLICTS=$(printf '%s\n' "$CONFLICT_OUT" | sed -n 's/^\t//p')
-if [ -z "$CONFLICTS" ]; then
+LISTED=$(printf '%s\n' "$CONFLICT_OUT" | sed -n 's/^\t//p')
+if [ -z "$LISTED" ]; then
   echo "canon-reconcile: fast-forward failed for a reason this tool doesn't recognize — leaving untouched:" >&2
   printf '%s\n' "$CONFLICT_OUT" >&2
   exit 1
 fi
 
+# git lists BOTH tracked paths with local edits and UNTRACKED paths that the
+# fast-forward would overwrite, in separate sections, but every listed path is
+# a tab-indented line. Classify each path by the index itself (language
+# independent, unlike the section headings).
+#
+# Untracked paths must never be stashed: `git stash push -u` puts them in the
+# stash's third parent (stash@{n}^3), and the "was it superseded?" check below
+# only diffs the tracked tree, so it cannot see them. 02.10.2026 03:03: the
+# day's unpublished ledger file (49 events, untracked because the canon was 187
+# commits behind and had never tracked it) was carried off exactly this way and
+# became invisible to every consumer (WP-530 F74). An untracked path blocking
+# the fast-forward is real, unreconciled content: refuse and leave the tree
+# untouched so a human (or the ledger publisher) deals with it.
+CONFLICTS=""
+UNTRACKED_BLOCKERS=""
+while IFS= read -r path; do
+  [ -n "$path" ] || continue
+  if git ls-files --error-unmatch -- "$path" >/dev/null 2>&1; then
+    CONFLICTS="${CONFLICTS}${path}"$'\n'
+  else
+    UNTRACKED_BLOCKERS="${UNTRACKED_BLOCKERS}${path}"$'\n'
+  fi
+done <<LISTED_EOF
+$LISTED
+LISTED_EOF
+
+if [ -n "$UNTRACKED_BLOCKERS" ]; then
+  echo "canon-reconcile: untracked file(s) would be overwritten by the fast-forward — refusing, tree untouched (never stashed: an untracked file hides inside the stash's third parent). Publish or move these by hand:" >&2
+  printf '%s' "$UNTRACKED_BLOCKERS" >&2
+  exit 1
+fi
+
 STASH_MARKER="canon-reconcile $(date -u +%FT%TZ)"
-STASH_ARGS=(stash push -u -m "$STASH_MARKER" --)
+STASH_ARGS=(stash push -m "$STASH_MARKER" --)
 while IFS= read -r path; do
   [ -n "$path" ] && STASH_ARGS+=("$path")
-done <<EOF
+done <<CONFLICTS_EOF
 $CONFLICTS
-EOF
+CONFLICTS_EOF
 
 if ! git "${STASH_ARGS[@]}" >/dev/null 2>&1; then
   echo "canon-reconcile: could not stash the blocking paths — leaving tree untouched" >&2
