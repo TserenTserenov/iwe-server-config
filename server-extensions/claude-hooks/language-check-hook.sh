@@ -89,4 +89,4 @@ echo "$TIMESTAMP | ${RESULT}" >> "$LOG_FILE"
 # попадает в следующий ход агента как ненавязчивая подсказка, не форсирует
 # переписывание уже показанного пилоту ответа (в отличие от decision:block).
 jq -nc --arg ctx "⚠️ language-check: последний ответ мог выйти не на русском ($RESULT) — если это не код/пути/термины, следующий ответ пиши на русском." \
-  '{additionalContext: $ctx}'
+  '{hookSpecificOutput: {hookEventName: "Stop", additionalContext: $ctx}}'
