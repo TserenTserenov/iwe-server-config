@@ -88,6 +88,18 @@ expect "git --html-path stash -u ничего не запускает и не б
 expect "git --no-pager log остаётся разрешённым" pass "git --no-pager -C $PRIMARY log --oneline -1" "$TMP_DIR"
 expect "git -c user.name=x commit не читается как stash" pass "git -c user.name=x -C $PRIMARY commit -m wip" "$TMP_DIR"
 
+# environment / config that redirect git to another tree: the linked-worktree exemption cannot be proven (documented limitation closed 02.10)
+expect "GIT_DIR перед командой при cwd в связанном дереве не даёт исключения" block "GIT_DIR=$PRIMARY/.git git stash -u" "$LINKED"
+expect "GIT_WORK_TREE перед командой при cwd в связанном дереве блокируется" block "GIT_WORK_TREE=$PRIMARY git stash" "$LINKED"
+expect "export GIT_DIR=...; git stash -u блокируется" block "export GIT_DIR=$PRIMARY/.git; git stash -u" "$LINKED"
+expect "-c core.worktree=<основной> при -C в связанное дерево блокируется" block "git -c core.worktree=$PRIMARY -C $LINKED stash -u" "$TMP_DIR"
+expect "GIT_DIR перед командой со списком своих путей проходит" pass "GIT_DIR=$PRIMARY/.git git stash push -- file.txt" "$LINKED"
+expect "посторонняя переменная GIT_AUTHOR_NAME не лишает исключения связанного дерева" pass "GIT_AUTHOR_NAME=x git -C $LINKED stash -u" "$TMP_DIR"
+
+expect "явный --work-tree на основной при -C в связанное дерево блокируется" block "git --work-tree=$PRIMARY -C $LINKED stash -u" "$TMP_DIR"
+expect "declare -x GIT_DIR=...; git stash -u блокируется" block "declare -x GIT_DIR=$PRIMARY/.git; git stash -u" "$LINKED"
+expect "env GIT_DIR=... git stash -u блокируется" block "env GIT_DIR=$PRIMARY/.git git stash -u" "$LINKED"
+
 # === linked worktree (one session's own tree): allowed ===
 expect "git stash -u в связанном worktree проходит" pass "git -C $LINKED stash -u" "$TMP_DIR"
 expect "голый git stash в связанном worktree проходит" pass "git -C $LINKED stash" "$TMP_DIR"

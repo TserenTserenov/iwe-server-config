@@ -554,14 +554,27 @@ stash_save_is_unsafe() {
       *) [ "$sub" = "push" ] && have_paths=1; shift ;;
     esac
   done
-  local dirs
-  dirs=$(git -C "$base" ${gopts[@]+"${gopts[@]}"} rev-parse --git-dir --git-common-dir 2>/dev/null) || return 1
-  [ "$(printf '%s\n' "$dirs" | sed -n 1p)" = "$(printf '%s\n' "$dirs" | sed -n 2p)" ] || return 1
+  # GIT_DIR/GIT_WORK_TREE before the command (GIT_CTX_OVERRIDE) or -c core.worktree= change the tree git works on:
+  # the linked-worktree exemption cannot be proven, so the checkout counts as shared.
+  local override="${GIT_CTX_OVERRIDE:-0}" g
+  for g in ${gopts[@]+"${gopts[@]}"}; do
+    case "$g" in *core.worktree*|--work-tree|--work-tree=*) override=1 ;; esac
+  done
+  if [ "$override" -eq 0 ]; then
+    local dirs
+    dirs=$(git -C "$base" ${gopts[@]+"${gopts[@]}"} rev-parse --git-dir --git-common-dir 2>/dev/null) || return 1
+    [ "$(printf '%s\n' "$dirs" | sed -n 1p)" = "$(printf '%s\n' "$dirs" | sed -n 2p)" ] || return 1
+  fi
   [ "$sweep" -eq 1 ] || [ "$have_paths" -eq 0 ]
 }
 
 # Same one-line-per-invocation reasoning as the reset check above — each
 # chained `git stash ...` gets its own token-position parse.
+# GIT_DIR / GIT_WORK_TREE assigned anywhere in the call (prefix or export) redirect git to another tree.
+GIT_CTX_OVERRIDE=0
+if printf '%s' "$CMD_EXEC" | grep -qE '(^|[;&|(`[:space:]])((export|declare[[:space:]]+-x|typeset[[:space:]]+-x)[[:space:]]+)?GIT_(DIR|WORK_TREE)='; then
+  GIT_CTX_OVERRIDE=1
+fi
 STASH_SEGMENT=$(git_segment stash)
 if [ -n "$STASH_SEGMENT" ]; then
   while IFS= read -r one_stash; do

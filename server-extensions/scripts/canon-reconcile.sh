@@ -68,6 +68,18 @@ fi
 LOCK_DIR="$GIT_DIR/dirty-guard.lock"
 LOCK_META="$LOCK_DIR/owner"
 HOSTNAME_NOW="${HOSTNAME:-$(hostname 2>/dev/null || echo unknown)}"
+# The exit of this run removes the lock only when no owner record of ANOTHER run stands in it (WP-530 Ф81, rounds 11 and 12 of the peer session with Kimi and Codex): a lock that
+# another run took over while this one was going, or a lock of the shared library (its record has node=, no host=), is not ours to delete. No record, or a record of this
+# very run, is ours as before. ONE read of the record decides (a second read would only move the gap): a shell has no compare-and-delete, so a lock that is taken over at the very
+# moment between that read and the rm is still removed, a window of about a millisecond when the run goes freely and without an upper bound when it is suspended there, that can only open when a run has taken over the LIVE lock of another (the old
+# takeover does that when its signal is refused); the shared library never does. Written first for the three guards whose exit removed the lock whatever stood in it; the library replaces this function.
+release_own_lock() {
+  local verdict
+  verdict=$(awk -F= -v h="$HOSTNAME_NOW" -v p="$$" '$1=="host"{oh=$2} $1=="pid"{op=$2} END { if (oh == "" && op == "") print "none"; else if (oh == h && op == p) print "ours"; else print "foreign" }' "$LOCK_META" 2>/dev/null) || :
+  if [ "$verdict" = foreign ]; then return 0; fi
+  rm -rf "$LOCK_DIR" 2>/dev/null || :
+  return 0
+}
 if ! mkdir "$LOCK_DIR" 2>/dev/null; then
   if [ -f "$LOCK_META" ]; then
     OTHER_HOST=$(awk -F= '$1=="host"{print $2}' "$LOCK_META" 2>/dev/null)
@@ -82,7 +94,7 @@ if ! mkdir "$LOCK_DIR" 2>/dev/null; then
     exit 0
   fi
 fi
-trap 'rm -rf "$LOCK_DIR" 2>/dev/null' EXIT
+trap release_own_lock EXIT
 printf 'host=%s\npid=%s\n' "$HOSTNAME_NOW" "$$" > "$LOCK_META"
 
 if ! git fetch origin "$BRANCH" --quiet 2>/dev/null; then
