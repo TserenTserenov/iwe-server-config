@@ -433,7 +433,7 @@ if [ -n "$RESET_SEGMENT" ]; then
   while IFS= read -r one_reset; do
     [ -n "$one_reset" ] || continue
     if echo "$one_reset" | grep -qE -- '(^|[[:space:]])--hard([[:space:]]|$)' && ! reset_is_non_destructive "$one_reset"; then
-      block "git reset --hard запрещён (теряет незакоммиченное). Используй git stash."
+      block "git reset --hard запрещён (теряет незакоммиченное). Сохрани только свои файлы: git stash push -- <свои пути> (никогда без списка путей и никогда с -u/--all: в общем чекауте это уносит работу параллельных сессий); чужое не трогай, публикуй из изолированной копии."
     fi
   done <<< "$RESET_SEGMENT"
 fi

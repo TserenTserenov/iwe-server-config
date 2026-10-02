@@ -460,11 +460,41 @@ cat > "$FAKEBIN/ls" <<EOF
 #!/usr/bin/env bash
 if [ -n "\${FAIL_LS:-}" ]; then exit 1; fi
 if [ -n "\${FAIL_LS_E:-}" ]; then case "\$*" in *-lde*) exit 1 ;; esac; fi
+if [ -n "\${LS_UNSTABLE_COUNTER:-}" ]; then case "\$*" in *-di*) n=\$(cat "\$LS_UNSTABLE_COUNTER" 2>/dev/null); n=\$((\${n:-0} + 1)); echo "\$n" > "\$LS_UNSTABLE_COUNTER"; echo "\$n \${!#}"; exit 0 ;; esac; fi
 exec "$REAL_LS" "\$@"
 EOF
-chmod +x "$FAKEBIN/date" "$FAKEBIN/git" "$FAKEBIN/ls"
+REAL_PS=$(command -v ps); REAL_MV=$(command -v mv); REAL_RM=$(command -v rm)
+cat > "$FAKEBIN/ps" <<EOF
+#!/usr/bin/env bash
+# FAIL_PS=1: every call fails. LISTING=fail|empty|only1: the listing of all processes (-A) fails, is empty, or holds nothing but pid 1.
+# LISTING=hide:<pid>: the real listing of all processes without that pid.
+if [ -n "\${FAIL_PS:-}" ]; then exit 1; fi
+case "\$*" in
+  *-A*) case "\${LISTING:-}" in
+          fail) exit 1 ;;
+          empty) exit 0 ;;
+          only1) echo 1; exit 0 ;;
+          hide:*) "$REAL_PS" "\$@" | awk -v h="\${LISTING#hide:}" '{ x = \$0; gsub(/[ \\t]/, "", x) } x != h'; exit 0 ;;
+        esac ;;
+esac
+exec "$REAL_PS" "\$@"
+EOF
+cat > "$FAKEBIN/mv" <<EOF
+#!/usr/bin/env bash
+if [ -n "\${FAIL_MV_OWNER:-}" ]; then case "\$*" in *owner.tmp*) exit 1 ;; esac; fi
+exec "$REAL_MV" "\$@"
+EOF
+cat > "$FAKEBIN/rm" <<EOF
+#!/usr/bin/env bash
+# FAIL_RM_SERIES=lockbusy|streak: removing a journal of that kind fails
+if [ -n "\${FAIL_RM_SERIES:-}" ]; then case "\$*" in *".\${FAIL_RM_SERIES}") exit 1 ;; esac; fi
+exec "$REAL_RM" "\$@"
+EOF
+chmod +x "$FAKEBIN/date" "$FAKEBIN/git" "$FAKEBIN/ls" "$FAKEBIN/ps" "$FAKEBIN/mv" "$FAKEBIN/rm"
 at() { local t="$1"; shift; env PATH="$FAKEBIN:$PATH" FAKE_NOW="$t" "$@"; }   # <epoch> <command...>: the command reads this time from `date -u +%s`
 T=2000000000; CLASS_U="local-only commits not on target"
+HN="${HOSTNAME:-$(hostname 2>/dev/null || echo unknown)}"   # the name the guard writes into the owner record of its lock
+DEAD_PID=$(( $(cat /proc/sys/kernel/pid_max 2>/dev/null || echo 999998) + 1 ))   # a pid that cannot exist: above pid_max (4194304 on Tsekh) and above every pid of macOS
 put_journal() {  # <file> <class> <first> <count> [<claim-epoch>...]: <count> refusals of <class> (the first stamped <first>, the others one second apart), then one alert claim per extra argument
   local f="$1" cls="$2" first="$3" n="$4" i=0 c; shift 4
   : > "$f"
@@ -973,5 +1003,244 @@ echo "scenario 60 (cold review): a new log is private, whatever the umask"
 refusing_canon s60; rm -f "$IWE_RUNTIME_DIR/canon-reconcile-published.log"
 ( umask 022; bash "$SCRIPT" "$CANON" main >/dev/null 2>&1 )
 assert "$(ls -l "$IWE_RUNTIME_DIR/canon-reconcile-published.log" | cut -c1-10)" "-rw-------" "a new log is created with mode 0600 although the umask is 022"
+
+echo "scenario 61 (Ф81, H1): a live pid is never taken for a dead owner, whatever its age: the lock stays and the skip says how old the lock is"
+fresh s61; GD=$(git -C "$CANON" rev-parse --absolute-git-dir)
+sleep 600 & LIVE=$!   # an unrelated live process of this user: a pid handed to another process looks exactly like this
+mkdir "$GD/dirty-guard.lock"; printf 'host=%s\npid=%s\n' "$HN" "$LIVE" > "$GD/dirty-guard.lock/owner"
+o=$(bash "$SCRIPT" "$CANON" main 2>&1); rc=$?
+assert "$rc/$(printf '%s' "$o" | grep -c "lock busy, skipping this cycle -- owner pid $LIVE is alive\$")/$([ -d "$GD/dirty-guard.lock" ] && echo present || echo gone)" "0/1/present" "a record of the old format (no epoch): skipped, the lock stays, no age is claimed"
+rm -rf "$GD/dirty-guard.lock"; mkdir "$GD/dirty-guard.lock"; printf 'host=%s\npid=%s\nepoch=%s\ntoken=x\n' "$HN" "$LIVE" $((T - 7200)) > "$GD/dirty-guard.lock/owner"
+o=$(at "$T" bash "$SCRIPT" "$CANON" main 2>&1); rc=$?
+assert "$rc/$(printf '%s' "$o" | grep -c "lock busy, skipping this cycle -- owner pid $LIVE is alive, the lock was taken 120 min ago")/$([ -d "$GD/dirty-guard.lock" ] && echo present || echo gone)" "0/1/present" "a record with its time: the skip names the age (a lock of two hours whose pid is alive is what a handed-over number looks like)"
+rm -rf "$GD/dirty-guard.lock"; mkdir "$GD/dirty-guard.lock"; printf 'host=%s\npid=%s\nstart_utc=%s\n' "$HN" "$LIVE" "Thu Jan 1 00:00:00 1970" > "$GD/dirty-guard.lock/owner"
+o=$(bash "$SCRIPT" "$CANON" main 2>&1); rc=$?
+assert "$rc/$([ -d "$GD/dirty-guard.lock" ] && echo present || echo gone)" "0/present" "a key an earlier draft wrote (a start time) proves nothing and is not read: the live pid keeps the lock"
+kill "$LIVE" 2>/dev/null; rm -rf "$GD/dirty-guard.lock"
+
+echo "scenario 62 (Ф81, H2/H7): a missing, empty or damaged owner file is no proof of anything: the lock stays, however old, and the skip says why"
+fresh s62; GD=$(git -C "$CANON" rev-parse --absolute-git-dir)
+for shape in "missing" "empty" "pid=12x" "doubled pid" "pid=0"; do
+  rm -rf "$GD/dirty-guard.lock"; mkdir "$GD/dirty-guard.lock"
+  case "$shape" in
+    missing) ;;
+    empty) : > "$GD/dirty-guard.lock/owner" ;;
+    "pid=12x") printf 'host=%s\npid=12x\n' "$HN" > "$GD/dirty-guard.lock/owner" ;;
+    "doubled pid") printf 'host=%s\npid=999999\npid=999998\n' "$HN" > "$GD/dirty-guard.lock/owner" ;;
+    "pid=0") printf 'host=%s\npid=0\n' "$HN" > "$GD/dirty-guard.lock/owner" ;;
+  esac
+  touch -t 202001010000 "$GD/dirty-guard.lock"
+  o=$(bash "$SCRIPT" "$CANON" main 2>&1); rc=$?
+  assert "$rc/$([ -d "$GD/dirty-guard.lock" ] && echo present || echo gone)/$(printf '%s' "$o" | grep -Ec 'lock busy, skipping this cycle -- the owner file is (missing|damaged)')" "0/present/1" "$shape: skipped, the lock (a year old) is left for a human, the message names the reason"
+done
+rm -rf "$GD/dirty-guard.lock"
+
+echo "scenario 63 (Ф81, H3): another host name is no proof of death either, however old the lock is"
+fresh s63; GD=$(git -C "$CANON" rev-parse --absolute-git-dir)
+mkdir "$GD/dirty-guard.lock"; printf 'host=%s\npid=%s\n' "OtherName.local" 999999 > "$GD/dirty-guard.lock/owner"; touch -t 202001010000 "$GD/dirty-guard.lock"
+o=$(bash "$SCRIPT" "$CANON" main 2>&1); rc=$?
+assert "$rc/$([ -d "$GD/dirty-guard.lock" ] && echo present || echo gone)/$(printf '%s' "$o" | grep -c "lock busy, skipping this cycle -- the owner host 'OtherName.local' is not this host")" "0/present/1" "the owner host differs: skipped, the lock stays, the message names both hosts"
+rm -rf "$GD/dirty-guard.lock"; mkdir "$GD/dirty-guard.lock"; printf 'host=%s\npid=%s\n' "$HN" "$DEAD_PID" > "$GD/dirty-guard.lock/owner"
+o=$(bash "$SCRIPT" "$CANON" main 2>&1); rc=$?
+assert "$rc/$(printf '%s' "$o" | grep -c "owner pid $DEAD_PID is gone")" "0/1" "control: the same host and a pid that is gone: the lock is taken over (an old-format owner record works as before)"
+
+echo "scenario 64 (Ф81, H8/H9): a pid that cannot be signalled is alive, and a ps that cannot tell proves nothing"
+fresh s64; GD=$(git -C "$CANON" rev-parse --absolute-git-dir)
+mkdir "$GD/dirty-guard.lock"; printf 'host=%s\npid=%s\n' "$HN" 1 > "$GD/dirty-guard.lock/owner"
+o=$(bash "$SCRIPT" "$CANON" main 2>&1); rc=$?
+assert "$rc/$([ -d "$GD/dirty-guard.lock" ] && echo present || echo gone)/$(printf '%s' "$o" | grep -c 'lock busy, skipping this cycle -- owner pid 1 is alive')" "0/present/1" "pid 1: kill -0 is refused for a user process (EPERM), the process exists: the lock stays (the published script took it for a dead owner and removed the lock of a live process)"
+rm -rf "$GD/dirty-guard.lock"; mkdir "$GD/dirty-guard.lock"; printf 'host=%s\npid=%s\n' "$HN" "$DEAD_PID" > "$GD/dirty-guard.lock/owner"
+o=$(env PATH="$FAKEBIN:$PATH" FAIL_PS=1 bash "$SCRIPT" "$CANON" main 2>&1); rc=$?
+assert "$rc/$([ -d "$GD/dirty-guard.lock" ] && echo present || echo gone)/$(printf '%s' "$o" | grep -c "lock busy, skipping this cycle -- it cannot be established whether owner pid $DEAD_PID is alive")" "0/present/1" "kill says no such process but ps itself fails: not proven, the lock stays"
+rm -rf "$GD/dirty-guard.lock"
+
+echo "scenario 65 (Ф81, H4): the release at exit removes only a lock whose owner record is ours"
+fresh s65; GD=$(git -C "$CANON" rev-parse --absolute-git-dir)
+bash "$SCRIPT" "$CANON" main >/dev/null 2>&1
+assert "$([ -d "$GD/dirty-guard.lock" ] && echo present || echo gone)" "gone" "control: a normal run releases its lock"
+sed 's@^if \[ -e "\$RUNTIME_PHYS/\$BUSY_NAME" \]@printf "host=x\\npid=1\\ntoken=foreign\\n" > "$LOCK_META"   # injected: the lock is taken over by somebody else while this run is still going\n&@' "$SCRIPT" > "$SANDBOX/script-foreign-lock.sh"
+assert "$(grep -c 'injected: the lock is taken over' "$SANDBOX/script-foreign-lock.sh")" "1" "precondition: the takeover is injected into the copy"
+bash "$SANDBOX/script-foreign-lock.sh" "$CANON" main >/dev/null 2>&1; rc=$?
+assert "$rc/$([ -d "$GD/dirty-guard.lock" ] && echo present || echo gone)/$(awk -F= '$1=="token"{print $2}' "$GD/dirty-guard.lock/owner" 2>/dev/null)" "0/present/foreign" "the owner record is no longer ours at exit: the lock of the other owner is left in place"
+rm -rf "$GD/dirty-guard.lock"
+
+echo "scenario 66 (Ф81): an owner record that cannot be published is fatal: the lock is removed and the run refuses before any protected work"
+refusing_canon s66; GD=$(git -C "$CANON" rev-parse --absolute-git-dir); H66=$(git -C "$CANON" rev-parse HEAD)
+o=$(env PATH="$FAKEBIN:$PATH" FAIL_MV_OWNER=1 bash "$SCRIPT" "$CANON" main 2>&1); rc=$?
+assert "$rc/$([ -d "$GD/dirty-guard.lock" ] && echo present || echo gone)/$(printf '%s' "$o" | grep -c 'cannot record the owner of the lock')/$(git -C "$CANON" rev-parse HEAD)" "1/gone/1/$H66" "exit 1, no lock left behind, the reason is named, the canon is untouched"
+
+echo "scenario 67 (Ф81, tier 2): a held lock is named with its owner and goes to the log"
+fresh s67; GD=$(git -C "$CANON" rev-parse --absolute-git-dir)
+mkdir "$GD/dirty-guard.lock"; printf 'host=%s\npid=%s\n' "$HN" "$$" > "$GD/dirty-guard.lock/owner"   # this shell is a live owner
+: > "$IWE_RUNTIME_DIR/canon-reconcile-published.log"
+o=$(bash "$SCRIPT" "$CANON" main 2>&1); rc=$?
+assert "$rc/$(printf '%s' "$o" | grep -c "lock busy, skipping this cycle -- owner pid $$ is alive")/$(grep -c 'dirty-guard lock cannot be taken' "$IWE_RUNTIME_DIR/canon-reconcile-published.log")" "0/1/1" "the skip names the owner and is in the log"
+assert "$(printf '%s' "$o" | grep -c '^canon-reconcile-published: skipped -- dirty-guard lock cannot be taken')/$(grep -c ' skipped repo=' "$IWE_RUNTIME_DIR/canon-reconcile-published.log")/$(grep -c ' refused repo=' "$IWE_RUNTIME_DIR/canon-reconcile-published.log")" "1/1/0" "a skipped cycle is printed and logged as skipped, never as refused (exit 0, the canon is fine)"
+rm -rf "$GD/dirty-guard.lock"
+
+echo "scenario 68 (Ф81, tier 3): a lock that stays held is an ALERT of its own series; taking the lock ends the series; the refusal journal is not touched"
+refusing_canon s68; GD=$(git -C "$CANON" rev-parse --absolute-git-dir); rm -rf "$IWE_RUNTIME_DIR"/canon-reconcile-published.*
+bash "$SCRIPT" "$CANON" main >/dev/null 2>&1; MAINJ=$(streak_file); MAIN_BEFORE=$(cat "$MAINJ")
+mkdir "$GD/dirty-guard.lock"; printf 'host=%s\npid=%s\n' "$HN" "$$" > "$GD/dirty-guard.lock/owner"
+o1=$(at $((T - 9000)) bash "$SCRIPT" "$CANON" main 2>&1); o2=$(at $((T - 4500)) bash "$SCRIPT" "$CANON" main 2>&1); o3=$(at "$T" bash "$SCRIPT" "$CANON" main 2>&1)
+assert "$(alerts_in "$o1")/$(alerts_in "$o2")/$(alerts_in "$o3")" "0/0/1" "the third skip in 2.5 hours raises the ALERT"
+assert "$(printf '%s' "$o3" | grep -c "ALERT canon .* not reconciled for 150 min: 3 refusals 'dirty-guard lock cannot be taken \[pid $$ dir [0-9]*\]'")" "1" "the ALERT names the class and the duration"
+assert "$(cat "$MAINJ")" "$MAIN_BEFORE" "the refusal journal of the canon is unchanged"
+BUSYJ=$(ls "$IWE_RUNTIME_DIR"/canon-reconcile-published.*.lockbusy 2>/dev/null | head -1)
+assert "$([ -s "$BUSYJ" ] && echo journal)" "journal" "the skips are in the lock journal"
+rm -rf "$GD/dirty-guard.lock"
+bash "$SCRIPT" "$CANON" main >/dev/null 2>&1
+assert "$([ -e "$BUSYJ" ] && echo present || echo gone)" "gone" "taking the lock ends the series: the lock journal is removed"
+
+echo "scenario 69 (Ф81, Codex round 2, Б1): a doubled or empty host in the owner file is damage: the lock stays whether the pid is alive or gone"
+fresh s69; GD=$(git -C "$CANON" rev-parse --absolute-git-dir)
+sleep 600 & LIVE=$!
+for pidcase in alive gone; do
+  if [ "$pidcase" = alive ]; then P=$LIVE; else P=$DEAD_PID; fi
+  for shape in "doubled host" "empty host"; do
+    rm -rf "$GD/dirty-guard.lock"; mkdir "$GD/dirty-guard.lock"
+    case "$shape" in
+      "doubled host") printf 'host=%s\nhost=%s\npid=%s\n' "$HN" "$HN" "$P" ;;
+      "empty host") printf 'host=\npid=%s\n' "$P" ;;
+    esac > "$GD/dirty-guard.lock/owner"
+    o=$(bash "$SCRIPT" "$CANON" main 2>&1); rc=$?
+    assert "$rc/$([ -d "$GD/dirty-guard.lock" ] && echo present || echo gone)/$(printf '%s' "$o" | grep -c 'lock busy, skipping this cycle -- the owner file is damaged')" "0/present/1" "$pidcase pid, $shape: the owner file is damaged, the lock is left for a human and the skip says so"
+  done
+done
+kill "$LIVE" 2>/dev/null; rm -rf "$GD/dirty-guard.lock"
+
+echo "scenario 70 (Ф81, Codex round 3, Б3): a process that cannot be signalled is alive by the kernel's own answer, whatever the listing says; a kill message the script does not know proves nothing; no function of the environment stands in for kill"
+if [ "$(id -u)" = 0 ]; then echo "  ok   (skipped: running as root, every process can be signalled)"; else
+fresh s70; GD=$(git -C "$CANON" rev-parse --absolute-git-dir)
+RP=$(LC_ALL=C ps -A -o pid=,user= | awk '$2 == "root" && $1 > 1 { print $1; exit }')   # a live process of another user, not pid 1
+if [ -z "$RP" ]; then echo "  ok   (skipped: no process of root to use)"; else
+  mkdir "$GD/dirty-guard.lock"; printf 'host=%s\npid=%s\n' "$HN" "$RP" > "$GD/dirty-guard.lock/owner"
+  o=$(env PATH="$FAKEBIN:$PATH" LISTING="hide:$RP" bash "$SCRIPT" "$CANON" main 2>&1); rc=$?
+  assert "$rc/$(printf '%s' "$o" | grep -c "lock busy, skipping this cycle -- owner pid $RP is alive")/$([ -d "$GD/dirty-guard.lock" ] && echo present || echo gone)" "0/1/present" "the owner is a process of root: kill is refused (not permitted), and the listing, complete in every other respect (this run and pid 1), does not show it: alive, the lock stays"
+  rm -rf "$GD/dirty-guard.lock"
+fi
+sed 's@builtin kill -0 "\$1" 2>&1@{ echo "weird refusal"; false; }@' "$SCRIPT" > "$SANDBOX/script-s70.sh"
+assert "$(grep -c 'echo "weird refusal"' "$SANDBOX/script-s70.sh")" "1" "precondition: the unknown message is injected into the copy"
+mkdir "$GD/dirty-guard.lock"; printf 'host=%s\npid=%s\n' "$HN" "$DEAD_PID" > "$GD/dirty-guard.lock/owner"
+o=$(bash "$SANDBOX/script-s70.sh" "$CANON" main 2>&1); rc=$?
+assert "$rc/$(printf '%s' "$o" | grep -c "lock busy, skipping this cycle -- it cannot be established whether owner pid $DEAD_PID is alive")/$([ -d "$GD/dirty-guard.lock" ] && echo present || echo gone)" "0/1/present" "a dead pid, but kill says something the script does not know: not proven, the lock stays"
+rm -rf "$GD/dirty-guard.lock"
+sleep 600 & LIVE=$!
+mkdir "$GD/dirty-guard.lock"; printf 'host=%s\npid=%s\n' "$HN" "$LIVE" > "$GD/dirty-guard.lock/owner"
+o=$( kill() { echo "x: No such process" >&2; return 1; }; export -f kill; env PATH="$FAKEBIN:$PATH" LISTING="hide:$LIVE" bash "$SCRIPT" "$CANON" main 2>&1 ); rc=$?
+assert "$rc/$(printf '%s' "$o" | grep -c "lock busy, skipping this cycle -- owner pid $LIVE is alive")/$([ -d "$GD/dirty-guard.lock" ] && echo present || echo gone)" "0/1/present" "a function kill exported by the environment that says no such process, and a listing without the live owner: the builtin is called, the owner is alive, the lock stays"
+kill "$LIVE" 2>/dev/null; rm -rf "$GD/dirty-guard.lock"
+fi
+
+echo "scenario 71 (Ф81, Codex round 2, Б3): a listing of processes that fails, is empty or is partial proves no death"
+fresh s71; GD=$(git -C "$CANON" rev-parse --absolute-git-dir)
+for mode in fail empty only1; do
+  rm -rf "$GD/dirty-guard.lock"; mkdir "$GD/dirty-guard.lock"; printf 'host=%s\npid=%s\n' "$HN" "$DEAD_PID" > "$GD/dirty-guard.lock/owner"
+  o=$(env PATH="$FAKEBIN:$PATH" LISTING="$mode" bash "$SCRIPT" "$CANON" main 2>&1); rc=$?
+  assert "$rc/$([ -d "$GD/dirty-guard.lock" ] && echo present || echo gone)/$(printf '%s' "$o" | grep -c "lock busy, skipping this cycle -- it cannot be established whether owner pid $DEAD_PID is alive")" "0/present/1" "listing $mode: the pid is not in it but the listing is no witness (it lacks this very run or pid 1): the lock stays"
+done
+rm -rf "$GD/dirty-guard.lock"; mkdir "$GD/dirty-guard.lock"; printf 'host=%s\npid=%s\n' "$HN" "$DEAD_PID" > "$GD/dirty-guard.lock/owner"
+o=$(bash "$SCRIPT" "$CANON" main 2>&1); rc=$?
+assert "$rc/$(printf '%s' "$o" | grep -c "owner pid $DEAD_PID is gone")" "0/1" "control: kill says no such process and the real listing holds this run and pid 1 and not the pid: gone, the lock is taken over"
+rm -rf "$GD/dirty-guard.lock"
+
+echo "scenario 72 (Ф81, Codex round 2, Б4): a journal that cannot be removed when its series ends is SAID, and the run goes on"
+refusing_canon s72; GD=$(git -C "$CANON" rev-parse --absolute-git-dir); rm -rf "$IWE_RUNTIME_DIR"/canon-reconcile-published.*
+mkdir "$GD/dirty-guard.lock"; printf 'host=%s\npid=%s\n' "$HN" "$$" > "$GD/dirty-guard.lock/owner"
+bash "$SCRIPT" "$CANON" main >/dev/null 2>&1; BUSYJ=$(ls "$IWE_RUNTIME_DIR"/canon-reconcile-published.*.lockbusy 2>/dev/null | head -1)
+assert "$([ -s "$BUSYJ" ] && echo journal)" "journal" "precondition: a skip made a lock journal"
+rm -rf "$GD/dirty-guard.lock"
+o=$(env PATH="$FAKEBIN:$PATH" FAIL_RM_SERIES=lockbusy bash "$SCRIPT" "$CANON" main 2>&1); rc=$?
+assert "$rc/$(printf '%s' "$o" | grep -c 'warning: the lock journal .*lockbusy is left in place although the lock was taken -- the removal failed')/$([ -e "$BUSYJ" ] && echo present || echo gone)" "1/1/present" "the removal fails: a warning names the journal and the reason, the journal stays, the run itself went on (it refuses as the canon does: exit 1)"
+chmod 666 "$BUSYJ"
+o=$(bash "$SCRIPT" "$CANON" main 2>&1)
+assert "$(printf '%s' "$o" | grep -c 'warning: the lock journal .*lockbusy is left in place although the lock was taken -- .* is not a plain file of this user without write for group or others')/$([ -e "$BUSYJ" ] && echo present || echo gone)" "1/present" "a journal that others can write to (mode 0666) is not trusted: it is left alone and the warning says why"
+chmod 600 "$BUSYJ"; bash "$SCRIPT" "$CANON" main >/dev/null 2>&1
+assert "$([ -e "$BUSYJ" ] && echo present || echo gone)" "gone" "control: with nothing failing the journal goes when the lock is taken"
+fresh s72b; echo one > "$CANON/b.txt"; commit_in "$CANON" "local"; republish_on_origin "$CANON" "$(git -C "$CANON" rev-parse HEAD)"
+rm -f "$IWE_RUNTIME_DIR"/canon-reconcile-published.*.streak
+echo dirty >> "$CANON/a.txt"; bash "$SCRIPT" "$CANON" main >/dev/null 2>&1; MAINJ=$(streak_file)
+assert "$([ -s "$MAINJ" ] && echo journal)" "journal" "precondition: a refusal made the refusal journal"
+git -C "$CANON" checkout -q -- a.txt
+o=$(env PATH="$FAKEBIN:$PATH" FAIL_RM_SERIES=streak bash "$SCRIPT" "$CANON" main 2>&1); rc=$?
+assert "$rc/$(printf '%s' "$o" | grep -c 'warning: the refusal journal .*streak is left in place on this healthy exit -- the removal failed')/$([ -e "$MAINJ" ] && echo present || echo gone)" "0/1/present" "the refusal journal cannot be removed on a healthy exit: the same kind of warning (the helper is shared), exit 0"
+
+echo "scenario 73 (Ф81, Codex round 3, Б4): the skips of one lock INSTANCE form their own series (the same owner pid, or no owner at all, does not make two lock directories one instance); a run that stalled between judging and writing records nothing about an instance that is gone"
+refusing_canon s73; GD=$(git -C "$CANON" rev-parse --absolute-git-dir); rm -rf "$IWE_RUNTIME_DIR"/canon-reconcile-published.*
+mkdir "$GD/dirty-guard.lock"; printf 'host=%s\npid=%s\n' "$HN" "$$" > "$GD/dirty-guard.lock/owner"   # instance 1: this shell owns it
+o=$(at $((T - 20000)) bash "$SCRIPT" "$CANON" main 2>&1); o=$(at $((T - 19000)) bash "$SCRIPT" "$CANON" main 2>&1)
+mv "$GD/dirty-guard.lock" "$GD/dirty-guard.lock.kept"; mkdir "$GD/dirty-guard.lock"; printf 'host=%s\npid=%s\n' "$HN" "$$" > "$GD/dirty-guard.lock/owner"   # instance 2: the same owner pid in ANOTHER directory (the first is kept, so that its inode cannot be reused)
+o=$(at $((T - 100)) bash "$SCRIPT" "$CANON" main 2>&1); o=$(at "$T" bash "$SCRIPT" "$CANON" main 2>&1)
+assert "$(alerts_in "$o")/$(printf '%s' "$o" | grep -c 'this reason 2 time(s)')" "0/1" "two skips under the first instance (5 hours earlier) and two under the second, the same pid: the second counts by itself (2), no ALERT"
+rm -rf "$GD/dirty-guard.lock" "$GD/dirty-guard.lock.kept" "$IWE_RUNTIME_DIR"/canon-reconcile-published.*.lockbusy
+mkdir "$GD/dirty-guard.lock"   # instance 1, no owner file at all
+o=$(at $((T - 20000)) bash "$SCRIPT" "$CANON" main 2>&1); o=$(at $((T - 19000)) bash "$SCRIPT" "$CANON" main 2>&1)
+mv "$GD/dirty-guard.lock" "$GD/dirty-guard.lock.kept"; mkdir "$GD/dirty-guard.lock"   # instance 2, no owner file either: the same label, another directory
+o=$(at $((T - 100)) bash "$SCRIPT" "$CANON" main 2>&1); o=$(at "$T" bash "$SCRIPT" "$CANON" main 2>&1)
+assert "$(alerts_in "$o")/$(printf '%s' "$o" | grep -c 'this reason 2 time(s)')" "0/1" "two empty locks in a row: the same label, other directories: the second series counts by itself (2), no ALERT"
+rm -rf "$GD/dirty-guard.lock" "$GD/dirty-guard.lock.kept" "$IWE_RUNTIME_DIR"/canon-reconcile-published.*.lockbusy
+sed 's@^  if \[ -n "\$LOCK_INO" \] && \[ "\$(lock_instance)" != "\$LOCK_INO" \]; then$@  mv "$LOCK_DIR" "$LOCK_DIR.moved"; mkdir "$LOCK_DIR"   # injected: the lock became another instance while this skip was being reported\n&@' "$SCRIPT" > "$SANDBOX/script-s73.sh"
+assert "$(grep -c 'injected: the lock became another instance' "$SANDBOX/script-s73.sh")" "1" "precondition: the stall is injected into the copy"
+mkdir "$GD/dirty-guard.lock"; printf 'host=%s\npid=%s\n' "$HN" "$$" > "$GD/dirty-guard.lock/owner"
+o=$(bash "$SANDBOX/script-s73.sh" "$CANON" main 2>&1)
+BJ=$(ls "$IWE_RUNTIME_DIR"/canon-reconcile-published.*.lockbusy 2>/dev/null | head -1)
+assert "$(printf '%s' "$o" | grep -c 'the lock changed while this skip was being reported.*: not recorded')/${BJ:-none}" "1/none" "the lock was replaced between the judgement and the write: nothing is written about the old instance"
+rm -rf "$GD"/dirty-guard.lock*
+
+echo "scenario 74 (Ф81, writer's review): a lock directory that cannot be created, or the lock of a dead owner that cannot be removed, is named as such, not as a held lock"
+if [ "$(id -u)" = 0 ]; then echo "  ok   (skipped: running as root, a directory mode does not stop root)"; else
+fresh s74; GD=$(git -C "$CANON" rev-parse --absolute-git-dir); rm -rf "$IWE_RUNTIME_DIR"/canon-reconcile-published.*
+chmod 555 "$GD"
+o=$(bash "$SCRIPT" "$CANON" main 2>&1); rc=$?
+assert "$rc/$(printf '%s' "$o" | grep -c 'lock busy, skipping this cycle -- the lock directory cannot be created')" "0/1" "no write access to the git directory: the skip says the lock directory cannot be created (not that somebody holds it)"
+chmod 755 "$GD"; mkdir "$GD/dirty-guard.lock"; printf 'host=%s\npid=%s\n' "$HN" "$DEAD_PID" > "$GD/dirty-guard.lock/owner"; chmod 555 "$GD"
+o=$(bash "$SCRIPT" "$CANON" main 2>&1); rc=$?
+assert "$rc/$([ -f "$GD/dirty-guard.lock/owner" ] && echo whole || echo damaged)/$(printf '%s' "$o" | grep -c "lock busy, skipping this cycle -- the lock could not be taken over (owner pid $DEAD_PID is gone)")" "0/whole/1" "the lock of a dead owner cannot be moved away (no write access to the git directory): the skip says so, and the lock is still whole (its owner record is not deleted piece by piece)"
+chmod 755 "$GD"; rm -rf "$GD/dirty-guard.lock"
+fi
+
+echo "scenario 75 (Ф81, cold review): after a failed publication only our own empty directory is removed: a lock that another run took and published meanwhile stays"
+refusing_canon s75; GD=$(git -C "$CANON" rev-parse --absolute-git-dir)
+sed 's@^if ! publish_owner; then$@&\n  rm -rf "$LOCK_DIR"; mkdir "$LOCK_DIR"; printf "host=%s\\npid=1\\ntoken=foreign\\n" "$HOST_NOW" > "$LOCK_META"   # injected: another run took the lock and published while this publication was failing@' "$SCRIPT" > "$SANDBOX/script-s75.sh"
+assert "$(grep -c 'injected: another run took the lock and published' "$SANDBOX/script-s75.sh")" "1" "precondition: the other run is injected into the copy"
+o=$(env PATH="$FAKEBIN:$PATH" FAIL_MV_OWNER=1 bash "$SANDBOX/script-s75.sh" "$CANON" main 2>&1); rc=$?
+assert "$rc/$(awk -F= '$1=="token"{print $2}' "$GD/dirty-guard.lock/owner" 2>/dev/null)/$(printf '%s' "$o" | grep -c 'cannot record the owner of the lock')" "1/foreign/1" "the run refuses, and the lock of the other run, published meanwhile, is still there with its owner record"
+rm -rf "$GD/dirty-guard.lock"
+
+echo "scenario 76 (Ф81, cold review): a lock released between our failed mkdir and the check is taken, not reported as a directory that cannot be created"
+fresh s76; GD=$(git -C "$CANON" rev-parse --absolute-git-dir)
+sed 's@^  mkdir "\$LOCK_DIR" 2>/dev/null && return 0$@&\n  rm -rf "$LOCK_DIR"   # injected: the holder released the lock between our failed mkdir and the check@' "$SCRIPT" > "$SANDBOX/script-s76.sh"
+assert "$(grep -c 'injected: the holder released the lock' "$SANDBOX/script-s76.sh")" "1" "precondition: the release is injected into the copy"
+mkdir "$GD/dirty-guard.lock"; printf 'host=%s\npid=%s\n' "$HN" "$$" > "$GD/dirty-guard.lock/owner"   # this shell is a live owner
+o=$(bash "$SANDBOX/script-s76.sh" "$CANON" main 2>&1); rc=$?
+assert "$rc/$(printf '%s' "$o" | grep -c 'lock busy')/$([ -d "$GD/dirty-guard.lock" ] && echo present || echo gone)" "0/0/gone" "the lock was free by the time of the check: the run takes it (no skip, no false diagnosis) and releases it at exit"
+
+echo "scenario 77 (Ф81, cold review): a stale lock that was moved aside but cannot be deleted is SAID, not left in silence"
+if [ "$(id -u)" = 0 ]; then echo "  ok   (skipped: running as root, a directory mode does not stop root)"; else
+fresh s77; GD=$(git -C "$CANON" rev-parse --absolute-git-dir)
+mkdir "$GD/dirty-guard.lock"; printf 'host=%s\npid=%s\n' "$HN" "$DEAD_PID" > "$GD/dirty-guard.lock/owner"; mkdir "$GD/dirty-guard.lock/sub"; echo x > "$GD/dirty-guard.lock/sub/f"; chmod 555 "$GD/dirty-guard.lock/sub"
+o=$(bash "$SCRIPT" "$CANON" main 2>&1); rc=$?
+LEFT=0; for d in "$GD"/dirty-guard.lock.stale.*; do [ -e "$d" ] && LEFT=$((LEFT + 1)); done
+assert "$rc/$(printf '%s' "$o" | grep -c 'warning: the stale lock moved to .* could not be removed')/$LEFT" "0/1/1" "the dead owner's lock is taken over, the leftover that cannot be deleted is named with its path, and the run itself went on"
+chmod -R u+w "$GD"/dirty-guard.lock.stale.* 2>/dev/null; rm -rf "$GD"/dirty-guard.lock.stale.*
+fi
+
+echo "scenario 78 (Ф81, Codex round 4, Б4): outside the supported scope (directory numbers that wander) a skip is NOT counted, but it is never silent: it is printed and logged, and the run goes on as a skipped cycle"
+fresh s78; GD=$(git -C "$CANON" rev-parse --absolute-git-dir); rm -rf "$IWE_RUNTIME_DIR"/canon-reconcile-published.*
+mkdir "$GD/dirty-guard.lock"; printf 'host=%s\npid=%s\n' "$HN" "$$" > "$GD/dirty-guard.lock/owner"; : > "$SANDBOX/ls-counter"
+o=$(at $((T - 100)) env LS_UNSTABLE_COUNTER="$SANDBOX/ls-counter" bash "$SCRIPT" "$CANON" main 2>&1); rc=$?
+BJ=$(ls "$IWE_RUNTIME_DIR"/canon-reconcile-published.*.lockbusy 2>/dev/null | head -1)
+assert "$rc/$(printf '%s' "$o" | grep -c 'not stable): not recorded\|keep directory numbers stable): not recorded')/$(grep -c ' skipped repo=.*not counted' "$IWE_RUNTIME_DIR/canon-reconcile-published.log")/${BJ:-none}" "0/1/1/none" "an erratic directory number: the skip says so on stderr and in the log, nothing is written to the series (outside the supported scope), the exit code stays 0"
+rm -rf "$GD/dirty-guard.lock"
+
+echo "scenario 79 (Ф81, cold review 2): a file or a dangling link in the place of the lock directory is named as that, not as an owner who died"
+fresh s79; GD=$(git -C "$CANON" rev-parse --absolute-git-dir)
+echo junk > "$GD/dirty-guard.lock"
+o=$(bash "$SCRIPT" "$CANON" main 2>&1); rc=$?
+assert "$rc/$(printf '%s' "$o" | grep -c 'lock busy, skipping this cycle -- .*dirty-guard.lock is not a directory')" "0/1" "a file stands in the place of the lock: said so"
+rm -f "$GD/dirty-guard.lock"; ln -s "$GD/nowhere" "$GD/dirty-guard.lock"
+o=$(bash "$SCRIPT" "$CANON" main 2>&1); rc=$?
+assert "$rc/$(printf '%s' "$o" | grep -c 'lock busy, skipping this cycle -- .*dirty-guard.lock is not a directory')" "0/1" "a dangling link stands in the place of the lock: said so"
+rm -f "$GD/dirty-guard.lock"
 
 [ "$fails" = 0 ] && echo "PASS: all scenarios" || { echo "FAIL: $fails assertion(s)"; exit 1; }
