@@ -301,9 +301,11 @@ SEGMENTER_PL='
       if (length $subcmd) {
         my $i = $index + 1;
         while ($i < @tokens) {
-          if ($tokens[$i] =~ /^-C$/ || $tokens[$i] =~ /^--(?:git-dir|work-tree)$/ || $tokens[$i] =~ /^-c$/) {
+          if ($tokens[$i] =~ /^(?:-C|--git-dir|--work-tree|-c|--namespace|--super-prefix|--config-env)$/) {
             $i += 2;
-          } elsif ($tokens[$i] =~ /^--(?:git-dir|work-tree)=/ || $tokens[$i] =~ /^-c/) {
+          } elsif ($tokens[$i] =~ /^--(?:git-dir|work-tree|namespace|super-prefix|config-env|exec-path)=/ || $tokens[$i] =~ /^-c/) {
+            $i++;
+          } elsif ($tokens[$i] =~ /^(?:--no-pager|--paginate|-p|-P|--no-optional-locks|--literal-pathspecs|--glob-pathspecs|--noglob-pathspecs|--icase-pathspecs|--no-replace-objects|--bare|--no-lazy-fetch|--no-advice)$/) {
             $i++;
           } else {
             last;
@@ -503,12 +505,70 @@ stash_pop_apply_is_safe() {
   ! echo "$status" | grep -qE '^D[[:space:]]'
 }
 
+# AR.306: a stash that saves the whole tree (no explicit own paths) or sweeps
+# untracked/ignored files (-u/-a/--all) takes other live sessions' unsaved work out
+# of a shared checkout (WP-170, 01.10: a manual `git stash -u` in MC-sessions swept
+# 279 files of nine parallel sessions). A linked worktree belongs to one session, so
+# the rule bites on the primary checkout only. Return 0 = unsafe save, 1 = not a save
+# or allowed. Same word-split parse as stash_pop_apply_is_safe above.
+stash_save_is_unsafe() {
+  local segment="$1" base="${CWD:-$PWD}" sub="" sweep=0 have_paths=0
+  local -a gopts=()
+  set -- $segment
+  [ "${1:-}" = "git" ] || return 1
+  shift
+  # Global git options before the subcommand. Those that change the repository context
+  # are kept and replayed in the rev-parse below; the others are only skipped.
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      -C|--git-dir|--work-tree|-c)
+        [ $# -ge 2 ] || return 1
+        gopts+=("$1" "$2"); shift 2 ;;
+      --namespace|--super-prefix|--config-env)
+        [ $# -ge 2 ] || return 1
+        shift 2 ;;
+      --git-dir=*|--work-tree=*|-c?*) gopts+=("$1"); shift ;;
+      --namespace=*|--super-prefix=*|--config-env=*|--exec-path=*) shift ;;
+      --no-pager|--paginate|-p|-P|--no-optional-locks|--literal-pathspecs|--glob-pathspecs|--noglob-pathspecs|--icase-pathspecs|--no-replace-objects|--bare|--no-lazy-fetch|--no-advice) shift ;;
+      *) break ;;
+    esac
+  done
+  [ "${1:-}" = "stash" ] || return 1
+  shift
+  case "${1:-}" in
+    push|save) sub="$1"; shift ;;
+    ""|-*) sub="push" ;;
+    *) return 1 ;;
+  esac
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --) shift; [ "$sub" = "push" ] && [ $# -gt 0 ] && have_paths=1; break ;;
+      -m|--message) shift; [ $# -gt 0 ] && shift ;;
+      -m*|--message=*) shift ;;
+      --pathspec-from-file=*) [ "$sub" = "push" ] && have_paths=1; shift ;;
+      --pathspec-from-file) [ "$sub" = "push" ] && have_paths=1; shift; [ $# -gt 0 ] && shift ;;
+      -u|--include-untracked|-a|--all) sweep=1; shift ;;
+      --*) shift ;;
+      -[!-]*[ua]*) sweep=1; shift ;;
+      -*) shift ;;
+      *) [ "$sub" = "push" ] && have_paths=1; shift ;;
+    esac
+  done
+  local dirs
+  dirs=$(git -C "$base" ${gopts[@]+"${gopts[@]}"} rev-parse --git-dir --git-common-dir 2>/dev/null) || return 1
+  [ "$(printf '%s\n' "$dirs" | sed -n 1p)" = "$(printf '%s\n' "$dirs" | sed -n 2p)" ] || return 1
+  [ "$sweep" -eq 1 ] || [ "$have_paths" -eq 0 ]
+}
+
 # Same one-line-per-invocation reasoning as the reset check above — each
 # chained `git stash ...` gets its own token-position parse.
 STASH_SEGMENT=$(git_segment stash)
 if [ -n "$STASH_SEGMENT" ]; then
   while IFS= read -r one_stash; do
     [ -n "$one_stash" ] || continue
+    if stash_save_is_unsafe "$one_stash"; then
+      block "git stash без списка своих путей или с -u/-a/--all запрещён в общем чекауте (AR.306): уносит несохранённую работу параллельных сессий. Сохрани только свои файлы: git stash push -- <свои пути> (без -u), либо работай и публикуй из изолированной копии (worktree)."
+    fi
     if ! stash_pop_apply_is_safe "$one_stash"; then
       block "git stash pop/apply запрещён: заначка содержит удаления файлов (или их не удалось проверить). Слепой возврат может стереть уже закоммиченные/задеплоенные артефакты (прецедент WP-547, 03.09). Сначала 'git stash show --name-status <ref>' и разбери каждое удаление вручную; разовая необходимость — CC_ALLOW_DESTRUCTIVE_INPUT=1 из реального шелла пилота."
     fi
