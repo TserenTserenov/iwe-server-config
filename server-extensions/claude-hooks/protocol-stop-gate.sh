@@ -30,6 +30,10 @@ if [ -z "$INPUT" ]; then
   exit 0
 fi
 
+# A Stop hook's feedback triggers another Stop event. Suppress advisory context
+# on that follow-up, while still evaluating real blocking gates below.
+STOP_FEEDBACK_ACTIVE=$(printf '%s' "$INPUT" | jq -r '.stop_hook_active // false' 2>/dev/null)
+
 TRANSCRIPT_PATH=$(echo "$INPUT" | jq -r '.transcript_path // empty')
 SESSION_ID=$(echo "$INPUT" | jq -r '.session_id // empty')
 # Fallback (WP-484 Ф148, same defect class as close-runner-gate.sh/
@@ -94,10 +98,19 @@ if [ -n "$SESSION_ID" ] && [ -f "$OBLIGATION_CLI" ]; then
       '{decision: "block", reason: $reason}'
     exit 0
   fi
-  if [ "$OBLIGATION_ACTION" = "warn" ]; then
+  if [ "$STOP_FEEDBACK_ACTIVE" = "true" ]; then
+    OBLIGATION_CTX=""
+  elif [ "$OBLIGATION_ACTION" = "warn" ]; then
     OBLIGATION_CTX="⚠️ CLOSE-OBLIGATION [warn] (Ф74б): ${OBLIGATION_REASON} — упомяни это предупреждение в ответе пилоту явно."
   elif [ -n "$OBLIGATION_NOTE" ]; then
-    OBLIGATION_CTX="CLOSE-OBLIGATION (Ф74б): $OBLIGATION_NOTE"
+    # These allow notes only describe a completed or exempt gate. Feeding them
+    # back to Claude would spend another turn at every peer-session Stop.
+    case "$OBLIGATION_ACTION:$OBLIGATION_NOTE" in
+      "allow:close_path=peer-session — раннер не требуется, Stop-гейт пропускает" \
+      | "allow:close_path=peer-session (obligation взведено внутри пир-сессии) — раннер не требуется, Stop-гейт пропускает" \
+      | "allow:close obligation verified and cleared") ;;
+      *) OBLIGATION_CTX="CLOSE-OBLIGATION (Ф74б): $OBLIGATION_NOTE" ;;
+    esac
   fi
 fi
 
@@ -113,7 +126,8 @@ if [ -z "$PROTOCOL_SKILL" ]; then
   # Протокольный скилл не запускался — gate не нужен, но если есть контекст
   # обязательства (note/warn), его всё равно нужно передать пилоту.
   if [ -n "$OBLIGATION_CTX" ]; then
-    jq -nc --arg ctx "$OBLIGATION_CTX" '{additionalContext: $ctx}'
+    jq -nc --arg ctx "$OBLIGATION_CTX" \
+      '{hookSpecificOutput: {hookEventName: "Stop", additionalContext: $ctx}}'
   else
     echo '{}'
   fi
@@ -163,7 +177,8 @@ if [ "$FIRED" = "1" ]; then
     jq -nc \
       --arg reason "$PROTOCOL_REASON" \
       --arg ctx "$OBLIGATION_CTX" \
-      '{decision: "block", reason: $reason, additionalContext: $ctx}'
+      '{decision: "block", reason: $reason,
+        hookSpecificOutput: {hookEventName: "Stop", additionalContext: $ctx}}'
   else
     cat <<EOF
 {"decision": "block", "reason": "$PROTOCOL_REASON"}
@@ -171,7 +186,8 @@ EOF
   fi
 else
   if [ -n "$OBLIGATION_CTX" ]; then
-    jq -nc --arg ctx "$OBLIGATION_CTX" '{additionalContext: $ctx}'
+    jq -nc --arg ctx "$OBLIGATION_CTX" \
+      '{hookSpecificOutput: {hookEventName: "Stop", additionalContext: $ctx}}'
   else
     echo '{}'
   fi

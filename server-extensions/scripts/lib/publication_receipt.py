@@ -223,6 +223,38 @@ def verify(repo: Path, semaphore: Path, name: str, source: str, remote: str) -> 
     return False
 
 
+def verified_anchors(repo: Path, semaphore: Path, name: str, remote: str) -> list[str]:
+    """Reconstruct exact receipts before returning published candidate OIDs.
+
+    Each anchor proves delivery of its own source claim. Callers must still
+    independently prove preservation of an older claim against that anchor.
+    """
+    raw = snapshot(semaphore)
+    anchors = set()
+    for line in raw.decode().splitlines():
+        if not line.startswith(PREFIX):
+            continue
+        try:
+            saved = json.loads(line[len(PREFIX):])
+            if not isinstance(saved, dict) or saved.get("repo") != name:
+                continue
+            source, anchor = saved["source_commit"], saved["anchor_commit"]
+            if any(not isinstance(value, str) or not re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", value)
+                   for value in (source, anchor)):
+                continue
+            if (ancestor(repo, anchor, remote)
+                    and saved == receipt(repo, raw, name, source, anchor)):
+                anchors.add(anchor)
+        except (KeyError, TypeError, ValueError, ProofError):
+            continue
+    if (oid(repo, 'refs/remotes/origin/main^{commit}') != remote
+            or snapshot(semaphore) != raw):
+        raise ProofError("session or remote changed while verifying anchors")
+    if len(anchors) > 32:
+        raise ProofError("verified anchors exceed supersession proof budget")
+    return sorted(anchors)
+
+
 def record(repo: Path, semaphore: Path, name: str, published: str) -> int:
     raw = snapshot(semaphore)
     remote = oid(repo, "refs/remotes/origin/main^{commit}")

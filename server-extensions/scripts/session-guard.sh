@@ -6306,13 +6306,16 @@ _manual_abandon_cleanup_has_publish_proof() {  # <worktree> <attested source hea
 }
 
 _commit_claim_supersession_has_publish_proof() {  # <repo> <source> <remote OID> <semaphore> <repo name>
-  # Prove preservation in an already claimed, OID-published successor.  Neither
-  # a declaration of supersession nor patch-id transitivity is sufficient.
+  # Prove preservation in an OID-published successor claimed directly or bound
+  # by a reconstructed publication receipt. Neither a declaration of
+  # supersession nor patch-id/receipt transitivity is sufficient.
   # Deadline 40s / kill 45s: measured 26.09 on DS-my-strategy (12 successor
   # claims, 700 KB current/hypotheses-log.md conflicts) the full candidate
-  # loop takes ~9.5s; the 32-claim cap makes ~30s the realistic ceiling.
-  timeout 45 python3 - "$@" <<'PY'
+  # loop takes ~9.5s. Up to 32 claims and 32 verified receipt anchors share
+  # the same 40s deadline / 45s process timeout; timeout never accepts proof.
+  timeout 45 python3 - "$@" "$(cd "$(dirname "${BASH_SOURCE[0]:-}")" && pwd)/lib/publication_receipt.py" <<'PY'
 import difflib
+import importlib.util
 import json
 import os
 from pathlib import Path
@@ -6322,7 +6325,7 @@ import sys
 import tempfile
 import time
 
-repo, source, remote, semaphore, repo_name = sys.argv[1:]
+repo, source, remote, semaphore, repo_name, receipt_module = sys.argv[1:]
 deadline = time.monotonic() + 40
 # Anti-DoS proof budget, identical in every heredoc that diffs blobs (drift is
 # checked by scripts/tests/session-guard-supersession-large-blob-smoke.sh).
@@ -6489,8 +6492,32 @@ try:
     if len(claims) > 32 or any(len(claim) != 2 for claim in claims):
         raise ValueError("invalid or excessive claims")
     candidates = sorted({oid for name, oid in claims if name == repo_name and oid != source})
+    receipt_candidates = set()
     if [repo_name, source] not in claims:
         raise ValueError("source is not a frozen claim")
+
+    def successor_candidates():
+        yield from candidates
+        # After rebase and cherry-pick the published OID may be a receipt
+        # anchor rather than a commit claim. Reconstruct its own session,
+        # repository and publication proof before the old-source proof below.
+        if b"publication_receipt_v2: " not in snapshot:
+            return
+        spec = importlib.util.spec_from_file_location("publication_receipt", receipt_module)
+        if spec is None or spec.loader is None:
+            raise ValueError("publication receipt verifier unavailable")
+        module = importlib.util.module_from_spec(spec)
+        sys.dont_write_bytecode = True
+        spec.loader.exec_module(module)
+        try:
+            anchors = module.verified_anchors(Path(repo), Path(semaphore), repo_name, remote)
+        except module.ProofError as error:
+            raise ValueError("publication anchors refused: " + str(error)) from error
+        for anchor in anchors:
+            if anchor != source and anchor not in candidates:
+                receipt_candidates.add(anchor)
+                yield anchor
+
     common = git(repo, "rev-parse", "--git-common-dir").stdout.strip().decode()
     objects = (Path(repo) / common / "objects").resolve()
     object_format = git(repo, "rev-parse", "--show-object-format").stdout.strip().decode("ascii")
@@ -6507,7 +6534,7 @@ try:
                           "-r", "-z", source).stdout.split(b"\0")) - {b""}
         if not changed or len(changed) > 64:
             raise ValueError("empty or excessive source scope")
-        for candidate in candidates:
+        for candidate in successor_candidates():
             if not re.fullmatch(r"[0-9a-fA-F]{40}|[0-9a-fA-F]{64}", candidate):
                 raise ValueError("invalid successor claim")
             if git(scratch, "merge-base", "--is-ancestor", candidate, remote, allowed=(0, 1)).returncode:
@@ -6522,6 +6549,9 @@ try:
             if proof(scratch, candidate, parent, changed):
                 if time.monotonic() >= deadline:
                     raise ValueError("proof deadline exceeded")
+                if (candidate in receipt_candidates and git(repo, "rev-parse", "--verify",
+                        "refs/remotes/origin/main^{commit}").stdout.strip().decode("ascii") != remote):
+                    raise ValueError("remote changed during receipt supersession proof")
                 if Path(semaphore).read_bytes() != snapshot:
                     raise ValueError("claim snapshot changed during proof")
                 print("Session CLOSE: claimed changes preserved in OID-published claim: "
