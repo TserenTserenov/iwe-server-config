@@ -2644,8 +2644,8 @@ _quarantine_dead_interactive() {  # <semaphore> <observed dead pid>
     _dead_interactive_refusal "$semaphore" "pid $pid is alive again"; return 1
   fi
   host=$(_semaphore_last_field "$semaphore" host)
-  if [ -n "$host" ] && [ "$host" != "$(hostname)" ]; then
-    _dead_interactive_refusal "$semaphore" "recorded host $host is not $(hostname)"; return 1
+  if [ -n "$host" ] && [ "$host" != "$(uname -n)" ]; then
+    _dead_interactive_refusal "$semaphore" "recorded host $host is not $(uname -n)"; return 1
   fi
   lease_deadline=$(lease_deadline_epoch "$semaphore") \
     || { _dead_interactive_refusal "$semaphore" "no parseable opened_at"; return 1; }
@@ -4296,7 +4296,7 @@ if [ "$CMD" = "open" ]; then
       echo "created_at: $(now_iso)"
       echo "session_id: $HK_SID"
       [ -n "${OWNER_PID:-${CLAUDE_PID:-}}" ] && echo "pid: ${OWNER_PID:-$CLAUDE_PID}"
-      echo "host: $(hostname)"
+      echo "host: $(uname -n)"
       if [ -n "${OWNER_PID:-${CLAUDE_PID:-}}" ]; then
         OWNER_PID_START=$(ps -p "${OWNER_PID:-$CLAUDE_PID}" -o lstart= 2>/dev/null | sed 's/^ *//; s/ *$//' || true)
         [ -n "$OWNER_PID_START" ] && echo "pid_start: $OWNER_PID_START"
@@ -4966,7 +4966,7 @@ $isolate_status_code $isolate_status_path"
     # WP-530 Ф53: host + process start time let a sweep distinguish "this
     # host's pid is gone" from "another host's pid" and, in the next phase, a
     # reused pid from the original owner. Informational for today's readers.
-    echo "host: $(hostname)"
+    echo "host: $(uname -n)"
     _write_canonical_owner_identity
     if [ -n "${OWNER_PID:-${CLAUDE_PID:-}}" ]; then
       OWNER_PID_START=$(ps -p "${OWNER_PID:-$CLAUDE_PID}" -o lstart= 2>/dev/null | sed 's/^ *//; s/ *$//' || true)
@@ -8357,6 +8357,123 @@ finally:
 PY
 }
 
+_closed_repeat_snapshot() {  # <closed receipt> <session-id> <agent> [wp] [slug]
+  # Only a durable terminal receipt can acknowledge a lost close response.
+  # Return an inode-bound snapshot for the caller's before/after comparison.
+  python3 - "$@" <<'PY' 2>/dev/null
+import hashlib
+import os
+import re
+import stat
+import sys
+
+path, session_id, agent, wp, slug = sys.argv[1:]
+if os.path.basename(path) != f"{agent}-{session_id}.open.closed":
+    raise SystemExit(1)
+fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+try:
+    info = os.fstat(fd)
+    if (not stat.S_ISREG(info.st_mode) or info.st_uid != os.geteuid()
+            or info.st_nlink != 1 or info.st_mode & 0o022
+            or not 0 < info.st_size <= 1024 * 1024):
+        raise SystemExit(1)
+    raw = os.read(fd, info.st_size + 1)
+    current = os.lstat(path)
+    if (len(raw) != info.st_size or b"\0" in raw or not raw.endswith(b"\n")
+            or stat.S_ISLNK(current.st_mode)
+            or (current.st_dev, current.st_ino) != (info.st_dev, info.st_ino)):
+        raise SystemExit(1)
+finally:
+    os.close(fd)
+lines = raw.decode("utf-8").splitlines()
+
+def field(key, optional=False):
+    values = [line[len(key) + 2:] for line in lines if line.startswith(key + ": ")]
+    if not values and optional:
+        return ""
+    if len(values) != 1 or not values[0]:
+        raise SystemExit(1)
+    return values[0]
+
+for key, expected in {"agent": agent, "session_id": session_id,
+                      "checklist_status": "closed", "checklist_publish_state": "clean"}.items():
+    if field(key) != expected:
+        raise SystemExit(1)
+if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,255}", field("wp")) or not field("slug"):
+    raise SystemExit(1)
+if (wp and field("wp") != wp) or (slug and field("slug") != slug):
+    raise SystemExit(1)
+if not re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", field("checklist_terminal_sha256")):
+    raise SystemExit(1)
+for key in ("harness_session_id", "close_path"):
+    value = field(key, optional=True)
+    if value and not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,255}", value):
+        raise SystemExit(1)
+if field("isolated_worktree", optional=True):
+    if field("checklist_delivery_digest") != field("close_publish_digest"):
+        raise SystemExit(1)
+    if field("checklist_terminal_sha256") != field("close_publish_terminal_sha256"):
+        raise SystemExit(1)
+else:
+    # An isolated receipt cannot shed its worktree identity and become legacy.
+    if any(line.startswith(("close_delivery_", "close_publish_", "close_cleanup_",
+                            "close_attempt_id:", "checklist_delivery_digest:")) for line in lines):
+        raise SystemExit(1)
+print(f"{info.st_dev}:{info.st_ino}:{hashlib.sha256(raw).hexdigest()}")
+PY
+}
+
+_acknowledge_closed_session() {  # <original open path> <session-id> <agent> [wp] [slug]
+  local open_path="$1" sid="$2" agent="$3" wp="${4:-}" slug="${5:-}"
+  local closed_path="$1.closed" before after state isolated
+  # Caller holds the SAME transition lock as a normal close. Never follow a
+  # dangling open symlink, infer an id from a slug, or repair an old receipt.
+  [ ! -e "$open_path" ] && [ ! -L "$open_path" ] || return 1
+  before=$(_closed_repeat_snapshot "$closed_path" "$sid" "$agent" "$wp" "$slug") || return 1
+  state=$(_close_delivery_state "$closed_path" "$sid") || return 1
+  isolated=$(_unique_record_field "$closed_path" isolated_worktree || true)
+  if [ -n "$isolated" ]; then
+    [ "$state" = cleaned ] || return 1
+  else
+    [ "$state" = none ] || return 1
+  fi
+  if [ "$ABANDON_PREPARED" -eq 1 ]; then
+    [ "$(_unique_record_field "$closed_path" close_publish_proof)" = manual-abandon-attestation/v1 ] || return 1
+    _abandon_prepared_matches_source "$closed_path" "${ABANDON_SOURCE_COMMITS[@]}" || return 1
+  fi
+  after=$(_closed_repeat_snapshot "$closed_path" "$sid" "$agent" "$wp" "$slug") || return 1
+  [ "$before" = "$after" ] && [ ! -e "$open_path" ] && [ ! -L "$open_path" ]
+}
+
+_closed_peer_has_no_live_owner() {  # <closed receipt>; caller holds admission lock
+  local owner
+  owner=$(_unique_record_field "$1" harness_session_id) || return 1
+  python3 - "$SESSION_DIR" "$owner" <<'PY' 2>/dev/null
+import os
+from pathlib import Path
+import stat
+import sys
+
+directory, owner = sys.argv[1:]
+for path in Path(directory).glob("*.open"):
+    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    try:
+        info = os.fstat(fd)
+        if (not stat.S_ISREG(info.st_mode) or info.st_uid != os.geteuid()
+                or not 0 < info.st_size <= 1024 * 1024):
+            raise SystemExit(1)
+        raw = os.read(fd, info.st_size + 1)
+        if len(raw) != info.st_size:
+            raise SystemExit(1)
+        for line in raw.decode("utf-8").splitlines():
+            if line.partition(": ")[0] in {"session_id", "harness_session_id"}:
+                if line.partition(": ")[2] == owner:
+                    raise SystemExit(1)
+    finally:
+        os.close(fd)
+PY
+}
+
 _rename_open_to_closed() {  # <prepared open> <closed destination>
   python3 - "$1" "$2" <<'PY'
 import fcntl
@@ -9166,6 +9283,10 @@ _undelivered_source_commits() {  # <semaphore> <worktree> <fresh remote> <commit
     fi
     parents=$(git -C "$worktree" rev-list --parents -n 1 "$commit") || return 1
     changed=$(git -C "$worktree" diff-tree --no-commit-id --name-only -r "$commit") || return 1
+    if [ "$(printf '%s\n' "$parents" | awk '{print NF}')" -eq 2 ] && [ -z "$changed" ]; then
+      echo "close: пустой source-коммит $commit не переносится публикатором; PREPARED не записан" >&2
+      return 1
+    fi
     if [ "$(printf '%s\n' "$parents" | awk '{print NF}')" -eq 2 ] && [ -n "$changed" ]; then
       cherry_line=$(git -C "$worktree" cherry "$remote_head" "$commit" "$commit^") || return 1
       [ "$cherry_line" != "- $commit" ] || continue
@@ -9244,7 +9365,16 @@ _isolated_copy_is_linked() {  # <worktree>: under the runtime store and a linked
   [ -n "$git_dir" ] && [ "$git_dir" != "$common_dir" ]
 }
 
-_rebuild_interrupted() {  # <worktree> <previous tip>: INT/TERM/HUP while the rebase in _rebuild_source_for_hot_files runs
+_restore_rebuild_claims() {  # <semaphore> <old shas> <rebuilt shas>, empty until rewriting starts
+  [ -n "$3" ] || return 0
+  _rewrite_commit_claims_atomic "$1" "$GOV_REPO" "$3" "$2" >/dev/null \
+    || fail "close: не удалось вернуть заявки note-commit; копия и семафор сохранены для разбора, PREPARED не записан" 7
+}
+
+_rebuild_interrupted() {  # <worktree> <previous tip> <semaphore> <old shas> <rebuilt shas>
+  # A signal after atomic claim replacement must roll back both witnesses.
+  trap '' INT TERM HUP
+  _restore_rebuild_claims "$3" "$4" "$5"
   _restore_copy_tip "$1" "$2" "пересборка прервана сигналом"
   fail "close: пересборка прервана сигналом; копия возвращена на прежнюю вершину $2, PREPARED не записан" 7
 }
@@ -9329,10 +9459,7 @@ PY
 _rebuild_source_for_hot_files() {  # <semaphore> <worktree> <hot_publish_cas.py>; fresh origin/main and a clean copy required
   local semaphore="$1" worktree="$2" cas_script="$3"
   local remote_head old_head old_base old_commits new_head new_commits cas_reason
-  local rebase_rc=0 rebase_out conflicts saved_traps rewritten
-  # A governance copy shipped without the check has nothing to pre-check here;
-  # isolate-push stays the enforcing point either way.
-  [ -f "$cas_script" ] || return 0
+  local rebase_rc=0 rebase_out conflicts saved_traps rewritten rollback_new_commits=""
   remote_head=$(git -C "$worktree" rev-parse --verify 'refs/remotes/origin/main^{commit}' 2>/dev/null) \
     || fail "close: fresh origin/main для проверки горячих файлов не читается; PREPARED не пишу" 7
   old_head=$(git -C "$worktree" rev-parse --verify 'HEAD^{commit}' 2>/dev/null) \
@@ -9344,6 +9471,8 @@ _rebuild_source_for_hot_files() {  # <semaphore> <worktree> <hot_publish_cas.py>
   # The commit lists below are newline-separated SHAs; word splitting is intended.
   old_commits=$(_undelivered_source_commits "$semaphore" "$worktree" "$remote_head" $old_commits) \
     || fail "close: недоставленные source commits не определены; PREPARED не пишу" 7
+  # Empty commits must be refused even when the optional hot-file check is absent.
+  [ -f "$cas_script" ] || return 0
   if cas_reason=$(python3 "$cas_script" "$worktree" "$remote_head" - $old_commits 2>&1); then
     return 0
   fi
@@ -9365,14 +9494,14 @@ _rebuild_source_for_hot_files() {  # <semaphore> <worktree> <hot_publish_cas.py>
   echo "Session CLOSE: $cas_reason; пересобираю коммиты сессии поверх свежего origin/main (git rebase --onto, без -X)" >&2
   # No autostash: the caller proved the copy clean, and a stash replayed onto
   # a rebuilt set that is then reset away would be lost with it. A signal
-  # during the rebase aborts it and puts the copy back on its previous tip;
-  # the previous handlers are restored afterwards.
+  # through claim replacement restores both the old tip and its claims.
   saved_traps=$(trap -p INT TERM HUP)
-  trap '_rebuild_interrupted "$worktree" "$old_head"' INT TERM HUP
+  trap '_rebuild_interrupted "$worktree" "$old_head" "$semaphore" "$old_commits" "$rollback_new_commits"' INT TERM HUP
   rebase_out=$(timeout 120 git -C "$worktree" -c rebase.autoStash=false rebase --onto "$remote_head" "$old_base" 2>&1) \
     || rebase_rc=$?
-  trap - INT TERM HUP
-  [ -z "$saved_traps" ] || eval "$saved_traps"
+  case "$rebase_rc" in
+    129|130|131|137|143) _rebuild_interrupted "$worktree" "$old_head" "$semaphore" "$old_commits" "$rollback_new_commits" ;;
+  esac
   if [ "$rebase_rc" -ne 0 ]; then
     conflicts=$(git -C "$worktree" diff --name-only --diff-filter=U 2>/dev/null | tr '\n' ' ')
     conflicts="${conflicts% }"
@@ -9393,10 +9522,14 @@ _rebuild_source_for_hot_files() {  # <semaphore> <worktree> <hot_publish_cas.py>
   # The note-commit claims must name the commits PREPARED is about to publish:
   # left on the replaced SHAs they have no publish proof once the rebuilt set
   # gets stuck, and --abandon-prepared (the documented way out) refuses them.
+  rollback_new_commits="$new_commits"
   rewritten=$(_rewrite_commit_claims_atomic "$semaphore" "$GOV_REPO" "$old_commits" "$new_commits") || {
+    _restore_rebuild_claims "$semaphore" "$old_commits" "$rollback_new_commits"
     _restore_copy_tip "$worktree" "$old_head" "заявки note-commit не перезаписаны"
     fail "close: заявки note-commit не перезаписаны на пересобранные коммиты; копия возвращена на прежнюю вершину, PREPARED не записан" 7
   }
+  trap - INT TERM HUP
+  [ -z "$saved_traps" ] || eval "$saved_traps"
   echo "Session CLOSE: набор коммитов сессии пересобран поверх origin/main $remote_head (заявок note-commit переписано: $rewritten)" >&2
   echo "  было:  $(printf '%s ' $old_commits)" >&2
   echo "  стало: $(printf '%s ' $new_commits)" >&2
@@ -9990,6 +10123,30 @@ if [ "$CMD" = "close" ]; then
   # применён к паре --wp+--slug внутри select_semaphore, комментарий WP-484
   # Ф49): совпало неоднозначно -- откажи, не угадывай.
   if [ -n "$SESSION_ID_ARG" ]; then
+    EXACT_OPEN="$SESSION_DIR/${AGENT}-${SESSION_ID_ARG}.open"
+    acquire_session_transition_lock "$EXACT_OPEN"
+    if [ ! -e "$EXACT_OPEN" ] && [ ! -L "$EXACT_OPEN" ]; then
+      # Re-enter in admission -> session order: recovery may clear an old peer
+      # obligation only while a new open of that native owner is excluded.
+      release_session_transition_lock || fail "close: session unlock failed" 1
+      acquire_scheduled_admission_lock
+      acquire_session_transition_lock "$EXACT_OPEN"
+      _acknowledge_closed_session "$EXACT_OPEN" "$SESSION_ID_ARG" "$AGENT" "${WP:-}" "${SLUG:-}" \
+        || fail "close: exact closed receipt отсутствует, повреждён или не совпал с запросом; повтор не подтверждён" 3
+      _cleanup_closed_session_projections "$EXACT_OPEN" "$AGENT" "$SESSION_ID_ARG" \
+        || fail "close: receipt подтверждён, но локальные projections не восстановлены" 7
+      if [ "$(_unique_record_field "$EXACT_OPEN.closed" close_path || true)" = peer-session ] \
+          && _closed_peer_has_no_live_owner "$EXACT_OPEN.closed"; then
+        # Do not lend authority descriptors to the ledger's detached publisher.
+        clear_peer_session_obligation "$EXACT_OPEN.closed" \
+          "$(_unique_record_field "$EXACT_OPEN.closed" slug)" 195>&- 196>&-
+      fi
+      release_session_transition_lock \
+        || fail "close: повтор подтверждён, но session lock не освободился" 1
+      release_scheduled_admission_lock || fail "close: admission unlock failed" 1
+      echo "CLOSE уже завершён: ${AGENT}-${SESSION_ID_ARG}; проверена точная terminal receipt ✅"
+      exit 0
+    fi
     SEM_FILE=$(resolve_semaphore_by_session_id "$AGENT" "$SESSION_ID_ARG" "${WP:-}" "${SLUG:-}") \
       || fail "close: --session-id $SESSION_ID_ARG не резолвится (см. диагностику выше)" 3
   else
@@ -9998,8 +10155,8 @@ if [ "$CMD" = "close" ]; then
     if [ "$SG_RC" -ne 0 ] || [ -z "$SEM_FILE" ] || [ ! -f "$SEM_FILE" ]; then
       fail "close без open: семафор не найден для $AGENT. Сначала session-guard.sh open --wp WP-N" 3
     fi
+    acquire_session_transition_lock "$SEM_FILE"
   fi
-  acquire_session_transition_lock "$SEM_FILE"
   LOCKED_SESSION_ID=$(_locked_open_identity "$SEM_FILE" "$AGENT" "${SESSION_ID_ARG:-}" 1 || true)
   [ -n "$LOCKED_SESSION_ID" ] \
     || fail "close: semaphore изменился после resolve или identity неоднозначна; mutation запрещена" 7

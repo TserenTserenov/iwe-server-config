@@ -168,6 +168,11 @@ EOF2
   work_sha=$(git -C "$WT" rev-parse HEAD)
   OLD_HEAD="$work_sha"
   echo "commit: DS-strategy $work_sha" >> "$SEM"
+  if [ "${EMPTY_COMMIT:-0}" -eq 1 ]; then
+    session_commit "$WT" --allow-empty -qm "session: empty marker"
+    OLD_HEAD=$(git -C "$WT" rev-parse HEAD)
+    echo "commit: DS-strategy $OLD_HEAD" >> "$SEM"
+  fi
   if [ "${FIRST_COMMIT_PUBLISHED:-0}" -eq 1 ]; then
     # A second commit; the first one is published mid-session, as ds-publish does.
     edit_line "$WT/docs/WP-REGISTRY.md" line6 line6-session
@@ -266,6 +271,64 @@ run_interrupt() {  # <guard script>
     sleep 0.2
     waited=$((waited + 1))
   done
+}
+
+# Each close owns a separate process group; a terminal Ctrl-C reaches the
+# guard and every child in that group, without signalling the test runner.
+run_group_interrupt() {  # <guard> <readiness path>
+  SEM_SHA_BEFORE=$(shasum "$SEM")
+  CLOSE_ERR="$E2E/close.err"
+  CLOSE_RC=$(python3 - "$1" "$2" "$E2E" "$SESS_SLUG" "$SHIM_DIR" <<'PY'
+import os, pathlib, signal, subprocess, sys, time
+guard, ready, cwd, slug, shim = sys.argv[1:]
+env = {**os.environ, "PATH": shim + os.pathsep + os.environ["PATH"]}
+with open(cwd + "/close.out", "w") as out, open(cwd + "/close.err", "w") as err:
+    process = subprocess.Popen(["bash", guard, "close", "--wp", "WP-484", "--slug", slug,
+                                "--agent", "fixture"], cwd=cwd, env=env, stdout=out,
+                               stderr=err, start_new_session=True)
+    deadline = time.monotonic() + 60
+    while not pathlib.Path(ready).exists() and process.poll() is None and time.monotonic() < deadline:
+        time.sleep(0.05)
+    if not pathlib.Path(ready).exists():
+        process.terminate()
+        process.wait(timeout=20)
+        raise SystemExit("close did not reach the requested interrupt point")
+    os.killpg(process.pid, signal.SIGINT)
+    print(process.wait(timeout=20))
+PY
+  )
+}
+
+run_claim_interrupt() {  # <guard> <before|after>: deterministic pause around atomic claim replacement
+  local phase_guard="$E2E/phase/session-guard.sh"
+  mkdir -p "$E2E/phase"
+  ln -s "$ROOT_DIR/lib" "$E2E/phase/lib"
+  export IWE_TEST_SIGNAL_READY="$E2E/claims-ready"
+  python3 - "$1" "$phase_guard" "$2" <<'PY'
+from pathlib import Path
+import sys
+source, target, phase = sys.argv[1:]
+text = Path(source).read_text()
+if phase == "before":
+    anchor = '  rewritten=$(_rewrite_commit_claims_atomic '
+    assert text.count(anchor) == 1
+    text = text.replace(anchor, '  touch "$IWE_TEST_SIGNAL_READY"\n  sleep 3\n' + anchor)
+else:
+    start = text.index("_rewrite_commit_claims_atomic() {")
+    end = text.index("\n_rebuild_source_for_hot_files()", start)
+    body = text[start:end]
+    anchor = "    os.replace(temporary, path)\n"
+    assert body.count(anchor) == 1
+    pause = ('    import time\n'
+             '    ready = os.environ["IWE_TEST_SIGNAL_READY"]\n'
+             '    if not os.path.exists(ready):\n'
+             '        open(ready, "w").close()\n'
+             '        time.sleep(3)\n')
+    text = text[:start] + body.replace(anchor, anchor + pause) + text[end:]
+Path(target).write_text(text)
+PY
+  run_group_interrupt "$phase_guard" "$IWE_TEST_SIGNAL_READY"
+  unset IWE_TEST_SIGNAL_READY
 }
 
 # Stops at PREPARED right after the rebuild, lets origin move the hot file
@@ -424,7 +487,21 @@ assert_interrupt() {
   expect_that "the copy is back on its previous tip, no rebase left in progress" copy_is_back_on_old_tip
   expect_that "the semaphore is byte-for-byte unchanged" semaphore_unchanged
   expect_that "PREPARED was not written to the semaphore" semaphore_has_no_delivery_record
+  expect_that "an interruption is not reported as a conflict" test ! "$(close_said 'конфликт в' && echo yes)"
 }
+assert_groupinterrupt() { assert_interrupt; }
+assert_claimsbefore() { assert_interrupt; }
+assert_claimsafter() { assert_interrupt; }
+
+assert_empty() {
+  expect_that "empty commit refuses with exit 7 (got $CLOSE_RC)" test "$CLOSE_RC" -eq 7
+  expect_that "the empty commit is identified explicitly" close_said 'пустой source-коммит'
+  expect_that "no rebase was attempted" test ! "$(rebase_was_attempted "$WT" && echo yes)"
+  expect_that "the copy stays on its previous tip" copy_is_back_on_old_tip
+  expect_that "the semaphore is byte-for-byte unchanged" semaphore_unchanged
+  expect_that "PREPARED was not written" semaphore_has_no_delivery_record
+}
+assert_emptycheckmissing() { assert_empty; }
 
 assert_merge() {
   expect_that "close refuses with exit 7 (got $CLOSE_RC)" test "$CLOSE_RC" -eq 7
@@ -488,9 +565,16 @@ FAILURES=0
 SANDBOX_N=0
 check_case() {  # <label> <expect: pass|fail> <kind> <guard>
   local label="$1" expectation="$2" kind="$3" guard="$4"
+  case ",${IWE_HOT_REBUILD_CASES:-all}," in
+    *,all,*|*,"$kind",*) ;;
+    *) return 0 ;;
+  esac
   SANDBOX_N=$((SANDBOX_N + 1))
   case "$kind" in
-    other|interrupt|abandon) build_sandbox "$kind-$SANDBOX_N" line8=line8-foreign ;;
+    other|interrupt|groupinterrupt|claimsbefore|claimsafter|abandon) build_sandbox "$kind-$SANDBOX_N" line8=line8-foreign ;;
+    empty|emptycheckmissing)
+      EMPTY_COMMIT=1 build_sandbox "$kind-$SANDBOX_N" line8=line8-foreign
+      [ "$kind" != emptycheckmissing ] || rm "$GOV/scripts/hot_publish_cas.py" ;;
     same) build_sandbox "$kind-$SANDBOX_N" line2=line2-foreign ;;
     duplicate) build_sandbox "$kind-$SANDBOX_N" line2=line2-session line8=line8-foreign ;;
     delivered) FIRST_COMMIT_PUBLISHED=1 build_sandbox "$kind-$SANDBOX_N" line8=line8-foreign ;;
@@ -504,6 +588,9 @@ check_case() {  # <label> <expect: pass|fail> <kind> <guard>
   case "$kind" in
     inprogress) run_inprogress "$guard" ;;
     interrupt) run_interrupt "$guard" ;;
+    groupinterrupt) run_group_interrupt "$guard" "$(git -C "$WT" rev-parse --path-format=absolute --git-path rebase-merge)" ;;
+    claimsbefore) run_claim_interrupt "$guard" before ;;
+    claimsafter) run_claim_interrupt "$guard" after ;;
     abandon) run_abandon "$guard" ;;
     *) run_close "$guard" ;;
   esac
@@ -529,6 +616,11 @@ check_case "dirty copy + autostash + duplicate edit: refused before rebase, edit
 check_case "dirty copy + autostash + other-line edit: refused, copy stays on its tip" pass dirtyother "$REAL_GUARD"
 check_case "copy left mid-rebase: refused with the abort hint, closes after a manual abort" pass inprogress "$REAL_GUARD"
 check_case "TERM during the rebase: copy back on its tip, exit 7" pass interrupt "$REAL_GUARD"
+check_case "Ctrl-C to the process group is reported as an interruption" pass groupinterrupt "$REAL_GUARD"
+check_case "Ctrl-C before claim rewrite restores the old tip and claims" pass claimsbefore "$REAL_GUARD"
+check_case "Ctrl-C after atomic claim replacement restores the old tip and claims" pass claimsafter "$REAL_GUARD"
+check_case "empty source commit is rejected before PREPARED and rebase" pass empty "$REAL_GUARD"
+check_case "empty source commit is rejected even without the hot-file check" pass emptycheckmissing "$REAL_GUARD"
 check_case "merge commit in the set: refused as such, no rebase attempted" pass merge "$REAL_GUARD"
 check_case "hot-file check itself fails: refused with its reason, no rebase attempted" pass casbroken "$REAL_GUARD"
 check_case "semaphore names the canonical checkout: refused, canon untouched" pass canon "$REAL_GUARD"
@@ -542,7 +634,7 @@ FILTER='old_commits=$(_undelivered_source_commits "$semaphore" "$worktree" "$rem
 PRECLEAN='|| fail "close: isolated worktree не полностью clean (включая ignored/untracked); PREPARED не пишу" 7'
 INPROGRESS='if _rebase_in_progress "$CLOSING_WORKTREE" \
         || ! git -C "$CLOSING_WORKTREE" symbolic-ref -q HEAD >/dev/null 2>&1; then'
-TRAP="trap '_rebuild_interrupted \"\$worktree\" \"\$old_head\"' INT TERM HUP"
+TRAP="trap '_rebuild_interrupted \"\$worktree\" \"\$old_head\" \"\$semaphore\" \"\$old_commits\" \"\$rollback_new_commits\"' INT TERM HUP"
 MERGETEXT='*"single-parent source commits"*)'
 CASTEXT='fail "close: проверка горячих файлов не отработала: ${cas_reason}; rebase не запускался, PREPARED не записан, копия не тронута" 7 ;;'
 LINKED='_isolated_copy_is_linked "$worktree" \'

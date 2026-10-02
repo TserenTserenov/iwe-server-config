@@ -36,6 +36,19 @@ SELECTION = SOURCE[SELECTION_START:SELECTION_END]
 
 
 class DeclaredTerminalProofTests(unittest.TestCase):
+    def test_closed_snapshot_preserves_supported_wp_labels_and_exact_selectors(self):
+        receipt = self.root / "fixture-exact.open.closed"
+        for wp in ("WP-484", "unknown", "day-close"):
+            receipt.write_text(
+                f"agent: fixture\nsession_id: exact\nwp: {wp}\nslug: test-close\n"
+                "checklist_status: closed\nchecklist_publish_state: clean\n"
+                "checklist_terminal_sha256: " + "a" * 64 + "\n")
+            receipt.chmod(0o600)
+            result = self.invoke("_closed_repeat_snapshot", str(receipt), "exact", "fixture", wp, "test-close")
+            self.assertEqual(result.returncode, 0, result.stderr)
+            refused = self.invoke("_closed_repeat_snapshot", str(receipt), "exact", "fixture", "WP-530", "test-close")
+            self.assertNotEqual(refused.returncode, 0)
+
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory(prefix="wp484-proof-", dir="/private/tmp")
         self.addCleanup(self.temp.cleanup)

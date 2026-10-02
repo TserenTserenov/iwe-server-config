@@ -34,10 +34,25 @@ trap 'rm -rf "$SANDBOX"' EXIT
 
 IWE_ROOT="$SANDBOX/iwe"
 GOV_REPO="$GOV_REPO_REAL"
+export IWE_ROOT IWE_GOVERNANCE_REPO="$GOV_REPO"
 mkdir -p "$IWE_ROOT/$GOV_REPO/scripts"
 cp "$OBLIGATION_CLI_REAL" "$IWE_ROOT/$GOV_REPO/scripts/"
+cat > "$IWE_ROOT/$GOV_REPO/scripts/ledger-append.sh" <<'SH'
+#!/usr/bin/env bash
+python3 - "$@" <<'PY'
+import json, os, pathlib, sys
+import yaml
+_, day, kind, payload, actor = sys.argv[1:]
+path = pathlib.Path(os.environ["IWE_LEDGER_DIR"]) / ("day-" + day + ".yaml")
+path.parent.mkdir(parents=True, exist_ok=True)
+data = yaml.safe_load(path.read_text()) if path.exists() else {"events": []}
+data["events"].append({"kind": kind, "data": json.loads(payload), "actor": actor})
+path.write_text(yaml.safe_dump(data))
+PY
+SH
 # Obligation state lives in its own runtime dir, never the real one.
 export IWE_RUNTIME_DIR="$SANDBOX/runtime"
+export IWE_LEDGER_DIR="$SANDBOX/ledger" IWE_PROCESS_CARDS_DIR="$SANDBOX/cards"
 mkdir -p "$IWE_RUNTIME_DIR"
 
 OBLIGATION_CLI="$IWE_ROOT/$GOV_REPO/scripts/close_obligation.py"
@@ -74,6 +89,7 @@ make_semaphore() {  # <path> [harness_session_id]
   {
     echo "wp: WP-484"
     echo "close_path: peer-session"
+    echo "opened_at: 2026-10-02T00:00:00Z"
     if [ -n "${2:-}" ]; then
       echo "harness_session_id: $2"
     fi
@@ -102,10 +118,12 @@ PY
 
 echo "1. взведённое обязательство пир-сессии снимается"
 SID_ARMED="11111111-1111-1111-1111-111111111111"
+mkdir -p "$IWE_RUNTIME_DIR/sessions"
+make_semaphore "$IWE_RUNTIME_DIR/sessions/armed.open" "$SID_ARMED"
 python3 "$OBLIGATION_CLI" arm --session-id "$SID_ARMED" --mode block >/dev/null
 check "до закрытия обязательство взведено" "$(obligation_state "$SID_ARMED")" "armed"
-make_semaphore "$SANDBOX/armed.open.closed" "$SID_ARMED"
-clear_peer_session_obligation "$SANDBOX/armed.open.closed" "wp484-peer" 2>/dev/null
+mv "$IWE_RUNTIME_DIR/sessions/armed.open" "$IWE_RUNTIME_DIR/sessions/armed.open.closed"
+clear_peer_session_obligation "$IWE_RUNTIME_DIR/sessions/armed.open.closed" "wp484-peer" 2>/dev/null
 check "после закрытия обязательства нет" "$(obligation_state "$SID_ARMED")" "none"
 
 echo "2. выполняющееся обязательство чужого РП не трогаем"
@@ -160,15 +178,19 @@ from pathlib import Path
 
 text = Path(sys.argv[1]).read_text(encoding="utf-8")
 calls = [m for m in re.finditer(r"^\s*clear_peer_session_obligation ", text, re.M)]
-if len(calls) != 1:
-    print(f"вызовов не один, а {len(calls)}")
+if len(calls) != 2:
+    print(f"ожидались обычное закрытие и повтор, вызовов: {len(calls)}")
     raise SystemExit(0)
-before = text[:calls[0].start()].rsplit("\n", 3)[-3:]
-guard = "\n".join(before)
-print("ok" if "close_path: peer-session" in guard else f"вызов не под нужным условием: {guard!r}")
+for call in calls:
+    guard = "\n".join(text[:call.start()].rsplit("\n", 5)[-5:])
+    if "close_path" not in guard or "peer-session" not in guard:
+        print(f"вызов не под нужным условием: {guard!r}")
+        break
+else:
+    print("ok")
 PY
 )
-check "вызов один и стоит под проверкой close_path" "$WIRING" "ok"
+check "обычное закрытие и повтор стоят под проверкой close_path" "$WIRING" "ok"
 
 echo
 echo "session-guard-peer-obligation-clear-smoke: прошло $PASS, провалено $FAIL"

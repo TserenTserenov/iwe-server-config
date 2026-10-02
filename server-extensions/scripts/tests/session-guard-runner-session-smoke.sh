@@ -112,7 +112,15 @@ if [ ! -f "$WRAPPER" ]; then
   echo "SKIP: wrapper integration needs IWE_TEST_GIT_WRAPPER pointing at the DS candidate"
   exit 0
 fi
-IWE_REAL_GIT="$(command -v git)"
+# The PATH entry named git can be the wrapper under test. Pass an actual Git
+# binary to its override, including when a fixture puts a shell shim first.
+IWE_REAL_GIT=""
+while IFS= read -r candidate; do
+  case "$(file -b -L "$candidate" 2>/dev/null)" in
+    *"ELF "*|*"Mach-O "*) IWE_REAL_GIT="$candidate"; break ;;
+  esac
+done < <(type -ap git)
+[ -n "$IWE_REAL_GIT" ] || fail "native git binary not found on PATH"
 export IWE_REAL_GIT IWE_GIT_WRAPPER_LOG="$TEST_ROOT/wrapper.jsonl"
 wrap() { bash "$WRAPPER" "$@" >"$TEST_ROOT/wrapper.out" 2>&1; }
 denied() {
