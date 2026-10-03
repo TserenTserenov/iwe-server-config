@@ -22,6 +22,9 @@ import time
 PREFIX = "publication_receipt_v2: "
 MAX_BYTES = 1024 * 1024
 MAX_CANDIDATES = 256
+MAIN_REF = "refs/heads/main"
+# Delivery evidence only: this policy never authorizes a push or deployment.
+PEER_PRODUCT_REFS = frozenset({"refs/heads/pilot", "refs/heads/new-architecture"})
 
 
 class ProofError(Exception):
@@ -159,7 +162,87 @@ def replay_matches(repo: Path, source: str, anchor: str) -> bool:
                 oid(repo, anchor + "^{tree}"))
 
 
-def receipt(repo: Path, raw: bytes, repo_name: str, source: str, anchor: str) -> dict:
+def tracking_ref(target_ref: str) -> str:
+    if target_ref != MAIN_REF and target_ref not in PEER_PRODUCT_REFS:
+        raise ProofError("publication target is outside delivery policy")
+    return "refs/remotes/origin/" + target_ref.removeprefix("refs/heads/")
+
+
+def repository_identity(repo: Path) -> tuple[Path, str]:
+    value = git(repo, "rev-parse", "--path-format=absolute", "--git-common-dir")
+    common = Path(value.decode().strip()).resolve(strict=True)
+    origin = git(repo, "remote", "get-url", "origin").decode().strip()
+    origin = re.sub(r"^[a-zA-Z][a-zA-Z0-9+.-]*://", "", origin)
+    origin = re.sub(r"^[^@/]*@", "", origin).replace(":", "/")
+    return common, re.sub(r"\.git$", "", origin)
+
+
+def product_target(repo: Path, raw: bytes, name: str, root: Path, target_ref: str) -> None:
+    """Only explicit peer product delivery destinations may differ from main."""
+    if target_ref not in PEER_PRODUCT_REFS or field(raw, "close_path") != "peer-session":
+        raise ProofError("non-main publication requires a peer product delivery target")
+    root = root.resolve(strict=True)
+    common, origin = repository_identity(repo)
+    if (common.name != ".git" or common.parent.name != name
+            or common.parent.parent not in {root / "DS-MCP", root / "DS-IT-systems"}):
+        raise ProofError("not a canonical product repository")
+    protected = []
+    # The server's workspace root may be a Nix mirror, not a Git checkout.
+    if (root / ".git").exists():
+        protected.append(root)
+    for key in ("governance_worktree", "orz_sessions_dir"):
+        value = Path(field(raw, key))
+        if not value.is_absolute():
+            raise ProofError("protected repository path must be absolute")
+        protected.append(value.resolve(strict=True))
+    for path in protected:
+        other_common, other_origin = repository_identity(path)
+        if common == other_common or origin == other_origin:
+            raise ProofError("protected repository requires main")
+    if not claims(raw, name, repo):
+        raise ProofError("no session-owned product claims")
+    if b"close_delivery_version: " in raw:
+        frozen = json.loads(field(raw, "close_delivery_claimed_commits"))
+        actual = sorted(set(line[8:] for line in raw.decode().splitlines() if line.startswith("commit: ")))
+        if (not isinstance(frozen, list) or frozen != actual
+                or field(raw, "close_delivery_session_id") != field(raw, "session_id")
+                or field(raw, "close_delivery_version") != "isolate-push/v2"):
+            raise ProofError("product claims differ from frozen session inventory")
+
+
+def fetch_target(repo: Path, target_ref: str) -> str:
+    tracking = tracking_ref(target_ref)
+    # A deleted branch must fail even if its old tracking ref still exists.
+    git(repo, "fetch", "--quiet", "--no-tags", "--no-recurse-submodules",
+        "origin", "+" + target_ref + ":" + tracking)
+    return oid(repo, tracking + "^{commit}")
+
+
+def verify_product(repo: Path, semaphore: Path, name: str, source: str, root: Path) -> bool:
+    raw = snapshot(semaphore)
+    targets = set()
+    for line in raw.decode().splitlines():
+        if not line.startswith(PREFIX):
+            continue
+        try:
+            saved = json.loads(line[len(PREFIX):])
+            if (isinstance(saved, dict) and saved.get("repo") == name
+                    and saved.get("source_commit") == source
+                    and saved.get("target_ref") in PEER_PRODUCT_REFS):
+                targets.add(saved["target_ref"])
+        except (TypeError, ValueError):
+            continue
+    for target in sorted(targets):
+        product_target(repo, raw, name, root, target)
+        remote = fetch_target(repo, target)
+        if (snapshot(semaphore) == raw and
+                verify(repo, semaphore, name, source, remote, target)):
+            return True
+    return False
+
+
+def receipt(repo: Path, raw: bytes, repo_name: str, source: str, anchor: str,
+            target_ref: str = MAIN_REF) -> dict:
     if source not in claims(raw, repo_name, repo):
         raise ProofError("source is not claimed by this session")
     if oid(repo, source + "^{commit}") != source or oid(repo, anchor + "^{commit}") != anchor:
@@ -176,7 +259,7 @@ def receipt(repo: Path, raw: bytes, repo_name: str, source: str, anchor: str) ->
     identity = {"agent": field(raw, "agent"), "session_id": field(raw, "session_id"),
                 "repo": repo_name, "origin_sha256": hashlib.sha256(
                     git(repo, "remote", "get-url", "origin").strip()).hexdigest(),
-                "target_ref": "refs/heads/main", "source_commit": source}
+                "target_ref": target_ref, "source_commit": source}
     return {"version": 2, **identity,
             "claim_id": hashlib.sha256(json.dumps(identity, sort_keys=True).encode()).hexdigest(),
             "source_tree": oid(repo, source + "^{tree}"),
@@ -185,21 +268,23 @@ def receipt(repo: Path, raw: bytes, repo_name: str, source: str, anchor: str) ->
             "published_paths": entries(repo, anchor, paths), "proof": proof}
 
 
-def find_receipt(repo: Path, raw: bytes, name: str, source: str, published: str) -> dict:
+def find_receipt(repo: Path, raw: bytes, name: str, source: str, published: str,
+                 target_ref: str = MAIN_REF) -> dict:
     deadline = time.monotonic() + 20
     if ancestor(repo, source, published):
-        return receipt(repo, raw, name, source, source)
+        return receipt(repo, raw, name, source, source, target_ref)
     candidates = git(repo, "rev-list", "--max-count=" + str(MAX_CANDIDATES),
                      published, "--", *changed_paths(repo, source)).decode().splitlines()
     for candidate in candidates:
         if time.monotonic() > deadline:
             raise ProofError("publication search exceeded time budget")
         if replay_matches(repo, source, candidate):
-            return receipt(repo, raw, name, source, candidate)
+            return receipt(repo, raw, name, source, candidate, target_ref)
     raise ProofError("no exact publication anchor within search budget")
 
 
-def verify(repo: Path, semaphore: Path, name: str, source: str, remote: str) -> bool:
+def verify(repo: Path, semaphore: Path, name: str, source: str, remote: str,
+           target_ref: str = MAIN_REF) -> bool:
     raw = snapshot(semaphore)
     for line in raw.decode().splitlines():
         if not line.startswith(PREFIX):
@@ -214,8 +299,8 @@ def verify(repo: Path, semaphore: Path, name: str, source: str, remote: str) -> 
             if not re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", anchor):
                 continue
             if (ancestor(repo, anchor, remote) and
-                    saved == receipt(repo, raw, name, source, anchor) and
-                    oid(repo, 'refs/remotes/origin/main^{commit}') == remote and
+                    saved == receipt(repo, raw, name, source, anchor, target_ref) and
+                    oid(repo, tracking_ref(target_ref) + "^{commit}") == remote and
                     snapshot(semaphore) == raw):
                 return True
         except (KeyError, TypeError, ValueError, ProofError):
@@ -255,22 +340,23 @@ def verified_anchors(repo: Path, semaphore: Path, name: str, remote: str) -> lis
     return sorted(anchors)
 
 
-def record(repo: Path, semaphore: Path, name: str, published: str) -> int:
+def record(repo: Path, semaphore: Path, name: str, published: str,
+           target_ref: str = MAIN_REF) -> int:
     raw = snapshot(semaphore)
-    remote = oid(repo, "refs/remotes/origin/main^{commit}")
+    remote = oid(repo, tracking_ref(target_ref) + "^{commit}")
     if not ancestor(repo, published, remote):
-        raise ProofError("publication is not on fetched origin/main")
+        raise ProofError("publication is not on fetched " + target_ref)
     sources = claims(raw, name, repo)
     if not sources:
         raise ProofError("session has no commit claims for this repository")
     added = []
     proven = 0
     for source in sources:
-        if verify(repo, semaphore, name, source, remote):
+        if verify(repo, semaphore, name, source, remote, target_ref):
             proven += 1
             continue
         try:
-            evidence = find_receipt(repo, raw, name, source, published)
+            evidence = find_receipt(repo, raw, name, source, published, target_ref)
         except ProofError:
             # A publisher may deliver one of several already declared claims.
             # Leave the others unproven; close still checks every claim.
@@ -290,7 +376,7 @@ def record(repo: Path, semaphore: Path, name: str, published: str) -> int:
             stream.write(updated)
             stream.flush()
             os.fsync(stream.fileno())
-        if snapshot(semaphore) != raw or oid(repo, "refs/remotes/origin/main^{commit}") != remote:
+        if snapshot(semaphore) != raw or oid(repo, tracking_ref(target_ref) + "^{commit}") != remote:
             raise ProofError("session or remote changed while recording")
         os.replace(temporary, semaphore)
         directory_fd = os.open(semaphore.parent, os.O_RDONLY)
@@ -322,22 +408,36 @@ def verify_checkout(repo: Path, semaphore: Path, name: str, remote: str) -> bool
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("action", choices=("record", "verify", "verify-checkout"))
+    parser.add_argument("action", choices=("record", "verify", "verify-checkout", "verify-product"))
     parser.add_argument("semaphore", type=Path)
     parser.add_argument("repo", type=Path)
     parser.add_argument("repo_name")
     parser.add_argument("commit")
     parser.add_argument("remote", nargs="?")
+    parser.add_argument("--target-ref", default=MAIN_REF)
+    parser.add_argument("--workspace", type=Path)
     args = parser.parse_args()
     try:
+        if args.action == "verify-product":
+            if args.workspace is None:
+                raise ProofError("product proof requires workspace identity")
+            return 0 if verify_product(args.repo, args.semaphore, args.repo_name, args.commit, args.workspace) else 1
         if args.action == "record":
-            print("publication receipts v2: " + str(record(args.repo, args.semaphore, args.repo_name, args.commit)))
+            if args.target_ref != MAIN_REF:
+                if args.workspace is None:
+                    raise ProofError("product receipt requires workspace identity")
+                raw = snapshot(args.semaphore)
+                product_target(args.repo, raw, args.repo_name, args.workspace, args.target_ref)
+                fetch_target(args.repo, args.target_ref)
+                if snapshot(args.semaphore) != raw:
+                    raise ProofError("session changed while fetching product target")
+            print("publication receipts v2: " + str(record(args.repo, args.semaphore, args.repo_name, args.commit, args.target_ref)))
             return 0
         if args.action == "verify-checkout":
             return 0 if verify_checkout(args.repo, args.semaphore, args.repo_name, args.commit) else 1
         if not args.remote:
             raise ProofError("verify requires the fetched remote commit")
-        return 0 if verify(args.repo, args.semaphore, args.repo_name, args.commit, args.remote) else 1
+        return 0 if verify(args.repo, args.semaphore, args.repo_name, args.commit, args.remote, args.target_ref) else 1
     except (ProofError, OSError, UnicodeError, ValueError, subprocess.SubprocessError) as error:
         print("publication receipt refused: " + str(error), file=sys.stderr)
         return 1

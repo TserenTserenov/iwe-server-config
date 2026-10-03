@@ -4,6 +4,7 @@ import json
 import os
 from pathlib import Path
 import subprocess
+import sys
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -365,6 +366,265 @@ _publish_prepared_source "$1" "$2" "$3"
         self.sem.symlink_to(real)
         with self.assertRaises(OSError):
             self.record(source)
+
+
+class ProductPublicationReceiptTest(unittest.TestCase):
+    """A declared product target proves delivery without rewriting old claims."""
+
+    git = PublicationReceiptTest.git
+    commit = PublicationReceiptTest.commit
+    claim = PublicationReceiptTest.claim
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name).resolve() / "IWE"
+        self.repo = self.root / "DS-IT-systems" / "repo"
+        self.governance = self.root / "governance"
+        self.orz = self.root / "sessions"
+        for path in (self.root, self.governance, self.orz, self.repo):
+            path.mkdir(parents=True, exist_ok=True)
+            subprocess.run(["git", "init", "-qb", "main", str(path)], check=True)
+            for key, value in (("user.name", "Test"), ("user.email", "test@example.invalid")):
+                subprocess.run(["git", "-C", str(path), "config", key, value], check=True)
+            subprocess.run(["git", "-C", str(path), "remote", "add", "origin",
+                            str(self.root.parent / (path.name + "-origin.git"))], check=True)
+        self.remote = self.root.parent / "repo-origin.git"
+        subprocess.run(["git", "init", "--bare", "-q", str(self.remote)], check=True)
+        self.base = self.commit("a.txt", "heading\nbase\nfooter\n")
+        self.source = self.commit("a.txt", "heading\nowned one\nowned two\nfooter\n")
+        self.git("checkout", "-q", "--detach", self.base)
+        self.commit("concurrent.txt", "another writer\n")
+        self.git("-c", "commit.gpgsign=false", "cherry-pick", self.source)
+        self.anchor = self.git("rev-parse", "HEAD")
+        self.assertNotEqual(self.anchor, self.source)
+        self.git("push", "-q", "origin", "HEAD:refs/heads/pilot")
+        self.sem = self.root / ".iwe-runtime/sessions/codex-one.open"
+        self.sem.parent.mkdir(parents=True)
+        self.sem.write_text("agent: codex\nsession_id: one\nwp: WP-484\nslug: product-close\n"
+                            "close_path: peer-session\n"
+                            f"governance_worktree: {self.governance}\n"
+                            f"orz_sessions_dir: {self.orz}\n")
+        self.claim(self.source)
+        self.claim(self.anchor)
+        self.guard = Path(__file__).parents[1] / "session-guard.sh"
+        self.env = {**os.environ, "IWE_ROOT": str(self.root), "IWE_GOVERNANCE_REPO": "governance",
+                    "GIT_ALLOW_PROTOCOL": "file"}
+
+    def record_cli(self, target="refs/heads/pilot"):
+        return subprocess.run(
+            [sys.executable, str(self.guard.parent / "lib/publication_receipt.py"),
+             "record", str(self.sem), str(self.repo), "repo", self.anchor,
+             "--target-ref", target, "--workspace", str(self.root)],
+            env=self.env, capture_output=True, text=True)
+
+    def note_publication(self):
+        return subprocess.run(
+            ["bash", str(self.guard), "note-publication", self.anchor, "--repo", "repo",
+             "--target-ref", "refs/heads/pilot", "--agent", "codex", "--session-id", "one"],
+            env=self.env, cwd=self.repo, capture_output=True, text=True)
+
+    def verify(self, source=None):
+        return receipt.verify_product(self.repo, self.sem, "repo", source or self.source, self.root)
+
+    def verify_cli(self):
+        return subprocess.run(
+            [sys.executable, str(self.guard.parent / "lib/publication_receipt.py"),
+             "verify-product", str(self.sem), str(self.repo), "repo", self.source,
+             "--workspace", str(self.root)], env=self.env, capture_output=True, text=True)
+
+    def assert_recorded(self):
+        before = self.sem.read_bytes()
+        result = self.record_cli()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertTrue(self.sem.read_bytes().startswith(before), "existing claims must remain unchanged")
+        self.assertTrue(self.verify())
+        self.assertTrue(self.verify(self.anchor))
+
+    def functions(self, *names):
+        source = self.guard.read_text()
+        functions = []
+        for name in names:
+            lines = source[source.index(name + "() {"):].splitlines(keepends=True)
+            body, in_python = [], False
+            for line in lines:
+                body.append(line)
+                if "<<'PY'" in line:
+                    in_python = True
+                elif in_python and line.rstrip() == "PY":
+                    in_python = False
+                elif not in_python and line.rstrip() == "}":
+                    break
+            functions.append("".join(body))
+        return "\n".join(functions)
+
+    def close_proof(self):
+        functions = self.functions("normalize_remote_url", "_resolve_repo_checkout",
+                                   "_claimed_commits_have_publish_proof")
+        functions += '\n_publication_receipt_tool() { python3 "$RECEIPT_TOOL" "$@"; }\n'
+        return subprocess.run(
+            ["bash", "-c", functions + '\n_claimed_commits_have_publish_proof "$1"',
+             "close-proof", str(self.sem)], cwd=self.repo,
+            env={**self.env, "GOV_REPO": "governance",
+                 "RECEIPT_TOOL": str(self.guard.parent / "lib/publication_receipt.py")},
+            capture_output=True, text=True)
+
+    def test_rebased_claim_and_close_proof_accept_explicit_pilot_without_main(self):
+        self.assert_recorded()
+        self.assertEqual(self.git("ls-remote", "origin", "refs/heads/main"), "")
+        result = self.close_proof()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        saved = [json.loads(line[len(receipt.PREFIX):]) for line in self.sem.read_text().splitlines()
+                 if line.startswith(receipt.PREFIX)]
+        self.assertEqual({item["source_commit"] for item in saved}, {self.source, self.anchor})
+        self.assertEqual({item["target_ref"] for item in saved}, {"refs/heads/pilot"})
+        self.assertEqual(next(item["proof"] for item in saved if item["source_commit"] == self.source),
+                         "exact-replay")
+
+    def test_later_remote_edit_keeps_historical_delivery_proven(self):
+        self.assert_recorded()
+        self.commit("a.txt", "later legitimate replacement\n")
+        self.git("push", "-q", "origin", "HEAD:refs/heads/pilot")
+        self.assertTrue(self.verify())
+
+    def test_guard_records_product_delivery_before_prepare(self):
+        before = self.sem.read_bytes()
+        result = self.note_publication()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertTrue(self.sem.read_bytes().startswith(before))
+        self.assertTrue(self.verify())
+
+    def test_new_architecture_is_an_explicit_supported_target(self):
+        self.git("push", "-q", "origin", "HEAD:refs/heads/new-architecture")
+        result = self.record_cli("refs/heads/new-architecture")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertTrue(self.verify())
+
+    def test_non_peer_session_cannot_use_product_delivery_policy(self):
+        self.sem.write_text(self.sem.read_text().replace("close_path: peer-session\n", ""))
+        before = self.sem.read_bytes()
+        result = self.record_cli()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(self.sem.read_bytes(), before)
+
+    def test_deleted_target_ref_rejects_stale_cached_receipt(self):
+        self.assert_recorded()
+        self.git("push", "-q", "origin", ":refs/heads/pilot")
+        self.git("update-ref", "refs/remotes/origin/pilot", self.anchor)
+        self.assertEqual(self.git("rev-parse", "refs/remotes/origin/pilot"), self.anchor)
+        before = self.sem.read_bytes()
+        self.assertNotEqual(self.verify_cli().returncode, 0)
+        self.assertEqual(self.sem.read_bytes(), before)
+
+    def test_foreign_session_origin_and_tampered_target_are_rejected(self):
+        self.assert_recorded()
+        original = self.sem.read_text()
+        self.sem.write_text(original.replace("session_id: one", "session_id: other"))
+        self.assertFalse(self.verify())
+        self.sem.write_text(original)
+        foreign = self.root.parent / "foreign.git"
+        subprocess.run(["git", "clone", "--bare", "-q", str(self.remote), str(foreign)], check=True)
+        self.git("remote", "set-url", "origin", str(foreign))
+        self.assertFalse(self.verify())
+        self.git("remote", "set-url", "origin", str(self.remote))
+        self.sem.write_text(original.replace('"target_ref":"refs/heads/pilot"',
+                                            '"target_ref":"refs/heads/new-architecture"'))
+        self.assertNotEqual(self.verify_cli().returncode, 0)
+        # Even the same commit on another allowed ref cannot repair a forged
+        # receipt: target identity is part of the reconstructed claim ID.
+        self.git("push", "-q", "origin", "HEAD:refs/heads/new-architecture")
+        self.assertFalse(self.verify())
+
+    def test_receipt_never_restores_an_unclaimed_source(self):
+        self.assert_recorded()
+        self.sem.write_text(self.sem.read_text().replace("commit: repo " + self.source + "\n", ""))
+        self.assertFalse(self.verify())
+        self.assertTrue(self.verify(self.anchor))
+
+    def test_dropped_hunk_cannot_prove_original_claim(self):
+        self.git("checkout", "-q", "--detach", self.anchor + "^")
+        self.anchor = self.commit("a.txt", "heading\nowned one\nfooter\n")
+        self.git("push", "-q", "--force", "origin", "HEAD:refs/heads/pilot")
+        self.claim(self.anchor)
+        result = self.record_cli()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertFalse(self.verify())
+        self.assertTrue(self.verify(self.anchor))
+
+    def test_protected_repository_identity_cannot_use_product_target(self):
+        before = self.sem.read_bytes()
+        for protected in (self.root, self.governance, self.orz):
+            with self.subTest(protected=protected.name):
+                old_origin = subprocess.run(["git", "-C", str(protected), "remote", "get-url", "origin"],
+                                            check=True, capture_output=True, text=True).stdout.strip()
+                subprocess.run(["git", "-C", str(protected), "remote", "set-url", "origin",
+                                str(self.remote)], check=True)
+                try:
+                    self.assertNotEqual(self.record_cli().returncode, 0)
+                    self.assertEqual(self.sem.read_bytes(), before)
+                finally:
+                    subprocess.run(["git", "-C", str(protected), "remote", "set-url", "origin",
+                                    old_origin], check=True)
+
+    def test_existing_receipt_rechecks_protected_identity(self):
+        self.assert_recorded()
+        before = self.sem.read_bytes()
+        subprocess.run(["git", "-C", str(self.governance), "remote", "set-url", "origin",
+                        str(self.remote)], check=True)
+        self.assertNotEqual(self.verify_cli().returncode, 0)
+        self.assertEqual(self.sem.read_bytes(), before)
+
+    def test_unpublished_target_does_not_write_a_receipt(self):
+        self.git("push", "-q", "origin", "HEAD:refs/heads/scratch")
+        before = self.sem.read_bytes()
+        for target in ("refs/heads/scratch", "refs/heads/new-architecture", "refs/tags/pilot",
+                       "pilot", "refs/heads/../pilot"):
+            with self.subTest(target=target):
+                self.assertNotEqual(self.record_cli(target).returncode, 0)
+                self.assertEqual(self.sem.read_bytes(), before)
+
+    def prepare(self):
+        terminal = self.root / "terminal.txt"
+        terminal.write_text("completed peer work\n")
+        functions = self.functions("_unique_record_field", "_terminal_proof_snapshot_sha",
+                                   "_owned_semaphore_snapshot_sha", "_append_close_fields_atomic",
+                                   "_record_close_prepared", "_close_delivery_state")
+        self.prepared_functions = functions
+        claim_rows = sorted(line[8:] for line in self.sem.read_text().splitlines()
+                            if line.startswith("commit: "))
+        command = functions + '''
+terminal_sha=$(_terminal_proof_snapshot_sha file "$4")
+_record_close_prepared "$1" one "$2" "$2/.git" "$3" "$3" "$3" \
+    '[]' "$5" file "$4" "$terminal_sha" "$6" refs/heads/main
+_close_delivery_state "$1" one
+'''
+        result = subprocess.run(
+            ["bash", "-c", command, "prepare", str(self.sem), str(self.governance), self.base,
+             str(terminal), json.dumps(claim_rows), str(self.root.parent / "governance-origin.git")],
+            env=self.env, capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.splitlines()[-1], "prepared")
+
+    def test_prepared_guard_appends_receipt_without_changing_frozen_claims(self):
+        self.prepare()
+        before = self.sem.read_bytes()
+        result = self.note_publication()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertTrue(self.sem.read_bytes().startswith(before))
+        result = subprocess.run(
+            ["bash", "-c", self.prepared_functions + '\n_close_delivery_state "$1" one',
+             "state", str(self.sem)], env=self.env, capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.strip(), "prepared")
+        self.assertTrue(self.verify())
+
+    def test_prepared_changed_claim_set_is_rejected(self):
+        self.prepare()
+        self.claim(self.base)
+        before = self.sem.read_bytes()
+        result = self.note_publication()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(self.sem.read_bytes(), before)
 
 
 if __name__ == "__main__":

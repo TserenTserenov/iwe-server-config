@@ -43,6 +43,8 @@
 #                                                      # коммита); отказ, если путь есть на диске,
 #                                                      # в HEAD/индексе или в заявленном коммите
 #   note-commit <sha> [--repo <name>] [--agent ...]   # заявить коммит сессии: даёт commit-push.sh
+#   note-publication <sha> --repo <name> [--target-ref refs/heads/main|pilot|new-architecture]
+#     Non-main: explicit peer product delivery evidence, also append-only in PREPARED; never a push grant.
 #                                                      # проверять доставку по СВОИМ коммитам,
 #                                                      # а не по состоянию всей ветки (WP-537).
 #                                                      # <name> = каталог внутри $IWE_ROOT либо
@@ -3687,6 +3689,7 @@ ISOLATE_FLAG=0
 ABANDON_PREPARED=0
 ABANDON_ACK=0
 ABANDON_SOURCE_COMMITS=()
+PUBLICATION_TARGET_REF="refs/heads/main"
 EXPECTED_HASH=""
 EXPECTED_ABSENT=0
 HOT_LOCK_TOKEN=""
@@ -3758,6 +3761,9 @@ while [[ $# -gt 0 ]]; do
         fail "--repo требует непустое значение (имя репозитория внутри \$IWE_ROOT)" 1
       fi
       REPO_ARG="$2"; shift 2 ;;
+    --target-ref)
+      [[ $# -ge 2 && -n "$2" ]] || fail "--target-ref требует значение" 1
+      PUBLICATION_TARGET_REF="$2"; shift 2 ;;
     --expected-hash)
       if [[ $# -lt 2 || -z "$2" ]]; then
         fail "--expected-hash требует непустое значение (sha256 файла, который читал вызывающий)" 1
@@ -7295,7 +7301,7 @@ _publication_receipt_tool() {
 }
 
 _record_publication_receipts() {  # caller owns this session transition lock
-  _publication_receipt_tool record "$1" "$2" "$3" "$4"
+  _publication_receipt_tool record "$@"
 }
 
 _receipt_checkout_has_publish_proof() {  # <semaphore> <checkout> <fresh remote>
@@ -7334,6 +7340,13 @@ _claimed_commits_have_publish_proof() {  # <semaphore> [exact claim strings JSON
     }
     git -C "$repo_dir" cat-file -e "$commit_sha^{commit}" 2>/dev/null \
       || { echo "Session CLOSE: claimed commit не читается: $repo_name $commit_sha" >&2; return 1; }
+    # An explicitly recorded peer product delivery may target pilot/production.
+    # Reconstruct its proof against that freshly fetched policy-bound ref before
+    # requiring main; keep every original (including rebased) claim intact.
+    if _publication_receipt_tool verify-product "$semaphore" "$repo_dir" "$repo_name" "$commit_sha" \
+        --workspace "$IWE_ROOT"; then
+      continue
+    fi
     if ! printf '%s\n' "$fetched" | grep -qxF "$repo_dir"; then
       git -C "$repo_dir" remote get-url origin >/dev/null 2>&1 \
         || { echo "Session CLOSE: claimed repo не имеет origin: $repo_name" >&2; return 1; }
@@ -11494,13 +11507,28 @@ if [ "$CMD" = "note-publication" ]; then
   fi
   acquire_session_transition_lock "$SEM_FILE"
   LOCKED_NOTE_SESSION_ID=$(_locked_open_identity "$SEM_FILE" "$NOTE_AGENT" "${SESSION_ID_ARG:-}") || exit 1
-  [ "$(_close_delivery_state "$SEM_FILE" "$LOCKED_NOTE_SESSION_ID" || true)" = "none" ] \
-    || fail "note-publication: prepared close records its receipt under its own lock" 1
+  PUBLICATION_CLOSE_STATE=$(_close_delivery_state "$SEM_FILE" "$LOCKED_NOTE_SESSION_ID" || true)
+  case "$PUBLICATION_CLOSE_STATE:$PUBLICATION_TARGET_REF" in
+    none:refs/heads/main|none:refs/heads/pilot|none:refs/heads/new-architecture) ;;
+    prepared:refs/heads/pilot|prepared:refs/heads/new-architecture) ;;
+    *) fail "note-publication: target or close state does not permit this receipt" 1 ;;
+  esac
+  PUBLICATION_PREPARE_DIGEST=$(_unique_record_field "$SEM_FILE" close_delivery_prepare_digest || true)
   [ "$REPO_ARG" != IWE ] || REPO_ARG=iwe-root
   RECEIPT_REPO=$(_resolve_repo_checkout "$REPO_ARG" "$PUBLISHED_SHA") || exit 1
-  timeout 10 git -C "$RECEIPT_REPO" fetch --quiet origin '+refs/heads/main:refs/remotes/origin/main' \
-    || fail "note-publication: fresh origin/main required" 1
-  _record_publication_receipts "$SEM_FILE" "$RECEIPT_REPO" "$REPO_ARG" "$PUBLISHED_SHA" || exit 1
+  if [ "$PUBLICATION_TARGET_REF" = refs/heads/main ]; then
+    timeout 10 git -C "$RECEIPT_REPO" fetch --quiet origin '+refs/heads/main:refs/remotes/origin/main' \
+      || fail "note-publication: fresh origin/main required" 1
+    _record_publication_receipts "$SEM_FILE" "$RECEIPT_REPO" "$REPO_ARG" "$PUBLISHED_SHA" || exit 1
+  else
+    # Product policy and frozen inventory are checked before the exact fetch.
+    # This only appends evidence, never replaces claims or authorizes a push.
+    _record_publication_receipts "$SEM_FILE" "$RECEIPT_REPO" "$REPO_ARG" "$PUBLISHED_SHA" \
+      --target-ref "$PUBLICATION_TARGET_REF" --workspace "$IWE_ROOT" || exit 1
+  fi
+  [ "$(_close_delivery_state "$SEM_FILE" "$LOCKED_NOTE_SESSION_ID" || true)" = "$PUBLICATION_CLOSE_STATE" ] \
+    && [ "$(_unique_record_field "$SEM_FILE" close_delivery_prepare_digest || true)" = "$PUBLICATION_PREPARE_DIGEST" ] \
+    || fail "note-publication: frozen close identity changed" 1
   exit 0
 fi
 
