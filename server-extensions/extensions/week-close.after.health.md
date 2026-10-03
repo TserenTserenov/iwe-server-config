@@ -32,9 +32,9 @@ fi
 bash "$HOME/IWE/DS-my-strategy/scripts/health-residency-guard.sh" "$REPORT_FILE" || exit 1
 
 # Часть B ниже, та же переменная WEEK_START/WEEK_END — тренд пилоту в чат, не в файл.
-(cd "$HOME/IWE/DS-my-strategy" && python3 -m scripts.lib.health.owner trend \
+"$HOME/.local/bin/iwe-health-owner" trend \
   --metrics sleep_duration,resting_heart_rate,readiness_score,sleep_score,nightly_hrv,steps,active_minutes \
-  --since "$WEEK_START" --until "$WEEK_END")
+  --since "$WEEK_START" --until "$WEEK_END"
 ```
 
 **Часть A — инвариант:**

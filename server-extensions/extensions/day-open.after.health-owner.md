@@ -14,9 +14,9 @@ owner: user
 **Что сделать:**
 
 ```bash
-(cd "$HOME/IWE/DS-my-strategy" && python3 -m scripts.lib.health.owner summary \
+"$HOME/.local/bin/iwe-health-owner" summary \
   --metrics sleep_duration,resting_heart_rate,readiness_score,sleep_score,nightly_hrv \
-  --since "$YDAY" --until "$YDAY")
+  --since "$YDAY" --until "$YDAY"
 ```
 
 `$YDAY` — та же вчерашняя дата, что использует шаг 6 (`YYYY-MM-DD`).
