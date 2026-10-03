@@ -9,7 +9,8 @@
 **Когда выполнять:** сразу после шага 12 (Мультипликатор IWE), как только «Мультипликатор дня» посчитан и прошёл sanity check.
 
 ```bash
-TODAY=$(date +%Y-%m-%d)
+DC_CONTEXT=$(bash "$HOME/IWE/.iwe-runtime/day-close-interactive.sh" --context '<токен из шага 0.5>') || exit 1; eval "$DC_CONTEXT"
+TODAY="$IWE_CLOSE_DATE"
 MULT_FINAL="<число из шага 12, например 2.9>"
 DATA_JSON=$(python3 -c "
 import json,sys,datetime
@@ -20,7 +21,7 @@ print(json.dumps({
   'multiplier_final_written_at': datetime.datetime.now(datetime.timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ'),
 }))
 " "$TODAY" "$MULT_FINAL")
-bash ~/IWE/DS-my-strategy/scripts/ledger-append.sh day "$TODAY" facts_digest "$DATA_JSON" "day-close-multiplier-final"
+bash "${GOV_REPO_ROOT:?}/scripts/ledger-append.sh" day "$TODAY" facts_digest "$DATA_JSON" "day-close-multiplier-final"
 ```
 
 Идемпотентно по построению (append-only, `render-open.py` берёт последнее значение поля) — повторный запуск с тем же числом просто добавит ещё одну согласованную запись, без вреда.

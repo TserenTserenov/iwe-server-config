@@ -90,14 +90,21 @@ MODE="${MATCH##* }"
 
 emit_bypass() {  # $1=reason
   local ledger="$IWE_ROOT/$GOV_REPO/scripts/ledger-append.sh"
-  [ -x "$ledger" ] || return 0
+  [ -x "$ledger" ] || [ -f "$IWE_ROOT/.iwe-runtime/day-close-ledger-route.py" ] || return 0
   local payload
   payload=$(python3 -c 'import json,sys; print(json.dumps({
       "file": sys.argv[1], "class": sys.argv[2], "reason": sys.argv[3],
       "agent": sys.argv[4]}))' \
     "$FILE_PATH" "$CLASS_ID" "$1" "$AGENT_ID" 2>/dev/null) || return 0
-  bash "$ledger" day "$(date +%F)" write_path_bypass "$payload" \
-    write-path-lease-guard >/dev/null 2>&1 \
+  # shellcheck source=lib/day-close-ledger-route.sh
+  . "$HOOK_DIR/lib/day-close-ledger-route.sh"
+  ledger_route_configure "$INPUT" "$IWE_ROOT" "$GOV_REPO"
+  local route_rc=$?
+  if [ "$route_rc" -ne 0 ] && [ "$route_rc" -ne 10 ]; then
+    echo "TELEMETRY_LOST: owner-aware write_path_bypass route unavailable ($FILE_PATH)" >&2
+    return 0
+  fi
+  ledger_route_append write_path_bypass "$payload" write-path-lease-guard \
     || echo "TELEMETRY_LOST: write_path_bypass не записан в ledger ($FILE_PATH)" >&2
 }
 

@@ -85,14 +85,23 @@ else
 fi
 
 LEDGER="$IWE_ROOT/$GOV_REPO/scripts/ledger-append.sh"
-if [ -x "$LEDGER" ]; then
+if [ -f "$LEDGER" ] || [ -f "$IWE_ROOT/.iwe-runtime/day-close-ledger-route.py" ]; then
+  # A hook is a separate process: it cannot inherit the shell environment of
+  # the interactive close. Resolve the exact native owner from this payload.
+  # shellcheck source=lib/day-close-ledger-route.sh
+  . "$HOOK_DIR/lib/day-close-ledger-route.sh"
+  ledger_route_configure "$INPUT" "$IWE_ROOT" "$GOV_REPO"
+  ROUTE_RC=$?
+  if [ "$ROUTE_RC" -ne 0 ] && [ "$ROUTE_RC" -ne 10 ]; then
+    echo "TELEMETRY_LOST: owner-aware ledger route unavailable ($FILE_PATH)" >&2
+    exit 0
+  fi
   PAYLOAD=$(python3 -c 'import json,sys; print(json.dumps({
       "file": sys.argv[1], "class": sys.argv[2], "reason": sys.argv[3],
       "agent": sys.argv[4]}))' \
     "$FILE_PATH" "$CLASS_ID" "$REASON" "$AGENT_ID" 2>/dev/null)
   if [ -n "$PAYLOAD" ]; then
-    bash "$LEDGER" day "$(date +%F)" write_verify_failed "$PAYLOAD" \
-      write-path-post-verify >/dev/null 2>&1 \
+    ledger_route_append write_verify_failed "$PAYLOAD" write-path-post-verify \
       || echo "TELEMETRY_LOST: write_verify_failed не записан в ledger ($FILE_PATH)" >&2
   fi
 fi

@@ -46,12 +46,13 @@ Day Close — кросс-РП инфраструктурная операция.
 
 **Правило корня.** Все изменения планов, карточек и итогов выполняются в `$GOV_REPO_ROOT`. Относительные пути `DS-my-strategy/…` ниже означают этот корень. Переход к каноническим правкам при ошибке подготовки запрещён.
 
-**Граница мостика (РП-561 Ф32).** Дневной журнал пока пишет в канон через `IWE_LEDGER_DIR`; полный запрет записей в общую копию ещё не принят. Остаток — внешний источник существующего `ledger-publish`, подтверждение доставки и маршрутизация хуков своего запуска (узкая зависимость от РП-530 Ф85). Журнал сессий `$IWE_OPEN_SESSIONS_LOG` и игнорируемые runtime-выходы `day-close.sh` (`exocortex/`, `current/sessions-today.md`) также пока остаются общими. Перенос последних требует проверки читателей восстановления и синхронизации; один экспорт корня не меняет их контракт. Не объявлять полную изоляцию на основании одной подготовленной копии.
+**Граница мостика (РП-561 Ф32).** Записи своего запуска Claude Code идут через `IWE_LEDGER_WRITE_DIR` во внешнюю очередь, а чтение старой истории пока использует `IWE_LEDGER_DIR`. Закреплённый помощник связывает родной идентификатор с очередью; перед завершением `--finish` требует подтверждение публикации её стабильного снимка. Поздние хуки той же сессии сохраняют привязку и отдельно публикуют свои записи. Маршрут только для своего запуска; остальные производители и читатели не объявлены перенесёнными. Журнал сессий `$IWE_OPEN_SESSIONS_LOG` и игнорируемые runtime-выходы `day-close.sh` (`exocortex/`, `current/sessions-today.md`) также пока остаются общими.
 
 **Владение запуском.** После успешного `--prepare` сохранить токен из вывода как неизменяемое значение этой сессии. Во всех командах ниже вместо `<токен из шага 0.5>` подставлять именно его, не перечитывать новый токен из общего файла. `--context` проверяет владельца, ветку и принадлежность копии репозиторию; только затем возвращает окружение. В новом Bash-вызове сначала выполнить этот префикс, в том числе перед одиночными командами из текста. При отказе остановить затронутый шаг. Для Edit/Write использовать корень из последней успешной проверки и проверить владение непосредственно перед записью. Дата `$IWE_CLOSE_DATE` фиксируется при подготовке и не меняется после полуночи.
 
 ```bash
 bash ~/IWE/scripts/day-close-step-log.sh start 0.5
+[ -n "${CLAUDE_CODE_SESSION_ID:-}" ] || { echo 'STOP: родной session_id Claude Code не передан в shell'; exit 1; }
 DCI=$(mktemp) || exit 1
 if ! git -C "$HOME/IWE/DS-my-strategy" fetch -q origin main ||
    ! git -C "$HOME/IWE/DS-my-strategy" show origin/main:scripts/day-close-isolated.sh > "$DCI" ||
@@ -336,11 +337,40 @@ bash ~/IWE/scripts/day-close-step-log.sh end 5b
 
 ### 12. Мультипликатор IWE [[gate]]
 
-`bash ~/IWE/scripts/day-close-step-log.sh start 6`
+```bash
+DC_CONTEXT=$(bash "$HOME/IWE/.iwe-runtime/day-close-interactive.sh" --context '<токен из шага 0.5>') || exit 1; eval "$DC_CONTEXT"
+bash ~/IWE/scripts/day-close-step-log.sh start 6
+# Сначала собственная запись шага 11, затем история из закреплённой копии.
+DAY_LEDGER_REL="day/${IWE_CLOSE_DATE:0:4}/${IWE_CLOSE_DATE:5:2}/day-$IWE_CLOSE_DATE.yaml"
+DIGEST_JSON=$(python3 - "$IWE_LEDGER_WRITE_DIR/$DAY_LEDGER_REL" "$GOV_REPO_ROOT/machine/ledger/$DAY_LEDGER_REL" "$IWE_CLOSE_DATE" <<'PY'
+import json, pathlib, sys, yaml
+digest = {}
+# Historical events first; this run's queue overlays only the fields it wrote.
+for name in (sys.argv[2], sys.argv[1]):
+    path = pathlib.Path(name)
+    if not path.exists():
+        continue
+    try:
+        doc = yaml.safe_load(path.read_text(encoding="utf-8"))
+    except (OSError, yaml.YAMLError):
+        raise SystemExit("STOP: журнал шага 11 не читается")
+    if not isinstance(doc, dict) or doc.get("schema") != "ledger/v1" or not isinstance(doc.get("events"), list):
+        raise SystemExit("STOP: журнал шага 11 не читается")
+    for event in doc["events"]:
+        if not isinstance(event, dict):
+            raise SystemExit("STOP: событие журнала повреждено")
+        data = event.get("data")
+        if event.get("kind") == "facts_digest" and isinstance(data, dict) and data.get("for_date") == sys.argv[3]:
+            digest.update(data)
+print(json.dumps(digest, ensure_ascii=False) if digest else "")
+PY
+) || exit 1
+printf '%s\n' "${DIGEST_JSON:-digest не записан}"
+```
 
 > Условный шаг: если `params.yaml → multiplier_enabled: false` → пропустить.
 
-**Шаг 0 (перед расчётом): прочитать, что уже посчитал шаг 11.** Взять `facts_digest` за день из журнала (`machine/ledger/day/YYYY/MM/day-YYYY-MM-DD.yaml`, последнее событие с этим `for_date`). `wakatime_h` — физическое время (скрипт сам берёт его из клиента или по API). `multiplier_estimated` — НЕ мультипликатор протокола, а приблизительная метрика покрытия: WakaTime / минуты событий `session_closed` с известной длительностью (события без длительности и ещё не закрытые сессии в знаменатель не входят). Показать пилоту оба числа с названиями и пометкой «покрытие N из M сессий». Digest не записан (шаг 11 не отработал) — написать это одной строкой и продолжить с пунктом 1 ниже.
+**Шаг 0 (перед расчётом): прочитать, что уже посчитал шаг 11.** Взять `facts_digest` из вывода команды выше: сначала собственная очередь, затем исходная история в закреплённой копии. Повреждённый файл не заменять старым числом. `wakatime_h` — физическое время (скрипт сам берёт его из клиента или по API). `multiplier_estimated` — НЕ мультипликатор протокола, а приблизительная метрика покрытия: WakaTime / минуты событий `session_closed` с известной длительностью (события без длительности и ещё не закрытые сессии в знаменатель не входят). Показать пилоту оба числа с названиями и пометкой «покрытие N из M сессий». Digest не записан (шаг 11 не отработал) — написать это одной строкой и продолжить с пунктом 1 ниже.
 **Правило «недоступно»:** писать «WakaTime недоступен» разрешено только после проверки по порядку: `facts_digest` → клиент → API (ключ не печатать, читать через `scripts/with-aist-env.sh`; само число часов показывать). Инцидент 01.10.2026: агент проверил один клиент и записал «не рассчитан», хотя шаг 11 уже записал `wakatime_h`.
 **Часы сессии для бюджета** брать из карточки/ОРЗ-файла по содержанию, не из разницы времён семафора: сессия, открытая весь день при нескольких ходах, не равна долгой работе (РП-170, 01.10: 9 ч по семафору при 5 ходах).
 
@@ -477,8 +507,8 @@ fi
 # DC_PUBLISHED_REVISION. Поиск коммита по заголовку доказательством не является.
 bash "${IWE_SCRIPTS:-$HOME/IWE/scripts}/session-guard.sh" close --housekeeping day-close --agent claude-code || exit 1
 cd "$HOME/IWE" || exit 1
-# При ignored-файлах --finish сохраняет всю копию/ветку и сообщает путь.
-# Это локальное сохранение, не подтверждение публикации этих файлов.
+# --finish подтверждает стабильный срез внешней очереди и сохраняет копию/маршрут
+# для поздних хуков этого же запуска. Отказ оставляет замок и данные для повтора.
 bash "$DAY_CLOSE_WRAPPER" --finish "$DAY_CLOSE_LOCK_TOKEN" || exit 1
 bash ~/IWE/scripts/day-close-step-log.sh end 10
 ```

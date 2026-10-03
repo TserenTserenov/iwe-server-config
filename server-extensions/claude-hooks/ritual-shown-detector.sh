@@ -45,7 +45,11 @@ TRANSCRIPT_PATH=$(printf '%s' "$INPUT" | jq -r '.transcript_path // empty' 2>/de
 if [ -z "$TRANSCRIPT_PATH" ] || [ ! -f "$TRANSCRIPT_PATH" ]; then exit 0; fi
 
 SESSION_ID=$(printf '%s' "$INPUT" | jq -r '.session_id // empty' 2>/dev/null || echo "")
-SESSION_ID=$(printf '%s' "$SESSION_ID" | tr -cd 'A-Za-z0-9._-')
+SESSION_ID="${SESSION_ID:-${CLAUDE_CODE_SESSION_ID:-}}"
+[ -z "$SESSION_ID" ] || [[ "$SESSION_ID" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,255}$ ]] || {
+  echo 'ritual-shown-detector: invalid session_id; ledger write withheld' >&2
+  exit 0
+}
 if [ -z "$SESSION_ID" ]; then exit 0; fi
 
 PROJECT_DIR="${CLAUDE_PROJECT_DIR:-$HOME/IWE}"
@@ -175,14 +179,24 @@ RITUAL_STATUS=$(printf '%s' "$RESULT" | jq -r '.ritual_status // empty' 2>/dev/n
 GOV_REPO_ROOT="$PROJECT_DIR/${IWE_GOVERNANCE_REPO:-DS-my-strategy}"
 LEDGER_APPEND="$GOV_REPO_ROOT/scripts/ledger-append.sh"
 LEDGER_WRITTEN=false
-if [ -x "$LEDGER_APPEND" ]; then
+if [ -f "$LEDGER_APPEND" ] || [ -f "$PROJECT_DIR/.iwe-runtime/day-close-ledger-route.py" ]; then
+  # shellcheck source=lib/day-close-ledger-route.sh
+  . "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/day-close-ledger-route.sh"
+  if ledger_route_configure "$INPUT" "$PROJECT_DIR" "${IWE_GOVERNANCE_REPO:-DS-my-strategy}"; then
+    ROUTE_RC=0
+  else
+    ROUTE_RC=$?
+  fi
+  if [ "$ROUTE_RC" -ne 0 ] && [ "$ROUTE_RC" -ne 10 ]; then
+    echo "ritual-shown-detector: owner-aware route unavailable; will retry next Stop" >&2
+    exit 0
+  fi
   EVENT_JSON=$(python3 -c '
 import json, sys
 print(json.dumps({"session_id": sys.argv[1], "ritual_status": sys.argv[2]}))
 ' "$SESSION_ID" "$RITUAL_STATUS" 2>/dev/null) || EVENT_JSON=""
   if [ -n "$EVENT_JSON" ]; then
-    if bash "$LEDGER_APPEND" day "$(date +%Y-%m-%d)" ritual_shown "$EVENT_JSON" ritual-shown-detector \
-      >/dev/null 2>&1; then
+    if ledger_route_append ritual_shown "$EVENT_JSON" ritual-shown-detector; then
       LEDGER_WRITTEN=true
     else
       echo "ritual-shown-detector: ledger write failed for session $SESSION_ID (will retry next Stop)" >&2
