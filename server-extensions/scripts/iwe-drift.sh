@@ -284,6 +284,19 @@ collect() {
         case "$src_path" in /*) ;; *) src_path="$IWE_ROOT/$src_path" ;; esac
         case "$dst_path" in /*) ;; *) dst_path="$IWE_ROOT/$dst_path" ;; esac
 
+        if [ "$check" = "content-diff" ]; then
+            local content_status
+            if [ ! -f "$src_path" ] || [ ! -f "$dst_path" ]; then
+                content_status="missing"
+            elif cmp -s "$src_path" "$dst_path"; then
+                content_status="ok"
+            else
+                content_status="critical"
+            fi
+            printf "%s\t%s\t%s\t%s\t%s\t%s\n" "?" "$id" "$relation" "$content_status" "$owner" "$symptom"
+            continue
+        fi
+
         local src_age dst_age lag status
         src_age=$(dir_newest_mtime_days_ago "$src_path")
         dst_age=$(dir_newest_mtime_days_ago "$dst_path")

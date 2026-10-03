@@ -24,9 +24,10 @@ set -uo pipefail
 WP_NUM="${1:-}"
 IWE="${2:-${IWE_ROOT:-$HOME/IWE}}"
 GOV_REPO="${IWE_GOVERNANCE_REPO:-DS-strategy}"
-INBOX="$IWE/$GOV_REPO/inbox"
-ARCHIVE="$IWE/$GOV_REPO/archive/wp-contexts"
-STRATEGY_REPO="$IWE/$GOV_REPO"
+# IWE_GOVERNANCE_REPO_PATH: the repo to archive in (an isolated Day Close copy, WP-530); unset = the shared checkout.
+STRATEGY_REPO="${IWE_GOVERNANCE_REPO_PATH:-$IWE/$GOV_REPO}"
+INBOX="$STRATEGY_REPO/inbox"
+ARCHIVE="$STRATEGY_REPO/archive/wp-contexts"
 # check-wp-transfer-completeness.sh lives next to this script — resolve relative to
 # self so both the root copy and the promoted template copy find their own sibling.
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
