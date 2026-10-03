@@ -67,30 +67,33 @@ in
           ${pkgs.coreutils}/bin/cp ${src}/CLAUDE.md /home/${cfg.user}/IWE/CLAUDE.md
         fi
 
-        ${pkgs.rsync}/bin/rsync -a --delete \
+        # --checksum (WP-530 Ф81, найдено холодной проверкой 02.10): файлы nix store имеют время 1970-01-01, а быстрая проверка rsync -a сравнивает
+        # только размер и время, поэтому правка той же длины (например, 8 на 9 в одном знаке) до сервера молча НЕ доходила; сравнение по содержимому
+        # читает файлы с обеих сторон (на этих каталогах это секунды) и доставляет любую правку.
+        ${pkgs.rsync}/bin/rsync -a --checksum --delete \
           ${src}/scripts/ \
           /home/${cfg.user}/IWE/scripts/
 
-        ${pkgs.rsync}/bin/rsync -a --delete \
+        ${pkgs.rsync}/bin/rsync -a --checksum --delete \
           ${src}/extensions/ \
           /home/${cfg.user}/IWE/extensions/
 
         # Все скиллы целиком (был только day-open — audit-installation и др. отсутствовали)
-        ${pkgs.rsync}/bin/rsync -a --delete \
+        ${pkgs.rsync}/bin/rsync -a --checksum --delete \
           ${src}/claude-skills/ \
           /home/${cfg.user}/IWE/.claude/skills/
 
-        ${pkgs.rsync}/bin/rsync -a --delete \
+        ${pkgs.rsync}/bin/rsync -a --checksum --delete \
           ${src}/claude-hooks/ \
           /home/${cfg.user}/IWE/.claude/hooks/
 
-        ${pkgs.rsync}/bin/rsync -a --delete \
+        ${pkgs.rsync}/bin/rsync -a --checksum --delete \
           ${src}/claude-scripts/ \
           /home/${cfg.user}/IWE/.claude/scripts/
 
         # WP-7 Ф-Backup-Resilience-Audit (27.07): check-dirty-repos.sh source'ит эту
         # библиотеку — раньше .claude/lib/ вообще не входил в синхронизацию.
-        ${pkgs.rsync}/bin/rsync -a --delete \
+        ${pkgs.rsync}/bin/rsync -a --checksum --delete \
           ${src}/claude-lib/ \
           /home/${cfg.user}/IWE/.claude/lib/
 
@@ -101,7 +104,7 @@ in
         # ни один процесс на сервере не читает (WP-484 delivery-version-handshake,
         # peer-session 2026-08-21-01, root cause: protocol-open.md/protocol-close.md
         # отставали на server 26-32 дня без единого сигнала ошибки).
-        ${pkgs.rsync}/bin/rsync -a \
+        ${pkgs.rsync}/bin/rsync -a --checksum \
           ${src}/memory/ \
           /home/${cfg.user}/.claude/projects/-home-${cfg.user}-IWE/memory/
 
