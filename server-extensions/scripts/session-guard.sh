@@ -408,74 +408,19 @@ emit_session_closed() {
   local ledger_script="$IWE_ROOT/$GOV_REPO/scripts/ledger-append.sh"
   [ -f "$ledger_script" ] || return 0
 
-  local personality orz_file session_id event_day
+  local personality orz_file session_id session_host event_day
   personality=$(grep '^personality: ' "$semaphore" 2>/dev/null | cut -d' ' -f2- || true)
   orz_file=$(grep '^orz_file: ' "$semaphore" 2>/dev/null | cut -d' ' -f2- || true)
   session_id=$(grep '^session_id: ' "$semaphore" 2>/dev/null | cut -d' ' -f2- || true)
+  session_host=$(grep '^host: ' "$semaphore" 2>/dev/null | cut -d' ' -f2- || true)
 
   # Event date from the session file, NOT from "today" -- the same rule and the
   # same reason as session-ledger-append.sh:112-116 (cold review 05.09): a close
   # that crosses midnight would otherwise file the whole session's hours under the
   # wrong day, taking them from the day that earned them and giving them to the
-  # next one. Both the duplicate check and the write must use this date, or they
-  # would consult one day file and write into another.
+  # next one. The atomic duplicate check in ledger-append uses this same day.
   event_day=$(printf '%s' "$orz_file" | grep -oE '[0-9]{4}-[0-9]{2}-[0-9]{2}' | head -1 || true)
   [ -n "$event_day" ] || event_day=$(now_date)
-
-  # Idempotency, best-effort by design (Kimi, turn 3: two processes can both read
-  # an absent event and both write it -- there is no distributed lock here).
-  #
-  # Matching by slug alone was wrong (cold review 05.09, Critical): `open` defaults
-  # slug to $WP, so two independent sessions of the same WP on the same day share
-  # it, and the second close would be silently skipped -- losing exactly the hours
-  # this function exists to record. Identity is checked strongest-first: session_id
-  # (unique per semaphore), then the session file basename (this is what lets the
-  # check ALSO see an event the runner itself already wrote -- its events carry
-  # session_file but neither slug nor session_id), then slug as the last resort.
-  local ledger_file=""
-  if [ -f "$IWE_ROOT/$GOV_REPO/scripts/lib/ledger-path.sh" ]; then
-    # shellcheck source=../DS-my-strategy/scripts/lib/ledger-path.sh
-    . "$IWE_ROOT/$GOV_REPO/scripts/lib/ledger-path.sh"
-    ledger_file="$IWE_ROOT/$GOV_REPO/machine/ledger/$(ledger_path_rel day "$event_day" 2>/dev/null || true)"
-  fi
-  if [ -n "$ledger_file" ] && [ -f "$ledger_file" ]; then
-    local dup=""
-    dup=$(LEDGER_FILE_ENV="$ledger_file" SLUG_ENV="$slug" SID_ENV="${session_id:-}" \
-      ORZ_ENV="${orz_file:-}" python3 -c '
-import os, sys
-
-try:
-    import yaml
-    with open(os.environ["LEDGER_FILE_ENV"], encoding="utf-8") as fh:
-        doc = yaml.safe_load(fh) or {}
-except Exception as exc:
-    # An unreadable ledger is not proof of a duplicate: say so and let the caller
-    # write. Silence here would look identical to "checked, nothing found".
-    print("unreadable: %s" % exc, file=sys.stderr)
-    raise SystemExit(0)
-
-want_sid = os.environ["SID_ENV"]
-want_file = os.path.basename(os.environ["ORZ_ENV"])
-want_slug = os.environ["SLUG_ENV"]
-for event in doc.get("events") or []:
-    if not isinstance(event, dict) or event.get("kind") != "session_closed":
-        continue
-    data = event.get("data") or {}
-    if want_sid and str(data.get("session_id") or "") == want_sid:
-        print("session_id")
-        break
-    if want_file and os.path.basename(str(data.get("session_file") or "")) == want_file:
-        print("session_file")
-        break
-    if not want_sid and not want_file and data.get("slug") == want_slug:
-        print("slug")
-        break
-' 2>/dev/null) || dup=""
-    if [ -n "$dup" ]; then
-      echo "  ℹ️  session_closed уже есть в журнале за $event_day (совпадение по $dup) — не дублирую" >&2
-      return 0
-    fi
-  fi
 
   local opened observed duration_json known reason max_min
   max_min="${IWE_MAX_SESSION_MIN:-480}"
@@ -518,7 +463,7 @@ for event in doc.get("events") or []:
   event_err=$(mktemp 2>/dev/null) || event_err=""
   event=$(CHANNEL_ENV="$channel" WP_ENV="$wp" SLUG_ENV="$slug" AGENT_ENV="$agent" \
     PERSONALITY_ENV="${personality:-unassigned}" ORZ_ENV="${orz_file:-}" \
-    SID_ENV="${session_id:-}" DURATION_ENV="$duration_json" KNOWN_ENV="$known" \
+    SID_ENV="${session_id:-}" HOST_ENV="${session_host:-}" DURATION_ENV="$duration_json" KNOWN_ENV="$known" \
     OBSERVED_ENV="$observed" REASON_ENV="$reason" python3 -c '
 import json, os
 duration = os.environ["DURATION_ENV"]
@@ -526,6 +471,7 @@ event = {
     "wp": os.environ["WP_ENV"] or "unknown",
     "slug": os.environ["SLUG_ENV"],
     "session_id": os.environ["SID_ENV"],
+    "host": os.environ["HOST_ENV"],
     "agent": os.environ["AGENT_ENV"] or "unknown",
     "personality": os.environ["PERSONALITY_ENV"],
     "close_channel": os.environ["CHANNEL_ENV"],
@@ -551,7 +497,7 @@ print(json.dumps(event, ensure_ascii=False))
   fi
   [ -n "$event_err" ] && rm -f "$event_err"
 
-  bash "$ledger_script" day "$event_day" session_closed "$event" session-guard \
+  bash "$ledger_script" day "$event_day" session_closed "$event" session-guard --dedup-session-closed \
     >/dev/null 2>&1 || echo "  ⚠️  ledger session_closed не записан (best-effort, не блокирует close)" >&2
 }
 

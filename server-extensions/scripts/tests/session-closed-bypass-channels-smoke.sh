@@ -18,9 +18,10 @@
 set -euo pipefail
 
 IWE_ROOT_REAL="${IWE_ROOT:-$HOME/IWE}"
-GUARD="$IWE_ROOT_REAL/scripts/session-guard.sh"
+GUARD="${IWE_GUARD_SCRIPT:-$IWE_ROOT_REAL/scripts/session-guard.sh}"
 GOV_REPO_REAL="${IWE_GOVERNANCE_REPO:-DS-my-strategy}"
-LEDGER_APPEND="$IWE_ROOT_REAL/$GOV_REPO_REAL/scripts/ledger-append.sh"
+LEDGER_APPEND="${IWE_LEDGER_SCRIPT:-$IWE_ROOT_REAL/$GOV_REPO_REAL/scripts/ledger-append.sh}"
+LEDGER_LIB_DIR="${IWE_LEDGER_LIB_DIR:-$IWE_ROOT_REAL/$GOV_REPO_REAL/scripts/lib}"
 
 [ -f "$GUARD" ] || { echo "SKIP: не найден $GUARD"; exit 0; }
 [ -f "$LEDGER_APPEND" ] || { echo "SKIP: не найден $LEDGER_APPEND"; exit 0; }
@@ -34,7 +35,7 @@ IWE_ROOT="$SANDBOX/iwe"
 GOV_REPO="$GOV_REPO_REAL"
 mkdir -p "$IWE_ROOT/$GOV_REPO/scripts" "$IWE_ROOT/$GOV_REPO/machine/ledger"
 cp "$LEDGER_APPEND" "$IWE_ROOT/$GOV_REPO/scripts/"
-cp -R "$IWE_ROOT_REAL/$GOV_REPO_REAL/scripts/lib" "$IWE_ROOT/$GOV_REPO/scripts/"
+cp -R "$LEDGER_LIB_DIR" "$IWE_ROOT/$GOV_REPO/scripts/"
 export IWE_LEDGER_DIR="$IWE_ROOT/$GOV_REPO/machine/ledger"
 
 # Extract emit_session_closed() from the live script: the test must exercise the
@@ -107,6 +108,7 @@ wp: WP-484
 slug: $3
 opened_at: $2
 session_id: $4
+host: test-host
 orz_file: $5
 ---
 EOF
@@ -146,11 +148,20 @@ emit_session_closed "auto-archive-cancelled" "$SANDBOX/sem5.open" "WP-484" "slug
 check "часы записаны, а не потеряны вместе со сбоем раннера" "1" "$(count_events "$TODAY" slug slug-archive)"
 
 echo "6. канал auto-archive-cancelled, событие раннера уже есть"
-RUNNER_EVENT="{\"wp\":\"WP-484\",\"agent\":\"claude-code\",\"duration_min\":30,\"turns\":7,\"session_file\":\"MC-sessions/2026-09/$TODAY-runner-wrote.md\",\"repos\":[],\"status\":\"done\"}"
-bash "$IWE_ROOT/$GOV_REPO/scripts/ledger-append.sh" day "$TODAY" session_closed "$RUNNER_EVENT" quick-close >/dev/null
+RUNNER_EVENT="{\"wp\":\"WP-484\",\"host\":\"test-host\",\"agent\":\"claude-code\",\"session_id\":\"1700000006\",\"duration_min\":30,\"turns\":7,\"session_file\":\"MC-sessions/2026-09/$TODAY-runner-wrote.md\",\"repos\":[],\"status\":\"done\"}"
+bash "$IWE_ROOT/$GOV_REPO/scripts/ledger-append.sh" day "$TODAY" session_closed "$RUNNER_EVENT" quick-close --dedup-session-closed >/dev/null
 make_sem "$SANDBOX/sem6.open" "$OPENED_45M" "slug-runner" "1700000006" "2026-09/$TODAY-runner-wrote.md"
 emit_session_closed "auto-archive-cancelled" "$SANDBOX/sem6.open" "WP-484" "slug-runner" "claude-code" 2>/dev/null
-check "событие раннера распознано по имени файла, дубля нет" "0" "$(count_events "$TODAY" slug slug-runner)"
+check "событие раннера распознано по точному ID, дубля нет" "0" "$(count_events "$TODAY" slug slug-runner)"
+
+echo "6b. старое событие без ID и новый сеанс с тем же файлом"
+LEGACY_FILE="2026-09/$TODAY-legacy.md"
+LEGACY_EVENT="{\"wp\":\"WP-484\",\"agent\":\"claude-code\",\"session_file\":\"$LEGACY_FILE\"}"
+bash "$IWE_ROOT/$GOV_REPO/scripts/ledger-append.sh" day "$TODAY" session_closed "$LEGACY_EVENT" quick-close >/dev/null
+make_sem "$SANDBOX/sem6b.open" "$OPENED_45M" "slug-legacy" "1700000006b" "$LEGACY_FILE"
+emit_session_closed "peer-session" "$SANDBOX/sem6b.open" "WP-484" "slug-legacy" "claude-code"
+check "неизвестная идентичность не удаляет новый сеанс" "2" "$(count_events "$TODAY" session_file "$LEGACY_FILE")"
+check "риск возможного дубля сохранён в событии" "True" "$(field_of "$TODAY" slug-legacy idempotency_risk)"
 
 echo "7. метка вне полосы правдоподобия"
 make_sem "$SANDBOX/sem7.open" "2020-01-01T00:00:00Z" "slug-susp" "1700000007" "2026-09/$TODAY-susp.md"
