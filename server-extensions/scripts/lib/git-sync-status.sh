@@ -48,6 +48,22 @@ check_git_sync_status() {
       OK|STALE|DIVERGED|fetch_failed|NO_UPSTREAM|NOT_A_REPO|checker_unavailable)
         GIT_SYNC_STATUS="$GIT_SYNC_PRECOMPUTED_STATUS"
         GIT_SYNC_DETAIL="method=precomputed"
+        # A caller that precomputed the status once may also hand over the
+        # remote OID it saw, so a per-card consumer can still read the cards
+        # from that origin snapshot (materialize_origin_tree needs the OID).
+        # Anything that is not a plain hex OID / integer is dropped, never trusted.
+        case "${GIT_SYNC_PRECOMPUTED_REMOTE_OID:-}" in
+          ''|*[!0-9a-fA-F]*) ;;
+          *) GIT_SYNC_REMOTE_OID="$GIT_SYNC_PRECOMPUTED_REMOTE_OID" ;;
+        esac
+        case "${GIT_SYNC_PRECOMPUTED_BEHIND:-}" in
+          ''|*[!0-9]*) ;;
+          *) GIT_SYNC_BEHIND="$GIT_SYNC_PRECOMPUTED_BEHIND" ;;
+        esac
+        case "${GIT_SYNC_PRECOMPUTED_AHEAD:-}" in
+          ''|*[!0-9]*) ;;
+          *) GIT_SYNC_AHEAD="$GIT_SYNC_PRECOMPUTED_AHEAD" ;;
+        esac
         return 0
         ;;
       *)

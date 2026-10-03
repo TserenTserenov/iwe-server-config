@@ -93,6 +93,29 @@ log_sync() {
   echo "$(date '+%Y-%m-%d %H:%M:%S') | WP-${wp_num} | ${result} | ${reason}" >> "$logfile"
 }
 
+# Shared-ledger trace of an interactive sync run (wp_sync_run). The local
+# wp-sync.log is per-host and per-workspace, so a Mac session leaves no trace
+# on tsekh-1; the day ledger is the one record every host writes to. The
+# nightly batch exports GIT_SYNC_PRECOMPUTED_STATUS and reports in its own
+# summary, so it stays silent here (one event per card per night is noise).
+# Best-effort: a ledger failure never changes the bundle result.
+emit_sync_run() {
+  local wp_num="$1" result="$2" drift="$3" related="$4"
+  [[ -z "${GIT_SYNC_PRECOMPUTED_STATUS:-}" ]] || return 0
+  local ledger="$IWE_WORKSPACE/$GOV_REPO/scripts/ledger-append.sh"
+  [[ -f "$ledger" ]] || return 0
+  local data
+  data=$(python3 -c '
+import json, sys
+wp, result, git_sync, card_source, drift, related, host, session = sys.argv[1:9]
+print(json.dumps({"wp": "WP-" + wp, "result": result, "git_sync": git_sync,
+                  "card_source": card_source.split(" ")[0], "drift_count": int(drift or 0),
+                  "related_count": int(related or 0), "host": host, "session_id": session}))
+' "$wp_num" "$result" "${GIT_SYNC_STATUS:-unknown}" "${CARD_SOURCE:-unknown}" "${drift:-0}" "${related:-0}" \
+    "$(hostname 2>/dev/null || echo unknown)" "${CLAUDE_CODE_SESSION_ID:-}" 2>/dev/null) || return 0
+  bash "$ledger" day "$(date +%F)" wp_sync_run "$data" wp-sync-bundle >/dev/null 2>&1 || true
+}
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -1047,10 +1070,12 @@ main() {
 
   if [[ "$git_sync_blocking" == "true" && "$force_sync" != "true" ]]; then
     log_sync "$wp_num" "BLOCKED" "git_sync=${GIT_SYNC_STATUS} related=${related_count} drift=${drift_count} card_source=${CARD_SOURCE}"
+    emit_sync_run "$wp_num" "BLOCKED" "$drift_count" "$related_count"
     exit 3
   fi
 
   log_sync "$wp_num" "SUCCESS" "related=${related_count} drift=${drift_count} git_sync=${GIT_SYNC_STATUS} card_source=${CARD_SOURCE}"
+  emit_sync_run "$wp_num" "SUCCESS" "$drift_count" "$related_count"
 }
 
 main "$@"

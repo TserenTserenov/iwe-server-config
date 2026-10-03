@@ -145,6 +145,24 @@ GIT_SYNC_PRECOMPUTED_STATUS="STALE" check_git_sync_status "$DIR/repo" main 5
 check "status" "STALE" "$GIT_SYNC_STATUS"
 check "detail method" "method=precomputed" "$GIT_SYNC_DETAIL"
 
+echo "=== precomputed: remote OID and counters are handed through when well-formed ==="
+DIR="$TMP/precomputed-oid"; mkdir -p "$DIR"; setup_sandbox "$DIR"
+GIT_SYNC_PRECOMPUTED_STATUS="STALE" GIT_SYNC_PRECOMPUTED_REMOTE_OID="0123456789abcdef0123456789abcdef01234567" \
+  GIT_SYNC_PRECOMPUTED_BEHIND="7" GIT_SYNC_PRECOMPUTED_AHEAD="0" check_git_sync_status "$DIR/repo" main 5
+check "status" "STALE" "$GIT_SYNC_STATUS"
+check "remote oid" "0123456789abcdef0123456789abcdef01234567" "$GIT_SYNC_REMOTE_OID"
+check "behind" "7" "$GIT_SYNC_BEHIND"
+check "ahead" "0" "$GIT_SYNC_AHEAD"
+
+echo "=== precomputed: malformed OID / counters are dropped, never trusted ==="
+DIR="$TMP/precomputed-oid-bad"; mkdir -p "$DIR"; setup_sandbox "$DIR"
+GIT_SYNC_PRECOMPUTED_STATUS="STALE" GIT_SYNC_PRECOMPUTED_REMOTE_OID="zz; rm -rf /" \
+  GIT_SYNC_PRECOMPUTED_BEHIND="many" GIT_SYNC_PRECOMPUTED_AHEAD="-1" check_git_sync_status "$DIR/repo" main 5
+check "status" "STALE" "$GIT_SYNC_STATUS"
+check "remote oid empty" "" "$GIT_SYNC_REMOTE_OID"
+check "behind empty" "" "$GIT_SYNC_BEHIND"
+check "ahead empty" "" "$GIT_SYNC_AHEAD"
+
 echo "=== precomputed: invalid value fails closed, not a silent re-check ==="
 DIR="$TMP/precomputed-invalid"; mkdir -p "$DIR"; setup_sandbox "$DIR"
 GIT_SYNC_PRECOMPUTED_STATUS="not-a-real-status" check_git_sync_status "$DIR/repo" main 5

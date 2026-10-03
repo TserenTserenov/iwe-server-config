@@ -5075,7 +5075,9 @@ EOF
   # mechanically checkable fact instead of trusting the agent's declaration
   # that it ran Sync Gate; it does not enforce Sync Gate, only records it.
   if [ -f "$IWE_ROOT/$GOV_REPO/scripts/ledger-append.sh" ]; then
-    _sync_marker="$IWE_ROOT/.claude/state/wp-sync-${WP}.done"
+    # Marker files are named by the bare WP number (wp-sync-561.done), while
+    # $WP is "WP-561" or a sentinel such as week-close.
+    _sync_marker="$IWE_ROOT/.claude/state/wp-sync-${WP#WP-}.done"
     if find "$_sync_marker" -mmin -480 >/dev/null 2>&1; then
       _sync_marker_present=true
     else

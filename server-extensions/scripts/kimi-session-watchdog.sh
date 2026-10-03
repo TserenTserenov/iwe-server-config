@@ -143,6 +143,49 @@ clear_alert() {
   [ -f "$state" ] && update_counter "$1" alerted 0 || true
 }
 
+# cmd_confirm <target-key> <true|false> — WP-7 F105 (03.10, peer-session
+# 2026-10-03-10-wp7-open-phases-actualize): the validation protocol in the
+# header requires 10 pilot-confirmed episodes before the downgrade decision,
+# but nothing wrote pilot_confirmed — the pilot edited the JSONL by hand.
+# Updates the OLDEST still-null `pilot_confirmed` line for this target
+# (episodes are reviewed in the order they fired); refuses on anything but
+# true/false so a typo can't silently write a string into the boolean field.
+cmd_confirm() {
+  local target="$1" value="$2"
+  case "$value" in
+    true | false) ;;
+    *)
+      echo "confirm: value must be 'true' or 'false', got '$value'" >&2
+      return 1
+      ;;
+  esac
+  if [ ! -f "$VALIDATION_LOG" ]; then
+    echo "confirm: no validation log at $VALIDATION_LOG" >&2
+    return 1
+  fi
+  python3 - "$VALIDATION_LOG" "$target" "$value" <<'PY'
+import json
+import sys
+
+log_path, target, value = sys.argv[1], sys.argv[2], sys.argv[3] == "true"
+lines = open(log_path, encoding="utf-8").read().splitlines()
+done = False
+for i, line in enumerate(lines):
+    if not line.strip():
+        continue
+    row = json.loads(line)
+    if row.get("target") == target and row.get("pilot_confirmed") is None:
+        row["pilot_confirmed"] = value
+        lines[i] = json.dumps(row, ensure_ascii=False)
+        done = True
+        break
+if not done:
+    print(f"confirm: no unconfirmed episode found for target '{target}'", file=sys.stderr)
+    sys.exit(1)
+open(log_path, "w", encoding="utf-8").write("\n".join(lines) + "\n")
+PY
+}
+
 target_key() { printf '%s' "$1" | md5 -q 2>/dev/null || printf '%s' "$1" | shasum -a 256 2>/dev/null | cut -d' ' -f1 || true; }
 
 # --- signal b: cumulative CPU seconds of a pid set -------------------------
@@ -542,6 +585,14 @@ while true; do
 done
 }
 
-# Запущен как программа — крутим цикл; подключён через `source` (тесты) —
-# только определяем функции.
-[ "${BASH_SOURCE[0]}" != "$0" ] || run_forever
+# Запущен как программа:
+#   confirm <target> <true|false>  — WP-7 F105, записать вердикт пилота
+#   (любой другой случай, включая без аргументов) — крутим цикл демона.
+# Подключён через `source` (тесты) — только определяем функции.
+if [ "${BASH_SOURCE[0]}" = "$0" ]; then
+  if [ "${1:-}" = "confirm" ]; then
+    cmd_confirm "$2" "$3"
+  else
+    run_forever
+  fi
+fi

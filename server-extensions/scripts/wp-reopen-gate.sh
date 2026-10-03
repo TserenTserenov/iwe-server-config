@@ -264,6 +264,23 @@ print(json.dumps({
   atomic_write "$(lease_file_for "$wp")" "$lease"
   echo "$lease"
   log_err "actualized: WP-$wp @ origin_commit=${origin_commit:0:9} digest=${digest:0:12} session=$session_id"
+  emit_actualized "$wp" "$session_id" "$origin_commit" "$digest"
+}
+
+# The lease files are host-local, so a session on another host leaves no trace
+# of having actualized. The day ledger is shared; best-effort, never fails the gate.
+emit_actualized() {
+  local wp="$1" session_id="$2" origin_commit="$3" digest="$4"
+  [ -n "$GOV_REPO" ] || return 0
+  local ledger="$IWE_ROOT/$GOV_REPO/scripts/ledger-append.sh" data
+  [ -f "$ledger" ] || return 0
+  data=$("$PYTHON3" -c "
+import json, os, socket, sys
+print(json.dumps({'wp': 'WP-' + sys.argv[1], 'session_id': sys.argv[2],
+                  'origin_commit': sys.argv[3], 'card_digest': sys.argv[4][:12],
+                  'host': socket.gethostname()}))
+" "$wp" "$session_id" "$origin_commit" "$digest" 2>/dev/null) || return 0
+  bash "$ledger" day "$(date +%F)" wp_actualized "$data" wp-reopen-gate >/dev/null 2>&1 || true
 }
 
 cmd_check_edit() {
