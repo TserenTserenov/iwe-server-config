@@ -2665,6 +2665,8 @@ notify_dead_quarantine() {  # <quarantined path> <age> <worktree> <pass key> <re
 # criterion -- a push failure here leaves the worktree untouched, same as in
 # `close`.
 _reap_orphaned_worktree() {
+  # The caller may still be inside the orphan: removal must not delete our cwd.
+  cd -- "$IWE_ROOT" || { echo "WARNING: stable workspace unavailable; orphan worktree retained" >&2; return 1; }
   local quarantined_semaphore="$1"
   local worktree_path
   worktree_path=$(grep '^isolated_worktree: ' "$quarantined_semaphore" 2>/dev/null | head -1 | cut -d' ' -f2- || true)
@@ -8211,7 +8213,12 @@ PY
 }
 
 _worktree_absent_and_unregistered() {  # <common-dir> <worktree>
-  python3 - "$1" "$2" <<'PY' 2>/dev/null
+  # Enter a surviving directory before Python starts; setting only Git's cwd
+  # cannot recover Python startup from an already removed caller directory.
+  [[ "$1" == /* && "$2" == /* ]] || return 1
+  (
+    cd -- "$1" || return 1
+    python3 - "$1" "$2" <<'PY' 2>/dev/null
 import os
 import subprocess
 import sys
@@ -8233,6 +8240,7 @@ for line in result.stdout.splitlines():
     if line.startswith("worktree ") and os.path.abspath(line[9:]) == target:
         raise SystemExit(1)
 PY
+  )
 }
 
 _prepare_close_receipt() {  # <open semaphore> <result> <carry-over> [publish-digest] <terminal-sha>
@@ -9696,6 +9704,9 @@ _close_delivery_and_transition() {
           _prepared_source_snapshot_matches "$SEM_FILE" "$CLOSING_WORKTREE" \
             || fail "close retry: worktree/source/terminal изменился после PUBLISHED; не удаляю" 7
         fi
+        # Keep source-relative publication helpers in their original cwd until
+        # proof is complete, then leave the directory before removing it.
+        cd -- "$IWE_ROOT" || fail "close: постоянный каталог IWE недоступен; рабочая копия сохранена" 7
         timeout 60 git -C "$CLOSING_WORKTREE" worktree remove "$CLOSING_WORKTREE" 2>/dev/null \
           || fail "close retry: published worktree не удалён; .open сохранён" 7
       fi
@@ -9709,6 +9720,8 @@ _close_delivery_and_transition() {
         || fail "close retry: CLEANED receipt не прошёл self-check" 7
       delivery_state="cleaned"
     fi
+    # CLEANED retries also continue their Python/ledger work from a stable cwd.
+    cd -- "$IWE_ROOT" || fail "close: постоянный каталог IWE недоступен; cleanup receipt сохранён" 7
     publish_digest=$(_unique_record_field "$SEM_FILE" close_publish_digest || true)
     _worktree_absent_and_unregistered "$common_dir" "$CLOSING_WORKTREE" \
       || fail "close: cleanup receipt не подтверждается текущим git registry" 7

@@ -2072,5 +2072,160 @@ class HistoricalAutomergePublicationTests(unittest.TestCase):
 
 
 
+class WorktreeCleanupCwdTests(unittest.TestCase):
+    """Real published close cleanup remains usable when invoked from its own checkout."""
+
+    @classmethod
+    def setUpClass(cls):
+        names = (
+            "normalize_remote_url", "_unique_record_field", "_terminal_proof_snapshot_sha",
+            "_owned_semaphore_snapshot_sha", "_append_close_fields_atomic", "_record_close_prepared",
+            "_record_close_published", "_close_delivery_state", "_worktree_clean_status_sha",
+            "_isolated_source_commits_json", "_session_commit_claims_json",
+            "_prepared_source_snapshot_matches", "_worktree_absent_and_unregistered",
+            "_record_close_cleanup", "_prepare_close_receipt", "_rename_open_to_closed",
+            "_close_delivery_and_transition", "_reap_orphaned_worktree",
+        )
+        cls.functions = "\n".join(extract_function(SOURCE, name) for name in names)
+        cls.functions += '\nfail() { printf "%s\\n" "$1" >&2; exit "${2:-1}"; }\n'
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory(prefix="close-cwd-")
+        self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name).resolve()
+        self.repo = self.root / "governance"
+        self.repo.mkdir()
+        self.git("init", "-qb", "main")
+        self.git("config", "user.name", "Test")
+        self.git("config", "user.email", "test@example.invalid")
+        self.git("remote", "add", "origin", str(self.root / "origin.git"))
+        (self.repo / "nested").mkdir()
+        (self.repo / "nested/file.txt").write_text("already published\n")
+        self.git("add", "--", "nested/file.txt")
+        self.git("-c", "commit.gpgsign=false", "commit", "-qm", "seed")
+        self.head = self.git("rev-parse", "HEAD")
+        self.worktree = self.root / ".iwe-runtime/isolated-worktrees/codex-one"
+        self.worktree.parent.mkdir(parents=True)
+        self.git("worktree", "add", "-q", "-b", "session-one", str(self.worktree))
+        self.sem = self.root / "codex-one.open"
+        self.sem.write_text("agent: codex\nsession_id: one\nwp: WP-484\nslug: close-cwd\n"
+                            f"isolated_worktree: {self.worktree}\n")
+        self.terminal = self.root / "terminal.txt"
+        self.terminal.write_text("verified terminal result\n")
+        self.env = {key: value for key, value in os.environ.items()
+                    if not key.startswith(("GIT_", "IWE_", "CLAUDE_"))}
+        self.env.update(IWE_ROOT=str(self.root), GOV_REPO="governance", AGENT="codex",
+                        SESSION_ID="one", SEM_FILE=str(self.sem), MACHINE_CLOSE_MODE="1")
+        prepared = self.invoke('''
+terminal_sha=$(_terminal_proof_snapshot_sha file "$3")
+source_status=$(_worktree_clean_status_sha "$1")
+origin=$(normalize_remote_url "$(git -C "$1" remote get-url origin)")
+prepare=$(_record_close_prepared "$SEM_FILE" one "$1" "$2" "$4" "$4" "$source_status" \
+    '[]' '[]' file "$3" "$terminal_sha" "$origin" refs/heads/main)
+_record_close_published "$SEM_FILE" one "$prepare" "$4" '[]' "$4" "$source_status" "$terminal_sha"
+_close_delivery_state "$SEM_FILE" one
+''', str(self.worktree), str(self.repo / ".git"), str(self.terminal), self.head)
+        self.assertEqual(prepared.returncode, 0, prepared.stderr)
+        self.assertEqual(prepared.stdout.splitlines()[-1], "published")
+
+    def git(self, *args):
+        return subprocess.run(["git", "-C", str(self.repo), *args], check=True,
+                              capture_output=True, text=True).stdout.strip()
+
+    def invoke(self, command, *args, cwd=None, env=None):
+        return subprocess.run(["bash", "-c", "set -euo pipefail\n" + self.functions + command,
+                               "cleanup-test", *args], cwd=cwd or self.root,
+                              env={**self.env, **(env or {})}, capture_output=True, text=True, timeout=30)
+
+    def assert_closed_from(self, cwd):
+        result = self.invoke('''
+_close_delivery_and_transition
+python3 -c 'import os; print(os.getcwd())'
+''', cwd=cwd)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.strip(), str(self.root))
+        self.assertFalse(self.worktree.exists())
+        self.assertNotIn(str(self.worktree), self.git("worktree", "list", "--porcelain"))
+        self.assertFalse(self.sem.exists())
+        closed = self.sem.with_suffix(".open.closed").read_text()
+        self.assertIn("close_cleanup_proof: worktree-absent/v1\n", closed)
+        self.assertIn("checklist_status: closed\n", closed)
+
+    def test_close_from_worktree_root_completes_cleanup_and_receipt(self):
+        self.assert_closed_from(self.worktree)
+
+    def test_close_from_worktree_descendant_completes_cleanup_and_receipt(self):
+        self.assert_closed_from(self.worktree / "nested")
+
+    def test_cleanup_changes_cwd_only_after_source_proof(self):
+        original = extract_function(SOURCE, "_prepared_source_snapshot_matches").replace(
+            "_prepared_source_snapshot_matches()", "_original_source_snapshot_matches()", 1)
+        command = original + '''
+_prepared_source_snapshot_matches() {
+    [ "$(pwd -P)" = "$EXPECTED_PROOF_CWD" ] || return 1
+    _original_source_snapshot_matches "$@"
+}
+_close_delivery_and_transition
+python3 -c 'import os; print(os.getcwd())'
+'''
+        result = self.invoke(command, cwd=self.worktree,
+                             env={"EXPECTED_PROOF_CWD": str(self.worktree)})
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.strip(), str(self.root))
+        self.assertTrue(self.sem.with_suffix(".open.closed").exists())
+        self.assertFalse(self.worktree.exists())
+
+    def test_dirty_copy_is_retained_with_unchanged_published_receipt(self):
+        (self.worktree / "nested/file.txt").write_text("unpublished change\n")
+        before = self.sem.read_bytes()
+        result = self.invoke("_close_delivery_and_transition\n", cwd=self.worktree)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertTrue(self.worktree.exists())
+        self.assertEqual(self.sem.read_bytes(), before)
+        self.assertFalse(self.sem.with_suffix(".open.closed").exists())
+
+    def test_missing_stable_directory_refuses_before_cleanup(self):
+        before = self.sem.read_bytes()
+        result = self.invoke("_close_delivery_and_transition\n", cwd=self.worktree,
+                             env={"IWE_ROOT": str(self.root / "missing")})
+        self.assertNotEqual(result.returncode, 0)
+        self.assertTrue(self.worktree.exists())
+        self.assertEqual(self.sem.read_bytes(), before)
+
+    def test_absence_verifier_starts_from_an_already_deleted_cwd(self):
+        result = self.invoke('''
+git -C "$1" worktree remove "$2"
+_worktree_absent_and_unregistered "$1/.git" "$2"
+''', str(self.repo), str(self.worktree), cwd=self.worktree)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertFalse(self.worktree.exists())
+
+    def test_absent_but_registered_copy_is_not_accepted(self):
+        self.worktree.rename(self.root / "moved-worktree")
+        result = self.invoke('_worktree_absent_and_unregistered "$1" "$2"\n',
+                             str(self.repo / ".git"), str(self.worktree))
+        self.assertNotEqual(result.returncode, 0)
+
+    def test_relative_verifier_paths_cannot_change_meaning_after_cd(self):
+        result = self.invoke('_worktree_absent_and_unregistered "$1" "$2"\n',
+                             str(self.repo / ".git"), str(self.worktree.relative_to(self.root)))
+        self.assertNotEqual(result.returncode, 0)
+        self.assertTrue(self.worktree.exists())
+
+    def test_orphan_reaper_preserves_a_usable_cwd_after_removal(self):
+        publisher = self.repo / "scripts/isolate-push.sh"
+        publisher.parent.mkdir()
+        publisher.write_text("#!/usr/bin/env bash\nexit 0\n")
+        publisher.chmod(0o755)
+        result = self.invoke('''
+_reap_orphaned_worktree "$SEM_FILE"
+python3 -c 'import os; print(os.getcwd())'
+''', cwd=self.worktree)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.strip(), str(self.root))
+        self.assertFalse(self.worktree.exists())
+        self.assertNotIn(str(self.worktree), self.git("worktree", "list", "--porcelain"))
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
