@@ -11,7 +11,7 @@ set -uo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
 SDIR="${1:-$HERE/..}"
 SANDBOX=$(mktemp -d "${TMPDIR:-/tmp}/dglock-guards.XXXXXX")
-trap 'rm -rf "$SANDBOX"' EXIT
+trap 'chmod -R u+w "$SANDBOX" 2>/dev/null; rm -rf "$SANDBOX"' EXIT   # the scripts directory under test may be read-only (the delivered copy on Tsekh comes from the nix store) and a copy keeps those modes
 REAL_GIT=$(command -v git)
 HN="${HOSTNAME:-$(hostname)}"
 DEAD_PID=$(( $(cat /proc/sys/kernel/pid_max 2>/dev/null || echo 999998) + 1 ))   # a pid that cannot exist: above pid_max (4194304 on Tsekh) and above every pid of macOS
@@ -72,8 +72,8 @@ for c in ln mv; do
 done
 
 # the scripts directory without the library, and with a library that was cut short in delivery
-cp -R "$SDIR" "$SANDBOX/scripts-nolib"; rm -f "$SANDBOX/scripts-nolib/lib/dirty-guard-lock.sh"
-cp -R "$SDIR" "$SANDBOX/scripts-cut"; if [ -f "$SDIR/lib/dirty-guard-lock.sh" ]; then sed '$d' "$SDIR/lib/dirty-guard-lock.sh" > "$SANDBOX/scripts-cut/lib/dirty-guard-lock.sh"; fi
+cp -R "$SDIR" "$SANDBOX/scripts-nolib"; chmod -R u+w "$SANDBOX/scripts-nolib"; rm -f "$SANDBOX/scripts-nolib/lib/dirty-guard-lock.sh"
+cp -R "$SDIR" "$SANDBOX/scripts-cut"; chmod -R u+w "$SANDBOX/scripts-cut"; if [ -f "$SDIR/lib/dirty-guard-lock.sh" ]; then sed '$d' "$SDIR/lib/dirty-guard-lock.sh" > "$SANDBOX/scripts-cut/lib/dirty-guard-lock.sh"; fi
 
 for G in canon-refresh canon-reconcile sync-strategy-files git-dirty-guard; do
   profile "$G"
