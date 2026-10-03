@@ -341,9 +341,9 @@ do_session_consolidation() {
   log "Шаг 4/4: Консолидация сессий дня"
 
   local today
-  today=$(date +%Y-%m-%d)
+  today="${IWE_CLOSE_DATE:-$(date +%Y-%m-%d)}"
   local month_dir
-  month_dir=$(date +%Y-%m)
+  month_dir="${today%-*}"
   local sessions_root="${IWE_SESSIONS_ROOT:-$WORKSPACE_DIR/MC-sessions}/$month_dir"  # WP-526 Ф2
   local output_file="$DS_STRATEGY/current/sessions-today.md"
 

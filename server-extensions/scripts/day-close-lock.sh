@@ -85,8 +85,9 @@ local_barrier() {
 # Финальный коммит "day-close: YYYY-MM-DD" несёт реальные файлы дня и никогда не был частью
 # лока — отдельный факт, проверяемый напрямую по истории ветки, не через аренду.
 final_close_commit() {
-  local ref="$1" today; today=$(date +%Y-%m-%d)
-  git log "$ref" --since="${today} 00:00" --grep="day-close: ${today}" --format="%cd" \
+  local ref="$1" today; today="${IWE_CLOSE_DATE:-$(date +%Y-%m-%d)}"
+  # Business date may start before midnight UTC; commit time cannot bound it.
+  git log "$ref" --grep="^day-close: ${today}$" --format="%cd" \
     --date=format:%H:%M 2>/dev/null | head -1
 }
 
@@ -98,7 +99,7 @@ acquire() {
   local branch who today
   branch=$(git rev-parse --abbrev-ref HEAD) || { log "не удалось определить текущую ветку — эскалирую"; exit 2; }
   who=$(lock_owner)
-  today=$(date +%Y-%m-%d)
+  today="${IWE_CLOSE_DATE:-$(date +%Y-%m-%d)}"
   export PUBLISH_LEASE_OWNER="$who"
 
   local attempt acq_rc closed_at

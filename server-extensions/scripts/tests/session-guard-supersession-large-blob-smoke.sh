@@ -175,4 +175,83 @@ defs=$(grep -E '^MAX_BLOB_(BYTES|LINES) = ' "$GUARD" | sort | uniq -c)
   || fail_test "T3: a literal 262144/4096 proof cap is still present"
 echo "PASS T3: budgets identical across $(grep -c '^def anchored_insertions' "$GUARD") heredocs"
 
+# --- T4: a rebased replacement can retain an exact session edit after a
+# concurrent change to another row of the same file. A different replacement
+# must still fail, even when the changed paths and branch topology match.
+REBASE_REPO="$TEST_ROOT/rebased-replacement"
+git init -q "$REBASE_REPO"
+git -C "$REBASE_REPO" config user.email test@example.com
+git -C "$REBASE_REPO" config user.name Test
+git -C "$REBASE_REPO" config commit.gpgsign false
+printf 'WP591 old\nWP590 old\nWP589 old\nWP588 old\n' > "$REBASE_REPO/registry.md"
+printf 'base\n' > "$REBASE_REPO/work.md"
+git -C "$REBASE_REPO" add registry.md work.md
+git -C "$REBASE_REPO" commit -qm base
+REBASE_BASE=$(git -C "$REBASE_REPO" rev-parse HEAD)
+printf 'earlier session commit\n' > "$REBASE_REPO/earlier.md"
+git -C "$REBASE_REPO" add earlier.md
+git -C "$REBASE_REPO" commit -qm earlier
+python3 - "$REBASE_REPO" <<'PY'
+from pathlib import Path
+import sys
+root = Path(sys.argv[1])
+path = root / "registry.md"
+path.write_text(path.read_text().replace("WP589 old", "WP589 session"))
+(root / "work.md").write_text("base\nsession addition\n")
+PY
+git -C "$REBASE_REPO" add registry.md work.md
+git -C "$REBASE_REPO" commit -qm source
+REBASE_SOURCE=$(git -C "$REBASE_REPO" rev-parse HEAD)
+git -C "$REBASE_REPO" checkout -q -B published "$REBASE_BASE"
+python3 - "$REBASE_REPO" <<'PY'
+from pathlib import Path
+import sys
+path = Path(sys.argv[1]) / "registry.md"
+path.write_text(path.read_text().replace("WP590 old", "WP590 concurrent"))
+PY
+git -C "$REBASE_REPO" add registry.md
+git -C "$REBASE_REPO" commit -qm concurrent
+REBASE_UPSTREAM=$(git -C "$REBASE_REPO" rev-parse HEAD)
+python3 - "$REBASE_REPO" <<'PY'
+from pathlib import Path
+import sys
+root = Path(sys.argv[1])
+path = root / "registry.md"
+path.write_text(path.read_text().replace("WP589 old", "WP589 session"))
+(root / "work.md").write_text("base\nsession addition\n")
+PY
+git -C "$REBASE_REPO" add registry.md work.md
+git -C "$REBASE_REPO" commit -qm published
+REBASE_GOOD=$(git -C "$REBASE_REPO" rev-parse HEAD)
+REBASE_SEM="$TEST_ROOT/rebase-good.open"
+write_semaphore "$REBASE_SEM" "$REBASE_SOURCE" "$REBASE_GOOD"
+out=$(_commit_claim_supersession_has_publish_proof "$REBASE_REPO" "$REBASE_SOURCE" \
+  "$REBASE_GOOD" "$REBASE_SEM" repo 2>&1) \
+  || fail_test "T4: exact rebased replacement refused: $out"
+grep -qF "claimed changes preserved in OID-published claim: repo $REBASE_SOURCE -> $REBASE_GOOD" <<< "$out" \
+  || fail_test "T4: expected exact successor message, got: $out"
+echo "PASS T4: $out"
+
+git -C "$REBASE_REPO" checkout -q -B lossy "$REBASE_UPSTREAM"
+python3 - "$REBASE_REPO" <<'PY'
+from pathlib import Path
+import sys
+root = Path(sys.argv[1])
+path = root / "registry.md"
+path.write_text(path.read_text().replace("WP589 old", "WP589 different"))
+(root / "work.md").write_text("base\nsession addition\n")
+PY
+git -C "$REBASE_REPO" add registry.md work.md
+git -C "$REBASE_REPO" commit -qm lossy
+REBASE_BAD=$(git -C "$REBASE_REPO" rev-parse HEAD)
+REBASE_BAD_SEM="$TEST_ROOT/rebase-bad.open"
+write_semaphore "$REBASE_BAD_SEM" "$REBASE_SOURCE" "$REBASE_BAD"
+set +e
+out=$(_commit_claim_supersession_has_publish_proof "$REBASE_REPO" "$REBASE_SOURCE" \
+  "$REBASE_BAD" "$REBASE_BAD_SEM" repo 2>&1)
+rc=$?
+set -e
+[ "$rc" -eq 1 ] || fail_test "T5: changed session row was accepted (rc=$rc): $out"
+echo "PASS T5: changed session row refused"
+
 echo "PASS: session-guard-supersession-large-blob-smoke"

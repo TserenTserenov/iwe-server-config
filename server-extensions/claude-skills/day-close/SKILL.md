@@ -2,7 +2,7 @@
 name: day-close
 description: "Протокол закрытия дня (Day Close). Алиас для /run-protocol close day — симметрия с /day-open."
 argument-hint: ""
-version: 1.2.0
+version: 1.2.1
 layer: L1
 status: active
 triggers:
@@ -44,48 +44,51 @@ Day Close = протокол. Исполнять ТОЛЬКО пошагово �
 ### 0.5. Изолированная копия и housekeeping-сессия Day Close [[gate]]
 Day Close — кросс-РП инфраструктурная операция. С 03.10.2026 (WP-530, решение пилота) шаги 1-15 идут **в изолированной копии, нарезанной от origin/main**, а не в общем каноническом чекауте: канон под freeze (WP-520) отстаёт от origin и несёт чужую работу, а правки закрытия дня (`git mv` DayPlan, WeekPlan, WeekState, priorities) раньше оставляли в нём расходящееся дерево, из-за чего сторож синка падал каждые 20 минут (02-03.10: 129 сбоев подряд).
 
-**Правило корня.** Все файлы DS-my-strategy в шагах ниже — и в командах, и в тексте (`DS-my-strategy/current/...` и т.д.; журнал сессий `inbox/open-sessions.log` — исключение: он не отслеживается git и живёт в каноне, путь в `$IWE_OPEN_SESSIONS_LOG`) — берутся и правятся **внутри `$GOV_REPO_ROOT`** (корень копии). Относительные пути `DS-my-strategy/…` читать как `$GOV_REPO_ROOT/…`. Править `~/IWE/DS-my-strategy` напрямую нельзя. Дневной журнал `machine/ledger/**` остаётся в каноне сознательно (`IWE_LEDGER_DIR`): им владеет `ledger-publish.sh`, не коммитить его в копии. Каждый bash-блок ниже начинается с подключения файла переменных; в новом вызове Bash переменные не переживают границу вызова, поэтому и одиночные команды в тексте шагов (3, 5b, 5c, 5h, 8, 17) начинаются с `. "$HOME/IWE/.iwe-runtime/day-close-interactive.vars" 2>/dev/null;`.
+**Правило корня.** Все изменения планов, карточек и итогов выполняются в `$GOV_REPO_ROOT`. Относительные пути `DS-my-strategy/…` ниже означают этот корень. Переход к каноническим правкам при ошибке подготовки запрещён.
+
+**Граница мостика (РП-561 Ф32).** Дневной журнал пока пишет в канон через `IWE_LEDGER_DIR`; полный запрет записей в общую копию ещё не принят. Остаток — внешний источник существующего `ledger-publish`, подтверждение доставки и маршрутизация хуков своего запуска (узкая зависимость от РП-530 Ф85). Журнал сессий `$IWE_OPEN_SESSIONS_LOG` и игнорируемые runtime-выходы `day-close.sh` (`exocortex/`, `current/sessions-today.md`) также пока остаются общими. Перенос последних требует проверки читателей восстановления и синхронизации; один экспорт корня не меняет их контракт. Не объявлять полную изоляцию на основании одной подготовленной копии.
+
+**Владение запуском.** После успешного `--prepare` сохранить токен из вывода как неизменяемое значение этой сессии. Во всех командах ниже вместо `<токен из шага 0.5>` подставлять именно его, не перечитывать новый токен из общего файла. `--context` проверяет владельца, ветку и принадлежность копии репозиторию; только затем возвращает окружение. В новом Bash-вызове сначала выполнить этот префикс, в том числе перед одиночными командами из текста. При отказе остановить затронутый шаг. Для Edit/Write использовать корень из последней успешной проверки и проверить владение непосредственно перед записью. Дата `$IWE_CLOSE_DATE` фиксируется при подготовке и не меняется после полуночи.
 
 ```bash
 bash ~/IWE/scripts/day-close-step-log.sh start 0.5
-# 1) Копия от origin/main + host-lock. Скрипт берём с origin/main, не из канона: канон под freeze отстаёт и может не знать
-#    режима --prepare (старый скрипт принял бы чужой флаг за запуск ночной механики).
-#    Коды --prepare: 1 = закрытие уже идёт, 3 = в каноне неопубликованная работа по DayPlan, 4 = остался прежний незавершённый запуск (--finish или --abort).
-RC_PREP=99
-if git -C "$HOME/IWE/DS-my-strategy" fetch -q origin main && DCI=$(mktemp) \
-   && git -C "$HOME/IWE/DS-my-strategy" show origin/main:scripts/day-close-isolated.sh > "$DCI" && grep -q 'MODE=prepare' "$DCI"; then
-  bash "$DCI" --prepare; RC_PREP=$?
-else
-  echo "STOP: не удалось взять с origin/main day-close-isolated.sh с режимом --prepare; закрывать день по откату (см. ниже)"
+DCI=$(mktemp) || exit 1
+if ! git -C "$HOME/IWE/DS-my-strategy" fetch -q origin main ||
+   ! git -C "$HOME/IWE/DS-my-strategy" show origin/main:scripts/day-close-isolated.sh > "$DCI" ||
+   ! grep -q 'MODE=context' "$DCI"; then
+  rm -f "$DCI"
+  echo 'STOP: не удалось получить обёртку с проверкой владельца'
+  exit 1
 fi
-rm -f "${DCI:-}"
-if [ "$RC_PREP" -eq 0 ]; then
-  . "$HOME/IWE/.iwe-runtime/day-close-interactive.vars"
-  # 2) Housekeeping-сессия открывается ИЗНУТРИ копии: под freeze это допустимо без --canonical-owner (cwd = worktree).
-  cd "$GOV_REPO_ROOT" && IWE_AGENT=claude-code bash "${IWE_SCRIPTS:-$HOME/IWE/scripts}/session-guard.sh" open --housekeeping day-close --agent claude-code
-else
-  echo "STOP: копия не подготовлена (код $RC_PREP), закрытие дня НЕ начинать; причина выше"
-fi
+bash "$DCI" --prepare
+RC_PREP=$?
+rm -f "$DCI"
+[ "$RC_PREP" -eq 0 ] || exit "$RC_PREP"
+# Здесь агент сохраняет токен из вывода --prepare и подставляет его ниже.
+DC_CONTEXT=$(bash "$HOME/IWE/.iwe-runtime/day-close-interactive.sh" --context '<токен из шага 0.5>') || exit 1; eval "$DC_CONTEXT"
+cd "$GOV_REPO_ROOT" || exit 1
+IWE_AGENT=claude-code bash "${IWE_SCRIPTS:-$HOME/IWE/scripts}/session-guard.sh" open --housekeeping day-close --agent claude-code || exit 1
 bash ~/IWE/scripts/day-close-step-log.sh end 0.5
 ```
 
-Откат на прежний режим (если `--prepare` недоступен на хосте или копия не нужна): если копия уже нарезана — сначала `--abort` (скрипт `day-close-isolated.sh`, взятый с origin/main как в шаге 0.5; содержимое копии сохранится в `~/IWE/.iwe-runtime/day-close-abandoned/`, снимет замок и файл переменных; НЕ просто `rm` файла переменных — копия и замок на 4 часа останутся); затем выполнить шаги без файла переменных — `${GOV_REPO_ROOT:-…}` в блоках ниже тогда указывает на канон, как раньше; для этого открыть сессию прежней командой `… open --housekeeping day-close --agent claude-code --canonical-owner day-close` и учесть временное исключение у шага 6.
+Незавершённый запуск продолжать через `--context` с исходным токеном, не вызывать повторный `--prepare`. Возраст замка не прекращает владение. Осознанная отмена: `bash "$DAY_CLOSE_WRAPPER" --abort "$DAY_CLOSE_LOCK_TOKEN"` после проверки контекста. Она сохраняет **всю** копию и ветку на прежнем месте, включая исключённые Git файлы и неопубликованные коммиты; освобождаются только состояние интерактивного запуска и замок. При утерянном токене или замке — восстановление по сохранённым данным, без удаления ветки.
 
-Закрыть сессию — только после п. 15 (после публикации через `ds-publish.sh`) вместе с `day-close-isolated.sh --finish`. Если сессия прервалась, TTL 30 мин переименует семафор в `.stale` при следующем запуске; копия и host-lock живут до `--finish` (замок снимается сам через 4 ч).
+**Существующий запуск старой версии:** завершить или отменить той версией обёртки, которая его подготовила; новый `--context` не считается подтверждением старого контекста. Не удалять vars/ветку для обхода отказа.
 
 ### 0.6. Git-lock против гонки двух закрытий (WP-484 Ф2) [[gate]]
 
 > Инцидент 17.07: сервер (tsekh-1) и пилот вручную закрыли один день независимо, разъезд обнаружился только на commit+push. Применяется одинаково к обоим путям закрытия — серверный `run_claude day-close` (диспетчер `scheduler.sh`) заходит в этот же SKILL.md, отдельно патчить `scheduler.sh` не нужно.
 
 ```bash
+DC_CONTEXT=$(bash "$HOME/IWE/.iwe-runtime/day-close-interactive.sh" --context '<токен из шага 0.5>') || exit 1; eval "$DC_CONTEXT"
 bash ~/IWE/scripts/day-close-step-log.sh start 0.6
-bash {{HOME_DIR}}/IWE/scripts/day-close-lock.sh acquire
+bash {{HOME_DIR}}/IWE/scripts/day-close-lock.sh acquire || exit $?
 bash ~/IWE/scripts/day-close-step-log.sh end 0.6
 ```
 
 - Exit 0 → лок взят (закоммичен и запушен маркер `day-close-start: YYYY-MM-DD`), продолжать к шагу 1.
-- Exit 1 → день уже закрыт сегодня (найден финальный коммит `day-close:`) — **остановиться немедленно**, закрыть housekeeping-семафор (`bash "${IWE_SCRIPTS:-$HOME/IWE/scripts}/session-guard.sh" close --housekeeping day-close --agent claude-code`), сообщить пилоту «день уже закрыт», не выполнять шаги 1-16 повторно.
-- Exit 3 → кто-то закрывает день прямо сейчас (свежий, <30 мин, маркер `day-close-start:` от другого агента/хоста) — **остановиться**, закрыть housekeeping-семафор (`bash "${IWE_SCRIPTS:-$HOME/IWE/scripts}/session-guard.sh" close --housekeeping day-close --agent claude-code`), сообщить пилоту кем и когда, предложить подождать или проверить вручную.
+- Exit 1 → день уже закрыт сегодня (найден финальный коммит `day-close:`) — **остановиться немедленно**, сохранить подготовленную копию и housekeeping-сессию до разбора (продолжение через `--context`, отмена через `--abort` после учёта результатов), сообщить пилоту «день уже закрыт», не выполнять шаги 1-16 повторно.
+- Exit 3 → кто-то закрывает день прямо сейчас (свежий, <30 мин, маркер `day-close-start:` от другого агента/хоста) — **остановиться**, сохранить подготовленную копию и housekeeping-сессию до разбора (продолжение через `--context`, отмена через `--abort` после учёта результатов), сообщить пилоту кем и когда, предложить подождать или проверить вручную.
 - Exit 2 → git-операция не удалась (сеть/конфликт) — не считать день закрытым, сообщить пилоту причину, предложить повтор. Housekeeping-семафор не закрывать — повторный `acquire` пойдёт в рамках той же сессии.
 
 > **Замок рабочее дерево не трогает (WP-484, 05.09).** Метка собирается пустым коммитом поверх свежего `origin/<branch>` и пушится прямо туда; ни stash, ни rebase, ни checkout не выполняются. Прежняя версия ради того же результата прятала в stash всё дерево и трижды за вечер стёрла незакоммиченную работу параллельных сессий. Побочный эффект «замок заодно подтягивает канон» снят сознательно: под freeze канон отстаёт по замыслу, публикация идёт через `ds-publish.sh`.
@@ -114,10 +117,10 @@ done
 
 **Свод по направлениям недели (РП-561 Ф15, 16.09 — живая находка 15.09: итоги были перечислены вперемешку, а не по направлениям, потому что состояние недели собиралось только в Части Б, когда пилот уже ушёл).** Генератор — reflex-скрипт без LLM, <1 с, свод из уже готовых данных (DP.D.288 не нарушается; канонический перегон остаётся шагом 5g):
 ```bash
-[ -f "$HOME/IWE/.iwe-runtime/day-close-interactive.vars" ] && . "$HOME/IWE/.iwe-runtime/day-close-interactive.vars"  # корень изолированной копии (шаг 0.5)
-WS="${GOV_REPO_ROOT:-$HOME/IWE/DS-my-strategy}/current/WeekState W$((10#$(date +%V))).md"
-if python3 ${GOV_REPO_ROOT:-$HOME/IWE/DS-my-strategy}/scripts/day-close-weekstate-fill.py \
-     --governance-repo ${GOV_REPO_ROOT:-$HOME/IWE/DS-my-strategy} --for-date "$(date +%F)" >/dev/null 2>/tmp/weekstate-fill.err; then
+DC_CONTEXT=$(bash "$HOME/IWE/.iwe-runtime/day-close-interactive.sh" --context '<токен из шага 0.5>') || exit 1; eval "$DC_CONTEXT"
+WS="${GOV_REPO_ROOT:?}/current/WeekState W$IWE_CLOSE_WEEK.md"
+if python3 ${GOV_REPO_ROOT:?}/scripts/day-close-weekstate-fill.py \
+     --governance-repo ${GOV_REPO_ROOT:?} --for-date "$IWE_CLOSE_DATE" >/dev/null 2>/tmp/weekstate-fill.err; then
   grep -E '^(📅|📊|⚠️|🗓️)' "$WS"
 else
   echo "состояние недели не пересчиталось: $(tail -1 /tmp/weekstate-fill.err)"
@@ -131,8 +134,8 @@ fi
 
 Подсказка активных РП, чтобы пилот не вспоминал номера вручную:
 ```bash
-[ -f "$HOME/IWE/.iwe-runtime/day-close-interactive.vars" ] && . "$HOME/IWE/.iwe-runtime/day-close-interactive.vars"  # корень изолированной копии (шаг 0.5)
-grep -oE "WP-[0-9]+" "${GOV_REPO_ROOT:-$HOME/IWE/DS-my-strategy}/current/DayPlan $(date +%F).md" 2>/dev/null | sort -u | head -10
+DC_CONTEXT=$(bash "$HOME/IWE/.iwe-runtime/day-close-interactive.sh" --context '<токен из шага 0.5>') || exit 1; eval "$DC_CONTEXT"
+grep -oE "WP-[0-9]+" "${GOV_REPO_ROOT:?}/current/DayPlan $IWE_CLOSE_DATE.md" 2>/dev/null | sort -u | head -10
 ```
 
 Задать ОДНИМ сообщением (не тремя отдельными ходами), рефлексия по-прежнему обязательна (решение пилота 30.07, CONCEPT-night-cycle.md §22), приоритеты и часы — можно пропустить по отдельности:
@@ -149,9 +152,9 @@ grep -oE "WP-[0-9]+" "${GOV_REPO_ROOT:-$HOME/IWE/DS-my-strategy}/current/DayPlan
 python3 -c "import json,sys; print(json.dumps(sys.argv[1]))" "<ответ на вопрос 1>" # экранирование
 ```
 ```bash
-[ -f "$HOME/IWE/.iwe-runtime/day-close-interactive.vars" ] && . "$HOME/IWE/.iwe-runtime/day-close-interactive.vars"  # корень изолированной копии (шаг 0.5)
+DC_CONTEXT=$(bash "$HOME/IWE/.iwe-runtime/day-close-interactive.sh" --context '<токен из шага 0.5>') || exit 1; eval "$DC_CONTEXT"
 RETRO_JSON="{\"subtype\": \"preclose_retro\", \"retro_worked\": <экранированный ответ 1>, \"retro_failed\": <экранированный ответ 2>}"
-bash ${GOV_REPO_ROOT:-$HOME/IWE/DS-my-strategy}/scripts/ledger-append.sh day "$(date +%F)" pilot_answer "$RETRO_JSON" day-close
+bash ${GOV_REPO_ROOT:?}/scripts/ledger-append.sh day "$IWE_CLOSE_DATE" pilot_answer "$RETRO_JSON" day-close
 ```
 Формулировка и поля идентичны `scripts/day-preclose.sh` — тот же скрипт остаётся терминальным запасным путём.
 
@@ -165,7 +168,7 @@ today:
   - WP-NNN
   - WP-MMM
 ```
-`last_updated` = завтрашняя дата (`date -v+1d +%Y-%m-%d 2>/dev/null || date -d "tomorrow" +%Y-%m-%d`). Добавить файл в список изменений для коммита на шаге 15 (если перезаписывался).
+`last_updated` = завтрашняя дата (`python3 -c 'import datetime, os; print(datetime.date.fromisoformat(os.environ["IWE_CLOSE_DATE"]) + datetime.timedelta(days=1))'`). Добавить файл в список изменений для коммита на шаге 15 (если перезаписывался).
 
 **3. Часы саморазвития (WP-310 Ф13c) → подсказка боту, не файл.** Пропущено пилотом → пометить «не записано», не блокировать. Иначе — подсказать команду `/slot N` в @aist_pilot_me или @aist_me_bot (handler пишет slot_logged event с source='self_report_daily').
 
@@ -174,8 +177,8 @@ today:
 Сказать пилоту: **«Ты свободен, дальше довожу закрытие дня сам»** — и продолжить Часть Б (governance-batch, архивация, метрики, верификация, коммит) без дальнейшего участия пилота. Записать факт передачи в ledger:
 
 ```bash
-[ -f "$HOME/IWE/.iwe-runtime/day-close-interactive.vars" ] && . "$HOME/IWE/.iwe-runtime/day-close-interactive.vars"  # корень изолированной копии (шаг 0.5)
-bash ${GOV_REPO_ROOT:-$HOME/IWE/DS-my-strategy}/scripts/ledger-append.sh day "$(date +%F)" conversational_close_done '{"source":"interactive-skill","handoff":"pilot_free"}'
+DC_CONTEXT=$(bash "$HOME/IWE/.iwe-runtime/day-close-interactive.sh" --context '<токен из шага 0.5>') || exit 1; eval "$DC_CONTEXT"
+bash ${GOV_REPO_ROOT:?}/scripts/ledger-append.sh day "$IWE_CLOSE_DATE" conversational_close_done '{"source":"interactive-skill","handoff":"pilot_free"}'
 ```
 
 ---
@@ -189,11 +192,11 @@ bash ${GOV_REPO_ROOT:-$HOME/IWE/DS-my-strategy}/scripts/ledger-append.sh day "$(
 
 **5a.** `bash ~/IWE/scripts/day-close-step-log.sh start 2a` — Обновить WeekPlan (`DS-my-strategy/current/Plan W{N}...`): статусы РП. **Grep по номеру РП** — обновить ВСЕ упоминания. `bash ~/IWE/scripts/day-close-step-log.sh end 2a` [[gate]]
 
-**5b.** `bash ~/IWE/scripts/day-close-step-log.sh start 2b` — Обновить DayPlan `DS-my-strategy/current/DayPlan YYYY-MM-DD.md`: статусы ВСЕХ строк (РП + ad-hoc). Done → зачеркнуть. Для строк с номером РП — сформировать список «РП → новый статус», затем по возрастанию номера вызывать `. "$HOME/IWE/.iwe-runtime/day-close-interactive.vars" 2>/dev/null; bash "${GOV_REPO_ROOT:-$HOME/IWE/DS-my-strategy}/scripts/wp-status-patch.sh" <N> --dayplan-status <статус>` (WP-484 Ф14) вместо ручного Edit; ad-hoc строки без номера РП — по-прежнему Edit. Любой ненулевой exit — остановиться на этом РП, НЕ вызывать `end 2b`, зафиксировать номер и код ошибки, доисправить Edit-ом вручную; скрипт идемпотентен — после исправления безопасно повторить весь список с начала. `bash ~/IWE/scripts/day-close-step-log.sh end 2b` [[gate]]
+**5b.** `bash ~/IWE/scripts/day-close-step-log.sh start 2b` — Обновить DayPlan `DS-my-strategy/current/DayPlan YYYY-MM-DD.md`: статусы ВСЕХ строк (РП + ad-hoc). Done → зачеркнуть. Для строк с номером РП — сформировать список «РП → новый статус», затем по возрастанию номера вызывать `DC_CONTEXT=$(bash "$HOME/IWE/.iwe-runtime/day-close-interactive.sh" --context '<токен из шага 0.5>') || exit 1; eval "$DC_CONTEXT"; bash "${GOV_REPO_ROOT:?}/scripts/wp-status-patch.sh" <N> --dayplan-path "$GOV_REPO_ROOT/current/DayPlan $IWE_CLOSE_DATE.md" --dayplan-status <статус>` (WP-484 Ф14) вместо ручного Edit; ad-hoc строки без номера РП — по-прежнему Edit. Любой ненулевой exit — остановиться на этом РП, НЕ вызывать `end 2b`, зафиксировать номер и код ошибки, доисправить Edit-ом вручную; скрипт идемпотентен — после исправления безопасно повторить весь список с начала. `bash ~/IWE/scripts/day-close-step-log.sh end 2b` [[gate]]
 
-**5c.** `bash ~/IWE/scripts/day-close-step-log.sh start 2c` — Обновить `DS-my-strategy/docs/WP-REGISTRY.md`: статусы + даты + **done-форматирование**. Для того же списка «РП → новый статус» — вызывать `. "$HOME/IWE/.iwe-runtime/day-close-interactive.vars" 2>/dev/null; bash "${GOV_REPO_ROOT:-$HOME/IWE/DS-my-strategy}/scripts/wp-status-patch.sh" <N> --registry-status <emoji>` (или `--done`, закрывая сразу оба файла одним вызовом, если РП завершён) вместо ручного Edit статуса; та же обработка сбоя, что в 5b (стоп без `end 2c`, фиксация, ручной фикс, безопасный повтор всего списка). Скрипт не создаёт зачёркивание — done-РП по-прежнему требует отдельного Edit: зачеркнуть номер, приоритет, название, репо, бюджет (`~~...~~`); снять bold с названия; эмодзи ✅ НЕ зачёркивать (см. `.claude/rules/formatting.md §Таблицы с РП`). Тильду внутри ячеек заменить (`~6.5h` → `6.5h`). `bash ~/IWE/scripts/day-close-step-log.sh end 2c` [[gate]]
+**5c.** `bash ~/IWE/scripts/day-close-step-log.sh start 2c` — Обновить `DS-my-strategy/docs/WP-REGISTRY.md`: статусы + даты + **done-форматирование**. Для того же списка «РП → новый статус» — вызывать `DC_CONTEXT=$(bash "$HOME/IWE/.iwe-runtime/day-close-interactive.sh" --context '<токен из шага 0.5>') || exit 1; eval "$DC_CONTEXT"; bash "${GOV_REPO_ROOT:?}/scripts/wp-status-patch.sh" <N> --dayplan-path "$GOV_REPO_ROOT/current/DayPlan $IWE_CLOSE_DATE.md" --registry-status <emoji>` (или `--done`, закрывая сразу оба файла одним вызовом, если РП завершён) вместо ручного Edit статуса; та же обработка сбоя, что в 5b (стоп без `end 2c`, фиксация, ручной фикс, безопасный повтор всего списка). Скрипт не создаёт зачёркивание — done-РП по-прежнему требует отдельного Edit: зачеркнуть номер, приоритет, название, репо, бюджет (`~~...~~`); снять bold с названия; эмодзи ✅ НЕ зачёркивать (см. `.claude/rules/formatting.md §Таблицы с РП`). Тильду внутри ячеек заменить (`~6.5h` → `6.5h`). `bash ~/IWE/scripts/day-close-step-log.sh end 2c` [[gate]]
 
-**5d.** `bash ~/IWE/scripts/day-close-step-log.sh start 2d` — Обновить журнал сессий — файл из `$IWE_OPEN_SESSIONS_LOG` (после `. "$HOME/IWE/.iwe-runtime/day-close-interactive.vars"`; это файл канона, он не отслеживается git и в копии его нет): удалить строки закрытых сессий. `bash ~/IWE/scripts/day-close-step-log.sh end 2d` [[gate]]
+**5d.** `bash ~/IWE/scripts/day-close-step-log.sh start 2d` — Обновить журнал сессий — файл из `$IWE_OPEN_SESSIONS_LOG` (после проверки контекста шага 0.5; это файл канона, он не отслеживается git и в копии его нет): удалить строки закрытых сессий. `bash ~/IWE/scripts/day-close-step-log.sh end 2d` [[gate]]
 
 **5e.** Governance-синхронизация: новые репо/сервисы за день? → REPOSITORY-REGISTRY, navigation.md, MAP.002. [[narrative]]
 
@@ -207,21 +210,21 @@ bash ${GOV_REPO_ROOT:-$HOME/IWE/DS-my-strategy}/scripts/ledger-append.sh day "$(
 
 **5g. Состояние недели по направлениям (WP-561 Ф14, 2026-09-15)** [[narrative]] — best-effort, не блокирует Close:
 ```bash
-[ -f "$HOME/IWE/.iwe-runtime/day-close-interactive.vars" ] && . "$HOME/IWE/.iwe-runtime/day-close-interactive.vars"  # корень изолированной копии (шаг 0.5)
-python3 ${GOV_REPO_ROOT:-$HOME/IWE/DS-my-strategy}/scripts/day-close-weekstate-fill.py \
-  --governance-repo ${GOV_REPO_ROOT:-$HOME/IWE/DS-my-strategy} --for-date "$(date +%F)" || \
+DC_CONTEXT=$(bash "$HOME/IWE/.iwe-runtime/day-close-interactive.sh" --context '<токен из шага 0.5>') || exit 1; eval "$DC_CONTEXT"
+python3 ${GOV_REPO_ROOT:?}/scripts/day-close-weekstate-fill.py \
+  --governance-repo ${GOV_REPO_ROOT:?} --for-date "$IWE_CLOSE_DATE" || \
   echo "WARN: WeekState не пересчитан — старая версия (если была) остаётся на диске, открытие дня покажет её устаревшей"
 ```
 Перезаписывает `current/WeekState W{N}.md` (PIPE-17) — ноль LLM-вызовов, каждое поле копируется дословно из плана недели, дневного журнала и карточек РП («Осталось»). Плана недели без секции «Направления недели» → честный `generated_status: no-directions`, не ошибка. Читает и использует этот файл открытие следующего дня (`day-open-weekstate-render.py`, шаг 1e `day-open/SKILL.md`) — этим потребление файла не ограничивается.
 
 **Обязательно и сегодня (РП-561 Ф15, 2026-09-16 — живая находка: 15.09 файл перегенерировался со строкой `⚠️` про 16 непривязанных РП, но пилот эту строку так и не увидел).** Строки `⚠️`/`🗓️` (и `📅`/`📊`) из только что перезаписанного `WeekState W{N}.md` цитируются ДОСЛОВНО (не пересказ, не «см. файл») в двух местах, куда пилот реально смотрит: (1) в Части А, шаг 1 — пилот ещё на связи; (2) в DayPlan «Итоги дня» (шаг 13з → 14a) — утром их подхватит Day Open («Направления сегодня» + «Требует внимания»). Сам шаг генерации остаётся `[[narrative]]`, но цитата проверяется машинно: `--verify-dayplan` (14a) сверяет каждую `⚠️`/`🗓️`-строку WeekState с `generated_for` = сегодня с архивным DayPlan, R23 (шаг 17, п.7) получает эти строки как вход.
 
-**5h. WP Context Freshness (БЛОКИРУЮЩЕЕ).** [[gate]] `bash ~/IWE/scripts/day-close-step-log.sh start 2g`. 5a-5c обновляют трекеры (WeekPlan/DayPlan/REGISTRY) — статус-строку, не сам контекст-файл РП. Для каждого РП, тронутого хотя бы одной сессией сегодня (`grep "$(date +%Y-%m-%d)" ~/IWE/MC-sessions/00-index.md` (WP-526 Ф2) + одиночные Quick Close сессии за день): открыть `inbox/WP-N/WP-N.md` **точечно** (grep по номеру/дате сегодняшней сессии → Read с `offset` вокруг найденной строки, не весь файл целиком — для зонтичных РП полное перечитывание дорого, WP-484 peer-session 2026-07-18-13 находка), свериться с §4/§6 отчётов всех сегодняшних сессий по этому РП — суб-пункты, которые сессия закрыла или нашла уже закрытыми, должны быть отмечены done в контекст-файле, а не только в статус-строке трекера. Несколько сессий трогали один зонтичный РП за день → одно согласованное состояние на конец дня, не разрозненные пере-перезаписи. Source: [2026-07-09-17-close-actualization-gap](../../../MC-sessions/2026-07/2026-07-09-17-close-actualization-gap/report.md).
+**5h. WP Context Freshness (БЛОКИРУЮЩЕЕ).** [[gate]] `bash ~/IWE/scripts/day-close-step-log.sh start 2g`. 5a-5c обновляют трекеры (WeekPlan/DayPlan/REGISTRY) — статус-строку, не сам контекст-файл РП. Для каждого РП, тронутого хотя бы одной сессией сегодня (`grep "$IWE_CLOSE_DATE" ~/IWE/MC-sessions/00-index.md` (WP-526 Ф2) + одиночные Quick Close сессии за день): открыть `inbox/WP-N/WP-N.md` **точечно** (grep по номеру/дате сегодняшней сессии → Read с `offset` вокруг найденной строки, не весь файл целиком — для зонтичных РП полное перечитывание дорого, WP-484 peer-session 2026-07-18-13 находка), свериться с §4/§6 отчётов всех сегодняшних сессий по этому РП — суб-пункты, которые сессия закрыла или нашла уже закрытыми, должны быть отмечены done в контекст-файле, а не только в статус-строке трекера. Несколько сессий трогали один зонтичный РП за день → одно согласованное состояние на конец дня, не разрозненные пере-перезаписи. Source: [2026-07-09-17-close-actualization-gap](../../../MC-sessions/2026-07/2026-07-09-17-close-actualization-gap/report.md).
 
   **Guarded write (WP-530 Ф5 п.1, 17.08 peer-session с Kimi).** Отметку суб-пунктов done делать НЕ через Edit tool напрямую — через `day-close-5g-apply.sh`, иначе параллельная сессия, тронувшая тот же контекст-файл между Read и записью, теряет свою правку молча (живой прецедент — Ф2 самой карточки WP-530, 15.08):
-  1. Сразу после Read (до формулирования правки) посчитать hash прочитанного файла: `. "$HOME/IWE/.iwe-runtime/day-close-interactive.vars" 2>/dev/null; shasum -a 256 "${GOV_REPO_ROOT:-$HOME/IWE/DS-my-strategy}/inbox/WP-N/WP-N.md" | cut -d' ' -f1`.
+  1. Сразу после Read (до формулирования правки) посчитать hash прочитанного файла: `DC_CONTEXT=$(bash "$HOME/IWE/.iwe-runtime/day-close-interactive.sh" --context '<токен из шага 0.5>') || exit 1; eval "$DC_CONTEXT"; shasum -a 256 "${GOV_REPO_ROOT:?}/inbox/WP-N/WP-N.md" | cut -d' ' -f1`.
   2. Собрать пары `{text, target_status}` по найденным суб-пунктам (текст — точная строка подпункта без чекбокса, ровно как она есть в файле; `target_status` — `"x"`).
-  3. Один вызов на файл (все пары этого файла — одним batch, не по отдельности): `echo '{"pairs":[...]}' | . "$HOME/IWE/.iwe-runtime/day-close-interactive.vars" 2>/dev/null; bash ~/IWE/scripts/day-close-5g-apply.sh "${GOV_REPO_ROOT:-$HOME/IWE/DS-my-strategy}/inbox/WP-N/WP-N.md" --expected-hash <hash из шага 1>`.
+  3. Один вызов на файл (все пары этого файла — одним batch, не по отдельности): `DC_CONTEXT=$(bash "$HOME/IWE/.iwe-runtime/day-close-interactive.sh" --context '<токен из шага 0.5>') || exit 1; eval "$DC_CONTEXT"; echo '{"pairs":[...]}' | bash ~/IWE/scripts/day-close-5g-apply.sh "${GOV_REPO_ROOT:?}/inbox/WP-N/WP-N.md" --expected-hash <hash из шага 1>`.
   4. Разобрать построчный JSON-вывод: `ok` — записано; `no-op`/`already_done` — суб-пункт уже был done (не твоя правка, но цель достигнута — не ошибка); `LINE_NOT_FOUND`/`LINE_AMBIGUOUS` — текст подпункта не нашёлся однозначно, перечитать файл заново и свериться с текстом вручную. Exit ≠ 0 у скрипта означает CONFLICT (файл изменился с момента Read — stderr содержит `expected_hash`/`actual_hash`/`file`) **или** хотя бы одну `error`-пару.
   5. При CONFLICT/error — НЕ повторять автоматически (LLM, перечитавший файл, не гарантированно воспроизводит ту же трансформацию — согласовано с Kimi явно, не retry). Зафиксировать через `capture_trace` (`wp_context_write_conflict`) и сообщить пилоту: какой файл, ожидался ли hash X, фактический Y, что именно не применилось — с выбором «продолжить Close без этого шага / перечитать вручную и повторить / прервать Close». Не импровизировать обход.
 
@@ -231,12 +234,11 @@ python3 ${GOV_REPO_ROOT:-$HOME/IWE/DS-my-strategy}/scripts/day-close-weekstate-f
 
 `bash ~/IWE/scripts/day-close-step-log.sh start 3`
 
-- **DayPlan сегодняшнего дня** → `. "$HOME/IWE/.iwe-runtime/day-close-interactive.vars" 2>/dev/null; git -C "${GOV_REPO_ROOT:-$HOME/IWE/DS-my-strategy}" mv "current/DayPlan $(date +%Y-%m-%d).md" archive/day-plans/`. Если есть DayPlan'ы прошлых дней в `current/` (накопленный мусор) — заархивировать их тоже одной командой.
+- **DayPlan сегодняшнего дня** → `DC_CONTEXT=$(bash "$HOME/IWE/.iwe-runtime/day-close-interactive.sh" --context '<токен из шага 0.5>') || exit 1; eval "$DC_CONTEXT"; git -C "${GOV_REPO_ROOT:?}" mv "current/DayPlan $IWE_CLOSE_DATE.md" archive/day-plans/`. Если есть DayPlan'ы прошлых дней в `current/` (накопленный мусор) — заархивировать их тоже одной командой.
 
-> **Только для отката без `--prepare` (с 03.10.2026 фаза «Day Close в изолированной копии» реализована мостиком, шаг 0.5). ВРЕМЕННОЕ ИСКЛЮЧЕНИЕ WP-520 действует лишь в прежнем режиме на каноническом чекауте.** Шаги 5-15 пока идут на каноническом чекауте, который под freeze отстаёт от origin/main: `git mv` и правки DayPlan/WeekPlan/WP-REGISTRY делаются на устаревшей базе, и публикация на шаге 15 может отдать конфликт (25.09: строку WP-170 другая сессия добавила на origin через изолированную публикацию, локально её не было). Ручное разрешение: во временной копии из вывода `ds-publish.sh` оставить ОБЕ стороны (строки таблиц обеих сессий), пересчитать «Портфель в работе» = базовая сумма + все добавленные часы, `git add` → `git cherry-pick --continue` → `git push origin HEAD:main` без пауз (origin уходит вперёд за минуты). После этого ОБЯЗАТЕЛЬНО записать diff-описание слияния (какие строки чьи, новая сумма) в журнал сессии (ORZ-файл дня) и строкой обкатки в `STAGING.md` (запись S-65) — следующее закрытие сверяет отсутствие накопленной дельты. Это описание действует только для отката; в основном режиме шаги идут в копии (шаг 0.5).
 - **Done WP context files (WP-530 "Осталось после Ф9", 19.08 peer-session с Codex).** Голый `mv` обходил `wp-context-guarded-edit` (защиту от гонки, поставленную 17.08) — параллельная сессия, тронувшая тот же файл между чтением статуса и переносом, теряла свою правку молча. Для каждой реально существующей папки `inbox/WP-{N}/WP-{N}.md`, у которой `status: done` находится именно в первом YAML frontmatter-блоке файла (не в тексте карточки — иначе ложные совпадения на цитаты статуса), вызвать:
   ```bash
-  . "$HOME/IWE/.iwe-runtime/day-close-interactive.vars" 2>/dev/null   # экспортирует IWE_GOVERNANCE_REPO_PATH = изолированная копия
+  DC_CONTEXT=$(bash "$HOME/IWE/.iwe-runtime/day-close-interactive.sh" --context '<токен из шага 0.5>') || exit 1; eval "$DC_CONTEXT"
   bash "$HOME/IWE/scripts/archive-done-wp.sh" {N}
   ```
   `archive-done-wp.sh` сам находит `inbox/WP-{N}/WP-{N}.md`, обновляет frontmatter, делает `git mv` через `wp-context-guarded-edit`. Уже заархивированные РП автоматически не подхватятся повторно — их папки физически отсутствуют в `inbox/` после переноса.
@@ -276,8 +278,8 @@ grep -nE "→ ждёт|ждёт|dep:|блокер|blocked:|остановлен|
 > Ловит раздутие индекс-файлов (MEMORY.md, WP-REGISTRY.md, MAPSTRATEGIC.md, *-registry.md, *-index.md, *-catalog.md). Правило: [feedback_memory_index_discipline.md](../../../memory/feedback_memory_index_discipline.md) — шапки и колонки индексов = hook-строки, не дамп контекста.
 
 ```bash
-[ -f "$HOME/IWE/.iwe-runtime/day-close-interactive.vars" ] && . "$HOME/IWE/.iwe-runtime/day-close-interactive.vars"  # корень изолированной копии (шаг 0.5)
-python3 ${GOV_REPO_ROOT:-$HOME/IWE/DS-my-strategy}/scripts/check-index-health.py
+DC_CONTEXT=$(bash "$HOME/IWE/.iwe-runtime/day-close-interactive.sh" --context '<токен из шага 0.5>') || exit 1; eval "$DC_CONTEXT"
+python3 ${GOV_REPO_ROOT:?}/scripts/check-index-health.py
 # Проверка сканирует ~/IWE целиком: пути DS-my-strategy в отчёте — это канон, находки по нему править ТОЛЬКО в копии ($GOV_REPO_ROOT/…), канон не править.
 ```
 
@@ -307,9 +309,9 @@ python3 ${GOV_REPO_ROOT:-$HOME/IWE/DS-my-strategy}/scripts/check-index-health.py
 ### 10. Автоматические шаги [[gate]]
 
 ```bash
-[ -f "$HOME/IWE/.iwe-runtime/day-close-interactive.vars" ] && . "$HOME/IWE/.iwe-runtime/day-close-interactive.vars"  # корень изолированной копии (шаг 0.5)
+DC_CONTEXT=$(bash "$HOME/IWE/.iwe-runtime/day-close-interactive.sh" --context '<токен из шага 0.5>') || exit 1; eval "$DC_CONTEXT"
 bash ~/IWE/scripts/day-close-step-log.sh start 5
-cd ${GOV_REPO_ROOT:-$HOME/IWE/DS-my-strategy} && python3 scripts/process-runner.py start day-close
+cd ${GOV_REPO_ROOT:?} && python3 scripts/process-runner.py start day-close
 bash ~/IWE/scripts/day-close-step-log.sh end 5
 ```
 
@@ -322,9 +324,9 @@ bash ~/IWE/scripts/day-close-step-log.sh end 5
 ### 11. Facts Digest (ledger) — WP-484 Ф16.3 [[narrative]]
 
 ```bash
-[ -f "$HOME/IWE/.iwe-runtime/day-close-interactive.vars" ] && . "$HOME/IWE/.iwe-runtime/day-close-interactive.vars"  # корень изолированной копии (шаг 0.5)
+DC_CONTEXT=$(bash "$HOME/IWE/.iwe-runtime/day-close-interactive.sh" --context '<токен из шага 0.5>') || exit 1; eval "$DC_CONTEXT"
 bash ~/IWE/scripts/day-close-step-log.sh start 5b
-bash "${GOV_REPO_ROOT:-$HOME/IWE/DS-my-strategy}/scripts/day-close-prepare.sh" --for-date "$(date +%F)" || true
+bash "${GOV_REPO_ROOT:?}/scripts/day-close-prepare.sh" --for-date "$IWE_CLOSE_DATE" || true
 bash ~/IWE/scripts/day-close-step-log.sh end 5b
 ```
 
@@ -350,7 +352,7 @@ bash ~/IWE/scripts/day-close-step-log.sh end 5b
    - Если Neon тоже пуст (данные синхронизируются ночью) → пометить «pending Neon» и пересчитать при следующей сессии
    - Поле: `payload->>'human_readable'` (напр. «9 hrs»); `total_seconds` для мультипликатора
 2. **Бюджет закрыт — считать ПО ФАКТУ, не по букве плана** (БЛОКИРУЮЩЕЕ, урок 27 мая):
-   - **Шаг 2.0 (обязательный prerequisite, WP-526 Ф2 — MC-sessions, не `<governance-repo>/sessions/`):** открыть `${IWE_SESSIONS_ROOT:-$HOME/IWE/MC-sessions}/00-index.md`, отфильтровать строки за сегодня (`grep "$(date +%Y-%m-%d)"`), составить полный список peer-сессий с числом ходов. Без этого расчёт занижен ×2. **Число ходов — не пересчитывать вручную**: `turns_count` уже посчитан в `meta.yaml` каждой сессии (`grep turns_count ~/IWE/MC-sessions/2026-MM/DD/2026-MM-DD-*/meta.yaml`) — брать оттуда (WP-484 peer-session 2026-07-18-13).
+   - **Шаг 2.0 (обязательный prerequisite, WP-526 Ф2 — MC-sessions, не `<governance-repo>/sessions/`):** открыть `${IWE_SESSIONS_ROOT:-$HOME/IWE/MC-sessions}/00-index.md`, отфильтровать строки за сегодня (`grep "$IWE_CLOSE_DATE"`), составить полный список peer-сессий с числом ходов. Без этого расчёт занижен ×2. **Число ходов — не пересчитывать вручную**: `turns_count` уже посчитан в `meta.yaml` каждой сессии (`grep turns_count ~/IWE/MC-sessions/2026-MM/DD/2026-MM-DD-*/meta.yaml`) — брать оттуда (WP-484 peer-session 2026-07-18-13).
    - **Индекс неполон или отстаёт (найдено 25.08 — системная причина хронических повторных запросов «доделай мультипликатор»):** это НЕ повод занизить расчёт или отложить его. Обойти папки сессий напрямую: `find ~/IWE/MC-sessions/YYYY-MM/DD -maxdepth 1 -type d` (и то же на второй машине, если он есть) — индекс лишь удобный кэш, не единственный источник. Число ходов из `meta.yaml`, если он не финализирован (`turns_count: 0`, `end_time: ""`) — считать по факту файлов в папке сессии (`ls <session_dir>/*.md | wc -l`), не пропускать сессию.
    - done → полный бюджет (или пропорционально фазам для зонтичных)
    - partial → % выполнения × бюджет; **если сверхплановая работа в плановом РП** (например, план Ф1, реализовано Ф1+Ф7) — засчитывать ФАКТ, не плановый бюджет
@@ -365,7 +367,7 @@ bash ~/IWE/scripts/day-close-step-log.sh end 5b
 
 5. **Записать итог в журнал дня (БЛОКИРУЮЩЕЕ).** Без этого утреннее открытие дня показывает не итог, а авто-снимок скрипта (`multiplier_estimated`, «≈, снимок сессий»); `render-open.py` берёт «Мультипликатор (уточнённый)» только из поля `multiplier_final` (инцидент 01.10: шаг пропущен, исправлен задним числом). Команда (подставить дату и итоговое число пункта 3):
    ```bash
-   bash ${GOV_REPO_ROOT:-$HOME/IWE/DS-my-strategy}/scripts/ledger-append.sh day YYYY-MM-DD facts_digest '{"for_date":"YYYY-MM-DD","multiplier_final":N.N,"multiplier_final_source":"day-close-manual-recalc (бюджет по содержанию Xч / WakaTime Yч)","multiplier_final_written_at":"<UTC ISO>"}' day-close-multiplier-final
+   bash ${GOV_REPO_ROOT:?}/scripts/ledger-append.sh day YYYY-MM-DD facts_digest '{"for_date":"YYYY-MM-DD","multiplier_final":N.N,"multiplier_final_source":"day-close-manual-recalc (бюджет по содержанию Xч / WakaTime Yч)","multiplier_final_written_at":"<UTC ISO>"}' day-close-multiplier-final
    ```
    Повторная запись безопасна: `render-open.py` склеивает события `facts_digest` поле за полем, позднее значение перекрывает раннее.
 
@@ -408,9 +410,9 @@ bash ~/IWE/scripts/day-close-step-log.sh end 5b
 
 **Postcondition 14a (машинная проверка — НЕ пропускать):**
 ```bash
-[ -f "$HOME/IWE/.iwe-runtime/day-close-interactive.vars" ] && . "$HOME/IWE/.iwe-runtime/day-close-interactive.vars"  # корень изолированной копии (шаг 0.5)
-TODAY=$(date +%Y-%m-%d)
-bash ${GOV_REPO_ROOT:-$HOME/IWE/DS-my-strategy}/scripts/day-close-prepare.sh --verify-dayplan --for-date "$TODAY"
+DC_CONTEXT=$(bash "$HOME/IWE/.iwe-runtime/day-close-interactive.sh" --context '<токен из шага 0.5>') || exit 1; eval "$DC_CONTEXT"
+TODAY="$IWE_CLOSE_DATE"
+bash ${GOV_REPO_ROOT:?}/scripts/day-close-prepare.sh --verify-dayplan --for-date "$TODAY"
 ```
 Результат `14a FAIL` → шаг НЕ помечать completed, вернуться к записи.
 
@@ -426,10 +428,10 @@ bash ${GOV_REPO_ROOT:-$HOME/IWE/DS-my-strategy}/scripts/day-close-prepare.sh --v
 
 **Postcondition 14b (машинная проверка — НЕ пропускать):**
 ```bash
-[ -f "$HOME/IWE/.iwe-runtime/day-close-interactive.vars" ] && . "$HOME/IWE/.iwe-runtime/day-close-interactive.vars"  # корень изолированной копии (шаг 0.5)
-TODAY=$(date +%Y-%m-%d)
+DC_CONTEXT=$(bash "$HOME/IWE/.iwe-runtime/day-close-interactive.sh" --context '<токен из шага 0.5>') || exit 1; eval "$DC_CONTEXT"
+TODAY="$IWE_CLOSE_DATE"
 # Сначала проверяет WeekReport (split ОПТ-5), затем WeekPlan; имена с пробелами безопасны.
-bash ${GOV_REPO_ROOT:-$HOME/IWE/DS-my-strategy}/scripts/day-close-prepare.sh --verify-week-summary --for-date "$TODAY"
+bash ${GOV_REPO_ROOT:?}/scripts/day-close-prepare.sh --verify-week-summary --for-date "$TODAY"
 ```
 Результат `14b FAIL` → шаг НЕ помечать completed, вернуться к записи.
 
@@ -438,68 +440,46 @@ bash ${GOV_REPO_ROOT:-$HOME/IWE/DS-my-strategy}/scripts/day-close-prepare.sh --v
 ### 15. Закоммитить DS-my-strategy [[gate:AR.005]]
 
 ```bash
-[ -f "$HOME/IWE/.iwe-runtime/day-close-interactive.vars" ] && . "$HOME/IWE/.iwe-runtime/day-close-interactive.vars"  # корень изолированной копии (шаг 0.5)
+DC_CONTEXT=$(bash "$HOME/IWE/.iwe-runtime/day-close-interactive.sh" --context '<токен из шага 0.5>') || exit 1; eval "$DC_CONTEXT"
 bash ~/IWE/scripts/day-close-step-log.sh start 10
-cd ${GOV_REPO_ROOT:-$HOME/IWE/DS-my-strategy}
+cd "$GOV_REPO_ROOT" || exit 1
 git status --short
-# НЕ git add -A/git add ./git add -u — AGENTS.md CRITICAL (может захватить работу других агентов)
-# Стейджить ТОЛЬКО файлы, изменённые в шагах 5-14 (в массив для pathspec):
-DC_FILES=(<каждый файл явным путём: WeekPlan, WeekReport, WP-REGISTRY, archive/day-plans/*, inbox/WP-*.md и т.д.>)
-# WeekState перегенерируется на шагах 1 и 5g и отслеживается git: включить в список, иначе копия останется грязной и публикация откажет
-DC_FILES+=("current/WeekState W$((10#$(date +%V))).md")
-# Если на шаге 3 обновлялись утренние приоритеты:
-DC_FILES+=(${GOV_REPO_ROOT:-$HOME/IWE/DS-my-strategy}/current/priorities.yaml)
-git add "${DC_FILES[@]}"
-git diff --cached --name-only  # проверить scope — только day-close файлы
-# pathspec после `--`: commit ТОЛЬКО свои файлы, не подметаем чужой индекс
-git commit -m "day-close: $(TZ=UTC date +%Y-%m-%d)" -- "${DC_FILES[@]}"
-# SHA коммита закрытия дня фиксируется ОДИН раз сразу после commit (WP-530 Ф67, 25.09):
-# публикуется ровно он, а не HEAD канона — под freeze диапазон origin/main..HEAD тянет
-# за собой чужие застрявшие коммиты (25.09: extraction report 1c8c3ca5e extractor'а
-# не смог опубликоваться, и закрытие дня трижды упиралось в его конфликт по captures).
-DC_SHA=$(git rev-parse HEAD)
-
-# Публикация — через ds-publish.sh, НЕ голым push (WP-484, 05.09).
-if [ -n "${DAY_CLOSE_WORKTREE:-}" ]; then
-  # В изолированной копии (шаг 0.5) публикуется ВСЯ копия, как в ночном цикле (day-close-mechanical.sh): раннер process-runner.py
-  # коммитит карточку RUN отдельным коммитом, и публикация одного $DC_SHA оставила бы его в копии (тогда --finish откажет).
-  # ds-publish/isolate-push требуют чистого дерева: незакоммиченное лучше увидеть здесь, чем получить отказ шлюза.
-  [ -z "$(git status --porcelain)" ] || { echo "STOP: в копии есть незакоммиченные файлы, добавить в DC_FILES и закоммитить:"; git status --porcelain; false; }
-  bash scripts/ds-publish.sh "$PWD" high --reason "day-close: $(TZ=UTC date +%Y-%m-%d)"
-else
-  # Откат (канон под freeze, WP-520/WP-484 Ф104): голый push с канона отбивает pre-push хук, обход через IWE_CANONICAL_OWNER
-  # здесь неуместен. ds-publish.sh --from-commit --exact-commit собирает одноразовую копию от свежего origin, переносит туда
-  # ТОЛЬКО этот один коммит и пушит оттуда; общий чекаут не трогается (peer-conversation 4.5.1: «НИКОГДА push текущей ветки»).
-  bash scripts/ds-publish.sh "$PWD" high --reason "day-close $(TZ=UTC date +%Y-%m-%d)" \
-    --from-commit "$DC_SHA" --exact-commit "$DC_SHA" --mode retry-wrapper
+# Перечислить только реально изменённые файлы своих шагов, включая результат раннера.
+# WeekState и priorities — добавить только если они изменены.
+# Игнорируемые runtime-файлы (exocortex, sessions-today, кэши) не добавлять в Git.
+DC_FILES=(<каждый свой изменённый файл явным относительным путём>)
+git add -- "${DC_FILES[@]}" || exit 1
+git diff --cached --name-only || exit 1
+# Сверить весь staged-список с DC_FILES до коммита.
+if ! git diff --cached --quiet -- "${DC_FILES[@]}"; then
+  git commit -m "day-close: $IWE_CLOSE_DATE" -- "${DC_FILES[@]}" || exit 1
 fi
-
-# Опубликованный эквивалент лежит на origin под ДРУГИМ SHA (cherry-pick) — именно его
-# получает R23 на шаге 17 вместе с командой проверки; локальный HEAD канона под freeze
-# доставку не доказывает (WP-530 Ф67: ложный ❌ R23 25.09).
-# Доказательство — patch-эквивалентность ИМЕННО $DC_SHA на свежем origin/main (тот же
-# приём, что в стороже: `git cherry` печатает `- <sha>`, если эквивалент есть), а не
-# «на origin есть какой-то коммит с сегодняшним заголовком»: повторный прогон закрытия
-# в тот же день нашёл бы по заголовку прежний коммит и подтвердил недоставленный
-# (холодное ревью Ф67). Ручное слияние конфликта при публикации меняет содержимое →
-# `+` → «НЕ ПОДТВЕРЖДЕНО» — честно: содержимое на origin другое, сверить руками.
-git fetch -q origin main || echo "WARN: fetch origin не прошёл — доставка НЕ подтверждена"
-if git cherry origin/main "$DC_SHA" "$DC_SHA~1" | grep -q '^- '; then
-  DC_PUBLISHED_SHA=$(git log --format=%h -1 --grep "^day-close: $(TZ=UTC date +%Y-%m-%d)$" origin/main)
-else
-  DC_PUBLISHED_SHA=""
+DC_SHA=$(git rev-parse HEAD) || exit 1
+DC_STATUS=$(git status --porcelain) || exit 1
+[ -z "$DC_STATUS" ] || { echo "STOP: неучтённые результаты в копии"; printf '%s\n' "$DC_STATUS"; exit 1; }
+# Проверить владение непосредственно перед публикацией. Публикуется вся копия:
+# process-runner мог создать отдельный коммит RUN, один DC_SHA его не покрывает.
+bash "$DAY_CLOSE_WRAPPER" --context "$DAY_CLOSE_LOCK_TOKEN" >/dev/null || exit 1
+bash scripts/ds-publish.sh "$PWD" high --reason "day-close: $IWE_CLOSE_DATE" || exit 1
+git fetch -q origin main || exit 1
+DC_PUBLISHED_REVISION=$(git rev-parse origin/main) || exit 1
+# Доказательство всей ветки: достижимость или проверяемая patch-эквивалентность
+# каждого обычного коммита. Неопубликованный merge требует отдельного разбора.
+if ! git merge-base --is-ancestor "$DC_SHA" "$DC_PUBLISHED_REVISION"; then
+  DC_MERGES=$(git rev-list --merges "$DC_PUBLISHED_REVISION..$DC_SHA") || exit 1
+  [ -z "$DC_MERGES" ] || { echo 'STOP: доставка merge-коммита не доказана'; exit 1; }
+  DC_CHERRY=$(git cherry "$DC_PUBLISHED_REVISION" "$DC_SHA") || exit 1
+  if printf '%s\n' "$DC_CHERRY" | grep -q '^+'; then
+    echo 'STOP: остались неопубликованные коммиты'; exit 1
+  fi
 fi
-echo "day-close published on origin/main as: ${DC_PUBLISHED_SHA:-НЕ ПОДТВЕРЖДЕНО — у $DC_SHA нет patch-эквивалента на origin/main, разобрать ДО шага 17}"
-
-# Закрыть housekeeping-сессию Day Close (открыта в п. 0.5; cwd = копия)
-bash "${IWE_SCRIPTS:-$HOME/IWE/scripts}/session-guard.sh" close --housekeeping day-close --agent claude-code
-# Убрать копию и host-lock — ТОЛЬКО если всё опубликовано (exit 5 = в копии остались результаты или неопубликованные коммиты:
-# копия и замок сохранены, разобрать причину из вывода, закрытие дня НЕ считать завершённым):
-if [ -n "${DAY_CLOSE_WORKTREE:-}" ]; then
-  cd "$HOME/IWE"   # --finish удаляет копию: не стоять в её каталоге
-  DCI=$(mktemp) && git -C "$HOME/IWE/DS-my-strategy" show origin/main:scripts/day-close-isolated.sh > "$DCI" && bash "$DCI" --finish; RC_FINISH=$?
-  rm -f "$DCI"; [ "$RC_FINISH" -eq 0 ] || echo "STOP: --finish отказал (exit $RC_FINISH): закрытие дня НЕ завершено; причина выше. Бросить прежний запуск осознанно: --abort (содержимое сохранится в ~/IWE/.iwe-runtime/day-close-abandoned/)"
-fi
+# Передать R23 сохранённые дату, номер недели, DC_SHA и точный входной срез
+# DC_PUBLISHED_REVISION. Поиск коммита по заголовку доказательством не является.
+bash "${IWE_SCRIPTS:-$HOME/IWE/scripts}/session-guard.sh" close --housekeeping day-close --agent claude-code || exit 1
+cd "$HOME/IWE" || exit 1
+# При ignored-файлах --finish сохраняет всю копию/ветку и сообщает путь.
+# Это локальное сохранение, не подтверждение публикации этих файлов.
+bash "$DAY_CLOSE_WRAPPER" --finish "$DAY_CLOSE_LOCK_TOKEN" || exit 1
 bash ~/IWE/scripts/day-close-step-log.sh end 10
 ```
 
@@ -520,7 +500,7 @@ python3 $HOME/IWE/.claude/scripts/rule-classifier.py
 **Проверка целостности тайминга шагов (WP-484 peer-session 2026-07-18-13).** `day-close-step-log.sh` пишет метки в `TZ=UTC` — дата в проверке ниже ОБЯЗАНА браться тем же поясом (иначе возле полуночи по местному времени пилота проверка ложно найдёт «0 аномалий», просто заглянув не в ту календарную дату — сама метрика тогда врёт молча, ровно то, против чего она построена): `grep "$(TZ=UTC date +%Y-%m-%d)" ~/logs/day-close-integrity.log` — есть ли аномалии за сегодня (неизвестный step_id, дубль start, end без start, немонотонность)? И `grep -c "$(TZ=UTC date +%Y-%m-%d).*start" ~/logs/day-close-steps.log` vs `grep -c "$(TZ=UTC date +%Y-%m-%d).*end" ~/logs/day-close-steps.log` — совпадает число start/end? Не блокирует закрытие дня — только доверие к метрике за сегодня (см. чеклист ниже).
 
 Запустить sub-agent Haiku в роли R23 Верификатор (context isolation).
-Передать: (1) чеклист Day Close, (2) черновик итогов, (3) список обновлённых файлов, (4) результат шага 5h (по каждому РП: контекст-файл поправлен или расхождений не было), (5) JSON вердикта trace-satisfaction, (6) результат проверки целостности тайминга шагов (аномалии из `day-close-integrity.log` + баланс start/end), (7) вход, не вопрос: вывод `git -C "$HOME/IWE/DS-my-strategy" fetch -q origin main && git -C "$HOME/IWE/DS-my-strategy" show "origin/main:current/WeekState W$((10#$(date +%V))).md" | grep -E '^(⚠️|🗓️|generated_for:)'` (копия после шага 15 уже убрана, читать опубликованное на origin) — верификатор сверяет, что каждая `⚠️`/`🗓️`-строка (если `generated_for` = сегодня) присутствует в черновике итогов (п.2) дословно; строк нет или файл не сегодняшний → пункт «н/п», (8) локальный `DC_SHA` и опубликованный `DC_PUBLISHED_SHA` из шага 15 плюс ТОЧНАЯ команда проверки доставки: `git -C ~/IWE/DS-my-strategy fetch -q origin main && git -C ~/IWE/DS-my-strategy cherry origin/main <DC_SHA> <DC_SHA>~1` — ожидается строка `- <DC_SHA>` (patch-эквивалент есть на origin/main); строка `+ <DC_SHA>` = доставка НЕ подтверждена; grep по заголовку в `git log origin/main` — только вспомогательно, он не доказывает доставку именно этого коммита; `git log HEAD`, `git status` канона и локальный SHA коммита под freeze показателями доставки не являются (WP-530 Ф67, 25.09: ложный ❌ «не запушено» при реально доставленном коммите — R23 смотрел локальный HEAD канона, а опубликованный эквивалент лежит на origin под другим SHA после cherry-pick).
+Передать: (1) чеклист Day Close, (2) черновик итогов, (3) список обновлённых файлов, (4) результат шага 5h (по каждому РП: контекст-файл поправлен или расхождений не было), (5) JSON вердикта trace-satisfaction, (6) результат проверки целостности тайминга шагов (аномалии из `day-close-integrity.log` + баланс start/end), (7) вход, не вопрос: вывод `git -C "$HOME/IWE/DS-my-strategy" fetch -q origin main && git -C "$HOME/IWE/DS-my-strategy" show "$DC_PUBLISHED_REVISION:current/WeekState W$IWE_CLOSE_WEEK.md" | grep -E '^(⚠️|🗓️|generated_for:)'` (копия после шага 15 уже убрана, читать опубликованное на origin) — верификатор сверяет, что каждая `⚠️`/`🗓️`-строка (если `generated_for` = сегодня) присутствует в черновике итогов (п.2) дословно; строк нет или файл не сегодняшний → пункт «н/п», (8) локальный `DC_SHA` и опубликованный срез `DC_PUBLISHED_REVISION` из шага 15; сначала проверить достижимость `git -C "$HOME/IWE/DS-my-strategy" merge-base --is-ancestor <DC_SHA> <DC_PUBLISHED_REVISION>`: код 0 подтверждает доставку; код 1 допускает следующую проверку; иной код означает ошибку, не отсутствие. При отсутствии достижимости для обычного коммита команда проверки patch-эквивалентности: `git -C ~/IWE/DS-my-strategy cherry <DC_PUBLISHED_REVISION> <DC_SHA> <DC_SHA>~1` — ожидается строка `- <DC_SHA>` (patch-эквивалент есть на origin/main); строка `+ <DC_SHA>` = доставка НЕ подтверждена; grep по заголовку в `git log origin/main` — только вспомогательно, он не доказывает доставку именно этого коммита; `git log HEAD`, `git status` канона и локальный SHA коммита под freeze показателями доставки не являются (WP-530 Ф67, 25.09: ложный ❌ «не запушено» при реально доставленном коммите — R23 смотрел локальный HEAD канона, а опубликованный эквивалент лежит на origin под другим SHA после cherry-pick).
 По ❌ — исправить до показа пользователю. Исключения: (а) ❌ только по пункту «тайминг шагов» (последний чеклист-пункт ниже) — не исправлять постфактум (дописывать правдоподобный timestamp запрещено, это и есть тихая подмена данных), просто показать пилоту предупреждение «данные тайминга за сегодня не заслуживают доверия» и продолжить закрытие дня; (б) ❌ по п.7 при отсутствующем/нечитаемом `WeekState` (не сегодняшняя генерация, generated_status не ok) — не блокирует, это отдельная деградация шага 5g, не пропуск цитаты.
 
 `bash ~/IWE/scripts/day-close-step-log.sh end 11`
@@ -557,7 +537,7 @@ python3 $HOME/IWE/.claude/scripts/rule-classifier.py
 - [ ] Видео: обработанные помечены (если video.enabled)
 - [ ] Governance: REPOSITORY-REGISTRY, navigation.md, MAP.002
 - [ ] Backup: `day-close.sh` выполнен
-- [ ] **Rule-engine FP-stats** (WP-272 Ф2.5): `python3 ~/IWE/.claude/scripts/fp-stats.py --date $(date +%Y-%m-%d)` → если есть `⚠️ REVISE` (FP > 20%) — записать в «Завтра начать с» правило + FP%. Флоу ревизии: `~/IWE/PACK-agent-rules/revision-flow.md`.
+- [ ] **Rule-engine FP-stats** (WP-272 Ф2.5): `python3 ~/IWE/.claude/scripts/fp-stats.py --date $IWE_CLOSE_DATE` → если есть `⚠️ REVISE` (FP > 20%) — записать в «Завтра начать с» правило + FP%. Флоу ревизии: `~/IWE/PACK-agent-rules/revision-flow.md`.
 - [ ] Верификация compliance: /verify запускался сегодня?
 - [ ] **Итоговый мультипликатор записан в журнал (шаг 12 п.5):** в `day-YYYY-MM-DD.yaml` есть событие `facts_digest` с `multiplier_final` за сегодня; без него Day Open покажет авто-снимок скрипта. Верификатор проверяет grep-ом
 - [ ] WakaTime + Мультипликатор: часы / **бюджет ПО ФАКТУ** (MC-sessions/00-index.md перечислен ИЛИ, если он неполон, папки сессий обойдены напрямую; ad-hoc peer-сессии оценены по факту содержания карточки, не только по числу ходов; сверхплановая работа в плановом РП — по факту); остаток недели. Sanity check: мультипликатор <1.5x при ≥10 peer-сессий = ПЕРЕСЧИТАТЬ СЕЙЧАС ЖЕ (не отложить, не пометить и продолжить)

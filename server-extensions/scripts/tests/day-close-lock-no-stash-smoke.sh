@@ -168,5 +168,16 @@ else
 fi
 
 echo
+echo "== 5. Закрытие за прошедший день проверяется по закреплённой дате =="
+rm -rf "${SANDBOX:?}/origin.git" "$CLONE"
+setup_sandbox
+git_sandbox commit --quiet --allow-empty -m 'day-close: 2026-09-20'
+git_sandbox push --quiet origin HEAD:main
+check "повтор за 20.09 остановлен независимо от сегодняшней даты" "$(IWE_CLOSE_DATE=2026-09-20 run_acquire)" "1"
+GIT_COMMITTER_DATE='2026-09-20T21:15:00Z' GIT_AUTHOR_DATE='2026-09-20T21:15:00Z' \
+  git_sandbox commit --quiet --allow-empty -m 'day-close: 2026-09-21'
+git_sandbox push --quiet origin HEAD:main
+check "закрытие до полуночи UTC найдено по местной дате" "$(IWE_CLOSE_DATE=2026-09-21 run_acquire)" "1"
+
 echo "Итого: пройдено $PASS, провалено $FAIL"
 [ "$FAIL" -eq 0 ]

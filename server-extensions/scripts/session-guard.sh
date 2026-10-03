@@ -6434,6 +6434,75 @@ def proof(store, candidate, parent, changed):
     return True
 
 
+def rebased_replacement_proof(store, candidate, parent, changed):
+    """Prove an exact replay of each changed path across different bases.
+
+    A concurrent commit may alter other rows of the same file before a session
+    commit is rebuilt. Accept only identical whole-file deltas or one unique,
+    identical line replacement; additions and deletions need the stricter merge
+    proof above. This does not infer delivery from a merely similar final tree.
+    """
+    def read(*args):
+        return git(store, *args).stdout
+
+    def entry(revision, path):
+        row = read("ls-tree", "-z", revision, "--", path)
+        if not row or row.count(b"\0") != 1:
+            return None
+        return tuple(row.split(b"\t", 1)[0].split())
+
+    def edit(before, after):
+        operations = [op for op in difflib.SequenceMatcher(
+            None, before, after, autojunk=False).get_opcodes() if op[0] != "equal"]
+        if len(operations) != 1:
+            return None
+        tag, old_start, old_end, new_start, new_end = operations[0]
+        if tag != "replace" or old_end - old_start != 1 or new_end - new_start != 1:
+            return None
+        return before[old_start], after[new_start]
+
+    history = read("rev-list", "--parents", "-n", "1", candidate).split()
+    if len(history) != 2:
+        return False
+    candidate_parent = history[1].decode("ascii")
+    candidate_paths = set(read("diff-tree", "--no-commit-id", "--name-only",
+                               "--no-renames", "-r", "-z", candidate).split(b"\0")) - {b""}
+    if candidate_paths != changed:
+        return False
+    for path in changed:
+        old, own = entry(parent, path), entry(source, path)
+        prior, published = entry(candidate_parent, path), entry(candidate, path)
+        if not all(row and len(row) == 3 and row[0] in (b"100644", b"100755")
+                   and row[1] == b"blob" for row in (old, own, prior, published)):
+            return False
+        if len({row[0] for row in (old, own, prior, published)}) != 1:
+            return False
+        if old == prior and own == published:
+            continue
+        blobs = []
+        for row in (old, own, prior, published):
+            if int(read("cat-file", "-s", row[2])) > MAX_BLOB_BYTES:
+                return False
+            data = read("cat-file", "blob", row[2])
+            if b"\0" in data:
+                return False
+            lines = data.splitlines(keepends=True)
+            if len(lines) > MAX_BLOB_LINES:
+                return False
+            blobs.append(lines)
+        before, after, candidate_before, candidate_after = blobs
+        replacement = edit(before, after)
+        if replacement is None or edit(candidate_before, candidate_after) != replacement:
+            return False
+        old_line, new_line = replacement
+        if (before.count(old_line) != 1 or candidate_before.count(old_line) != 1
+                or after.count(new_line) != 1 or candidate_after.count(new_line) != 1
+                or new_line in before or new_line in candidate_before
+                or old_line in after or old_line in candidate_after):
+            return False
+    return True
+
+
 try:
     if not all(re.fullmatch(r"[0-9a-fA-F]{40}|[0-9a-fA-F]{64}", value)
                for value in (source, remote)):
@@ -6498,9 +6567,10 @@ try:
             if not git(scratch, "diff-tree", "--no-commit-id", "--name-only", "-r", candidate).stdout:
                 continue
             bases = git(scratch, "merge-base", "--all", source, candidate, allowed=(0, 1)).stdout.split()
-            if bases != [parents[1]]:
+            if not bases:
                 continue
-            if proof(scratch, candidate, parent, changed):
+            if ((bases == [parents[1]] and proof(scratch, candidate, parent, changed))
+                    or rebased_replacement_proof(scratch, candidate, parent, changed)):
                 if time.monotonic() >= deadline:
                     raise ValueError("proof deadline exceeded")
                 if (candidate in receipt_candidates and git(repo, "rev-parse", "--verify",
