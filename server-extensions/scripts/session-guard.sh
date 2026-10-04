@@ -44,7 +44,7 @@
 #                                                      # в HEAD/индексе или в заявленном коммите
 #   note-commit <sha> [--repo <name>] [--agent ...]   # заявить коммит сессии: даёт commit-push.sh
 #   note-publication <sha> --repo <name> [--target-ref refs/heads/main|pilot|new-architecture]
-#     Non-main: explicit peer product delivery evidence, also append-only in PREPARED; never a push grant.
+#     PREPARED: append-only peer product evidence (including main); never a push grant.
 #                                                      # проверять доставку по СВОИМ коммитам,
 #                                                      # а не по состоянию всей ветки (WP-537).
 #                                                      # <name> = каталог внутри $IWE_ROOT либо
@@ -11595,17 +11595,19 @@ if [ "$CMD" = "note-publication" ]; then
   PUBLICATION_CLOSE_STATE=$(_close_delivery_state "$SEM_FILE" "$LOCKED_NOTE_SESSION_ID" || true)
   case "$PUBLICATION_CLOSE_STATE:$PUBLICATION_TARGET_REF" in
     none:refs/heads/main|none:refs/heads/pilot|none:refs/heads/new-architecture) ;;
-    prepared:refs/heads/pilot|prepared:refs/heads/new-architecture) ;;
+    prepared:refs/heads/main|prepared:refs/heads/pilot|prepared:refs/heads/new-architecture) ;;
     *) fail "note-publication: target or close state does not permit this receipt" 1 ;;
   esac
   PUBLICATION_PREPARE_DIGEST=$(_unique_record_field "$SEM_FILE" close_delivery_prepare_digest || true)
   [ "$REPO_ARG" != IWE ] || REPO_ARG=iwe-root
   RECEIPT_REPO=$(_resolve_repo_checkout "$REPO_ARG" "$PUBLISHED_SHA") || exit 1
-  if [ "$PUBLICATION_TARGET_REF" = refs/heads/main ]; then
+  if [ "$PUBLICATION_TARGET_REF" = refs/heads/main ] && [ "$PUBLICATION_CLOSE_STATE" = none ]; then
     timeout 10 git -C "$RECEIPT_REPO" fetch --quiet origin '+refs/heads/main:refs/remotes/origin/main' \
       || fail "note-publication: fresh origin/main required" 1
     _record_publication_receipts "$SEM_FILE" "$RECEIPT_REPO" "$REPO_ARG" "$PUBLISHED_SHA" || exit 1
   else
+    # All PREPARED receipts, including main, require the product policy. Root,
+    # governance and session repositories cannot use this recovery route.
     # Product policy and frozen inventory are checked before the exact fetch.
     # This only appends evidence, never replaces claims or authorizes a push.
     _record_publication_receipts "$SEM_FILE" "$RECEIPT_REPO" "$REPO_ARG" "$PUBLISHED_SHA" \

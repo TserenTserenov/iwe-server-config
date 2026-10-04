@@ -14,6 +14,7 @@ triggers:
 routing:
   executor: script
   deterministic: true
+  script_root: workspace
   script_path: "scripts/lesson-close.sh"
   optimization_priority: 2
 agents: none

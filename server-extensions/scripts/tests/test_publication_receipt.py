@@ -68,6 +68,96 @@ class PublicationReceiptTest(unittest.TestCase):
         self.assertTrue(self.verify(source, later))
         self.assertEqual(self.record(later), 0)
 
+    def squash_series(self):
+        first = self.commit("a.txt", "initial implementation\n")
+        second = self.commit("a.txt", "review correction\n")
+        tip = self.commit("b.txt", "regression test\n")
+        for source in (first, second, tip):
+            self.claim(source)
+        self.git("checkout", "-q", "--detach", self.base)
+        self.commit("concurrent.txt", "another writer\n")
+        self.git("merge", "--squash", tip)
+        self.git("-c", "commit.gpgsign=false", "commit", "-qm", "squashed PR")
+        anchor = self.git("rev-parse", "HEAD")
+        self.published(anchor)
+        return (first, second, tip), anchor
+
+    def test_squash_proves_final_owned_series_including_review_corrections(self):
+        sources, anchor = self.squash_series()
+        before = self.sem.read_bytes()
+        self.assertEqual(self.record(anchor), 3)
+        self.assertTrue(self.sem.read_bytes().startswith(before))
+        self.assertTrue(all(self.verify(source, anchor) for source in sources))
+        saved = [json.loads(line[len(receipt.PREFIX):]) for line in self.sem.read_text().splitlines()
+                 if line.startswith(receipt.PREFIX)]
+        self.assertEqual({item["proof"] for item in saved}, {"exact-squash-series"})
+        self.assertTrue(all(item["series_commits"] == list(sources) for item in saved))
+        later = self.commit("a.txt", "later legitimate edit\n")
+        self.published(later)
+        self.assertTrue(all(self.verify(source, later) for source in sources))
+
+    def test_squash_missing_or_foreign_intermediate_claim_is_rejected(self):
+        sources, anchor = self.squash_series()
+        self.sem.write_text(self.sem.read_text().replace("commit: repo " + sources[1] + "\n", ""))
+        before = self.sem.read_bytes()
+        with self.assertRaises(receipt.ProofError):
+            self.record(anchor)
+        self.assertEqual(self.sem.read_bytes(), before)
+        self.assertFalse(self.verify(sources[0], anchor))
+
+    def test_squash_receipt_tampering_and_lost_final_hunk_are_rejected(self):
+        sources, anchor = self.squash_series()
+        self.record(anchor)
+        original = self.sem.read_text()
+        self.sem.write_text(original.replace('"series_commits":["' + sources[0],
+                                            '"series_commits":["' + self.base))
+        self.assertFalse(self.verify(sources[0], anchor))
+        self.sem.write_text(original)
+        self.git("checkout", "-q", "--detach", anchor + "^")
+        partial = self.commit("a.txt", "review correction\n")
+        self.published(partial)
+        self.assertFalse(self.verify(sources[0], partial))
+        with self.assertRaises(receipt.ProofError):
+            self.record(partial)
+
+    def test_squash_divergent_claims_and_empty_series_are_rejected(self):
+        sources, anchor = self.squash_series()
+        self.git("checkout", "-q", "--detach", self.base)
+        foreign = self.commit("other.txt", "separate branch\n")
+        self.claim(foreign)
+        with self.assertRaises(receipt.ProofError):
+            self.record(anchor)
+        self.sem.write_text("agent: codex\nsession_id: one\n")
+        self.git("checkout", "-q", "--detach", sources[0])
+        reverted = self.commit("a.txt", "base\n")
+        self.claim(sources[0])
+        self.claim(reverted)
+        with self.assertRaises(receipt.ProofError):
+            receipt.owned_chain(self.repo, self.sem.read_bytes(), "repo", sources[0])
+
+    def test_squash_unpublished_anchor_is_not_delivery(self):
+        sources, anchor = self.squash_series()
+        self.published(self.base)
+        before = self.sem.read_bytes()
+        with self.assertRaises(receipt.ProofError):
+            self.record(anchor)
+        self.assertEqual(self.sem.read_bytes(), before)
+        self.assertFalse(self.verify(sources[0], self.base))
+
+    def test_fetch_uses_global_transport_config_but_proof_stays_isolated(self):
+        remote = self.root / "remote.git"
+        subprocess.run(["git", "clone", "--bare", "-q", str(self.repo), str(remote)], check=True)
+        config_home = self.root / "auth-home"
+        config_home.mkdir()
+        # URL routing stands in for credential-helper configuration without
+        # introducing any credentials or contacting an external server.
+        (config_home / ".gitconfig").write_text(
+            '[url "' + remote.as_uri() + '"]\n\tinsteadOf = fixture:private\n')
+        self.git("remote", "set-url", "origin", "fixture:private")
+        with patch.dict(os.environ, {"HOME": str(config_home)}):
+            self.assertEqual(receipt.fetch_target(self.repo, receipt.MAIN_REF), self.base)
+            self.assertEqual(receipt.git_env()["GIT_CONFIG_GLOBAL"], os.devnull)
+
     def test_guard_records_only_the_selected_session_and_close_reader_accepts(self):
         remote = self.root / 'remote.git'
         subprocess.run(['git', 'init', '--bare', '-q', str(remote)], check=True)
@@ -418,10 +508,10 @@ class ProductPublicationReceiptTest(unittest.TestCase):
              "--target-ref", target, "--workspace", str(self.root)],
             env=self.env, capture_output=True, text=True)
 
-    def note_publication(self):
+    def note_publication(self, target="refs/heads/pilot"):
         return subprocess.run(
             ["bash", str(self.guard), "note-publication", self.anchor, "--repo", "repo",
-             "--target-ref", "refs/heads/pilot", "--agent", "codex", "--session-id", "one"],
+             "--target-ref", target, "--agent", "codex", "--session-id", "one"],
             env=self.env, cwd=self.repo, capture_output=True, text=True)
 
     def verify(self, source=None):
@@ -625,6 +715,90 @@ _close_delivery_state "$1" one
         result = self.note_publication()
         self.assertNotEqual(result.returncode, 0)
         self.assertEqual(self.sem.read_bytes(), before)
+
+    def test_prepared_product_main_receipt_preserves_frozen_identity(self):
+        self.git("push", "-q", "origin", "HEAD:refs/heads/main")
+        self.prepare()
+        before = self.sem.read_bytes()
+        result = self.note_publication("refs/heads/main")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertTrue(self.sem.read_bytes().startswith(before))
+        self.assertTrue(receipt.verify(self.repo, self.sem, "repo", self.source, self.anchor))
+        result = self.close_proof()
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_prepared_main_recovery_rejects_non_peer_and_changed_inventory(self):
+        self.git("push", "-q", "origin", "HEAD:refs/heads/main")
+        self.prepare()
+        original = self.sem.read_bytes()
+        for raw in (original.replace(b"close_path: peer-session\n", b""),
+                    original + ("commit: repo " + self.base + "\n").encode()):
+            self.sem.write_bytes(raw)
+            self.assertNotEqual(self.note_publication("refs/heads/main").returncode, 0)
+            self.assertEqual(self.sem.read_bytes(), raw)
+
+    def test_prepared_main_squash_is_accepted_by_real_close_reader(self):
+        self.git("checkout", "-q", "--detach", self.source)
+        second = self.commit("a.txt", "reviewed implementation\n")
+        tip = self.commit("test.txt", "regression coverage\n")
+        self.sem.write_text("\n".join(line for line in self.sem.read_text().splitlines()
+                                      if not line.startswith("commit: ")) + "\n")
+        for source in (self.source, second, tip):
+            self.claim(source)
+        self.git("checkout", "-q", "--detach", self.base)
+        self.commit("parallel.txt", "concurrent change\n")
+        self.git("merge", "--squash", tip)
+        self.git("-c", "commit.gpgsign=false", "commit", "-qm", "squash")
+        self.anchor = self.git("rev-parse", "HEAD")
+        self.git("push", "-q", "origin", "HEAD:refs/heads/main")
+        self.prepare()
+        before = self.sem.read_bytes()
+        result = self.note_publication("refs/heads/main")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertTrue(self.sem.read_bytes().startswith(before))
+        result = self.close_proof()
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_prepared_main_recovery_rejects_protected_repo_identity(self):
+        self.git("push", "-q", "origin", "HEAD:refs/heads/main")
+        self.prepare()
+        subprocess.run(["git", "-C", str(self.governance), "remote", "set-url", "origin",
+                        str(self.remote)], check=True)
+        before = self.sem.read_bytes()
+        self.assertNotEqual(self.note_publication("refs/heads/main").returncode, 0)
+        self.assertEqual(self.sem.read_bytes(), before)
+
+    def legacy_checkout(self):
+        legacy = self.root / "repo"
+        self.repo.rename(legacy)
+        self.repo = legacy
+
+    def claim_legacy_files(self):
+        with self.sem.open("a") as out:
+            for path in ("a.txt",):
+                out.write("file_v2: " + json.dumps({"repo": str(self.repo / ".git"), "path": path}) + "\n")
+
+    def test_legacy_root_product_requires_exact_file_scope_and_preserves_prepare(self):
+        self.legacy_checkout()
+        self.claim_legacy_files()
+        self.prepare()
+        before = self.sem.read_bytes()
+        result = self.note_publication()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertTrue(self.sem.read_bytes().startswith(before))
+        result = self.close_proof()
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_legacy_root_product_missing_foreign_or_incomplete_scope_is_rejected(self):
+        self.legacy_checkout()
+        original = self.sem.read_text()
+        for binding in (None, {"repo": str(self.governance / ".git"), "path": "a.txt"},
+                        {"repo": str(self.repo / ".git"), "path": "wrong.txt"},
+                        {"repo": str(self.repo / ".git"), "path": "../a.txt"}):
+            text = original + ("file_v2: " + json.dumps(binding) + "\n" if binding else "")
+            self.sem.write_text(text)
+            self.assertNotEqual(self.note_publication().returncode, 0)
+            self.assertEqual(self.sem.read_text(), text)
 
 
 if __name__ == "__main__":

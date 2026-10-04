@@ -140,8 +140,14 @@ def entries(repo: Path, commit: str, paths: list[str]) -> list[dict]:
 
 def replay_matches(repo: Path, source: str, anchor: str) -> bool:
     source_line = git(repo, "rev-list", "--parents", "-n", "1", source).decode().split()
+    if len(source_line) != 2:
+        return False
+    return range_replay_matches(repo, source_line[1], source, anchor)
+
+
+def range_replay_matches(repo: Path, base: str, tip: str, anchor: str) -> bool:
     anchor_line = git(repo, "rev-list", "--parents", "-n", "1", anchor).decode().split()
-    if len(source_line) != 2 or len(anchor_line) != 2:
+    if len(anchor_line) != 2:
         return False
     if oid(repo, anchor + "^{tree}") == oid(repo, anchor_line[1] + "^{tree}"):
         return False
@@ -156,10 +162,53 @@ def replay_matches(repo: Path, source: str, anchor: str) -> bool:
         env["GIT_ATTR_SOURCE"] = git(scratch, "mktree", env=env, input=b"").decode().strip()
         result = subprocess.run(
             ["git", "-C", str(scratch), "-c", "merge.renames=false", "merge-tree",
-             "--write-tree", "--merge-base=" + source_line[1], anchor_line[1], source],
+             "--write-tree", "--merge-base=" + base, anchor_line[1], tip],
             env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=30)
         return (result.returncode == 0 and result.stdout.decode().strip() ==
                 oid(repo, anchor + "^{tree}"))
+
+
+def owned_chain(repo: Path, raw: bytes, name: str, source: str) -> tuple[str, list[str]]:
+    """One complete, bounded linear series; no unclaimed intermediate commits.
+
+    Squash delivery proves the final revision of this series, not historical
+    publication of the intermediate versions subsequently edited by its owner.
+    """
+    owned = set(claims(raw, name, repo))
+    if source not in owned or not 2 <= len(owned) <= 32:
+        raise ProofError("squash requires a bounded session-owned series")
+    parents = {}
+    for commit in owned:
+        row = git(repo, "rev-list", "--parents", "-n", "1", commit).decode().split()
+        if len(row) != 2:
+            raise ProofError("squash series must have single-parent commits")
+        parents[commit] = row[1]
+    tips = owned - set(parents.values())
+    if len(tips) != 1:
+        raise ProofError("squash series is disconnected or branched")
+    current = tips.pop()
+    chain = []
+    while current in parents:
+        chain.append(current)
+        current = parents[current]
+    if set(chain) != owned:
+        raise ProofError("squash series contains an unclaimed gap")
+    chain.reverse()
+    if oid(repo, current + "^{tree}") == oid(repo, chain[-1] + "^{tree}"):
+        raise ProofError("squash series has no net change")
+    return current, chain
+
+
+def squash_receipt(repo: Path, raw: bytes, name: str, source: str, anchor: str,
+                   target_ref: str) -> dict:
+    base, chain = owned_chain(repo, raw, name, source)
+    anchor_row = git(repo, "rev-list", "--parents", "-n", "1", anchor).decode().split()
+    if (len(anchor_row) != 2 or not ancestor(repo, base, anchor_row[1])
+            or not range_replay_matches(repo, base, chain[-1], anchor)):
+        raise ProofError("published commit does not reproduce the owned series")
+    result = receipt_identity(repo, raw, name, source, anchor, target_ref)
+    return {**result, "proof": "exact-squash-series", "series_base": base,
+            "series_commits": chain, "series_tip_tree": oid(repo, chain[-1] + "^{tree}")}
 
 
 def tracking_ref(target_ref: str) -> str:
@@ -177,14 +226,35 @@ def repository_identity(repo: Path) -> tuple[Path, str]:
     return common, re.sub(r"\.git$", "", origin)
 
 
+def legacy_product_scope(repo: Path, raw: bytes, common: Path, name: str) -> None:
+    """A legacy root checkout needs exact repository-qualified file claims."""
+    scope = []
+    for line in raw.decode().splitlines():
+        if not line.startswith("file_v2: "):
+            continue
+        item = json.loads(line[len("file_v2: "):])
+        if not isinstance(item, dict) or item.get("repo") != str(common):
+            continue
+        path = item.get("path")
+        if (not isinstance(path, str) or not path or path.startswith("/")
+                or any(part in {"", ".", ".."} for part in path.rstrip("/").split("/"))):
+            raise ProofError("invalid repository-qualified file scope")
+        scope.append(path)
+    for commit in claims(raw, name, repo):
+        for path in changed_paths(repo, commit):
+            if not any(path == declared or (declared.endswith("/") and path.startswith(declared))
+                       for declared in scope):
+                raise ProofError("legacy product change lacks repository-qualified file scope")
+
+
 def product_target(repo: Path, raw: bytes, name: str, root: Path, target_ref: str) -> None:
-    """Only explicit peer product delivery destinations may differ from main."""
-    if target_ref not in PEER_PRODUCT_REFS or field(raw, "close_path") != "peer-session":
-        raise ProofError("non-main publication requires a peer product delivery target")
+    """Bind non-main delivery and PREPARED recovery to peer product repositories."""
+    if target_ref not in PEER_PRODUCT_REFS | {MAIN_REF} or field(raw, "close_path") != "peer-session":
+        raise ProofError("publication recovery requires a peer product delivery target")
     root = root.resolve(strict=True)
     common, origin = repository_identity(repo)
     if (common.name != ".git" or common.parent.name != name
-            or common.parent.parent not in {root / "DS-MCP", root / "DS-IT-systems"}):
+            or common.parent.parent not in {root, root / "DS-MCP", root / "DS-IT-systems"}):
         raise ProofError("not a canonical product repository")
     protected = []
     # The server's workspace root may be a Nix mirror, not a Git checkout.
@@ -201,6 +271,8 @@ def product_target(repo: Path, raw: bytes, name: str, root: Path, target_ref: st
             raise ProofError("protected repository requires main")
     if not claims(raw, name, repo):
         raise ProofError("no session-owned product claims")
+    if common.parent.parent == root:
+        legacy_product_scope(repo, raw, common, name)
     if b"close_delivery_version: " in raw:
         frozen = json.loads(field(raw, "close_delivery_claimed_commits"))
         actual = sorted(set(line[8:] for line in raw.decode().splitlines() if line.startswith("commit: ")))
@@ -213,8 +285,12 @@ def product_target(repo: Path, raw: bytes, name: str, root: Path, target_ref: st
 def fetch_target(repo: Path, target_ref: str) -> str:
     tracking = tracking_ref(target_ref)
     # A deleted branch must fail even if its old tracking ref still exists.
+    # Network transport needs the user's credential helper. Proof commands
+    # still use git_env(), which excludes global configuration and replacements.
+    transport_env = {key: value for key, value in os.environ.items() if not key.startswith("GIT_")}
+    transport_env["GIT_TERMINAL_PROMPT"] = "0"
     git(repo, "fetch", "--quiet", "--no-tags", "--no-recurse-submodules",
-        "origin", "+" + target_ref + ":" + tracking)
+        "origin", "+" + target_ref + ":" + tracking, env=transport_env)
     return oid(repo, tracking + "^{commit}")
 
 
@@ -243,18 +319,22 @@ def verify_product(repo: Path, semaphore: Path, name: str, source: str, root: Pa
 
 def receipt(repo: Path, raw: bytes, repo_name: str, source: str, anchor: str,
             target_ref: str = MAIN_REF) -> dict:
-    if source not in claims(raw, repo_name, repo):
-        raise ProofError("source is not claimed by this session")
-    if oid(repo, source + "^{commit}") != source or oid(repo, anchor + "^{commit}") != anchor:
-        raise ProofError("non-canonical commit identity")
-    # An original commit is itself the best historical anchor. Do not label a
-    # later overwritten tree as containing its bytes merely through ancestry.
+    result = receipt_identity(repo, raw, repo_name, source, anchor, target_ref)
     if source == anchor:
         proof = "exact-commit"
     elif replay_matches(repo, source, anchor):
         proof = "exact-replay"
     else:
         raise ProofError("anchor does not reproduce the source change")
+    return {**result, "proof": proof}
+
+
+def receipt_identity(repo: Path, raw: bytes, repo_name: str, source: str, anchor: str,
+                     target_ref: str) -> dict:
+    if source not in claims(raw, repo_name, repo):
+        raise ProofError("source is not claimed by this session")
+    if oid(repo, source + "^{commit}") != source or oid(repo, anchor + "^{commit}") != anchor:
+        raise ProofError("non-canonical commit identity")
     paths = changed_paths(repo, source)
     identity = {"agent": field(raw, "agent"), "session_id": field(raw, "session_id"),
                 "repo": repo_name, "origin_sha256": hashlib.sha256(
@@ -265,7 +345,7 @@ def receipt(repo: Path, raw: bytes, repo_name: str, source: str, anchor: str,
             "source_tree": oid(repo, source + "^{tree}"),
             "source_paths": entries(repo, source, paths),
             "anchor_commit": anchor, "anchor_tree": oid(repo, anchor + "^{tree}"),
-            "published_paths": entries(repo, anchor, paths), "proof": proof}
+            "published_paths": entries(repo, anchor, paths)}
 
 
 def find_receipt(repo: Path, raw: bytes, name: str, source: str, published: str,
@@ -273,6 +353,12 @@ def find_receipt(repo: Path, raw: bytes, name: str, source: str, published: str,
     deadline = time.monotonic() + 20
     if ancestor(repo, source, published):
         return receipt(repo, raw, name, source, source, target_ref)
+    try:
+        aggregate = squash_receipt(repo, raw, name, source, published, target_ref)
+    except ProofError:
+        aggregate = None  # Individual historical publication may still prove this claim.
+    if aggregate is not None:
+        return aggregate
     candidates = git(repo, "rev-list", "--max-count=" + str(MAX_CANDIDATES),
                      published, "--", *changed_paths(repo, source)).decode().splitlines()
     for candidate in candidates:
@@ -281,6 +367,13 @@ def find_receipt(repo: Path, raw: bytes, name: str, source: str, published: str,
         if replay_matches(repo, source, candidate):
             return receipt(repo, raw, name, source, candidate, target_ref)
     raise ProofError("no exact publication anchor within search budget")
+
+
+def reconstruct_receipt(repo: Path, raw: bytes, name: str, source: str, saved: dict,
+                        target_ref: str = MAIN_REF) -> dict:
+    if saved.get("proof") == "exact-squash-series":
+        return squash_receipt(repo, raw, name, source, saved["anchor_commit"], target_ref)
+    return receipt(repo, raw, name, source, saved["anchor_commit"], target_ref)
 
 
 def verify(repo: Path, semaphore: Path, name: str, source: str, remote: str,
@@ -299,7 +392,7 @@ def verify(repo: Path, semaphore: Path, name: str, source: str, remote: str,
             if not re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", anchor):
                 continue
             if (ancestor(repo, anchor, remote) and
-                    saved == receipt(repo, raw, name, source, anchor, target_ref) and
+                    saved == reconstruct_receipt(repo, raw, name, source, saved, target_ref) and
                     oid(repo, tracking_ref(target_ref) + "^{commit}") == remote and
                     snapshot(semaphore) == raw):
                 return True
@@ -328,7 +421,7 @@ def verified_anchors(repo: Path, semaphore: Path, name: str, remote: str) -> lis
                    for value in (source, anchor)):
                 continue
             if (ancestor(repo, anchor, remote)
-                    and saved == receipt(repo, raw, name, source, anchor)):
+                    and saved == reconstruct_receipt(repo, raw, name, source, saved)):
                 anchors.add(anchor)
         except (KeyError, TypeError, ValueError, ProofError):
             continue
@@ -423,7 +516,7 @@ def main() -> int:
                 raise ProofError("product proof requires workspace identity")
             return 0 if verify_product(args.repo, args.semaphore, args.repo_name, args.commit, args.workspace) else 1
         if args.action == "record":
-            if args.target_ref != MAIN_REF:
+            if args.target_ref != MAIN_REF or args.workspace is not None:
                 if args.workspace is None:
                     raise ProofError("product receipt requires workspace identity")
                 raw = snapshot(args.semaphore)
