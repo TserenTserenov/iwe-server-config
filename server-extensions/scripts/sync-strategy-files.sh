@@ -135,9 +135,17 @@ fi
 # server; cross-machine delivery for it is an open gap, not solved by this
 # script — see WP-526 "Осталось".
 
+HAVE_FILES_TO_SYNC=true
 if [ "${#FILES_TO_SYNC[@]}" -eq 0 ]; then
-  echo "$TS [sync-strategy-files] no files matched"
-  exit 0
+  # origin/main itself has zero paths matching our scope right now (every WP card and
+  # current/*.md gone at once -- plausible for current/ alone after a Day Close archives
+  # the last plan) -- the update loop below has nothing to do, but a path this script
+  # mirrored earlier can still be sitting stale in the canon and the removal loop below
+  # must still run for it (WP-530, found 04.10.2026 by Codex review: this exit used to
+  # skip removal entirely, undoing the whole point of the fix on exactly the shape it
+  # was meant to cover).
+  HAVE_FILES_TO_SYNC=false
+  echo "$TS [sync-strategy-files] no files matched on origin/main for the update loop" >&2
 fi
 
 # A staged path is OUR stale mirror -- refreshable without data loss -- only
@@ -184,8 +192,13 @@ SKIPPED=0
 SKIPPED_DIRTY=0
 SKIPPED_AHEAD=0
 FAILED=0
+REMOVED=0
+SKIPPED_REMOVE_DIRTY=0
+SKIPPED_REMOVE_AHEAD=0
 
-for FILE in "${FILES_TO_SYNC[@]}"; do
+if [ "$HAVE_FILES_TO_SYNC" = true ]; then
+
+  for FILE in "${FILES_TO_SYNC[@]}"; do
   # Skip fleeting-notes — у него отдельный sync (не наш скоп)
   case "$FILE" in
     inbox/fleeting-notes.md) continue ;;
@@ -255,12 +268,103 @@ for FILE in "${FILES_TO_SYNC[@]}"; do
   else
     FAILED=$((FAILED + 1))
     echo "$TS [sync-strategy-files] FAIL: $FILE" >&2
-  fi
-done
-
-if [ "$((SKIPPED_DIRTY + SKIPPED_AHEAD))" -gt 0 ]; then
-  echo "$TS [sync-strategy-files] WARN: $SKIPPED_DIRTY file(s) skipped-dirty, $SKIPPED_AHEAD file(s) skipped-ahead (local work not yet committed/pushed)" >&2
+    fi
+  done
 fi
 
-echo "$TS [sync-strategy-files] synced=$SYNCED skipped=$SKIPPED skipped_dirty=$SKIPPED_DIRTY skipped_ahead=$SKIPPED_AHEAD failed=$FAILED"
+# is_own_removed_mirror: generalises is_own_stale_mirror() above to a path origin/main has
+# removed ENTIRELY (not just advanced) -- a mirror this script itself staged from some past
+# origin tip is not "dirty" just because origin went on to delete the path (Codex review,
+# 04.10.2026: the first version of this fix used a bare `git diff HEAD` dirty-check here, which
+# misclassified exactly the shape that caused the original incident -- the canon's DayPlan had
+# already been refreshed to the pre-archival origin content by this same mirror logic, so it
+# differed from HEAD and was treated as human work forever).
+is_own_removed_mirror() {
+  local file="$1" index_blob
+  git diff --quiet -- "$file" 2>/dev/null || return 1   # worktree must equal the index -- no unstaged edit on top
+  index_blob=$(git rev-parse ":${file}" 2>/dev/null) || return 1   # must be staged -- nothing of ours to recognise otherwise
+
+  # Bounded scan (same 200-revision limit as is_own_stale_mirror() above): mirrors are always
+  # from a recent origin tip, and an unbounded walk on a long-lived path's full history would be
+  # a real cost (Codex review, 04.10.2026).
+  local rev matched=false
+  for rev in $(git rev-list -n 200 "${REMOTE}/${BRANCH}" -- "$file" 2>/dev/null); do
+    if [ "$(git rev-parse "${rev}:${file}" 2>/dev/null)" = "$index_blob" ]; then
+      matched=true
+      break
+    fi
+  done
+  [ "$matched" = true ] || return 1
+
+  local ahead_revs
+  # A failed check (not "no local-only commits") must not be read as "safe to remove" -- same
+  # fail-closed principle as the pipeline fix above, applied here since this is new code from the
+  # same review (Codex, 04.10.2026).
+  ahead_revs=$(git rev-list HEAD --not "${REMOTE}/${BRANCH}" -- "$file" 2>/dev/null) || return 1
+  for rev in $ahead_revs; do
+    [ "$(git rev-parse "${rev}:${file}" 2>/dev/null)" = "$index_blob" ] && return 1
+  done
+  return 0
+}
+
+# A tracked path this script's scope covers but origin/main no longer has at all
+# (renamed or deleted there -- WP-530, found 04.10.2026: current/DayPlan *.md stayed
+# staged forever after Day Close moved it to archive/day-plans/, and the published-
+# ledger transaction refuses any staged path it cannot resolve on origin) is removed
+# here, under the same two guards as a content update above: a path with local work
+# (dirty) or an unpublished local commit (ahead) is left for a human/publish to settle.
+# git ls-files, not `git ls-tree HEAD`: a mirror this script staged but never committed
+# (origin deleted the path before the next commit landed) lives only in the index, and
+# `ls-tree HEAD` would silently never see it -- the second defect Codex's review found.
+TRACKED_IN_SCOPE=$(git ls-files -- inbox current MEMORY.md 2>/dev/null \
+  | grep -E '^(inbox/WP-.*\.md|current/[^/]+\.md|MEMORY\.md)$' || true)
+while IFS= read -r FILE; do
+  [ -n "$FILE" ] || continue
+  case "$FILE" in inbox/fleeting-notes.md) continue ;; esac
+  # Still present on origin under this exact path: the update loop above owns it.
+  git rev-parse -q --verify "${REMOTE}/${BRANCH}:${FILE}" >/dev/null 2>&1 && continue
+
+  if git diff --quiet HEAD -- "$FILE" 2>/dev/null; then
+    :   # clean relative to HEAD -- ordinary case, fall through to the ahead-guard below
+  elif is_own_removed_mirror "$FILE"; then
+    :   # our own stale mirror, now orphaned by origin deleting the path entirely
+  else
+    SKIPPED_REMOVE_DIRTY=$((SKIPPED_REMOVE_DIRTY + 1))
+    continue
+  fi
+  if [ "$REPO_DIVERGED" = true ]; then
+    # -n 1, no pipe to grep (Codex review 04.10.2026, reproduced with 1500 local commits): `git
+    # rev-list ... | grep -q .` lets grep exit the instant it reads one match and close the pipe;
+    # under `pipefail`, git's own SIGPIPE exit (141) then OUTRANKS grep's real "found a match" (0),
+    # so a long unpublished history silently looked like "no local work" and the guard let the
+    # deletion through. `-n 1` caps git's own work and removes the pipe entirely -- a failed check
+    # (not "zero matches", an actual git error) also defaults to NOT removing.
+    if ! LOCAL_ONLY_REV=$(git rev-list -n 1 HEAD --not "${REMOTE}/${BRANCH}" -- "$FILE" 2>/dev/null); then
+      SKIPPED_REMOVE_AHEAD=$((SKIPPED_REMOVE_AHEAD + 1))
+      continue
+    fi
+    if [ -n "$LOCAL_ONLY_REV" ]; then
+      # A local-only commit touched this path (edited or itself removed/moved it) and has
+      # not reached origin yet -- that is git history we must not race past.
+      SKIPPED_REMOVE_AHEAD=$((SKIPPED_REMOVE_AHEAD + 1))
+      continue
+    fi
+  fi
+  # -f: both guards above already proved this safe (clean vs HEAD, or our own stale mirror of a
+  # past origin tip) -- plain `git rm` refuses whenever the index differs from HEAD, which is
+  # exactly the own-stale-mirror shape by design, not a reason to leave the path stuck.
+  if git rm -q -f -- "$FILE" 2>/dev/null; then
+    REMOVED=$((REMOVED + 1))
+    echo "$TS [sync-strategy-files] removed (gone on origin/main): $FILE" >&2
+  else
+    FAILED=$((FAILED + 1))
+    echo "$TS [sync-strategy-files] FAIL removing: $FILE" >&2
+  fi
+done <<< "$TRACKED_IN_SCOPE"
+
+if [ "$((SKIPPED_DIRTY + SKIPPED_AHEAD + SKIPPED_REMOVE_DIRTY + SKIPPED_REMOVE_AHEAD))" -gt 0 ]; then
+  echo "$TS [sync-strategy-files] WARN: $SKIPPED_DIRTY file(s) skipped-dirty, $SKIPPED_AHEAD file(s) skipped-ahead, $SKIPPED_REMOVE_DIRTY file(s) skipped-remove-dirty, $SKIPPED_REMOVE_AHEAD file(s) skipped-remove-ahead (local work not yet committed/pushed)" >&2
+fi
+
+echo "$TS [sync-strategy-files] synced=$SYNCED skipped=$SKIPPED skipped_dirty=$SKIPPED_DIRTY skipped_ahead=$SKIPPED_AHEAD removed=$REMOVED skipped_remove_dirty=$SKIPPED_REMOVE_DIRTY skipped_remove_ahead=$SKIPPED_REMOVE_AHEAD failed=$FAILED"
 exit 0
