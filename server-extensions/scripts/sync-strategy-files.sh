@@ -279,6 +279,22 @@ fi
 # misclassified exactly the shape that caused the original incident -- the canon's DayPlan had
 # already been refreshed to the pre-archival origin content by this same mirror logic, so it
 # differed from HEAD and was treated as human work forever).
+# BEGIN-NO-UNPUBLISHED-LOCAL-COMMIT (extracted by scripts/tests/sync-strategy-files-no-unpublished-local-commit-smoke.sh)
+# no_unpublished_local_commit <file> -> true (0) only when it is PROVEN that no local-only commit
+# touches this path; false (1) both when one exists and when the proof itself fails (fail-closed:
+# an unproven state must never be read as "safe to remove" -- Codex review 04.10.2026).
+# -n 1 is enough to prove existence, captured via command substitution rather than piped into
+# `grep -q`: a pipe lets grep close its read end the instant it matches, which can SIGPIPE git
+# mid-write on a long history; under `pipefail` that broken-pipe exit then outranks grep's own
+# "found a match", so a long unpublished local history silently looked clean (reproduced with
+# 1500 local commits -- the original incident this whole fix addresses).
+no_unpublished_local_commit() {
+  local file="$1" found
+  found=$(git rev-list -n 1 HEAD --not "${REMOTE}/${BRANCH}" -- "$file" 2>/dev/null) || return 1
+  [ -z "$found" ]
+}
+# END-NO-UNPUBLISHED-LOCAL-COMMIT
+
 is_own_removed_mirror() {
   local file="$1" index_blob
   git diff --quiet -- "$file" 2>/dev/null || return 1   # worktree must equal the index -- no unstaged edit on top
@@ -332,23 +348,11 @@ while IFS= read -r FILE; do
     SKIPPED_REMOVE_DIRTY=$((SKIPPED_REMOVE_DIRTY + 1))
     continue
   fi
-  if [ "$REPO_DIVERGED" = true ]; then
-    # -n 1, no pipe to grep (Codex review 04.10.2026, reproduced with 1500 local commits): `git
-    # rev-list ... | grep -q .` lets grep exit the instant it reads one match and close the pipe;
-    # under `pipefail`, git's own SIGPIPE exit (141) then OUTRANKS grep's real "found a match" (0),
-    # so a long unpublished history silently looked like "no local work" and the guard let the
-    # deletion through. `-n 1` caps git's own work and removes the pipe entirely -- a failed check
-    # (not "zero matches", an actual git error) also defaults to NOT removing.
-    if ! LOCAL_ONLY_REV=$(git rev-list -n 1 HEAD --not "${REMOTE}/${BRANCH}" -- "$FILE" 2>/dev/null); then
-      SKIPPED_REMOVE_AHEAD=$((SKIPPED_REMOVE_AHEAD + 1))
-      continue
-    fi
-    if [ -n "$LOCAL_ONLY_REV" ]; then
-      # A local-only commit touched this path (edited or itself removed/moved it) and has
-      # not reached origin yet -- that is git history we must not race past.
-      SKIPPED_REMOVE_AHEAD=$((SKIPPED_REMOVE_AHEAD + 1))
-      continue
-    fi
+  if [ "$REPO_DIVERGED" = true ] && ! no_unpublished_local_commit "$FILE"; then
+    # A local-only commit touched this path (or the check itself could not prove otherwise) and
+    # has not reached origin yet -- that is git history we must not race past.
+    SKIPPED_REMOVE_AHEAD=$((SKIPPED_REMOVE_AHEAD + 1))
+    continue
   fi
   # -f: both guards above already proved this safe (clean vs HEAD, or our own stale mirror of a
   # past origin tip) -- plain `git rm` refuses whenever the index differs from HEAD, which is
