@@ -10,10 +10,9 @@ triggers:
   slash: [/extend]
   phrases: []
 routing:
-  executor: script
-  deterministic: true
-  script_path: ".claude/skills/extend/show-catalog.sh"
-agents: none
+  executor: sonnet
+  deterministic: false
+agents: single
 interaction: one-shot
 gates_required: []
 gates_enforced: []

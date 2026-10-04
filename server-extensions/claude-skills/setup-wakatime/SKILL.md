@@ -9,11 +9,10 @@ triggers:
   slash: [/setup-wakatime]
   phrases: []
 routing:
-  executor: script
-  deterministic: true
-  script_path: ".claude/skills/setup-wakatime/setup.sh"
-agents: none
-interaction: one-shot
+  executor: sonnet
+  deterministic: false
+agents: single
+interaction: multi-step
 gates_required: []
 gates_enforced: []
 gates_rationale: "операционный скилл; WP Gate применим только при создании нового РП, не для операционных вызовов"

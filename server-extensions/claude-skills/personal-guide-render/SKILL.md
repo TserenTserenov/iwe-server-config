@@ -13,7 +13,7 @@ triggers:
   phrases: []
 routing:
   executor: sonnet
-  deterministic: true
+  deterministic: false
 agents: single
 interaction: single-step
 gates_required: []
@@ -40,7 +40,7 @@ gates_rationale: "операционный скилл; WP Gate применим 
 
 ## Шаг 0. Проверить предусловие (setup завершён)
 
-Вызови `personal_search(source: "DS-personal-guide", path: ".claude/skills/personal-guide-start/SKILL.md")`. Не нашёл (0 результатов) → повтори с `source: "personal-guide"` (legacy-пользователи, не мигрировавшие на канон, WP-559 Ф3).
+Вызови `personal_search(source: "DS-personal-guide", path: "README.md")`. Не нашёл (0 результатов) → повтори с `source: "personal-guide"` (legacy-пользователи, не мигрировавшие на канон, WP-559 Ф3).
 
 Если файл **не найден** ни под одним из имён → сообщить пилоту:
 ```
