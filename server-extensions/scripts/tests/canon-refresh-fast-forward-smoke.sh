@@ -371,9 +371,15 @@ assert_eq "case18 HEAD unchanged" "$PRE18_HEAD" "$("$REAL_GIT" -C "$CLONE18" rev
 
 # --- Scenario 19: origin also changed a path OUTSIDE the contract that the
 # local mirror never touched (still equals the OLD head, so it never shows
-# up as dirty on its own) -> the whole-tree check must still catch this and
-# refuse, or a reset --soft would silently introduce new local dirtiness on
-# that path (Codex's cold-review finding, round 4 of the design session). --
+# up as dirty on its own). The whole-tree reset --soft branch must still
+# refuse this (a soft reset would leave a stale index entry for that path —
+# Codex's cold-review finding, round 4 of the design session), but the
+# per-path discard branch (peer session 2026-10-05-03-wp538-canon-mirror-
+# drift) resolves it: the mirrored card is byte-equal to origin, so dropping
+# it loses nothing, and the ff-only merge then brings scripts/other.sh to v2
+# the way any fast-forward does. On a live canon this is the common shape —
+# every batch of origin commits touches docs/, machine/ledger/ or scripts/ —
+# which is why the whole-tree branch had never fired once in production. ----
 new_origin_and_clone case19 >/dev/null
 CLONE19="$TEST_ROOT/case19-clone"
 SEED19="$TEST_ROOT/case19-seed"
@@ -402,13 +408,17 @@ printf 'other v2\n' > "$SEED19/scripts/other.sh"
 "$REAL_GIT" -C "$SEED19" push -q
 "$REAL_GIT" -C "$CLONE19" fetch -q origin
 "$REAL_GIT" -C "$CLONE19" checkout -q "origin/main" -- inbox/WP-1002.md
+REMOTE_HEAD19=$("$REAL_GIT" -C "$SEED19" rev-parse HEAD)
 out19=$(AUTOMATION_CONTRACT_FILE="$CONTRACT15" bash "$SCRIPT" "$CLONE19" main 2>&1)
 rc19=$?
 assert_eq "case19 exit code" "0" "$rc19"
-assert_contains "case19 diagnostic" "$out19" "tree not clean"
-assert_eq "case19 HEAD unchanged (must not silently adopt scripts/other.sh v2)" \
-  "$PRE19_HEAD" "$("$REAL_GIT" -C "$CLONE19" rev-parse HEAD)"
-assert_eq "case19 scripts/other.sh still at old content" "other v1" "$(cat "$CLONE19/scripts/other.sh")"
+assert_contains "case19 discard diagnostic" "$out19" "discarded a sync-strategy-files mirror"
+assert_contains "case19 ff diagnostic" "$out19" "fast-forwarded"
+assert_eq "case19 HEAD advanced to origin" "$REMOTE_HEAD19" "$("$REAL_GIT" -C "$CLONE19" rev-parse HEAD)"
+assert_eq "case19 tree clean after recovery" "" "$("$REAL_GIT" -C "$CLONE19" status --porcelain)"
+assert_eq "case19 scripts/other.sh brought to v2 by the fast-forward" "other v2" "$(cat "$CLONE19/scripts/other.sh")"
+assert_eq "case19 mirrored card content intact" "card body" "$(cat "$CLONE19/inbox/WP-1002.md")"
+[ "$PRE19_HEAD" != "$REMOTE_HEAD19" ] || fail "case19 fixture must start behind origin"
 
 # --- Scenario 20: a genuinely STAGED edit (git add, not a mirror checkout)
 # on a contract-owned path, diverging from origin -> not recovered. This is
@@ -452,4 +462,152 @@ real edit, not from origin" "$(cat "$CLONE20/inbox/WP-2000.md")"
 assert_contains "case20 edit still staged, not lost" \
   "$("$REAL_GIT" -C "$CLONE20" diff --cached --name-only)" "inbox/WP-2000.md"
 
-echo "PASS: canon-refresh-fast-forward-smoke.sh (20 scenarios)"
+# --- Scenario 21: a mirrored contract path whose NAME CONTAINS A SPACE, plus
+# an origin move outside the contract -> recovered by the per-path discard.
+# `git status --porcelain` (v1, non -z) wraps such paths in double quotes, so
+# a parser that reads it line-wise never matches the contract and fails closed
+# forever — the live canon's current/DayPlan YYYY-MM-DD.md and WeekPlan files
+# are exactly this shape (peer session 2026-10-05-03-wp538-canon-mirror-drift).
+new_origin_and_clone case21 >/dev/null
+CLONE21="$TEST_ROOT/case21-clone"
+SEED21="$TEST_ROOT/case21-seed"
+mkdir -p "$SEED21/current" "$SEED21/scripts"
+printf 'plan v1\n' > "$SEED21/current/DayPlan 2026-10-05.md"
+printf 'other v1\n' > "$SEED21/scripts/other.sh"
+"$REAL_GIT" -C "$SEED21" add "current/DayPlan 2026-10-05.md" scripts/other.sh
+"$REAL_GIT" -C "$SEED21" commit -qm "add day plan v1 and scripts/other.sh v1"
+"$REAL_GIT" -C "$SEED21" push -q
+"$REAL_GIT" -C "$CLONE21" fetch -q origin
+"$REAL_GIT" -C "$CLONE21" merge -q --ff-only origin/main
+printf 'plan v2\n' > "$SEED21/current/DayPlan 2026-10-05.md"
+printf 'other v2\n' > "$SEED21/scripts/other.sh"
+"$REAL_GIT" -C "$SEED21" add "current/DayPlan 2026-10-05.md" scripts/other.sh
+"$REAL_GIT" -C "$SEED21" commit -qm "advance plan and other.sh to v2"
+"$REAL_GIT" -C "$SEED21" push -q
+REMOTE_HEAD21=$("$REAL_GIT" -C "$SEED21" rev-parse HEAD)
+"$REAL_GIT" -C "$CLONE21" fetch -q origin
+"$REAL_GIT" -C "$CLONE21" checkout -q "origin/main" -- "current/DayPlan 2026-10-05.md"
+assert_contains "case21 fixture: porcelain quotes the spaced path" \
+  "$("$REAL_GIT" -C "$CLONE21" status --porcelain)" '"current/DayPlan 2026-10-05.md"'
+out21=$(AUTOMATION_CONTRACT_FILE="$CONTRACT15" bash "$SCRIPT" "$CLONE21" main 2>&1)
+rc21=$?
+assert_eq "case21 exit code" "0" "$rc21"
+assert_contains "case21 discard diagnostic" "$out21" "discarded a sync-strategy-files mirror"
+assert_eq "case21 HEAD advanced to origin" "$REMOTE_HEAD21" "$("$REAL_GIT" -C "$CLONE21" rev-parse HEAD)"
+assert_eq "case21 tree clean after recovery" "" "$("$REAL_GIT" -C "$CLONE21" status --porcelain)"
+assert_eq "case21 spaced path at v2" "plan v2" "$(cat "$CLONE21/current/DayPlan 2026-10-05.md")"
+assert_eq "case21 non-contract path at v2" "other v2" "$(cat "$CLONE21/scripts/other.sh")"
+
+# --- Scenario 22: a STAGED DELETION left by the automation (origin moved
+# current/DayPlan.md to archive/, sync-strategy-files.sh ran `git rm` on the
+# contract path) plus an origin move outside the contract -> recovered. This
+# is the once-a-day Day Close shape; a parser that accepts only M/A stalls the
+# canon on it every morning (cold review of this patch, 2026-10-05). ---------
+new_origin_and_clone case22 >/dev/null
+CLONE22="$TEST_ROOT/case22-clone"
+SEED22="$TEST_ROOT/case22-seed"
+mkdir -p "$SEED22/current" "$SEED22/scripts"
+printf 'plan body\n' > "$SEED22/current/DayPlan 2026-10-04.md"
+printf 'other v1\n' > "$SEED22/scripts/other.sh"
+"$REAL_GIT" -C "$SEED22" add "current/DayPlan 2026-10-04.md" scripts/other.sh
+"$REAL_GIT" -C "$SEED22" commit -qm "day plan + other v1"
+"$REAL_GIT" -C "$SEED22" push -q
+"$REAL_GIT" -C "$CLONE22" fetch -q origin
+"$REAL_GIT" -C "$CLONE22" merge -q --ff-only origin/main
+mkdir -p "$SEED22/archive"
+"$REAL_GIT" -C "$SEED22" mv "current/DayPlan 2026-10-04.md" "archive/DayPlan 2026-10-04.md"
+printf 'other v2\n' > "$SEED22/scripts/other.sh"
+"$REAL_GIT" -C "$SEED22" add -A archive current scripts/other.sh
+"$REAL_GIT" -C "$SEED22" commit -qm "archive day plan, other v2"
+"$REAL_GIT" -C "$SEED22" push -q
+REMOTE_HEAD22=$("$REAL_GIT" -C "$SEED22" rev-parse HEAD)
+"$REAL_GIT" -C "$CLONE22" fetch -q origin
+"$REAL_GIT" -C "$CLONE22" rm -q -f -- "current/DayPlan 2026-10-04.md"
+assert_contains "case22 fixture: staged deletion present" "$("$REAL_GIT" -C "$CLONE22" status --porcelain)" 'D  "current/DayPlan 2026-10-04.md"'
+out22=$(AUTOMATION_CONTRACT_FILE="$CONTRACT15" bash "$SCRIPT" "$CLONE22" main 2>&1)
+rc22=$?
+assert_eq "case22 exit code" "0" "$rc22"
+assert_contains "case22 discard diagnostic" "$out22" "discarded a sync-strategy-files mirror"
+assert_eq "case22 HEAD advanced to origin" "$REMOTE_HEAD22" "$("$REAL_GIT" -C "$CLONE22" rev-parse HEAD)"
+assert_eq "case22 tree clean after recovery" "" "$("$REAL_GIT" -C "$CLONE22" status --porcelain)"
+[ ! -e "$CLONE22/current/DayPlan 2026-10-04.md" ] || fail "case22 old path must be gone after the fast-forward"
+assert_eq "case22 archived copy present" "plan body" "$(cat "$CLONE22/archive/DayPlan 2026-10-04.md")"
+
+# --- Scenario 23: MIXED set — one byte-equal mirror plus one REAL staged
+# edit on another contract path -> the whole set is refused, both preserved.
+# Whole-set-or-nothing is the load-bearing guarantee of the discard branch. --
+new_origin_and_clone case23 >/dev/null
+CLONE23="$TEST_ROOT/case23-clone"
+SEED23="$TEST_ROOT/case23-seed"
+mkdir -p "$SEED23/inbox" "$SEED23/current"
+printf 'card v1\n' > "$SEED23/inbox/WP-3001.md"
+printf 'plan v1\n' > "$SEED23/current/WeekPlan.md"
+"$REAL_GIT" -C "$SEED23" add inbox/WP-3001.md current/WeekPlan.md
+"$REAL_GIT" -C "$SEED23" commit -qm "card v1, plan v1"
+"$REAL_GIT" -C "$SEED23" push -q
+"$REAL_GIT" -C "$CLONE23" fetch -q origin
+"$REAL_GIT" -C "$CLONE23" merge -q --ff-only origin/main
+PRE23_HEAD=$("$REAL_GIT" -C "$CLONE23" rev-parse HEAD)
+printf 'card v2\n' > "$SEED23/inbox/WP-3001.md"
+"$REAL_GIT" -C "$SEED23" add inbox/WP-3001.md
+"$REAL_GIT" -C "$SEED23" commit -qm "card v2"
+"$REAL_GIT" -C "$SEED23" push -q
+"$REAL_GIT" -C "$CLONE23" fetch -q origin
+"$REAL_GIT" -C "$CLONE23" checkout -q "origin/main" -- inbox/WP-3001.md
+printf 'plan v1\npilot edit, not on origin\n' > "$CLONE23/current/WeekPlan.md"
+"$REAL_GIT" -C "$CLONE23" add current/WeekPlan.md
+out23=$(AUTOMATION_CONTRACT_FILE="$CONTRACT15" bash "$SCRIPT" "$CLONE23" main 2>&1)
+rc23=$?
+assert_eq "case23 exit code" "0" "$rc23"
+assert_contains "case23 diagnostic" "$out23" "tree not clean"
+assert_eq "case23 HEAD unchanged" "$PRE23_HEAD" "$("$REAL_GIT" -C "$CLONE23" rev-parse HEAD)"
+assert_eq "case23 mirror entry preserved" "card v2" "$(cat "$CLONE23/inbox/WP-3001.md")"
+assert_eq "case23 pilot edit preserved" "plan v1
+pilot edit, not on origin" "$(cat "$CLONE23/current/WeekPlan.md")"
+assert_contains "case23 both still staged" "$("$REAL_GIT" -C "$CLONE23" diff --cached --name-only)" "current/WeekPlan.md"
+
+# --- Scenario 24: a staged RENAME entry (R, two NUL fields in -z output) on
+# contract paths -> refused before the second field could be read as a path.
+new_origin_and_clone case24 >/dev/null
+CLONE24="$TEST_ROOT/case24-clone"
+SEED24="$TEST_ROOT/case24-seed"
+mkdir -p "$SEED24/inbox"
+printf 'card body\n' > "$SEED24/inbox/WP-4001.md"
+"$REAL_GIT" -C "$SEED24" add inbox/WP-4001.md
+"$REAL_GIT" -C "$SEED24" commit -qm "card"
+"$REAL_GIT" -C "$SEED24" push -q
+"$REAL_GIT" -C "$CLONE24" fetch -q origin
+"$REAL_GIT" -C "$CLONE24" merge -q --ff-only origin/main
+advance_origin "$SEED24" "behind by one"
+"$REAL_GIT" -C "$CLONE24" fetch -q origin
+PRE24_HEAD=$("$REAL_GIT" -C "$CLONE24" rev-parse HEAD)
+"$REAL_GIT" -C "$CLONE24" mv inbox/WP-4001.md inbox/WP-4002.md
+assert_contains "case24 fixture: rename staged" "$("$REAL_GIT" -C "$CLONE24" status --porcelain)" "R  inbox/WP-4001.md -> inbox/WP-4002.md"
+out24=$(AUTOMATION_CONTRACT_FILE="$CONTRACT15" bash "$SCRIPT" "$CLONE24" main 2>&1)
+rc24=$?
+assert_eq "case24 exit code" "0" "$rc24"
+assert_contains "case24 diagnostic" "$out24" "tree not clean"
+assert_eq "case24 HEAD unchanged" "$PRE24_HEAD" "$("$REAL_GIT" -C "$CLONE24" rev-parse HEAD)"
+assert_eq "case24 renamed file kept" "card body" "$(cat "$CLONE24/inbox/WP-4002.md")"
+
+# --- Scenario 25: a LOCAL-ONLY added file on a contract path that origin
+# does not have -> refused, file kept (an A entry is a mirror only when the
+# same blob exists at that path on origin). --------------------------------
+new_origin_and_clone case25 >/dev/null
+CLONE25="$TEST_ROOT/case25-clone"
+SEED25="$TEST_ROOT/case25-seed"
+advance_origin "$SEED25" "behind by one"
+"$REAL_GIT" -C "$CLONE25" fetch -q origin
+PRE25_HEAD=$("$REAL_GIT" -C "$CLONE25" rev-parse HEAD)
+mkdir -p "$CLONE25/inbox"
+printf 'local draft, never pushed\n' > "$CLONE25/inbox/WP-5001.md"
+"$REAL_GIT" -C "$CLONE25" add inbox/WP-5001.md
+out25=$(AUTOMATION_CONTRACT_FILE="$CONTRACT15" bash "$SCRIPT" "$CLONE25" main 2>&1)
+rc25=$?
+assert_eq "case25 exit code" "0" "$rc25"
+assert_contains "case25 diagnostic" "$out25" "tree not clean"
+assert_eq "case25 HEAD unchanged" "$PRE25_HEAD" "$("$REAL_GIT" -C "$CLONE25" rev-parse HEAD)"
+assert_eq "case25 local draft kept" "local draft, never pushed" "$(cat "$CLONE25/inbox/WP-5001.md")"
+assert_contains "case25 draft still staged" "$("$REAL_GIT" -C "$CLONE25" diff --cached --name-only)" "inbox/WP-5001.md"
+
+echo "PASS: canon-refresh-fast-forward-smoke.sh (25 scenarios)"

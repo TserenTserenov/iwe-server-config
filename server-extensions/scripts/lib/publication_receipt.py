@@ -33,6 +33,16 @@ BOT_ANCHOR = "bb95977a0c7cd5bd9404a14b3e1b42033d42f066"
 BOT_CLAIMS = frozenset({BOT_SOURCE, "b772ae59a644720912148a554f3394e194ec17ab",
                         "234f0bd4d25b287c5e08332449564aae8e5091b9"})
 BOT_PATHS = ["requirements.in", "requirements.txt"]
+WP167_BOT_SESSION = "1791187833-14d2"
+WP167_BOT_CLAIMS = frozenset({
+    "34d8038d1f62ef16a0a213d0295b838869075166",
+    "5b1786a08fa36a2682c5da38ff6fd9068e6ea1e7",
+})
+WP167_BOT_PATHS = frozenset({
+    "config/settings.py", "core/scheduler.py",
+    "docs/processes/process-16-publisher-content-scan.md",
+    "tests/smoke/test_publisher_scan.py",
+})
 
 
 class ProofError(Exception):
@@ -275,7 +285,18 @@ def product_target(repo: Path, raw: bytes, name: str, root: Path, target_ref: st
                   and target_ref == BOT_REF and origin == "github.com/aisystant/aist_bot"
                   and field(raw, "close_delivery_version") == "isolate-push/v2"
                   and frozenset(claims(raw, name, repo)) == BOT_CLAIMS)
-    if (field(raw, "close_path") != "peer-session" and not legacy_bot
+    # WP-167 opened before repository-qualified file claims were recorded.
+    # Admit only its immutable two-commit publisher scope; receipt construction
+    # still has to prove each claimed commit by exact replay on the fetched ref.
+    legacy_wp167 = (field(raw, "close_path") == "unknown" and name == BOT_REPO
+                    and target_ref == BOT_REF and origin == "github.com/aisystant/aist_bot"
+                    and field(raw, "wp") == "WP-167"
+                    and field(raw, "session_id") == WP167_BOT_SESSION
+                    and field(raw, "close_delivery_version") == "isolate-push/v2"
+                    and frozenset(claims(raw, name, repo)) == WP167_BOT_CLAIMS
+                    and all(frozenset(changed_paths(repo, commit)) == WP167_BOT_PATHS
+                            for commit in WP167_BOT_CLAIMS))
+    if (field(raw, "close_path") != "peer-session" and not (legacy_bot or legacy_wp167)
             and (target_ref != MAIN_REF
                  or field(raw, "close_delivery_version") != "isolate-push/v2")):
         raise ProofError("publication recovery requires a peer product delivery target")
@@ -297,7 +318,7 @@ def product_target(repo: Path, raw: bytes, name: str, root: Path, target_ref: st
             raise ProofError("protected repository requires main")
     if not claims(raw, name, repo):
         raise ProofError("no session-owned product claims")
-    if common.parent.parent == root:
+    if common.parent.parent == root and not legacy_wp167:
         legacy_product_scope(repo, raw, common, name)
     if b"close_delivery_version: " in raw:
         frozen = json.loads(field(raw, "close_delivery_claimed_commits"))

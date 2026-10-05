@@ -48,6 +48,15 @@
 # itself is not touched by this — its exit contract for its 20+ other
 # callers stays exactly as it was.
 #
+# ...and a second, per-path variant of the same exception (peer session
+# 2026-10-05-03-wp538-canon-mirror-drift): on the live canon the whole-tree
+# condition above never held (origin moves non-contract paths in every
+# batch), so the mirror was never resolved. When every tracked-dirty path is
+# contract-owned and equal to origin at that path, the mirror copies are
+# discarded (`git restore` to HEAD — the only mutation of index/worktree in
+# this file, see try_contract_mirror_discard) and the ordinary ff-only merge
+# below brings the whole tree, contract paths included, to origin.
+#
 # Usage: canon-refresh.sh <repo-path> [branch]
 # Exit codes: 0 = nothing to do, or fast-forwarded successfully.
 #             1 = real problem (mid-rebase/merge, tree became dirty between
@@ -81,6 +90,9 @@ BRANCH="${2:-}"
 
 cd "$REPO" 2>/dev/null || { echo "canon-refresh: cannot cd to $REPO" >&2; exit 2; }
 git rev-parse --is-inside-work-tree >/dev/null 2>&1 || { echo "canon-refresh: $REPO is not a git repo" >&2; exit 2; }
+# Porcelain paths are toplevel-relative while pathspecs are cwd-relative; a
+# caller passing a subdirectory would make every per-path check below miss.
+cd "$(git rev-parse --show-toplevel)" || { echo "canon-refresh: cannot cd to the worktree toplevel of $REPO" >&2; exit 2; }
 
 GIT_DIR=$(git rev-parse --git-dir && printf x); GIT_DIR="${GIT_DIR%x}"; GIT_DIR="${GIT_DIR%$'\n'}"   # the marker x keeps a newline at the end of the name (the lock is made where the guard says)
 
@@ -258,13 +270,125 @@ try_automation_mirror_recovery() {
   return 0
 }
 
+# contract_mirror_paths <automation-name> <remote-oid> <out-file>
+# Writes the tracked-dirty paths, NUL-separated, to <out-file> when, and only
+# when, every one of them is a per-path mirror of <remote-oid> left by
+# <automation-name>:
+#   - no untracked files; no rename/copy/type-change/unmerged entries
+#   - index status M, A or D with the worktree equal to the index (Y blank);
+#     D is the automation's own `git rm` of a contract path origin no longer
+#     has (the daily Day Close move of current/DayPlan *.md to archive/)
+#   - path declared for <automation-name> in automation-contract.conf
+#   - index entry equal to <remote-oid> at that path: present in the index
+#     with the same blob and mode for M/A, absent on origin for D. The
+#     pathspec is anchored at the toplevel (cd above), so `diff --cached
+#     --quiet` can never pass vacuously on an unmatched pathspec.
+# Anything else leaves <out-file> empty and returns 1. Unlike
+# automation_mirror_snapshot this does NOT require the whole index to equal
+# <remote-oid>'s tree: on a live canon origin moves paths outside the contract
+# (docs/, machine/ledger/, archive/, scripts/) in almost every batch, so the
+# whole-tree condition never held and the reset --soft branch never fired
+# (WP-538 Ф5а follow-up, peer session 2026-10-05-03-wp538-canon-mirror-drift).
+# Those paths are exactly what the ff-only merge below brings in; discarding
+# mirror copies first loses nothing because origin holds the same bytes.
+# Status is read with -z: porcelain v1 quotes paths containing spaces
+# ("current/DayPlan 2026-10-04.md"), and a quoted path never matches the
+# contract — the second reason the whole-tree branch never recovered anything.
+contract_mirror_paths() {
+  local automation="$1" remote_oid="$2" out_file="$3" status_file entry x y path rc=0
+  # NUL-separated output cannot travel through a command substitution (bash
+  # drops the NULs), so both lists go through files; a failed or empty status
+  # is fail-closed, same as is_clean above.
+  status_file=$(mktemp "${TMPDIR:-/tmp}/canon-refresh-status.XXXXXX") || return 1
+  : > "$out_file"
+  if ! git status --porcelain=v1 -z --untracked-files=all > "$status_file" 2>/dev/null || [ ! -s "$status_file" ]; then
+    rm -f "$status_file"
+    return 1
+  fi
+  while IFS= read -r -d '' entry; do
+    [ -n "$entry" ] || continue
+    x="${entry:0:1}"
+    y="${entry:1:1}"
+    path="${entry:3}"
+    case "$x" in M|A|D) ;; *) rc=1; break ;; esac
+    if [ "$y" != ' ' ] || ! automation_contract_path_allowed "$automation" "$path"; then
+      rc=1
+      break
+    fi
+    if [ "$x" = D ]; then
+      # a staged deletion mirrors origin only if origin has dropped the path too
+      if git cat-file -e "$remote_oid:$path" 2>/dev/null; then rc=1; break; fi
+    elif ! git ls-files --error-unmatch -- "$path" >/dev/null 2>&1; then
+      rc=1
+      break
+    fi
+    if ! git diff --cached --quiet "$remote_oid" -- "$path" 2>/dev/null; then
+      rc=1
+      break
+    fi
+    printf '%s\0' "$path" >> "$out_file"
+  done < "$status_file"
+  rm -f "$status_file"
+  if [ "$rc" -ne 0 ] || [ ! -s "$out_file" ]; then
+    : > "$out_file"
+    return 1
+  fi
+  return 0
+}
+
+# try_contract_mirror_discard <remote-oid>
+# Returns 0 with a clean tree (ready for the ff-only merge below) only when
+# contract_mirror_paths passes twice in a row with the same path set and HEAD
+# did not move in between; the mutation is `git restore --source=<head>
+# --staged --worktree` on exactly those paths. Returns 1 with nothing touched
+# otherwise. This is the one branch of this file that touches the index and
+# the worktree: the residual race is a writer that ignores dirty-guard.lock
+# and edits a contract path between the last check and the restore — every
+# known writer (sync-strategy-files.sh, git-dirty-guard.sh, canon-reconcile.sh)
+# takes that lock, the canon is frozen for direct writes (WP-520), and the
+# per-file re-hash right before the restore narrows the window to the width
+# of one hash-object call. It does not close it.
+try_contract_mirror_discard() {
+  local remote_oid="$1" automation="sync-strategy-files" head_oid list_a list_b path
+  local -a paths=()
+  head_oid=$(git rev-parse HEAD 2>/dev/null) || return 1
+  git merge-base --is-ancestor "$head_oid" "$remote_oid" 2>/dev/null || return 1
+  list_a=$(mktemp "${TMPDIR:-/tmp}/canon-refresh-mirror.XXXXXX") || return 1
+  list_b=$(mktemp "${TMPDIR:-/tmp}/canon-refresh-mirror.XXXXXX") || { rm -f "$list_a"; return 1; }
+  # shellcheck disable=SC2064  # paths are fixed at trap time on purpose
+  trap "rm -f '$list_a' '$list_b'" RETURN
+  contract_mirror_paths "$automation" "$remote_oid" "$list_a" || return 1
+  contract_mirror_paths "$automation" "$remote_oid" "$list_b" || return 1
+  cmp -s "$list_a" "$list_b" || return 1
+  [ "$(git rev-parse HEAD 2>/dev/null)" = "$head_oid" ] || return 1
+  mapfile -d '' -t paths < "$list_a"
+  [ "${#paths[@]}" -gt 0 ] || return 1
+  for path in "${paths[@]}"; do
+    [ -f "$path" ] || continue   # D entries have no worktree file
+    [ "$(git hash-object -- "$path" 2>/dev/null)" = "$(git rev-parse "$remote_oid:$path" 2>/dev/null)" ] || return 1
+  done
+
+  if ! git restore --source="$head_oid" --staged --worktree -- "${paths[@]}" 2>&1; then
+    echo "canon-refresh: contract-mirror restore failed unexpectedly" >&2
+    exit 1
+  fi
+  if ! is_clean; then
+    echo "canon-refresh: contract-mirror discard left the tree dirty — investigate manually" >&2
+    exit 1
+  fi
+  echo "canon-refresh: discarded a $automation mirror of ${remote_oid:0:12} in $REPO (${#paths[@]} path(s), each equal to origin) — fast-forwarding"
+  return 0
+}
+
 if ! is_clean; then
   REMOTE_OID_FOR_RECOVERY=$(git rev-parse "origin/$BRANCH" 2>/dev/null) || REMOTE_OID_FOR_RECOVERY=""
   if [ -n "$REMOTE_OID_FOR_RECOVERY" ] && try_automation_mirror_recovery "$REMOTE_OID_FOR_RECOVERY"; then
     exit 0
   fi
-  echo "canon-refresh: tree not clean — nothing to do (git-dirty-guard.sh/pilot own that case)"
-  exit 0
+  if [ -z "$REMOTE_OID_FOR_RECOVERY" ] || ! try_contract_mirror_discard "$REMOTE_OID_FOR_RECOVERY"; then
+    echo "canon-refresh: tree not clean — nothing to do (git-dirty-guard.sh/pilot own that case)"
+    exit 0
+  fi
 fi
 
 HEAD_OID=$(git rev-parse HEAD)

@@ -986,6 +986,44 @@ _close_delivery_state "$1" one
             self.assertNotEqual(self.note_publication().returncode, 0)
             self.assertEqual(self.sem.read_text(), text)
 
+    def test_frozen_wp167_legacy_bot_claims_require_exact_identity_scope_and_replay(self):
+        self.legacy_checkout()
+        bot = self.root / receipt.BOT_REPO
+        self.repo.rename(bot)
+        self.repo = bot
+        self.git("remote", "set-url", "origin", "https://github.com/aisystant/aist_bot.git")
+        claimed = sorted([f"{receipt.BOT_REPO} {self.source}",
+                          f"{receipt.BOT_REPO} {self.anchor}"])
+        self.sem.write_text(
+            "agent: codex\nsession_id: one\nwp: WP-167\nclose_path: unknown\n"
+            "close_delivery_version: isolate-push/v2\nclose_delivery_session_id: one\n"
+            f"close_delivery_common_dir: {self.governance / '.git'}\n"
+            f"close_delivery_claimed_commits: {json.dumps(claimed)}\n"
+            f"governance_worktree: {self.governance}\norz_sessions_dir: {self.orz}\n"
+            + "".join(f"commit: {item}\n" for item in claimed)
+        )
+        self.git("update-ref", "refs/remotes/origin/new-architecture", self.anchor)
+        with (patch.object(receipt, "WP167_BOT_SESSION", "one"),
+              patch.object(receipt, "WP167_BOT_CLAIMS", frozenset({self.source, self.anchor})),
+              patch.object(receipt, "WP167_BOT_PATHS", frozenset({"a.txt"}))):
+            raw = self.sem.read_bytes()
+            receipt.product_target(self.repo, raw, receipt.BOT_REPO, self.root, receipt.BOT_REF)
+            self.assertEqual(receipt.record(self.repo, self.sem, receipt.BOT_REPO,
+                                            self.anchor, receipt.BOT_REF), 2)
+            self.assertTrue(receipt.verify(self.repo, self.sem, receipt.BOT_REPO,
+                                           self.source, self.anchor, receipt.BOT_REF))
+            for damaged in (raw.replace(b"session_id: one", b"session_id: other", 1),
+                            raw.replace(b"wp: WP-167", b"wp: WP-7"),
+                            raw.replace(self.source.encode(), b"0" * 40)):
+                with self.subTest(damaged=damaged[:80]):
+                    with self.assertRaises(receipt.ProofError):
+                        receipt.product_target(self.repo, damaged, receipt.BOT_REPO,
+                                               self.root, receipt.BOT_REF)
+            with patch.object(receipt, "WP167_BOT_PATHS", frozenset({"wrong.txt"})):
+                with self.assertRaises(receipt.ProofError):
+                    receipt.product_target(self.repo, raw, receipt.BOT_REPO,
+                                           self.root, receipt.BOT_REF)
+
 
 if __name__ == "__main__":
     unittest.main()
