@@ -563,12 +563,41 @@ def _scan_heredocs(command, start, parts, bodies, in_substitution):
 
 def _skip_arithmetic_expansion(command, index):
     # `index` is at "$((": return the index just past the matching "))".
+    # Quote-aware like _scan_heredocs -- a stray ")" inside a quoted operand
+    # (e.g. $(( "1)2"=="1)2" ))) is not a real paren. Without this, depth
+    # closes early, the caller resumes its own quote-tracking from the wrong
+    # index with quote=None, and the orphaned closing quote one character
+    # later is misread as opening a new one -- desyncing quote state for the
+    # rest of that call (found by adversarial review, 2026-10-06).
+    single_quote = "'"
+    quote = None
     depth = 0
     cursor = index + 1
     while cursor < len(command):
-        if command[cursor] == "(":
+        character = command[cursor]
+        if quote == single_quote:
+            if character == single_quote:
+                quote = None
+            cursor += 1
+            continue
+        if quote == "\"":
+            if character == "\\" and cursor + 1 < len(command):
+                cursor += 2
+                continue
+            if character == "\"":
+                quote = None
+            cursor += 1
+            continue
+        if character == "\\" and cursor + 1 < len(command):
+            cursor += 2
+            continue
+        if character in (single_quote, "\""):
+            quote = character
+            cursor += 1
+            continue
+        if character == "(":
             depth += 1
-        elif command[cursor] == ")":
+        elif character == ")":
             depth -= 1
             if depth == 0:
                 return cursor + 1
@@ -2179,6 +2208,12 @@ def self_test():
         ("echo \"$((1<<3))\"", "echo \"$((1<<3))\"", []),
         ("echo \"\\$(cat <<'EOF') it's\"", "echo \"\\$(cat <<'EOF') it's\"", []),
         ("echo \"$(echo '$(cat <<X' it)\" done", "echo \"$(echo '$(cat <<X' it)\" done", []),
+        # A ")" inside a quoted arithmetic operand is not a real paren -- it
+        # must not close "$((" early and desync quote-tracking for whatever
+        # follows on the same line (found by adversarial review, 2026-10-06).
+        ("echo $(( \"1)2\"==\"1)2\" )) ; cat <<EOF\nit's broken\nEOF\n",
+         "echo $(( \"1)2\"==\"1)2\" )) ; cat << __CLAUDE_HEREDOC_BODY_0__\n",
+         ["it's broken\n"]),
     )
     for command, expected_scaffold, expected_bodies in heredoc_scaffold_cases:
         scaffold, bodies = extract_heredocs(command)
