@@ -443,11 +443,41 @@ def read_heredoc_word(command, index):
     return word_start, index, "".join(delimiter)
 
 
-def parse_heredoc_header(command, start):
-    declarations = []
+def extract_heredocs(command):
+    # shell_command_variants()/shell_tokens() parse the *shell scaffold* of a
+    # command, not language-aware -- a heredoc body handed to python3/bash -c
+    # is free-form text (Python `if`, quotes, `{...}`) that looks like broken
+    # shell syntax to that parser and made it fail-closed on ordinary Bash
+    # calls (WP544 D6.8 regression, 785e7ed25d). Replace each heredoc body
+    # with a neutral placeholder before shell analysis, and scan the bodies
+    # separately as literal text so secret detection still covers them.
+    #
+    # The scan mirrors how bash itself reads here-documents: "$(" opens a
+    # fresh parsing context even inside a double-quoted word (the commit
+    # idiom git commit -m "$(cat <<'EOF' ... EOF)" was invisible to the old
+    # flat quote tracker, found live 2026-10-05); every heredoc declared on a
+    # line is remembered, and the bodies are read in declaration order right
+    # after the newline token that ends that line, per nesting level
+    # (cat <<A <<B; an inner "$(cat <<'B' ...)" reads B inside the parens).
+    parts = []
+    bodies = []
+    try:
+        _scan_heredocs(command, 0, parts, bodies, False)
+    except RecursionError:
+        fail("command substitution nesting is too deep")
+    return "".join(parts), bodies
+
+
+def _scan_heredocs(command, start, parts, bodies, in_substitution):
+    # in_substitution=True marks a recursive call scanning inside "$(" ... ")":
+    # it stops at the matching unquoted ")" instead of running to the end of
+    # `command`. Returns the index just past the scanned region; everything
+    # before it has been appended to `parts` (scaffold) or `bodies`.
     single_quote = "\u0027"
     quote = None
     index = start
+    flush_from = start
+    pending = []  # (slot, delimiter, strip_tabs) declared on the current line
 
     while index < len(command):
         character = command[index]
@@ -455,6 +485,17 @@ def parse_heredoc_header(command, start):
             if character == single_quote:
                 quote = None
             index += 1
+            continue
+        if command.startswith("$((", index):
+            # Arithmetic expansion: "<<" inside it is a shift, never a
+            # heredoc (bash 5.3 reports a syntax error rather than reparsing
+            # "$((" as "$( (" -- checked 2026-10-05).
+            index = _skip_arithmetic_expansion(command, index)
+            continue
+        if command.startswith("$(", index):
+            parts.append(command[flush_from:index + 2])
+            index = _scan_heredocs(command, index + 2, parts, bodies, True)
+            flush_from = index
             continue
         if quote == "\"":
             if character == "\\" and index + 1 < len(command):
@@ -476,99 +517,90 @@ def parse_heredoc_header(command, start):
             or command[index - 1].isspace()
             or command[index - 1] in ";|&()"
         ):
+            # Stop AT the newline, not past it: that newline token is what
+            # starts the bodies of the heredocs declared on this line.
             newline = command.find("\n", index)
-            return (
-                len(command) if newline < 0 else newline + 1,
-                declarations,
-            )
+            index = len(command) if newline < 0 else newline
+            continue
         if character == "\n":
-            return index + 1, declarations
+            index += 1
+            if pending:
+                parts.append(command[flush_from:index])
+                index = _consume_heredoc_bodies(command, index, pending, bodies)
+                flush_from = index
+                pending = []
+            continue
+        if in_substitution and character == ")":
+            if pending:
+                fail("unterminated heredoc: expected delimiter " + repr(pending[0][1]))
+            parts.append(command[flush_from:index + 1])
+            return index + 1
         if command.startswith("<<<", index):
             # A here-string is not a here-document: skip the whole operator,
             # otherwise the cursor lands on the 2nd "<" and "<< word" is
             # misread as a heredoc start (issue #874 in the template).
             index += 3
             continue
-        if (
-            command.startswith("<<", index)
-            and not command.startswith("<<<", index)
-        ):
-            operator_start = index
-            index += 2
-            strip_tabs = index < len(command) and command[index] == "-"
+        if command.startswith("<<", index):
+            op_index = index + 2
+            strip_tabs = op_index < len(command) and command[op_index] == "-"
             if strip_tabs:
-                index += 1
-            _word_start, word_end, delimiter = read_heredoc_word(
-                command, index
-            )
-            declarations.append(
-                (operator_start, word_end, delimiter, strip_tabs)
-            )
+                op_index += 1
+            _word_start, word_end, delimiter = read_heredoc_word(command, op_index)
+            parts.append(command[flush_from:index])
+            parts.append("<< __CLAUDE_HEREDOC_BODY_" + str(len(bodies)) + "__")
+            pending.append((len(bodies), delimiter, strip_tabs))
+            bodies.append(None)
             index = word_end
+            flush_from = word_end
             continue
         index += 1
-    return len(command), declarations
+    if pending:
+        fail("unterminated heredoc: expected delimiter " + repr(pending[0][1]))
+    parts.append(command[flush_from:index])
+    return index
 
 
-def extract_heredocs(command):
-    # shell_command_variants()/shell_tokens() parse the *shell scaffold* of a
-    # command, not language-aware — a heredoc body handed to python3/bash -c
-    # is free-form text (Python `if`, quotes, `{...}`) that looks like broken
-    # shell syntax to that parser and made it fail-closed on ordinary Bash
-    # calls (WP544 D6.8 regression, 785e7ed25d). Replace each heredoc body
-    # with a neutral placeholder before shell analysis, and scan the bodies
-    # separately as literal text so secret detection still covers them.
-    shell_parts = []
-    bodies = []
-    position = 0
+def _skip_arithmetic_expansion(command, index):
+    # `index` is at "$((": return the index just past the matching "))".
+    depth = 0
+    cursor = index + 1
+    while cursor < len(command):
+        if command[cursor] == "(":
+            depth += 1
+        elif command[cursor] == ")":
+            depth -= 1
+            if depth == 0:
+                return cursor + 1
+        cursor += 1
+    fail("unterminated arithmetic expansion")
 
-    while position < len(command):
-        header_end, declarations = parse_heredoc_header(command, position)
-        if not declarations:
-            shell_parts.append(command[position:header_end])
-            position = header_end
-            continue
 
-        cursor = position
-        for operator_start, word_end, _delimiter, _strip_tabs in declarations:
-            shell_parts.append(command[cursor:operator_start])
-            shell_parts.append(
-                "<< __CLAUDE_HEREDOC_BODY_"
-                + str(len(bodies))
-                + "__"
-            )
-            cursor = word_end
-        shell_parts.append(command[cursor:header_end])
-        position = header_end
-
-        for _operator_start, _word_end, delimiter, strip_tabs in declarations:
-            body_lines = []
-            while True:
-                if position >= len(command):
-                    fail(
-                        "unterminated heredoc: expected delimiter "
-                        + repr(delimiter)
-                    )
-                newline = command.find("\n", position)
-                line_end = len(command) if newline < 0 else newline + 1
-                raw_line = command[position:line_end]
-                comparison = raw_line
-                if comparison.endswith("\n"):
-                    comparison = comparison[:-1]
-                if comparison.endswith("\r"):
-                    comparison = comparison[:-1]
-                if strip_tabs:
-                    comparison = comparison.lstrip("\t")
-                position = line_end
-                if comparison == delimiter:
-                    break
-                body_lines.append(
-                    raw_line.lstrip("\t") if strip_tabs else raw_line
-                )
-            bodies.append("".join(body_lines))
-
-    return "".join(shell_parts), bodies
-
+def _consume_heredoc_bodies(command, index, pending, bodies):
+    # `index` is at the first line after the declaring line. Bash reads the
+    # bodies in declaration order, one after another; each ends at the first
+    # line equal to its delimiter (tabs stripped first for "<<-").
+    for slot, delimiter, strip_tabs in pending:
+        body_lines = []
+        while True:
+            if index >= len(command):
+                fail("unterminated heredoc: expected delimiter " + repr(delimiter))
+            newline = command.find("\n", index)
+            line_end = len(command) if newline < 0 else newline + 1
+            raw_line = command[index:line_end]
+            comparison = raw_line
+            if comparison.endswith("\n"):
+                comparison = comparison[:-1]
+            if comparison.endswith("\r"):
+                comparison = comparison[:-1]
+            if strip_tabs:
+                comparison = comparison.lstrip("\t")
+            index = line_end
+            if comparison == delimiter:
+                break
+            body_lines.append(raw_line.lstrip("\t") if strip_tabs else raw_line)
+        bodies[slot] = "".join(body_lines)
+    return index
 
 def expand_brace_range(content):
     numeric = re.fullmatch(r"(-?)(\d+)\.\.(-?)(\d+)(?:\.\.(-?\d+))?", content)
@@ -2112,6 +2144,63 @@ def self_test():
         if any(is_sensitive_path(fragment) for fragment in fragments) != expected:
             fail(f"path_fragments/is_sensitive_path({path_value!r}) expected {expected}")
 
+    # Found live 2026-10-05: a heredoc declared inside "$(...)" that itself sits
+    # inside a still-open double quote -- the commit-message idiom this project's
+    # own instructions prescribe -- was invisible to the flat heredoc scan, so
+    # the body went through shlex and one odd double quote or stray apostrophe
+    # in the message fail-closed every Bash call of the session. Pinned as exact
+    # scaffold/bodies pairs so a future rewrite cannot quietly drop a shape.
+    heredoc_scaffold_cases = (
+        ("cat <<'EOF'\nuser's copy\nEOF\n",
+         "cat << __CLAUDE_HEREDOC_BODY_0__\n", ["user's copy\n"]),
+        ("git commit -m \"$(cat <<'EOF'\nfix: don't break on a lone \" here\nEOF\n)\"",
+         "git commit -m \"$(cat << __CLAUDE_HEREDOC_BODY_0__\n)\"",
+         ["fix: don't break on a lone \" here\n"]),
+        ("echo $(a $(b <<'X'\nit's\nX\n) c)",
+         "echo $(a $(b << __CLAUDE_HEREDOC_BODY_0__\n) c)", ["it's\n"]),
+        # Two heredocs on one line: both bodies follow the line, in order (bash).
+        ("cat <<A <<B\nbodyA it's\nA\nbodyB it's\nB\n",
+         "cat << __CLAUDE_HEREDOC_BODY_0__ << __CLAUDE_HEREDOC_BODY_1__\n",
+         ["bodyA it's\n", "bodyB it's\n"]),
+        ("cat <<-'EOF'\n\tline1\n\t\tline2\n\tEOF\n",
+         "cat << __CLAUDE_HEREDOC_BODY_0__\n", ["line1\nline2\n"]),
+        # A quoted body is literal text: "$(", ")" and quotes inside it must not
+        # steer the scan.
+        ("cat <<'EOF'\nprice $(cat /etc/passwd) ) \" it's\nEOF\necho after",
+         "cat << __CLAUDE_HEREDOC_BODY_0__\necho after",
+         ["price $(cat /etc/passwd) ) \" it's\n"]),
+        ("echo \"$(cat <<'EOF'\n)\nit's\nEOF\n)\"",
+         "echo \"$(cat << __CLAUDE_HEREDOC_BODY_0__\n)\"", [")\nit's\n"]),
+        # Inner heredoc read inside the parens, outer one after the outer line.
+        ("cat <<'A' | sed \"s/x/$(cat <<'B'\nb\nB\n)/\"\nax\nA\n",
+         "cat << __CLAUDE_HEREDOC_BODY_0__ | sed \"s/x/$(cat << __CLAUDE_HEREDOC_BODY_1__\n)/\"\n",
+         ["ax\n", "b\n"]),
+        # Not heredocs: arithmetic shift, escaped "$(", "$(" inside single quotes.
+        ("echo \"$((1<<3))\"", "echo \"$((1<<3))\"", []),
+        ("echo \"\\$(cat <<'EOF') it's\"", "echo \"\\$(cat <<'EOF') it's\"", []),
+        ("echo \"$(echo '$(cat <<X' it)\" done", "echo \"$(echo '$(cat <<X' it)\" done", []),
+    )
+    for command, expected_scaffold, expected_bodies in heredoc_scaffold_cases:
+        scaffold, bodies = extract_heredocs(command)
+        if scaffold != expected_scaffold or bodies != expected_bodies:
+            fail("heredoc extraction mismatch: " + repr(command))
+    heredoc_allow_cases = (
+        "git commit -m \"$(cat <<'EOF'\nsay \"hi\" to the user's \"copy\nEOF\n)\" -- a.txt",
+        "echo \"$(cat <<'EOF'\nit's\nEOF\n)\" && echo \"done's\"",
+        "cat <<A <<B\nbodyA it's\nA\nbodyB it's\nB\n",
+        "echo \"$((1<<3))\"",
+    )
+    for command in heredoc_allow_cases:
+        upload["tool_input"] = {"command": command}
+        heredoc_analysis = analyze_bash(json.dumps(upload))
+        if heredoc_analysis["pattern_ids"] or heredoc_analysis["shell_model"] != "complete":
+            fail("heredoc command was not analyzed cleanly: " + repr(command))
+    upload["tool_input"] = {
+        "command": "git commit -m \"$(cat <<'EOF'\nkey " + positives["openai-project"] + "\nEOF\n)\""
+    }
+    if not analyze_bash(json.dumps(upload))["pattern_ids"]:
+        fail("secret inside a heredoc body inside \"$(...)\" was missed")
+
     print("PASS canonical_pattern_corpus")
     print("PASS structured_output_shape")
     print("PASS direct_sensitive_upload")
@@ -2120,6 +2209,7 @@ def self_test():
     print("PASS path_bypass_normalization")
     print("PASS home_config_dir_coverage")
     print("PASS file_uri_case_insensitive")
+    print("PASS heredoc_inside_command_substitution")
 
 
 mode = sys.argv[1]
