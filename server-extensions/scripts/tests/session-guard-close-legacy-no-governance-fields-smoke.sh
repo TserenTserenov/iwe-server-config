@@ -20,7 +20,11 @@ trap 'rm -rf "$TEST_ROOT"' EXIT
 REPO="$TEST_ROOT/DS-strategy"
 ORIGIN="$TEST_ROOT/origin.git"
 mkdir -p "$REPO/inbox/agent/tasks" "$REPO/scripts"
-git init --bare -q "$ORIGIN"
+# -b main: see session-guard-close-sessions-own-field-legacy-fallback-smoke.sh
+# for the live failure this guards against (macos-latest, 05.10, WP-484 Ф166)
+# -- an unqualified bare init's HEAD can disagree with this fixture's own
+# `push origin HEAD:main` calls below, breaking the republish in scenario D.
+git init --bare -q -b main "$ORIGIN"
 git -C "$REPO" init -q
 git -C "$REPO" config user.email test@example.com
 git -C "$REPO" config user.name "Test"
@@ -42,7 +46,7 @@ git -C "$REPO" push -q origin HEAD:main
 SESSIONS="$TEST_ROOT/MC-sessions"
 SESSIONS_ORIGIN="$TEST_ROOT/sessions-origin.git"
 mkdir -p "$SESSIONS"
-git init --bare -q "$SESSIONS_ORIGIN"
+git init --bare -q -b main "$SESSIONS_ORIGIN"
 git -C "$SESSIONS" init -q
 git -C "$SESSIONS" config user.email test@example.com
 git -C "$SESSIONS" config user.name "Test"

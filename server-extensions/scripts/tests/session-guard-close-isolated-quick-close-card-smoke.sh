@@ -144,7 +144,13 @@ results:
 ---
 EOF
 echo "file: inbox/agent/tasks/RUN-quick-close-isolated-close-smoke.md" >> "$SEM"
-git -C "$WORKTREE_PATH" add inbox/agent/tasks/RUN-quick-close-isolated-close-smoke.md
+# WP-484 Ф165 put RUN-*.md under isolated worktrees' per-base-dir
+# info/exclude so quick-close's own terminal-card autocommit (which already
+# force-adds on this exact gitignore hit -- process-runner.py's
+# _commit_terminal_card) still works. This fixture's own `git add` needs the
+# same `-f` to keep simulating that production path, or it fails outright
+# ("paths are ignored") instead of simulating a tracked terminal card.
+git -C "$WORKTREE_PATH" add -f inbox/agent/tasks/RUN-quick-close-isolated-close-smoke.md
 git -C "$WORKTREE_PATH" commit -qm "terminal card"
 
 if bash "$GUARD" close --wp WP-484 --slug isolated-close-smoke --agent fixture; then
@@ -226,7 +232,9 @@ results:
 ---
 EOF
   printf '%s\n' "file: inbox/agent/tasks/RUN-quick-close-$slug.md" >> "$CASE_SEM"
-  git -C "$CASE_WORKTREE" add "inbox/agent/tasks/RUN-quick-close-$slug.md"
+  # -f: see the first terminal card above -- WP-484 Ф165's info/exclude
+  # covers every RUN-*.md in this isolated worktree, this one included.
+  git -C "$CASE_WORKTREE" add -f "inbox/agent/tasks/RUN-quick-close-$slug.md"
   git -C "$CASE_WORKTREE" commit -qm "terminal card $slug"
 }
 
@@ -261,7 +269,7 @@ results:
     verdict: pass
 ---
 EOF
-git -C "$RELEASE_WORKTREE" add inbox/agent/tasks/RUN-quick-close-release-step-proof.md
+git -C "$RELEASE_WORKTREE" add -f inbox/agent/tasks/RUN-quick-close-release-step-proof.md
 git -C "$RELEASE_WORKTREE" commit -qm "release-step terminal proof"
 printf '\nRunner persisted its release-step history after publication.\n' \
   >> "$RELEASE_WORKTREE/inbox/agent/tasks/RUN-quick-close-release-step-proof.md"
@@ -271,7 +279,7 @@ if /bin/bash "$GUARD" close --wp WP-484 --slug release-step-proof --agent fixtur
 fi
 [ -d "$RELEASE_WORKTREE" ] && [ -f "$CASE_SEM" ] \
   || { echo "FAIL: refused cleanup lost worktree or semaphore" >&2; exit 1; }
-git -C "$RELEASE_WORKTREE" add inbox/agent/tasks/RUN-quick-close-release-step-proof.md
+git -C "$RELEASE_WORKTREE" add -f inbox/agent/tasks/RUN-quick-close-release-step-proof.md
 git -C "$RELEASE_WORKTREE" commit -qm "persist runtime journal before isolated cleanup"
 /bin/bash "$GUARD" close --wp WP-484 --slug release-step-proof --agent fixture >/dev/null
 [ ! -e "$RELEASE_SEM" ] && [ -f "$RELEASE_SEM.closed" ] && [ ! -e "$RELEASE_WORKTREE" ] \

@@ -26,7 +26,14 @@ trap 'rm -rf "$TEST_ROOT"' EXIT
 REPO="$TEST_ROOT/DS-strategy"
 ORIGIN="$TEST_ROOT/origin.git"
 mkdir -p "$REPO/inbox/agent/tasks" "$REPO/scripts"
-git init --bare -q "$ORIGIN"
+# -b main: an unqualified `git init --bare` leaves HEAD pointing at whatever
+# `init.defaultBranch` this runner happens to default to, not necessarily
+# "main" -- found live on macos-latest CI (05.10, WP-484 Ф166), where that
+# default disagreed with the explicit `push origin HEAD:main` calls below.
+# Cloning such a repo warns "remote HEAD refers to nonexistent ref" and
+# builds the next commit on an empty/wrong branch, which then fails to
+# fast-forward onto the real main history it was supposed to extend.
+git init --bare -q -b main "$ORIGIN"
 git -C "$REPO" init -q
 git -C "$REPO" config user.email test@example.com
 git -C "$REPO" config user.name "Test"
@@ -43,7 +50,7 @@ git -C "$REPO" push -q origin HEAD:main
 SESSIONS="$TEST_ROOT/MC-sessions"
 SESSIONS_ORIGIN="$TEST_ROOT/sessions-origin.git"
 mkdir -p "$SESSIONS"
-git init --bare -q "$SESSIONS_ORIGIN"
+git init --bare -q -b main "$SESSIONS_ORIGIN"
 git -C "$SESSIONS" init -q
 git -C "$SESSIONS" config user.email test@example.com
 git -C "$SESSIONS" config user.name "Test"

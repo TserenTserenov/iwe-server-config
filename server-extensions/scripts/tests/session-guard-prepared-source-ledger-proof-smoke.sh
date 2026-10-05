@@ -85,7 +85,13 @@ write_doc() {  # <repo> <path> <schema> <events-lines...>
 new_repo() {  # <name> -> prints bare origin path; seeds one ledger doc with event A
   local name="$1"
   local bare="$TEST_ROOT/$name-origin.git" seed="$TEST_ROOT/$name-seed"
-  git init -q --bare "$bare"
+  # -b main: see session-guard-close-sessions-own-field-legacy-fallback-smoke.sh
+  # for the live failure this guards against (macos-latest, 05.10, WP-484 Ф166)
+  # -- an unqualified bare init's HEAD can disagree with this fixture's own
+  # `push origin main` below, which then fails outright: no local branch
+  # literally named "main" to push, surfacing downstream as "cloned an empty
+  # repository" / "ambiguous argument 'HEAD'" in whatever clones $bare next.
+  git init -q --bare -b main "$bare"
   git clone -q "$bare" "$seed"
   git -C "$seed" config user.email test@example.com
   git -C "$seed" config user.name test
