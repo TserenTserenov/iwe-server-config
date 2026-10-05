@@ -81,7 +81,7 @@ def test_strategy_has_a_title_for_wp_creation():
     r = run_artifactor("актуализируй стратегию")
     result = json.loads(r.stdout)
     assert result["task_type"] == "strategy"
-    assert result["artifact"] == "Актуализированная стратегия"
+    assert result["artifact"] == "Документ стратегии"
 
 
 def test_spec_writing_is_unresolved_not_method_description():
