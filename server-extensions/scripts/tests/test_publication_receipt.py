@@ -58,6 +58,67 @@ class PublicationReceiptTest(unittest.TestCase):
     def verify(self, source, remote):
         return receipt.verify(self.repo, self.sem, "repo", source, remote)
 
+    def test_line_superset_proves_only_exact_unique_replacements(self):
+        def commit_files(message, inputs):
+            for name, content in inputs.items():
+                (self.repo / name).write_text(content)
+                self.git("add", "--", name)
+            self.git("-c", "commit.gpgsign=false", "commit", "-qm", message)
+            return self.git("rev-parse", "HEAD")
+
+        baseline = commit_files("baseline requirements", {
+            "requirements.in": "head\naiohttp==3.14.1\ntail\n",
+            "requirements.txt": "head\nmiddle\nanyio==4.13.0\ntail\n"})
+        source = commit_files("two replacements", {
+            "requirements.in": "head\naiohttp==3.14.3\ntail\n",
+            "requirements.txt": "head\nmiddle\nanyio==4.14.2\ntail\n"})
+        self.claim(source)
+        self.git("checkout", "-q", "--detach", baseline)
+        anchor = commit_files("two replacements plus independent changes", {
+            "requirements.in": "head\naiohttp==3.14.3\ntail\nextra\n",
+            "requirements.txt": "new head\nmiddle\nanyio==4.14.2\ntail\n"})
+        with (patch.object(receipt, "BOT_REPO", "repo"),
+              patch.object(receipt, "BOT_SOURCE", source),
+              patch.object(receipt, "BOT_ANCHOR", anchor),
+              patch.object(receipt, "repository_identity",
+                           return_value=(self.repo / ".git", "github.com/aisystant/aist_bot"))):
+            saved = receipt.bot_line_superset_receipt(
+                self.repo, self.sem.read_bytes(), "repo", source, anchor, receipt.BOT_REF)
+            self.assertEqual(saved["proof"], "exact-line-superset")
+            self.assertEqual(receipt.reconstruct_receipt(
+                self.repo, self.sem.read_bytes(), "repo", source, saved, receipt.BOT_REF), saved)
+            original = self.sem.read_text()
+            self.git("update-ref", "refs/remotes/origin/new-architecture", anchor)
+            self.sem.write_text(original + receipt.PREFIX + json.dumps(saved) + "\n")
+            self.assertTrue(receipt.verify(self.repo, self.sem, "repo", source,
+                                           anchor, receipt.BOT_REF))
+            forged = {**saved, "proof": "exact-commit"}
+            self.sem.write_text(original + receipt.PREFIX + json.dumps(forged) + "\n")
+            self.assertFalse(receipt.verify(self.repo, self.sem, "repo", source,
+                                            anchor, receipt.BOT_REF))
+            self.git("checkout", "-q", "--detach", baseline)
+            damaged = commit_files("different replacement", {
+                "requirements.in": "head\naiohttp==3.14.4\ntail\nextra\n",
+                "requirements.txt": "new head\nmiddle\nanyio==4.14.3\ntail\n"})
+            with patch.object(receipt, "BOT_ANCHOR", damaged):
+                with self.assertRaises(receipt.ProofError):
+                    receipt.bot_line_superset_receipt(
+                        self.repo, self.sem.read_bytes(), "repo", source, damaged, receipt.BOT_REF)
+
+    def test_new_architecture_receipt_requires_fresh_default_head(self):
+        remote = self.root / "remote.git"
+        subprocess.run(["git", "init", "--bare", "-q", str(remote)], check=True)
+        self.git("push", "-q", "origin", "HEAD:refs/heads/new-architecture")
+        subprocess.run(["git", "-C", str(remote), "symbolic-ref", "HEAD",
+                        "refs/heads/main"], check=True)
+        with patch.object(receipt, "repository_identity",
+                          return_value=(self.repo / ".git", "github.com/aisystant/aist_bot")):
+            with self.assertRaises(receipt.ProofError):
+                receipt.fetch_target(self.repo, receipt.BOT_REF)
+            subprocess.run(["git", "-C", str(remote), "symbolic-ref", "HEAD",
+                            receipt.BOT_REF], check=True)
+            self.assertEqual(receipt.fetch_target(self.repo, receipt.BOT_REF), self.base)
+
     def test_later_replacement_preserves_historical_delivery(self):
         source = self.commit("a.txt", "mine\n")
         self.claim(source)
@@ -120,13 +181,14 @@ class PublicationReceiptTest(unittest.TestCase):
         with self.assertRaises(receipt.ProofError):
             self.record(partial)
 
-    def test_squash_divergent_claims_and_empty_series_are_rejected(self):
+    def test_squash_independent_claim_stays_unproven_and_empty_series_is_rejected(self):
         sources, anchor = self.squash_series()
         self.git("checkout", "-q", "--detach", self.base)
         foreign = self.commit("other.txt", "separate branch\n")
         self.claim(foreign)
-        with self.assertRaises(receipt.ProofError):
-            self.record(anchor)
+        self.assertEqual(self.record(anchor), len(sources))
+        self.assertTrue(all(self.verify(source, anchor) for source in sources))
+        self.assertFalse(self.verify(foreign, anchor))
         self.sem.write_text("agent: codex\nsession_id: one\n")
         self.git("checkout", "-q", "--detach", sources[0])
         reverted = self.commit("a.txt", "base\n")
@@ -738,6 +800,40 @@ _close_delivery_state "$1" one
         self.assertTrue(self.sem.read_bytes().startswith(before))
         self.assertTrue(receipt.verify(self.repo, self.sem, "repo", self.source, self.anchor))
 
+    def test_same_origin_checkout_requires_exact_v2_anchor_binding(self):
+        self.git("push", "-q", "origin", "HEAD:refs/heads/main")
+        legacy = self.root / "repo"
+        subprocess.run(["git", "clone", "-q", str(self.remote), str(legacy)], check=True)
+        self.assertEqual(receipt.select_checkout(legacy, self.sem, "repo", self.anchor,
+                                                 self.root), legacy)
+        binding = {"path": "a.txt", "repo": str(self.repo / ".git")}
+        with self.sem.open("a") as stream:
+            stream.write("file: a.txt\nfile_v2: " + json.dumps(binding) + "\n")
+        self.assertEqual(receipt.select_checkout(legacy, self.sem, "repo", self.anchor,
+                                                 self.root), self.repo)
+        with self.sem.open("a") as stream:
+            stream.write("file: a.txt\nfile_v2: " + json.dumps(
+                {"path": "a.txt", "repo": str(legacy / ".git")}) + "\n")
+        self.assertEqual(receipt.select_checkout(legacy, self.sem, "repo", self.anchor,
+                                                 self.root), legacy)
+
+    def test_checkout_selection_rejects_foreign_origin_and_unpaired_scope(self):
+        self.git("push", "-q", "origin", "HEAD:refs/heads/main")
+        legacy = self.root / "repo"
+        subprocess.run(["git", "clone", "-q", str(self.remote), str(legacy)], check=True)
+        with self.sem.open("a") as stream:
+            stream.write("file_v2: " + json.dumps(
+                {"path": "a.txt", "repo": str(self.repo / ".git")}) + "\n")
+        with self.assertRaises(receipt.ProofError):
+            receipt.select_checkout(legacy, self.sem, "repo", self.anchor, self.root)
+        self.sem.write_text(self.sem.read_text().replace("file_v2: ",
+            "file: a.txt\nfile_v2: "))
+        foreign = self.root.parent / "foreign-origin.git"
+        subprocess.run(["git", "init", "--bare", "-q", str(foreign)], check=True)
+        self.git("remote", "set-url", "origin", str(foreign))
+        self.assertEqual(receipt.select_checkout(legacy, self.sem, "repo", self.anchor,
+                                                 self.root), legacy)
+
     def test_unprepared_main_rejects_legacy_close_path(self):
         self.git("push", "-q", "origin", "HEAD:refs/heads/main")
         self.sem.write_text(self.sem.read_text().replace("close_path: peer-session\n",
@@ -794,6 +890,60 @@ _close_delivery_state "$1" one
         self.assertTrue(self.sem.read_bytes().startswith(before))
         result = self.close_proof()
         self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_squash_proves_only_its_independent_claimed_series(self):
+        self.git("checkout", "-q", "--detach", self.source)
+        first_tip = self.commit("a.txt", "reviewed series one\n")
+        self.git("checkout", "-q", "--detach", self.base)
+        other_root = self.commit("other.txt", "series two\n")
+        other_tip = self.commit("other.txt", "reviewed series two\n")
+        self.git("checkout", "-q", "--detach", self.base)
+        self.commit("parallel.txt", "concurrent change\n")
+        self.git("merge", "--squash", first_tip)
+        self.git("-c", "commit.gpgsign=false", "commit", "-qm", "squash series one")
+        self.anchor = self.git("rev-parse", "HEAD")
+        self.git("push", "-q", "origin", "HEAD:refs/heads/main")
+        self.sem.write_text("\n".join(line for line in self.sem.read_text().splitlines()
+                                      if not line.startswith("commit: ")) + "\n")
+        for source in (self.source, first_tip, other_root, other_tip):
+            self.claim(source)
+        self.prepare()
+        result = self.note_publication("refs/heads/main")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertTrue(receipt.verify(self.repo, self.sem, "repo", self.source, self.anchor))
+        self.assertTrue(receipt.verify(self.repo, self.sem, "repo", first_tip, self.anchor))
+        self.assertFalse(receipt.verify(self.repo, self.sem, "repo", other_root, self.anchor))
+        self.assertFalse(receipt.verify(self.repo, self.sem, "repo", other_tip, self.anchor))
+
+    def test_branched_claimed_series_cannot_use_squash_proof(self):
+        self.git("checkout", "-q", "--detach", self.source)
+        first_tip = self.commit("a.txt", "first branch\n")
+        self.git("checkout", "-q", "--detach", self.source)
+        second_tip = self.commit("a.txt", "second branch\n")
+        for source in (first_tip, second_tip):
+            self.claim(source)
+        with self.assertRaisesRegex(receipt.ProofError, "branched"):
+            receipt.owned_chain(self.repo, self.sem.read_bytes(), "repo", self.source)
+
+    def test_unclaimed_intermediate_cannot_join_squash_series(self):
+        self.git("checkout", "-q", "--detach", self.source)
+        self.commit("gap.txt", "unclaimed intermediate\n")
+        final = self.commit("a.txt", "claimed final\n")
+        self.claim(final)
+        with self.assertRaises(receipt.ProofError):
+            receipt.owned_chain(self.repo, self.sem.read_bytes(), "repo", self.source)
+
+    def test_claimed_merge_cannot_extend_squash_series(self):
+        self.git("checkout", "-q", "--detach", self.source)
+        linear = self.commit("linear.txt", "linear branch\n")
+        self.git("checkout", "-q", "--detach", self.base)
+        self.commit("other.txt", "other branch\n")
+        self.git("-c", "commit.gpgsign=false", "merge", "--no-ff", "-qm", "merge", linear)
+        merged = self.git("rev-parse", "HEAD")
+        self.claim(linear)
+        self.claim(merged)
+        with self.assertRaisesRegex(receipt.ProofError, "single-parent"):
+            receipt.owned_chain(self.repo, self.sem.read_bytes(), "repo", self.source)
 
     def test_prepared_main_recovery_rejects_protected_repo_identity(self):
         self.git("push", "-q", "origin", "HEAD:refs/heads/main")

@@ -8,6 +8,7 @@ the proof, including the original claim, from immutable Git objects.
 from __future__ import annotations
 
 import argparse
+import difflib
 import hashlib
 import json
 import os
@@ -25,6 +26,13 @@ MAX_CANDIDATES = 256
 MAIN_REF = "refs/heads/main"
 # Delivery evidence only: this policy never authorizes a push or deployment.
 PEER_PRODUCT_REFS = frozenset({"refs/heads/pilot", "refs/heads/new-architecture"})
+BOT_REPO = "aist_bot_newarchitecture"
+BOT_REF = "refs/heads/new-architecture"
+BOT_SOURCE = "f058845b20ee134eca5904a7b0dab99f893dc4f3"
+BOT_ANCHOR = "bb95977a0c7cd5bd9404a14b3e1b42033d42f066"
+BOT_CLAIMS = frozenset({BOT_SOURCE, "b772ae59a644720912148a554f3394e194ec17ab",
+                        "234f0bd4d25b287c5e08332449564aae8e5091b9"})
+BOT_PATHS = ["requirements.in", "requirements.txt"]
 
 
 class ProofError(Exception):
@@ -169,34 +177,44 @@ def range_replay_matches(repo: Path, base: str, tip: str, anchor: str) -> bool:
 
 
 def owned_chain(repo: Path, raw: bytes, name: str, source: str) -> tuple[str, list[str]]:
-    """One complete, bounded linear series; no unclaimed intermediate commits.
+    """The complete linear claimed series containing source.
 
+    An independent series in the same session needs its own publication proof.
     Squash delivery proves the final revision of this series, not historical
-    publication of the intermediate versions subsequently edited by its owner.
+    publication of intermediate versions subsequently edited by its owner.
     """
     owned = set(claims(raw, name, repo))
-    if source not in owned or not 2 <= len(owned) <= 32:
-        raise ProofError("squash requires a bounded session-owned series")
-    parents = {}
+    if source not in owned or len(owned) > 256:
+        raise ProofError("squash requires a bounded session-owned source")
+    parents: dict[str, str] = {}
+    children: dict[str, list[str]] = {}
     for commit in owned:
         row = git(repo, "rev-list", "--parents", "-n", "1", commit).decode().split()
-        if len(row) != 2:
-            raise ProofError("squash series must have single-parent commits")
-        parents[commit] = row[1]
-    tips = owned - set(parents.values())
-    if len(tips) != 1:
-        raise ProofError("squash series is disconnected or branched")
-    current = tips.pop()
-    chain = []
-    while current in parents:
-        chain.append(current)
+        if len(row) == 2:
+            parents[commit] = row[1]
+        for parent in row[1:]:
+            if parent in owned:
+                children.setdefault(parent, []).append(commit)
+    current = source
+    while current in parents and parents[current] in owned:
         current = parents[current]
-    if set(chain) != owned:
-        raise ProofError("squash series contains an unclaimed gap")
-    chain.reverse()
-    if oid(repo, current + "^{tree}") == oid(repo, chain[-1] + "^{tree}"):
+    if current not in parents:
+        raise ProofError("squash series must have single-parent commits")
+    base = parents[current]
+    chain = [current]
+    while children.get(current):
+        following = children[current]
+        if len(following) != 1 or len(chain) >= 32:
+            raise ProofError("squash series is branched or excessive")
+        current = following[0]
+        if current not in parents or parents[current] != chain[-1]:
+            raise ProofError("squash series must have single-parent commits")
+        chain.append(current)
+    if source not in chain or not 2 <= len(chain) <= 32:
+        raise ProofError("squash requires a bounded session-owned series")
+    if oid(repo, base + "^{tree}") == oid(repo, chain[-1] + "^{tree}"):
         raise ProofError("squash series has no net change")
-    return current, chain
+    return base, chain
 
 
 def squash_receipt(repo: Path, raw: bytes, name: str, source: str, anchor: str,
@@ -249,13 +267,18 @@ def legacy_product_scope(repo: Path, raw: bytes, common: Path, name: str) -> Non
 
 def product_target(repo: Path, raw: bytes, name: str, root: Path, target_ref: str) -> None:
     """Bind non-main delivery and PREPARED recovery to peer product repositories."""
-    if (target_ref not in PEER_PRODUCT_REFS | {MAIN_REF}
-            or (field(raw, "close_path") != "peer-session"
-                and (target_ref != MAIN_REF
-                     or field(raw, "close_delivery_version") != "isolate-push/v2"))):
+    if target_ref not in PEER_PRODUCT_REFS | {MAIN_REF}:
         raise ProofError("publication recovery requires a peer product delivery target")
     root = root.resolve(strict=True)
     common, origin = repository_identity(repo)
+    legacy_bot = (field(raw, "close_path") == "unknown" and name == BOT_REPO
+                  and target_ref == BOT_REF and origin == "github.com/aisystant/aist_bot"
+                  and field(raw, "close_delivery_version") == "isolate-push/v2"
+                  and frozenset(claims(raw, name, repo)) == BOT_CLAIMS)
+    if (field(raw, "close_path") != "peer-session" and not legacy_bot
+            and (target_ref != MAIN_REF
+                 or field(raw, "close_delivery_version") != "isolate-push/v2")):
+        raise ProofError("publication recovery requires a peer product delivery target")
     if (common.name != ".git" or common.parent.name != name
             or common.parent.parent not in {root, root / "DS-MCP", root / "DS-IT-systems"}):
         raise ProofError("not a canonical product repository")
@@ -285,6 +308,69 @@ def product_target(repo: Path, raw: bytes, name: str, root: Path, target_ref: st
             raise ProofError("product claims differ from frozen session inventory")
 
 
+def file_bindings(raw: bytes) -> set[tuple[str, str]]:
+    """Reject malformed qualified claims before using their repository scope."""
+    bindings = set()
+    lines = raw.decode().splitlines()
+    for index, line in enumerate(lines):
+        if not line.startswith("file_v2: "):
+            continue
+        item = json.loads(line[len("file_v2: "):])
+        if not isinstance(item, dict):
+            raise ProofError("invalid repository-qualified file claim")
+        path, declared_repo = item.get("path"), item.get("repo")
+        if not isinstance(path, str) or not isinstance(declared_repo, str):
+            raise ProofError("invalid repository-qualified file claim")
+        if index == 0 or lines[index - 1] != "file: " + path:
+            raise ProofError("unpaired repository-qualified file claim")
+        bindings.add((declared_repo, path))
+    return bindings
+
+
+def source_bound(repo: Path, raw: bytes, source: str, bindings: set[tuple[str, str]]) -> bool:
+    common, _ = repository_identity(repo)
+    paths = changed_paths(repo, source)
+    return bool(paths) and all((str(common), path) in bindings for path in paths)
+
+
+def select_checkout(repo: Path, semaphore: Path, name: str, published: str,
+                    root: Path) -> Path:
+    """Prefer a same-origin product clone only for bound source changes."""
+    raw = snapshot(semaphore)
+    root = root.resolve(strict=True)
+    if repo.resolve(strict=True) != root / name or repo.is_symlink():
+        return repo
+    original_common, original_origin = repository_identity(repo)
+    if original_common != repo / ".git":
+        return repo
+    for container in (root / "DS-MCP", root / "DS-IT-systems"):
+        candidate = container / name
+        if not candidate.exists() or candidate.is_symlink():
+            continue
+        try:
+            common, origin = repository_identity(candidate)
+        except (OSError, ProofError, subprocess.SubprocessError, ValueError):
+            continue
+        if common != candidate / ".git" or origin != original_origin:
+            continue
+        if (git(candidate, "rev-parse", "--is-shallow-repository").strip() != b"false"
+                or oid(candidate, published + "^{commit}") != published):
+            continue
+        bindings = file_bindings(raw)
+        sources = claims(raw, name, candidate)
+        if not sources or len(sources) > 64:
+            continue
+        bound = [source for source in sources if source_bound(candidate, raw, source, bindings)]
+        if (bound and all((str(original_common), path) not in bindings
+                          for source in bound for path in changed_paths(candidate, source))):
+            if snapshot(semaphore) != raw:
+                raise ProofError("session changed during checkout selection")
+            return candidate
+    if snapshot(semaphore) != raw:
+        raise ProofError("session changed during checkout selection")
+    return repo
+
+
 def fetch_target(repo: Path, target_ref: str) -> str:
     tracking = tracking_ref(target_ref)
     # A deleted branch must fail even if its old tracking ref still exists.
@@ -294,7 +380,14 @@ def fetch_target(repo: Path, target_ref: str) -> str:
     transport_env["GIT_TERMINAL_PROMPT"] = "0"
     git(repo, "fetch", "--quiet", "--no-tags", "--no-recurse-submodules",
         "origin", "+" + target_ref + ":" + tracking, env=transport_env)
-    return oid(repo, tracking + "^{commit}")
+    remote = oid(repo, tracking + "^{commit}")
+    if target_ref == BOT_REF and repository_identity(repo)[1] == "github.com/aisystant/aist_bot":
+        head = git(repo, "ls-remote", "--symref", "origin", "HEAD", target_ref,
+                   env=transport_env).decode().splitlines()
+        if head != ["ref: " + BOT_REF + "\tHEAD", remote + "\tHEAD",
+                    remote + "\t" + BOT_REF]:
+            raise ProofError("bot delivery target is not fresh origin HEAD")
+    return remote
 
 
 def verify_product(repo: Path, semaphore: Path, name: str, source: str, root: Path) -> bool:
@@ -351,11 +444,68 @@ def receipt_identity(repo: Path, raw: bytes, repo_name: str, source: str, anchor
             "published_paths": entries(repo, anchor, paths)}
 
 
+def bot_line_superset_receipt(repo: Path, raw: bytes, name: str, source: str,
+                              anchor: str, target_ref: str) -> dict:
+    """Prove the two exact dependency replacements within a wider bot commit."""
+    if ((name, source, anchor, target_ref) != (BOT_REPO, BOT_SOURCE, BOT_ANCHOR, BOT_REF)
+            or repository_identity(repo)[1] != "github.com/aisystant/aist_bot"
+            or sorted(changed_paths(repo, source)) != BOT_PATHS
+            or sorted(changed_paths(repo, anchor)) != BOT_PATHS):
+        raise ProofError("unsupported line-superset publication")
+    parents = []
+    for commit in (source, anchor):
+        row = git(repo, "rev-list", "--parents", "-n", "1", commit).decode().split()
+        if len(row) != 2 or row[0] != commit:
+            raise ProofError("line-superset commit is not linear")
+        parents.append(row[1])
+    before_source = entries(repo, parents[0], BOT_PATHS)
+    before_anchor = entries(repo, parents[1], BOT_PATHS)
+    if before_source != before_anchor or any(
+            row["entry"] is None or row["entry"]["mode"] != "100644"
+            or row["entry"]["kind"] != "blob" for row in before_source):
+        raise ProofError("line-superset preimage differs")
+    for path in BOT_PATHS:
+        def lines(commit: str) -> list[str]:
+            blob = git(repo, "show", commit + ":" + path)
+            if len(blob) > 65536 or b"\0" in blob:
+                raise ProofError("line-superset file exceeds text budget")
+            return blob.decode("utf-8").splitlines(keepends=True)
+
+        old = lines(parents[0])
+        source_lines = lines(source)
+        anchor_lines = lines(anchor)
+        source_ops = [(tag, i1, i2, j1, j2) for tag, i1, i2, j1, j2 in
+                      difflib.SequenceMatcher(None, old, source_lines, autojunk=False).get_opcodes()
+                      if tag != "equal"]
+        if len(source_ops) != 1:
+            raise ProofError("source has more than one line replacement")
+        tag, i1, i2, j1, j2 = source_ops[0]
+        if tag != "replace" or i2 != i1 + 1 or j2 != j1 + 1:
+            raise ProofError("source replacement is not a single line")
+        old_line, new_line = old[i1], source_lines[j1]
+        if (old.count(old_line) != 1 or old.count(new_line) != 0
+                or source_lines.count(new_line) != 1
+                or anchor_lines.count(old_line) != 0
+                or anchor_lines.count(new_line) != 1):
+            raise ProofError("line-superset replacement is ambiguous")
+        anchor_ops = [(tag, a1, a2, b1, b2) for tag, a1, a2, b1, b2 in
+                      difflib.SequenceMatcher(None, old, anchor_lines, autojunk=False).get_opcodes()
+                      if tag != "equal"]
+        if not any(tag == "replace" and a1 == i1 and a2 == i2 and b2 == b1 + 1
+                   and anchor_lines[b1] == new_line for tag, a1, a2, b1, b2 in anchor_ops):
+            raise ProofError("published commit lacks exact source replacement")
+    return {**receipt_identity(repo, raw, name, source, anchor, target_ref),
+            "proof": "exact-line-superset"}
+
+
 def find_receipt(repo: Path, raw: bytes, name: str, source: str, published: str,
                  target_ref: str = MAIN_REF) -> dict:
     deadline = time.monotonic() + 20
     if ancestor(repo, source, published):
         return receipt(repo, raw, name, source, source, target_ref)
+    if ((name, source, target_ref) == (BOT_REPO, BOT_SOURCE, BOT_REF)
+            and ancestor(repo, BOT_ANCHOR, published)):
+        return bot_line_superset_receipt(repo, raw, name, source, BOT_ANCHOR, target_ref)
     try:
         aggregate = squash_receipt(repo, raw, name, source, published, target_ref)
     except ProofError:
@@ -376,6 +526,8 @@ def reconstruct_receipt(repo: Path, raw: bytes, name: str, source: str, saved: d
                         target_ref: str = MAIN_REF) -> dict:
     if saved.get("proof") == "exact-squash-series":
         return squash_receipt(repo, raw, name, source, saved["anchor_commit"], target_ref)
+    if saved.get("proof") == "exact-line-superset":
+        return bot_line_superset_receipt(repo, raw, name, source, saved["anchor_commit"], target_ref)
     return receipt(repo, raw, name, source, saved["anchor_commit"], target_ref)
 
 
@@ -437,8 +589,14 @@ def verified_anchors(repo: Path, semaphore: Path, name: str, remote: str) -> lis
 
 
 def record(repo: Path, semaphore: Path, name: str, published: str,
-           target_ref: str = MAIN_REF) -> int:
+           target_ref: str = MAIN_REF, workspace: Path | None = None) -> int:
     raw = snapshot(semaphore)
+    alternate = (workspace is not None and (workspace / name).exists()
+                 and repo.resolve(strict=True) != (workspace / name).resolve())
+    if (alternate
+            and select_checkout(workspace / name, semaphore, name, published, workspace) != repo):
+        raise ProofError("alternative checkout is no longer bound to source claims")
+    bindings = file_bindings(raw) if alternate else set()
     remote = oid(repo, tracking_ref(target_ref) + "^{commit}")
     if not ancestor(repo, published, remote):
         raise ProofError("publication is not on fetched " + target_ref)
@@ -457,6 +615,8 @@ def record(repo: Path, semaphore: Path, name: str, published: str,
             # A publisher may deliver one of several already declared claims.
             # Leave the others unproven; close still checks every claim.
             continue
+        if alternate and not source_bound(repo, raw, source, bindings):
+            raise ProofError("new receipt source lacks alternative checkout file scope")
         proven += 1
         added.append(PREFIX + json.dumps(evidence, sort_keys=True, separators=(",", ":")))
     if not proven:
@@ -474,6 +634,9 @@ def record(repo: Path, semaphore: Path, name: str, published: str,
             os.fsync(stream.fileno())
         if snapshot(semaphore) != raw or oid(repo, tracking_ref(target_ref) + "^{commit}") != remote:
             raise ProofError("session or remote changed while recording")
+        if (alternate
+                and select_checkout(workspace / name, semaphore, name, published, workspace) != repo):
+            raise ProofError("alternative checkout changed while recording")
         os.replace(temporary, semaphore)
         directory_fd = os.open(semaphore.parent, os.O_RDONLY)
         try:
@@ -504,7 +667,8 @@ def verify_checkout(repo: Path, semaphore: Path, name: str, remote: str) -> bool
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("action", choices=("record", "verify", "verify-checkout", "verify-product"))
+    parser.add_argument("action", choices=("record", "verify", "verify-checkout", "verify-product",
+                                           "select-checkout"))
     parser.add_argument("semaphore", type=Path)
     parser.add_argument("repo", type=Path)
     parser.add_argument("repo_name")
@@ -514,6 +678,12 @@ def main() -> int:
     parser.add_argument("--workspace", type=Path)
     args = parser.parse_args()
     try:
+        if args.action == "select-checkout":
+            if args.workspace is None:
+                raise ProofError("checkout selection requires workspace identity")
+            print(select_checkout(args.repo, args.semaphore, args.repo_name, args.commit,
+                                  args.workspace))
+            return 0
         if args.action == "verify-product":
             if args.workspace is None:
                 raise ProofError("product proof requires workspace identity")
@@ -527,7 +697,8 @@ def main() -> int:
                 fetch_target(args.repo, args.target_ref)
                 if snapshot(args.semaphore) != raw:
                     raise ProofError("session changed while fetching product target")
-            print("publication receipts v2: " + str(record(args.repo, args.semaphore, args.repo_name, args.commit, args.target_ref)))
+            print("publication receipts v2: " + str(record(args.repo, args.semaphore, args.repo_name,
+                                                    args.commit, args.target_ref, args.workspace)))
             return 0
         if args.action == "verify-checkout":
             return 0 if verify_checkout(args.repo, args.semaphore, args.repo_name, args.commit) else 1

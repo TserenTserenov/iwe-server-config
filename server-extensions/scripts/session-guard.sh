@@ -11652,6 +11652,13 @@ if [ "$CMD" = "note-publication" ]; then
   PUBLICATION_PREPARE_DIGEST=$(_unique_record_field "$SEM_FILE" close_delivery_prepare_digest || true)
   [ "$REPO_ARG" != IWE ] || REPO_ARG=iwe-root
   RECEIPT_REPO=$(_resolve_repo_checkout "$REPO_ARG" "$PUBLISHED_SHA") || exit 1
+  # A PREPARED product may have a newer DS-MCP clone than the root checkout.
+  # Select it only when new source receipts are bound to its qualified files.
+  if [ "$PUBLICATION_CLOSE_STATE" = prepared ]; then
+    RECEIPT_REPO=$(_publication_receipt_tool \
+      select-checkout "$SEM_FILE" "$RECEIPT_REPO" "$REPO_ARG" "$PUBLISHED_SHA" \
+      --workspace "$IWE_ROOT") || exit 1
+  fi
   if [ "$PUBLICATION_TARGET_REF" = refs/heads/main ] && [ "$PUBLICATION_CLOSE_STATE" = none ]; then
     timeout 10 git -C "$RECEIPT_REPO" fetch --quiet origin '+refs/heads/main:refs/remotes/origin/main' \
       || fail "note-publication: fresh origin/main required" 1
