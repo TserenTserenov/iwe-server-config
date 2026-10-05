@@ -1,184 +1,279 @@
 #!/usr/bin/env bash
-# session-guard-empty-scope-governance-proof-smoke.sh -- WP-484 п.16-continuation
-# (16.09, peer session 2026-09-16-13-wp484-close-drift-fix, Claude+Kimi).
-#
-# `close` used to demand the WHOLE shared governance checkout's HEAD be an
-# ancestor of origin/main for EVERY non-isolated session, even one that never
-# touched it. In a checkout shared by many concurrent sessions (the common
-# case here), that HEAD drifts constantly from sibling sessions' local,
-# not-yet-pushed commits -- a session with zero footprint in that repo failed
-# for a divergence it had no part in.
-#
-# First fix attempt gated the check on a `commit:` claim alone -- cold review
-# caught that this silently drops an existing (accidental) safety net: a
-# session that edited a file here (auto-tracked as `file:` by
-# post-tool-use-scope-track.sh) and committed it directly, forgetting
-# `note-commit`, used to fail closed on this same check. Fixed by requiring
-# EITHER a `commit:` claim for this repo OR a `file:` claim that resolves to
-# a path actually present under the repo -- see cases 2/3 below, which is
-# exactly the gap the first version left open.
-#
-# Second cold review then caught that a bare existence check alone is itself
-# unsound: `file:` claims are not repo-qualified, and confirmed live data
-# (CLAUDE.md/AGENTS.md/.claude/settings.json/several scripts/* exist verbatim
-# in both $IWE_ROOT and the governance checkout) showed a root-repo edit of
-# one of those routinely-touched files would be miscounted as governance-repo
-# footprint and reopen the exact false block this fix removes -- not a rare
-# edge case. Fixed again: a `file:` claim only counts as footprint when it
-# resolves under the governance repo AND does NOT also exist at the same
-# relative path under $IWE_ROOT -- see case 2.5 below for the collision this
-# closes.
-#
-# The guard block itself is extracted verbatim from `_close_delivery_and_
-# transition` (by marker lines, since it is not a standalone function), and
-# `_repo_head_has_publish_proof`/`_repo_scope_has_publish_proof` are extracted
-# as functions -- both so the test cannot drift from the code it guards.
+# WP-484: exercise the real governance decision and publication proofs against
+# temporary repositories. A missing path/commit is never proof of empty scope.
 set -euo pipefail
-
-IWE_ROOT_REAL="${IWE_ROOT:-$HOME/IWE}"
-GUARD="$IWE_ROOT_REAL/scripts/session-guard.sh"
-[ -f "$GUARD" ] || { echo "SKIP: не найден $GUARD"; exit 0; }
-
-SANDBOX=$(mktemp -d)
-trap 'rm -rf "$SANDBOX"' EXIT
-# _repo_scope_has_publish_proof (called internally when the ancestor check
-# fails and a semaphore is given) references $IWE_ROOT unguarded -- unrelated
-# to this repo's IWE_ROOT, just needs to be set under `set -u`.
-export IWE_ROOT="$SANDBOX/iwe-root-placeholder"
-
-# --- extract the two proof functions, plus the guard block that decides
-# whether to call them, from the live script ---
-python3 - "$GUARD" "$SANDBOX/proof_fns.sh" "$SANDBOX/guard_block.sh" <<'PY'
-import sys
+ROOT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
+python3 - "$ROOT_DIR" <<'PY_TEST'
+import json
+import os
 from pathlib import Path
+import re
+import shutil
+import subprocess
+import sys
+import tempfile
+import unittest
 
-lines = Path(sys.argv[1]).read_text(encoding="utf-8").split("\n")
+SOURCE = Path(sys.argv.pop()).resolve()
+GUARD = (SOURCE / "scripts/session-guard.sh").read_text()
 
-def extract_fn(name):
+
+def extract_function(name):
+    """Extract production code, skipping braces inside its here-documents."""
+    lines = GUARD.splitlines(keepends=True)
     start = next(i for i, line in enumerate(lines) if line.startswith(name + "() {"))
-    end = next(i for i in range(start + 1, len(lines)) if lines[i] == "}")
-    return lines[start:end + 1]
+    delimiter = None
+    for end in range(start + 1, len(lines)):
+        line = lines[end]
+        if delimiter:
+            if line.strip() == delimiter:
+                delimiter = None
+            continue
+        match = re.search(r"(?<!<)<<-?\s*['\"]?([A-Za-z_][A-Za-z_0-9]*)", line)
+        if match:
+            delimiter = match[1]
+        elif line == "}\n":
+            return "".join(lines[start:end + 1])
+    raise AssertionError("unterminated production function: " + name)
 
-fns = extract_fn("_repo_scope_has_publish_proof") + [""] + extract_fn("_repo_head_has_publish_proof")
-Path(sys.argv[2]).write_text("\n".join(fns), encoding="utf-8")
 
-start = next(i for i, line in enumerate(lines)
-             if line.strip().startswith('GOVERNANCE_REPO_BASENAME=$(basename "$governance_repo")'))
-end = next(i for i in range(start + 1, len(lines)) if lines[i] == "  fi")
-Path(sys.argv[3]).write_text("\n".join(lines[start:end + 1]), encoding="utf-8")
-PY
-# shellcheck source=/dev/null
-. "$SANDBOX/proof_fns.sh"
-# The guard block calls `fail "..." 7` on a failed proof, which in the real
-# script exits the process -- stub it once, globally, so a "checked -> fails"
-# case (expected for an unpushed commit) doesn't kill this test. Its return
-# value is never asserted on; only $GOVERNANCE_REPO_HAS_FOOTPRINT is.
-fail() { :; }
+FUNCTIONS = "\n".join(extract_function(name) for name in (
+    "normalize_remote_url", "_resolve_repo_checkout", "_publication_receipt_tool",
+    "semaphore_governance_worktree", "is_append_safe_session_path",
+    "_untracked_matches_published", "session_scope_dirty_paths", "resolve_orz_sessions_dir",
+    "_receipt_checkout_has_publish_proof", "_repo_scope_has_publish_proof",
+    "_repo_head_has_publish_proof", "_claimed_commits_have_publish_proof",
+    "_code_branch_claim_has_publish_proof", "_commit_current_tree_has_publish_proof",
+    "_commit_claim_supersession_has_publish_proof", "_peer_metadata_claim_has_publish_proof",
+    "_claimed_source_chain_has_publish_proof", "_commit_automerge_has_publish_proof",
+))
+START = GUARD.index("  # Classify every claim by repository identity.")
+END = GUARD.index('\n  if [ -n "$isolated_worktree" ]; then', START)
+DECISION = GUARD[START:END]
+DIRTY_START = GUARD.index('  SCOPE_DIRTY=$(session_scope_dirty_paths "$SEM_FILE")')
+DIRTY_END = GUARD.index("\n  # Quick Close", DIRTY_START)
+DIRTY_GATE = GUARD[DIRTY_START:DIRTY_END]
+# The actual close caller executes this gate before invoking delivery.
+assert GUARD.index("\n  _close_delivery_and_transition\n", DIRTY_START) > DIRTY_END
+SESSIONS_START = GUARD.index('  if [ "${MACHINE_CLOSE_MODE:-0}" != "1" ]; then',
+                            GUARD.index("_close_delivery_and_transition() {"))
+SESSIONS_END = GUARD.index("\n  # Resume begins", SESSIONS_START)
+SESSIONS_DELIVERY = GUARD[SESSIONS_START:SESSIONS_END]
 
-PASS=0
-FAIL=0
-check() {
-  if [ "$2" = "$3" ]; then
-    PASS=$((PASS + 1)); echo "  ok: $1"
-  else
-    FAIL=$((FAIL + 1)); echo "  ПРОВАЛ: $1 (ожидал '$3', получил '$2')"
-  fi
-}
 
-# --- fixture: bare "origin" + a local clone that will diverge from it,
-# simulating a canonical checkout other sessions have committed into without
-# pushing yet ---
-git init --quiet --bare "$SANDBOX/origin.git"
-git -c init.defaultBranch=main clone --quiet "$SANDBOX/origin.git" "$SANDBOX/work" 2>/dev/null
-cd "$SANDBOX/work"
-git config user.email test@example.com
-git config user.name Test
-echo one > tracked.txt && git add tracked.txt && git commit --quiet -m one
-git push --quiet origin HEAD:main
-# A sibling session's local, not-yet-pushed commit -- this is the drift that
-# makes the unconditional ancestry check fail for everyone sharing this repo.
-echo two > tracked.txt && git add tracked.txt && git commit --quiet -m "sibling session, not pushed"
-cd - >/dev/null
+class GovernanceDeliveryTest(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory(prefix="governance-scope-proof-")
+        self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name).resolve()
+        self.env = {key: value for key, value in os.environ.items() if not key.startswith("GIT_")}
+        self.env.update(GIT_CONFIG_NOSYSTEM="1", GIT_CONFIG_GLOBAL=os.devnull,
+                        GIT_OPTIONAL_LOCKS="0", GIT_TERMINAL_PROMPT="0",
+                        IWE_ROOT=str(self.root), IWE_GOVERNANCE_REPO="DS-strategy",
+                        PYTHONDONTWRITEBYTECODE="1")
+        scripts = self.root / "scripts"
+        (scripts / "lib").mkdir(parents=True)
+        for name in ("session_receipt_scope.py", "publication_receipt.py"):
+            shutil.copyfile(SOURCE / "scripts/lib" / name, scripts / "lib" / name)
+        (scripts / "proof-functions.sh").write_text(FUNCTIONS)
+        self.runner = scripts / "decision.sh"
+        self.runner.write_text(
+            'set -euo pipefail\n. "$IWE_ROOT/scripts/proof-functions.sh"\n'
+            'fail() { echo "$1" >&2; exit "$2"; }\n'
+            'GOV_REPO=DS-strategy\ngovernance_repo="$IWE_ROOT/$GOV_REPO"\n'
+            'SEM_FILE="$IWE_ROOT/session.open"\nisolated_worktree=""\n'
+            'legacy_semaphore_canonical="$governance_repo"\n'
+            'legacy_semaphore_sessions_dir="$IWE_ROOT/MC-sessions"\n'
+            + DECISION + '\nprintf "DELIVERY_ACCEPTED\\n"\n'
+        )
+        self.scope_runner = scripts / "scope-then-decision.sh"
+        self.scope_runner.write_text(self.runner.read_text().replace(
+            DECISION,
+            'ORZ_DIR="$IWE_ROOT/MC-sessions"\nORZ_SESSIONS_DIR="$ORZ_DIR"\n'
+            + DIRTY_GATE + '\nprintf "SCOPE_CLEAN\\n"\n'
+            + SESSIONS_DELIVERY + '\nprintf "SESSIONS_DELIVERY_ACCEPTED\\n"\n' + DECISION,
+            1,
+        ))
+        self.gov, self.gov_remote = self.repo("DS-strategy")
+        self.sessions, self.sessions_remote = self.repo("MC-sessions")
+        for repo in (self.gov, self.sessions):
+            (repo / "shared.md").write_text("published same-name file\n")
+            (repo / "deleted.md").write_text("published original\n")
+        self.orz = "2026-10/session.md"
+        (self.sessions / "2026-10").mkdir()
+        (self.sessions / self.orz).write_text("published session report\n")
+        (self.gov / ".gitignore").write_text("inbox/open-sessions.log\n")
+        self.commit(self.gov, ["shared.md", "deleted.md", ".gitignore"], "governance seed", publish=True)
+        self.external = self.commit(self.sessions, ["shared.md", "deleted.md", self.orz],
+                                    "session delivery", publish=True)
+        # Foreign history is genuinely divergent: both the bare remote and
+        # this shared checkout advance independently from the common base.
+        publisher = self.root / "remote-writer"
+        self.command("git", "clone", str(self.gov_remote), str(publisher))
+        self.identity(publisher)
+        (publisher / "remote-only.md").write_text("foreign remote history\n")
+        self.commit(publisher, ["remote-only.md"], "remote advance", publish=True)
+        (self.gov / "foreign-committed.md").write_text("foreign unpublished history\n")
+        self.commit(self.gov, ["foreign-committed.md"], "foreign local advance")
+        self.git(self.gov, "fetch", "origin", "main")
+        (self.gov / "foreign-committed.md").write_text("foreign uncommitted edit\n")
+        (self.gov / "foreign-untracked.md").write_text("foreign untracked output\n")
+        (self.gov / "inbox").mkdir()
+        (self.gov / "inbox/open-sessions.log").write_text("runtime projection\n")
+        self.sem = self.root / "session.open"
+        self.sem.write_text(
+            "---\nagent: codex\nsession_id: fixture\nharness_session_id: native-fixture\n"
+            "host: fixture-host\nwp: WP-484\nslug: fixture\nclose_path: unknown\n"
+            f"governance_worktree: {self.gov}\norz_sessions_dir: {self.sessions}\n"
+            f"orz_file: {self.orz}\n---\nfile: {self.orz}\nfile: inbox/open-sessions.log\n"
+            + self.claim(self.sessions, "shared.md")
+            + f"commit: MC-sessions {self.external}\n"
+        )
+        (self.root / "session.open.lease").write_text("lease must survive\n")
+        (self.root / "current-codex.ptr").write_text(str(self.sem) + "\n")
 
-REPO_NAME=$(basename "$SANDBOX/work")
-UNPUSHED_SHA=$(git -C "$SANDBOX/work" rev-parse HEAD)
+    def command(self, *args):
+        return subprocess.run(args, env=self.env, check=True, capture_output=True, text=True)
 
-# run_guard <semaphore> -> "checked" | "skipped", via the extracted block
-# (sets governance_repo/isolated_worktree/SEM_FILE it reads; `_repo_head_has_
-# publish_proof` runs for real -- it's a cheap, local, deterministic git call
-# against the fixture repo, and case 4 below needs the real one anyway, which
-# a bash function redefinition inside this function would otherwise clobber
-# globally for the rest of the script).
-run_guard() {
-  # shellcheck disable=SC2034  # read inside the dynamically sourced guard_block.sh below
-  local governance_repo="$SANDBOX/work" isolated_worktree="" SEM_FILE="$1"
-  # shellcheck source=/dev/null
-  . "$SANDBOX/guard_block.sh" >/dev/null 2>&1
-  if [ "$GOVERNANCE_REPO_HAS_FOOTPRINT" -eq 1 ]; then echo checked; else echo skipped; fi
-}
+    def git(self, repo, *args):
+        return self.command("git", "-C", str(repo), *args).stdout.strip()
 
-# 1. No commit: claim, no file: claim resolving inside this repo (this
-#    session's real shape: only session-transcript paths registered) -> skip.
-SEM_NONE="$SANDBOX/sem-none"
-{
-  echo "wp: WP-484"
-  echo "governance_worktree: $SANDBOX/work"
-  echo "file: MC-sessions/2026-09/16/some-session/00-writer.md"
-} > "$SEM_NONE"
-check "ни commit:, ни file: внутри репо -> пропуск (нечего доказывать)" \
-  "$(run_guard "$SEM_NONE")" "skipped"
+    def identity(self, repo):
+        self.git(repo, "config", "user.name", "Fixture")
+        self.git(repo, "config", "user.email", "fixture@example.invalid")
 
-# 2. No commit: claim, but a file: claim that DOES resolve to a real path
-#    inside this repo (the "edited + committed directly, forgot note-commit"
-#    gap the cold review found in the first version of this fix) -> checked.
-SEM_FILE_NO_COMMIT="$SANDBOX/sem-file-no-commit"
-{
-  echo "wp: WP-484"
-  echo "governance_worktree: $SANDBOX/work"
-  echo "file: tracked.txt"
-} > "$SEM_FILE_NO_COMMIT"
-check "file:-заявка внутри репо без commit: -> проверка запускается (закрывает найденную дыру)" \
-  "$(run_guard "$SEM_FILE_NO_COMMIT")" "checked"
+    def repo(self, name):
+        remote = self.root / (name + ".git")
+        repo = self.root / name
+        self.command("git", "init", "--bare", "--initial-branch=main", str(remote))
+        self.command("git", "clone", str(remote), str(repo))
+        self.identity(repo)
+        return repo, remote
 
-# 2.5. A file: claim whose relative path exists in BOTH the governance repo
-#      AND $IWE_ROOT (the exact CLAUDE.md/AGENTS.md-style collision the
-#      second cold review found live) -> ambiguous, no footprint from this
-#      claim -> skip (this is what closes the false-block the second review
-#      caught: a root-repo edit of a routinely-shared filename must not
-#      re-trigger the check for a session that never touched THIS repo).
-mkdir -p "$IWE_ROOT"
-echo shared-in-root > "$IWE_ROOT/shared.md"
-echo shared-in-governance > "$SANDBOX/work/shared.md"
-SEM_COLLISION="$SANDBOX/sem-collision"
-{
-  echo "wp: WP-484"
-  echo "governance_worktree: $SANDBOX/work"
-  echo "file: shared.md"
-} > "$SEM_COLLISION"
-check "file:-путь существует и там, и там -> неоднозначность -> пропуск" \
-  "$(run_guard "$SEM_COLLISION")" "skipped"
+    def commit(self, repo, paths, message, publish=False):
+        self.git(repo, "add", "--", *paths)
+        self.git(repo, "commit", "-m", message)
+        if publish:
+            self.git(repo, "push", "origin", "HEAD:main")
+            self.git(repo, "fetch", "origin", "main")
+        return self.git(repo, "rev-parse", "HEAD")
 
-# 3. A commit: claim for this repo -> checked (unchanged from the original
-#    design).
-SEM_WITH_COMMIT="$SANDBOX/sem-with-commit"
-{
-  echo "wp: WP-484"
-  echo "governance_worktree: $SANDBOX/work"
-  echo "commit: ${REPO_NAME} ${UNPUSHED_SHA}"
-} > "$SEM_WITH_COMMIT"
-check "commit:-заявка -> проверка запускается" \
-  "$(run_guard "$SEM_WITH_COMMIT")" "checked"
+    @staticmethod
+    def claim(repo, path):
+        return (f"file: {path}\nfile_v2: "
+                + json.dumps({"repo": str(repo / ".git"), "path": path}) + "\n")
 
-# 4. And when the real (unstubbed) proof function runs, it still fails closed
-#    for a genuinely unpushed commit -- the fix must not weaken protection
-#    for a session that actually changed something here.
-if _repo_head_has_publish_proof "$SANDBOX/work" "governance checkout" "$SEM_WITH_COMMIT" \
-     "governance_worktree" "orz_sessions_dir" 2>/dev/null; then
-  PROOF_RESULT="passed"
-else
-  PROOF_RESULT="failed"
-fi
-check "непроверенный непушенный коммит -> строгая проверка по-прежнему отказывает" "$PROOF_RESULT" "failed"
+    def append(self, text):
+        self.sem.write_text(self.sem.read_text() + text)
 
-echo "session-guard-empty-scope-governance-proof-smoke: прошло $PASS, провалено $FAIL"
-[ "$FAIL" -eq 0 ]
+    def state(self):
+        result = {}
+        for repo in (self.gov, self.sessions):
+            result[str(repo)] = (
+                self.git(repo, "rev-parse", "HEAD"), self.git(repo, "show-ref"),
+                (repo / ".git/index").read_bytes(),
+                {str(path.relative_to(repo)): path.read_bytes()
+                 for path in repo.rglob("*") if path.is_file()
+                 and ".git" not in path.relative_to(repo).parts},
+            )
+        for remote in (self.gov_remote, self.sessions_remote):
+            result[str(remote)] = self.git(remote, "show-ref")
+        for name in ("session.open", "session.open.lease", "current-codex.ptr"):
+            result[name] = (self.root / name).read_bytes()
+        return result
+
+    def verdict(self, accepted, runner=None):
+        before = self.state()
+        result = subprocess.run(["bash", str(runner or self.runner)], env=self.env,
+                                capture_output=True, text=True, timeout=60)
+        output = result.stdout + result.stderr
+        self.assertNotIn("command not found", output)
+        self.assertNotIn("Traceback (most recent call last)", output)
+        self.assertNotIn("No such file or directory", output)
+        self.assertEqual(result.returncode, 0 if accepted else 7, output)
+        self.assertEqual("DELIVERY_ACCEPTED" in result.stdout, accepted, output)
+        self.assertEqual(self.state(), before, "proof changed refs, index, files, or session markers")
+        return output
+
+    def test_external_scope_ignores_foreign_history_and_dirty_files(self):
+        output = self.verdict(True)
+        self.assertIn("scope относятся к другим репозиториям", output)
+
+    def test_own_deleted_file_still_blocks(self):
+        (self.gov / "deleted.md").unlink()
+        self.append(self.claim(self.gov, "deleted.md"))
+        self.assertIn("governance delivery не подтверждена", self.verdict(False))
+
+    def test_own_same_name_file_still_blocks(self):
+        (self.gov / "shared.md").write_text("own unpublished change\n")
+        self.append(self.claim(self.gov, "shared.md"))
+        self.verdict(False)
+
+    def test_unqualified_nonexistent_file_still_blocks(self):
+        self.append("file: absent-everywhere.md\n")
+        self.verdict(False)
+
+    def test_unqualified_same_name_file_still_blocks(self):
+        self.append("file: shared.md\n")
+        self.verdict(False)
+
+    def test_own_unpublished_commit_still_blocks(self):
+        (self.gov / "own.md").write_text("own unpublished committed output\n")
+        source = self.commit(self.gov, ["own.md"], "own change")
+        self.append(self.claim(self.gov, "own.md") + f"commit: DS-strategy {source}\n")
+        self.verdict(False)
+
+    def test_empty_journal_still_blocks(self):
+        self.sem.write_text("\n".join(line for line in self.sem.read_text().splitlines()
+                                     if not line.startswith(("file:", "file_v2:", "commit:"))) + "\n")
+        self.verdict(False)
+
+    def published_payload(self):
+        path = "export/payload.json"
+        payload = self.sessions / path
+        payload.parent.mkdir()
+        payload.write_text('{"published": true}\n')
+        source = self.commit(self.sessions, [path], "published payload", publish=True)
+        self.append(self.claim(self.sessions, path) + f"commit: MC-sessions {source}\n")
+        return payload
+
+    def test_clean_sessions_payload_passes_actual_scope_and_sessions_gates(self):
+        self.published_payload()
+        output = self.verdict(True, self.scope_runner)
+        self.assertIn("SCOPE_CLEAN", output)
+        self.assertIn("SESSIONS_DELIVERY_ACCEPTED", output)
+        self.assertIn("scope относятся к другим репозиториям", output)
+
+    def test_dirty_sessions_payload_blocks_before_empty_governance_proof(self):
+        payload = self.published_payload()
+        payload.write_text('{"published": false, "own_new_work": true}\n')
+        output = self.verdict(False, self.scope_runner)
+        self.assertIn("export/payload.json", output)
+        self.assertIn("Сначала зафиксируй и отправь", output)
+        self.assertNotIn("SCOPE_CLEAN", output)
+        self.assertNotIn("SESSIONS_DELIVERY_ACCEPTED", output)
+        self.assertNotIn("scope относятся к другим репозиториям", output)
+
+    def test_untracked_sessions_payload_blocks_with_published_session_commit(self):
+        path = "export/payload.json"
+        payload = self.sessions / path
+        payload.parent.mkdir()
+        payload.write_text('{"untracked_own_work": true}\n')
+        self.append(self.claim(self.sessions, path))
+        output = self.verdict(False, self.scope_runner)
+        self.assertIn("?? export/payload.json", output)
+        self.assertIn("Сначала зафиксируй и отправь", output)
+        self.assertNotIn("SCOPE_CLEAN", output)
+        self.assertNotIn("scope относятся к другим репозиториям", output)
+
+    def test_external_unpublished_commit_is_not_excused(self):
+        (self.sessions / "own-unpublished.md").write_text("session output not delivered\n")
+        source = self.commit(self.sessions, ["own-unpublished.md"], "unpublished session output")
+        self.append(self.claim(self.sessions, "own-unpublished.md") + f"commit: MC-sessions {source}\n")
+        output = self.verdict(False)
+        self.assertIn("session-owned commits", output)
+        self.assertIn("scope относятся к другим репозиториям", output)
+
+
+unittest.main(verbosity=2)
+PY_TEST

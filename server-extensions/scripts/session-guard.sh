@@ -1659,6 +1659,96 @@ _runtime_harness_session_id() {  # <agent>; guard UUID and harness UUID are dist
   printf '%s\n' "$native"
 }
 
+_open_native_identity_available() {  # admission lock held; no adoption of another guard ID
+  python3 - "$SESSION_DIR" "$AGENT" "$1" "$2" "$WP" "${SLUG:-$WP}" "${IWE_SESSION_ID:-}" <<'PY_NATIVE'
+import os
+from pathlib import Path
+import re
+import stat
+import sys
+
+root, agent, native, host, wp, slug, requested = sys.argv[1:]
+if not native:
+    raise SystemExit(0)
+
+
+def refuse(path, reason):
+    raise SystemExit("open: " + reason + ": " + path.name)
+
+
+def snapshot(path):
+    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    try:
+        before = os.fstat(fd)
+        if (not stat.S_ISREG(before.st_mode) or before.st_uid != os.geteuid()
+                or before.st_nlink != 1 or before.st_mode & 0o022
+                or not 0 < before.st_size <= 1024 * 1024):
+            refuse(path, "небезопасная запись владельца")
+        raw = b""
+        while len(raw) <= before.st_size:
+            chunk = os.read(fd, min(65536, before.st_size + 1 - len(raw)))
+            if not chunk:
+                break
+            raw += chunk
+        after, current = os.fstat(fd), path.lstat()
+        fields = ("st_dev", "st_ino", "st_mode", "st_nlink", "st_size", "st_mtime_ns", "st_ctime_ns")
+        if (any(getattr(before, key) != getattr(after, key)
+                or getattr(before, key) != getattr(current, key) for key in fields)
+                or len(raw) != before.st_size or b"\0" in raw or not raw.endswith(b"\n")):
+            refuse(path, "запись владельца изменилась во время проверки")
+        return raw.decode("utf-8").splitlines()
+    finally:
+        os.close(fd)
+
+
+def normalize_wp(value):
+    match = re.fullmatch(r"(?:[Ww][Pp]-)?([1-9][0-9]*)", value)
+    return "WP-" + match[1] if match else value
+
+
+try:
+    for path in sorted(Path(root).iterdir()):
+        if not (path.name.startswith(agent + "-")
+                and (path.name.endswith(".open") or path.name.endswith(".open.closed"))):
+            continue
+        lines = snapshot(path)
+
+        def values(key):
+            return [line.partition(":")[2].strip() for line in lines
+                    if line.startswith(key + ":")]
+
+        def unique(key):
+            found = values(key)
+            if len(found) != 1 or not found[0]:
+                refuse(path, "неоднозначное поле " + key)
+            return found[0]
+
+        # Legacy records without a native identity cannot establish a match.
+        # A matching value among duplicate fields is ambiguity, never absence.
+        if native not in values("harness_session_id"):
+            continue
+        unique("harness_session_id")
+        if unique("host") != host:
+            continue
+        if unique("agent") != agent:
+            refuse(path, "agent не совпадает с именем записи")
+        recorded_wp, recorded_slug = unique("wp"), unique("slug")
+        if normalize_wp(recorded_wp) != normalize_wp(wp) or recorded_slug != slug:
+            continue
+        session = unique("session_id")
+        suffix = ".open.closed" if path.name.endswith(".closed") else ".open"
+        if path.name != agent + "-" + session + suffix:
+            refuse(path, "session_id не совпадает с именем записи")
+        if suffix == ".open.closed":
+            refuse(path, "эта работа native-сессии уже закрыта; session_id=" + session)
+        if not requested or session != requested:
+            refuse(path, "эта работа native-сессии уже открыта; повтори с session_id=" + session)
+        # The exact-ID path still has to pass _open_reentry_matches below.
+except (OSError, UnicodeError) as error:
+    raise SystemExit("open: не удалось безопасно проверить native identity: " + str(error))
+PY_NATIVE
+}
+
 _legacy_codex_harness_session_id() {  # <semaphore>; scoped compatibility for pre-native-ID opens
   python3 - "$1" <<'PY'
 import os
@@ -4276,6 +4366,12 @@ if [ "$CMD" = "open" ]; then
   validate_open_wp "$WP"
 
   acquire_scheduled_admission_lock
+  OPEN_HARNESS_SESSION_ID=$(_runtime_harness_session_id "$AGENT") \
+    || fail "open: native harness session id is malformed" 1
+  # Serialize the logical owner check with publication, before isolation or
+  # ORZ creation. A new generated guard ID must not duplicate this work.
+  _open_native_identity_available "$OPEN_HARNESS_SESSION_ID" "$(uname -n)" \
+    || fail "open: native identity уже занята или неоднозначна; существующая запись сохранена" 1
   SCHEDULED_ADMISSION=0
   [ -n "$SCHEDULED_OWNER" ] && SCHEDULED_ADMISSION=1
   if _scheduled_admission_barrier "$WP" "$SCHEDULED_ADMISSION" "$AGENT" "${IWE_SESSION_ID:-}"; then
@@ -4857,8 +4953,6 @@ $isolate_status_code $isolate_status_path"
   ORZ_FILE="$ORZ_SESSIONS_DIR/$ORZ_BASENAME"
   mkdir -p "$(dirname "$ORZ_FILE")"
   EFFECTIVE_OWNER_PID="${OWNER_PID:-${CLAUDE_PID:-}}"
-  OPEN_HARNESS_SESSION_ID=$(_runtime_harness_session_id "$AGENT") \
-    || fail "open: native harness session id is malformed" 1
   REUSE_EXISTING_SEMAPHORE=0
   if [ -e "$SEM_FILE" ] || [ -L "$SEM_FILE" ]; then
     _open_reentry_matches "$SEM_FILE" "$AGENT" "$SESSION_ID" "$WP" "${SLUG:-$WP}" \
@@ -6187,6 +6281,15 @@ _repo_head_has_publish_proof() {  # <repo> <role> [exact semaphore] [own field] 
   if ! git -C "$root" merge-base --is-ancestor HEAD "$origin_ref" 2>/dev/null; then
     if [ -n "${3:-}" ] && _receipt_checkout_has_publish_proof "$3" "$root" "$origin_ref"; then
       echo "Session CLOSE: historical publication receipts v2 cover checkout: $root" >&2
+      return 0
+    fi
+    # A shared MC-sessions checkout may contain other agents' unpublished
+    # commits and be parked before this session's published paths. Prove only
+    # this session's exact file_v2 scope and reconstructed receipt anchors;
+    # never infer delivery from the shared HEAD or publish any of its commits.
+    if [ "$role" = "sessions checkout" ] && [ -n "${3:-}" ] \
+       && python3 "$IWE_ROOT/scripts/lib/session_receipt_scope.py" "$3" "$root" "$origin_ref"; then
+      echo "Session CLOSE: exact session-owned receipts cover shared sessions checkout: $root" >&2
       return 0
     fi
     if [ "$role" = "sessions checkout" ] && _repo_head_is_patch_equivalent "$root" "$origin_ref"; then
@@ -9870,72 +9973,20 @@ _close_delivery_and_transition() {
   [ -n "$governance_repo" ] \
     || fail "close: governance checkout не доказан; clean/terminal transition запрещён" 7
 
-  # A shared governance checkout may have foreign unpublished history.  Its
-  # alternative proof covers this session's current exact output and declared
-  # commits.  The shared sessions checkout (MC-sessions) is delivered by
-  # cherry-pick and may instead prove itself by patch-equivalence of every
-  # local commit (_repo_head_is_patch_equivalent, WP-530 Ф67); the strict
-  # ancestry proof remains the target state for the governance checkout only.
-  # Missing origin or a tracking ref is never implicit `clean`.
-  #
-  # WP-484 (16.09, peer-session 2026-09-16-13-wp484-close-drift-fix,
-  # Claude+Kimi): a session that never touched the governance repo has
-  # nothing to prove there. This check used to run unconditionally for every
-  # non-isolated session regardless of scope, demanding the WHOLE shared
-  # canonical checkout's HEAD be an ancestor of origin/main -- a checkout
-  # that drifts constantly under real concurrency (other sessions committing
-  # locally without pushing yet), so a session with zero footprint in this
-  # repo failed for a divergence it had no part in.
-  #
-  # Cold-review Critical (same session, before deploy): gating on `commit:`
-  # claims alone is not the same as "touched nothing" -- a session that
-  # edited a file here (auto-tracked as a `file:` claim by
-  # post-tool-use-scope-track.sh) and committed it directly, forgetting to
-  # call `note-commit`, would previously fail closed on this exact check (its
-  # unpublished HEAD commit fails the ancestor test, and the scoped fallback
-  # also refuses with an empty `commit:` list) -- a real, if accidental,
-  # safety net. Skipping whenever `commit:` is empty silently drops that net.
-  # Fixed by requiring EITHER a `commit:` claim for this repo OR at least one
-  # `file:` claim that resolves to a path actually present under
-  # $governance_repo -- a session with neither has provably no footprint here
-  # (nothing committed, nothing present to have been committed), so there is
-  # still nothing to prove; a session with a stray `file:` claim under this
-  # repo still runs the full check, the same as before this fix (rejected the
-  # alternative of comparing HEAD against its value at `open`: in a shared
-  # checkout that drifts from sibling sessions just as easily, that proves
-  # nothing more than the existing ancestry check).
-  GOVERNANCE_REPO_BASENAME=$(basename "$governance_repo")
-  GOVERNANCE_REPO_HAS_FOOTPRINT=0
-  if grep -qF "commit: ${GOVERNANCE_REPO_BASENAME} " "$SEM_FILE" 2>/dev/null; then
-    GOVERNANCE_REPO_HAS_FOOTPRINT=1
-  else
-    # Second cold-review (same session): a bare `file:` claim is not
-    # repo-qualified -- the same relative path can legitimately exist in more
-    # than one repo (confirmed live: CLAUDE.md/AGENTS.md/.claude/settings.json
-    # and several scripts/* exist verbatim in both $IWE_ROOT and every
-    # governance checkout). A naive existence check alone would count a root
-    # repo edit (e.g. this file's own CLAUDE.md) as governance-repo footprint
-    # and re-trigger the exact false block this fix exists to remove -- not
-    # rare, CLAUDE.md/AGENTS.md are edited routinely per this file's own §7.
-    # Only trust a path as this session's governance-repo footprint when it
-    # exists HERE and NOT at the same relative path under $IWE_ROOT; an
-    # ambiguous path falls through with no footprint from this claim (still
-    # picked up by the `commit:` signal above, or by another unambiguous
-    # `file:` claim) rather than forcing a check that fails for unrelated
-    # repo drift on a session that never touched this file here.
-    while IFS= read -r _footprint_path; do
-      _footprint_path="${_footprint_path#file: }"
-      [ -n "$_footprint_path" ] || continue
-      if [ -e "$governance_repo/$_footprint_path" ] && [ ! -e "$IWE_ROOT/$_footprint_path" ]; then
-        GOVERNANCE_REPO_HAS_FOOTPRINT=1
-        break
-      fi
-    done < <(grep '^file: ' "$SEM_FILE" 2>/dev/null || true)
-  fi
-  if [ -z "$isolated_worktree" ] && [ "$GOVERNANCE_REPO_HAS_FOOTPRINT" -eq 1 ]; then
-    _repo_head_has_publish_proof "$governance_repo" "governance checkout" "$SEM_FILE" \
-      "governance_worktree" "orz_sessions_dir" "$legacy_semaphore_canonical" "$legacy_semaphore_sessions_dir" \
-      || fail "close: governance delivery не подтверждена; .open/lease/pointer сохранены" 7
+  # Classify every claim by repository identity. Filesystem existence cannot
+  # distinguish another repo's same-name file, a deleted own file, or the
+  # runtime open-log projection from an actual governance deliverable.
+  # An empty/ambiguous journal is NOT evidence of an empty own scope: it must
+  # satisfy the ordinary full checkout/scope publication proof below.
+  if [ -z "$isolated_worktree" ]; then
+    if python3 "$IWE_ROOT/scripts/lib/session_receipt_scope.py" --empty-governance \
+        "$SEM_FILE" "$governance_repo"; then
+      echo "Session CLOSE: все результаты scope относятся к другим репозиториям; governance runtime log не требует публикации" >&2
+    else
+      _repo_head_has_publish_proof "$governance_repo" "governance checkout" "$SEM_FILE" \
+        "governance_worktree" "orz_sessions_dir" "$legacy_semaphore_canonical" "$legacy_semaphore_sessions_dir" \
+        || fail "close: governance delivery не подтверждена; .open/lease/pointer сохранены" 7
+    fi
   fi
   if [ -z "$isolated_worktree" ]; then
     _claimed_commits_have_publish_proof "$SEM_FILE" \

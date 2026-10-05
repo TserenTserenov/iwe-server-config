@@ -727,15 +727,51 @@ _close_delivery_state "$1" one
         result = self.close_proof()
         self.assertEqual(result.returncode, 0, result.stderr)
 
-    def test_prepared_main_recovery_rejects_non_peer_and_changed_inventory(self):
+    def test_prepared_main_recovery_accepts_legacy_close_path(self):
+        self.git("push", "-q", "origin", "HEAD:refs/heads/main")
+        self.sem.write_text(self.sem.read_text().replace("close_path: peer-session\n",
+                                                    "close_path: unknown\n"))
+        self.prepare()
+        before = self.sem.read_bytes()
+        result = self.note_publication("refs/heads/main")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertTrue(self.sem.read_bytes().startswith(before))
+        self.assertTrue(receipt.verify(self.repo, self.sem, "repo", self.source, self.anchor))
+
+    def test_unprepared_main_rejects_legacy_close_path(self):
+        self.git("push", "-q", "origin", "HEAD:refs/heads/main")
+        self.sem.write_text(self.sem.read_text().replace("close_path: peer-session\n",
+                                                    "close_path: unknown\n"))
+        before = self.sem.read_bytes()
+        self.assertNotEqual(self.record_cli("refs/heads/main").returncode, 0)
+        self.assertEqual(self.sem.read_bytes(), before)
+
+    def test_prepared_main_requires_close_path_field(self):
         self.git("push", "-q", "origin", "HEAD:refs/heads/main")
         self.prepare()
+        missing_path = self.sem.read_bytes().replace(b"close_path: peer-session\n", b"")
+        self.sem.write_bytes(missing_path)
+        self.assertNotEqual(self.note_publication("refs/heads/main").returncode, 0)
+        self.assertEqual(self.sem.read_bytes(), missing_path)
+
+    def test_prepared_main_recovery_rejects_changed_inventory(self):
+        self.git("push", "-q", "origin", "HEAD:refs/heads/main")
+        self.sem.write_text(self.sem.read_text().replace("close_path: peer-session\n",
+                                                    "close_path: unknown\n"))
+        self.prepare()
         original = self.sem.read_bytes()
-        for raw in (original.replace(b"close_path: peer-session\n", b""),
-                    original + ("commit: repo " + self.base + "\n").encode()):
+        for raw in (original + ("commit: repo " + self.base + "\n").encode(),):
             self.sem.write_bytes(raw)
             self.assertNotEqual(self.note_publication("refs/heads/main").returncode, 0)
             self.assertEqual(self.sem.read_bytes(), raw)
+
+    def test_legacy_close_path_cannot_use_alternate_target(self):
+        self.sem.write_text(self.sem.read_text().replace("close_path: peer-session\n",
+                                                    "close_path: unknown\n"))
+        self.prepare()
+        before = self.sem.read_bytes()
+        self.assertNotEqual(self.note_publication("refs/heads/pilot").returncode, 0)
+        self.assertEqual(self.sem.read_bytes(), before)
 
     def test_prepared_main_squash_is_accepted_by_real_close_reader(self):
         self.git("checkout", "-q", "--detach", self.source)

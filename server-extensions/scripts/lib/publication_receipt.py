@@ -249,7 +249,10 @@ def legacy_product_scope(repo: Path, raw: bytes, common: Path, name: str) -> Non
 
 def product_target(repo: Path, raw: bytes, name: str, root: Path, target_ref: str) -> None:
     """Bind non-main delivery and PREPARED recovery to peer product repositories."""
-    if target_ref not in PEER_PRODUCT_REFS | {MAIN_REF} or field(raw, "close_path") != "peer-session":
+    if (target_ref not in PEER_PRODUCT_REFS | {MAIN_REF}
+            or (field(raw, "close_path") != "peer-session"
+                and (target_ref != MAIN_REF
+                     or field(raw, "close_delivery_version") != "isolate-push/v2"))):
         raise ProofError("publication recovery requires a peer product delivery target")
     root = root.resolve(strict=True)
     common, origin = repository_identity(repo)
