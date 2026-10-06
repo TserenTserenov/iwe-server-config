@@ -464,22 +464,36 @@ fi
 # Same rule as in the round-loop below: an empty .err is noise, not evidence
 # (WP-481 F13).
 [ -s "${PEER_FILE%.md}.err" ] || rm -f "${PEER_FILE%.md}.err"
-# $PEER_FILE идёт через Bash-редирект, не через Write/Edit — scope gate
-# session-guard его не увидит и заблокирует коммит на Шаге 4.5.1 (найдено
-# 2026-08-10, сессия 2026-08-10-08-wp7-update-fatigue-community: блокировка
-# сразу на обоих peer-файлах сессии). Регистрируем сразу, не дожидаясь блока.
-# Отказ регистрации — громкий (WP-530 Ф67, 25.09): три сессии за день молча
-# потеряли заявки на файлы напарников (прежнее `2>/dev/null || true`), scope-proof
-# при закрытии не сошёлся, семафоры остались открытыми. Раунд не роняем, но
-# писатель ОБЯЗАН увидеть WARN и повторить note-file до Шага 4.5.
-if ! note_err=$(bash "${IWE_SCRIPTS:-$HOME/IWE/scripts}/session-guard.sh" note-file "$PEER_FILE" \
-    --wp "<WP-NNN из Шага 0б>" --slug "$SESSION_ID" 2>&1); then
-  printf 'WARN: note-file failed for %s: %s\n' "$PEER_FILE" "$note_err" >&2
-  printf 'NOTE_FILE_WARN %s\n' "$PEER_FILE"
+# Пустой $PEER_FILE (адаптер отказал без вывода, напр. известный класс
+# bug-2026-10-05-grok-peer-adapter-empty-response-exit-1.md) нечего заявлять
+# и нечего коммитить — удаляем сразу, чтобы более поздний коммит всей папки
+# сессии (Шаг 4.5.1) не подхватил его молча мимо scope gate. `--forget` на
+# путь, который ещё не заявлен (обычный случай), безопасно отказывает кодом 1
+# без побочных эффектов — тот же путь мог быть заявлен ПРЕДЫДУЩЕЙ попыткой
+# этого же раунда (3р.1а допускает повторный вызов одного peer с тем же
+# $PEER_FILE), и тогда заявка должна быть снята вместе с файлом.
+if [ ! -s "$PEER_FILE" ]; then
+  rm -f "$PEER_FILE"
+  bash "${IWE_SCRIPTS:-$HOME/IWE/scripts}/session-guard.sh" note-file --forget "${PEER_FILE#"$SESSIONS_DIR"/}" \
+    --slug "$SESSION_ID" >/dev/null 2>&1 || true
+else
+  # $PEER_FILE идёт через Bash-редирект, не через Write/Edit — scope gate
+  # session-guard его не увидит и заблокирует коммит на Шаге 4.5.1 (найдено
+  # 2026-08-10, сессия 2026-08-10-08-wp7-update-fatigue-community: блокировка
+  # сразу на обоих peer-файлах сессии). Регистрируем сразу, не дожидаясь блока.
+  # Отказ регистрации — громкий (WP-530 Ф67, 25.09): три сессии за день молча
+  # потеряли заявки на файлы напарников (прежнее `2>/dev/null || true`), scope-proof
+  # при закрытии не сошёлся, семафоры остались открытыми. Раунд не роняем, но
+  # писатель ОБЯЗАН увидеть WARN и повторить note-file до Шага 4.5.
+  if ! note_err=$(bash "${IWE_SCRIPTS:-$HOME/IWE/scripts}/session-guard.sh" note-file "$PEER_FILE" \
+      --wp "<WP-NNN из Шага 0б>" --slug "$SESSION_ID" 2>&1); then
+    printf 'WARN: note-file failed for %s: %s\n' "$PEER_FILE" "$note_err" >&2
+    printf 'NOTE_FILE_WARN %s\n' "$PEER_FILE"
+  fi
 fi
 ```
 
-Если файл пустой или exit ≠ 0 → сообщить пилоту: «<PEER_VENDOR> не ответил. Повторить или прервать?»
+Если файл пустой (значит, уже удалён предыдущим шагом) или exit ≠ 0 → сообщить пилоту: «<PEER_VENDOR> не ответил. Повторить или прервать?»
 
 ### 3.2 Показать пилоту
 
@@ -635,16 +649,29 @@ fi
 # STATUS is captured so the cleanup cannot clobber the adapter's exit code.
 [ -s "${PEER_FILE%.md}.err" ] || rm -f "${PEER_FILE%.md}.err"
 rm -f "$PROMPT_FILE"
-# Тот же разрыв, что в турн-loop Шага 3.1 (найдено 2026-08-10) — $PEER_FILE
-# идёт через Bash-редирект, scope gate его не видит без явной регистрации.
-# Отказ регистрации — громкий (WP-530 Ф67, 25.09): три сессии за день молча
-# потеряли заявки на файлы напарников (прежнее `2>/dev/null || true`), scope-proof
-# при закрытии не сошёлся, семафоры остались открытыми. Раунд не роняем, но
-# писатель ОБЯЗАН увидеть WARN и повторить note-file до Шага 4.5.
-if ! note_err=$(bash "${IWE_SCRIPTS:-$HOME/IWE/scripts}/session-guard.sh" note-file "$PEER_FILE" \
-    --wp "<WP-NNN из Шага 0б>" --slug "$SESSION_ID" 2>&1); then
-  printf 'WARN: note-file failed for %s: %s\n' "$PEER_FILE" "$note_err" >&2
-  printf 'NOTE_FILE_WARN %s\n' "$PEER_FILE"
+# Пустой $PEER_FILE (адаптер отказал без вывода, напр.
+# bug-2026-10-05-grok-peer-adapter-empty-response-exit-1.md) нечего заявлять
+# и нечего коммитить — удаляем сразу, чтобы более поздний коммит всей папки
+# сессии (Шаг 4.5.1) не подхватил его молча мимо scope gate. `--forget` на
+# ещё не заявленный путь (обычный случай) безопасно отказывает кодом 1 без
+# побочных эффектов — тот же путь мог быть заявлен ПРЕДЫДУЩЕЙ попыткой этого
+# же раунда (3р.1а допускает повторный вызов peer с тем же $PEER_FILE).
+if [ ! -s "$PEER_FILE" ]; then
+  rm -f "$PEER_FILE"
+  bash "${IWE_SCRIPTS:-$HOME/IWE/scripts}/session-guard.sh" note-file --forget "${PEER_FILE#"$SESSIONS_DIR"/}" \
+    --slug "$SESSION_ID" >/dev/null 2>&1 || true
+else
+  # Тот же разрыв, что в турн-loop Шага 3.1 (найдено 2026-08-10) — $PEER_FILE
+  # идёт через Bash-редирект, scope gate его не видит без явной регистрации.
+  # Отказ регистрации — громкий (WP-530 Ф67, 25.09): три сессии за день молча
+  # потеряли заявки на файлы напарников (прежнее `2>/dev/null || true`), scope-proof
+  # при закрытии не сошёлся, семафоры остались открытыми. Раунд не роняем, но
+  # писатель ОБЯЗАН увидеть WARN и повторить note-file до Шага 4.5.
+  if ! note_err=$(bash "${IWE_SCRIPTS:-$HOME/IWE/scripts}/session-guard.sh" note-file "$PEER_FILE" \
+      --wp "<WP-NNN из Шага 0б>" --slug "$SESSION_ID" 2>&1); then
+    printf 'WARN: note-file failed for %s: %s\n' "$PEER_FILE" "$note_err" >&2
+    printf 'NOTE_FILE_WARN %s\n' "$PEER_FILE"
+  fi
 fi
 ```
 
@@ -899,7 +926,7 @@ SHA=$(git -C "$REPO_ROOT" rev-parse HEAD)
 # приоритет уже единственная ручка).
 PRIORITY="normal"
 if is_ds_repo_by_origin "$REPO_ROOT"; then
-    publish_commit "$REPO_ROOT" "$SHA" "$PRIORITY" "peer-session <SESSION_ID> deploy" \
+    IWE_AGENT=claude-code publish_commit "$REPO_ROOT" "$SHA" "$PRIORITY" "peer-session <SESSION_ID> deploy" \
         || { echo "publish_commit не удался — см. stderr/Telegram-алерт ds-publish.sh" >&2; exit 1; }
 else
     push_branch "$REPO_ROOT"
@@ -907,6 +934,8 @@ fi
 ```
 
 > **Код возврата обязателен, не только текст в stderr** (найдено холодным ревью Ф9): `|| echo ...` без `exit 1` делает последней командой ветки `echo`, который сам всегда успешен — компаунд `if/else` тогда выглядит завершившимся успешно даже когда `publish_commit` реально упал (ровно тот сбой, ради обработки которого существует шлюз). `exit 1` в конце `||`-блока — обязательная часть паттерна, не опция.
+
+> **`IWE_AGENT=claude-code` перед `publish_commit` — обязательно, не косметика** (найдено 06.10, холодная проверка Fable + пир-сессия `2026-10-06-03-session-close-problems-audit`). `publish_commit` зовёт канонический `ds-publish.sh` → `isolate-push.sh:record_publication_receipts()`, который молча пишет `WARN: receipt v2 not recorded: no bound publishing agent/guard` и пропускает квитанцию, если `IWE_AGENT` не задан в окружении вызова — семафор закрывается по legacy-доказательству, но публикация остаётся без квитанции v2. Этот скилл задавал `IWE_AGENT` для `session-guard.sh open/close`, но не для публикации — живой `.iwe-runtime/publication-receipt-gaps.log` показал 21 пропуск за 05-06.10, 20 из них с этой причиной.
 
 Записать commit SHA для каждого репо в переменную `DEPLOY_SHAS` (map: repo → sha).
 
@@ -1279,11 +1308,13 @@ bash "${IWE_SCRIPTS:-$HOME/IWE/scripts}/session-guard.sh" note-publication "$PUB
 REPO_ROOT=$(git rev-parse --show-toplevel)
 git -C "$REPO_ROOT" fetch -q origin main
 for SHA in "${OUR_SHAS[@]}"; do
-    bash "$HOME/IWE/DS-my-strategy/scripts/ds-publish.sh" "$REPO_ROOT" high \
+    IWE_AGENT=claude-code bash "$HOME/IWE/DS-my-strategy/scripts/ds-publish.sh" "$REPO_ROOT" high \
         --from-commit "$SHA" --exact-commit "$SHA" --reason "peer-session $SESSION_ID close" \
         || { echo "ds-publish --exact-commit не удался для $SHA — см. вывод шлюза" >&2; exit 1; }
 done
 ```
+
+> **`IWE_AGENT=claude-code` здесь обязательно, та же причина, что у Шага 3.6.5** (см. примечание там, найдено 06.10). Это публикует `MC-sessions` — именно тот busy-репозиторий, в котором `publication-receipt-gaps.log` показал пропуски квитанций.
 
 Приоритет `high`, а не `normal` как в 3.6.5: пилот реально ждёт закрытие сессии сейчас, это не фоновый деплой (WP-530 Ф9: голый push обходил шлюз координации, которым уже пользуются quick-close/day-close).
 
@@ -1395,7 +1426,7 @@ if [ "${#ACCEPTANCE_ISSUES[@]}" -gt 0 ]; then
   git -C "$SESSIONS_DIR" add "$ACCEPT_ESC_FILE" "$SESSION_DIR/meta.yaml"
   git -C "$SESSIONS_DIR" commit -m "fix(peer): $SESSION_ID — эскалация приёмки закрытия" \
     -- "$ACCEPT_ESC_FILE" "$SESSION_DIR/meta.yaml" 2>&1 || true
-  bash "$HOME/IWE/DS-my-strategy/scripts/ds-publish.sh" "$SESSIONS_DIR" high \
+  IWE_AGENT=claude-code bash "$HOME/IWE/DS-my-strategy/scripts/ds-publish.sh" "$SESSIONS_DIR" high \
     --from-commit "$(git -C "$SESSIONS_DIR" rev-parse HEAD)" --exact-commit "$(git -C "$SESSIONS_DIR" rev-parse HEAD)" \
     --reason "peer-session $SESSION_ID close: escalation" 2>&1 \
     || echo "⚠️  публикация эскалации не удалась — коммит существует локально, файл не тонет, но не на remote" >&2

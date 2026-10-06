@@ -59,7 +59,34 @@ log_decision() {
 }
 
 input=$(cat) || security_failure "не удалось прочитать ввод"
-analysis=$(printf '%s' "$input" | secret_pattern_process analyze-bash 2>/dev/null) || security_failure "анализатор не отработал"
+# Причина отказа анализатора шла в /dev/null: сообщение агенту было всегда
+# «анализатор не отработал» независимо от настоящей причины (неподдерживаемая
+# синтаксическая конструкция vs сам анализатор упал) — найдено 06.10,
+# bug-2026-10-06-secret-leak-block-guard-fails-closed-on-quick-close-runner-start.md.
+# secret_patterns.py:fail() пишет короткую структурную причину ("invalid shell
+# command", "unterminated heredoc" и т.п.), никогда текст команды или значение —
+# тот же минимализм, что log_decision уже соблюдает ниже для своего журнала.
+# Захват stderr -- в приватный temp-файл, не напрямую в общий durable-журнал:
+# общий журнал мог бы получить дозапись от другого параллельного вызова между
+# завершением анализатора и чтением причины (чужая строка вместо своей), а
+# неоткрываемый durable-путь (права/диск) сделал бы сам редирект частью
+# условия запуска анализатора. mktemp в /tmp — тоже не гарантирован, но при
+# его отказе падаем на /dev/null, как было до этой правки (тот же risk profile).
+ANALYZER_STDERR_TMP=$(mktemp "${TMPDIR:-/tmp}/secret-leak-analyzer.XXXXXX" 2>/dev/null) || ANALYZER_STDERR_TMP=/dev/null
+analysis=$(printf '%s' "$input" | secret_pattern_process analyze-bash 2>"$ANALYZER_STDERR_TMP")
+analyzer_rc=$?
+# /dev/null (mktemp-отказ, fallback) не читается строкой и не удаляется —
+# только настоящий temp-файл проходит через лог и rm.
+if [ "$ANALYZER_STDERR_TMP" != /dev/null ]; then
+  cat "$ANALYZER_STDERR_TMP" >> "$IWE_ROOT/.claude/logs/secret-leak-block-analyzer-errors.log" 2>/dev/null || true
+  if [ "$analyzer_rc" -ne 0 ]; then
+    analyzer_reason=$(tail -n1 "$ANALYZER_STDERR_TMP" 2>/dev/null)
+  fi
+  rm -f "$ANALYZER_STDERR_TMP"
+fi
+if [ "$analyzer_rc" -ne 0 ]; then
+  security_failure "анализатор не отработал: ${analyzer_reason:-причина не записана}"
+fi
 # Только поля, которые есть у анализатора любой версии. Новые поля читаются
 # ниже со значением по умолчанию: жёсткое требование в этой проверке означало
 # бы, что рассинхрон хука и библиотеки (обычное дело, когда их правят
