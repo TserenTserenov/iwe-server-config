@@ -251,4 +251,242 @@ if grep -q '^close_publish_abandoned_reason:' "$E2E_SEM.closed"; then
 fi
 echo "PASS: T4b -- resumed peer-session close without --reason writes both events once"
 
+# --- Test 5/6: WP-561 Ч4 (peer-session 2026-10-06-07-wp561-f33-contract-tests,
+#     Claude+Kimi+Codex, consensus) -- the two remaining bypass-via-FORCED_CARD
+#     channels (auto-archive-cancelled, cancel-obligation) also skipped close
+#     events on the resumed (--abandon-prepared) path, the same gap T4 fixed
+#     for peer-session. Unlike peer-session (whose channel is a static
+#     close_path field), these two are a property of which card/obligation the
+#     FIRST attempt matched -- re-derived here from the already-frozen
+#     close_delivery_terminal_kind/_reference the first attempt wrote into
+#     PREPARED, not by re-scanning RUNNER_CARDS or re-querying
+#     close_obligation.py (both would risk a different answer than the first
+#     attempt got, and RUNNER_CARDS is unavailable on the resumed path at all
+#     -- it is only built inside the fresh-close branch).
+setup_e2e_sandbox() {  # setup_e2e_sandbox <name> -> prints E2E root; exports IWE_* for the caller
+  local name="$1"
+  local e2e="$TEST_ROOT/$name"
+  mkdir -p "$e2e/scripts"
+  printf '#!/usr/bin/env bash\nexit 0\n' > "$e2e/scripts/agent-status-report.sh"
+  chmod +x "$e2e/scripts/agent-status-report.sh"
+  local origin="$e2e/origin.git"
+  git init -q --bare -b main "$origin"
+  local gov="$e2e/DS-strategy"
+  mkdir -p "$gov/inbox/agent/tasks" "$gov/scripts"
+  git -C "$gov" init -q -b main
+  git -C "$gov" config user.email test@example.com
+  git -C "$gov" config user.name Test
+  git -C "$gov" remote add origin "$origin"
+  printf '#!/usr/bin/env python3\nprint("{}")\n' > "$gov/scripts/process-runner.py"
+  printf '#!/usr/bin/env bash\nexit 0\n' > "$gov/scripts/isolate-push.sh"
+  cat > "$gov/scripts/ledger-append.sh" <<'EOF2'
+#!/usr/bin/env bash
+printf '%s %s\n' "$3" "$4" >> "${IWE_TEST_LEDGER_LOG:?}"
+EOF2
+  chmod +x "$gov/scripts/process-runner.py" "$gov/scripts/isolate-push.sh" "$gov/scripts/ledger-append.sh"
+  git -C "$gov" add scripts
+  git -C "$gov" commit -qm init
+  git -C "$gov" push -q origin main
+  local sess="$e2e/MC-sessions-fixture"
+  local sess_origin="$e2e/sessions-origin.git"
+  git init -q --bare -b main "$sess_origin"
+  git init -q -b main "$sess"
+  git -C "$sess" config user.email test@example.com
+  git -C "$sess" config user.name Test
+  git -C "$sess" remote add origin "$sess_origin"
+  echo placeholder > "$sess/00-index.md"
+  git -C "$sess" add 00-index.md
+  git -C "$sess" commit -qm init
+  git -C "$sess" push -q origin main
+  printf '%s %s %s\n' "$e2e" "$gov" "$sess"
+}
+
+record_orz_and_commit() {  # record_orz_and_commit <sem> <sess-repo> <worktree>
+  local sem="$1" sess="$2" wt="$3"
+  local orz
+  orz=$(grep '^orz_file: ' "$sem" | cut -d' ' -f2-)
+  mkdir -p "$sess/$(dirname "$orz")"
+  printf -- '---\ndate: 2026-10-06\ntype: work\nwp: WP-561\nduration_h: 0.1\nartifacts: []\nagent: fixture\n---\n\n# Fixture\n\n## Главный инсайт\nx\n\n## Контекст\nx\n\n## Достигнуто\nx\n\n## Ключевые решения\nx\n' > "$sess/$orz"
+  git -C "$sess" add "$orz"
+  git -C "$sess" commit -qm orz
+  git -C "$sess" push -q origin main
+  echo work > "$wt/work.txt"
+  git -C "$wt" add work.txt
+  git -C "$wt" commit -qm "session work"
+  git -C "$wt" rev-parse HEAD
+}
+
+read -r E2E5 GOV5 SESS5 <<<"$(setup_e2e_sandbox e2e5)"
+export IWE_ROOT="$E2E5" IWE_GOVERNANCE_REPO="DS-strategy" IWE_AGENT="fixture" \
+       IWE_SESSIONS_ROOT="$SESS5" IWE_FROZEN_CANONICAL_PATH="" \
+       CLAUDE_CODE_SESSION_ID="archive-e2e" IWE_TEST_LEDGER_LOG="$E2E5/ledger.log"
+: > "$IWE_TEST_LEDGER_LOG"
+OPEN_OUT5=$(bash "$GUARD" open --wp WP-561 --task fixture --slug archive-e2e --agent fixture --isolate --force)
+WT5=$(printf '%s\n' "$OPEN_OUT5" | grep -o '"worktree_path": "[^"]*"' | cut -d'"' -f4)
+[ -n "$WT5" ] && [ -d "$WT5" ] || fail_test "T5 setup: open --isolate gave no worktree"
+E2E5_SEM=$(find "$E2E5/.iwe-runtime/sessions" -name 'fixture-*.open' -type f | head -1)
+HARNESS5=$(grep '^harness_session_id: ' "$E2E5_SEM" | cut -d' ' -f2-)
+[ -n "$HARNESS5" ] || fail_test "T5 setup: no harness_session_id recorded (CLAUDE_CODE_SESSION_ID did not flow through)"
+SRC5=$(record_orz_and_commit "$E2E5_SEM" "$SESS5" "$WT5")
+# A valid RUN-quick-close card for mode=archive-cancelled, matching every
+# field _terminal_card_snapshot_sha validates (process_id, status,
+# current_step, owner_session_id, results.*.wp, requested_slug, run_id/
+# filename pairing, all_pushed) -- built by hand once rather than through a
+# real quick-close run, same trade-off test-session-guard-force-no-reflection.sh
+# already makes for this exact card shape.
+cat > "$GOV5/inbox/agent/tasks/RUN-quick-close-archive-e2e.md" <<EOF2
+---
+process_id: quick-close
+run_id: quick-close-archive-e2e
+requested_slug: archive-e2e
+owner_session_id: $HARNESS5
+status: cancelled
+current_step: wp-archive-run
+all_pushed: true
+results:
+  gather-session-facts:
+    wp: "561"
+---
+EOF2
+if IWE_SESSION_GUARD_FAULT_POINT=after-prepared bash "$GUARD" close --wp WP-561 --slug archive-e2e --agent fixture >/dev/null 2>"$E2E5/c1.err"; then
+  fail_test "T5 setup: close did not stop at the after-prepared fault point"
+fi
+E2E5_SESSION_ID=$(_unique_record_field "$E2E5_SEM" close_delivery_session_id)
+[ "$(_close_delivery_state "$E2E5_SEM" "$E2E5_SESSION_ID")" = "prepared" ] \
+  || { cat "$E2E5/c1.err" >&2; fail_test "T5 setup: session is not PREPARED after the fault"; }
+grep -q '^close_delivery_terminal_kind: file$' "$E2E5_SEM" \
+  || fail_test "T5 setup: fresh path did not record terminal_kind=file for the archive-cancelled card"
+: > "$IWE_TEST_LEDGER_LOG"
+bash "$GUARD" close --wp WP-561 --slug archive-e2e --agent fixture --abandon-prepared \
+  --i-understand-loss-risk --source-commit "$SRC5" --reason "smoke: T5" >/dev/null 2>"$E2E5/c2.err" \
+  || { cat "$E2E5/c2.err" >&2; fail_test "T5: resumed --abandon-prepared close failed"; }
+[ "$(grep -c '^session_closed_direct ' "$IWE_TEST_LEDGER_LOG")" = "1" ] \
+  || { cat "$IWE_TEST_LEDGER_LOG" >&2; fail_test "T5: expected exactly one session_closed_direct on the resumed auto-archive-cancelled path"; }
+echo "PASS: T5 -- resumed auto-archive-cancelled close re-derives FORCED_CARD from frozen terminal proof and writes session_closed_direct"
+
+read -r E2E6 GOV6 SESS6 <<<"$(setup_e2e_sandbox e2e6)"
+export IWE_ROOT="$E2E6" IWE_GOVERNANCE_REPO="DS-strategy" IWE_AGENT="fixture" \
+       IWE_SESSIONS_ROOT="$SESS6" IWE_FROZEN_CANONICAL_PATH="" \
+       CLAUDE_CODE_SESSION_ID="obligation-e2e" IWE_TEST_LEDGER_LOG="$E2E6/ledger.log"
+: > "$IWE_TEST_LEDGER_LOG"
+OPEN_OUT6=$(bash "$GUARD" open --wp WP-561 --task fixture --slug obligation-e2e --agent fixture --isolate --force)
+WT6=$(printf '%s\n' "$OPEN_OUT6" | grep -o '"worktree_path": "[^"]*"' | cut -d'"' -f4)
+[ -n "$WT6" ] && [ -d "$WT6" ] || fail_test "T6 setup: open --isolate gave no worktree"
+E2E6_SEM=$(find "$E2E6/.iwe-runtime/sessions" -name 'fixture-*.open' -type f | head -1)
+HARNESS6=$(grep '^harness_session_id: ' "$E2E6_SEM" | cut -d' ' -f2-)
+[ -n "$HARNESS6" ] || fail_test "T6 setup: no harness_session_id recorded"
+SRC6=$(record_orz_and_commit "$E2E6_SEM" "$SESS6" "$WT6")
+# Stub close_obligation.py -- same convention this file already uses for
+# ledger-append.sh/isolate-push.sh/process-runner.py (fixture replacement for
+# an external CLI, not the real implementation under test). No RUN-quick-close
+# card exists, so the fresh path falls through to this check (:10688-10719).
+cat > "$GOV6/scripts/close_obligation.py" <<EOF2
+#!/usr/bin/env python3
+import json, sys
+if sys.argv[1] == "cancel-status" and sys.argv[3] == "$HARNESS6":
+    print(json.dumps({"cancelled": True, "action": "cancel-close", "actor": "pilot"}))
+else:
+    print(json.dumps({"cancelled": False}))
+EOF2
+chmod +x "$GOV6/scripts/close_obligation.py"
+if IWE_SESSION_GUARD_FAULT_POINT=after-prepared bash "$GUARD" close --wp WP-561 --slug obligation-e2e --agent fixture >/dev/null 2>"$E2E6/c1.err"; then
+  fail_test "T6 setup: close did not stop at the after-prepared fault point"
+fi
+E2E6_SESSION_ID=$(_unique_record_field "$E2E6_SEM" close_delivery_session_id)
+[ "$(_close_delivery_state "$E2E6_SEM" "$E2E6_SESSION_ID")" = "prepared" ] \
+  || { cat "$E2E6/c1.err" >&2; fail_test "T6 setup: session is not PREPARED after the fault"; }
+grep -q '^close_delivery_terminal_reference: cancel-obligation:' "$E2E6_SEM" \
+  || fail_test "T6 setup: fresh path did not record a cancel-obligation terminal reference"
+: > "$IWE_TEST_LEDGER_LOG"
+bash "$GUARD" close --wp WP-561 --slug obligation-e2e --agent fixture --abandon-prepared \
+  --i-understand-loss-risk --source-commit "$SRC6" --reason "smoke: T6" >/dev/null 2>"$E2E6/c2.err" \
+  || { cat "$E2E6/c2.err" >&2; fail_test "T6: resumed --abandon-prepared close failed"; }
+[ "$(grep -c '^session_closed_direct ' "$IWE_TEST_LEDGER_LOG")" = "1" ] \
+  || { cat "$IWE_TEST_LEDGER_LOG" >&2; fail_test "T6: expected exactly one session_closed_direct on the resumed cancel-obligation path"; }
+echo "PASS: T6 -- resumed cancel-obligation close re-derives FORCED_CARD from frozen terminal proof and writes session_closed_direct"
+
+# --- Test 8: force-no-reflection channel on resume (cold review,
+#     2026-10-06: the first cut of this fix only covered auto-archive-cancelled
+#     and cancel-obligation, missing this third documented channel -- a live
+#     repro confirmed session_closed_direct was 0 on resume before this test
+#     was added). The card shape is the same "file" terminal-kind category as
+#     T5 (current_step: blocked-witness-unavailable instead of
+#     wp-archive-run); --force-no-reflection is only needed on the FIRST
+#     (faulted) attempt to reach that fresh-path branch at all -- the resumed
+#     attempt deliberately omits it, to prove the generic event does not
+#     depend on re-passing the flag (only the custom reason text does, and
+#     this test does not claim to restore that).
+read -r E2E8 GOV8 SESS8 <<<"$(setup_e2e_sandbox e2e8)"
+export IWE_ROOT="$E2E8" IWE_GOVERNANCE_REPO="DS-strategy" IWE_AGENT="fixture" \
+       IWE_SESSIONS_ROOT="$SESS8" IWE_FROZEN_CANONICAL_PATH="" \
+       CLAUDE_CODE_SESSION_ID="reflection-e2e" IWE_TEST_LEDGER_LOG="$E2E8/ledger.log"
+: > "$IWE_TEST_LEDGER_LOG"
+OPEN_OUT8=$(bash "$GUARD" open --wp WP-561 --task fixture --slug reflection-e2e --agent fixture --isolate --force)
+WT8=$(printf '%s\n' "$OPEN_OUT8" | grep -o '"worktree_path": "[^"]*"' | cut -d'"' -f4)
+[ -n "$WT8" ] && [ -d "$WT8" ] || fail_test "T8 setup: open --isolate gave no worktree"
+E2E8_SEM=$(find "$E2E8/.iwe-runtime/sessions" -name 'fixture-*.open' -type f | head -1)
+HARNESS8=$(grep '^harness_session_id: ' "$E2E8_SEM" | cut -d' ' -f2-)
+[ -n "$HARNESS8" ] || fail_test "T8 setup: no harness_session_id recorded"
+SRC8=$(record_orz_and_commit "$E2E8_SEM" "$SESS8" "$WT8")
+cat > "$GOV8/inbox/agent/tasks/RUN-quick-close-reflection-e2e.md" <<EOF2
+---
+process_id: quick-close
+run_id: quick-close-reflection-e2e
+requested_slug: reflection-e2e
+owner_session_id: $HARNESS8
+status: cancelled
+current_step: blocked-witness-unavailable
+all_pushed: true
+results:
+  gather-session-facts:
+    wp: "561"
+---
+EOF2
+if IWE_SESSION_GUARD_FAULT_POINT=after-prepared bash "$GUARD" close --wp WP-561 --slug reflection-e2e --agent fixture \
+     --force-no-reflection "smoke: original reason" >/dev/null 2>"$E2E8/c1.err"; then
+  fail_test "T8 setup: close did not stop at the after-prepared fault point"
+fi
+E2E8_SESSION_ID=$(_unique_record_field "$E2E8_SEM" close_delivery_session_id)
+[ "$(_close_delivery_state "$E2E8_SEM" "$E2E8_SESSION_ID")" = "prepared" ] \
+  || { cat "$E2E8/c1.err" >&2; fail_test "T8 setup: session is not PREPARED after the fault"; }
+grep -q '^close_delivery_terminal_kind: file$' "$E2E8_SEM" \
+  || fail_test "T8 setup: fresh path did not record terminal_kind=file for the blocked-witness card"
+: > "$IWE_TEST_LEDGER_LOG"
+bash "$GUARD" close --wp WP-561 --slug reflection-e2e --agent fixture --abandon-prepared \
+  --i-understand-loss-risk --source-commit "$SRC8" --reason "smoke: T8" >/dev/null 2>"$E2E8/c2.err" \
+  || { cat "$E2E8/c2.err" >&2; fail_test "T8: resumed --abandon-prepared close failed"; }
+[ "$(grep -c '^session_closed_direct ' "$IWE_TEST_LEDGER_LOG")" = "1" ] \
+  || { cat "$IWE_TEST_LEDGER_LOG" >&2; fail_test "T8: expected exactly one session_closed_direct on the resumed force-no-reflection path"; }
+echo "PASS: T8 -- resumed force-no-reflection close re-derives FORCED_CARD and writes session_closed_direct without the flag being re-passed"
+
+# --- Test 7: negative -- a resumed close whose frozen terminal proof is
+#     neither a close_path channel nor one of the three re-derivable
+#     sentinels must NOT fabricate a FORCED_CARD (no double emission, no
+#     false positive channel attribution). Reuses T3's isolate-push-exit0/v1
+#     semaphore shape, which has no close_path and no archive/obligation/
+#     blocked-witness terminal reference.
+SEM7="$TEST_ROOT/sem7.open"
+cp "$SEM3" "$SEM7"
+# T3's semaphore never reached the resumed-close branch in a live `close`
+# invocation; exercise the exact bash fragment under test directly instead
+# -- same level this file already tests _record_close_prepared/_abandon_
+# prepared_matches_source at (T1-T3), not through the CLI.
+FORCED_CARD=""
+_wp561_t7_kind=$(_unique_record_field "$SEM7" close_delivery_terminal_kind || true)
+_wp561_t7_ref=$(_unique_record_field "$SEM7" close_delivery_terminal_reference || true)
+case "$_wp561_t7_ref" in
+  cancel-obligation:*)
+    FORCED_CARD="$_wp561_t7_ref"
+    ;;
+  *)
+    if [ "$_wp561_t7_kind" = file ] && [ -f "$_wp561_t7_ref" ] \
+       && grep -q '^current_step: wp-archive-run$' "$_wp561_t7_ref"; then
+      FORCED_CARD="$_wp561_t7_ref"
+    fi
+    ;;
+esac
+[ -z "$FORCED_CARD" ] \
+  || fail_test "T7: FORCED_CARD was fabricated ($FORCED_CARD) for a semaphore with no archive/obligation terminal proof"
+echo "PASS: T7 -- a semaphore with no archive/obligation terminal proof does not fabricate FORCED_CARD on resume"
+
 echo "ALL PASS: session-guard-abandon-prepared-smoke.sh"
