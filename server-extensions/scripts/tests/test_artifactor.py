@@ -96,7 +96,7 @@ def test_spec_writing_is_unresolved_not_method_description():
 def test_peer_session_is_deferred_not_static():
     """Мета-триггер — kind решается на Decision Gate внутри самой сессии, не в
     момент классификации запроса."""
-    r = run_artifactor("начнём peer-сессия с codex")
+    r = run_artifactor("начнём пир-сессию с codex")
     result = json.loads(r.stdout)
     assert result["expected_result_kind"] is None
     assert result["result_kind_resolution"] == "deferred-to-session"
