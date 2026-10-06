@@ -32,8 +32,13 @@ GATE_BLOCK="$WORKDIR/gate-block.sh"
 awk '/^PUSH_OUT=""/{exit} /^GATE_LOG=\$\(mktemp\)/{p=1} p' "$SCRIPT_SRC" > "$GATE_BLOCK"
 [ -s "$GATE_BLOCK" ] || { echo "не удалось извлечь гейт-блок из $SCRIPT_SRC — сдвинулись маркеры-якоря?"; exit 1; }
 
-run_tick() {  # <repo-dir> <source-dir> -> запускает извлечённый блок отдельным процессом
-  local repo="$1" source="$2"
+run_tick() {  # <repo-dir> <source-dir> [gate-failure-log-dir] -> запускает извлечённый блок отдельным процессом
+  # Раздельные присваивания, не одной строкой `local a=.. b=$a` -- под set -u
+  # более ранняя переменная той же команды local не всегда видна выражению
+  # по умолчанию ("${3:-${repo}...}") следующей, живой случай этого же теста.
+  local repo="$1"
+  local source="$2"
+  local gate_log_dir="${3:-${repo}-gate-failures}"
   {
     echo '#!/usr/bin/env bash'
     echo 'set -uo pipefail'
@@ -44,6 +49,17 @@ run_tick() {  # <repo-dir> <source-dir> -> запускает извлечённ
     echo 'cleanup_test_env() { :; }'
     echo "REPO_ROOT=\"$repo\""
     echo "SOURCE_SNAPSHOT=\"$source\""
+    echo "GATE_FAILURE_LOG_DIR=\"$gate_log_dir\""
+    # WP-538 (06.10): gate_detail_text() — реальная функция скрипта, не
+    # переписанная заново (тот же принцип, что у GATE_BLOCK выше).
+    sed -n '/^gate_detail_text() {/,/^}/p' "$SCRIPT_SRC"
+    # cold-review (06.10, High): trap EXIT, не строка после cat "$GATE_BLOCK"
+    # -- живой дефект первой версии фикса: GATE_BLOCK содержит собственный
+    # "exit 0" на ветке "все файлы исключены" (test-gate), который обходил
+    # любую диагностику, дописанную ПОСЛЕ блока, и тест читал протухший след
+    # от предыдущего сценария. trap переживает и явный exit, и обычное
+    # завершение скрипта.
+    echo "trap 'echo \"\${GATE_LOG:-}\" > \"$WORKDIR/last-gate-log-path.txt\"' EXIT"
     echo 'cd "$REPO_ROOT"'
     echo 'CHANGED=$(git status --porcelain server-extensions/)'
     echo 'FILE_COUNT=$(echo "$CHANGED" | wc -l | tr -d " ")'
@@ -98,6 +114,16 @@ git -C "$S1_REPO" show --stat HEAD | grep -q "foo.sh" \
   && ok "смешанный тик: коммит реально содержит прошедший файл" \
   || bad "смешанный тик: коммит содержит foo.sh" "$(git -C "$S1_REPO" show --stat HEAD)"
 
+# WP-538 (06.10): полный вывод провалившегося теста сохраняется постоянно,
+# и алерт test-gate-partial ссылается на тот же файл.
+S1_PERSISTED=$(find "${S1_REPO}-gate-failures" -maxdepth 1 -name '*.log' 2>/dev/null | head -1)
+[ -n "$S1_PERSISTED" ] && grep -q "GATE FAIL:" "$S1_PERSISTED" \
+  && ok "смешанный тик: полный вывод провалившегося теста сохранён в постоянный файл" \
+  || bad "смешанный тик: полный вывод сохранён" "${S1_PERSISTED:-(файл не создан)}"
+[ -n "$S1_PERSISTED" ] && grep -F "ALERT[test-gate-partial]" "$WORKDIR/tick.out" | grep -qF "$S1_PERSISTED" \
+  && ok "смешанный тик: алерт test-gate-partial ссылается на сохранённый файл" \
+  || bad "смешанный тик: алерт ссылается на файл" "$(grep -F 'ALERT[test-gate-partial]' "$WORKDIR/tick.out")"
+
 # --- Сценарий 2: провалились ВСЕ изменённые файлы — тик завершается чисто --
 #     (exit 0, не ошибка), коммита нет вообще.
 S2_SRC="$WORKDIR/s2-source"; S2_REPO="$WORKDIR/s2-repo"
@@ -119,6 +145,81 @@ run_tick "$S2_REPO" "$S2_SRC"
 [ "$(git -C "$S2_REPO" rev-parse HEAD)" = "$BEFORE_SHA" ] \
   && ok "все файлы провалились: коммита нет вообще" \
   || bad "все файлы провалились: HEAD не сдвинулся" "$(git -C "$S2_REPO" log --oneline -1)"
+
+# WP-538 (06.10): то же для ветки "все файлы исключены" (класс алерта test-gate).
+S2_PERSISTED=$(find "${S2_REPO}-gate-failures" -maxdepth 1 -name '*.log' 2>/dev/null | head -1)
+[ -n "$S2_PERSISTED" ] && grep -q "GATE FAIL:" "$S2_PERSISTED" \
+  && ok "все файлы провалились: полный вывод сохранён в постоянный файл" \
+  || bad "все файлы провалились: полный вывод сохранён" "${S2_PERSISTED:-(файл не создан)}"
+[ -n "$S2_PERSISTED" ] && grep -F "ALERT[test-gate]" "$WORKDIR/tick.out" | grep -qF "$S2_PERSISTED" \
+  && ok "все файлы провалились: алерт test-gate ссылается на сохранённый файл" \
+  || bad "все файлы провалились: алерт ссылается на файл" "$(grep -F 'ALERT[test-gate]' "$WORKDIR/tick.out")"
+
+# --- Сценарий 6 (WP-538, 06.10, требование Codex peer-review): постоянное
+#     сохранение не удалось (директория недоступна для записи) -- временный
+#     $GATE_LOG не должен удаляться, алерт должен честно сослаться на него
+#     с оговоркой о недолгом сроке жизни, не на несуществующий постоянный путь.
+S6_SRC="$WORKDIR/s6-source"; S6_REPO="$WORKDIR/s6-repo"
+mkdir -p "$S6_REPO/server-extensions/scripts"
+make_source_file "$S6_SRC" bar 1
+git -C "$S6_REPO" init -q
+git -C "$S6_REPO" config user.email t@t.local
+git -C "$S6_REPO" config user.name t
+echo "bar old" > "$S6_REPO/server-extensions/scripts/bar.sh"
+git -C "$S6_REPO" add server-extensions/
+git -C "$S6_REPO" commit -q -m baseline
+echo "bar content" > "$S6_REPO/server-extensions/scripts/bar.sh"
+
+S6_GATE_DIR="$WORKDIR/s6-gate-failures-unwritable"
+mkdir -p "$S6_GATE_DIR"
+chmod 555 "$S6_GATE_DIR"  # read-only: mkdir -p внутри уже существующей директории не поможет, cp должен отказать
+run_tick "$S6_REPO" "$S6_SRC" "$S6_GATE_DIR/sub"  # поддиректория не создастся -- именно это и проверяем
+chmod 755 "$S6_GATE_DIR"  # вернуть права, чтобы trap cleanup мог удалить WORKDIR
+[ -z "$(find "$S6_GATE_DIR/sub" -maxdepth 1 -name '*.log' 2>/dev/null)" ] \
+  && ok "сохранение не удалось: постоянный файл не создан (как и ожидалось)" \
+  || bad "сохранение не удалось: постоянный файл действительно не создан" "$(find "$S6_GATE_DIR" -type f)"
+# cold-review (06.10, High): главная заявленная гарантия этого сценария —
+# что временный $GATE_LOG НЕ удаляется при неудачном постоянном сохранении
+# (это единственный оставшийся экземпляр полного вывода). Мутационный тест
+# ревьюера подтвердил: без этой проверки откат на безусловный rm -f всё
+# равно проходит весь suite.
+S6_GATE_LOG=$(cat "$WORKDIR/last-gate-log-path.txt" 2>/dev/null)
+[ -n "$S6_GATE_LOG" ] && [ -e "$S6_GATE_LOG" ] \
+  && ok "сохранение не удалось: временный \$GATE_LOG реально выжил на диске" \
+  || bad "сохранение не удалось: временный \$GATE_LOG выжил" "путь='${S6_GATE_LOG:-(пусто)}'"
+grep -qF "WARN: не удалось сохранить полный вывод гейта" "$WORKDIR/tick.out" \
+  && ok "сохранение не удалось: скрипт честно предупредил в лог" \
+  || bad "сохранение не удалось: предупреждение в лог" "$(cat "$WORKDIR/tick.out")"
+grep -F "ALERT[test-gate]" "$WORKDIR/tick.out" | grep -qF "полный вывод не сохранён постоянно" \
+  && ok "сохранение не удалось: алерт честно говорит про временный путь, не про несуществующий постоянный" \
+  || bad "сохранение не удалось: алерт честен" "$(grep -F 'ALERT[test-gate]' "$WORKDIR/tick.out")"
+
+# --- Сценарий 7 (WP-538, 06.10): ротация 14 дней -- старый файл удаляется,
+#     свежий (только что сохранённый этим же тиком) остаётся.
+S7_SRC="$WORKDIR/s7-source"; S7_REPO="$WORKDIR/s7-repo"
+mkdir -p "$S7_REPO/server-extensions/scripts"
+make_source_file "$S7_SRC" bar 1
+git -C "$S7_REPO" init -q
+git -C "$S7_REPO" config user.email t@t.local
+git -C "$S7_REPO" config user.name t
+echo "bar old" > "$S7_REPO/server-extensions/scripts/bar.sh"
+git -C "$S7_REPO" add server-extensions/
+git -C "$S7_REPO" commit -q -m baseline
+echo "bar content" > "$S7_REPO/server-extensions/scripts/bar.sh"
+
+S7_GATE_DIR="${S7_REPO}-gate-failures"
+mkdir -p "$S7_GATE_DIR"
+S7_OLD_FILE="$S7_GATE_DIR/20260101T000000Z-99999.log"
+echo "old failure, should be rotated away" > "$S7_OLD_FILE"
+touch -t 202601010000 "$S7_OLD_FILE"  # 15+ дней в прошлом относительно "сегодня" этого теста
+
+run_tick "$S7_REPO" "$S7_SRC"
+[ ! -e "$S7_OLD_FILE" ] \
+  && ok "ротация: файл старше 14 дней удалён" \
+  || bad "ротация: старый файл удалён" "$(find "$S7_GATE_DIR" -type f -exec ls -la {} \;)"
+[ "$(find "$S7_GATE_DIR" -maxdepth 1 -name '*.log' | wc -l | tr -d ' ')" = "1" ] \
+  && ok "ротация: свежий файл этого тика остался" \
+  || bad "ротация: свежий файл остался" "$(find "$S7_GATE_DIR" -type f)"
 
 # --- Сценарий 3 (cold review 25.09, Critical): предыдущий тик успел сделать
 #     `git add`, но упал до `git commit` (крах/сбой диска) -- в индексе
@@ -202,8 +303,10 @@ if [ -f "$NOTIFY_LIB" ]; then
     echo 'send_telegram() { :; }'
     sed -n '/^alert() {/,/^}/p' "$SCRIPT_SRC"
     sed -n '/^alert_ok() {/,/^}/p' "$SCRIPT_SRC"
+    sed -n '/^gate_detail_text() {/,/^}/p' "$SCRIPT_SRC"
     echo "REPO_ROOT=\"$S5_REPO\""
     echo "SOURCE_SNAPSHOT=\"$S5_SRC\""
+    echo "GATE_FAILURE_LOG_DIR=\"${S5_REPO}-gate-failures\""
     echo 'cd "$REPO_ROOT"'
     echo 'cleanup_test_env() { :; }'
     echo 'CHANGED=$(git status --porcelain server-extensions/)'

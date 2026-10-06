@@ -38,6 +38,12 @@ REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 LOG_PREFIX="[sync-extensions-auto]"
 LOCK_KEY="repo:iwe-server-config"
 GATEWAY_LOCK_PY="$HOME/IWE/DS-my-strategy/scripts/lib/gateway-lock.py"
+# WP-538 (06.10, пир-сессия с Codex): полный вывод тестового гейта раньше
+# печатался только в stdout (launchd append-лог без ротации, строки находились
+# только ручным grep) -- каждый провал сохраняется ещё и отдельным файлом
+# здесь, с тем же 14-дневным сроком хранения, что day-open-run.sh:78 уже
+# использует для похожего случая.
+GATE_FAILURE_LOG_DIR="$HOME/IWE/DS-autonomous-agents/logs/sync-extensions-gate-failures"
 
 AIST_ENV="$HOME/.config/aist/env"
 if [ -f "$AIST_ENV" ]; then
@@ -180,6 +186,19 @@ lock_acquire() {
 lock_release() {
   [ -f "$GATEWAY_LOCK_PY" ] || return 0
   python3 "$GATEWAY_LOCK_PY" release "$LOCK_KEY" >/dev/null 2>&1 || true
+}
+
+# gate_detail_text: текст для вставки в алерт теста-гейта — ссылается на
+# постоянный файл ($GATE_LOG_PERSISTED_PATH), либо, если сохранение не
+# удалось, честно называет временный ($GATE_LOG) с оговоркой о его сроке
+# жизни (peer-review с Codex, WP-538, 06.10 — не обещать постоянство того,
+# чего не гарантировали).
+gate_detail_text() {
+  if [ -n "${GATE_LOG_PERSISTED_PATH:-}" ]; then
+    printf 'полный вывод: %s' "$GATE_LOG_PERSISTED_PATH"
+  else
+    printf 'полный вывод не сохранён постоянно, временный лог: %s (может не прожить до следующего тика)' "$GATE_LOG"
+  fi
 }
 
 SYNC_LOG=""
@@ -381,6 +400,28 @@ if [ "$GATE_FAILED" = true ]; then
   echo "$LOG_PREFIX test-gate failed: $(grep '^GATE FAIL:' "$GATE_LOG" | tr '\n' ' ')"
   echo "$LOG_PREFIX test-gate full output follows:"
   cat "$GATE_LOG"
+
+  # Постоянная копия ДО rm -f "$GATE_LOG" ниже (WP-538, 06.10): штамп+PID
+  # исключает коллизию имён даже при двух прогонах подряд; хранение 14 дней —
+  # то же правило, что day-open-run.sh:78 уже использует для похожего случая.
+  # Не удалось сохранить -> не трогаем $GATE_LOG (см. gate_detail_text выше),
+  # данные остаются доступными хотя бы до конца этого прогона.
+  mkdir -p "$GATE_FAILURE_LOG_DIR" 2>/dev/null
+  GATE_LOG_PERSISTED_PATH="$GATE_FAILURE_LOG_DIR/$(date -u +%Y%m%dT%H%M%SZ)-$$.log"
+  if ! { cp "$GATE_LOG" "$GATE_LOG_PERSISTED_PATH" 2>/dev/null && [ -s "$GATE_LOG_PERSISTED_PATH" ]; }; then
+    # cold-review (06.10): cp может упасть НЕ сразу (диск заполнился в процессе
+    # копирования) и оставить обрезанный файл по правдоподобному имени — не
+    # оставляем его сбивать с толку будущий разбор инцидента.
+    rm -f "$GATE_LOG_PERSISTED_PATH" 2>/dev/null
+    echo "$LOG_PREFIX WARN: не удалось сохранить полный вывод гейта в $GATE_LOG_PERSISTED_PATH — временный $GATE_LOG не удаляю"
+    GATE_LOG_PERSISTED_PATH=""
+  fi
+  # Ротация — ВСЕГДА при провале гейта, не только при успешном сохранении
+  # этого тика (cold-review, Medium): иначе именно в момент "диск заполнен"
+  # самоочистка отключается, хотя старые файлы старше 14 дней могли бы
+  # освободить место.
+  find "$GATE_FAILURE_LOG_DIR" -maxdepth 1 -name '*.log' -mtime +14 -delete 2>/dev/null || true
+
   # Revert only the failed paths to their last-committed state (WP-530,
   # bug-2026-09-16: one flaky test used to block every unrelated file for
   # 2-58+ hours). They get regenerated from source and retried next tick.
@@ -408,7 +449,12 @@ elif $NOTIFY_LIB_AVAILABLE; then
   # recovery point (see why it's excluded from ALERT_CLASSES above).
   notify_escalation_update "sync-extensions-auto/test-gate-partial" ok >/dev/null
 fi
-rm -f "$GATE_LOG"
+# Не удалять, если постоянное сохранение выше явно отказало (GATE_FAILED=true
+# и GATE_LOG_PERSISTED_PATH=="") -- это единственный оставшийся экземпляр
+# полного вывода в таком случае.
+if [ "$GATE_FAILED" != true ] || [ -n "${GATE_LOG_PERSISTED_PATH:-}" ]; then
+  rm -f "$GATE_LOG"
+fi
 
 # Явно, не полагаясь на on_exit() в конце скрипта (cold-review, Critical,
 # WP-530 2026-09-16): trap срабатывает ПОСЛЕ git add/commit/push ниже --
@@ -423,7 +469,7 @@ cleanup_test_env
 # исходный, ещё не просеянный гейтом список.
 CHANGED=$(git status --porcelain server-extensions/)
 if [ -z "$CHANGED" ]; then
-  alert test-gate "🚨 sync-extensions-auto: тестовый гейт нашёл провал во всех ${FILE_COUNT} изменённых файлах (${FILE_LIST}...) — доставлять на этом тике нечего, подробности в логе на Маке"
+  alert test-gate "🚨 sync-extensions-auto: тестовый гейт нашёл провал во всех ${FILE_COUNT} изменённых файлах (${FILE_LIST}...) — доставлять на этом тике нечего, $(gate_detail_text)"
   exit 0
 fi
 FILE_COUNT=$(echo "$CHANGED" | wc -l | tr -d ' ')
@@ -431,7 +477,7 @@ FILE_LIST=$(echo "$CHANGED" | awk '{print $2}' | head -5 | tr '\n' ', ')
 
 if [ "$GATE_FAILED" = true ]; then
   EXCLUDED_LIST=$(printf '%s\n' "${FAILED_PATHS[@]}" | sort -u | tr '\n' ', ')
-  alert test-gate-partial "⚠️ sync-extensions-auto: тестовый гейт исключил часть файлов (${EXCLUDED_LIST%, }) — они пересоберутся на следующем тике; остальные ${FILE_COUNT} файлов (${FILE_LIST}...) доставляются как обычно"
+  alert test-gate-partial "⚠️ sync-extensions-auto: тестовый гейт исключил часть файлов (${EXCLUDED_LIST%, }) — они пересоберутся на следующем тике; остальные ${FILE_COUNT} файлов (${FILE_LIST}...) доставляются как обычно; $(gate_detail_text)"
 fi
 
 # Pathspec на commit (не только на add) — если параллельная сессия уже держит
