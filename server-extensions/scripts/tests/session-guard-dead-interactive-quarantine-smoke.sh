@@ -198,6 +198,7 @@ grep -q '"audit_recovered":true' "$REGISTRY" || fail "recovered quarantine audit
 
 # 12. `open` records host: and pid_start: for the owner pid.
 OUT=$( cd "$GOV" && IWE_ROOT="$TEST_ROOT" IWE_GOVERNANCE_REPO=DS-strategy IWE_FROZEN_CANONICAL_PATH="" \
+  IWE_SESSION_ID="open-fields-smoke" \
   PATH="$TEST_ROOT/bin:$PATH" /bin/bash "$GUARD" open --wp WP-530 --agent claude-code --owner-pid "$$" \
   --slug open-fields-smoke --task "open fields smoke" 2>&1 ) || fail "open failed in the fixture: $OUT"
 OPEN_SEM=$(grep -o 'Session OPEN: [^ ]*' <<<"$OUT" | awk '{print $3}')
