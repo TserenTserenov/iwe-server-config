@@ -340,6 +340,25 @@ GATE_FAILED=false
 # Paths whose own test failed (WP-530, bug-2026-09-16): excluded from this
 # tick's commit below instead of cancelling the whole batch for everyone else.
 FAILED_PATHS=()
+# WP-530 Ф90 follow-up (07.10.2026, found live while delivering Ф90 itself):
+# this operator's shell exports IWE_ROOT/IWE_GOVERNANCE_REPO/IWE_SESSIONS_ROOT
+# for everyday interactive use, and that ambient env silently overrides every
+# test's OWN fixture IWE_ROOT -- a test is supposed to be a closed world. Live
+# count that tick: 11 of 13 session-guard.sh tests failed only because of
+# this, one of them (session-guard-quick-close-owner-session-smoke.sh) by
+# WRITING its fixture ORZ files straight into the real MC-sessions repo. The
+# one test in this family already written defensively (the Python smoke
+# test) already strips exactly this prefix set; a test author should not
+# have to remember to repeat that, and the gate itself must not keep
+# excluding a file forever because of a developer's personal shell config --
+# same class of silent, permanent block this file's own GATE FAIL mechanism
+# (WP-530, bug-2026-09-16) exists to avoid. Computed once -- ambient env does
+# not change mid-run -- and applied to every test subprocess below.
+STRIP_ENV_ARGS=()
+while IFS= read -r ambient_var; do
+  [ -n "$ambient_var" ] || continue
+  STRIP_ENV_ARGS+=(-u "$ambient_var")
+done < <(env | grep -oE '^(IWE|CLAUDE|CODEX)_[A-Za-z0-9_]*' | sort -u)
 delivery_source_path() {
   local delivered_path="$1"
   case "$delivered_path" in
@@ -382,7 +401,7 @@ while IFS= read -r changed_line; do
       *.py) test_runner=(python3 "$test_file") ;;
       *)    test_runner=(bash "$test_file") ;;
     esac
-    if ! "${test_runner[@]}" >> "$GATE_LOG" 2>&1; then
+    if ! env "${STRIP_ENV_ARGS[@]}" "${test_runner[@]}" >> "$GATE_LOG" 2>&1; then
       echo "GATE FAIL: $test_file (для $rel_path)" >> "$GATE_LOG"
       GATE_FAILED=true
       FAILED_PATHS+=("$rel_path")
