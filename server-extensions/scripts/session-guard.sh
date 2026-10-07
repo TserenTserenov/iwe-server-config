@@ -28,7 +28,24 @@
 #                                                      # manual-abandon-attestation/v1, never as the
 #                                                      # normal isolate-push proof.
 #   owner-status --owner-session-id <id> [--owner-agent <agent>]
-#                                      # read-only admission-locked snapshot
+#                                      # read-only admission-locked snapshot;
+#                                      # JSON carries `blockers` (every file that
+#                                      # kept the verdict from `absent`)
+#   retire-semaphore-artifact <path> --reason "<why>" [--i-confirm-no-live-owner]
+#                                      # WP-530 Ф90: record (append-only, bound to
+#                                      # exact path + sha256) that an INACTIVE
+#                                      # record -- .open.orphaned-* or a hand-made
+#                                      # .open.<suffix> copy -- is no obligation
+#                                      # for owner-status. Never touches *.open,
+#                                      # never moves or deletes the file. Basis:
+#                                      # a `quarantined` registry record of the
+#                                      # same generation, else the explicit flag.
+#                                      # Refuses the caller's own record and any
+#                                      # record with a harness identity unless the
+#                                      # flag says that conversation is over. The
+#                                      # record binds the exact path: after
+#                                      # recover-orphaned renames the file
+#                                      # (.recovery-pending/.recovered) retire again.
 #   audit [--since YYYY-MM-DD] [--cleanup-orphans [--quarantine-dead-interactive]]
 #                                                      # --quarantine-dead-interactive (WP-530 Ф53):
 #                                                      # opt-in terminal path for ordinary semaphores
@@ -3787,6 +3804,7 @@ EXPECTED_ABSENT=0
 HOT_LOCK_TOKEN=""
 BASE_SHA=""
 RENEW_FOREIGN=0
+RETIRE_CONFIRM_NO_LIVE_OWNER=0
 POSITIONAL=()
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -3904,6 +3922,10 @@ while [[ $# -gt 0 ]]; do
     # below).
     --abandon-prepared) ABANDON_PREPARED=1; shift ;;
     --i-understand-loss-risk) ABANDON_ACK=1; shift ;;
+    # WP-530 Ф90: operator attestation for retire-semaphore-artifact when no
+    # `quarantined` registry record binds the artifact's generation (manual
+    # `.bak-*` copies never have one). Validated against CMD below.
+    --i-confirm-no-live-owner) RETIRE_CONFIRM_NO_LIVE_OWNER=1; shift ;;
     --source-commit)
       if [[ $# -lt 2 || -z "$2" ]]; then
         fail "--source-commit требует непустое значение (SHA из close_delivery_source_commits)" 1
@@ -3937,6 +3959,9 @@ if [ -n "$OWNER_SESSION_ID_ARG" ] && [ "$CMD" != "owner-status" ]; then
 fi
 if [ -n "$OWNER_AGENT_ARG" ] && [ "$CMD" != "owner-status" ]; then
   fail "--owner-agent применим только к owner-status" 1
+fi
+if [ "$RETIRE_CONFIRM_NO_LIVE_OWNER" -eq 1 ] && [ "$CMD" != "retire-semaphore-artifact" ]; then
+  fail "--i-confirm-no-live-owner применим только к retire-semaphore-artifact" 1
 fi
 
 # WP-530 Ф53: the quarantine flag is meaningless anywhere else; refusing keeps
@@ -4108,7 +4133,13 @@ if [ "$CMD" = "owner-status" ]; then
   # create another session after the probe releases the lock. No semaphore,
   # receipt, lease or run card is modified by the probe.
   acquire_scheduled_admission_lock
-  python3 - "$SESSION_DIR" "$OWNER_SESSION_ID_ARG" "$OWNER_AGENT_ARG" <<'PY_OWNER_STATUS'
+  # WP-530 Ф90 (peer-session 2026-10-06-10-wp530-f90-session-close-blockers,
+  # Claude+Kimi+Codex): the zombie registry is passed in so the absence
+  # verdict can honour `retired` records written by retire-semaphore-artifact.
+  # Read once as a snapshot under the same admission lock; never appended to
+  # from here (the probe stays mutation-free).
+  python3 - "$SESSION_DIR" "$OWNER_SESSION_ID_ARG" "$OWNER_AGENT_ARG" "$ZOMBIE_REGISTRY" <<'PY_OWNER_STATUS'
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -4121,7 +4152,49 @@ import yaml
 sessions = Path(sys.argv[1])
 owner = sys.argv[2]
 owner_agent = sys.argv[3]
+registry = Path(sys.argv[4])
 token = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,255}\Z")
+
+
+def retired_artifacts(path):
+    """Set of (artifact path, sha256) pairs the registry marks as retired.
+
+    A missing registry simply has no retire proofs. An unsafe or unparseable
+    registry must not grant any skip either: return an empty set and report
+    why, so the operator sees the registry itself as the blocker.
+    """
+    retired = set()
+    try:
+        info = path.lstat()
+        if (not stat.S_ISREG(info.st_mode) or info.st_uid != os.geteuid()
+                or info.st_mode & 0o022):
+            return set(), "zombie registry is not a safe regular file owned by this user"
+        with open(path, "r", encoding="utf-8") as stream:
+            for number, line in enumerate(stream, 1):
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    event = json.loads(line)
+                except (ValueError, RecursionError):
+                    # Other registry readers tolerate a torn line too; one bad
+                    # line must not revoke every retire proof on the host.
+                    print(f"owner-status: zombie registry line {number} is not JSON, skipped",
+                          file=sys.stderr)
+                    continue
+                if not isinstance(event, dict) or event.get("action") != "retired":
+                    continue
+                artifact = event.get("artifact")
+                digest = event.get("sha256")
+                if (not isinstance(artifact, str) or not isinstance(digest, str)
+                        or not re.fullmatch(r"[0-9a-f]{64}", digest)):
+                    return set(), f"zombie registry line {number} has a malformed retired record"
+                retired.add((artifact, digest))
+    except FileNotFoundError:
+        return set(), None
+    except (OSError, UnicodeError, RecursionError) as error:
+        return set(), f"zombie registry unreadable: {error}"
+    return retired, None
 
 
 def started_millis(value):
@@ -4134,13 +4207,18 @@ def started_millis(value):
     return int(epoch.group(1)) * 1000 if epoch else None
 
 
-def emit(state, reason):
+def emit(state, reason, blockers=()):
+    # `blockers` lists EVERY file that kept the verdict away from `absent`
+    # (before Ф90 only the alphabetically first reason surfaced, so the
+    # operator fixed one file and hit the next on the following run).
     print(json.dumps({"schema_version": 1, "owner_session_id": owner,
                       "state": state, "reason": reason,
+                      "blockers": list(blockers),
                       "proof": "admission-locked-snapshot/v1"}))
 
 
-def identity(path, basename):
+def read_raw(path):
+    """Stable, safety-checked bytes of one semaphore sibling."""
     fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
     with os.fdopen(fd, "rb") as stream:
         before = os.fstat(stream.fileno())
@@ -4154,6 +4232,10 @@ def identity(path, basename):
     if (any(getattr(before, key) != getattr(after, key) for key in fields)
             or len(raw) != before.st_size or b"\0" in raw or not raw.endswith(b"\n")):
         raise ValueError("semaphore changed during read")
+    return raw
+
+
+def identity(raw, basename):
     lines = raw.decode("utf-8").splitlines()
     if not lines or lines[0] != "---":
         raise ValueError("missing semaphore frontmatter")
@@ -4198,8 +4280,15 @@ try:
     if (sessions.resolve(strict=True) != sessions or not stat.S_ISDIR(info.st_mode)
             or info.st_uid != os.geteuid() or info.st_mode & 0o022):
         raise ValueError("unsafe sessions directory")
+    retired, registry_problem = retired_artifacts(registry)
     matches = []
-    ambiguities = []
+    blockers = []   # [{"file": name, "reason": text}] -- every ambiguity, not just the first
+    skipped_retired = []
+    nonstandard = []  # readable siblings with a suffix nobody in this script writes
+    if registry_problem:
+        # No retire proof can be trusted, but a broken registry is not itself an
+        # obligation: the siblings it fails to cover surface as blockers below.
+        print(f"owner-status: retire-записи не учитываются: {registry_problem}", file=sys.stderr)
     for path in sorted(sessions.iterdir()):
         try:
             stem, marker, suffix = path.name.rpartition(".open")
@@ -4210,15 +4299,24 @@ try:
                     or suffix.startswith((".closed.", ".closed-"))
                     or re.fullmatch(r"\.backup-before-manual-close-[0-9]{10}", suffix)):
                 continue  # Projections and terminal receipts cannot be active sessions.
-            if suffix and not suffix.startswith(".orphaned-"):
-                raise ValueError("unknown semaphore sibling state")
-            fields = identity(path, stem + marker)
+            raw = read_raw(path)
+            if suffix:
+                # A quarantined or manually renamed record can never be selected
+                # by `close` (list_candidates matches *.open only). It leaves the
+                # absence verdict alone once retire-semaphore-artifact recorded
+                # exactly this path with exactly these bytes.
+                if (str(path), hashlib.sha256(raw).hexdigest()) in retired:
+                    skipped_retired.append(path.name)
+                    continue
+                if not suffix.startswith(".orphaned-"):
+                    nonstandard.append(path.name)
+            fields = identity(raw, stem + marker)
             if owner in (fields["session_id"], fields.get("harness_session_id")):
-                if suffix.endswith(".recovered"):
-                    # A filename alone cannot prove the recovery_id's durable
-                    # terminal ledger event. Keep this path explicit and closed
-                    # until the recovery proof reader is shared with owner-status.
-                    raise ValueError("matching recovered quarantine needs terminal recovery_id ledger proof")
+                # Any sibling naming this owner -- active, quarantined, recovered
+                # or renamed by hand -- is a nonterminal obligation of this very
+                # conversation. (Ф90: `.recovered` used to raise here and end as
+                # `unknown`; `present` says the same thing without hiding which
+                # file it was.)
                 matches.append(path.name)
             elif "harness_session_id" not in fields:
                 # Guard IDs and harness IDs are different namespaces. A legacy or
@@ -4240,16 +4338,35 @@ try:
                         and candidate_started is not None
                         and candidate_started < owner_started):
                     continue
+                if suffix:
+                    raise ValueError("inactive semaphore record without harness identity and without a retire record; owner may match")
                 raise ValueError("semaphore has no harness identity; owner may match")
+            # A hand-renamed or quarantined sibling that names another harness
+            # conversation is foreign by the same rule, nothing to record.
         except (OSError, UnicodeError, ValueError, yaml.YAMLError) as error:
             # A proven matching session is already enough to answer `present`.
             # Keep unrelated malformed/quarantined siblings fail-closed only
             # for the absence case, where they could still hide this owner.
-            ambiguities.append(str(error))
+            reason = str(error)
+            if suffix and not suffix.startswith(".orphaned-"):
+                reason = "unknown semaphore sibling state: " + reason
+            blockers.append({"file": path.name, "reason": reason})
+    for name in nonstandard:
+        print(f"owner-status: сосед с нестандартным суффиксом в каталоге сессий: {name}", file=sys.stderr)
+    for name in skipped_retired:
+        print(f"owner-status: выведен из обращения (retired), не влияет на вердикт: {name}", file=sys.stderr)
     if matches:
-        emit("present", "matching active or nonterminal semaphore exists")
-    elif ambiguities:
-        emit("unknown", sorted(set(ambiguities))[0])
+        emit("present", "matching active or nonterminal semaphore exists", blockers)
+    elif blockers:
+        for blocker in blockers:
+            if blocker["file"].endswith(".open"):
+                hint = "активная запись: закрывает её владелец (close) или audit --cleanup-orphans"
+            else:
+                hint = ("если это не живая сессия: session-guard.sh retire-semaphore-artifact "
+                        f"{sessions / blocker['file']} --reason \"<почему запись не обязательство>\"")
+            print(f"owner-status: мешает доказать отсутствие: {blocker['file']} ({blocker['reason']}); {hint}",
+                  file=sys.stderr)
+        emit("unknown", sorted({blocker["reason"] for blocker in blockers})[0], blockers)
     else:
         emit("absent", "no matching owner semaphore at the admission-locked snapshot")
 except (OSError, UnicodeError, ValueError, yaml.YAMLError) as error:
@@ -4364,6 +4481,25 @@ if [ "$CMD" = "open" ]; then
 
   [ -z "$WP" ] && fail "--wp обязателен для open" 2
   validate_open_wp "$WP"
+
+  # WP-530 Ф90 (peer-session 2026-10-06-10, Claude+Kimi+Codex): an interactive
+  # Claude/Codex record without its conversation identity can never be told
+  # apart from any later conversation of the same agent by owner-status, and
+  # once quarantined it blocks every day-close on the host for good. Refuse at
+  # the producer -- cheap here, unfixable later. Checked per agent against the
+  # env var itself, not via _runtime_harness_session_id: that helper lets Codex
+  # fall back to an ambient Claude id, which is exactly the wrong identity.
+  # Scheduled/housekeeping callers carry their own identity (IWE_SESSION_ID or
+  # the owner flags) and are not affected; kimi has no harness identity by
+  # construction and keeps the time-based comparison.
+  if [ -z "$SCHEDULED_OWNER" ] && [ -z "$CANONICAL_OWNER" ] && [ -z "${IWE_SESSION_ID:-}" ]; then
+    case "$AGENT" in
+      claude-code) [ -n "${CLAUDE_CODE_SESSION_ID:-}" ] \
+        || fail "open: нет идентичности разговора (CLAUDE_CODE_SESSION_ID пуст). Внутри Claude Code она есть всегда; для скрипта задай IWE_SESSION_ID=<uuid4> или используй --housekeeping/--scheduled-owner/--canonical-owner. Запись без идентичности после карантина блокировала бы owner-status всем сессиям этого агента (WP-530 Ф90)" 1 ;;
+      codex) [ -n "${CODEX_THREAD_ID:-}" ] \
+        || fail "open: нет идентичности разговора (CODEX_THREAD_ID пуст). Для скрипта задай IWE_SESSION_ID=<uuid4> или используй --housekeeping/--scheduled-owner/--canonical-owner (WP-530 Ф90)" 1 ;;
+    esac
+  fi
 
   acquire_scheduled_admission_lock
   OPEN_HARNESS_SESSION_ID=$(_runtime_harness_session_id "$AGENT") \
@@ -4808,6 +4944,36 @@ $isolate_status_code $isolate_status_path"
         git -C "$base_dir" worktree add "$wt_path" -b "$wt_branch" "$base_sha" --quiet
       else
         git -C "$base_dir" worktree add "$wt_path" -b "$wt_branch" origin/main --quiet
+      fi
+
+      # WP-484 Ф165 (05.10, пир-сессия Claude+Kimi+Codex): служебная RUN-карточка
+      # изолированного прогона не должна попадать в git-индекс этого worktree
+      # с самого начала -- иначе close вынужден выбирать между "карточка
+      # должна быть tracked" (принятая практика в каноне, где дерево никогда
+      # не удаляется -- origin/main уже отслеживает 1125+ исторических
+      # RUN-*.md) и "карточка должна быть untracked" (инвариант relocate-card,
+      # process-runner.py cmd_relocate_card: "tracked source запрещён"), а оба
+      # сразу выполнить нельзя. Запись в info/exclude снимает конфликт без
+      # изменения relocate-card или CARDS_DIR.
+      # info/exclude НЕ per-worktree, несмотря на название -- общий файл
+      # через common git-dir (все worktree одного $base_dir делят один
+      # физический файл), поэтому запись делается один раз и переживает
+      # конкретный worktree; идемпотентная проверка ниже достаточна и при
+      # нескольких параллельных "open --isolate" на одном $base_dir.
+      # Ранняя версия этого фикса (cold-review, 05.10) добавляла сюда ещё
+      # проверку "git ls-files по тому же глобу пуст иначе отказ" -- снята:
+      # она проверяла несуществующий риск. gitignore/exclude не трогает уже
+      # ОТСЛЕЖИВАЕМЫЕ файлы (влияет только на то, что ещё не в индексе), а
+      # исторические RUN-*.md, которых в origin/main уже тысяча с лишним,
+      # отличаются от карточки ЭТОГО прогона именем файла (slug/timestamp
+      # уникален на запуск) -- коллизии физически не бывает. Проверка по
+      # глобу матчила вообще любой прошлый коммит с такой карточкой, то есть
+      # отказывала всегда и на любом base_dir с историей -- живая находка
+      # холодного ревью в пир-сессии Ф166 (05.10 вечером), до деплоя на живой
+      # узел, воспроизведено прямым git ls-files на origin/main.
+      exclude_file=$(git -C "$wt_path" rev-parse --git-path info/exclude)
+      if ! grep -qxF "inbox/agent/tasks/RUN-*.md" "$exclude_file" 2>/dev/null; then
+        echo "inbox/agent/tasks/RUN-*.md" >> "$exclude_file"
       fi
 
       # realpath after creation, not the assembled string: containment must
@@ -9882,8 +10048,15 @@ _close_delivery_and_transition() {
         # Keep source-relative publication helpers in their original cwd until
         # proof is complete, then leave the directory before removing it.
         cd -- "$IWE_ROOT" || fail "close: постоянный каталог IWE недоступен; рабочая копия сохранена" 7
-        timeout 60 git -C "$CLOSING_WORKTREE" worktree remove "$CLOSING_WORKTREE" 2>/dev/null \
-          || fail "close retry: published worktree не удалён; .open сохранён" 7
+        # WP-530 Ф90: git's own reason (dirty tree, locked worktree, timeout)
+        # used to vanish into /dev/null, so every refusal here read the same
+        # and the operator could not tell which precondition to fix.
+        if worktree_remove_err=$(timeout 60 git -C "$CLOSING_WORKTREE" worktree remove "$CLOSING_WORKTREE" 2>&1 >/dev/null); then
+          :
+        else
+          worktree_remove_rc=$?
+          fail "close retry: published worktree не удалён (git worktree remove rc=$worktree_remove_rc; 124 = таймаут 60с): $(printf '%s' "$worktree_remove_err" | tail -n 3 | tr '\n' ' '); .open сохранён" 7
+        fi
       fi
       _worktree_absent_and_unregistered "$common_dir" "$CLOSING_WORKTREE" \
         || fail "close retry: worktree отсутствует не полностью или всё ещё зарегистрирован; .open сохранён" 7
@@ -10881,6 +11054,43 @@ print(json.dumps({"wp": sys.argv[1], "slug": sys.argv[2], "agent": sys.argv[3], 
       FORCED_CARD="declared-peer-session:$SLUG"
     elif grep -q '^close_path: publish-only$' "${SEM_FILE:-}" 2>/dev/null; then
       FORCED_CARD="declared-publish-only:$SLUG"
+    fi
+    # WP-561 Ч4 (peer-session 2026-10-06-07-wp561-f33-contract-tests,
+    # Claude+Kimi+Codex, consensus; cold review found a 3rd missed channel
+    # the same day): auto-archive-cancelled, cancel-obligation and
+    # force-no-reflection skip the close events on resume the same way
+    # peer-session/publish-only did before this fix -- but unlike those two,
+    # they have no close_path field to re-read (they are a property of which
+    # close ATTEMPT matched a card/obligation, not of the session as a
+    # whole). The value is not re-derivable live without re-scanning
+    # RUNNER_CARDS (unavailable here, built only inside the fresh-close `if`
+    # above) or re-querying close_obligation.py (risks a different answer
+    # than the first attempt got). Both risks are avoided by reading what
+    # the first attempt already froze into PREPARED: TERMINAL_PROOF_KIND/
+    # TERMINAL_PROOF_REFERENCE (:10890-10900) are persisted verbatim as
+    # close_delivery_terminal_kind/_reference at PREPARE time, and for all
+    # three channels they ARE the FORCED_CARD value the first attempt
+    # computed -- so resume can just read it back, not recompute it. This
+    # restores the generic session_closed_direct/session_closed events for
+    # force-no-reflection, same as the other two; it does NOT restore the
+    # custom --force-no-reflection reason text into DEFERRED_NO_REFLECTION_EVENT
+    # (that string is never persisted anywhere, only passed on the call that
+    # found it) -- a resumed force-no-reflection close still records no
+    # reason line, exactly like T4b already established for peer-session.
+    if [ -z "${FORCED_CARD:-}" ]; then
+      _wp561_persisted_kind=$(_unique_record_field "${SEM_FILE:-}" close_delivery_terminal_kind || true)
+      _wp561_persisted_ref=$(_unique_record_field "${SEM_FILE:-}" close_delivery_terminal_reference || true)
+      case "$_wp561_persisted_ref" in
+        cancel-obligation:*)
+          FORCED_CARD="$_wp561_persisted_ref"
+          ;;
+        *)
+          if [ "$_wp561_persisted_kind" = file ] && [ -f "$_wp561_persisted_ref" ] \
+             && grep -qE '^current_step: (wp-archive-run|blocked-witness-unavailable)$' "$_wp561_persisted_ref"; then
+            FORCED_CARD="$_wp561_persisted_ref"
+          fi
+          ;;
+      esac
     fi
   fi
 
@@ -12595,6 +12805,237 @@ if [ "$CMD" = "recover-orphaned" ]; then
   exit 0
 fi
 
+# --- RETIRE-SEMAPHORE-ARTIFACT (WP-530 Ф90) ---
+# A quarantined (`.open.orphaned-*`) or hand-renamed (`.open.<anything>`)
+# record can never be selected by `close`, yet owner-status kept counting every
+# such same-agent record without a harness identity as "maybe this owner" --
+# forever, because quarantine never leaves the directory. On tsekh-1 two
+# pilot-authorised quarantines from 05.10 plus two manual `.bak-*` copies made
+# `absent` unprovable for EVERY Claude conversation, so every day-close ended
+# in close-override (peer-session 2026-10-06-10-wp530-f90-session-close-blockers,
+# Claude+Kimi+Codex). This command records, append-only and bound to the exact
+# path and bytes, that one inactive artifact is no longer an obligation for the
+# absence verdict. It moves and deletes nothing; it never touches `*.open`.
+# Retiring says "this file is not a live session"; it does NOT say the
+# session's own commitments were fulfilled -- that stays with close/audit.
+_retire_artifact_basis() {  # <artifact abs path> <original .open abs path> -- prints basis or returns 1
+  # Basis 1: the sweep or a pilot already quarantined this very generation --
+  # a `quarantined` registry record for the original .open path whose
+  # opened_epoch equals the artifact's own opened_at (a fixed-name record can
+  # die more than once, so the path alone does not bind the generation).
+  python3 - "$ZOMBIE_REGISTRY" "$1" "$2" <<'PY'
+import datetime as dt
+import json
+import sys
+
+registry, artifact, original = sys.argv[1:]
+# First of opened_at/created_at, mirroring semaphore_epoch(): housekeeping
+# records carry only created_at.
+opened_at = None
+with open(artifact, "r", encoding="utf-8") as stream:
+    for line in stream:
+        if line.startswith(("opened_at: ", "created_at: ")):
+            value = line.split(": ", 1)[1].strip()
+            try:
+                opened_at = int(dt.datetime.fromisoformat(value.replace("Z", "+00:00")).timestamp())
+            except ValueError:
+                print(f"retire-semaphore-artifact: opened_at/created_at артефакта не разбирается: {value!r}",
+                      file=sys.stderr)
+                raise SystemExit(1)
+            break
+if opened_at is None:
+    print("retire-semaphore-artifact: у артефакта нет opened_at/created_at — поколение не привязать",
+          file=sys.stderr)
+    raise SystemExit(1)
+try:
+    stream = open(registry, "r", encoding="utf-8")
+except FileNotFoundError:
+    print(f"retire-semaphore-artifact: журнала {registry} нет — записи quarantined искать негде", file=sys.stderr)
+    raise SystemExit(1)
+with stream:
+    for number, line in enumerate(stream, 1):
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            event = json.loads(line)
+        except (ValueError, RecursionError):
+            print(f"retire-semaphore-artifact: строка {number} журнала не JSON, пропущена", file=sys.stderr)
+            continue
+        if (isinstance(event, dict) and event.get("action") == "quarantined"
+                and event.get("semaphore") == original
+                and isinstance(event.get("opened_epoch"), int)
+                and abs(event["opened_epoch"] - opened_at) <= 5):
+            print("journal-quarantined:" + str(event.get("pass_key") or "no-pass-key"))
+            raise SystemExit(0)
+raise SystemExit(1)
+PY
+}
+
+_retire_artifact_fingerprint() {  # <artifact> -- prints "<sha256> <session_id> <harness_session_id|->" or fails
+  # Same safety checks owner-status applies in read_raw(): an artifact that
+  # owner-status would refuse to read must not get a "retired" record that
+  # can never match (hardlink, world-writable, oversized, no trailing newline).
+  python3 - "$1" <<'PY_FP'
+import hashlib
+import os
+import stat
+import sys
+
+path = sys.argv[1]
+fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+with os.fdopen(fd, "rb") as stream:
+    info = os.fstat(stream.fileno())
+    if (not stat.S_ISREG(info.st_mode) or info.st_uid != os.geteuid()
+            or info.st_nlink != 1 or info.st_mode & 0o022
+            or not 0 < info.st_size <= 1024 * 1024):
+        raise SystemExit("артефакт не проходит проверки безопасности owner-status (не обычный файл, чужой владелец, hardlink, права группы/мира на запись или размер > 1 МБ)")
+    raw = stream.read(1024 * 1024 + 1)
+if len(raw) != info.st_size or b"\0" in raw or not raw.endswith(b"\n"):
+    raise SystemExit("артефакт изменился при чтении или не заканчивается переводом строки")
+lines = raw.decode("utf-8").splitlines()
+if not lines or lines[0] != "---" or "---" not in lines[1:]:
+    raise SystemExit("у артефакта нет frontmatter семафора")
+try:
+    import yaml
+    front = yaml.safe_load("\n".join(lines[1:lines.index("---", 1)])) or {}
+except Exception as error:  # any parse failure is a refusal, reported as such
+    raise SystemExit(f"frontmatter артефакта не разбирается как YAML: {error}")
+if not isinstance(front, dict):
+    raise SystemExit("frontmatter артефакта не является отображением")
+
+
+def scalar(key):
+    value = front.get(key)
+    return str(value) if isinstance(value, (str, int)) and str(value) else "-"
+
+
+print(hashlib.sha256(raw).hexdigest(), scalar("session_id"), scalar("harness_session_id"))
+PY_FP
+}
+
+_append_retire_record() {  # <artifact> <sha256> <reason> <basis> <agent> <harness or empty>
+  mkdir -p "$(dirname "$ZOMBIE_REGISTRY")"
+  python3 - "$ZOMBIE_REGISTRY" "$@" <<'PY'
+import datetime as dt
+import json
+import os
+import stat
+import sys
+
+path, artifact, digest, reason, basis, agent, harness = sys.argv[1:]
+# owner-status refuses a registry that is not a plain file owned by this user
+# without group/world write bits -- a record appended into such a file would
+# be dead and "Retired" a lie. A missing registry is created 0600.
+try:
+    info = os.lstat(path)
+except FileNotFoundError:
+    info = None
+if info is not None and (not stat.S_ISREG(info.st_mode) or info.st_uid != os.geteuid()
+                         or info.st_mode & 0o022):
+    raise SystemExit(f"журнал {path} небезопасен (не обычный файл, чужой владелец или права группы/мира "
+                     f"на запись: {oct(info.st_mode & 0o777)}) — owner-status его не читает; исправь "
+                     "(chmod 600) и повтори")
+now = dt.datetime.now(dt.timezone.utc)
+event = {
+    "recorded_at": now.isoformat().replace("+00:00", "Z"),
+    "reason": reason,
+    "source": "session-guard.sh retire-semaphore-artifact",
+    "artifact": artifact,
+    "sha256": digest,
+    "basis": basis,
+    "by": agent,
+    "harness_session_id": harness or None,
+    "action": "retired",
+    "pass_key": now.strftime("%Y%m%dT%H%M%SZ"),
+}
+fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND | os.O_NOFOLLOW, 0o600)
+with os.fdopen(fd, "a", encoding="utf-8") as stream:
+    stream.write(json.dumps(event, ensure_ascii=False, separators=(",", ":")) + "\n")
+PY
+}
+
+if [ "$CMD" = "retire-semaphore-artifact" ]; then
+  RETIRE_ARG="${POSITIONAL[0]:-}"
+  [ -n "$RETIRE_ARG" ] || fail "retire-semaphore-artifact: нужен путь к файлу в каталоге семафоров" 1
+  [ -n "$UNFREEZE_REASON" ] || fail "retire-semaphore-artifact: --reason обязателен (почему запись не является живой сессией)" 1
+  case "$RETIRE_ARG" in
+    /*) RETIRE_REQUEST="$RETIRE_ARG" ;;
+    *)  RETIRE_REQUEST="$SESSION_DIR/$RETIRE_ARG" ;;
+  esac
+  RETIRE_FILE=$(python3 -c 'import os,sys; print(os.path.abspath(os.path.normpath(sys.argv[1])))' "$RETIRE_REQUEST")
+  RETIRE_CANON_DIR=$(python3 -c 'import os,sys; print(os.path.realpath(sys.argv[1]))' "$SESSION_DIR")
+  RETIRE_BASE=$(basename -- "$RETIRE_FILE")
+  [ "$(dirname -- "$RETIRE_FILE")" = "$RETIRE_CANON_DIR" ] \
+    || fail "retire-semaphore-artifact: '$RETIRE_FILE' должен лежать непосредственно в каталоге семафоров ($SESSION_DIR)" 1
+  case "$RETIRE_BASE" in
+    *.open) fail "retire-semaphore-artifact: '$RETIRE_BASE' — активный семафор; его снимает только close или audit --cleanup-orphans" 1 ;;
+    *.open.*) : ;;
+    *) fail "retire-semaphore-artifact: '$RETIRE_BASE' не является записью семафора (ожидается <agent>-<id>.open.<состояние>)" 1 ;;
+  esac
+  [ -L "$RETIRE_FILE" ] && fail "retire-semaphore-artifact: '$RETIRE_BASE' — символическая ссылка" 1
+  [ -f "$RETIRE_FILE" ] || fail "retire-semaphore-artifact: файл не найден: $RETIRE_FILE" 1
+  RETIRE_ORIGINAL_OPEN="$RETIRE_CANON_DIR/${RETIRE_BASE%%.open.*}.open"
+  RETIRE_AGENT="${AGENT:-${IWE_AGENT:-unknown}}"
+  RETIRE_HARNESS=$(_runtime_harness_session_id "$RETIRE_AGENT" 2>/dev/null || true)
+
+  # Same fence as recover-orphaned: admission first, then the exact session
+  # lock of the generation this artifact belongs to. Hashing and the append
+  # happen inside, so the recorded bytes are the bytes owner-status will see.
+  # `fail` exits with both locks still held; the EXIT trap releases them.
+  acquire_scheduled_admission_lock
+  acquire_session_transition_lock "$RETIRE_ORIGINAL_OPEN"
+  if [ -e "$RETIRE_ORIGINAL_OPEN" ] || [ -L "$RETIRE_ORIGINAL_OPEN" ]; then
+    fail "retire-semaphore-artifact: рядом существует живой $(basename -- "$RETIRE_ORIGINAL_OPEN") — у этого поколения есть активный семафор, вывод из обращения запрещён" 1
+  fi
+  RETIRE_FP=$(_retire_artifact_fingerprint "$RETIRE_FILE") \
+    || fail "retire-semaphore-artifact: $RETIRE_BASE не читается безопасно; запись не сделана (см. причину выше)" 1
+  read -r RETIRE_SHA RETIRE_ART_SESSION RETIRE_ART_HARNESS <<<"$RETIRE_FP"
+  # A conversation never retires its own obligation: that path is close or
+  # recover-orphaned. Cold review of Ф90 reproduced the hole -- a quarantined
+  # record of the CALLER's harness plus a matching `quarantined` journal line
+  # flipped the caller's own owner-status from present to absent.
+  for own_id in "$RETIRE_HARNESS" "${IWE_SESSION_ID:-}" "${CLAUDE_CODE_SESSION_ID:-}" "${CODEX_THREAD_ID:-}"; do
+    [ -n "$own_id" ] || continue
+    if [ "$RETIRE_ART_SESSION" = "$own_id" ] || [ "$RETIRE_ART_HARNESS" = "$own_id" ]; then
+      fail "retire-semaphore-artifact: $RETIRE_BASE принадлежит ЭТОМУ разговору ($own_id) — своё обязательство снимает только close или recover-orphaned, не retire" 1
+    fi
+  done
+  case "$RETIRE_BASE" in
+    *.open.orphaned-*)
+      if [ "$RETIRE_ART_HARNESS" != "-" ]; then
+        # With a harness identity owner-status already tells this record apart
+        # from every other conversation; retiring it can only hide `present`
+        # from its own owner. Journal history is not enough -- an operator must
+        # say so explicitly, and the record names whose conversation it was.
+        [ "$RETIRE_CONFIRM_NO_LIVE_OWNER" -eq 1 ] \
+          || fail "retire-semaphore-artifact: $RETIRE_BASE несёт идентичность разговора $RETIRE_ART_HARNESS; такой карантин owner-status и так отличает от чужих — вывод из обращения только с --i-confirm-no-live-owner (подтверждаешь, что разговор $RETIRE_ART_HARNESS завершён)" 1
+        RETIRE_BASIS="operator-confirmation:harness=$RETIRE_ART_HARNESS"
+      elif RETIRE_BASIS=$(_retire_artifact_basis "$RETIRE_FILE" "$RETIRE_ORIGINAL_OPEN"); then
+        :
+      elif [ "$RETIRE_CONFIRM_NO_LIVE_OWNER" -eq 1 ]; then
+        RETIRE_BASIS="operator-confirmation"
+      else
+        fail "retire-semaphore-artifact: в $ZOMBIE_REGISTRY нет записи quarantined для этого поколения ($(basename -- "$RETIRE_ORIGINAL_OPEN"), opened_at/created_at артефакта); если живого владельца точно нет — повтори с --i-confirm-no-live-owner" 1
+      fi ;;
+    *)
+      # A `.bak-*` or any other hand-made sibling has no sweep history at all:
+      # only an explicit operator confirmation can retire it.
+      [ "$RETIRE_CONFIRM_NO_LIVE_OWNER" -eq 1 ] \
+        || fail "retire-semaphore-artifact: '$RETIRE_BASE' — не карантин, а файл с нестандартным суффиксом; вывод из обращения только с --i-confirm-no-live-owner" 1
+      RETIRE_BASIS="operator-confirmation"
+      [ "$RETIRE_ART_HARNESS" = "-" ] || RETIRE_BASIS="operator-confirmation:harness=$RETIRE_ART_HARNESS" ;;
+  esac
+  _append_retire_record "$RETIRE_FILE" "$RETIRE_SHA" "$UNFREEZE_REASON" "$RETIRE_BASIS" "$RETIRE_AGENT" "$RETIRE_HARNESS" \
+    || fail "retire-semaphore-artifact: запись в $ZOMBIE_REGISTRY не выполнена; ничего не изменено" 1
+  release_session_transition_lock \
+    || fail "retire-semaphore-artifact: запись сделана, но exact session lock не освободился" 1
+  release_scheduled_admission_lock \
+    || fail "retire-semaphore-artifact: запись сделана, но admission lock не освободился" 1
+  echo "Retired: $RETIRE_BASE (basis=$RETIRE_BASIS, sha256=${RETIRE_SHA:0:12}…) — файл не тронут, owner-status больше не считает его обязательством"
+  exit 0
+fi
+
 # A registered directory covers everything under it (QUICKCLOSE-GAPS1 п.2, found
 # live 04.08): a peer-conversation opens ONE session directory and then writes a
 # dozen files into it as the run goes on. Before this, every one of those files
@@ -13660,4 +14101,4 @@ if [ "$CMD" = "post-merge-check" ]; then
   exit 0
 fi
 
-fail "Unknown command: $CMD (use: open, close, audit, renew, note-file, note-commit, recover-orphaned, pre-commit-check, post-merge-check)"
+fail "Unknown command: $CMD (use: open, close, audit, renew, note-file, note-commit, recover-orphaned, retire-semaphore-artifact, owner-status, pre-commit-check, post-merge-check)"
