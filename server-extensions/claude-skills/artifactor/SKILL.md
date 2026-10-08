@@ -5,6 +5,7 @@ description: "Classifies raw pilot request → structured JSON {task_type, class
 version: 1.1.0
 layer: L1
 status: active
+browser_safe: false
 triggers:
   slash: [/artifactor]
   phrases: []
@@ -60,7 +61,7 @@ Classifies raw pilot request → structured JSON {task_type, class, artifact, bu
 - `confidence=high` только при keyword-пути; `confidence=low` при LLM-пути
 - При запросе <5 слов: вернуть `{"error": "INSUFFICIENT_INPUT"}`, стоп
 - `budget_estimate: "?"` только при `problem-framing` или полной неопределённости
-- `result_type` (WP-575 Ф2, `hard-distinctions.md` №36) — Исполнитель (`system`: агент/скрипт/сервис — действующее) vs Информационный объект (`episteme`: документ/знание/правило — читаемое). Решается ДО имени и класса задачи, независимая ось от `expected_result_kind` — НЕ выводится из `kind_id` (кортеж `kind_id`/`task_type`/`class` присваивается одновременно, вывод из него нарушил бы «раньше имени и класса», и `kind_id` создавался для другого различения). `unresolved` — тип неочевиден → форсирует уточнение у пилота на WP Gate, классификатор НЕ гадает (тот же принцип, что `hypothesis_relation: "unclassified"` ниже).
+- `result_type` (WP-575 Ф2, hard-distinctions.md №36) — Исполнитель (`system`: агент/скрипт/сервис — действующее) vs Информационный объект (`episteme`: документ/знание/правило — читаемое). Решается ДО имени и класса задачи, независимая ось от `expected_result_kind` — НЕ выводится из `kind_id` (кортеж `kind_id`/`task_type`/`class` присваивается одновременно, вывод из него нарушил бы «раньше имени и класса», и `kind_id` создавался для другого различения). `unresolved` — тип неочевиден → форсирует уточнение у пилота на WP Gate, классификатор НЕ гадает (тот же принцип, что `hypothesis_relation: "unclassified"` ниже).
 - **Маршрутизация по `result_type`** (делает потребитель — `/wp-new`/WP Gate Ритуал, не сам Артефактор, тот же принцип, что и передача `hypothesis_relation` в WP Gate): `system` → обязательна проверка IntegrationGate (новизна инструмента/агента/скрипта/сервиса); `episteme` → Routing Gate (карта размещения документа/знания, `DP.KR.001 §5`); `unresolved` → уточнение у пилота до продолжения.
 - `expected_result_kind` — дискриминатор ожидаемого kind-а результата (WP-481 Ф7, «не бывает общего результата»), НЕ показатель готовности проверки (`gate_ready` — забота `/verify`, не Артефактора)
 - `result_kind_resolution: "unresolved"` — ни один kind реестра не подходит; классификатор НЕ подменяет ближайшим (анти-утечка в супертип)
@@ -92,7 +93,8 @@ Classifies raw pilot request → structured JSON {task_type, class, artifact, bu
 Запустить скрипт (возвращает JSON или сигнал):
 
 ```bash
-python3 "${IWE_SCRIPTS:-$HOME/IWE/scripts}/artifactor.py" "$ARGUMENTS"
+S="${IWE_SCRIPTS:-$HOME/IWE/scripts}"
+PY3="$(bash "$S/lib/find-python3.sh")" && "$PY3" "$S/artifactor.py" "$ARGUMENTS"
 ```
 
 Интерпретация результата:
@@ -160,3 +162,6 @@ python3 "${IWE_SCRIPTS:-$HOME/IWE/scripts}/artifactor.py" "$ARGUMENTS"
 | Запрос < 5 слов | `{"error": "INSUFFICIENT_INPUT"}` |
 | Скрипт не найден / сбой | Перейти к Шагу 2 напрямую |
 | Запрос на иностранном языке | Классифицировать как есть, `confidence: low` |
+
+<!-- USER-SPACE -->
+<!-- /USER-SPACE -->

@@ -2,12 +2,12 @@
 name: fpf
 description: Загрузка применимых принципов для задачи из иерархии Pack → SPF → FPF. Используй когда нужно найти релевантные принципы перед принятием решения.
 argument-hint: "<запрос или тема>"
-version: 1.0.0
+version: 1.1.0
 layer: L1
 status: active
 triggers:
   slash: [/fpf]
-  phrases: []
+  phrases: ["по FPF", "сверь с FPF", "что говорит FPF", "какие принципы", "по принципам", "первые принципы"]
 routing:
   executor: haiku
   deterministic: false
@@ -88,19 +88,19 @@ Pack (предметное) → SPF (корректность) → FPF (перв
 - Форма, процесс, корректность → source=SPF
 - Базовые различения, первые принципы → source=FPF
 
-### 3. Ищи через iwe-knowledge
+### 3. Ищи через iwe-knowledge (Pack, SPF) и fpf-tools (FPF/DPF)
 
 - `iwe-knowledge search(query="<запрос>", source_type="pack")` -- по всем Pack
 - `iwe-knowledge search(query="<запрос>", source="SPF")` -- по SPF
-- `iwe-knowledge search(query="<запрос>", source="FPF")` -- по FPF
+- Слой FPF/DPF -- через `fpf-tools` (публичный сервис Левенчука `https://mcp.fpf.tools/mcp`, без ключа; WP-595 Ф4, 08.10.2026): `get_corpus_status {}` → snapshot (цитируй как версию источника), `search {"q": "<термин или код>"}` → `read_pattern {"pattern_id": "SYSE.24"}` / `read_section`. Поиск там лексический, без синонимов и опечаток -- смысловое сопоставление с задачей остаётся за тобой, сервис его не делает. Свой индекс по Pack этот шаг не заменяет.
 - Если первый уровень не дал результатов -- спускайся по fallback chain
 
-### 4. Если iwe-knowledge недоступен
+### 4. Если iwe-knowledge или fpf-tools недоступны
 
-(нет в `/mcp`):
+(нет в `/mcp` или сервис не отвечает -- Protective Procedure Fallback: блокируется только этот шаг, не вся работа):
 - Pack: читай файлы `PACK-*/pack/` через Glob + Read
 - SPF: читай `SPF/docs/` через Glob + Read
-- FPF: читай `FPF/Readme.md` (обзор) или ищи через Grep по `FPF/`
+- FPF: локальная копия `FPF/` по Шагу 0 (`rg`/`grep` по `## <ID>` ... `### <ID>:End`); копия может отставать от сервиса -- назови её версию
 
 ### 5. Покажи результат
 
