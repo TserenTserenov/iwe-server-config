@@ -279,4 +279,35 @@ grep -q "\"pass_key\":\"$PASS_KEY\"" "$REGISTRY" \
   || fail "recovered summary points to pass key $PASS_KEY absent from the registry"
 [ ! -s "$PENDING" ] || fail "pending file not cleared once the recovered 6-event batch was confirmed delivered"
 
-echo "PASS: one sweep pass sends one Telegram summary (small and large), a failed delivery or a real SIGKILL is recovered by the next pass with a correct type breakdown and a searchable pass key, and the queue does not leak across passes"
+# 7. WP-568 Ф4 (09.10): the sweep summary also mirrors into the notification
+#    center, IN ADDITION to the Telegram send above (not instead of it), via
+#    a stub standing in for the real notification-center-bridge.sh -- this
+#    only checks that session-guard.sh calls the function with the right
+#    arguments, not the real bridge's own whitelist/dedup logic (that's
+#    notification-center-bridge-smoke.sh's job). Two passes must reuse the
+#    SAME correlation_id -- a fresh one per pass would silently recreate the
+#    exact spam bug this source integration exists to avoid.
+NC_LOG="$TEST_ROOT/nc-bridge-calls.log"
+mkdir -p "$GOV/scripts/lib"
+cat > "$GOV/scripts/lib/notification-center-bridge.sh" <<EOF
+notification_center_bridge_send() { printf '%s\n' "\$*" >> "$NC_LOG"; }
+EOF
+write_iwe_tg 0
+: > "$TG_LOG"
+: > "$NC_LOG"
+write_semaphore "$SESSION_DIR/claude-code-nc1.open" "nc1"
+run_audit --cleanup-orphans >/dev/null
+[ "$(wc -l < "$NC_LOG")" -eq 1 ] || fail "expected exactly 1 notification-center-bridge call for the first pass, got $(wc -l < "$NC_LOG")"
+grep -q '^session-guard yellow' "$NC_LOG" || fail "bridge call did not start with the expected source-id and severity: $(cat "$NC_LOG")"
+FIRST_CORR_ID=$(grep -oE 'session-guard:quarantine:open' "$NC_LOG")
+[ -n "$FIRST_CORR_ID" ] || fail "bridge call is missing the stable correlation_id: $(cat "$NC_LOG")"
+[ "$(call_count)" -eq 1 ] || fail "adding the centre mirror must not add a second Telegram message, got $(call_count)"
+
+write_semaphore "$SESSION_DIR/claude-code-nc2.open" "nc2"
+run_audit --cleanup-orphans >/dev/null
+[ "$(wc -l < "$NC_LOG")" -eq 2 ] || fail "expected 1 more bridge call after the second pass, got $(wc -l < "$NC_LOG") total"
+SECOND_CORR_ID=$(tail -1 "$NC_LOG" | grep -oE 'session-guard:quarantine:open')
+[ "$SECOND_CORR_ID" = "$FIRST_CORR_ID" ] \
+  || fail "correlation_id changed between passes ($FIRST_CORR_ID -> $SECOND_CORR_ID) -- would reopen a new incident every sweep instead of updating one"
+
+echo "PASS: one sweep pass sends one Telegram summary (small and large), a failed delivery or a real SIGKILL is recovered by the next pass with a correct type breakdown and a searchable pass key, the queue does not leak across passes, and each pass also mirrors into the notification center under one stable incident key"
