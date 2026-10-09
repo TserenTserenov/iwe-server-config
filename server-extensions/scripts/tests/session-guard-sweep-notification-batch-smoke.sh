@@ -128,6 +128,12 @@ grep -q 'zombies_escalated=6' <<<"$OUT" || fail "sweep did not count all 6 escal
 grep -q '6 событий за проход' "$TG_LOG" || fail "compact summary missing the event count"
 grep -q 'осиротевшие: 6' "$TG_LOG" || fail "compact summary missing the per-type escalated count"
 grep -qF "$REGISTRY" "$TG_LOG" || fail "compact summary does not point at the registry path"
+# Regression (09.10, pilot's live dump): the old text sent the pilot to grep
+# the registry themselves with no answer for who actually follows up and
+# when. "Дальше:" must name the agent as the one who reconciles, not just
+# repeat the registry path.
+grep -qF 'Дальше: от тебя сейчас ничего не нужно' "$TG_LOG" \
+  || fail "compact summary does not say who acts next, just points at the log"
 grep -q 'many-1' "$TG_LOG" && fail "compact summary leaked per-semaphore detail it should have omitted"
 PASS_KEY=$(grep -oE '[0-9]{8}T[0-9]{6}Z' "$TG_LOG" | head -1)
 [ -n "$PASS_KEY" ] || fail "could not extract the pass key from the compact summary"
