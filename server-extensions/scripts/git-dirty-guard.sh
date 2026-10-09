@@ -118,6 +118,19 @@ import signal
 import subprocess
 import sys
 
+# #1005b: SIGHUP/killpg are POSIX-only. The old code hit this as an
+# uncaught AttributeError raised AFTER Popen() had already started the
+# child, so a platform without them (e.g. native Windows Python) leaked a
+# running, un-managed child process on every call instead of failing
+# cleanly. Check before starting anything.
+if not (hasattr(signal, "SIGHUP") and hasattr(os, "killpg")):
+    sys.stderr.write(
+        "run_with_timeout: process-group hard deadline needs POSIX "
+        "signal.SIGHUP/os.killpg, unavailable on this platform -- "
+        "refusing before starting the child process.\n"
+    )
+    raise SystemExit(1)
+
 seconds = int(sys.argv[1])
 process = subprocess.Popen(sys.argv[2:], start_new_session=True)
 handled_signals = (signal.SIGTERM, signal.SIGINT, signal.SIGHUP)

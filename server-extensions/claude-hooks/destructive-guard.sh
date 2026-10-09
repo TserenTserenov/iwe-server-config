@@ -602,6 +602,31 @@ fi
 # виден только в присваивании выше).
 RM_INVOCATIONS=$(shell_invocations rm)
 if [ -n "$RM_INVOCATIONS" ]; then
+  # Fix #1002 fallback, computed once for the whole command: strip the
+  # literal text of EVERY rm invocation found (not just the one currently
+  # being checked) before searching the remainder for a leniency pattern.
+  # Subtracting only the current invocation left a cross-command bypass
+  # open (`rm -rf /important_data; rm -rf /tmp/scratch`): the literal
+  # "/tmp/" of the second, unrelated, already-safe rm call still matched in
+  # the leftover text and waived the first, dangerous one. NUL-delimited
+  # stdin, not an env var, to stay clear of the ARG_MAX crash documented
+  # above for execve-sized command text; `|| block ...` (not a bare
+  # assignment), same reasoning as the jq check above this block — under
+  # `set -e` a failing python3 would otherwise crash the hook open instead
+  # of through block()'s deliberate exit 2.
+  if ! CMD_EXEC_MINUS_ALL_RM=$(printf '%s\0%s' "$CMD_EXEC" "$RM_INVOCATIONS" | python3 -c '
+import sys
+data = sys.stdin.buffer.read()
+cmd_bytes, invocations_bytes = data.split(b"\x00", 1)
+cmd = cmd_bytes.decode("utf-8", "surrogateescape")
+invocations = invocations_bytes.decode("utf-8", "surrogateescape").split("\n")
+for inv in invocations:
+    if inv:
+        cmd = cmd.replace(inv, "", 1)
+sys.stdout.buffer.write(cmd.encode("utf-8", "surrogateescape"))
+' 2>&1); then
+    block "не удалось проверить rm-вызовы (ошибка python3: $CMD_EXEC_MINUS_ALL_RM) — блокирую как неопределённо опасный запрос"
+  fi
   while IFS= read -r one_rm; do
     [ -n "$one_rm" ] || continue
     if ! echo "$one_rm" | grep -qE -- '(^|[[:space:]])(-[^[:space:]]*[rR][^[:space:]]*|--recursive)([[:space:]]|$)'; then
@@ -610,10 +635,54 @@ if [ -n "$RM_INVOCATIONS" ]; then
     if ! echo "$one_rm" | grep -qE -- '(^|[[:space:]])(-[^[:space:]]*f[^[:space:]]*|--force)([[:space:]]|$)'; then
       continue
     fi
-    if echo "$one_rm" | grep -qE '(/tmp/|/scratchpad/|\.claude/worktrees/)'; then
+    # The old check passed if /tmp/ (etc.) appeared ANYWHERE in this
+    # invocation's tokens, so `rm -rf /protected /tmp/ok` slipped through
+    # on the second target. Require EVERY target of this invocation to be
+    # safe, not just one of them — and require at least one target to
+    # actually be found (an invocation reduced to pure flags, e.g.
+    # `rm -rf --` with its target hidden behind `find -exec ... {} +`,
+    # found nothing to vouch for and must fall through to the stricter
+    # checks below, not be waved through by default).
+    all_targets_safe=true
+    found_target=false
+    after_dashdash=false
+    read -ra rm_tokens <<< "$one_rm"
+    for tok in "${rm_tokens[@]:1}"; do
+      if ! $after_dashdash && [ "$tok" = "--" ]; then
+        after_dashdash=true
+        continue
+      fi
+      if ! $after_dashdash; then
+        case "$tok" in
+          -*) continue ;;  # flag, not a target
+        esac
+      fi
+      # Past `--`, every token is a literal target, flag-shaped or not.
+      found_target=true
+      # A `..` segment anywhere lets a target that textually starts with
+      # /tmp/ (or contains .claude/worktrees/) walk right back out of it
+      # (`/tmp/../important_data`) — this is a plain substring/prefix
+      # match, not a resolved path, so reject traversal outright rather
+      # than trust it.
+      case "$tok" in
+        */../*|../*|*/..|..)
+          all_targets_safe=false
+          break
+          ;;
+      esac
+      if ! echo "$tok" | grep -qE '(^/tmp/|^/scratchpad/|\.claude/worktrees/)'; then
+        all_targets_safe=false
+        break
+      fi
+    done
+    if $found_target && $all_targets_safe; then
       continue
     fi
-    if echo "$CMD_EXEC" | grep -qE '(/tmp/|/scratchpad/|\.claude/worktrees/)'; then
+    # Variable-indirection fallback: a target built from a variable assigned
+    # elsewhere in the same command (`S=/tmp/x; rm -rf "$S/y"`) won't show
+    # /tmp/ in its own token. Scan the REST of the command text (every rm
+    # invocation's own text removed, see above) for that pattern.
+    if echo "$CMD_EXEC_MINUS_ALL_RM" | grep -qE '(/tmp/|/scratchpad/|\.claude/worktrees/)'; then
       continue
     fi
     block "rm -r -f (в любом сочетании флагов) вне /tmp, scratchpad или worktree запрещён — удаление необратимо. Разовая необходимость: CC_ALLOW_DESTRUCTIVE_INPUT=1 из реального шелла пилота."
