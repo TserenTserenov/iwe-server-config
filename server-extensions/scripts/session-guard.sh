@@ -60,6 +60,12 @@
 #                                                      # коммита); отказ, если путь есть на диске,
 #                                                      # в HEAD/индексе или в заявленном коммите
 #   note-commit <sha> [--repo <name>] [--agent ...]   # заявить коммит сессии: даёт commit-push.sh
+#   note-commit --forget <sha> [--repo <name>] [--agent ...]
+#                                      # WP-7 Ф209: снять заявку на коммит, если она не входит в
+#                                      # source/expected набор текущего PREPARE и ещё не имеет
+#                                      # независимого publish proof (иначе это ослабление
+#                                      # доказательства доставки, не уборка мусора). Работает до
+#                                      # PREPARE и во время него (в отличие от обычного note-commit).
 #   note-publication <sha> --repo <name> [--target-ref refs/heads/main|pilot|new-architecture]
 #     PREPARED: append-only peer product evidence (including main); never a push grant.
 #                                                      # проверять доставку по СВОИМ коммитам,
@@ -2755,7 +2761,9 @@ _quarantine_dead_interactive() {  # <semaphore> <observed dead pid>
 
 notify_dead_quarantine() {  # <quarantined path> <age> <worktree> <pass key> <reason> <original semaphore> <opened epoch>
   local age_h=$(( $2 / 3600 ))
-  _session_guard_notify "Мёртвая сессия IWE переведена в карантин: $(basename -- "$1") (возраст ${age_h}ч; процесс-владелец не существует, аренда истекла, пульса нет). Барьер на коммиты снят, файл и улики сохранены. Незакоммиченная работа, если была, лежит в ${3:-неизвестной копии} — разобрать вручную." \
+  # "разобрать вручную" без ответа кто и когда -- тот же пробел, что у
+  # сводки нескольких событий (_sweep_flush_notify_queue, то же 09.10).
+  _session_guard_notify "Мёртвая сессия IWE переведена в карантин: $(basename -- "$1") (возраст ${age_h}ч; процесс-владелец не существует, аренда истекла, пульса нет). Барьер на коммиты снят, файл и улики сохранены. Незакоммиченная работа, если была, лежит в ${3:-неизвестной копии}. Дальше: от тебя сейчас ничего не нужно -- агент сверит эту сессию при следующей работе по её рабочему продукту; если хочешь раньше, скажи." \
     "$6" "quarantined" "$4" "$5" "$7" "$2" "quarantined"
 }
 
@@ -3522,7 +3530,14 @@ print(hashlib.sha256(sys.stdin.buffer.read()).hexdigest()[:16])
     # to $total. The registry now also carries each record's own pass_key
     # (append_zombie_event), so "ищи по ключу прохода" is an actual grep,
     # not just a suggestion with nothing to match against.
-    summary="🔔 Сторож сессий: $total событий $pass_scope (осиротевшие: $_SWEEP_NOTIFY_ESCALATED_COUNT, в карантине: $_SWEEP_NOTIFY_QUARANTINED_COUNT). Карантин не значит, что незакоммиченная работа этих сессий опубликована — каждая требует отдельного разбора. Подробности каждой — в $ZOMBIE_REGISTRY, ищи по указанному ключу прохода."
+    # Было "каждая требует отдельного разбора ... ищи по указанному ключу
+    # прохода" -- отправляло пилота самого грепать JSONL, без ответа кто
+    # реально разбирает и когда (найдено 09.10, живой дамп, пир-сессия
+    # WP-538/568). "Дальше:" теперь называет, что разбор делает агент при
+    # следующей работе по затронутому РП, а не пилот прямо сейчас -- честно
+    # (это НЕ гарантия, что каждая сессия будет проверена сегодня же), без
+    # обещания "всё починено" (WP-538 Ф9).
+    summary="🔔 Сторож сессий: $total событий $pass_scope (осиротевшие: $_SWEEP_NOTIFY_ESCALATED_COUNT, в карантине: $_SWEEP_NOTIFY_QUARANTINED_COUNT). Карантин не значит, что незакоммиченная работа этих сессий опубликована. Дальше: от тебя сейчас ничего не нужно -- агент сверит каждую с опубликованной версией при следующей работе по её рабочему продукту; если хочешь проверить раньше, назови ключ прохода в чате, и я посмотрю в $ZOMBIE_REGISTRY."
   fi
   if command -v iwe-tg >/dev/null 2>&1; then
     local tg_rc=0
@@ -4972,6 +4987,11 @@ $isolate_status_code $isolate_status_path"
       # холодного ревью в пир-сессии Ф166 (05.10 вечером), до деплоя на живой
       # узел, воспроизведено прямым git ls-files на origin/main.
       exclude_file=$(git -C "$wt_path" rev-parse --git-path info/exclude)
+      # info/ может не существовать после `git init` без шаблона (fresh
+      # worktree base) -- без mkdir здесь `echo >> "$exclude_file"` падает
+      # "No such file or directory" и валит весь --isolate (WP-484, found
+      # 09.10: блокировало доставку этого файла минимум 14 тиков sync-extensions-auto).
+      mkdir -p "$(dirname "$exclude_file")"
       if ! grep -qxF "inbox/agent/tasks/RUN-*.md" "$exclude_file" 2>/dev/null; then
         echo "inbox/agent/tasks/RUN-*.md" >> "$exclude_file"
       fi
@@ -11743,8 +11763,19 @@ if [ "$CMD" = "note-commit" ]; then
   LOCKED_NOTE_SESSION_ID=$(_locked_open_identity "$SEM_FILE" "$NOTE_AGENT" "${SESSION_ID_ARG:-}" || true)
   [ -n "$LOCKED_NOTE_SESSION_ID" ] \
     || fail "note-commit: semaphore изменился после resolve или уже закрывается" 1
-  [ "$(_close_delivery_state "$SEM_FILE" "$LOCKED_NOTE_SESSION_ID" || true)" = "none" ] \
-    || fail "note-commit: close transition уже подготовлен; commit claims frozen" 1
+  NC_STATE=$(_close_delivery_state "$SEM_FILE" "$LOCKED_NOTE_SESSION_ID" || true)
+  if [ "$FORGET_FLAG" = "1" ]; then
+    # Ф209: forget must also work once PREPARE already froze the claim list --
+    # that is exactly the stuck state it exists to recover from. Normal
+    # note-commit below keeps requiring "none" unchanged.
+    case "$NC_STATE" in
+      none|prepared) ;;
+      *) fail "note-commit --forget: close transition в состоянии '$NC_STATE'; снятие заявки возможно только до или во время PREPARE" 1 ;;
+    esac
+  else
+    [ "$NC_STATE" = "none" ] \
+      || fail "note-commit: close transition уже подготовлен; commit claims frozen" 1
+  fi
   # WP-530 Ф61: a commit is at least as strong a liveness signal as note-file
   # -- same fix, same already-held lock, see _refresh_owner_pid above.
   _refresh_owner_pid "$SEM_FILE"
@@ -11831,6 +11862,220 @@ if [ "$CMD" = "note-commit" ]; then
   NC_FULL_SHA=$(git -C "$NC_REPO_DIR" rev-parse --verify --quiet "${COMMIT_SHA}^{commit}" 2>/dev/null) \
     || fail "note-commit: '$COMMIT_SHA' не резолвится в коммит репозитория '$NC_REPO_NAME'" 1
   NC_ENTRY="commit: $NC_REPO_NAME $NC_FULL_SHA"
+  if [ "$FORGET_FLAG" = "1" ]; then
+    # Only the target claim must lack independent publish proof: exclude
+    # every OTHER raw claim so the shared proof-checker verifies just this
+    # one. exit 0 (proof found) -> refuse; exit 1 (no proof, or any other
+    # check failure) -> proceed. That second case folds two different
+    # meanings into one code (Ф209 "Осталое": no `unknown` status exists yet
+    # to tell "not published" from "could not verify") -- known, accepted,
+    # same limitation close --abandon-prepared already lives with.
+    # grep -v exits 1 (not an error here) when the target is the only claim --
+    # nothing left to exclude is a valid, expected case under set -e, not a
+    # failure to mask with it (live, found running this script's own test).
+    NC_FORGET_OTHER_CLAIMS=$(sed -n 's/^commit: //p' "$SEM_FILE" | { grep -vxF "$NC_REPO_NAME $NC_FULL_SHA" || true; } | jq -R . | jq -s -c .)
+    if _claimed_commits_have_publish_proof "$SEM_FILE" "$NC_FORGET_OTHER_CLAIMS" >/dev/null 2>&1; then
+      fail "note-commit --forget: '$NC_ENTRY' уже имеет независимое доказательство публикации; снятие запрещено" 1
+    fi
+    python3 - "$SEM_FILE" "$NC_REPO_NAME" "$NC_FULL_SHA" "$NC_STATE" <<'PY' || exit $?
+import datetime
+import fcntl
+import hashlib
+import json
+import os
+import re
+import stat
+import sys
+import tempfile
+from pathlib import Path
+
+sem, repo_name, full_sha, state = sys.argv[1:]
+
+
+def refuse(message):
+    sys.stderr.write("note-commit --forget: " + message + "\n")
+    sys.exit(1)
+
+
+fd = os.open(sem, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+try:
+    info = os.fstat(fd)
+    current = os.lstat(sem)
+    if (not stat.S_ISREG(info.st_mode) or info.st_uid != os.geteuid()
+            or info.st_nlink != 1 or info.st_size <= 0 or info.st_size > 1024 * 1024
+            or stat.S_ISLNK(current.st_mode)
+            or (current.st_dev, current.st_ino) != (info.st_dev, info.st_ino)):
+        refuse("небезопасная запись семафора")
+    raw = b""
+    while True:
+        chunk = os.read(fd, 65536)
+        if not chunk:
+            break
+        raw += chunk
+    if len(raw) != info.st_size or b"\0" in raw or not raw.endswith(b"\n"):
+        refuse("повреждённая запись семафора")
+finally:
+    os.close(fd)
+
+snapshot = raw
+lines = snapshot.decode("utf-8").split("\n")
+
+
+def field(name):
+    return [line[len(name) + 2:] for line in lines if line.startswith(name + ": ")]
+
+
+raw_claims = [line[len("commit: "):] for line in lines if line.startswith("commit: ")]
+for claim in raw_claims:
+    if not re.fullmatch(r"[A-Za-z0-9._-]+ [0-9a-fA-F]{40,64}", claim):
+        refuse("неоднозначная заявка коммита в семафоре ('commit: " + claim + "'): заявка остаётся, снятие остановлено")
+
+target = repo_name + " " + full_sha
+if target not in raw_claims:
+    refuse("заявки на '" + target + "' в семафоре нет")
+# _close_delivery_state requires claimed_commits stored already sorted
+# (claimed != sorted(set(claimed)) -> invalid); the raw file order is
+# whatever order note-commit happened to append in, not sorted (Codex
+# cold review, 07.10 peer-session -- caught a real PREPARED-breaking bug
+# here, reproduced: unsorted leftover list fails the very next validation).
+claims_after = sorted(claim for claim in raw_claims if claim != target)
+
+# PREPARE already froze claimed_commits/prepare_digest as single-occurrence
+# fields (_close_delivery_state requires exactly one of each) -- forgetting a
+# claim while prepared must REPLACE both in place, not append a second copy.
+replacements = {}
+if state == "prepared":
+    prepare_keys = (
+        "close_delivery_version", "close_attempt_id", "close_delivery_session_id",
+        "close_delivery_worktree", "close_delivery_common_dir",
+        "close_delivery_origin", "close_delivery_target_ref",
+        "close_delivery_source_base", "close_delivery_source_head",
+        "close_delivery_source_commits", "close_delivery_source_commits_digest",
+        "close_delivery_source_status_sha256", "close_delivery_expected_commits",
+        "close_delivery_claimed_commits",
+        "close_delivery_terminal_kind", "close_delivery_terminal_reference",
+        "close_delivery_terminal_sha256", "close_delivery_semaphore_sha256",
+        "close_delivery_prepare_digest",
+    )
+    fields = {}
+    for key in prepare_keys:
+        found = field(key)
+        if len(found) != 1 or not found[0]:
+            refuse("PREPARED-снимок семафора повреждён: поле '" + key + "' не единственное")
+        fields[key] = found[0]
+
+    source_commits = json.loads(fields["close_delivery_source_commits"])
+    expected_commits = json.loads(fields["close_delivery_expected_commits"])
+    claimed_commits = json.loads(fields["close_delivery_claimed_commits"])
+    if sorted(claimed_commits) != sorted(raw_claims):
+        refuse("JSON-снимок close_delivery_claimed_commits разошёлся с сырыми заявками семафора; снятие остановлено до починки рассинхрона")
+
+    sha_lower = full_sha.lower()
+    if sha_lower in {s.lower() for s in source_commits}:
+        refuse("'" + target + "' входит в close_delivery_source_commits -- снятие ослабило бы доказательство финальной доставки")
+    if sha_lower in {s.lower() for s in expected_commits}:
+        refuse("'" + target + "' входит в close_delivery_expected_commits -- снятие ослабило бы доказательство финальной доставки")
+
+    # Same payload shape _close_delivery_state validates and _record_close_prepared
+    # writes (session-guard.sh, keep both in sync with this block by hand).
+    payload = {
+        "version": fields["close_delivery_version"],
+        "close_attempt_id": fields["close_attempt_id"],
+        "session_id": fields["close_delivery_session_id"],
+        "worktree": fields["close_delivery_worktree"],
+        "common_dir": fields["close_delivery_common_dir"],
+        "origin": fields["close_delivery_origin"],
+        "target_ref": fields["close_delivery_target_ref"],
+        "source_base": fields["close_delivery_source_base"],
+        "source_head": fields["close_delivery_source_head"],
+        "source_commits": source_commits,
+        "source_commits_digest": fields["close_delivery_source_commits_digest"],
+        "source_status_sha256": fields["close_delivery_source_status_sha256"],
+        "expected_commits": expected_commits,
+        "claimed_commits": claims_after,
+        "terminal_kind": fields["close_delivery_terminal_kind"],
+        "terminal_reference": fields["close_delivery_terminal_reference"],
+        "terminal_sha256": fields["close_delivery_terminal_sha256"],
+        "semaphore_sha256": fields["close_delivery_semaphore_sha256"],
+    }
+    new_digest = hashlib.sha256(
+        json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
+    replacements["close_delivery_claimed_commits"] = json.dumps(claims_after, separators=(",", ":"))
+    replacements["close_delivery_prepare_digest"] = new_digest
+
+kept = []
+replaced_keys = set()
+for line in lines:
+    if line == "commit: " + target:
+        continue
+    matched_key = next((key for key in replacements if line.startswith(key + ": ")), None)
+    if matched_key:
+        kept.append(matched_key + ": " + replacements[matched_key])
+        replaced_keys.add(matched_key)
+    else:
+        kept.append(line)
+if set(replacements) - replaced_keys:
+    refuse("не удалось найти строку для замены: " + ", ".join(sorted(set(replacements) - replaced_keys)))
+
+candidate = "\n".join(kept).encode("utf-8")
+
+sem_dir = os.path.dirname(os.path.abspath(sem))
+audit_path = os.path.join(os.path.dirname(sem_dir), "note-commit-forget.log")
+
+
+def audit_event(event):
+    record = json.dumps({
+        "at": datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "event": event,
+        "session_id": (field("session_id") or [""])[0],
+        "slug": (field("slug") or [""])[0],
+        "target": target,
+        "state": state,
+    }, ensure_ascii=False)
+    data = (record + "\n").encode("utf-8")
+    afd = os.open(audit_path, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o644)
+    try:
+        # Shared by every session; the per-session lock does not serialize
+        # them, same reasoning as note-file-forget.log above.
+        fcntl.flock(afd, fcntl.LOCK_EX)
+        view = memoryview(data)
+        while view:
+            view = view[os.write(afd, view):]
+        os.fsync(afd)
+    finally:
+        os.close(afd)
+
+
+audit_event("forget-intent")
+mode = os.stat(sem).st_mode & 0o7777
+fd2, tmp = tempfile.mkstemp(dir=sem_dir, prefix=".commit-forget-")
+try:
+    with os.fdopen(fd2, "wb") as handle:
+        handle.write(candidate)
+        handle.flush()
+        os.fchmod(handle.fileno(), mode)
+        os.fsync(handle.fileno())
+    # acquire_session_transition_lock (held by the calling bash process for
+    # this whole command) already serializes every writer of this semaphore,
+    # so this cannot actually fire -- defense in depth, raised in the 07.10
+    # peer-session review as worth keeping explicit rather than assumed.
+    if Path(sem).read_bytes() != snapshot:
+        refuse("семафор изменился во время проверки, повтори")
+    os.replace(tmp, sem)
+finally:
+    if os.path.exists(tmp):
+        os.unlink(tmp)
+dir_fd = os.open(sem_dir, os.O_RDONLY)
+try:
+    os.fsync(dir_fd)
+finally:
+    os.close(dir_fd)
+audit_event("forget-done")
+print("Forgot commit: " + target)
+PY
+    exit 0
+  fi
   # Idempotent: the same commit may legitimately be reported twice (a retried
   # close step), and a duplicated entry would be verified twice for nothing.
   if ! grep -qxF "$NC_ENTRY" "$SEM_FILE" 2>/dev/null; then
