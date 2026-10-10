@@ -154,8 +154,9 @@ alert() {
 alert_ok() {
   local text="$1"
   local full_text="$text"
+  local recovered_parts=()
   if $NOTIFY_LIB_AVAILABLE; then
-    local class recovered_parts=()
+    local class
     for class in "${ALERT_CLASSES[@]}"; do
       if notify_escalation_update "sync-extensions-auto/$class" ok; then
         recovered_parts+=("$class: $NOTIFY_ESCALATION_COUNT попыток, $(notify_format_duration "$NOTIFY_ESCALATION_DURATION_SEC")")
@@ -168,7 +169,12 @@ alert_ok() {
     fi
   fi
   echo "$LOG_PREFIX $full_text"
-  send_telegram "$full_text"
+  # WP-568 Ф4: a clean delivery is routine, not news — only a recovery after a
+  # failure reaches the pilot. Without the notify lib there is no way to tell
+  # the two apart, so that path keeps sending.
+  if [ "${#recovered_parts[@]}" -gt 0 ] || ! $NOTIFY_LIB_AVAILABLE; then
+    send_telegram "$full_text"
+  fi
 }
 
 lock_acquire() {
