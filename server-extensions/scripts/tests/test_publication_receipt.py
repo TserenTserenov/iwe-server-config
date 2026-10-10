@@ -1024,6 +1024,5 @@ _close_delivery_state "$1" one
                     receipt.product_target(self.repo, raw, receipt.BOT_REPO,
                                            self.root, receipt.BOT_REF)
 
-
 if __name__ == "__main__":
     unittest.main()

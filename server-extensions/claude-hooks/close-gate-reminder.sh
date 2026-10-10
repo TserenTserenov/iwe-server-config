@@ -371,6 +371,20 @@ _consume_pending_reflection() {
 # while keeping its own close protocol: no runner obligation or sentinel.
 CLOSE_PATH_MATCH=$(grep -Flx -- "harness_session_id: $SESSION_ID" \
   "$IWE_ROOT"/.iwe-runtime/sessions/*.open 2>/dev/null | head -1)
+# РП-7 Ф212 (пир-сессия 2026-10-10-11, Claude+Codex+Kimi): штатное закрытие
+# пир-сессии переименовывает её семафор в "*.open.closed" (session-guard.sh
+# close) -- файл выпадает из глоба "*.open" выше, и слово "закрой"/"закрывай"
+# про уже закрытую пир-сессию (а не про весь разговор) трактуется как команда
+# на весь разговор и взводит close_obligation. Живой инцидент: 10.10, 4 взвода
+# за один разговор, минимум 2 из 4 -- сразу после закрытия названной
+# пир-сессии (подтверждено пилотом). Фикс -- только расширение поиска на
+# недавно закрытые семафоры (grace-окно 5 минут), не новый контракт
+# target_session_id (это отдельное архитектурное решение, не делалось здесь).
+if [ -z "$CLOSE_PATH_MATCH" ]; then
+  CLOSE_PATH_MATCH=$(find "$IWE_ROOT/.iwe-runtime/sessions" -maxdepth 1 -name "*.open.closed" -mmin -5 \
+    -exec grep -Flx -- "harness_session_id: $SESSION_ID" {} + 2>/dev/null \
+    | xargs -I{} stat -f '%m %N' {} 2>/dev/null | sort -rn | head -1 | cut -d' ' -f2-)
+fi
 if [ -n "$CLOSE_PATH_MATCH" ] && grep -q '^close_path: peer-session$' "$CLOSE_PATH_MATCH" 2>/dev/null; then
   if [ "$FILTER_NO" != true ] && echo "$PROMPT" | grep -qE "($CLOSE_TRIGGER_RE)"; then
     PREFIX_LEN=$(_prefix_char_len_before_trigger "$CLOSE_TRIGGER_RE")
