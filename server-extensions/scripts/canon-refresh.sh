@@ -380,6 +380,81 @@ try_contract_mirror_discard() {
   return 0
 }
 
+# try_flush_append_only <>
+# WP-538 (incident 2026-10-09/10, Claude+Kimi+Codex): fpf-check-references
+# and wp-reopen-gate only ever append to their own declared files (see
+# automation-contract.conf mode "append") — they never produce a mirror of
+# any origin commit, so try_automation_mirror_recovery/try_contract_mirror_discard
+# above can never resolve them, and the resulting permanent dirt blocked the
+# ff-only merge below for every OTHER contract path too, every cycle, for
+# three days straight (373 commits of drift by the time this was found).
+#
+# Safety proof is against this repo's own HEAD, not against any origin tree:
+# commit the path only if the bytes on disk are an exact superset of HEAD's
+# committed bytes for that same path, old content first, byte for byte. Any
+# other difference (truncation, an edit in the middle, a changed byte
+# anywhere before the old length) fails closed and leaves the path
+# untouched — same default as every other check in this file. This commits
+# local-only content ahead of origin; nothing here pushes it (out of scope
+# for a script whose only other mutations are `git reset --soft`/`git
+# restore` — WP-538 round 4, Codex: pushing it is a separate, already-
+# existing periodic job's job, not this script's).
+try_flush_append_only() {
+  local status_file entry x path automation old_len flushed=0
+  # -z/NUL-read, not plain --porcelain=v1 line-splitting: core.quotePath
+  # (on by default) quotes/escapes any path with a space, quote, backslash
+  # or non-ASCII byte -- which includes the Cyrillic names this repo's own
+  # CLAUDE.md mandates for РП artifacts. A quoted literal would miss every
+  # lookup below and silently report "nothing to flush" (cold review, WP-538
+  # round 4) -- contract_mirror_paths above already learned this the same
+  # way and already uses -z; this function must match it, not relearn it.
+  status_file=$(mktemp "${TMPDIR:-/tmp}/canon-refresh-append.XXXXXX") || return 1
+  # shellcheck disable=SC2064  # path is fixed at trap time on purpose
+  trap "rm -f '$status_file'" RETURN
+  git status --porcelain=v1 -z > "$status_file" 2>/dev/null || return 1
+  [ -s "$status_file" ] || return 1
+  while IFS= read -r -d '' entry; do
+    [ -n "$entry" ] || continue
+    x="${entry:0:1}"
+    path="${entry:3}"
+    # Append-only automations write in place and never stage: a staged (X
+    # != ' ') or added/deleted/untracked path is not this function's case —
+    # leave it for try_automation_mirror_recovery/try_contract_mirror_discard
+    # or the plain refusal below, whichever applies.
+    [ "$x" = ' ' ] || continue
+    # `head -c` reads through a symlink to its TARGET's bytes, while git's
+    # blob for a symlinked path is the link-target string read via
+    # readlink() -- comparing the two would be a meaningless pass/fail on
+    # unrelated byte streams (cold review, WP-538 round 4). No declared
+    # append-only glob is a symlink today, but nothing enforces that stays
+    # true, so check it the same way the mirror-discard path above already
+    # checks `-f` before trusting a path (line ~367).
+    [ -L "$path" ] && continue
+    automation=$(automation_contract_append_owner "$path") || continue
+    old_len=$(git cat-file -s "HEAD:$path" 2>/dev/null) || continue
+    # cmp on two process-substitution streams, not a `$()`-captured string:
+    # command substitution strips trailing newlines, which would silently
+    # accept a file whose last committed byte was dropped (Codex, round 4).
+    cmp -s <(git show "HEAD:$path" 2>/dev/null) <(head -c "$old_len" -- "$path" 2>/dev/null) || continue
+    if ! git add -- "$path"; then
+      echo "canon-refresh: append-only flush — git add failed for '$path' (owner: $automation), leaving it dirty" >&2
+      continue
+    fi
+    flushed=1
+  done < "$status_file"
+  [ "$flushed" = 1 ] || return 1
+  if ! git commit -q -m "chore(sync): flush append-only automation writes (canon-refresh.sh)"; then
+    echo "canon-refresh: append-only flush — git commit failed after staging; paths remain staged, not committed" >&2
+    return 1
+  fi
+  echo "canon-refresh: committed append-only writes in $REPO — HEAD now ahead of origin, a later push delivers them"
+  return 0
+}
+
+if ! is_clean; then
+  try_flush_append_only || true
+fi
+
 if ! is_clean; then
   REMOTE_OID_FOR_RECOVERY=$(git rev-parse "origin/$BRANCH" 2>/dev/null) || REMOTE_OID_FOR_RECOVERY=""
   if [ -n "$REMOTE_OID_FOR_RECOVERY" ] && try_automation_mirror_recovery "$REMOTE_OID_FOR_RECOVERY"; then

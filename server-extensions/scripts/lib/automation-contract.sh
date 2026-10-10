@@ -20,11 +20,14 @@ automation_contract_file() {
 # Prints "<caller-basename><TAB><comma-separated globs>" and returns 0, or
 # prints nothing and returns 1 if the name has no entry (or the file is
 # missing/unreadable — fail closed, same as every other lookup in this repo).
+# Field 4 (mode) is read by automation_contract_append_owner below, not here —
+# this function's two-field output is an existing contract other callers rely
+# on (automation_contract_path_allowed's "${entry#*$'\t'}" split).
 automation_contract_lookup() {
-  local name="$1" contract_file auto caller globs
+  local name="$1" contract_file auto caller globs mode
   contract_file=$(automation_contract_file)
   [ -r "$contract_file" ] || return 1
-  while IFS=$'\t' read -r auto caller globs || [ -n "$auto" ]; do
+  while IFS=$'\t' read -r auto caller globs mode || [ -n "$auto" ]; do
     case "$auto" in
       ''|'#'*) continue ;;
     esac
@@ -107,5 +110,48 @@ automation_contract_path_allowed() {
   for g in "$@"; do
     _automation_glob_match "$path" "$g" && return 0
   done
+  return 1
+}
+
+# automation_contract_append_owner <path>
+# WP-538 (incident 2026-10-09/10, Claude+Kimi+Codex): some declared
+# automations never produce a byte-for-byte mirror of any origin tip —
+# fpf-check-references and wp-reopen-gate only ever append to their own log
+# files, so automation_mirror_snapshot's whole-tree-equals-one-commit check
+# (designed for sync-strategy-files.sh) can never pass for them even when
+# nothing is actually at risk. Prints the owning automation's name and
+# returns 0 for a path declared with mode "append" in column 4; prints
+# nothing and returns 1 for every other case (no entry, wrong mode, path not
+# in that automation's globs) — same fail-closed default as the rest of this
+# file. canon-refresh.sh uses this to decide which dirty paths are even
+# candidates for its own content-level append-only proof; this function only
+# answers "who declares ownership of this path as append-only", nothing
+# about the actual file content.
+automation_contract_append_owner() {
+  local path="$1" contract_file auto caller globs mode g ifs_saved noglob_was_set
+  contract_file=$(automation_contract_file)
+  [ -r "$contract_file" ] || return 1
+  while IFS=$'\t' read -r auto caller globs mode || [ -n "$auto" ]; do
+    case "$auto" in
+      ''|'#'*) continue ;;
+    esac
+    [ "$mode" = "append" ] || continue
+    case "$-" in
+      *f*) noglob_was_set=1 ;;
+      *) noglob_was_set=0 ;;
+    esac
+    set -f
+    ifs_saved="$IFS"
+    IFS=','
+    set -- $globs
+    IFS="$ifs_saved"
+    [ "$noglob_was_set" -eq 1 ] || set +f
+    for g in "$@"; do
+      if _automation_glob_match "$path" "$g"; then
+        printf '%s\n' "$auto"
+        return 0
+      fi
+    done
+  done < "$contract_file"
   return 1
 }
