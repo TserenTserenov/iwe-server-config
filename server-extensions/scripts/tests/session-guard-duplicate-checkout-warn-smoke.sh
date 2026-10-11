@@ -8,7 +8,7 @@ set -euo pipefail
 
 ROOT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
 GUARD="$ROOT_DIR/scripts/session-guard.sh"
-TEST_ROOT=$(mktemp -d /private/tmp/session-guard-dup-checkout.XXXXXX)
+TEST_ROOT=$(mktemp -d /private/tmp/session-guard-dup-checkout.XXXXXX 2>/dev/null || mktemp -d)
 trap 'rm -rf "$TEST_ROOT"' EXIT
 
 # gov_repo_dir() (the existing identity mechanism this fix reuses) only
@@ -76,24 +76,32 @@ if [ ! -f "$TEST_ROOT/.iwe-runtime/sessions/fixture-beta-beta.open" ]; then
     exit 1
 fi
 
-# The sibling pre-commit warning consumes the same governance identity. It
-# must see the actual checkouts even though orz_sessions_dir names MC-sessions,
-# and it remains advisory when git runs from canonical by mistake.
+# The sibling pre-commit check (6a) consumes the same governance identity. It
+# must see the actual checkouts even though orz_sessions_dir names MC-sessions.
+# Hard block since 2026-10-11 (peer-session 2026-10-10-03-tsekh1-sync-lag-fix):
+# the one-week observation window (ArchGate WP-539, 2026-08-18) ran out long
+# before this test was last touched, and the gap it watches for is exactly
+# what caused the WP-539 Ф16 multi-day outage (8 unpublished commits landing
+# in the frozen canonical checkout by this same inertia mistake). This test
+# used to assert "advisory, never blocks" for this exact scenario; that
+# assertion is now the wrong contract to pin down.
 mkdir -p "$TEST_ROOT/home"
-if ! PRECOMMIT_OUT=$(cd "$CANONICAL" && HOME="$TEST_ROOT/home" \
+PRECOMMIT_RC=0
+PRECOMMIT_OUT=$(cd "$CANONICAL" && HOME="$TEST_ROOT/home" \
     IWE_ROOT="$TEST_ROOT" IWE_GOVERNANCE_REPO="canonical" \
-    bash "$GUARD" pre-commit-check 2>&1); then
-    echo "FAIL: checkout-mismatch observation must not block pre-commit: $PRECOMMIT_OUT" >&2
+    bash "$GUARD" pre-commit-check 2>&1) || PRECOMMIT_RC=$?
+if [ "$PRECOMMIT_RC" -ne 6 ]; then
+    echo "FAIL: checkout mismatch must block pre-commit with exit 6, got rc=$PRECOMMIT_RC: $PRECOMMIT_OUT" >&2
     exit 1
 fi
 if ! grep -q 'зарегистрированная worktree не совпадает' <<<"$PRECOMMIT_OUT" \
    || ! grep -Fq "$CHECKOUT_A" <<<"$PRECOMMIT_OUT" \
    || ! grep -Fq "$CHECKOUT_B" <<<"$PRECOMMIT_OUT"; then
-    echo "FAIL: pre-commit warning must attribute both governance checkouts: $PRECOMMIT_OUT" >&2
+    echo "FAIL: pre-commit block must attribute both governance checkouts: $PRECOMMIT_OUT" >&2
     exit 1
 fi
 if grep -Fq "$MC_SESSIONS" <<<"$PRECOMMIT_OUT"; then
-    echo "FAIL: pre-commit warning must not treat MC-sessions as a governance checkout: $PRECOMMIT_OUT" >&2
+    echo "FAIL: pre-commit block must not treat MC-sessions as a governance checkout: $PRECOMMIT_OUT" >&2
     exit 1
 fi
 
