@@ -20,6 +20,7 @@ in
     ../../modules/backup.nix
     ../../modules/monitoring.nix
     ../../modules/caddy.nix
+    ../../modules/tailscale.nix
     # ../../modules/postgres-preprod.nix  # Ф3
     ../../modules/systemd-timers.nix
     ../../modules/claude-agents.nix
@@ -90,6 +91,12 @@ in
     enable        = true;
     workspacePath = values.iweHome;
     publicHost    = values.ipv4.address;
+  };
+
+  # Приватная сеть для доступа с телефона (WP-389) — первый вход интерактивный,
+  # см. комментарий в modules/tailscale.nix.
+  tsekh.tailscale = {
+    enable = true;
   };
 
   tsekh.calendarSecrets = {
