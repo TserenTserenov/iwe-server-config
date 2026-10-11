@@ -58,6 +58,61 @@ class PublicationReceiptTest(unittest.TestCase):
     def verify(self, source, remote):
         return receipt.verify(self.repo, self.sem, "repo", source, remote)
 
+    def test_draft_pr_proof_requires_matching_live_pr_and_remote_head(self):
+        remote = self.root / "remote.git"
+        subprocess.run(["git", "init", "--bare", "-q", str(remote)], check=True)
+        branch = "session-isolate/codex-wp561-f23"
+        self.git("push", "-q", "origin", "HEAD:refs/heads/" + branch)
+        self.claim(self.base)
+        governance = self.root / "governance"
+        sessions = self.root / "sessions"
+        governance.mkdir()
+        sessions.mkdir()
+        with self.sem.open("a") as out:
+            out.write("governance_worktree: " + str(governance) + "\n")
+            out.write("orz_sessions_dir: " + str(sessions) + "\n")
+        pr = {"state": "open", "draft": True, "merged_at": None,
+              "head": {"sha": self.base, "ref": branch,
+                       "repo": {"full_name": "TserenTserenov/repo"}},
+              "base": {"ref": "main", "repo": {"full_name": "TserenTserenov/repo"}}}
+        real_run = subprocess.run
+
+        def verify_with(payload):
+            def run(args, **kwargs):
+                if args[:2] == ["gh", "api"]:
+                    return subprocess.CompletedProcess(args, 0, json.dumps([payload]).encode())
+                return real_run(args, **kwargs)
+
+            def identity(path):
+                if path == self.repo:
+                    return self.repo / ".git", "github.com/TserenTserenov/repo"
+                return path / ".git", "github.com/TserenTserenov/" + path.name
+
+            with (patch.object(receipt, "repository_identity", side_effect=identity),
+                  patch.object(receipt.subprocess, "run", side_effect=run)):
+                return receipt.verify_review_pr(self.repo, self.sem, "repo", self.base, self.root)
+
+        self.assertTrue(verify_with([pr]))
+        with patch.dict(os.environ, {"GIT_CONFIG_COUNT": "1",
+                                     "GIT_CONFIG_KEY_0": "remote.origin.url",
+                                     "GIT_CONFIG_VALUE_0": str(self.root / "wrong.git")}):
+            self.assertTrue(verify_with([pr]))
+        original = self.sem.read_text()
+        self.sem.write_text(original.replace(str(governance), str(self.repo)))
+        self.assertFalse(verify_with([pr]))
+        self.sem.write_text(original.replace("commit: repo " + self.base + "\n", ""))
+        self.assertFalse(verify_with([pr]))
+        self.sem.write_text(original)
+        for changed in ({**pr, "draft": False}, {**pr, "state": "closed"},
+                        {**pr, "head": {**pr["head"], "sha": "0" * 40}},
+                        {**pr, "head": {**pr["head"], "ref": "foreign-branch"}},
+                        {**pr, "base": {**pr["base"], "ref": "pilot"}}):
+            self.assertFalse(verify_with([changed]))
+        self.assertFalse(verify_with([pr, pr]))
+        self.assertFalse(verify_with([]))
+        self.git("push", "-q", "origin", "--delete", branch)
+        self.assertFalse(verify_with([pr]))
+
     def test_line_superset_proves_only_exact_unique_replacements(self):
         def commit_files(message, inputs):
             for name, content in inputs.items():

@@ -434,6 +434,81 @@ def verify_product(repo: Path, semaphore: Path, name: str, source: str, root: Pa
     return False
 
 
+def verify_review_pr(repo: Path, semaphore: Path, name: str, source: str,
+                     root: Path) -> bool:
+    """A live draft PR is delivery evidence for an explicitly claimed product commit.
+
+    This does not attest deployment or merge. Both GitHub's current PR record
+    and the remote Git ref must still point at the exact claimed commit.
+    """
+    raw = snapshot(semaphore)
+    if source not in claims(raw, name, repo):
+        return False
+    if not re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", source):
+        return False
+    root = root.resolve(strict=True)
+    common, origin = repository_identity(repo)
+    common = common.resolve(strict=True)
+    if (common.name != ".git" or common.parent.name != name
+            or common.parent.parent not in {root, root / "DS-MCP", root / "DS-IT-systems"}
+            or origin != "github.com/TserenTserenov/" + name):
+        return False
+    for key in ("governance_worktree", "orz_sessions_dir"):
+        protected = Path(field(raw, key))
+        if not protected.is_absolute():
+            return False
+        other_common, other_origin = repository_identity(protected.resolve(strict=True))
+        if common == other_common or origin == other_origin:
+            return False
+    if oid(repo, source + "^{commit}") != source:
+        return False
+
+    agent = field(raw, "agent")
+    wp = field(raw, "wp")
+    if not re.fullmatch(r"[a-z][a-z0-9-]*", agent) or not re.fullmatch(r"WP-[0-9]+", wp):
+        return False
+    endpoint = "repos/TserenTserenov/" + name + "/commits/" + source + "/pulls"
+    result = subprocess.run(["gh", "api", "--paginate", "--slurp", endpoint],
+                            env=git_env(), stdout=subprocess.PIPE,
+                            stderr=subprocess.DEVNULL, timeout=20)
+    if result.returncode != 0 or len(result.stdout) > MAX_BYTES:
+        return False
+    pages = json.loads(result.stdout)
+    if not isinstance(pages, list) or any(not isinstance(page, list) for page in pages):
+        return False
+    matches = []
+    for page in pages:
+        for pr in page:
+            if not isinstance(pr, dict):
+                continue
+            head, base = pr.get("head"), pr.get("base")
+            if not isinstance(head, dict) or not isinstance(base, dict):
+                continue
+            head_repo, base_repo = head.get("repo"), base.get("repo")
+            if not isinstance(head_repo, dict) or not isinstance(base_repo, dict):
+                continue
+            branch = head.get("ref")
+            if (pr.get("state") == "open" and pr.get("draft") is True
+                    and pr.get("merged_at") is None
+                    and head_repo.get("full_name") == "TserenTserenov/" + name
+                    and base_repo.get("full_name") == "TserenTserenov/" + name
+                    and base.get("ref") == "main" and head.get("sha") == source
+                    and isinstance(branch, str)
+                    and re.fullmatch(r"session-isolate/" + re.escape(agent) + r"-"
+                                     + re.escape(wp.lower().replace("-", ""))
+                                     + r"-[a-zA-Z0-9._/-]+", branch)):
+                matches.append(branch)
+    if len(matches) != 1:
+        return False
+    transport_env = {key: value for key, value in os.environ.items()
+                     if not key.startswith("GIT_")}
+    transport_env["GIT_TERMINAL_PROMPT"] = "0"
+    remote = git(repo, "ls-remote", "origin", "refs/heads/" + matches[0],
+                 env=transport_env).decode().strip()
+    return (remote == source + "\trefs/heads/" + matches[0]
+            and snapshot(semaphore) == raw)
+
+
 def receipt(repo: Path, raw: bytes, repo_name: str, source: str, anchor: str,
             target_ref: str = MAIN_REF) -> dict:
     result = receipt_identity(repo, raw, repo_name, source, anchor, target_ref)
@@ -689,7 +764,7 @@ def verify_checkout(repo: Path, semaphore: Path, name: str, remote: str) -> bool
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("action", choices=("record", "verify", "verify-checkout", "verify-product",
-                                           "select-checkout"))
+                                           "verify-review-pr", "select-checkout"))
     parser.add_argument("semaphore", type=Path)
     parser.add_argument("repo", type=Path)
     parser.add_argument("repo_name")
@@ -709,6 +784,11 @@ def main() -> int:
             if args.workspace is None:
                 raise ProofError("product proof requires workspace identity")
             return 0 if verify_product(args.repo, args.semaphore, args.repo_name, args.commit, args.workspace) else 1
+        if args.action == "verify-review-pr":
+            if args.workspace is None:
+                raise ProofError("review PR proof requires workspace identity")
+            return 0 if verify_review_pr(args.repo, args.semaphore, args.repo_name,
+                                         args.commit, args.workspace) else 1
         if args.action == "record":
             if args.target_ref != MAIN_REF or args.workspace is not None:
                 if args.workspace is None:
