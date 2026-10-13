@@ -430,11 +430,25 @@ fi
 # 1. no live canonical writer (strict, Codex round 3). Isolated sessions never
 #    touch this tree; only semaphores without isolated_worktree count.
 live_canonical_writers() {  # prints " name name ..." or nothing
-  local sem sem_pid out=""
+  local sem sem_pid sem_host out=""
+  local self_pid="${OWNER_PID:-${CLAUDE_PID:-}}" self_host="$(uname -n)"
   for sem in "$RUNTIME_DIR"/sessions/*.open; do
     [ -f "$sem" ] || continue
     grep -q '^isolated_worktree:' "$sem" && continue
     sem_pid=$(awk '$1=="pid:"{print $2; exit}' "$sem")
+    sem_host=$(awk '$1=="host:"{print $2; exit}' "$sem")
+    # Same pid as ours (OWNER_PID/CLAUDE_PID, the env var session-guard wrote
+    # it from) is our own still-open semaphore, not a foreign writer -- it
+    # hasn't closed yet only because this reconcile call is part of its own
+    # publish/close sequence (WP-7, found 2026-10-13). A pid is only unique
+    # within one host's process namespace (same guard as session-guard.sh's
+    # _quarantine_dead_interactive, WP-530 Ф53): require the recorded host,
+    # when present, to match ours too, or a restored/foreign semaphore whose
+    # pid numerically collides with ours would be skipped as if it were us.
+    if [ -n "$self_pid" ] && [ "$sem_pid" = "$self_pid" ] \
+        && { [ -z "$sem_host" ] || [ "$sem_host" = "$self_host" ]; }; then
+      continue
+    fi
     # no pid (Kimi/Codex semaphores never carry one) = no proof of death -> treat as live, like session-guard's own sweep
     if [ -z "$sem_pid" ] || kill -0 "$sem_pid" 2>/dev/null; then out="$out $(basename "$sem" .open)"; fi
   done

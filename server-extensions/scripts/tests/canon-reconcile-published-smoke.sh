@@ -1262,4 +1262,29 @@ o=$(bash "$SCRIPT" "$CANON" main 2>&1); rc=$?
 assert "$rc/$(printf '%s' "$o" | grep -c "lock busy, skipping this cycle -- owner pid $DEAD_PID is gone, but its record is in the old format")/$([ -d "$GD/dirty-guard.lock" ] && echo present || echo gone)/$(grep -c "^pid=$DEAD_PID$" "$GD/dirty-guard.lock/owner")" "0/1/present/1" "the old-format lock of a dead owner is left alone, loudly, and the record is untouched"
 rm -rf "$GD/dirty-guard.lock"
 
+echo "scenario 81 (WP-7, 2026-10-13, peer-session Claude+Kimi+Codex): a semaphore whose pid matches this process's own CLAUDE_PID/OWNER_PID is its own still-open semaphore, not a foreign live writer -- a semaphore with a different, genuinely live pid still blocks"
+fresh s81; echo one > "$CANON/b.txt"; commit_in "$CANON" "local"; C=$(git -C "$CANON" rev-parse HEAD); republish_on_origin "$CANON" "$C"
+sleep 30 & OTHER_PID=$!
+printf 'agent: claude-code\npid: %s\n' "$OTHER_PID" > "$IWE_RUNTIME_DIR/sessions/claude-code-other.open"; H=$(git -C "$CANON" rev-parse HEAD)
+CLAUDE_PID="$$" bash "$SCRIPT" "$CANON" main >/dev/null 2>&1; rc=$?
+assert "$rc" "1" "a different live pid still blocks even with CLAUDE_PID set"; assert "$(git -C "$CANON" rev-parse HEAD)" "$H" "HEAD unchanged"
+rm -f "$IWE_RUNTIME_DIR/sessions/claude-code-other.open"
+printf 'agent: claude-code\npid: %s\n' "$$" > "$IWE_RUNTIME_DIR/sessions/claude-code-self.open"
+CLAUDE_PID="$$" bash "$SCRIPT" "$CANON" main >/dev/null 2>&1; rc=$?
+git -C "$CANON" fetch -q origin
+assert "$rc" "0" "own semaphore (matching CLAUDE_PID) does not block"; assert "$(git -C "$CANON" rev-parse HEAD)" "$(git -C "$CANON" rev-parse origin/main)" "replaced once the only live semaphore is our own"
+rm -f "$IWE_RUNTIME_DIR/sessions/claude-code-self.open"; kill "$OTHER_PID" 2>/dev/null; wait "$OTHER_PID" 2>/dev/null
+
+echo "scenario 82 (WP-7, 2026-10-13, cold review by subagent): a pid is only unique within one host's process namespace -- a foreign semaphore recording a DIFFERENT host that happens to carry the same pid number as ours still blocks, exactly like session-guard.sh's own _quarantine_dead_interactive already requires for this field"
+fresh s82; echo one > "$CANON/b.txt"; commit_in "$CANON" "local"; C=$(git -C "$CANON" rev-parse HEAD); republish_on_origin "$CANON" "$C"
+printf 'agent: claude-code\npid: %s\nhost: some-other-host\n' "$$" > "$IWE_RUNTIME_DIR/sessions/claude-code-foreign-host.open"; H=$(git -C "$CANON" rev-parse HEAD)
+CLAUDE_PID="$$" bash "$SCRIPT" "$CANON" main >/dev/null 2>&1; rc=$?
+assert "$rc" "1" "same pid, different recorded host: still blocks (a numeric pid collision across hosts is not proof it's ours)"; assert "$(git -C "$CANON" rev-parse HEAD)" "$H" "HEAD unchanged"
+rm -f "$IWE_RUNTIME_DIR/sessions/claude-code-foreign-host.open"
+printf 'agent: claude-code\npid: %s\nhost: %s\n' "$$" "$(uname -n)" > "$IWE_RUNTIME_DIR/sessions/claude-code-same-host.open"
+CLAUDE_PID="$$" bash "$SCRIPT" "$CANON" main >/dev/null 2>&1; rc=$?
+git -C "$CANON" fetch -q origin
+assert "$rc" "0" "same pid, same recorded host: does not block"; assert "$(git -C "$CANON" rev-parse HEAD)" "$(git -C "$CANON" rev-parse origin/main)" "replaced once the only live semaphore is our own, host confirmed"
+rm -f "$IWE_RUNTIME_DIR/sessions/claude-code-same-host.open"
+
 [ "$fails" = 0 ] && echo "PASS: all scenarios" || { echo "FAIL: $fails assertion(s)"; exit 1; }
