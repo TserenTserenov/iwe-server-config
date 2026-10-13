@@ -583,12 +583,11 @@ git_log_for_file() {
 extract_open_phases() {
   local file="$1"
   if has_structured_phases "$file"; then
-    extract_structured_open_phases "$file" | head -20
+    extract_structured_open_phases "$file"
   else
     awk '/^---$/{fm++; next} fm<2{next} {print}' "$file" 2>/dev/null \
       | grep -E '^\s*- \[ \]' \
       | sed 's/^\s*- \[ \] //' \
-      | head -20 \
       || true
   fi
 }

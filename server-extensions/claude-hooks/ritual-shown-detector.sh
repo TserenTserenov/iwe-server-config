@@ -2,8 +2,17 @@
 # ritual-shown-detector.sh — проверяемый по факту вывода признак показа
 # Ритуала согласования (TACT-01, РП-544 Д31, РП-561 Ф6-а).
 #
-# Тип: Stop hook. Уровень: наблюдатель, не блокирует — всегда exit 0.
-# Лог: machine/ledger/day-<date>.yaml, событие "ritual_shown" (ledger-append.sh).
+# Тип: Stop hook. Уровень: наблюдатель (всегда пишет ritual_shown в ledger,
+# exit 0) ПЛЮС однократный блокирующий гейт за сессию (РП-544 Д31, решение
+# пилота 13.10.2026 peer-session 2026-10-13-10-revizija-otkrytij-zakrytij):
+# первый Stop с ritual_status=absent на нетривиальной сессии возвращает
+# {"decision":"block"} — агент обязан показать блок Ритуала задним числом,
+# прежде чем ход реально завершится. Второй и последующие Stop той же
+# сессии больше не блокируют (state-файл ritual-gate-enforced-<session_id>),
+# чтобы несогласие/баг детектора не подвешивал сессию навсегда — тот же
+# fail-open принцип, что уже применяется в TACT-02 (РП-561 Ф6-а).
+# Лог: machine/ledger/day-<date>.yaml, события "ritual_shown" и
+# "ritual_gate_enforced" (ledger-append.sh).
 #
 # Не путать с полем session_opened.sync_gate_marker_present — то фиксирует
 # ТОЛЬКО свежесть .claude/state/wp-sync-<WP>.done (шаг Sync Gate), не имеет
@@ -179,6 +188,9 @@ RITUAL_STATUS=$(printf '%s' "$RESULT" | jq -r '.ritual_status // empty' 2>/dev/n
 GOV_REPO_ROOT="$PROJECT_DIR/${IWE_GOVERNANCE_REPO:-DS-my-strategy}"
 LEDGER_APPEND="$GOV_REPO_ROOT/scripts/ledger-append.sh"
 LEDGER_WRITTEN=false
+# Становится true только после успешной настройки маршрута — тот же маршрут
+# переиспользует запись ritual_gate_enforced ниже.
+LEDGER_ROUTE_READY=false
 if [ -f "$LEDGER_APPEND" ] || [ -f "$PROJECT_DIR/.iwe-runtime/day-close-ledger-route.py" ]; then
   # shellcheck source=lib/day-close-ledger-route.sh
   . "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/day-close-ledger-route.sh"
@@ -191,6 +203,7 @@ if [ -f "$LEDGER_APPEND" ] || [ -f "$PROJECT_DIR/.iwe-runtime/day-close-ledger-r
     echo "ritual-shown-detector: owner-aware route unavailable; will retry next Stop" >&2
     exit 0
   fi
+  LEDGER_ROUTE_READY=true
   EVENT_JSON=$(python3 -c '
 import json, sys
 print(json.dumps({"session_id": sys.argv[1], "ritual_status": sys.argv[2]}))
@@ -212,8 +225,37 @@ fi
 if [ "$LEDGER_WRITTEN" = "true" ]; then
   mkdir -p "$STATE_DIR"
   : > "$STATE_FILE"
-  # Уборка старых маркеров (>24ч) — тот же паттерн, что response-clarity-hook.sh.
-  find "$STATE_DIR" -name "ritual-checked-*" -mmin +1440 -delete 2>/dev/null || true
+  # Уборка старых маркеров (>24ч) обоих видов — тот же паттерн, что
+  # response-clarity-hook.sh. Маркер гейта живёт по тому же сроку, что и
+  # маркер проверки: без этого ritual-gate-enforced-* копились бы бессрочно.
+  find "$STATE_DIR" \( -name "ritual-checked-*" -o -name "ritual-gate-enforced-*" \) \
+    -mmin +1440 -delete 2>/dev/null || true
+fi
+
+# Однократный блокирующий гейт (РП-544 Д31). Маркер ставится ДО вывода
+# решения и независимо от записи в ledger: запись события — наблюдаемость,
+# гейт — поведение; сбой первой не должен ни отключать, ни повторять второе.
+# Тот же check-then-create, что у ritual-checked-*: Claude Code шлёт один
+# Stop на ход, параллельных Stop одной сессии не бывает — атомарность не нужна.
+GATE_MARKER="$STATE_DIR/ritual-gate-enforced-$SESSION_ID"
+if [ "$RITUAL_STATUS" = "absent" ] && [ ! -f "$GATE_MARKER" ]; then
+  mkdir -p "$STATE_DIR"
+  : > "$GATE_MARKER"
+  GATE_EVENT_JSON=$(python3 -c '
+import json, sys
+print(json.dumps({"session_id": sys.argv[1]}))
+' "$SESSION_ID" 2>/dev/null) || GATE_EVENT_JSON=""
+  if [ -n "$GATE_EVENT_JSON" ] && [ "$LEDGER_ROUTE_READY" = "true" ]; then
+    ledger_route_append ritual_gate_enforced "$GATE_EVENT_JSON" ritual-shown-detector \
+      || echo "ritual-shown-detector: ritual_gate_enforced ledger write failed for session $SESSION_ID" >&2
+  else
+    # Повтора не будет (маркер уже стоит) — поэтому пропуск события должен быть виден.
+    echo "ritual-shown-detector: ritual_gate_enforced not logged for session $SESSION_ID (ledger route unavailable)" >&2
+  fi
+  cat <<'EOF'
+{"decision": "block", "reason": "WP Gate: Ритуал согласования (роль/РП/класс/ставка — memory/protocol-open.md §Сессия) не был объявлен в этой сессии. Решение РП-544 Д31 (13.10.2026) сделало это блокирующим гейтом. Покажи пилоту блок Ритуала сейчас, задним числом, и дождись его ответа на следующем ходу — только потом завершай."}
+EOF
+  exit 0
 fi
 
 echo '{}'
