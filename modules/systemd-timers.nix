@@ -1406,6 +1406,7 @@ in
     # пересобирает current/process-board.md (gitignored, не трогает git-дерево).
     systemd.services."iwe-wp-panel-snapshot" = {
       description = "IWE — снимок панели РП (WP-494) для площадки tsekh-1";
+      unitConfig   = commonUnitConfig;
       serviceConfig = commonServiceConfig // {
         ExecStart = "${pythonForIWE}/bin/python3 ${iwe}/DS-my-strategy/scripts/build-process-board.py --snapshot-out ${iwe}/.iwe-runtime/wp-panel-snapshot.json --site-id tsekh-1";
         TimeoutSec = 60;
