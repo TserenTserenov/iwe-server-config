@@ -2,17 +2,17 @@
 # ritual-shown-detector.sh — проверяемый по факту вывода признак показа
 # Ритуала согласования (TACT-01, РП-544 Д31, РП-561 Ф6-а).
 #
-# Тип: Stop hook. Уровень: наблюдатель (всегда пишет ritual_shown в ledger,
-# exit 0) ПЛЮС однократный блокирующий гейт за сессию (РП-544 Д31, решение
-# пилота 13.10.2026 peer-session 2026-10-13-10-revizija-otkrytij-zakrytij):
-# первый Stop с ritual_status=absent на нетривиальной сессии возвращает
-# {"decision":"block"} — агент обязан показать блок Ритуала задним числом,
-# прежде чем ход реально завершится. Второй и последующие Stop той же
-# сессии больше не блокируют (state-файл ritual-gate-enforced-<session_id>),
-# чтобы несогласие/баг детектора не подвешивал сессию навсегда — тот же
-# fail-open принцип, что уже применяется в TACT-02 (РП-561 Ф6-а).
-# Лог: machine/ledger/day-<date>.yaml, события "ritual_shown" и
-# "ritual_gate_enforced" (ledger-append.sh).
+# Тип: Stop hook. Уровень: чистый наблюдатель — всегда exit 0, только пишет
+# ritual_shown в ledger (machine/ledger/day-<date>.yaml, ledger-append.sh).
+#
+# РП-544 Д31 (13.10.2026) на один день превратил этот хук в блокирующий —
+# возвращал {"decision":"block"} с текстом "покажи Ритуал задним числом".
+# Диагноз той же даты (пир-сессия 2026-10-13-19-retroactive-ritual-gate,
+# Claude+Kimi+Codex): блок на Stop физически не может сработать РАНЬШЕ
+# начала работы — Stop срабатывает, когда ход уже произведён и большая
+# часть вывода уже видна пилоту (стриминг). Поэтому блокирующая ветка
+# убрана целиком; наблюдение (эта логика) используется новым хуком
+# ritual-pre-gate.sh (PreToolUse, warn-only), см. тот файл.
 #
 # Не путать с полем session_opened.sync_gate_marker_present — то фиксирует
 # ТОЛЬКО свежесть .claude/state/wp-sync-<WP>.done (шаг Sync Gate), не имеет
@@ -66,116 +66,9 @@ STATE_DIR="$PROJECT_DIR/.claude/state"
 STATE_FILE="$STATE_DIR/ritual-checked-$SESSION_ID"
 [ -f "$STATE_FILE" ] && exit 0
 
-# --- Один проход по всей стенограмме (не только текущего хода): нетривиальность
-# и сигнатура Ритуала считаются по накопленной истории, потому что порог
-# ">20 записей" может быть пересечён на N-м ходу, а сам блок Ритуала обычно
-# показывается на первом. Один Python-проход надёжнее поэлементного shell+jq.
-RESULT=$(TRANSCRIPT_PATH="$TRANSCRIPT_PATH" python3 <<'PY' 2>/dev/null || echo ""
-import json, os, re
-
-path = os.environ["TRANSCRIPT_PATH"]
-rows = []
-with open(path, encoding="utf-8") as f:
-    for line in f:
-        line = line.strip()
-        if not line:
-            continue
-        try:
-            rows.append(json.loads(line))
-        except Exception:
-            continue
-
-def role_of(r):
-    return r.get("type") or r.get("role") or ""
-
-def blocks_of(r):
-    content = r.get("message", {}).get("content", r.get("content", []))
-    if isinstance(content, str):
-        return [{"type": "text", "text": content}]
-    if isinstance(content, list):
-        return [b for b in content if isinstance(b, dict)]
-    return []
-
-def has_tool_use(r):
-    return any(b.get("type") == "tool_use" for b in blocks_of(r))
-
-def assistant_text(r):
-    return "\n".join(b.get("text", "") for b in blocks_of(r) if b.get("type") == "text")
-
-total_records = len(rows)
-tool_use_present = any(role_of(r) == "assistant" and has_tool_use(r) for r in rows)
-
-if not (total_records > 20 and tool_use_present):
-    print(json.dumps({"applies": False}))
-    raise SystemExit
-
-# Сигнатура блока Ритуала — структурный якорь, не голые ключевые слова.
-# Только "три фразы встречаются где-то в тексте" ловит и пересказ/обсуждение
-# протокола (этот же файл, WP-544/561, онбординг — обычное дело в этой
-# кодовой базе): один такой пересказ на первом ходу навсегда блокирует
-# детекцию настоящего Ритуала позже (проверка идёт один раз за сессию).
-# Поэтому требуем формат реального объявления (protocol-open.md §Ритуал
-# согласования, Шаг 1): blockquote-строка с жирным лейблом в начале строки
-# ("> **Роль пользователя:**"), и все три поля — в пределах одного окна
-# ±15 строк одного сообщения (сам блок компактный, 5 строк подряд).
-FIELD_PATTERNS = [
-    re.compile(r"^>\s*\*\*Роль\s+(пользователя|Claude)\s*:\*\*", re.IGNORECASE | re.MULTILINE),
-    re.compile(r"^>\s*\*\*РП\s*:\*\*", re.IGNORECASE | re.MULTILINE),
-    re.compile(r"^>\s*\*\*Целевой переход состояния\s*:\*\*", re.IGNORECASE | re.MULTILINE),
-]
-PROXIMITY_WINDOW_LINES = 15
-
-def ritual_block_present(text):
-    lines = text.split("\n")
-    match_lines = []
-    for pattern in FIELD_PATTERNS:
-        found_at = None
-        for i, line in enumerate(lines):
-            if pattern.search(line):
-                found_at = i
-                break
-        if found_at is None:
-            return False
-        match_lines.append(found_at)
-    return max(match_lines) - min(match_lines) <= PROXIMITY_WINDOW_LINES
-
-ritual_row_idx = None
-for i, r in enumerate(rows):
-    if role_of(r) != "assistant":
-        continue
-    text = assistant_text(r)
-    if not text:
-        continue
-    if ritual_block_present(text):
-        ritual_row_idx = i
-        break
-
-if ritual_row_idx is None:
-    print(json.dumps({"applies": True, "ritual_status": "absent", "total_records": total_records}))
-    raise SystemExit
-
-# Между блоком Ритуала и следующим tool_use — искать ход пользователя.
-next_tool_use_idx = None
-for i in range(ritual_row_idx, total_records):
-    if role_of(rows[i]) == "assistant" and has_tool_use(rows[i]):
-        next_tool_use_idx = i
-        break
-
-pause_found = False
-if next_tool_use_idx is not None:
-    for i in range(ritual_row_idx + 1, next_tool_use_idx):
-        if role_of(rows[i]) == "user":
-            pause_found = True
-            break
-else:
-    # tool_use после блока не найден вообще в текущей стенограмме —
-    # трактуем как паузу (агент ничего не предпринял после блока).
-    pause_found = True
-
-status = "text_and_pause" if pause_found else "text_only"
-print(json.dumps({"applies": True, "ritual_status": status, "total_records": total_records}))
-PY
-)
+# shellcheck source=lib/ritual-detect.sh
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/ritual-detect.sh"
+RESULT=$(ritual_detect_status "$TRANSCRIPT_PATH")
 
 [ -n "$RESULT" ] || exit 0
 
@@ -188,9 +81,6 @@ RITUAL_STATUS=$(printf '%s' "$RESULT" | jq -r '.ritual_status // empty' 2>/dev/n
 GOV_REPO_ROOT="$PROJECT_DIR/${IWE_GOVERNANCE_REPO:-DS-my-strategy}"
 LEDGER_APPEND="$GOV_REPO_ROOT/scripts/ledger-append.sh"
 LEDGER_WRITTEN=false
-# Становится true только после успешной настройки маршрута — тот же маршрут
-# переиспользует запись ritual_gate_enforced ниже.
-LEDGER_ROUTE_READY=false
 if [ -f "$LEDGER_APPEND" ] || [ -f "$PROJECT_DIR/.iwe-runtime/day-close-ledger-route.py" ]; then
   # shellcheck source=lib/day-close-ledger-route.sh
   . "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/day-close-ledger-route.sh"
@@ -203,7 +93,6 @@ if [ -f "$LEDGER_APPEND" ] || [ -f "$PROJECT_DIR/.iwe-runtime/day-close-ledger-r
     echo "ritual-shown-detector: owner-aware route unavailable; will retry next Stop" >&2
     exit 0
   fi
-  LEDGER_ROUTE_READY=true
   EVENT_JSON=$(python3 -c '
 import json, sys
 print(json.dumps({"session_id": sys.argv[1], "ritual_status": sys.argv[2]}))
@@ -225,37 +114,12 @@ fi
 if [ "$LEDGER_WRITTEN" = "true" ]; then
   mkdir -p "$STATE_DIR"
   : > "$STATE_FILE"
-  # Уборка старых маркеров (>24ч) обоих видов — тот же паттерн, что
-  # response-clarity-hook.sh. Маркер гейта живёт по тому же сроку, что и
-  # маркер проверки: без этого ritual-gate-enforced-* копились бы бессрочно.
-  find "$STATE_DIR" \( -name "ritual-checked-*" -o -name "ritual-gate-enforced-*" \) \
+  # Уборка старых маркеров (>24ч) — тот же паттерн, что response-clarity-hook.sh.
+  # ritual-confirmed-* принадлежит ritual-pre-gate.sh/ritual-hard-gate.sh
+  # (не этому хуку), но уборка живёт здесь централизованно, той же меткой
+  # времени — два отдельных find-а по одному state-каталогу не нужны.
+  find "$STATE_DIR" \( -name "ritual-checked-*" -o -name "ritual-confirmed-*" \) \
     -mmin +1440 -delete 2>/dev/null || true
-fi
-
-# Однократный блокирующий гейт (РП-544 Д31). Маркер ставится ДО вывода
-# решения и независимо от записи в ledger: запись события — наблюдаемость,
-# гейт — поведение; сбой первой не должен ни отключать, ни повторять второе.
-# Тот же check-then-create, что у ritual-checked-*: Claude Code шлёт один
-# Stop на ход, параллельных Stop одной сессии не бывает — атомарность не нужна.
-GATE_MARKER="$STATE_DIR/ritual-gate-enforced-$SESSION_ID"
-if [ "$RITUAL_STATUS" = "absent" ] && [ ! -f "$GATE_MARKER" ]; then
-  mkdir -p "$STATE_DIR"
-  : > "$GATE_MARKER"
-  GATE_EVENT_JSON=$(python3 -c '
-import json, sys
-print(json.dumps({"session_id": sys.argv[1]}))
-' "$SESSION_ID" 2>/dev/null) || GATE_EVENT_JSON=""
-  if [ -n "$GATE_EVENT_JSON" ] && [ "$LEDGER_ROUTE_READY" = "true" ]; then
-    ledger_route_append ritual_gate_enforced "$GATE_EVENT_JSON" ritual-shown-detector \
-      || echo "ritual-shown-detector: ritual_gate_enforced ledger write failed for session $SESSION_ID" >&2
-  else
-    # Повтора не будет (маркер уже стоит) — поэтому пропуск события должен быть виден.
-    echo "ritual-shown-detector: ritual_gate_enforced not logged for session $SESSION_ID (ledger route unavailable)" >&2
-  fi
-  cat <<'EOF'
-{"decision": "block", "reason": "WP Gate: Ритуал согласования (роль/РП/класс/ставка — memory/protocol-open.md §Сессия) не был объявлен в этой сессии. Решение РП-544 Д31 (13.10.2026) сделало это блокирующим гейтом. Покажи пилоту блок Ритуала сейчас, задним числом, и дождись его ответа на следующем ходу — только потом завершай."}
-EOF
-  exit 0
 fi
 
 echo '{}'
