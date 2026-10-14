@@ -1396,6 +1396,34 @@ in
     };
 
     # =========================================================
+    # WP-494 — WP PANEL SNAPSHOT (многоплощадочная панель VS Code, Ф12)
+    # =========================================================
+    # Снимок сессий/раннеров этой площадки для панели iwe-wp-panel: клиент
+    # читает его по SSH (`ssh tsekh-1 cat ~/IWE/.iwe-runtime/wp-panel-snapshot.json`,
+    # см. fetchAndCacheSnapshot в DS-iwe-wp-panel/src/ui/wpDashboard.ts), сам
+    # процесс сервер не слушает порт. `--snapshot-out`/`--site-id` — штатные
+    # флаги build-process-board.py (WP-482 Ф3); тот же вызов без них уже
+    # пересобирает current/process-board.md (gitignored, не трогает git-дерево).
+    systemd.services."iwe-wp-panel-snapshot" = {
+      description = "IWE — снимок панели РП (WP-494) для площадки tsekh-1";
+      serviceConfig = commonServiceConfig // {
+        ExecStart = "${pythonForIWE}/bin/python3 ${iwe}/DS-my-strategy/scripts/build-process-board.py --snapshot-out ${iwe}/.iwe-runtime/wp-panel-snapshot.json --site-id tsekh-1";
+        TimeoutSec = 60;
+      };
+      path = commonPath;
+      environment = commonEnv;
+    };
+
+    systemd.timers."iwe-wp-panel-snapshot" = {
+      wantedBy    = [ "timers.target" ];
+      description = "IWE снимок панели РП — каждые 5 минут";
+      timerConfig = {
+        OnCalendar = "*:0/5";
+        Persistent = true;
+      };
+    };
+
+    # =========================================================
     # FAILURE ALERT — template service (iwe-failure-alert@.service)
     # =========================================================
     # Вызывается через OnFailure=iwe-failure-alert@%N.service от каждого IWE-сервиса.
