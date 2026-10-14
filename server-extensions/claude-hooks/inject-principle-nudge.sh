@@ -48,9 +48,22 @@ CONTEXT_FILE="$STATE_DIR/principle-nudge-context-$SESSION_ID"
 CONTEXT_BLOCK_FILE="$STATE_DIR/principle-nudge-context-block-$SESSION_ID"
 F7_ENABLE_FILE="$STATE_DIR/principle-nudge-f7-enabled-$SESSION_ID"
 LOCK_DIR="$STATE_FILE.lock"
-# Both events use the same lock. On collision omit the nudge rather than
-# delivering a stale context from the preceding user prompt.
-if ! mkdir "$LOCK_DIR" 2>/dev/null; then
+# Both events use the same lock. Parallel SubagentStart calls wait briefly
+# for one another; UserPromptSubmit still fails closed on a collision so it
+# cannot deliver the preceding prompt's context.
+LOCK_ACQUIRED=0
+if [ "$EVENT" = "SubagentStart" ]; then
+  for (( attempt=0; attempt<100; attempt++ )); do
+    if mkdir "$LOCK_DIR" 2>/dev/null; then
+      LOCK_ACQUIRED=1
+      break
+    fi
+    sleep 0.05
+  done
+else
+  mkdir "$LOCK_DIR" 2>/dev/null && LOCK_ACQUIRED=1
+fi
+if [ "$LOCK_ACQUIRED" -ne 1 ]; then
   [ "$EVENT" = "UserPromptSubmit" ] && touch "$CONTEXT_BLOCK_FILE" 2>/dev/null
   echo '{}'; exit 0
 fi
