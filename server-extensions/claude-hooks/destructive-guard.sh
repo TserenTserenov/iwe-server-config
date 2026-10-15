@@ -424,6 +424,56 @@ reset_is_non_destructive() {
   git -C "$repo" merge-base --is-ancestor HEAD "$target" 2>/dev/null
 }
 
+# A --mixed/--soft reset never discards tracked work by itself (it only moves
+# HEAD/the index, never the working tree) -- but that is exactly the trap: it
+# can silently strand the working tree on an old snapshot while HEAD jumps to
+# a target hundreds of commits away, and `git status` then reports a clean
+# "0 ahead/0 behind" branch while ~189 tracked files sit stale on disk (real
+# incident, WP-530/561 tsekh-mac sync review, 2026-10-15: a session reset
+# DS-my-strategy's canonical checkout straight to origin/main after
+# publishing via cherry-pick, concluded "clean" from `ls` on a few paths, and
+# reported it so -- the mismatch was found a day later by chance). Safe iff
+# either (a) the target already contains HEAD (ordinary "undo my last local
+# commit(s)", nothing from the target overwrites anything) or (b) the
+# worktree is already byte-identical to the target tree, so the reset is
+# pure bookkeeping with nothing left stale. Anything else -- a target that
+# is ahead/sideways of HEAD while the tree still differs from it -- is the
+# exact shape that stranded DS-my-strategy and must go through
+# scripts/canon-reconcile-published.sh (cherry-pick-aware) instead.
+reset_soft_mixed_is_safe() {
+  local segment="$1" repo="${CWD:-$PWD}" target="" hard=false soft=false mixed=false explicit_mode=false
+  set -- $segment
+  [ "${1:-}" = "git" ] || return 1
+  shift
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      -C) repo="${2:-}"; shift 2 ;;
+      --git-dir|--work-tree|-c) shift 2 ;;
+      --git-dir=*|--work-tree=*|-c*) shift ;;
+      *) break ;;
+    esac
+  done
+  [ "${1:-}" = "reset" ] || return 1
+  shift
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --hard) hard=true; explicit_mode=true ;;
+      --soft) soft=true; explicit_mode=true ;;
+      --mixed) mixed=true; explicit_mode=true ;;
+      --) shift; [ $# -eq 1 ] || return 1; target="$1"; break ;;
+      -*) ;;
+      *) [ -z "$target" ] || return 1; target="$1" ;;
+    esac
+    shift
+  done
+  # --hard has its own, stricter check above; a bare `git reset` with no
+  # target (e.g. unstaging everything) never touches history, out of scope.
+  [ "$hard" = false ] && { [ "$soft" = true ] || [ "$mixed" = true ] || [ "$explicit_mode" = false ]; } && [ -n "$target" ] || return 1
+  git -C "$repo" rev-parse --is-inside-work-tree >/dev/null 2>&1 || return 1
+  git -C "$repo" merge-base --is-ancestor "$target" HEAD 2>/dev/null && return 0
+  git -C "$repo" diff --quiet "$target" -- 2>/dev/null
+}
+
 # git reset --hard — one $RESET_SEGMENT line per chained `git reset` in the
 # command (WP-544 Ф8, 04.09: git_segment now returns every match, not just
 # the first — a compound `git reset --hard a && git reset --hard b` used to
@@ -436,6 +486,9 @@ if [ -n "$RESET_SEGMENT" ]; then
     [ -n "$one_reset" ] || continue
     if echo "$one_reset" | grep -qE -- '(^|[[:space:]])--hard([[:space:]]|$)' && ! reset_is_non_destructive "$one_reset"; then
       block "git reset --hard запрещён (теряет незакоммиченное). Сохрани только свои файлы: git stash push -- <свои пути> (никогда без списка путей и никогда с -u/--all: в общем чекауте это уносит работу параллельных сессий); чужое не трогай, публикуй из изолированной копии."
+    fi
+    if ! echo "$one_reset" | grep -qE -- '(^|[[:space:]])--hard([[:space:]]|$)' && ! reset_soft_mixed_is_safe "$one_reset"; then
+      block "git reset --soft/--mixed на цель, которая не является предком HEAD, пока рабочее дерево отличается от цели — запрещён (рассинхронизирует HEAD/рабочее дерево без следа: git status покажет «0 behind», а файлы на диске останутся старыми, WP-530/561). Используй scripts/canon-reconcile-published.sh (понимает cherry-pick-доставку) или git checkout <target> -- <конкретные пути> по проверенному списку."
     fi
   done <<< "$RESET_SEGMENT"
 fi
