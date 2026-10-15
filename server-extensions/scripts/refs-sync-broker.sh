@@ -146,6 +146,48 @@ print(json.dumps({'ts': int(sys.argv[1]), 'fetched': int(sys.argv[2]), 'failed':
   mv -f "$tmp" "$HEARTBEAT_FILE"
 }
 
+# Ahead>0 and behind>0 together means real two-sided divergence, not a
+# normal lag. Alert only (this script's whole contract is fetch-only);
+# resolution is scripts/canon-reconcile-published.sh or a manual merge.
+# Debounced twice: age (must persist past REFS_SYNC_DIVERGENCE_ALERT_AFTER_SECONDS,
+# not a one-tick mid-rebase blip) and repeat interval (don't re-page every tick).
+check_divergence_alert() {
+  local path="$1" full_path="$2" remote_ref="$3" safe_path counts ahead behind
+  safe_path=$(printf '%s' "$path" | tr '/' '_')
+  counts=$(git -C "$full_path" rev-list --left-right --count "HEAD...$remote_ref" 2>/dev/null) || return 0
+  read -r ahead behind <<< "$counts"
+  if [ "${ahead:-0}" -eq 0 ] || [ "${behind:-0}" -eq 0 ]; then
+    rm -f "$STATE_DIR/divergence-first-seen.$safe_path"
+    return 0
+  fi
+
+  local first_seen_file="$STATE_DIR/divergence-first-seen.$safe_path" now first_seen age
+  now=$(date +%s)
+  first_seen=$(cat "$first_seen_file" 2>/dev/null || echo "")
+  if ! [[ "$first_seen" =~ ^[0-9]+$ ]]; then
+    echo "$now" > "$first_seen_file"
+    return 0
+  fi
+  age=$(( now - first_seen ))
+  [ "$age" -ge "${REFS_SYNC_DIVERGENCE_ALERT_AFTER_SECONDS:-1800}" ] || return 0
+
+  local alert_state="$STATE_DIR/divergence-alerted.$safe_path" last_alert interval
+  interval="${REFS_SYNC_DIVERGENCE_ALERT_INTERVAL_SECONDS:-21600}"
+  last_alert=$(cat "$alert_state" 2>/dev/null || echo 0)
+  [[ "$last_alert" =~ ^[0-9]+$ ]] || last_alert=0
+  [ $(( now - last_alert )) -ge "$interval" ] || return 0
+  echo "$now" > "$alert_state"
+
+  log "DIVERGED $path: ahead=$ahead behind=$behind vs $remote_ref (age ${age}s)"
+  local telegram_lib="$IWE_ROOT/DS-my-strategy/scripts/lib/telegram.sh"
+  [ -f "$telegram_lib" ] || return 0
+  # shellcheck disable=SC1090
+  . "$telegram_lib"
+  local host_label
+  case "$(uname -s 2>/dev/null)" in Darwin) host_label="Мак" ;; *) host_label=$(hostname -s 2>/dev/null || echo "хост") ;; esac
+  telegram_send "⚠️ ${host_label}: репозиторий ${path} разошёлся с сервером - ${ahead} своих коммитов и ${behind} серверных не слиты уже $(( age / 60 )) мин. Свести: scripts/canon-reconcile-published.sh или ручной merge." || true
+}
+
 run_once() {
   require_registry
   local registry_out fetched=0 failed=0
@@ -195,6 +237,7 @@ run_once() {
     if [ "$fetch_rc" -eq 0 ]; then
       fetched=$((fetched + 1))
       log "OK $path <- $remote $refspec"
+      check_divergence_alert "$path" "$full_path" "${refspec#*:}"
     else
       failed=$((failed + 1))
       log "FAIL $path <- $remote $refspec (exit $fetch_rc after $attempt attempts, timeout ${FETCH_TIMEOUT_SECONDS}s)"
