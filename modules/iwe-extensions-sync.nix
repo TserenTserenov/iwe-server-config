@@ -50,6 +50,8 @@ in
       "d /home/${cfg.user}/IWE/.claude/hooks 0755 ${cfg.user} users -"
       "d /home/${cfg.user}/IWE/.claude/scripts 0755 ${cfg.user} users -"
       "d /home/${cfg.user}/IWE/.claude/lib 0755 ${cfg.user} users -"
+      "d /home/${cfg.user}/IWE/.claude/rules 0755 ${cfg.user} users -"
+      "d /home/${cfg.user}/IWE/.claude/rules-lazy 0755 ${cfg.user} users -"
       "d /home/${cfg.user}/IWE/extensions 0755 ${cfg.user} users -"
       "d /home/${cfg.user}/IWE/scripts 0755 ${cfg.user} users -"
       "d /home/${cfg.user}/.claude/projects/-home-${cfg.user}-IWE/memory 0755 ${cfg.user} users -"
@@ -96,6 +98,18 @@ in
         ${pkgs.rsync}/bin/rsync -a --checksum --delete \
           ${src}/claude-lib/ \
           /home/${cfg.user}/IWE/.claude/lib/
+
+        # WP-7 F130 (15.10.2026, пир-сессия 2026-10-15-39-wp7-open-phases): эта
+        # пара отсутствовала с самого начала модуля — корневой CLAUDE.md
+        # безусловно ссылается на .claude/rules/{formatting,distinctions}.md и
+        # .claude/rules-lazy/*.md, но ни один из них сюда не доставлялся.
+        ${pkgs.rsync}/bin/rsync -a --checksum --delete \
+          ${src}/claude-rules/ \
+          /home/${cfg.user}/IWE/.claude/rules/
+
+        ${pkgs.rsync}/bin/rsync -a --checksum --delete \
+          ${src}/claude-rules-lazy/ \
+          /home/${cfg.user}/IWE/.claude/rules-lazy/
 
         # Claude project-key на сервере кодирует Linux-путь (-home-...), не
         # macOS-путь источника (-Users-...) — эти два префикса разные строки,

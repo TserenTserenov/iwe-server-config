@@ -222,7 +222,7 @@ SOURCE_SNAPSHOT=""
 EXT_DIR="$REPO_ROOT/server-extensions"
 TEST_ENV_CREATED=()
 setup_test_env() {
-  local pairs=(claude-lib:.claude/lib claude-skills:.claude/skills claude-hooks:.claude/hooks claude-scripts:.claude/scripts)
+  local pairs=(claude-lib:.claude/lib claude-skills:.claude/skills claude-hooks:.claude/hooks claude-scripts:.claude/scripts claude-rules:.claude/rules claude-rules-lazy:.claude/rules-lazy)
   local pair src target rel
   for pair in "${pairs[@]}"; do
     src="${pair%%:*}"
