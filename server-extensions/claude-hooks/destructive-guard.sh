@@ -440,10 +440,20 @@ reset_is_non_destructive() {
 # is ahead/sideways of HEAD while the tree still differs from it -- is the
 # exact shape that stranded DS-my-strategy and must go through
 # scripts/canon-reconcile-published.sh (cherry-pick-aware) instead.
+#
+# Pathspec resets are explicitly OUT of scope and must return safe (self-caught
+# regression, same day: `git reset -- some/file.md` blocked a routine unstage
+# right after this landed). `git reset [<ref>] [--] <pathspec>...` never moves
+# HEAD at all -- the moment ANY pathspec is present (`--` seen, or more than
+# one bare positional token, since git itself then treats the rest as paths),
+# this function must not even look at ancestry/tree-match. Only the single
+# shape `git reset [--soft|--mixed] <one-bare-token-that-resolves-as-a-commit>`
+# with zero pathspecs is the dangerous ref-move this function exists to catch.
 reset_soft_mixed_is_safe() {
-  local segment="$1" repo="${CWD:-$PWD}" target="" hard=false soft=false mixed=false explicit_mode=false
+  local segment="$1" repo="${CWD:-$PWD}" hard=false saw_dashdash=false
+  local pos_count=0 pos1=""
   set -- $segment
-  [ "${1:-}" = "git" ] || return 1
+  [ "${1:-}" = "git" ] || return 0
   shift
   while [ $# -gt 0 ]; do
     case "$1" in
@@ -453,25 +463,29 @@ reset_soft_mixed_is_safe() {
       *) break ;;
     esac
   done
-  [ "${1:-}" = "reset" ] || return 1
+  [ "${1:-}" = "reset" ] || return 0
   shift
   while [ $# -gt 0 ]; do
     case "$1" in
-      --hard) hard=true; explicit_mode=true ;;
-      --soft) soft=true; explicit_mode=true ;;
-      --mixed) mixed=true; explicit_mode=true ;;
-      --) shift; [ $# -eq 1 ] || return 1; target="$1"; break ;;
+      --hard) hard=true ;;
+      --soft|--mixed) ;;
+      --) saw_dashdash=true; shift; pos_count=$(( pos_count + $# )); break ;;
       -*) ;;
-      *) [ -z "$target" ] || return 1; target="$1" ;;
+      *) pos_count=$(( pos_count + 1 )); [ -n "$pos1" ] || pos1="$1" ;;
     esac
     shift
   done
-  # --hard has its own, stricter check above; a bare `git reset` with no
-  # target (e.g. unstaging everything) never touches history, out of scope.
-  [ "$hard" = false ] && { [ "$soft" = true ] || [ "$mixed" = true ] || [ "$explicit_mode" = false ]; } && [ -n "$target" ] || return 1
-  git -C "$repo" rev-parse --is-inside-work-tree >/dev/null 2>&1 || return 1
-  git -C "$repo" merge-base --is-ancestor "$target" HEAD 2>/dev/null && return 0
-  git -C "$repo" diff --quiet "$target" -- 2>/dev/null
+  # --hard has its own, stricter check above (reset_is_non_destructive).
+  [ "$hard" = false ] || return 0
+  # Any pathspec present (via `--`, or a second bare token git would treat as
+  # one) -- HEAD never moves, always safe regardless of what the ref/paths are.
+  [ "$saw_dashdash" = false ] && [ "$pos_count" -eq 1 ] || return 0
+  git -C "$repo" rev-parse --is-inside-work-tree >/dev/null 2>&1 || return 0
+  # The one bare token must resolve as a real commit to be a ref-move at all;
+  # if it doesn't, git itself would treat it as a pathspec (safe, out of scope).
+  git -C "$repo" rev-parse --verify --quiet "${pos1}^{commit}" >/dev/null 2>&1 || return 0
+  git -C "$repo" merge-base --is-ancestor "$pos1" HEAD 2>/dev/null && return 0
+  git -C "$repo" diff --quiet "$pos1" -- 2>/dev/null
 }
 
 # git reset --hard — one $RESET_SEGMENT line per chained `git reset` in the
