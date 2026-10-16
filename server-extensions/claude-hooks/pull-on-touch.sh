@@ -24,9 +24,6 @@ set -uo pipefail
 INPUT=$(cat)
 [ -z "$INPUT" ] && exit 0
 
-# Быстрый отсев: нет упоминания репо под IWE → нечего тянуть.
-echo "$INPUT" | grep -q "IWE/" || exit 0
-
 IWE_ROOT="${IWE_WORKSPACE:-$HOME/IWE}"
 
 # Имя сессии для файла состояния.
@@ -39,20 +36,60 @@ mkdir -p "$STATE_DIR"
 touch "$STATE_FILE"
 
 # Извлечь имена репо (первый сегмент под IWE/) из пути (Read/Edit) или команды (Bash).
+# Отдельно: `cd <IWE_ROOT> && <сегмент>` (пир-сессия 2026-10-16-23-fix-pull-on-touch,
+# Claude+Kimi+Codex, ревью той же сессии добавило кавычки/`~` и множественный `cd`) —
+# repo-имя в относительном пути ПОСЛЕ && не содержит подстроки "IWE/<repo>" целиком
+# (путь разбит между целью cd и следующим аргументом), основной regex выше его не ловит.
+# Команда делится на сегменты по `&&`/`||`/`;`/`|`; для КАЖДОГО сегмента вида `cd X`,
+# резолвящегося в IWE_ROOT (с учётом кавычек, `~/`, `$HOME`, `$IWE_ROOT`), разбирается
+# только СЛЕДУЮЩИЙ сегмент — не весь хвост команды (codex: `cd A && cd B && ...` не
+# должен подхватывать репо из третьего сегмента через первый cd). Известное ограничение
+# (не решаем здесь): симлинк IWE_ROOT на другой физический путь не резолвится.
 REPOS=$(INPUT="$INPUT" IWE_ROOT="$IWE_ROOT" python3 -c '
 import sys, json, re, os
 d = json.loads(os.environ["INPUT"])
 ti = d.get("tool_input", {}) or {}
 blob = (ti.get("file_path") or ti.get("path") or "") + "\n" + (ti.get("command") or "")
+command = ti.get("command") or ""
 root = os.environ["IWE_ROOT"]
 seen, out = set(), []
-for name in re.findall(r"IWE/([A-Za-z0-9._-]+)", blob):
+
+def consider(name):
     if name in seen:
-        continue
+        return
     seen.add(name)
     marker = os.path.join(root, name, ".git")
     if os.path.isdir(marker) or os.path.isfile(marker):
         out.append(name)
+
+for name in re.findall(r"IWE/([A-Za-z0-9._-]+)", blob):
+    consider(name)
+
+home = os.environ.get("HOME", "")
+segments = re.split(r"\s*(?:&&|\|\||;|\|)\s*", command)
+for i in range(len(segments) - 1):
+    cdm = re.match(r"^cd\s+(.+)$", segments[i])
+    if not cdm:
+        continue
+    cd_target = cdm.group(1).strip()
+    while cd_target[:1] in (chr(34), chr(39)) and cd_target[-1:] == cd_target[:1]:
+        cd_target = cd_target[1:-1]
+    if cd_target == "~" or cd_target.startswith("~/"):
+        cd_target = home + cd_target[1:]
+    cd_target = cd_target.replace("$HOME", home).replace("$IWE_ROOT", root)
+    if os.path.normpath(cd_target) != os.path.normpath(root):
+        continue
+    for token in segments[i + 1].split():
+        tm = re.match(r"^IWE/([A-Za-z0-9._-]+)", token)
+        if not tm:
+            tm = re.match(r"^\./([A-Za-z0-9._-]+)/", token)
+        if not tm:
+            tm2 = re.match(r"^([A-Za-z0-9._-]+)/", token)
+            if tm2 and tm2.group(1) not in (".", ".."):
+                tm = tm2
+        if tm:
+            consider(tm.group(1))
+
 print("\n".join(out))
 ' 2>/dev/null)
 
