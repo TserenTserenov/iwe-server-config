@@ -239,9 +239,8 @@ def main():
         status_label = {"open": "[открыта]", "closed": "[закрыта]", "orphaned": "[осиротел]"}.get(
             entry["status"].split(" ")[0], f"[{entry['status']}]"
         )
-        name = os.path.basename(folder)
         when = entry.get("opened_at") or "?"
-        print(f"  {status_label} {name} ({when}) — {rep}")
+        print(f"  {status_label} {folder} ({when}) — {rep}")
     return 0
 
 

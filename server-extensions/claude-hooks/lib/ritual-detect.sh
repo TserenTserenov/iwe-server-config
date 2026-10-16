@@ -140,3 +140,69 @@ except Exception:
     print("error")
 PY
 }
+
+# ritual_prompt_wp_number TRANSCRIPT_PATH -> "WP-NNN" or "" (empty on no
+# match or parse error — fail-open, same discipline as ritual_prompt_names_wp
+# above). Same scope/pattern as ritual_prompt_names_wp (latest user message
+# only), but returns the actual number instead of yes/no — needed by
+# session-handoff-gate.sh (РП-484 Ф197, 16.10) to know WHICH WP's last
+# session to check, not just that some WP was named. Multiple distinct
+# numbers in one message → first match (same ambiguity the Ritual template
+# itself leaves to the agent's judgment call, this gate does not referee it).
+ritual_prompt_wp_number() {
+  local transcript_path="$1"
+  RITUAL_LIB_DIR="$RITUAL_LIB_DIR" TRANSCRIPT_PATH="$transcript_path" python3 <<'PY' 2>/dev/null || echo ""
+import os, re, sys
+
+sys.path.insert(0, os.environ["RITUAL_LIB_DIR"])
+import ritual_signature as rs
+
+try:
+    pattern = re.compile(r"\b(?:WP|РП)-(\d+)\b", re.IGNORECASE)
+    last_user_text = ""
+    for r in rs.read_transcript(os.environ["TRANSCRIPT_PATH"]):
+        if rs.role_of(r) != "user":
+            continue
+        last_user_text = rs.message_text(r)
+    m = pattern.search(last_user_text) if last_user_text else None
+    print(f"WP-{m.group(1)}" if m else "")
+except Exception:
+    print("")
+PY
+}
+
+# transcript_has_read_of TRANSCRIPT_PATH PATH_SUBSTRING -> "yes"/"no": did
+# any Read tool_use in the transcript target a file_path containing this
+# substring? Used by session-handoff-gate.sh to confirm the agent actually
+# opened the flagged report.md, not just that the scanner printed its path.
+# Fails open ("no" on parse error is safe here — caller treats "no" as
+# "requirement not yet met", not as a reason to crash; the deny path it
+# feeds is itself fail-open at the hook's own top-level try/except).
+transcript_has_read_of() {
+  local transcript_path="$1"
+  local needle="$2"
+  RITUAL_LIB_DIR="$RITUAL_LIB_DIR" TRANSCRIPT_PATH="$transcript_path" NEEDLE="$needle" python3 <<'PY' 2>/dev/null || echo "no"
+import os, sys
+
+sys.path.insert(0, os.environ["RITUAL_LIB_DIR"])
+import ritual_signature as rs
+
+try:
+    needle = os.environ["NEEDLE"]
+    found = False
+    for r in rs.read_transcript(os.environ["TRANSCRIPT_PATH"]):
+        if rs.role_of(r) != "assistant":
+            continue
+        for b in rs.text_blocks(r):
+            if b.get("type") == "tool_use" and b.get("name") == "Read":
+                fp = (b.get("input") or {}).get("file_path", "")
+                if needle in fp:
+                    found = True
+                    break
+        if found:
+            break
+    print("yes" if found else "no")
+except Exception:
+    print("no")
+PY
+}
