@@ -25,11 +25,13 @@ import sys
 # matched and was redacted. Fail-closed by design: this callback exempts a
 # candidate ONLY when it is BOTH shaped like a pytest identifier (five or
 # more lowercase snake_case segments, no mixed case or extra characters a
-# real key would have) AND appears in one of two narrowly recognized source
-# contexts (a def/async def line, or a pytest node id after ::). Any other
-# context, including a bare occurrence with no surrounding text, is still
-# redacted -- the cost of a missed real secret is judged higher than the
-# cost of an unnecessarily redacted test name.
+# real key would have) AND appears in one of four narrowly recognized source
+# contexts (a def/async def line, a pytest node id after ::, the start of a
+# `python3 -m unittest -v` result line, or that same line's dotted repeat of
+# the name inside parens). Any other context, including a bare occurrence
+# with no surrounding text, is still redacted -- the cost of a missed real
+# secret is judged higher than the cost of an unnecessarily redacted test
+# name.
 YOOKASSA_CANDIDATE_RE = re.compile(r"(?:live|test)_[A-Za-z0-9_-]{30,}")
 YOOKASSA_PYTEST_SHAPE_RE = re.compile(r"test_[a-z][a-z0-9]*(?:_[a-z][a-z0-9]*){4,}\Z")
 
@@ -48,7 +50,31 @@ def redact_yookassa(match):
         before.endswith("::")
         and re.match(r"(?:\[[^\]\r\n]*\])?(?=\s|$|:)", after) is not None
     )
-    if YOOKASSA_PYTEST_SHAPE_RE.fullmatch(value) and (source_definition or pytest_nodeid):
+    # WP-544 (peer-session 2026-10-16, Claude+Codex): third narrowly recognized
+    # context, same shape requirement as the two above -- `python3 -m unittest
+    # -v` prints a test's own name bare at the very start of its result line
+    # ("test_foo (module.Class.test_foo) ... ok"), which matched neither
+    # existing context and got redacted on every verbose run. Line-start is
+    # checked structurally (nothing between the match and either a preceding
+    # newline or the start of the scanned text), not by whitespace heuristics.
+    unittest_verbose = (
+        (before == "" or before.endswith("\n"))
+        and re.match(r"\s*\(", after) is not None
+    )
+    # Same session, same fix: a `unittest -v` result line repeats the test
+    # name TWICE -- bare at the line start (unittest_verbose above) and again
+    # as the final segment of the dotted path inside the parens. Narrowed to
+    # that exact tail (a dot immediately before, `) ...` immediately after,
+    # any following FAIL/ERROR/ok/skipped text is unconstrained) rather than
+    # "anything after a dot", so this does not exempt an arbitrary attribute
+    # access elsewhere in a log line.
+    unittest_verbose_dotted = (
+        before.endswith(".")
+        and re.match(r"\)\s*\.\.\.\s", after) is not None
+    )
+    if YOOKASSA_PYTEST_SHAPE_RE.fullmatch(value) and (
+        source_definition or pytest_nodeid or unittest_verbose or unittest_verbose_dotted
+    ):
         return value
     return "[REDACTED-YOOKASSA-KEY]"
 
@@ -1839,6 +1865,8 @@ def self_test():
         "123456789:short",
         "def test_alpha_bravo_charlie_delta_echo(self):",
         "tests/test_foo.py::test_alpha_bravo_charlie_delta_echo PASSED",
+        "test_alpha_bravo_charlie_delta_echo (tests.test_foo.FooTests.test_alpha_bravo_charlie_delta_echo) ... ok",
+        "test_alpha_bravo_charlie_delta_echo (tests.test_foo.FooTests.test_alpha_bravo_charlie_delta_echo) ... FAIL",
     )
     for name, value in positives.items():
         ids, count, _details = scan(value)
