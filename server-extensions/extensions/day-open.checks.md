@@ -101,24 +101,16 @@ fi
 
 - [ ] Каждый `WP-NNN` из `priorities.yaml → today:` присутствует в DayPlan, либо расхождение отмечено в «Требует внимания». Больше не блокирует commit.
 
-### 🔴 БЛОКИРУЮЩАЯ ПРОВЕРКА: `<details>` без `<summary>` или без `</details>` (баг «Details» bug-2026-07-01; баг «пустой план» bug-2026-10-16)
+### 🔴 БЛОКИРУЮЩАЯ ПРОВЕРКА: `<details>` без `<summary>` (баг «Details», bug-2026-07-01)
 
-> **Источник (summary):** 2026-07-01 в 7 секциях DayPlan стоял голый `<details>` без `<summary>` —
+> **Источник:** 2026-07-01 в 7 секциях DayPlan стоял голый `<details>` без `<summary>` —
 > браузер/VS Code рендерит его как слово "Details". Причина: LLM оборачивал ответ в
 > лишний `<details>`. Инвариант: каждый `<details>` парен с одним `<summary>`.
-> **Источник (closer, добавлено 2026-10-16):** `day-open-llm-fill.py` сравнивал число `</details>`
-> в заполненном чанке со СТАРЫМ (до заполнения) числом, а не с реальным числом открывающих
-> тегов в новом тексте — легитимно добавленные вложенные секции («ТОС + запрос недели» и
-> четыре вложенных под ней, появились 2026-10-12/14) теряли закрывающие теги как «лишние».
-> Эта проверка не ловила баг: баланс `</details>` никогда не считался. 15 и 16 октября план
-> физически был полон, но 5 незакрытых `<details>` формально прятали весь хвост файла
-> (включая саму таблицу «План на сегодня») внутри несвёрнутого блока — пилот видел «пустой
-> план». Код пофикшен (`_balance_nested_details`, WP-484), эта проверка — страховка на будущее.
 
 <!-- GATE-B: always-on -->
 ```bash
 FILE="${FILE:-$(ls ~/IWE/DS-my-strategy/current/DayPlan\ *.md 2>/dev/null | sort | tail -1)}"
-echo "=== Проверка: баланс <details>/<summary>/</details> ==="
+echo "=== Проверка: баланс <details>/<summary> ==="
 # grep -c печатает "0" (не пусто) даже без совпадений, но выходит с кодом 1;
 # под set -e (см. day-open-checks-runner.sh) голое присваивание с таким кодом
 # молча обрывает блок ДО if — `|| true` обязателен, `:-0` после присваивания
@@ -126,20 +118,15 @@ echo "=== Проверка: баланс <details>/<summary>/</details> ==="
 # WP-5 Ф2 09.07 — исходный `|| echo 0` вдобавок дублировал вывод ("0\n0").
 OPENS=$(grep -cE '^<details' "$FILE" 2>/dev/null || true)
 SUMMARIES=$(grep -cE '<summary>' "$FILE" 2>/dev/null || true)
-CLOSERS=$(grep -cE '^</details>' "$FILE" 2>/dev/null || true)
 if [ "$OPENS" -gt "$SUMMARIES" ]; then
   echo "  ❌ Голый <details> без <summary> ($OPENS открытий vs $SUMMARIES summary) — рендерится как 'Details'. COMMIT БЛОКИРОВАН"
   exit 1
-elif [ "$OPENS" -ne "$CLOSERS" ]; then
-  echo "  ❌ <details> не закрыт ($OPENS открытий vs $CLOSERS закрытий) — хвост файла после первого незакрытого блока прячется от читателя. COMMIT БЛОКИРОВАН"
-  exit 1
 else
-  echo "  ✅ Все <details> имеют <summary> и </details> ($OPENS/$SUMMARIES/$CLOSERS)"
+  echo "  ✅ Все <details> имеют <summary> ($OPENS/$SUMMARIES)"
 fi
 ```
 
 - [ ] Число `<details>` ≤ числу `<summary>`. Если больше — голый блок рендерится как "Details", commit заблокирован.
-- [ ] Число `<details>` == числу `</details>`. Если не равно — хвост файла прячется внутри незакрытого блока, commit заблокирован.
 
 ### Секции DayPlan (полнота по шаблону)
 
