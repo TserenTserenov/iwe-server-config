@@ -19,8 +19,13 @@ FAIL=0
 cleanup() { rm -rf "$TMP_ROOT"; }
 trap cleanup EXIT
 
-open_semaphore() {
-  printf 'agent: claude-code\nharness_session_id: %s\nopened_at: test\n' "$SID" \
+open_semaphore() { # --wp-backed semaphore (satisfies the gate)
+  printf 'agent: claude-code\nharness_session_id: %s\nwp: WP-1\nopened_at: test\n' "$SID" \
+    > "$SESSION_DIR/claude-code-$SID.open"
+}
+
+open_housekeeping_semaphore() { # no wp: field, mirrors real session-guard.sh --housekeeping output
+  printf 'agent: claude-code\nharness_session_id: %s\nhousekeeping: some-reason\nopened_at: test\n' "$SID" \
     > "$SESSION_DIR/claude-code-$SID.open"
 }
 
@@ -48,7 +53,7 @@ expect() { # $1 = описание, $2 = ожидаемый код (0|2), $3 = �
 # === Нет семафора → блок на commit/push, формы как у close-runner-gate.sh ===
 close_semaphore
 expect "no semaphore: bare commit"    2 'git commit -m x'
-expect "no semaphore: -C commit"      2 'git -C DS-my-strategy commit -m x'
+expect "no semaphore: -C commit"      2 'git -C DS-strategy commit -m x'
 expect "no semaphore: push"           2 'git push'
 expect "no semaphore: push after ;"   2 'git add x; git push'
 
@@ -58,20 +63,25 @@ expect "no semaphore: commit-tree"    0 'git commit-tree -m x'
 expect "no semaphore: non-git"        0 'ls -la'
 expect "no semaphore: echo mentions"  0 'echo "git commit"'
 
-# === Семафор этой сессии открыт → пропуск ===
+# === Семафор этой сессии открыт (--wp) → пропуск ===
 open_semaphore
-expect "semaphore open: commit"       0 'git commit -m x'
-expect "semaphore open: -C push"      0 'git -C repo push'
+expect "wp semaphore open: commit"    0 'git commit -m x'
+expect "wp semaphore open: -C push"   0 'git -C repo push'
+
+# === Семафор этой сессии открыт, но без wp: (--housekeeping) → по-прежнему блок (S-68) ===
+close_semaphore
+open_housekeeping_semaphore
+expect "housekeeping semaphore: commit" 2 'git commit -m x'
+close_semaphore
 
 # === Семафор чужой сессии (другой harness_session_id) → не считается ===
-close_semaphore
-printf 'agent: claude-code\nharness_session_id: %s\nopened_at: test\n' "other-$$" \
+printf 'agent: claude-code\nharness_session_id: %s\nwp: WP-1\nopened_at: test\n' "other-$$" \
   > "$SESSION_DIR/claude-code-other-$$.open"
 expect "foreign semaphore: commit"    2 'git commit -m x'
 rm -f "$SESSION_DIR/claude-code-other-$$.open"
 
 # === Семафор с ID, у которого наш SID — префикс (не должен матчиться подстрокой) ===
-printf 'agent: claude-code\nharness_session_id: %sX\nopened_at: test\n' "$SID" \
+printf 'agent: claude-code\nharness_session_id: %sX\nwp: WP-1\nopened_at: test\n' "$SID" \
   > "$SESSION_DIR/claude-code-${SID}X.open"
 expect "prefix-collision semaphore: commit" 2 'git commit -m x'
 rm -f "$SESSION_DIR/claude-code-${SID}X.open"

@@ -12,11 +12,22 @@
 # anywhere in its lifetime — Quick Close then had nothing to close.
 #
 # What this gate does: the same proven git-commit detection this repo already
-# uses (close-runner-gate.sh) — but checks for ANY open semaphore carrying this
-# session's harness_session_id, not a runner-start marker. Missing → block,
-# point at session-guard.sh open (--housekeeping for an unrelated fix, --wp for
-# real RP work); session-guard.sh's own freeze guard then tells the agent to
-# use an isolated worktree, this gate does not re-implement that logic.
+# uses (close-runner-gate.sh) — but checks for an open semaphore carrying both
+# this session's harness_session_id AND a real `wp: WP-N` field. Missing →
+# block, point at `session-guard.sh open --wp WP-N`; session-guard.sh's own
+# freeze guard then tells the agent to use an isolated worktree, this gate
+# does not re-implement that logic.
+#
+# Why `--wp` only, not `--housekeeping` (pilot decision 16.10.2026, S-68 in
+# STAGING.md): a free-text housekeeping reason isn't tracked anywhere as a
+# real work product, so every edit must carry a real WP-N — either the one
+# already active, the standing umbrella tech-debt РП (e.g. the author's own
+# WP-7), or a new one per the WP Entry Filter (S-47). This also happens to
+# already be how `session-guard.sh open --housekeeping` behaves today: that
+# path never writes a `harness_session_id:` line at all (confirmed by
+# reading its heredoc), so it could never have satisfied this gate anyway —
+# the wp: field check below just makes that requirement explicit instead of
+# relying on an incidental side effect of a different code path.
 #
 # What this gate does NOT do: it does not require the semaphore to live in the
 # repo being committed to — the semaphore directory is session-scoped, not
@@ -66,22 +77,28 @@ AGENT="${IWE_AGENT:-claude-code}"
 # ПП-74б/31.08 already hit this exact defect: a shorter session_id that is a
 # prefix of a longer one would otherwise match it as a substring).
 SEM_MATCHES=$(grep -lxF "harness_session_id: $SESSION_ID" "$SESSION_DIR/${AGENT}"-*.open 2>/dev/null)
-[ -n "$SEM_MATCHES" ] && exit 0
+WP_BOUND=0
+while IFS= read -r sem_file; do
+  [ -z "$sem_file" ] && continue
+  if grep -qE '^wp: .+' "$sem_file" 2>/dev/null; then
+    WP_BOUND=1
+    break
+  fi
+done <<< "$SEM_MATCHES"
+[ "$WP_BOUND" = 1 ] && exit 0
 
-echo "[session-open-gate] session=$SESSION_ID_SAFE no open semaphore (${SESSION_DIR}/${AGENT}-*.open carrying harness_session_id: $SESSION_ID) — blocking direct git commit/push" >&2
+echo "[session-open-gate] session=$SESSION_ID_SAFE no semaphore with both harness_session_id: $SESSION_ID and a wp: field (${SESSION_DIR}/${AGENT}-*.open) — blocking direct git commit/push" >&2
 
 cat >&2 <<EOF
-🚫 Session Open Gate (WP-561): прямой git commit/push без открытой сессии заблокирован.
+🚫 Session Open Gate (WP-561/S-68): прямой git commit/push без привязки к РП заблокирован.
 
-Эта сессия ни разу не вызывала session-guard.sh open — session-guard.sh сам
-заявляет, что коммит без него не должен проходить, но реальный pre-commit хук
-это не проверял (найдено 16.10.2026). Теперь проверяет этот хук.
+Эта сессия ни разу не открывала себя на конкретный РП — каждая правка обязана
+нести номер рабочего продукта, свободная причина без номера не считается.
 
-Если правка не про конкретный РП:
-  bash scripts/session-guard.sh open --housekeeping "<короткая причина>" --agent claude-code
-
-Если правка про конкретный РП (или вырастает в него):
   bash scripts/session-guard.sh open --wp WP-N --task "..." --agent claude-code
+
+WP-N — РП, который уже обсуждался в этой сессии; если его нет, подойдёт
+зонтичный РП техдолга платформы или новый РП по фильтру входа (S-47).
 
 Канонический чекаут может быть заморожен (WP-520/WP-484) — session-guard.sh в
 этом случае сам укажет, как перейти в изолированную копию (EnterWorktree /
