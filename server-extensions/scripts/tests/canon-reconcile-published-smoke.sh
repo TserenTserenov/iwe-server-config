@@ -1287,4 +1287,51 @@ git -C "$CANON" fetch -q origin
 assert "$rc" "0" "same pid, same recorded host: does not block"; assert "$(git -C "$CANON" rev-parse HEAD)" "$(git -C "$CANON" rev-parse origin/main)" "replaced once the only live semaphore is our own, host confirmed"
 rm -f "$IWE_RUNTIME_DIR/sessions/claude-code-same-host.open"
 
+echo "scenario 83 (WP-538/568, peer-session 2026-10-17-01, Claude+Kimi+Codex): a pid-less semaphore (Kimi/Codex never write pid:) whose commit-lease has expired does not block"
+fresh s83; echo one > "$CANON/b.txt"; commit_in "$CANON" "local"; C=$(git -C "$CANON" rev-parse HEAD); republish_on_origin "$CANON" "$C"
+EXPIRED_EPOCH=$(( $(date +%s) - 14401 ))  # one second past the default 4h lease (LEASE_SEC=14400)
+EXPIRED_TS=$(date -u -r "$EXPIRED_EPOCH" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u -d "@$EXPIRED_EPOCH" +%Y-%m-%dT%H:%M:%SZ)
+printf 'agent: codex\nopened_at: %s\n' "$EXPIRED_TS" > "$IWE_RUNTIME_DIR/sessions/codex-expired.open"
+bash "$SCRIPT" "$CANON" main >/dev/null 2>&1; rc=$?
+git -C "$CANON" fetch -q origin
+assert "$rc" "0" "pid-less semaphore with an expired lease does not block"; assert "$(git -C "$CANON" rev-parse HEAD)" "$(git -C "$CANON" rev-parse origin/main)" "replaced once the only pid-less semaphore has an expired lease"
+rm -f "$IWE_RUNTIME_DIR/sessions/codex-expired.open"
+
+echo "scenario 84 (WP-538/568, peer-session 2026-10-17-01, Claude+Kimi+Codex): a pid-less semaphore within its commit-lease still blocks, and a fresh renewed_at in the matching .lease sidecar extends it past an otherwise-expired opened_at"
+fresh s84; echo one > "$CANON/b.txt"; commit_in "$CANON" "local"; C=$(git -C "$CANON" rev-parse HEAD); republish_on_origin "$CANON" "$C"
+RECENT_TS=$(date -u +%Y-%m-%dT%H:%M:%SZ); H=$(git -C "$CANON" rev-parse HEAD)
+printf 'agent: kimi\nopened_at: %s\n' "$RECENT_TS" > "$IWE_RUNTIME_DIR/sessions/kimi-fresh.open"
+bash "$SCRIPT" "$CANON" main >/dev/null 2>&1; rc=$?
+assert "$rc" "1" "pid-less semaphore within its lease still blocks"; assert "$(git -C "$CANON" rev-parse HEAD)" "$H" "HEAD unchanged"
+rm -f "$IWE_RUNTIME_DIR/sessions/kimi-fresh.open"
+OLD_EPOCH=$(( $(date +%s) - 14401 ))
+OLD_TS=$(date -u -r "$OLD_EPOCH" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u -d "@$OLD_EPOCH" +%Y-%m-%dT%H:%M:%SZ)
+printf 'agent: kimi\nopened_at: %s\n' "$OLD_TS" > "$IWE_RUNTIME_DIR/sessions/kimi-renewed.open"
+printf 'renewed_at: %s\n' "$RECENT_TS" > "$IWE_RUNTIME_DIR/sessions/kimi-renewed.open.lease"
+bash "$SCRIPT" "$CANON" main >/dev/null 2>&1; rc=$?
+assert "$rc" "1" "pid-less semaphore with a stale opened_at but a fresh renewed_at still blocks"; assert "$(git -C "$CANON" rev-parse HEAD)" "$H" "HEAD unchanged"
+rm -f "$IWE_RUNTIME_DIR/sessions/kimi-renewed.open" "$IWE_RUNTIME_DIR/sessions/kimi-renewed.open.lease"
+
+echo "scenario 85 (WP-538/568, cold review): two pid-less semaphores are judged independently (one expired does not hide behind one still valid), and a renewed_at OLDER than opened_at is ignored, not treated as a reset"
+fresh s85; echo one > "$CANON/b.txt"; commit_in "$CANON" "local"; C=$(git -C "$CANON" rev-parse HEAD); republish_on_origin "$CANON" "$C"
+EXPIRED_EPOCH=$(( $(date +%s) - 14401 ))
+EXPIRED_TS=$(date -u -r "$EXPIRED_EPOCH" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u -d "@$EXPIRED_EPOCH" +%Y-%m-%dT%H:%M:%SZ)
+RECENT_TS=$(date -u +%Y-%m-%dT%H:%M:%SZ); H=$(git -C "$CANON" rev-parse HEAD)
+printf 'agent: codex\nopened_at: %s\n' "$EXPIRED_TS" > "$IWE_RUNTIME_DIR/sessions/codex-s85-expired.open"
+printf 'agent: kimi\nopened_at: %s\n' "$RECENT_TS" > "$IWE_RUNTIME_DIR/sessions/kimi-s85-fresh.open"
+bash "$SCRIPT" "$CANON" main >/dev/null 2>&1; rc=$?
+assert "$rc" "1" "one expired pid-less semaphore does not let a second, still-valid one go unnoticed"; assert "$(git -C "$CANON" rev-parse HEAD)" "$H" "HEAD unchanged"
+rm -f "$IWE_RUNTIME_DIR/sessions/kimi-s85-fresh.open"
+bash "$SCRIPT" "$CANON" main >/dev/null 2>&1; rc=$?
+git -C "$CANON" fetch -q origin
+assert "$rc" "0" "once the valid one is gone, the remaining expired one alone does not block"; assert "$(git -C "$CANON" rev-parse HEAD)" "$(git -C "$CANON" rev-parse origin/main)" "replaced"
+rm -f "$IWE_RUNTIME_DIR/sessions/codex-s85-expired.open"
+printf 'agent: kimi\nopened_at: %s\n' "$EXPIRED_TS" > "$IWE_RUNTIME_DIR/sessions/kimi-s85-stale-renew.open"
+printf 'renewed_at: %s\n' "$EXPIRED_TS" > "$IWE_RUNTIME_DIR/sessions/kimi-s85-stale-renew.open.lease"  # renewed_at == opened_at: not newer, must not reset the deadline
+H=$(git -C "$CANON" rev-parse HEAD)
+bash "$SCRIPT" "$CANON" main >/dev/null 2>&1; rc=$?
+git -C "$CANON" fetch -q origin
+assert "$rc" "0" "a renewed_at that is not strictly newer than opened_at is ignored, the lease is still expired"; assert "$(git -C "$CANON" rev-parse HEAD)" "$(git -C "$CANON" rev-parse origin/main)" "replaced"
+rm -f "$IWE_RUNTIME_DIR/sessions/kimi-s85-stale-renew.open" "$IWE_RUNTIME_DIR/sessions/kimi-s85-stale-renew.open.lease"
+
 [ "$fails" = 0 ] && echo "PASS: all scenarios" || { echo "FAIL: $fails assertion(s)"; exit 1; }

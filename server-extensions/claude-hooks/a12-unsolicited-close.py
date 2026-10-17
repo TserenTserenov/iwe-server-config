@@ -59,6 +59,15 @@ INLINE_WRAPPER_RE = re.compile(
     r"<(system-reminder|ide_selection|ide_opened_file)>.*?</\1>", re.DOTALL
 )
 QUOTED_SPAN_RE = re.compile(r"«[^»]*»|\"[^\"]*\"|`[^`]*`|```.*?```", re.DOTALL)
+# A pasted inbox/open-sessions.log line: "YYYY-MM-DD HH:MM | <wp> | <agent> | <note>".
+# WP-484 Ф206 (live incident 16.10): a close word inside such a line, copied
+# verbatim across hosts during cross-session discussion and never wrapped in
+# any quote mark, armed the obligation even though the pilot was quoting
+# another session's log entry, not commanding this one to close. Anchored to
+# the start of the line so a real command sharing a line with log-like text
+# after it is never masked -- only a line that itself opens with the log's own
+# timestamp format is pasted content, not something the pilot typed as prose.
+LOG_LINE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}\s*\|.*$", re.MULTILINE)
 PASTE_PREFIX_LIMIT = 600  # same threshold as close-gate-reminder.sh
 
 
@@ -133,8 +142,10 @@ def last_human_message(rows):
 
 
 def mask_quoted_spans(text):
-    """Replace quoted spans with spaces of the same length (offsets stay valid)."""
-    return QUOTED_SPAN_RE.sub(lambda m: " " * len(m.group()), text)
+    """Replace quoted spans AND pasted session-log lines with spaces of the
+    same length (offsets stay valid)."""
+    masked = QUOTED_SPAN_RE.sub(lambda m: " " * len(m.group()), text)
+    return LOG_LINE_RE.sub(lambda m: " " * len(m.group()), masked)
 
 
 def valid_trigger_starts(text, pattern=CLOSE_INTENT_RE, paste_limit=PASTE_PREFIX_LIMIT):

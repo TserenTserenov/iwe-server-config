@@ -106,6 +106,28 @@ class QuotedTriggerTests(unittest.TestCase):
     def test_quoted_push_phrase(self):
         self.assert_not_armed("Ты пишешь «заливай и закрывай» в каждом отчёте, зачем?")
 
+    # --- pasted session-log lines must not arm (WP-484 Ф206, live incident 16.10) ---
+    def test_pasted_log_line_with_trigger_word_is_not_armed(self):
+        # Live repro: a tsekh-1 open-sessions.log line pasted verbatim, no quote
+        # marks, whose note field happens to contain the trigger word.
+        self.assert_not_armed(
+            "2026-10-16 16:18 | WP-561 | claude-code | "
+            "Quick Close: закрыть сессию пир-работы по РП-561 (ПСЗ)"
+        )
+
+    def test_real_command_on_a_separate_line_from_a_pasted_log_still_arms(self):
+        self.assert_armed(
+            "Вот лог с того хоста:\n"
+            "2026-10-16 16:18 | WP-561 | claude-code | закрывай без рефлексии\n"
+            "Теперь закрывай."
+        )
+
+    def test_command_sharing_a_line_with_log_like_text_after_it_still_arms(self):
+        # The date pattern is anchored to the START of the line (^): a real
+        # command typed BEFORE log-like text on the same line must not be
+        # masked just because the rest of the line looks like a timestamp.
+        self.assert_armed("закрывай, см. 2026-10-16 16:18 | WP-561 | заметка")
+
     # --- real commands still arm, also next to a quote ---
     def test_plain_command(self):
         self.assert_armed("Закрывай")

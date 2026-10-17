@@ -429,6 +429,38 @@ fi
 
 # 1. no live canonical writer (strict, Codex round 3). Isolated sessions never
 #    touch this tree; only semaphores without isolated_worktree count.
+#
+# pid-less semaphores (WP-538/568, peer-session 2026-10-17-01, Claude+Kimi+Codex):
+# Kimi/Codex adapters never write a `pid:` field, so "no pid = no proof of death"
+# used to mean "treat as live forever" -- a completed, published Kimi/Codex session
+# that simply never called `session-guard.sh close` blocked reconcile indefinitely
+# (live case found 17.10: codex-*.open from WP-484, work on origin/main 9h earlier,
+# session never closed). session-guard.sh already has the right signal for this --
+# the commit-lease that `close`/`renew` manage (LEASE_SEC, default 4h) -- so a
+# pid-less semaphore is only still counted as live while that lease has not expired.
+# Sourcing session-guard.sh itself is not an option: it ends in an unconditional
+# command dispatch on $CMD, so sourcing it would also execute whatever command this
+# script's own argv happens to contain. The handful of lines that compute lease
+# expiry are duplicated here instead (semaphore_epoch/lease_deadline_epoch in
+# session-guard.sh is the source of truth; keep both in sync by hand).
+#
+# Fail-safe default: a semaphore with neither opened_at: nor created_at: cannot be
+# timed at all -- treated as live, same as before this fix (no regression for the
+# pre-WP-484 semaphore shape the existing smoke test scenario 8 already covers).
+pidless_semaphore_lease_expired() {  # <semaphore> -- 0 (expired, safe to not count as live) / 1 (valid or undecidable -> still live)
+  local sem="$1" ts base_epoch renewed_at renewed_epoch="" lease_sec="${IWE_SESSION_LEASE_SEC:-14400}"
+  ts=$(grep -E '^(opened_at|created_at): ' "$sem" | head -1 | cut -d' ' -f2-)
+  [ -n "$ts" ] || return 1
+  base_epoch=$(date -u -j -f "%Y-%m-%dT%H:%M:%SZ" "$ts" +%s 2>/dev/null || date -u -d "$ts" +%s 2>/dev/null) || return 1
+  if [ -f "${sem}.lease" ]; then
+    renewed_at=$(grep '^renewed_at: ' "${sem}.lease" | tail -1 | cut -d' ' -f2-)
+    if [ -n "$renewed_at" ]; then
+      renewed_epoch=$(date -u -j -f "%Y-%m-%dT%H:%M:%SZ" "$renewed_at" +%s 2>/dev/null || date -u -d "$renewed_at" +%s 2>/dev/null)
+    fi
+  fi
+  [ -n "$renewed_epoch" ] && [ "$renewed_epoch" -gt "$base_epoch" ] && base_epoch="$renewed_epoch"
+  [ "$(date +%s)" -ge $(( base_epoch + lease_sec )) ]
+}
 live_canonical_writers() {  # prints " name name ..." or nothing
   local sem sem_pid sem_host out=""
   local self_pid="${OWNER_PID:-${CLAUDE_PID:-}}" self_host="$(uname -n)"
@@ -449,8 +481,13 @@ live_canonical_writers() {  # prints " name name ..." or nothing
         && { [ -z "$sem_host" ] || [ "$sem_host" = "$self_host" ]; }; then
       continue
     fi
-    # no pid (Kimi/Codex semaphores never carry one) = no proof of death -> treat as live, like session-guard's own sweep
-    if [ -z "$sem_pid" ] || kill -0 "$sem_pid" 2>/dev/null; then out="$out $(basename "$sem" .open)"; fi
+    if [ -z "$sem_pid" ]; then
+      # pid-less (Kimi/Codex): live only while the commit-lease has not expired.
+      pidless_semaphore_lease_expired "$sem" && continue
+      out="$out $(basename "$sem" .open)"
+    elif kill -0 "$sem_pid" 2>/dev/null; then
+      out="$out $(basename "$sem" .open)"
+    fi
   done
   printf '%s' "$out"
 }
