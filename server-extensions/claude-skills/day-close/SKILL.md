@@ -199,6 +199,8 @@ bash ${GOV_REPO_ROOT:?}/scripts/ledger-append.sh day "$IWE_CLOSE_DATE" conversat
 
 **5d.** `bash ~/IWE/scripts/day-close-step-log.sh start 2d` — Обновить снимок открытых сессий в проверенной копии: `bash "$DAY_CLOSE_WRAPPER" --refresh-sessions "<токен из шага 0.5>"`. Обёртка повторно проверяет владельца, рабочую копию и каталог назначения. При ошибке остановиться и сохранить копию для повтора. Не удалять строки из общего журнала по дате: открытые сессии определяются по действующим семафорам. `bash ~/IWE/scripts/day-close-step-log.sh end 2d` [[gate]]
 
+**5d.1 Зависшие семафоры (WP-484 Ф207, 17.10).** `bash ~/IWE/scripts/stale-sessions-report.sh` — таблица открытых сессий старше 30 мин с причиной (`expired`/`invalid-timestamp`/`long-running-valid`). Непустой вывод → показать пилоту, решение close/renew по каждой строке — его, не авто-закрывать (возраст не доказывает смерть сессии, WP-484 Ф49). [[narrative]]
+
 **5e.** Governance-синхронизация: новые репо/сервисы за день? → REPOSITORY-REGISTRY, navigation.md, MAP.002. [[narrative]]
 
 **5f. WeekReport — ФАКТЫ ДНЯ (новый шаг, ОПТ-5):** [[narrative]] Если Week Open завершена (есть WeekReport W{N}.md):
