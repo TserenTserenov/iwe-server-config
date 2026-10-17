@@ -20,7 +20,7 @@ HOOK, CLOSE_CLI = map(lambda value: str(Path(value).resolve(strict=True)), sys.a
 
 class PeerIntentTests(unittest.TestCase):
     def setUp(self):
-        temporary = tempfile.TemporaryDirectory(prefix="wp484-peer-intent-", dir="/private/tmp")
+        temporary = tempfile.TemporaryDirectory(prefix="wp484-peer-intent-", dir=os.environ.get("TMPDIR", "/tmp"))
         self.addCleanup(temporary.cleanup)
         self.root = Path(temporary.name)
         self.sid = "f156-" + uuid.uuid4().hex

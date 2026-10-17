@@ -2,7 +2,7 @@
 set -euo pipefail
 
 HOOKS_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-TEST_ROOT=$(mktemp -d /private/tmp/wp595-hooks.XXXXXX)
+TEST_ROOT=$(mktemp -d "${TMPDIR:-/tmp}/wp595-hooks.XXXXXX")
 trap 'rm -rf "$TEST_ROOT"' EXIT
 mkdir -p "$TEST_ROOT/.claude/hooks" "$TEST_ROOT/.claude/principles" "$TEST_ROOT/.claude/state" "$TEST_ROOT/memory"
 cp "$HOOKS_DIR/inject-principle-nudge.sh" "$TEST_ROOT/.claude/hooks/"

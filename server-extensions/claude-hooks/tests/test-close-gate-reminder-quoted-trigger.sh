@@ -31,7 +31,7 @@ class QuotedTriggerTests(unittest.TestCase):
     PEER = False  # PeerQuotedTriggerTests re-runs every scenario in peer-session mode
 
     def setUp(self):
-        temporary = tempfile.TemporaryDirectory(prefix="wp561-quoted-", dir="/private/tmp")
+        temporary = tempfile.TemporaryDirectory(prefix="wp561-quoted-", dir=os.environ.get("TMPDIR", "/tmp"))
         self.addCleanup(temporary.cleanup)
         self.root = Path(temporary.name)
         self.sid = "wp561-" + uuid.uuid4().hex
