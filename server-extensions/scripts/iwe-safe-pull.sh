@@ -224,8 +224,10 @@ fi
 
 if git merge-base --is-ancestor "$LOCAL_HEAD" "$REMOTE_HEAD" 2>/dev/null; then
   echo "iwe-safe-pull: origin/$BRANCH is ahead -- shared checkout not auto-mutated, data potentially stale" >&2
+  echo "IWE_COMMITS_BEHIND: $(git rev-list --count "$LOCAL_HEAD..$REMOTE_HEAD" 2>/dev/null || echo unknown)" >&2
   exit 1
 fi
 
 echo "iwe-safe-pull: local and origin/$BRANCH histories diverged -- refusing without rebase" >&2
+echo "IWE_COMMITS_BEHIND: $(git rev-list --count "$LOCAL_HEAD..$REMOTE_HEAD" 2>/dev/null || echo unknown)" >&2
 exit 1

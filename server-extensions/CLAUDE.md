@@ -93,7 +93,7 @@ Hot-каркас ≤20K токенов (M1), строгая цель ≤12K (M2)
 
 ## Pull-on-Touch — CRITICAL
 
-**Первое обращение к git-репо за сессию → `scripts/iwe-safe-pull.sh <repo>`, НЕ raw `git pull --rebase --autostash`.** Guard отказал → pull пропущен, дерево не тронуто, пометка potentially-stale, продолжать. Основание → `memory/reference/agent-core.md`.
+**Первое обращение к git-репо за сессию → `scripts/iwe-safe-pull.sh <repo>`, НЕ raw `git pull --rebase --autostash`.** Guard отказал → градация по степени (WP-561 Ф41, 17.10), хук сам НИКОГДА не блокирует: обычное отставание — пометка potentially-stale, продолжать, в очередь долга не пишется (это рутинный шум параллельных сессий, не долг); отставание за жёстким потолком (`IWE_STALENESS_HARD_CEILING`, см. `scripts/iwe-staleness-queue.sh`) — громкая пометка + запись в переживающую сессию очередь долга, выводы на этом хранилище без сверки не делать. Фактический жёсткий блок (не этого хука) — отдельно, при правке карточки РП, через уже существующий `wp-reopen-gate.sh`. Основание → `memory/reference/agent-core.md`.
 
 ## State-Transition Gate — CRITICAL
 

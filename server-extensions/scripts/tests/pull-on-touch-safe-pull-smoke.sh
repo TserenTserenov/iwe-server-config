@@ -261,7 +261,7 @@ done
 verb="${args[$index]:-}"
 next="${args[$((index + 1))]:-}"
 case "$verb" in
-    --version|check-ref-format|diff|diff-files|merge-base|rev-parse|show-ref|status) ;;
+    --version|check-ref-format|diff|diff-files|merge-base|rev-parse|rev-list|show-ref|status) ;;
     symbolic-ref)
         [ "$next" = "--quiet" ] || {
             printf 'mutating symbolic-ref: %s\n' "$*" >> "$AUDIT_VIOLATIONS"

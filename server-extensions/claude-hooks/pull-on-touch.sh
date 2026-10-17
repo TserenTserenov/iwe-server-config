@@ -96,6 +96,8 @@ print("\n".join(out))
 [ -z "$REPOS" ] && exit 0
 
 SAFE_PULL="$IWE_ROOT/scripts/iwe-safe-pull.sh"
+STALE_QUEUE="$IWE_ROOT/scripts/iwe-staleness-queue.sh"
+STALE_CEILING="${IWE_STALENESS_HARD_CEILING:-100}"
 
 run_safe_pull() {
     local repo_dir="$1"
@@ -104,7 +106,27 @@ run_safe_pull() {
         return 1
     }
 
-    IWE_ROOT="$IWE_ROOT" bash "$SAFE_PULL" "$repo_dir"
+    IWE_ROOT="$IWE_ROOT" bash "$SAFE_PULL" "$repo_dir" 2>&1
+}
+
+# Tri-state response to a failed freshness check (WP-561 Ф41): a repo past the
+# hard ceiling is not just "potentially stale" like any other touch — it gets
+# a louder marker and a durable queue entry, so the debt survives past this
+# session instead of being silently re-forgotten on every future touch.
+classify_staleness() {
+    local repo="$1" safe_pull_output="$2"
+    local behind
+    behind=$(printf '%s\n' "$safe_pull_output" | sed -n 's/^IWE_COMMITS_BEHIND: //p' | tail -1)
+    if [ -n "$behind" ] && [ "$behind" != "unknown" ] && [ "$behind" -ge "$STALE_CEILING" ] 2>/dev/null; then
+        # Queue entry only for the hard-ceiling case — an ordinary stale touch
+        # (dirty tree, network blip, a few commits behind) is routine parallel-
+        # session noise (WP-538 Ф4), not debt worth remembering across sessions.
+        [ -x "$STALE_QUEUE" ] && bash "$STALE_QUEUE" upsert "$repo" "$behind" abstain >/dev/null 2>&1
+        printf '🛑 %s: отставание %s коммитов — за жёстким потолком (%s), нужна ручная синхронизация, не делай выводов на этом хранилище без сверки с GitHub. ' \
+            "$repo" "$behind" "$STALE_CEILING"
+    else
+        printf '%s: проверка свежести не пройдена, данные potentially stale. ' "$repo"
+    fi
 }
 
 warns=""
@@ -130,11 +152,20 @@ while IFS= read -r repo; do
     stash_before_ok=true
     stash_before=$(git -C "$dir" stash list --format=%H 2>/dev/null) || stash_before_ok=false
 
-    if run_safe_pull "$dir" >/dev/null 2>&1; then
+    # Capture to a file, not `$(...)`: a command substitution forks a subshell,
+    # which would change the safe-pull child's PPID and break the abrupt-kill
+    # contract below (TERM to PPID must still reach this very process).
+    safe_pull_out_file="$STATE_DIR/.safe-pull-out-${SESSION_ID}.$$"
+    run_safe_pull "$dir" >"$safe_pull_out_file" 2>&1
+    safe_pull_rc=$?
+    safe_pull_output=$(cat "$safe_pull_out_file" 2>/dev/null)
+    rm -f "$safe_pull_out_file"
+    if [ "$safe_pull_rc" -eq 0 ]; then
         fresh="${fresh}${repo} "
+        [ -x "$STALE_QUEUE" ] && bash "$STALE_QUEUE" clear "$repo" >/dev/null 2>&1
     else
         # Shared checkout не меняется автоматически: safe-pull отказывается без cleanup.
-        warns="${warns}${repo}: проверка свежести не пройдена, данные potentially stale. "
+        warns="${warns}$(classify_staleness "$repo" "$safe_pull_output")"
     fi
 
     stash_after_ok=true
