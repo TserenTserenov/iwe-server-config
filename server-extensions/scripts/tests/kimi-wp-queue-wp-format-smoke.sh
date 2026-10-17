@@ -15,7 +15,7 @@ set -euo pipefail
 
 ROOT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
 QUEUE="$ROOT_DIR/scripts/kimi-wp-queue.sh"
-TEST_ROOT=$(mktemp -d /private/tmp/kimi-wp-queue-format.XXXXXX)
+TEST_ROOT=$(mktemp -d "${TMPDIR:-/tmp}/kimi-wp-queue-format.XXXXXX")
 trap 'rm -rf "$TEST_ROOT"' EXIT
 
 fail() { echo "FAIL: $*" >&2; exit 1; }

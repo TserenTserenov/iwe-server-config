@@ -14,7 +14,7 @@ set -euo pipefail
 
 ROOT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
 GUARD="$ROOT_DIR/scripts/session-guard.sh"
-TEST_ROOT=$(mktemp -d /private/tmp/session-guard-legacy-no-governance.XXXXXX)
+TEST_ROOT=$(mktemp -d ${TMPDIR:-/tmp}/session-guard-legacy-no-governance.XXXXXX)
 trap 'rm -rf "$TEST_ROOT"' EXIT
 
 REPO="$TEST_ROOT/DS-strategy"

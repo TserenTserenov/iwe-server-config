@@ -16,7 +16,7 @@ unset CLAUDE_CODE_SESSION_ID CODEX_THREAD_ID
 
 ROOT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
 GUARD="$ROOT_DIR/scripts/session-guard.sh"
-TEST_ROOT=$(mktemp -d /private/tmp/session-guard-append-safe.XXXXXX)
+TEST_ROOT=$(mktemp -d ${TMPDIR:-/tmp}/session-guard-append-safe.XXXXXX)
 TEST_ROOT2=""
 trap 'rm -rf "$TEST_ROOT" "$TEST_ROOT2"' EXIT
 
@@ -176,7 +176,7 @@ echo "PASS: close still inspects an unpushed third repository on a current-schem
 
 # Control: a non-append-safe registered file left genuinely dirty must still
 # block close -- the exclusion is scoped to 00-index.md, not a blanket bypass.
-TEST_ROOT2=$(mktemp -d /private/tmp/session-guard-append-safe-control.XXXXXX)
+TEST_ROOT2=$(mktemp -d ${TMPDIR:-/tmp}/session-guard-append-safe-control.XXXXXX)
 REPO2="$TEST_ROOT2/DS-strategy"
 mkdir -p "$REPO2/sessions" "$REPO2/inbox/agent/tasks"
 git -C "$REPO2" init -q

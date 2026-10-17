@@ -50,7 +50,7 @@ class DeclaredTerminalProofTests(unittest.TestCase):
             self.assertNotEqual(refused.returncode, 0)
 
     def setUp(self):
-        self.temp = tempfile.TemporaryDirectory(prefix="wp484-proof-", dir="/private/tmp")
+        self.temp = tempfile.TemporaryDirectory(prefix="wp484-proof-", dir=os.environ.get("TMPDIR", "/tmp"))
         self.addCleanup(self.temp.cleanup)
         self.root = Path(self.temp.name)
         self.env = os.environ.copy()
@@ -614,7 +614,7 @@ class ScopePublicationProofTests(unittest.TestCase):
         )
 
     def setUp(self):
-        temp = tempfile.TemporaryDirectory(prefix="wp484-scope-case-", dir="/private/tmp")
+        temp = tempfile.TemporaryDirectory(prefix="wp484-scope-case-", dir=os.environ.get("TMPDIR", "/tmp"))
         self.addCleanup(temp.cleanup)
         self.root = Path(temp.name)
         self.repo = self.root / "DS-my-strategy"

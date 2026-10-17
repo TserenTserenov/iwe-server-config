@@ -18,7 +18,7 @@ FUNCS_END=$(awk -v start="$FUNCS_END" 'NR>=start && /^}/{print NR; exit}' "$GUAR
 [ -n "$FUNCS_START" ] && [ -n "$FUNCS_END" ] || { echo "FAIL: could not locate functions in $GUARD" >&2; exit 1; }
 FUNCS_SRC=$(sed -n "${FUNCS_START},${FUNCS_END}p" "$GUARD")
 
-TEST_ROOT=$(mktemp -d /private/tmp/session-guard-close-fetch.XXXXXX)
+TEST_ROOT=$(mktemp -d ${TMPDIR:-/tmp}/session-guard-close-fetch.XXXXXX)
 trap 'rm -rf "$TEST_ROOT"' EXIT
 
 # A real bare origin -- not just a remote-add -- so `git fetch` has something

@@ -38,7 +38,7 @@ FUNCS_SRC="$(extract_function normalize_remote_url)
 $(extract_function semaphore_governance_worktree)
 $(sed -n "${FUNCS_START},${FUNCS_END}p" "$GUARD")"
 
-TEST_ROOT=$(mktemp -d /private/tmp/session-guard-canonical-fallback.XXXXXX 2>/dev/null || mktemp -d)
+TEST_ROOT=$(mktemp -d ${TMPDIR:-/tmp}/session-guard-canonical-fallback.XXXXXX 2>/dev/null || mktemp -d)
 trap 'rm -rf "$TEST_ROOT"' EXIT
 
 # "Canonical" governance checkout -- shared, no isolated_worktree registered.

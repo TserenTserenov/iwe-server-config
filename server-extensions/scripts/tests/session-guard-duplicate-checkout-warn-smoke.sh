@@ -8,7 +8,7 @@ set -euo pipefail
 
 ROOT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
 GUARD="$ROOT_DIR/scripts/session-guard.sh"
-TEST_ROOT=$(mktemp -d /private/tmp/session-guard-dup-checkout.XXXXXX)
+TEST_ROOT=$(mktemp -d ${TMPDIR:-/tmp}/session-guard-dup-checkout.XXXXXX)
 trap 'rm -rf "$TEST_ROOT"' EXIT
 
 # gov_repo_dir() (the existing identity mechanism this fix reuses) only

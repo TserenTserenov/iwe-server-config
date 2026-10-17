@@ -28,7 +28,7 @@ FUNC_SRC="$SENTINEL_DEF
 $(sed -n "${IDENTITY_START},${IDENTITY_END}p" "$GUARD")
 $(sed -n "${START},${END}p" "$GUARD")"
 
-TEST_ROOT=$(mktemp -d /private/tmp/session-guard-frozen-quarantine-sentinel.XXXXXX 2>/dev/null || mktemp -d)
+TEST_ROOT=$(mktemp -d ${TMPDIR:-/tmp}/session-guard-frozen-quarantine-sentinel.XXXXXX 2>/dev/null || mktemp -d)
 trap 'rm -rf "$TEST_ROOT"' EXIT
 
 REPO="$TEST_ROOT/repo"

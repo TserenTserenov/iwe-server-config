@@ -5,7 +5,7 @@ set -euo pipefail
 
 ROOT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
 GUARD="$ROOT_DIR/scripts/session-guard.sh"
-TEST_ROOT=$(mktemp -d /private/tmp/session-guard-selector.XXXXXX)
+TEST_ROOT=$(mktemp -d ${TMPDIR:-/tmp}/session-guard-selector.XXXXXX)
 trap 'rm -rf "$TEST_ROOT"' EXIT
 
 # session-guard.sh:135 has read GOV_REPO from IWE_GOVERNANCE_REPO with no
@@ -74,8 +74,8 @@ poison_refusal() {  # poison_refusal <path> <cwd> — refusal must be the PATH o
     fi
 }
 
-NOREPO_DIR=$(mktemp -d /private/tmp/session-guard-norepo.XXXXXX)
-OTHER_DIR=$(mktemp -d /private/tmp/session-guard-other.XXXXXX)
+NOREPO_DIR=$(mktemp -d ${TMPDIR:-/tmp}/session-guard-norepo.XXXXXX)
+OTHER_DIR=$(mktemp -d ${TMPDIR:-/tmp}/session-guard-other.XXXXXX)
 trap 'rm -rf "$TEST_ROOT" "$NOREPO_DIR" "$OTHER_DIR"' EXIT
 
 # Nonexistent path, cwd outside any repo -> no git context at all: refuse
