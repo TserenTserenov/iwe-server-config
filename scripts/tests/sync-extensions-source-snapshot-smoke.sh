@@ -19,18 +19,25 @@ mkdir -p \
   "$SOURCE/extensions" \
   "$SOURCE/.claude/skills/demo" \
   "$SOURCE/.claude/hooks" \
-  "$SOURCE/.claude/scripts"
+  "$SOURCE/.claude/scripts" \
+  "$SOURCE/.claude/lib" \
+  "$SOURCE/.claude/rules" \
+  "$SOURCE/.claude/rules-lazy"
 printf 'snapshot-script\n' > "$SOURCE/scripts/from-snapshot.sh"
 printf 'snapshot-extension\n' > "$SOURCE/extensions/from-snapshot.txt"
 printf 'snapshot-skill\n' > "$SOURCE/.claude/skills/demo/SKILL.md"
 printf 'snapshot-hook\n' > "$SOURCE/.claude/hooks/hook.sh"
 printf 'snapshot-claude-script\n' > "$SOURCE/.claude/scripts/tool.sh"
 printf 'snapshot-instructions\n' > "$SOURCE/CLAUDE.md"
+printf 'snapshot-agent-instructions\n' > "$SOURCE/AGENTS.md"
+printf 'snapshot-agent-blocks\n' > "$SOURCE/AGENTS-agent-blocks.md"
 
 git -C "$SOURCE" init -q
 git -C "$SOURCE" config user.email test@example.invalid
 git -C "$SOURCE" config user.name test
-git -C "$SOURCE" add -- .
+git -C "$SOURCE" add -- scripts/from-snapshot.sh extensions/from-snapshot.txt \
+  .claude/skills/demo/SKILL.md .claude/hooks/hook.sh .claude/scripts/tool.sh \
+  CLAUDE.md AGENTS.md AGENTS-agent-blocks.md
 git -C "$SOURCE" commit -qm fixture
 EXPECTED_SHA=$(git -C "$SOURCE" rev-parse HEAD)
 
@@ -55,5 +62,16 @@ test "$(cat "$FIXTURE_REPO/server-extensions/claude-skills/demo/SKILL.md")" = sn
 test "$(cat "$FIXTURE_REPO/server-extensions/claude-hooks/hook.sh")" = snapshot-hook
 test "$(cat "$FIXTURE_REPO/server-extensions/claude-scripts/tool.sh")" = snapshot-claude-script
 test "$(cat "$FIXTURE_REPO/server-extensions/CLAUDE.md")" = snapshot-instructions
+test "$(cat "$FIXTURE_REPO/server-extensions/AGENTS.md")" = snapshot-agent-instructions
+test "$(cat "$FIXTURE_REPO/server-extensions/AGENTS-agent-blocks.md")" = snapshot-agent-blocks
+
+rm "$SOURCE/AGENTS.md"
+if IWE_EXTENSIONS_SOURCE_ROOT="$SOURCE" \
+  SYNC_EXTENSIONS_LINT="$WORK/lint.sh" \
+  SYNC_EXTENSIONS_CLASSIFIER="$WORK/classifier.py" \
+  bash "$FIXTURE_REPO/scripts/sync-extensions.sh" >/dev/null 2>&1; then
+  echo "FAIL: missing AGENTS source must not silently retain the old projection" >&2
+  exit 1
+fi
 
 echo "PASS: sync-extensions uses the explicit source snapshot"

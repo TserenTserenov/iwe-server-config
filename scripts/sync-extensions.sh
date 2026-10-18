@@ -7,6 +7,7 @@
 #
 # Что делает:
 #   ~/IWE/CLAUDE.md                                           → server-extensions/CLAUDE.md
+#   ~/IWE/AGENTS.md + AGENTS-agent-blocks.md                  → server-extensions/ (инструкции Codex/Kimi и источник сборки)
 #   ~/IWE/scripts/                                            → server-extensions/scripts/
 #   ~/IWE/extensions/                                         → server-extensions/extensions/
 #   ~/IWE/.claude/skills/                                     → server-extensions/claude-skills/        (все скиллы)
@@ -41,10 +42,11 @@ mkdir -p "$DST"/{scripts,extensions,claude-skills,claude-scripts,claude-hooks,cl
 # сборки (nix build sandbox не имеет сетевого доступа к .git).
 git -C "$SOURCE_ROOT" rev-parse HEAD > "$DST/ROOT_COMMIT_SHA"
 
-# Root-level CLAUDE.md (slim-ядро инструкций, нужен агенту на сервере)
-if [ -f "$SOURCE_ROOT/CLAUDE.md" ]; then
-    cp "$SOURCE_ROOT/CLAUDE.md" "$DST/CLAUDE.md"
-fi
+# Deliver the generated instructions together with their source blocks.
+# Missing input must stop the snapshot, not leave a stale staged projection.
+for instruction in CLAUDE.md AGENTS.md AGENTS-agent-blocks.md; do
+    cp "$SOURCE_ROOT/$instruction" "$DST/$instruction"
+done
 
 # WP-538 Ф8 (11.09, пир-сессия Codex+Kimi): регресс-гейт для источников,
 # шлющих Telegram напрямую через curl (git-dirty-guard.sh/semaphore-watchdog.sh/

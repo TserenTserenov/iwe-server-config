@@ -1,4 +1,5 @@
 checklists.md
+feedback_response_clarity_for_pilot.md
 lessons_day_rituals.md
 protocol-close.md
 protocol-open.md

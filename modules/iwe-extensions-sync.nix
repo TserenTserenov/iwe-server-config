@@ -64,10 +64,13 @@ in
       text = ''
         echo "[iwe-ext-sync] копирую IWE extensions из nix store..."
 
-        # Root-level CLAUDE.md (slim-ядро инструкций для агента)
-        if [ -f ${src}/CLAUDE.md ]; then
-          ${pkgs.coreutils}/bin/cp ${src}/CLAUDE.md /home/${cfg.user}/IWE/CLAUDE.md
-        fi
+        # Root instructions and the source needed to verify the AGENTS projection.
+        for instruction in CLAUDE.md AGENTS.md AGENTS-agent-blocks.md; do
+          if [ -f ${src}/$instruction ]; then
+            ${pkgs.coreutils}/bin/cp ${src}/$instruction /home/${cfg.user}/IWE/$instruction
+            chown ${cfg.user}:users /home/${cfg.user}/IWE/$instruction
+          fi
+        done
 
         # --checksum (WP-530 Ф81, найдено холодной проверкой 02.10): файлы nix store имеют время 1970-01-01, а быстрая проверка rsync -a сравнивает
         # только размер и время, поэтому правка той же длины (например, 8 на 9 в одном знаке) до сервера молча НЕ доходила; сравнение по содержимому
@@ -123,7 +126,6 @@ in
           /home/${cfg.user}/.claude/projects/-home-${cfg.user}-IWE/memory/
 
         # Восстановить права (rsync из nix store даёт root, нужно tseren)
-        chown ${cfg.user}:users /home/${cfg.user}/IWE/CLAUDE.md 2>/dev/null || true
         chown -R ${cfg.user}:users \
           /home/${cfg.user}/IWE/scripts \
           /home/${cfg.user}/IWE/extensions \
