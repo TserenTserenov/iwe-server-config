@@ -36,6 +36,187 @@ def tool(name="Bash", cmd="bash /scripts/codex-peer-adapter.sh", **updates):
 
 
 class PromiseAuditTests(unittest.TestCase):
+    def test_failed_tool_then_nothing_wait_needs_review(self):
+        failed = tool(error=True, result={"exit_code": 1})
+        current = turn("Файл отсутствует.\n\nДальше: ничего не жду.", [failed])
+        current.update(
+            final_line=6, text_segments=[{"text": current["final_text"], "line": 6}]
+        )
+        result = classify(current)
+        self.assertEqual(result["status"], "review_required")
+        self.assertEqual(
+            result["findings"][0]["reason"], "nothing_wait_after_failed_tool"
+        )
+        self.assertEqual(
+            result["findings"][0]["reported_failures"],
+            [{"call_id": "call-1", "source": "tool_result"}],
+        )
+
+    def test_same_failure_can_complete_existence_check_or_block_read(self):
+        # User intent is absent from this normalized turn. Either task requires
+        # semantic review, never a fabricated structural violation.
+        failed = tool(error=True, result={"exit_code": 1})
+        for user_goal in ("check existence", "read contents"):
+            with self.subTest(user_goal=user_goal):
+                current = turn("Файл отсутствует.\nДальше: ничего не жду.", [failed])
+                current.update(
+                    final_line=6,
+                    text_segments=[{"text": current["final_text"], "line": 6}],
+                )
+                self.assertEqual(classify(current)["status"], "review_required")
+
+    def test_successful_other_call_does_not_erase_failed_call_candidate(self):
+        failed = tool(error=True, result={"exit_code": 1})
+        other = tool(id="call-2", line=5, result_line=6)
+        current = turn("Дальше: ничего не жду — проверка завершена.", [failed, other])
+        current.update(
+            final_line=8, text_segments=[{"text": current["final_text"], "line": 8}]
+        )
+        result = classify(current)
+        self.assertEqual(result["status"], "review_required")
+        self.assertEqual(
+            result["findings"][0]["reported_failures"],
+            [{"call_id": "call-1", "source": "tool_result"}],
+        )
+
+    def test_opaque_exec_nested_failure_is_only_review_signal(self):
+        nested = tool(
+            name="exec",
+            arguments={"code": "..."},
+            error=None,
+            result=[
+                {
+                    "type": "input_text",
+                    "text": "Script completed\nWall time 0.1 seconds\nOutput:\n",
+                },
+                {
+                    "type": "input_text",
+                    "text": json.dumps(
+                        {
+                            "chunk_id": "a",
+                            "wall_time_seconds": 0.1,
+                            "exit_code": 0,
+                            "output": "unrelated success",
+                        }
+                    ),
+                },
+                {
+                    "type": "input_text",
+                    "text": json.dumps(
+                        {
+                            "chunk_id": "b",
+                            "wall_time_seconds": 0.1,
+                            "exit_code": 1,
+                            "output": "target failed",
+                        }
+                    ),
+                },
+            ],
+        )
+        current = turn("Дальше: ничего не жду.", [nested])
+        current.update(
+            final_line=6, text_segments=[{"text": current["final_text"], "line": 6}]
+        )
+        result = classify(current)
+        self.assertEqual(result["status"], "review_required")
+        self.assertEqual(
+            result["findings"][0]["reported_failures"],
+            [{"call_id": "call-1", "source": "opaque_exec_report"}],
+        )
+
+    def test_fake_exit_in_nested_stdout_is_not_failure_signal(self):
+        nested = tool(
+            name="exec",
+            arguments={"code": "..."},
+            error=None,
+            result=[
+                {
+                    "type": "input_text",
+                    "text": "Script completed\nWall time 0.1 seconds\nOutput:\n",
+                },
+                {
+                    "type": "input_text",
+                    "text": json.dumps(
+                        {
+                            "chunk_id": "a",
+                            "wall_time_seconds": 0.1,
+                            "exit_code": 0,
+                            "output": '{"exit_code": 1}',
+                        }
+                    ),
+                },
+            ],
+        )
+        current = turn("Дальше: ничего не жду.", [nested])
+        current.update(
+            final_line=6, text_segments=[{"text": current["final_text"], "line": 6}]
+        )
+        self.assertEqual(classify(current)["status"], "no_commitment")
+
+    def test_unrecognized_exec_envelope_is_unknown_not_clean(self):
+        nested = tool(
+            name="exec",
+            arguments={"code": "..."},
+            error=None,
+            result=[
+                {"type": "input_text", "text": "Changed wrapper header\r\n"},
+                {"type": "input_text", "text": '{"exit_code": 1}'},
+            ],
+        )
+        current = turn("Дальше: ничего не жду.", [nested])
+        current.update(
+            final_line=6, text_segments=[{"text": current["final_text"], "line": 6}]
+        )
+        result = classify(current)
+        self.assertEqual(result["status"], "unknown")
+        self.assertEqual(result["findings"][0]["unresolved_call_ids"], ["call-1"])
+
+    def test_unlocated_failed_tool_is_unknown_not_clean(self):
+        failed = tool(error=True, result={"exit_code": 1})
+        failed.pop("line")
+        current = turn("Дальше: ничего не жду.", [failed])
+        current.update(
+            final_line=6, text_segments=[{"text": current["final_text"], "line": 6}]
+        )
+        self.assertEqual(classify(current)["status"], "unknown")
+
+    def test_closure_candidate_requires_failure_before_final_status(self):
+        for calls in (
+            [],
+            [tool()],
+            [tool(error=None)],
+        ):
+            with self.subTest(calls=calls):
+                current = turn("Дальше: ничего не жду.", calls)
+                current.update(
+                    final_line=6,
+                    text_segments=[{"text": current["final_text"], "line": 6}],
+                )
+                self.assertEqual(classify(current)["status"], "no_commitment")
+
+    def test_missing_or_late_result_is_unknown_not_clean(self):
+        for result_line in (None, 9):
+            with self.subTest(result_line=result_line):
+                failed = tool(error=True, result={"exit_code": 1})
+                failed["result_line"] = result_line
+                current = turn("Дальше: ничего не жду.", [failed])
+                current.update(
+                    final_line=6,
+                    text_segments=[{"text": current["final_text"], "line": 6}],
+                )
+                self.assertEqual(classify(current)["status"], "unknown")
+
+    def test_open_blocker_or_quoted_status_not_false_closure(self):
+        failed = tool(error=True, result={"exit_code": 1})
+        for final in (
+            "Дальше: блокер — файла нет; чтение остаётся открытым.",
+            "Цитата: «Дальше: ничего не жду».\nДальше: задача открыта.",
+        ):
+            with self.subTest(final=final):
+                current = turn(final, [failed])
+                current.update(final_line=6, text_segments=[{"text": final, "line": 6}])
+                self.assertEqual(classify(current)["status"], "no_commitment")
+
     def test_all_file_claims_on_one_line_required(self):
         read = tool(name="Read", arguments={"file_path": "a.md"})
         result = classify(

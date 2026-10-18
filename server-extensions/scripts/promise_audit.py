@@ -18,7 +18,7 @@ from pathlib import Path
 
 from turn_evidence import load_turns
 
-RULE_VERSION = "wp603-v1"
+RULE_VERSION = "wp603-v2"
 VENDORS = {
     "codex": "codex",
     "claude": "claude",
@@ -265,6 +265,112 @@ def check_target(target: dict, tools: list[dict], line: int, end: int) -> dict:
     }
 
 
+def reported_failure(tool: dict) -> str | None:
+    """Any failed nested chunk merits review, even beside later successes.
+
+    Opaque exec output never proves which chunk satisfied the user's goal.
+    An unfamiliar envelope is uncertainty, not evidence of a clean turn.
+    """
+    if tool.get("error") is True:
+        return "tool_result"
+    if tool.get("error") is not None or tool.get("name", "").lower() != "exec":
+        return None
+    result = tool.get("result")
+    if not isinstance(result, list) or len(result) < 2:
+        return "opaque_exec_unrecognized"
+    header = result[0]
+    if (
+        not isinstance(header, dict)
+        or header.get("type") != "input_text"
+        or not isinstance(header.get("text"), str)
+        or not re.fullmatch(
+            r"Script completed\nWall time [0-9]+(?:\.[0-9]+)? seconds\nOutput:\n",
+            header["text"],
+        )
+    ):
+        return "opaque_exec_unrecognized"
+    uncertain = False
+    recognized = False
+    for block in result[1:]:
+        if (
+            not isinstance(block, dict)
+            or block.get("type") != "input_text"
+            or not isinstance(block.get("text"), str)
+        ):
+            uncertain = True
+            continue
+        try:
+            nested = json.loads(block["text"])
+        except ValueError:
+            uncertain = True
+            continue
+        if (
+            isinstance(nested, dict)
+            and isinstance(nested.get("chunk_id"), str)
+            and type(nested.get("exit_code")) is int
+            and type(nested.get("wall_time_seconds")) in {int, float}
+            and isinstance(nested.get("output"), str)
+        ):
+            recognized = True
+            if nested["exit_code"] != 0:
+                return "opaque_exec_report"
+        else:
+            uncertain = True
+    return "opaque_exec_unrecognized" if uncertain or not recognized else None
+
+
+def closure_after_failed_tool(turn: dict) -> dict | None:
+    """Request semantic review; reported failure cannot define user success."""
+    final = turn.get("final_text", "")
+    if not isinstance(final, str):
+        return None
+    final_lines = [line.strip() for line in final.splitlines() if line.strip()]
+    if not final_lines or not re.match(
+        r"^Дальше:\s*ничего\s+не\s+жду\b", final_lines[-1], re.IGNORECASE
+    ):
+        return None
+    final_line = turn.get("final_line")
+    if not isinstance(final_line, int):
+        return None
+    failures = []
+    uncertain_calls = []
+    for tool in turn.get("tools", []):
+        if not tool.get("id"):
+            continue
+        call_line = tool.get("line")
+        result_line = tool.get("result_line")
+        if not isinstance(call_line, int):
+            uncertain_calls.append(tool["id"])
+            continue
+        if call_line >= final_line:
+            continue
+        if not isinstance(result_line, int) or not call_line < result_line < final_line:
+            uncertain_calls.append(tool["id"])
+            continue
+        source = reported_failure(tool)
+        if not source:
+            continue
+        if source == "opaque_exec_unrecognized":
+            uncertain_calls.append(tool["id"])
+        else:
+            failures.append({"call_id": tool["id"], "source": source})
+    if failures:
+        return {
+            "status": "review_required",
+            "reason": "nothing_wait_after_failed_tool",
+            "candidate_line": final_line,
+            "reported_failures": failures,
+        }
+    if uncertain_calls:
+        return {
+            "status": "unknown",
+            "reason": "nothing_wait_with_unresolved_exec_result",
+            "candidate_line": final_line,
+            "unresolved_call_ids": uncertain_calls,
+        }
+    return None
+
+
 def classify(turn: dict) -> dict:
     base = {
         "turn_id": str(turn["id"]),
@@ -321,6 +427,9 @@ def classify(turn: dict) -> dict:
                         "candidate_line": segment["line"],
                     }
                 )
+    closure = closure_after_failed_tool(turn)
+    if closure:
+        findings.append(closure)
     base["findings"] = findings
     # One sound violation suffices, even if another claim is ambiguous.
     priority = (
