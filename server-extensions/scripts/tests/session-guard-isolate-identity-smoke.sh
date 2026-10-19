@@ -151,20 +151,38 @@ grep -q 'физическую идентичность' "$TEST_ROOT/e.err" \
   || { cat "$TEST_ROOT/e.err" >&2; fail_test "E: refusal did not mention physical identity"; }
 echo "PASS: E -- isolating an unrelated repo (no inbox/) without --force is refused"
 
-# F: same unrelated repo, but with --force -- must succeed, and the
-# resulting worktree must be based on cwd (OTHER_E), not the canonical gov
-# repo (checked by presence of a file unique to OTHER_E's working tree).
+# F: WP-530 Ф91б (2026-10-19, live incident closing РП-385). `open` always
+# requires --wp (enforced earlier, unconditionally outside --housekeeping),
+# so the identity-mismatch branch below never sees an empty $WP in practice
+# -- plain --force alone used to accept this silently (this test used to
+# assert success for exactly this call) and wrote a governance_worktree
+# pointing at a repo that cannot hold any WP card: wp-card-license-gate.sh
+# and close_obligation.py both read that path literally from the semaphore,
+# so the WP's card became permanently unreachable for the rest of the
+# session. Must now refuse with a message naming --force-wp-elsewhere.
 printf 'only-in-other\n' > "$OTHER_E/marker-other.txt"
 git -C "$OTHER_E" add marker-other.txt
 git -C "$OTHER_E" commit -qm "marker" >/dev/null
 git -C "$OTHER_E" push -q origin main
-OUT_F=$(run_open "$E_ROOT" "gov" "$OTHER_E" --wp WP-999 --slug "f-$RANDOM" --force) \
-  || fail_test "F: isolating an unrelated repo WITH --force failed: see stderr above"
-WT_F=$(printf '%s\n' "$OUT_F" | grep -o '"worktree_path": "[^"]*"' | cut -d'"' -f4)
-[ -n "$WT_F" ] && [ -d "$WT_F" ] || fail_test "F: --force did not produce a worktree path"
-[ -f "$WT_F/marker-other.txt" ] \
-  || fail_test "F: the forced worktree is not based on cwd (OTHER_E) -- expected marker-other.txt"
-echo "PASS: F -- --force isolates cwd itself, not the canonical governance repo"
+if OUT_F=$(run_open "$E_ROOT" "gov" "$OTHER_E" --wp WP-999 --slug "f-$RANDOM" --force 2>"$TEST_ROOT/f.err"); then
+  fail_test "F: isolating an unrelated repo WITH --force (and the always-required --wp) unexpectedly succeeded: $OUT_F"
+fi
+grep -q -- '--force-wp-elsewhere' "$TEST_ROOT/f.err" \
+  || { cat "$TEST_ROOT/f.err" >&2; fail_test "F: refusal did not mention --force-wp-elsewhere"; }
+echo "PASS: F -- --force alone no longer bypasses identity mismatch when --wp is (always) given"
+
+# F2: same unrelated repo, same --wp, but with the explicit second ack
+# (--force-wp-elsewhere) -- must succeed, and the resulting worktree must be
+# based on cwd (OTHER_E), not the canonical gov repo (checked by presence of
+# a file unique to OTHER_E's working tree) -- this is the --force behavior
+# from before Ф91б, now reachable only with the explicit second flag.
+OUT_F2=$(run_open "$E_ROOT" "gov" "$OTHER_E" --wp WP-999 --slug "f2-$RANDOM" --force --force-wp-elsewhere) \
+  || fail_test "F2: --force + --force-wp-elsewhere failed: see stderr above"
+WT_F2=$(printf '%s\n' "$OUT_F2" | grep -o '"worktree_path": "[^"]*"' | cut -d'"' -f4)
+[ -n "$WT_F2" ] && [ -d "$WT_F2" ] || fail_test "F2: --force-wp-elsewhere did not produce a worktree path"
+[ -f "$WT_F2/marker-other.txt" ] \
+  || fail_test "F2: the forced worktree is not based on cwd (OTHER_E) -- expected marker-other.txt"
+echo "PASS: F2 -- --force-wp-elsewhere explicitly allows --wp against a mismatched repo"
 
 # G: cwd IS the canonical governance repo (identity matches), has inbox/,
 # but lacks the requested WP's folder -- the *existing*, unchanged inbox/WP
