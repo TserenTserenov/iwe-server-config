@@ -13,15 +13,17 @@ FIXTURES="$GOV/scripts/tests/wp-pipeline-fixtures/DS-my-strategy"
 [ -x "$GOV/scripts/ledger-append.sh" ] && [ -d "$FIXTURES" ] || { echo "SKIP: нет $GOV/scripts/ledger-append.sh или фикстур карточек"; exit 0; }
 
 T=$(mktemp -d)
-trap 'find "$T" -mindepth 1 -delete 2>/dev/null; rmdir "$T" 2>/dev/null' EXIT
+trap 'chmod -R u+w "$T" 2>/dev/null; find "$T" -mindepth 1 -delete 2>/dev/null; rmdir "$T" 2>/dev/null' EXIT
 FAIL=0
 check() { if [[ "$2" == "$3" ]]; then echo "  ✅ $1"; else echo "  ❌ $1 — ожидалось '$2', получено '$3'"; FAIL=$((FAIL + 1)); fi; }
 
 mkdir -p "$T/ws/.claude/state" "$T/interactive" "$T/batch" "$T/bin"
 cp -r "$FIXTURES" "$T/ws/"
+chmod -R u+w "$T/ws/DS-my-strategy"
 mkdir -p "$T/ws/DS-my-strategy/scripts"
 cp "$GOV/scripts/ledger-append.sh" "$T/ws/DS-my-strategy/scripts/"
 cp -r "$GOV/scripts/lib" "$T/ws/DS-my-strategy/scripts/"
+chmod -R u+w "$T/ws/DS-my-strategy/scripts/lib"
 # The ledger writer must never start the real publisher.
 printf '#!/usr/bin/env bash\nexit 0\n' > "$T/bin/systemctl"; chmod +x "$T/bin/systemctl"
 

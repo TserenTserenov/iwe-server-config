@@ -27,7 +27,7 @@ LEDGER_LIB_DIR="${IWE_LEDGER_LIB_DIR:-$IWE_ROOT_REAL/$GOV_REPO_REAL/scripts/lib}
 [ -f "$LEDGER_APPEND" ] || { echo "SKIP: не найден $LEDGER_APPEND"; exit 0; }
 
 SANDBOX=$(mktemp -d)
-trap 'rm -rf "$SANDBOX"' EXIT
+trap 'chmod -R u+w "$SANDBOX" 2>/dev/null; rm -rf "$SANDBOX"' EXIT
 
 # Sandbox mirrors only what the function touches: the ledger writer, its lib/,
 # and an empty ledger tree. Nothing here points at the real ledger.
@@ -36,6 +36,7 @@ GOV_REPO="$GOV_REPO_REAL"
 mkdir -p "$IWE_ROOT/$GOV_REPO/scripts" "$IWE_ROOT/$GOV_REPO/machine/ledger"
 cp "$LEDGER_APPEND" "$IWE_ROOT/$GOV_REPO/scripts/"
 cp -R "$LEDGER_LIB_DIR" "$IWE_ROOT/$GOV_REPO/scripts/"
+chmod -R u+w "$IWE_ROOT/$GOV_REPO/scripts/lib"
 export IWE_LEDGER_DIR="$IWE_ROOT/$GOV_REPO/machine/ledger"
 
 # Extract emit_session_closed() from the live script: the test must exercise the

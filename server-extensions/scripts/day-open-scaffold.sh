@@ -630,6 +630,14 @@ render_iwe_status() {
   last_watchdog_log=$(ls -t "$HOME/logs/synchronizer/feedback-watchdog-"*.log 2>/dev/null | head -1 || echo "")
   local last_feedback_triage_log
   last_feedback_triage_log=$(ls -t "$IWE/${IWE_GOVERNANCE_REPO:-DS-strategy}/logs/feedback-triage"*.log 2>/dev/null | head -1 || echo "")
+  # Фактический артефакт triage на этом хосте -- markdown-отчёт в этой папке
+  # (та же, что $triage_file выше), а не .log двух переменных над этой строкой:
+  # их имена/пути устарели относительно реального пайплайна (найдено 19.10).
+  # Сортировка по имени файла (YYYY-MM-DD.md), не по mtime (`ls -t`): несвязанный
+  # ночной процесс трогает старые файлы в этой папке, mtime там не монотонен
+  # с реальной датой отчёта (найдено 19.10 -- сентябрьский файл "новее" сегодняшнего).
+  local last_triage_report
+  last_triage_report=$(ls "$IWE/DS-agent-workspace/scheduler/feedback-triage/"*.md 2>/dev/null | sort | tail -1 || echo "")
   local has_launchd_unit=false
   if launchctl list 2>/dev/null | grep -qE "iwe\.(scheduler|feedback-watchdog|synchronizer|feedback-triage)"; then
     has_launchd_unit=true
@@ -649,19 +657,31 @@ render_iwe_status() {
   elif [ "$has_launchd_unit" = "true" ] && [ "$in_grace_window" = "true" ]; then
     # Mode C: юнит загружен, но cron ещё не сработал (до 06:30)
     echo "| Scheduler/триаж | 🟡 | Mode C: юнит загружен, ожидание cron (06:00) — grace window до 06:30 |"
-  elif [ "$has_launchd_unit" = "true" ] && { [ -n "$last_watchdog_log" ] || [ -n "$last_feedback_triage_log" ]; }; then
-    # Mode B-2: юнит зарегистрирован, есть свежий лог < 2 дней → норм (тишина = нет жалоб)
+  elif [ -n "$last_triage_report" ] || [ -n "$last_watchdog_log" ] || [ -n "$last_feedback_triage_log" ]; then
+    # Mode B-2: есть свежий лог/отчёт < 2 дней → норм (тишина = нет жалоб). Раньше
+    # требовала has_launchd_unit, которая на systemd-хостах (нет launchctl)
+    # всегда false -- 7 недель подряд ложного Mode A при реально живом триаже.
     local last_log_age_days=-1
     local last_log_file=""
-    if [ -n "$last_feedback_triage_log" ]; then
+    if [ -n "$last_triage_report" ]; then
+      last_log_file="$last_triage_report"
+    elif [ -n "$last_feedback_triage_log" ]; then
       last_log_file="$last_feedback_triage_log"
     else
       last_log_file="$last_watchdog_log"
     fi
     if [ -n "$last_log_file" ]; then
-      # WP-537: GNU stat -f leaks garbage on Linux (filesystem-status mode, not
-      # a format flag) -- GNU form first so it short-circuits before BSD form runs.
-      last_log_age_days=$(( ( $(date +%s) - $(stat -c %Y "$last_log_file" 2>/dev/null || stat -f %m "$last_log_file" 2>/dev/null || echo 0) ) / 86400 ))
+      local last_log_epoch
+      if [ "$last_log_file" = "$last_triage_report" ]; then
+        # Дата отчёта -- само имя файла (YYYY-MM-DD.md), не mtime (см. находку
+        # 19.10 над выбором last_triage_report выше).
+        last_log_epoch=$(date -d "$(basename "$last_log_file" .md)" +%s 2>/dev/null || echo 0)
+      else
+        # WP-537: GNU stat -f leaks garbage on Linux (filesystem-status mode, not
+        # a format flag) -- GNU form first so it short-circuits before BSD form runs.
+        last_log_epoch=$(stat -c %Y "$last_log_file" 2>/dev/null || stat -f %m "$last_log_file" 2>/dev/null || echo 0)
+      fi
+      last_log_age_days=$(( ( $(date +%s) - last_log_epoch ) / 86400 ))
     fi
     if [ "$last_log_age_days" -le 1 ] || [ "$last_log_age_days" -eq -1 ]; then
       echo "| Scheduler/триаж | 🟢 | Mode B: feedback-triage зарегистрирован, последний лог присутствует (нет жалоб = тишина) |"
