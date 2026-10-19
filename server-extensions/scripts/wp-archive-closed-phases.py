@@ -44,7 +44,12 @@ Usage:
 Exit: 0 = ok (dry-run report, or applied, or nothing to do)
       1 = usage / card not found
       3 = safety refusal (lock busy, recovery pending, guard unavailable for
-          --apply, post-check failed and rolled back)
+          --apply, post-check failed and rolled back) OR a phase-section
+          self-check mismatch (WP-484 Ф217: the independent cross-check
+          scanner disagrees with the real parser -- most pointedly 0 phase
+          sections found while phase headings exist on disk). The mismatch
+          case fires in dry-run too, not only --apply: a parser bug is worth
+          a non-zero exit even when nothing was going to be written.
 """
 from __future__ import annotations
 
@@ -61,12 +66,18 @@ import sys
 import tempfile
 import time
 
+_LIB_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "lib")
+if _LIB_DIR not in sys.path:
+    sys.path.insert(0, _LIB_DIR)
+import phase_sections as _phase_sections  # noqa: E402  (needs sys.path set up above)
+
 TERMINAL_STATUSES = {"done", "closed", "archived", "completed"}
-# ФN, sub-phases ФN.M(.K), optional letter suffix (Ф5а) -- the FIRST token after "## ".
-# Cold review 27.09: `Ф\d+` alone truncated Ф16.2 to Ф16, so frontmatter `Ф16: done`
-# licensed the still-open sub-phase 16.2 for archival.
-PHASE_ID = r"Ф\d+(?:\.\d+)*[а-яa-z]?"
-PHASE_HEADING_RE = re.compile(rf"^## ({PHASE_ID})\b(.*)$")
+# ФN, sub-phases ФN.M(.K), optional letter suffix (Ф5а) -- the FIRST token after the
+# leading #'s. Cold review 27.09: `Ф\d+` alone truncated Ф16.2 to Ф16, so frontmatter
+# `Ф16: done` licensed the still-open sub-phase 16.2 for archival.
+# WP-484 Ф217: level-aware (## .. ######, not only H2) -- cards and create-wp.sh
+# commonly use ### ФN; the heading-level split itself lives in phase_sections.py.
+PHASE_ID = _phase_sections.PHASE_ID
 FIELD_LINE_RE = re.compile(r"^\*\*[^*]+\*\*")
 # formal terminal markers in a fixed position (see module docstring)
 HEAD_MARK_AFTER_ID_RE = re.compile(r"^\s*(?:[—\-:]\s*)?✅")
@@ -99,6 +110,9 @@ class Card:
         self.lines = self.text.split("\n")
         self.fm_end = self._frontmatter_end()
         self.sections = self._split_sections()
+        body_start = self.fm_end + 1 if self.fm_end >= 0 else 0
+        self.phase_sections, self.phase_diagnostics = _phase_sections.split_phase_sections(
+            self.lines, start=body_start)
 
     def _frontmatter_end(self) -> int:
         """Index of the closing '---' line of the frontmatter, or -1."""
@@ -186,16 +200,19 @@ class Card:
 # ---------------------------------------------------------------------------
 # analysis
 # ---------------------------------------------------------------------------
-def phase_id_of(heading: str) -> str | None:
-    m = PHASE_HEADING_RE.match(heading)
-    return m.group(1) if m else None
-
-
 def heading_has_terminal_marker(heading: str) -> bool:
-    m = PHASE_HEADING_RE.match(heading)
+    # Cold review (peer-session 2026-10-19-16): this used to re-derive the heading-level
+    # prefix with its own regex (`^#{2,6} `, exactly one space), which disagreed with
+    # phase_sections.HEADING_RE (`\s+`, any run of whitespace) on a heading nobody has
+    # written yet but nothing rules out -- one rule, split across two copies that could
+    # silently drift. Reuse the same two regexes split_phase_sections() uses instead.
+    m = _phase_sections.HEADING_RE.match(heading)
     if not m:
         return False
-    rest = m.group(2)
+    pm = _phase_sections.PHASE_HEAD_RE.match(m.group(2))
+    if not pm:
+        return False
+    rest = pm.group(2)
     if HEAD_MARK_AFTER_ID_RE.match(rest):
         return True
     if heading.rstrip().endswith("✅"):
@@ -231,16 +248,21 @@ def next_step_text(card: Card) -> str:
 
 def analyze(card: Card, keep_last: int) -> dict:
     fm_phases = card.fm_phases()
-    heading_counts: dict[str, int] = {}
-    for s in card.sections:
-        heading_counts[s["heading"].strip()] = heading_counts.get(s["heading"].strip(), 0) + 1
-    phase_secs = [s for s in card.sections if phase_id_of(s["heading"])]
-    keep_ids = {phase_id_of(s["heading"]) for s in phase_secs[-keep_last:]} if keep_last > 0 else set()
+    phase_secs = card.phase_sections
+    keep_ids = {s["id"] for s in phase_secs[-keep_last:]} if keep_last > 0 else set()
     next_step = next_step_text(card)
+    # WP-484 Ф217: independent cross-check (phase_sections.scan_phase_heading_lines) --
+    # a different, simpler algorithm from split_phase_sections() above, so a boundary
+    # bug in the latter cannot agree with itself by construction. "0 found while
+    # markers exist" (and any other mismatch) is a parser error, not an empty card.
+    body_start = card.fm_end + 1 if card.fm_end >= 0 else 0
+    scan = _phase_sections.scan_phase_heading_lines(card.lines, start=body_start)
+    self_check = {"split_count": len(phase_secs), "scan_count": len(scan),
+                  "match": len(phase_secs) == len(scan)}
 
     candidates, vetoed, no_marker, attention = [], [], [], []
     for s in phase_secs:
-        pid = phase_id_of(s["heading"])
+        pid = s["id"]
         body = card.section_text(s)
         fm_status = fm_phases.get(pid, "")
         positive = fm_status in TERMINAL_STATUSES or heading_has_terminal_marker(s["heading"])
@@ -249,7 +271,7 @@ def analyze(card: Card, keep_last: int) -> dict:
         if referenced and unchecked:
             attention.append({"phase": pid, "reason": "упомянута в «Следующий шаг», но содержит незакрытые пункты"})
         if not positive:
-            no_marker.append({"phase": pid, "heading": s["heading"]})
+            no_marker.append({"phase": pid, "heading": s["heading"], "duplicate": s["duplicate"], "occurrence": s["occurrence"]})
             continue
         vetoes = []
         if unchecked:
@@ -260,19 +282,20 @@ def analyze(card: Card, keep_last: int) -> dict:
             vetoes.append("упомянута в «Следующий шаг» секции «Осталось»")
         if pid in keep_ids:
             vetoes.append(f"одна из последних {keep_last} фаз (--keep-last)")
-        if heading_counts.get(s["heading"].strip(), 0) != 1:
-            vetoes.append("заголовок H2 не уникален в карточке")
+        if s["duplicate"]:
+            vetoes.append(f"id фазы не уникален в карточке (вхождение {s['occurrence']} из нескольких -- Codex, 19.10: дубли считаются по id, не по тексту заголовка)")
         if fm_status and fm_status not in TERMINAL_STATUSES:
             vetoes.append(f"frontmatter phases.{pid}={fm_status}")
         entry = {"phase": pid, "heading": s["heading"], "start": s["start"] + 1, "end": s["end"],
-                 "lines": s["end"] - s["start"], "sha256": sha256_text(body)}
+                 "lines": s["end"] - s["start"], "sha256": sha256_text(body), "start0": s["start"]}
         if vetoes:
             entry["vetoes"] = vetoes
             vetoed.append(entry)
         else:
             candidates.append(entry)
     return {"candidates": candidates, "vetoed": vetoed, "no_terminal_marker": no_marker,
-            "attention": attention, "phase_sections": len(phase_secs)}
+            "attention": attention, "phase_sections": len(phase_secs),
+            "self_check": self_check, "phase_diagnostics": card.phase_diagnostics}
 
 
 def ostalos_check(card: Card) -> dict:
@@ -563,9 +586,9 @@ def apply(card: Card, wp: str, cands: list[dict], gov: str, inbox: str, runtime:
         # One normalised form of each block (trailing blank lines stripped) is used for the
         # precondition count, the archive text and BOTH post-check deltas (cold review: the raw
         # block with its trailing newlines never matched the rstripped copy written to the archive).
-        blocks = [card.section_text(next(s for s in card.sections if s["heading"] == c["heading"])).rstrip("\n") for c in moved]
+        blocks = [card.section_text(next(s for s in card.phase_sections if s["start"] == c["start0"])).rstrip("\n") for c in moved]
         for b, c in zip(blocks, moved):
-            raw = card.section_text(next(s for s in card.sections if s["heading"] == c["heading"]))
+            raw = card.section_text(next(s for s in card.phase_sections if s["start"] == c["start0"]))
             if sha256_text(raw) != c["sha256"]:
                 raise Refusal(f"precondition: block {c['phase']} changed between analysis and apply")
             if card_before.count(b) != 1:
@@ -584,7 +607,7 @@ def apply(card: Card, wp: str, cands: list[dict], gov: str, inbox: str, runtime:
         # ONLY at the seam left by the removal (cold review: a whole-card collapse rewrote
         # unrelated text, including code blocks, invisibly to the post-check)
         for c in sorted(moved, key=lambda x: x["start"], reverse=True):
-            s = next(s for s in card.sections if s["heading"] == c["heading"])
+            s = next(s for s in card.phase_sections if s["start"] == c["start0"])
             del new_lines[s["start"]:s["end"]]
             seam = s["start"]
             while 0 < seam < len(new_lines) and new_lines[seam - 1] == "" and new_lines[seam] == "":
@@ -705,26 +728,45 @@ def main(argv: list[str]) -> int:
     if a.ostalos_check:
         report["ostalos"] = ostalos_check(card)
     rc = 0
-    if a.apply and report["candidates"]:
+    # WP-484 Ф217: the independent cross-check disagreeing with the real parser --
+    # most pointedly 0 phase sections found while phase headings exist on disk --
+    # is a parser bug, not a card with no phases. Refuse --apply outright (acting
+    # on a provably wrong model is unsafe); dry-run still prints the report so the
+    # mismatch itself is visible.
+    if not report["self_check"]["match"]:
+        print(f"ERROR: phase section self-check mismatch for WP-{wp}: "
+              f"parser found {report['self_check']['split_count']}, independent scan found "
+              f"{report['self_check']['scan_count']} -- treat as a parser bug, not an empty card",
+              file=sys.stderr)
+        rc = 3
+    if a.apply and rc == 0 and report["candidates"]:
         try:
             report["result"] = apply(card, wp, report["candidates"], gov, inbox, runtime, a.guard_timeout, a.lock_wait)
         except Refusal as e:
             report["result"] = {"applied": False, "refused": str(e)}
             rc = 3
-    elif a.apply:
+    elif a.apply and rc == 0:
         report["result"] = {"applied": False, "reason": "no candidates"}
+    elif a.apply:
+        report["result"] = {"applied": False, "reason": "phase section self-check mismatch -- refused, see self_check"}
 
     if a.json:
         print(json.dumps(report, ensure_ascii=False, indent=1))
     else:
         print(f"WP-{wp}: фаз-секций {report['phase_sections']}, кандидатов на архив {len(report['candidates'])}, "
               f"с вето {len(report['vetoed'])}, без явного маркера закрытия {len(report['no_terminal_marker'])}")
+        sc = report["self_check"]
+        if not sc["match"]:
+            print(f"  ⚠ self-check: парсер={sc['split_count']} независимый скан={sc['scan_count']} -- расхождение, см. stderr")
+        for d in report.get("phase_diagnostics", []):
+            print(f"  ⚠ строка {d['line'] + 1}: {d['issue']} ({d['heading'][:80]!r}), открыт id={d['open_id']}")
         for c in report["candidates"]:
             print(f"  → {c['phase']} ({c['lines']} строк) {c['heading'][:80]}")
         for v in report["vetoed"]:
             print(f"  ✗ {v['phase']}: {'; '.join(v['vetoes'])}")
         for n in report["no_terminal_marker"]:
-            print(f"  ? {n['phase']}: нет явного маркера закрытия (✅ после номера / [done] / frontmatter phases)")
+            dup_note = f" [дубль id, вхождение {n['occurrence']}]" if n["duplicate"] else ""
+            print(f"  ? {n['phase']}: нет явного маркера закрытия (✅ после номера / [done] / frontmatter phases){dup_note}")
         for at in report["attention"]:
             print(f"  ! {at['phase']}: {at['reason']}")
         if "ostalos" in report:

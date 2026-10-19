@@ -267,4 +267,57 @@ mode() { stat -f '%Lp' "$1" 2>/dev/null || stat -c '%a' "$1"; }
 assert "$(mode "$CARD")" "644" "card keeps 644"
 assert "$(mode "$GOV/inbox/WP-9201/WP-9201-archive.md")" "644" "new archive is world-readable (0666 & ~umask)"
 
+echo "scenario 19 (WP-484 Ф217): H3 phase headings are now found, not only H2"
+reset_rt; mkcard '' $'### Ф1 \xe2\x9c\x85 \xe2\x80\x94 h3 phase, candidate\nBody.\n\n### Ф2 \xe2\x9c\x85 \xe2\x80\x94 h3 pad\nBody.\n\n### Ф3 \xe2\x9c\x85 \xe2\x80\x94 h3 pad\nBody.\n'
+out=$(run)
+assert "$(printf '%s' "$out" | jq_ "','.join(sorted(c['phase'] for c in d['candidates']))")" "Ф1" "H3 phase heading is a candidate (used to be invisible to the archiver)"
+assert "$(printf '%s' "$out" | jq_ "d['self_check']['match']")" "True" "independent scan agrees with the parser"
+
+echo "scenario 20 (WP-484 Ф217): ordinary subheading of the same/shallower level closes the block; a deeper one stays nested"
+reset_rt; mkcard '' $'## Ф1 \xe2\x9c\x85 \xe2\x80\x94 outer\n### not a phase, deeper -- stays inside\nnested body\n\n## not a phase, same level -- closes Ф1\nBody.\n\n## Ф2 \xe2\x9c\x85 \xe2\x80\x94 pad\nBody.\n\n## Ф3 \xe2\x9c\x85 \xe2\x80\x94 pad\nBody.\n'
+out=$(run)
+assert "$(printf '%s' "$out" | jq_ "[c for c in d['candidates'] if c['phase']=='Ф1'][0]['lines']")" "4" "Ф1's block includes the nested H3 but stops at the sibling H2"
+
+echo "scenario 21 (WP-484 Ф217): duplicate id with DIFFERENT heading text is vetoed by id, not by heading-text equality"
+reset_rt; mkcard '' $'## Ф1 \xe2\x9c\x85 \xe2\x80\x94 first telling\nBody one.\n\n## Ф1 \xe2\x9c\x85 \xe2\x80\x94 a different later section, same id\nBody one again.\n\n## Ф2 \xe2\x9c\x85 \xe2\x80\x94 pad\nBody.\n\n## Ф3 \xe2\x9c\x85 \xe2\x80\x94 pad\nBody.\n'
+out=$(run)
+assert "$(printf '%s' "$out" | jq_ "any(v['phase']=='Ф1' and any('не уникален' in x for x in v['vetoes']) for v in d['vetoed'])")" "True" "both Ф1 occurrences vetoed even though their heading text differs (Codex, 19.10: count duplicates by id)"
+
+echo "scenario 22 (WP-484 Ф217): «#### Продолжение ФNN» extends the open block instead of starting a new occurrence; a mismatched id is a diagnostic"
+reset_rt; mkcard '' $'## Ф1 \xe2\x9c\x85 \xe2\x80\x94 opens\nBody one.\n\n#### Продолжение Ф1: more of the same phase\nmore body, still Ф1.\n\n## Ф2 \xe2\x9c\x85 \xe2\x80\x94 pad\nBody.\n\n#### Продолжение Ф9: id does not match anything open\nstray continuation.\n\n## Ф3 \xe2\x9c\x85 \xe2\x80\x94 pad\nBody.\n'
+out=$(run)
+assert "$(printf '%s' "$out" | jq_ "d['phase_sections']")" "3" "the continuation did not create a 4th phase section"
+assert "$(printf '%s' "$out" | jq_ "any('Продолжение' in x['heading'] for x in d['phase_diagnostics'])")" "True" "mismatched continuation is reported as a diagnostic, not silently dropped"
+
+echo "scenario 23 (WP-484 Ф217 п.4, found running --dry-run over inbox/): a bare id glued to '-'/'/' (cross-reference tag, not a phase heading) is not matched"
+reset_rt; mkcard '' $'## Ф1 \xe2\x9c\x85 \xe2\x80\x94 real phase\nBody.\n\n## Ф1/Ф2 \xe2\x80\x94 cross-reference tag, not a phase heading\nnot a new occurrence of Ф1.\n\n### Ф1-live-gap-audit \xe2\x80\x94 descriptive slug, not a phase heading\nalso not a new occurrence.\n\n## Ф2 \xe2\x9c\x85 \xe2\x80\x94 pad\nBody.\n\n## Ф3 \xe2\x9c\x85 \xe2\x80\x94 pad\nBody.\n'
+out=$(run)
+assert "$(printf '%s' "$out" | jq_ "d['phase_sections']")" "3" "only the 3 real phase headings counted, the compound tags are not phases"
+assert "$(printf '%s' "$out" | jq_ "d['self_check']['match']")" "True" "self-check still agrees (both the real parser and the independent scan reject the compound tags)"
+
+echo "scenario 24 (WP-484 Ф217 п.3, real-card fixture): WP-561 snapshot -- 39 phase headings, 38 unique ids, Ф30 duplicated"
+FIXDIR="$(cd "$(dirname "$0")" && pwd)/fixtures"
+mkdir -p "$GOV/inbox/WP-9202"
+cp "$FIXDIR/wp561-snapshot-2026-10-19.md" "$GOV/inbox/WP-9202/WP-9202.md"
+out=$(python3 "$TOOL" 9202 --governance-repo "$GOV" --runtime-dir "$RT" --json)
+assert "$(printf '%s' "$out" | jq_ "d['phase_sections']")" "39" "39 phase headings found (not 0 -- this card is almost entirely H3, the bug Ф217 fixes)"
+assert "$(printf '%s' "$out" | jq_ "len(set(c['phase'] for c in d['candidates']+d['vetoed']+d['no_terminal_marker']))")" "38" "38 unique ids (one of the 39 headings is the Ф30 duplicate)"
+assert "$(printf '%s' "$out" | jq_ "sum(1 for n in d['no_terminal_marker'] if n['phase']=='Ф30' and n['duplicate'])")" "2" "both Ф30 occurrences flagged as a duplicate id (they have no terminal marker on this card, so they land in no_terminal_marker rather than vetoed -- still not silently merged or silently picking one)"
+assert "$(printf '%s' "$out" | jq_ "d['self_check']['match']")" "True" "self-check agrees on the real РП-561 card"
+
+echo "scenario 25 (WP-484 Ф217 п.3, real-card fixture): WP-417 snapshot -- compound cross-reference tags (Ф3/Ф6, Ф1-live-gap-audit) are not phase headings"
+mkdir -p "$GOV/inbox/WP-9203"
+cp "$FIXDIR/wp417-snapshot-2026-10-19.md" "$GOV/inbox/WP-9203/WP-9203.md"
+out=$(python3 "$TOOL" 9203 --governance-repo "$GOV" --runtime-dir "$RT" --json)
+assert "$(printf '%s' "$out" | jq_ "d['phase_sections']")" "7" "7 real phase headings (Ф1..Ф6, Ф6.3) -- a naive '## Ф'/'### Ф' grep overcounts to 12 by also matching the compound tags"
+assert "$(printf '%s' "$out" | jq_ "d['self_check']['match']")" "True" "self-check agrees (no duplicates, no mismatch)"
+
+echo "scenario 26 (WP-484 Ф217 п.3, real-card fixture): WP-442 snapshot -- genuine duplicate id across H2/H3 (Ф1 used twice for different content)"
+mkdir -p "$GOV/inbox/WP-9204"
+cp "$FIXDIR/wp442-snapshot-2026-10-19.md" "$GOV/inbox/WP-9204/WP-9204.md"
+out=$(python3 "$TOOL" 9204 --governance-repo "$GOV" --runtime-dir "$RT" --json)
+assert "$(printf '%s' "$out" | jq_ "d['phase_sections']")" "21" "21 phase headings (2 H2 + 19 H3)"
+assert "$(printf '%s' "$out" | jq_ "len(set(c['phase'] for c in d['candidates']+d['vetoed']+d['no_terminal_marker']))")" "20" "20 unique ids"
+assert "$(printf '%s' "$out" | jq_ "d['self_check']['match']")" "True" "self-check agrees"
+
 [ "$fails" = 0 ] && echo "PASS: all scenarios" || { echo "FAIL: $fails assertion(s)"; exit 1; }
