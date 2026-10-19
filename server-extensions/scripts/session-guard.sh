@@ -163,23 +163,10 @@ IWE_ROOT="${IWE_ROOT:-$HOME/IWE}"
 # the variable got a quietly wrong repo instead of an error).
 GOV_REPO="${IWE_GOVERNANCE_REPO:?IWE_ERROR: IWE_GOVERNANCE_REPO is required, no silent default}"
 SESSION_DIR="$IWE_ROOT/.iwe-runtime/sessions"
-# OPEN_LOG stays a stable local path -- 8+ readers across session-guard.sh's
-# own repo AND two foreign ones (DS-ai-systems/synchronizer, DS-MCP/
-# digital-twin-mcp) still read this exact path; nothing migrates. It is an
-# ignored, replaceable projection (inbox/open-sessions.log has been in
-# .gitignore since 04.05.2026, commit 01ff6fae3a -- predating this file by
-# ~2.5 months; found live 2026-08-18 preparing a since-abandoned migration
-# marker, WP-484 peer-session with Codex), not a git-tracked archive with its
-# own history to preserve. OPEN_LOG_RUNTIME is the ACTUAL write target and
-# sole SSOT for every `open` (including --isolate) from here on -- a plain
-# append to $OPEN_LOG dirtied the canonical checkout on every call,
-# live-reproduced blocking neighboring `--isolate open`s the same way the
-# pre-fix ORZ scaffold did (peer-sessions 2026-08-15-14-isolate-aware-orz-dir
-# smoke test, 2026-08-15-17-open-log-runtime-registry design, Codex+Kimi).
-# open-log-snapshot.sh (separate script) periodically rebuilds OPEN_LOG as a
-# full, atomically-renamed materialization of OPEN_LOG_RUNTIME -- no commit,
-# no push, no semaphore; readers are unaffected until/unless they choose to
-# migrate off the path.
+# OPEN_LOG is retained as a legacy receipt path, not a write target.
+# OPEN_LOG_RUNTIME is the append-only history of open events outside Git.
+# open-log-snapshot.sh reads the authoritative *.open semaphores on demand to
+# show sessions still open; no process recreates the ignored canonical file.
 OPEN_LOG="$IWE_ROOT/$GOV_REPO/inbox/open-sessions.log"
 OPEN_LOG_RUNTIME="$IWE_ROOT/.iwe-runtime/open-sessions.log"
 # WP-526 Ф2: session content lives in MC-sessions now, not "$GOV_REPO/sessions"
@@ -275,7 +262,7 @@ frozen_checkout_match() {
 # is now `resolve_orz_sessions_dir`'s job, at the point a subcommand
 # actually needs it, over the real pre-existing state.
 if [ "${1:-}" != "owner-status" ]; then
-  mkdir -p "$SESSION_DIR" "$(dirname "$OPEN_LOG")" "$(dirname "$OPEN_LOG_RUNTIME")"
+  mkdir -p "$SESSION_DIR" "$(dirname "$OPEN_LOG_RUNTIME")"
 fi
 
 CMD="${1:-}"
@@ -351,7 +338,14 @@ value = " ".join(sys.argv[1].splitlines())
 try:
     import yaml
 except ImportError:
-    print("task: %s" % value)
+    # #1006: the bare fallback used to print the raw value unescaped,
+    # reintroducing the exact ": "-in-value corruption this function exists
+    # to fix (bug-2026-09-09-...), just only when PyYAML happens to be
+    # missing. A double-quoted YAML scalar accepts the same range of values
+    # that PyYAML would reach for quoting on, without needing the full
+    # plain-scalar grammar.
+    escaped = value.replace("\\", "\\\\").replace("\"", "\\\"")
+    print("task: \"%s\"" % escaped)
     raise SystemExit(0)
 sys.stdout.write(yaml.safe_dump({"task": value}, allow_unicode=True, default_flow_style=False, width=10**7).rstrip("\n"))
 ' "$1"
@@ -2270,6 +2264,96 @@ validate_isolate_slug() {
     || fail "--isolate: slug '$slug' содержит недопустимые символы (разрешены: буквы, цифры, точка, подчёркивание, дефис) — не может использоваться в пути worktree или имени ветки" 1
 }
 
+# --- Session refs snapshot + close-time debt report (WP-484 Ф210) ---
+# Повод (пир-сессия 2026-10-17, consensus Codex+Grok): закрытие сессии не
+# замечало временные git-артефакты (живой кейс: ветка backup-pre-reset-
+# 2026-10-17 осталась в каноне DS-my-strategy после закрытия). Снимок
+# refs/heads+refs/tags на open, сверка на close, строго report-only —
+# закрытие никогда не проваливается (trade-off Ф185).
+REFS_SNAPSHOT_DIR="$IWE_ROOT/.iwe-runtime/session-refs-snapshots"
+
+session_refs_snapshot_file() {  # <agent> <session_id>
+  printf '%s/%s-%s.refs' "$REFS_SNAPSHOT_DIR" "$1" "$2"
+}
+
+# session_refs_snapshot <repo_dir> <agent> <session_id> -- записать имя+OID
+# всех веток и тегов ДО того, как сессия создаст первый реф. No-clobber:
+# повторный open той же сессии сохраняет исходную базовую линию, иначе всё,
+# созданное посреди сессии, отстирётся в «старое». Атомарно (temp + mv -n),
+# никогда не валит вызывающего: потерянный снимок = на close одна строка
+# «проверка неполна», а не сломанное закрытие.
+session_refs_snapshot() {
+  local repo_dir="$1" agent="$2" session_id="$3"
+  [ -d "$repo_dir" ] || return 0
+  git -C "$repo_dir" rev-parse --is-inside-work-tree >/dev/null 2>&1 || return 0
+  mkdir -p "$REFS_SNAPSHOT_DIR" 2>/dev/null || return 0
+  local target tmp
+  target=$(session_refs_snapshot_file "$agent" "$session_id")
+  [ -e "$target" ] && return 0
+  tmp=$(mktemp "$REFS_SNAPSHOT_DIR/.snap.XXXXXX") || return 0
+  {
+    echo "# session_refs_snapshot/v1"
+    echo "# repo: $(cd "$repo_dir" && pwd -P 2>/dev/null || echo "$repo_dir")"
+    echo "# taken_at: $(now_iso)"
+    git -C "$repo_dir" for-each-ref --format='%(refname) %(objectname)' refs/heads refs/tags 2>/dev/null
+  } > "$tmp" || { rm -f "$tmp"; return 0; }
+  mv -n "$tmp" "$target" 2>/dev/null || rm -f "$tmp"
+  return 0
+}
+
+# session_refs_debt_report <repo_dir> <snapshot_file> [exclude_branch] --
+# report-only сверка снимка с текущими рефами. Печатает в stderr, ВСЕГДА
+# exit 0. Формулировки без атрибуции: рефы общие на репозиторий, в diff
+# попадут параллельная сессия и чужой терминал. Новое имя ≠ долг этой
+# сессии; смена OID ≠ доказательство пересоздания (обычное перемещение
+# неотличимо) — отдельная секция «причина не установлена». Команды удаления
+# не печатаются (общая оговорка одна) — per-name подсказки возможны только
+# после поимённого реестра одноразовых рефов (фаза 2).
+session_refs_debt_report() {
+  local repo_dir="$1" snap_file="$2" exclude_branch="${3:-}"
+  if [ ! -d "$repo_dir" ] \
+     || ! git -C "$repo_dir" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+    echo "Session CLOSE: репозиторий недоступен — проверка рефов неполна, долг не аттестован (WP-484 Ф210)" >&2
+    return 0
+  fi
+  if [ ! -s "$snap_file" ]; then
+    echo "Session CLOSE: снимок рефов отсутствует или пуст — проверка неполна, долг не аттестован (WP-484 Ф210)" >&2
+    return 0
+  fi
+  local tmp_dir
+  tmp_dir=$(mktemp -d "${TMPDIR:-/tmp}/refs-debt.XXXXXX") || return 0
+  grep -v '^#' "$snap_file" > "$tmp_dir/snap" 2>/dev/null || true
+  git -C "$repo_dir" for-each-ref --format='%(refname) %(objectname)' refs/heads refs/tags 2>/dev/null > "$tmp_dir/cur"
+  local result
+  result=$(awk -v excl="refs/heads/${exclude_branch}" '
+    NR==FNR { if ($1 != "") oid[$1]=$2; next }
+    {
+      if ($1 in oid) {
+        if (oid[$1] != $2) changed[++c]=$1
+      } else if ($1 != excl) new[++n]=$1
+    }
+    END {
+      if (n == 0 && c == 0) { print "__CLEAN__"; exit }
+      if (n > 0) {
+        print "Появились после открытия сессии (принадлежность не установлена):"
+        for (i = 1; i <= n; i++) print "  " new[i]
+      }
+      if (c > 0) {
+        print "OID изменился (перемещение или пересоздание; причина не установлена):"
+        for (i = 1; i <= c; i++) print "  " changed[i]
+      }
+    }' "$tmp_dir/snap" "$tmp_dir/cur")
+  rm -rf "$tmp_dir"
+  if [ "$result" = "__CLEAN__" ]; then
+    echo "Session CLOSE: новых веток/тегов после открытия сессии не появилось (WP-484 Ф210)" >&2
+    return 0
+  fi
+  echo "Session CLOSE: сверка git-рефов с момента открытия (report-only, ничего не удаляется):" >&2
+  printf '%s\n' "$result" >&2
+  echo "Session CLOSE: перед удалением проверь назначение рефа; ветку снимай через 'git branch -d' (WP-484 Ф210)" >&2
+  return 0
+}
+
 # isolate_entropy_suffix -- 4 hex chars appended to the `date +%s` second so
 # two ISOLATE_SESSION_IDs generated in the same second don't collide. Not
 # `date +%s%N` (nanosecond resolution): %N is a GNU date extension, not
@@ -3155,10 +3239,9 @@ finally:
 PY
 }
 
-# Verify sub-agent (2026-08-20, post-implementation): the sibling
-# sweep_stale_open_log_entries() got with_isolate_lock against concurrent
-# `audit --cleanup-orphans` runs (real trigger: kimi-wp-run-scheduled.sh:86,
-# unconditional, no collision guard) -- this function, which reaps orphaned
+# Verify sub-agent (2026-08-20, post-implementation): concurrent
+# `audit --cleanup-orphans` runs can collide (real trigger:
+# kimi-wp-run-scheduled.sh:86, unconditional). This function, which reaps orphaned
 # isolated worktrees via the same trigger, didn't. Confirmed by live test
 # (not just code reading): two concurrent isolate-push.sh calls on the same
 # worktree don't corrupt data (its own retry logic self-heals: attempt 2
@@ -3492,6 +3575,22 @@ _SWEEP_QUARANTINE_SUMMARY_THRESHOLD=5
 _sweep_flush_notify_queue() {
   local total=${#_SWEEP_NOTIFY_QUEUE[@]}
   [ "$total" -gt 0 ] || return 0
+  # WP-568 Ф4 (09.10): sourced lazily, only on a pass that actually has
+  # something to flush -- a previous version of this ran gov_repo_dir() (a
+  # git subprocess) and the source unconditionally at file-load time, which
+  # perturbed an unrelated timing-sensitive test
+  # (session-guard-dead-interactive-quarantine-smoke.sh, found by re-running
+  # it after this change). The bridge lives in the governance repo
+  # (scripts/lib/notification-center-bridge.sh), not in this one -- resolved
+  # through gov_repo_dir() (already defined above), not a hardcoded
+  # "DS-my-strategy" (issue #266: that broke every template user whose
+  # governance repo has a different name).
+  if ! command -v notification_center_bridge_send >/dev/null 2>&1 \
+      && command -v gov_repo_dir >/dev/null 2>&1; then
+    local _nc_bridge_lib
+    _nc_bridge_lib="$(gov_repo_dir)/scripts/lib/notification-center-bridge.sh"
+    [ -f "$_nc_bridge_lib" ] && . "$_nc_bridge_lib"
+  fi
   if [ "${_SWEEP_NOTIFY_CAN_FLUSH:-1}" != "1" ]; then
     echo "WARN: sweep summary retained because its audit record is not durable yet" >&2
     return 0
@@ -3512,6 +3611,25 @@ import sys
 print(hashlib.sha256(sys.stdin.buffer.read()).hexdigest()[:16])
 ')
   admission_key="unexpected:session-guard:sweep-$admission_digest"
+  # WP-568 Ф4 (09.10, пир-сессия Kimi+Codex, продолжение WP-538/568
+  # notification-spam-readable): mirror into the notification center in
+  # ADDITION to the Telegram send below, same pattern as deploy-watchdog.sh/
+  # wp-pool-cascade.sh/etc -- this does not reduce today's chat volume by
+  # itself (the Center has no viewer yet, WP-568 Ф5 is still open), it only
+  # starts building the aggregate history a future dashboard will read.
+  # correlation_id is a FIXED string, not per-pass ($admission_digest changes
+  # every pass) -- a stable key means every sweep updates the SAME incident
+  # instead of opening a new one each time (the exact bug class already
+  # fixed once for tsekh1-git-sync, WP-568 Ф4, 22.09). severity stays yellow
+  # unconditionally: ageing the carousel into red needs a stored "since when
+  # has this been open" timestamp this function does not track yet --
+  # that's the still-open WP-538 Ф12 escalation-by-age item, not solved here.
+  if command -v notification_center_bridge_send >/dev/null 2>&1; then
+    notification_center_bridge_send session-guard yellow \
+      "Карантин сессий: $total событий $pass_scope" \
+      "осиротевшие: $_SWEEP_NOTIFY_ESCALATED_COUNT, в карантине: $_SWEEP_NOTIFY_QUARANTINED_COUNT" \
+      0 "session-guard:quarantine:open"
+  fi
   if [ "$total" -le "$_SWEEP_QUARANTINE_SUMMARY_THRESHOLD" ]; then
     summary=$(printf '🔔 Сторож сессий: %d событий %s\n\n%s' \
       "$total" "$pass_scope" "$(printf '%s\n\n' "${_SWEEP_NOTIFY_QUEUE[@]}")")
@@ -3557,87 +3675,7 @@ print(hashlib.sha256(sys.stdin.buffer.read()).hexdigest()[:16])
   fi
 }
 
-# WP-484 (session-close-hygiene peer-session, 2026-08-20): every `open`
-# appends one line to OPEN_LOG_RUNTIME (above), nothing ever removes one --
-# `close` never touches this file at all. Unlike a semaphore, a log line
-# carries no session_id (format is "date | WP | agent | task", see the
-# `open` append site) -- no reliable key exists to delete a SPECIFIC line at
-# close time without risking a wrong match against another line sharing the
-# same date/WP/agent. Same "zombie candidate, never proven dead" situation
-# sweep_orphaned_semaphores() already handles for PID-less semaphores above,
-# so this reuses that TTL rather than inventing a second one: age alone
-# (IWE_ZOMBIE_CLEANUP_SEC) decides what is dropped when this rebuild runs.
-# Code review (2026-08-20) + live tests, two rounds. Round 1: the first
-# version wrapped the body below in with_isolate_lock, believing that closed
-# the TOCTOU window where `open` appends a line between this function's
-# `while read` finishing and its `mv -f`. It didn't -- `open`'s own append
-# site (above) never takes that lock, so serializing sweep against ITSELF
-# does nothing against a concurrent, unlocked appender. Reproduced live
-# (signal-file synced harness): a line appended in the exact read-done ->
-# mv window was silently dropped even with the lock in place. Fixed by
-# offset-capture instead (below): record the file's byte size before
-# reading, tail-append anything the ORIGINAL file grew past that offset
-# onto the filtered result before the atomic replace -- needs no lock, works
-# whether or not the appender takes one. Round 2: offset-capture alone still
-# leaves sweep racing ITSELF -- two concurrent `audit --cleanup-orphans`
-# calls (real trigger: kimi-wp-run-scheduled.sh:86 fires this unconditionally
-# on every queued WP start, no collision guard around it) can both finish
-# their read+filter pass, and whichever's `mv` lands second unconditionally
-# overwrites the first's result, silently reviving lines the first sweep
-# correctly dropped and losing anything the first sweep's own offset-capture
-# had appended. with_isolate_lock IS the right tool for this -- sweep vs
-# sweep is exactly the same-operation serialization it exists for; round 1
-# only misapplied it to the wrong race (sweep vs append).
-sweep_stale_open_log_entries() {
-  with_isolate_lock "open-log-sweep" _sweep_stale_open_log_entries_body
-}
-
-_sweep_stale_open_log_entries_body() {
-  [ -f "$OPEN_LOG_RUNTIME" ] || return 0
-  local now_epoch dropped=0 kept=0 orig_size_before orig_size_after
-  now_epoch=$(date +%s)
-  orig_size_before=$(wc -c < "$OPEN_LOG_RUNTIME" | tr -d ' ')
-  local tmp_log
-  tmp_log=$(mktemp "${OPEN_LOG_RUNTIME}.tmp.XXXXXX")
-  while IFS= read -r line; do
-    [ -n "$line" ] || continue
-    local entry_date entry_epoch age
-    entry_date=$(echo "$line" | cut -d'|' -f1 | xargs)
-    # Live-caught bug (2026-08-20, own multi-process race test): the append
-    # site (`date '+%Y-%m-%d %H:%M'`, no -u) writes LOCAL time. Parsing that
-    # same string with `-u` here read it as UTC instead -- on a machine
-    # ahead of UTC this makes every entry look OLDER than it is (wrong
-    # direction: risks dropping fresh sessions), on one behind it makes
-    # everything look YOUNGER (risks never cleaning up). No -u here, to
-    # match the writer.
-    entry_epoch=$(date -j -f "%Y-%m-%d %H:%M" "$entry_date" +%s 2>/dev/null \
-      || date -d "$entry_date" +%s 2>/dev/null || echo "")
-    if [ -z "$entry_epoch" ]; then
-      # Unparseable date: keep, same fail-closed choice as semaphore sweep's
-      # "no proof of death" branch -- an unreadable entry is not a proven zombie.
-      echo "$line" >> "$tmp_log"
-      kept=$((kept + 1))
-      continue
-    fi
-    age=$(( now_epoch - entry_epoch ))
-    if [ "$age" -ge "$IWE_ZOMBIE_CLEANUP_SEC" ]; then
-      dropped=$((dropped + 1))
-    else
-      echo "$line" >> "$tmp_log"
-      kept=$((kept + 1))
-    fi
-  done < "$OPEN_LOG_RUNTIME"
-  # This is the actual race fix (see the comment above the function) --
-  # capture whatever a concurrent, unlocked `open` appended to the ORIGINAL
-  # file past the byte offset recorded before we started reading, and
-  # reattach it verbatim before the atomic replace.
-  orig_size_after=$(wc -c < "$OPEN_LOG_RUNTIME" | tr -d ' ')
-  if [ "$orig_size_after" -gt "$orig_size_before" ]; then
-    tail -c "+$((orig_size_before + 1))" "$OPEN_LOG_RUNTIME" >> "$tmp_log"
-  fi
-  mv -f "$tmp_log" "$OPEN_LOG_RUNTIME"
-  echo "open-sessions.log sweep: kept=$kept dropped=$dropped (age >= ${IWE_ZOMBIE_CLEANUP_SEC}s)"
-}
+# Open events remain in the runtime history; the current view is derived from *.open.
 orz_agent_name() {
   case "$1" in
     kimi) echo "kimi-headless" ;;
@@ -4741,7 +4779,31 @@ if [ "$CMD" = "open" ]; then
     # script might run under; /dev/urandom -> $RANDOM fallback keeps this
     # id generator working even where /dev/urandom is unreadable (some
     # sandboxes/containers) (WP-530 peer-session 2026-08-15-10, Kimi turn 2).
-    ISOLATE_SESSION_ID="${IWE_SESSION_ID:-$(date +%s)-$(isolate_entropy_suffix)}"
+    #
+    # WP-484 Ф204 (18.10): a fresh random id on every retry is exactly what
+    # let a single chat pile up eight orphaned semaphores on 16.10 -- the
+    # peer-conversation skill's documented recovery step is "reopen with
+    # --isolate", and a bare retry without an explicit IWE_SESSION_ID landed
+    # here every time. For claude-code/codex, OPEN_HARNESS_SESSION_ID (the
+    # native conversation id) is already available and stable across
+    # retries of the SAME conversation -- derive the isolate id from it
+    # instead of rolling new entropy, so a retry naturally re-enters the
+    # same worktree/semaphore. WP and slug go into the same derivation so
+    # one conversation opening genuinely different work (different WP, or
+    # a deliberately different explicit slug) still gets separate ids, not
+    # one shared across unrelated opens (Codex, turn 3). A caller with
+    # neither an explicit IWE_SESSION_ID nor a native id (kimi "by
+    # construction", scheduled/housekeeping without IWE_SESSION_ID) has no
+    # safe default to derive from -- fail closed instead of rolling fresh
+    # entropy, which is what silently produced the pile-up.
+    if [ -n "${IWE_SESSION_ID:-}" ]; then
+      ISOLATE_SESSION_ID="$IWE_SESSION_ID"
+    elif [ -n "$OPEN_HARNESS_SESSION_ID" ]; then
+      ISOLATE_SESSION_ID=$(python3 -c 'import hashlib,sys; print(hashlib.sha256(sys.argv[1].encode()).hexdigest()[:16])' \
+        "${AGENT}:${OPEN_HARNESS_SESSION_ID}:${WP}:${SLUG:-$WP}")
+    else
+      fail "open --isolate: нет ни --session-id (IWE_SESSION_ID), ни нативной harness-идентичности агента '$AGENT' -- без одного из двух повтор после конфликта публикации не распознаётся как та же беседа и копит сиротские семафоры (WP-484 Ф204). Передай IWE_SESSION_ID=<uuid4> и используй ТОТ ЖЕ при каждом повторе этой беседы." 1
+    fi
     ISOLATE_EXISTING_SEM="$SESSION_DIR/${AGENT}-${ISOLATE_SESSION_ID}.open"
     # The stable kernel lock is the authority for the whole same-session
     # transition, including dirty/re-entry reads, fetch, worktree creation and
@@ -4859,6 +4921,22 @@ if [ "$CMD" = "open" ]; then
         echo "⚠️  --isolate: канонический чекаут ($ISOLATE_BASE_DIR) грязный от чужой работы (${#ISOLATE_DIRTY_ENTRIES[@]} путей, fingerprint $ISOLATE_DIRTY_HASH) -- new worktree её не унаследует (ожидаемо, HEAD-only), она остаётся на диске нетронутой. История в $ISOLATE_BYPASS_LOG." >&2
         [ -n "$ISOLATE_PRIOR_BYPASS" ] \
           && echo "   ↳ ту же грязь уже обошёл: $ISOLATE_PRIOR_BYPASS" >&2 || true
+        # WP-538/545 (09.10.2026): голое число путей выше ничего не говорит о
+        # том, что это за грязь -- разные сессии видели 30/56/68 на разных
+        # хостах и репортили пилоту как будто это новая находка каждый раз.
+        # canon-state.sh даёт один и тот же разбор (зеркала/очередь/
+        # автоматика/настоящая работа) везде, где сессия видит эту картину.
+        # Best-effort: читается из канонического IWE_ROOT, не из
+        # $ISOLATE_BASE_DIR (у изолированного repo своего canon-state.sh нет);
+        # недоступность библиотеки не блокирует --isolate, только убирает
+        # один информационный абзац.
+        if [ -z "${CANON_STATE_LIB_READY:-}" ] && [ -r "$IWE_ROOT/scripts/lib/canon-state.sh" ]; then
+          # shellcheck source=lib/canon-state.sh
+          . "$IWE_ROOT/scripts/lib/canon-state.sh" 2>/dev/null || true
+        fi
+        if [ -n "${CANON_STATE_LIB_READY:-}" ]; then
+          canon_state "$ISOLATE_BASE_DIR" 2>/dev/null | grep '^CANON_STATE_HUMAN:' | sed 's/^CANON_STATE_HUMAN: /   ↳ /' >&2 || true
+        fi
       else
         # Re-entry: build the exact allowlist from THIS session's own
         # semaphore, not a hardcoded filename list. Codex turn 15 point 4 --
@@ -5107,7 +5185,20 @@ $isolate_status_code $isolate_status_path"
   # confirmed live on real files, e.g. sessions/2026-07/2026-07-31-2026-07-31-wp510-*.md.
   # This is the ONE place that assembles the path, so it's the one place that can
   # enforce "date appears exactly once" regardless of what any caller passes.
-  CLEAN_SLUG="${SLUG:-$WP}"
+  # WP-484 Ф204/Ф211 (18.10): bare WP as the default slug was deterministic
+  # per WP+day, so two different conversations on the same WP collided on one
+  # journal file (live: parallel claude-code/codex sessions on WP-604,
+  # 2026-10-17). $OPEN_HARNESS_SESSION_ID is stable across retries of the SAME
+  # conversation, so suffixing with it separates conversations without
+  # breaking re-entry. Empty for no-harness-identity callers (kimi, scheduled,
+  # housekeeping) -- unchanged bare-WP fallback there.
+  if [ -n "$SLUG" ]; then
+    CLEAN_SLUG="$SLUG"
+  elif [ -n "$OPEN_HARNESS_SESSION_ID" ]; then
+    CLEAN_SLUG="${WP}-${OPEN_HARNESS_SESSION_ID:0:8}"
+  else
+    CLEAN_SLUG="$WP"
+  fi
   CLEAN_SLUG="${CLEAN_SLUG#"$(now_date)"-}"
   ORZ_BASENAME="$(now_month)/$(now_date)-${CLEAN_SLUG}.md"
   # gov_repo_dir() (2026-08-12, peer-session close-pipeline-consolidation) --
@@ -5252,12 +5343,8 @@ r = os.path.realpath(sys.argv[2])
 print(os.path.relpath(f, r))
 " "$ORZ_FILE" "$ORZ_GIT_ROOT")"
     echo "file: $ORZ_REL_PATH"
-    # Same class of gap as the ORZ line above (Ф32 п.5), found for --isolate
-    # re-entry (peer-session 2026-08-14-13, turn 15, Codex): OPEN_LOG's own
-    # append below is a real, expected, this-session side effect --
-    # registering it here means the isolate re-entry check (below in this
-    # same script) can trust the `file:` allowlist instead of guessing this
-    # specific filename by name.
+    # Legacy receipt contract still names the former projection; open itself
+    # appends only to OPEN_LOG_RUNTIME. Keep the marker for old proof readers.
     echo "file: $(basename "$(dirname "$OPEN_LOG")")/$(basename "$OPEN_LOG")"
     } > "$SEM_TEMP"
     _publish_new_open_semaphore "$SEM_TEMP" "$SEM_FILE" \
@@ -5278,6 +5365,41 @@ print(os.path.relpath(f, r))
     # empty -- the whole point of this check is catching that at `open`.
     grep -qE '^orz_sessions_dir: .+' "$SEM_FILE" \
       || fail "open: опубликованный semaphore не содержит orz_sessions_dir (внутренняя ошибка записи, см. РП484 16.09) -- сессия не считается открытой" 1
+  fi
+
+  # WP-484 Ф210: снимок веток/тегов governance-репо до первых правок сессии
+  # (no-clobber: повторный open той же сессии базовую линию не сдвигает).
+  # Дёшево и ни при каких условиях не валит open.
+  session_refs_snapshot "$IWE_ROOT/$GOV_REPO" "$AGENT" "$SESSION_ID"
+
+  # WP-484 Ф210: авто-actualize карточки РП в свежем изоляте -- лицензия на
+  # правку карточки (wp-reopen-gate) берётся сразу, а не перед первой правкой.
+  # Неудача НЕ валит open: WARNING + явная команда для агента (слой б —
+  # PreToolUse-хук wp-card-license-gate.sh -- дозирует остальные пути).
+  if [ "$ISOLATE_FLAG" = "1" ] && [ -n "${ISOLATED_WORKTREE_PATH:-}" ]; then
+    _f210_gate="$IWE_ROOT/scripts/wp-reopen-gate.sh"
+    _f210_wp_num="${WP#WP-}"
+    if [ -x "$_f210_gate" ] \
+       && { [ -f "$ISOLATED_WORKTREE_PATH/inbox/$WP/$WP.md" ] \
+            || [ -f "$ISOLATED_WORKTREE_PATH/archive/wp-contexts/$WP/$WP.md" ]; }; then
+      if "$_f210_gate" actualize --wp "$_f210_wp_num" \
+           --governance-repo "$ISOLATED_WORKTREE_PATH" --session-id "$SESSION_ID" \
+           >/dev/null 2>&1; then
+        echo "WP-484 Ф210: карточка $WP актуализирована в изоляте (лицензия на правку получена)" >&2
+      elif git -C "$ISOLATED_WORKTREE_PATH" merge --ff-only origin/main >/dev/null 2>&1 \
+           && "$_f210_gate" actualize --wp "$_f210_wp_num" \
+                --governance-repo "$ISOLATED_WORKTREE_PATH" --session-id "$SESSION_ID" \
+                >/dev/null 2>&1; then
+        # Гонка: origin ушёл между worktree add и fetch внутри actualize.
+        # Worktree только что создан и гарантированно чист -- догон целиком
+        # ff-only, без частичного checkout и без reset --hard.
+        echo "WP-484 Ф210: карточка $WP актуализирована после ff-only догона origin (лицензия получена)" >&2
+      else
+        echo "WARNING (WP-484 Ф210): wp-reopen-gate actualize для $WP не прошёл — лицензия НЕ получена." >&2
+        echo "         Перед первой правкой карточки выполни: $_f210_gate actualize --wp $_f210_wp_num --governance-repo $ISOLATED_WORKTREE_PATH --session-id $SESSION_ID" >&2
+      fi
+    fi
+    unset _f210_gate _f210_wp_num
   fi
   # Marker is a projection: a missing marker can be rebuilt, while a marker
   # without a durable semaphore must never be treated as session authority.
@@ -5318,9 +5440,7 @@ artifacts: []
 EOF
     echo "ORZ scaffold создан: $ORZ_FILE"
   fi
-  # open-sessions.log — runtime target, not the git-tracked $OPEN_LOG (see
-  # OPEN_LOG_RUNTIME declaration above); open-log-snapshot.sh folds this back
-  # into $OPEN_LOG periodically.
+  # Preserve the open-event history; the active view comes from *.open.
   printf "%s | %s | %s | %s\n" "$(date '+%Y-%m-%d %H:%M')" "$WP" "$AGENT" "${TASK:-standalone}" >> "$OPEN_LOG_RUNTIME"
   # The authority mutation is complete.  Release both kernel locks before
   # best-effort status/ledger/version children so a detached publisher cannot
@@ -5345,6 +5465,19 @@ EOF
   if [ -s "$FINDINGS_REGISTRY" ]; then
     FINDINGS_COUNT=$(wc -l < "$FINDINGS_REGISTRY" | tr -d ' ')
     echo "ℹ️  $FINDINGS_COUNT запись(ей) в findings registry чужих RUN-карточек ($FINDINGS_REGISTRY) — разбор на Day/Week Close, не блокирует эту сессию" >&2
+  fi
+  # Session-handoff gap scan (WP-484, peer-session
+  # 2026-10-15-33-wp484-session-handoff-gap): did the previous session(s) of
+  # this WP finalize their journal (report.md)? Runs AFTER both kernel locks
+  # above are released -- Codex's cold review rejected the locked insertion
+  # point this check used to share with the TTL loop near "потеряла права на
+  # коммит" (~5143), since a scanner reading multiple session folders and the
+  # ledger would prolong that critical section. Best-effort and
+  # unconditionally non-fatal: a missed hint here is not a reason to fail
+  # `open`.
+  JOURNAL_GAPS_SCRIPT="${IWE_SCRIPTS:-$IWE_ROOT/scripts}/wp-session-journal-gaps.sh"
+  if [ -x "$JOURNAL_GAPS_SCRIPT" ]; then
+    timeout 5 bash "$JOURNAL_GAPS_SCRIPT" "$WP" --exclude-session-id "$SESSION_ID" >&2 || true
   fi
   echo "Session OPEN: $SEM_FILE (WP: $WP, agent: $AGENT, slug: ${SLUG:-$WP})"
   # session_opened ledger event (WP-561 Ф6-а, TACT-01 contract DP.SC.201;
@@ -7681,8 +7814,17 @@ _receipt_checkout_has_publish_proof() {  # <semaphore> <checkout> <fresh remote>
 
 _claimed_commits_have_publish_proof() {  # <semaphore> [exact claim strings JSON to exclude]
   local semaphore="$1" excluded_json="${2:-[]}" entry repo_name commit_sha repo_dir fetched=""
+  local nc_excluded_count
   jq -e 'type == "array" and all(.[]; type == "string")' <<<"$excluded_json" >/dev/null 2>&1 \
     || { echo "Session CLOSE: invalid excluded commit claims" >&2; return 1; }
+  # claim-proof-trace (WP-484 Ф191, bug-2026-10-15-session-guard-close-stuck-on-stale-claim-after-mid-session-commit-split.md):
+  # close and note-commit --forget both call this predicate, but on a stuck
+  # session they disagreed on the SAME claim with no visible reason -- neither
+  # command said which of the 7 fallback checks fired. These stderr-only lines
+  # (same channel as the existing "Session CLOSE: ..." diagnostics below, no
+  # behavior change) let a future repro tell which of the ~12 fallback
+  # branches below actually matched.
+  nc_excluded_count=$(jq 'length' <<<"$excluded_json" 2>/dev/null || echo "?")
   while IFS= read -r entry; do
     [ -n "$entry" ] || continue
     if jq -e --arg entry "$entry" 'index($entry) != null' <<<"$excluded_json" >/dev/null 2>&1; then
@@ -7694,6 +7836,7 @@ _claimed_commits_have_publish_proof() {  # <semaphore> [exact claim strings JSON
       && [[ "$repo_name" =~ ^[A-Za-z0-9._-]+$ ]] \
       && [[ "$commit_sha" =~ ^[0-9a-fA-F]{40,64}$ ]] \
       || { echo "Session CLOSE: malformed commit claim: $entry" >&2; return 1; }
+    echo "claim-proof-trace: $repo_name $commit_sha excluded=$nc_excluded_count" >&2
     repo_dir=$(_resolve_repo_checkout "$repo_name" "$commit_sha") || {
       case $? in
         3) echo "Session CLOSE: закрытие отклонено — имя '$repo_name' принадлежит нескольким checkout с РАЗНЫМИ origin, заявка не указывает, о каком из них речь (кандидаты выше): $repo_name $commit_sha" >&2 ;;
@@ -7708,6 +7851,7 @@ _claimed_commits_have_publish_proof() {  # <semaphore> [exact claim strings JSON
     # requiring main; keep every original (including rebased) claim intact.
     if _publication_receipt_tool verify-product "$semaphore" "$repo_dir" "$repo_name" "$commit_sha" \
         --workspace "$IWE_ROOT"; then
+      echo "claim-proof-trace: $repo_name $commit_sha -> OK via verify-product" >&2
       continue
     fi
     if ! printf '%s\n' "$fetched" | grep -qxF "$repo_dir"; then
@@ -7720,12 +7864,20 @@ _claimed_commits_have_publish_proof() {  # <semaphore> [exact claim strings JSON
     fi
     if _publication_receipt_tool verify "$semaphore" "$repo_dir" "$repo_name" "$commit_sha" \
         "$(git -C "$repo_dir" rev-parse refs/remotes/origin/main)"; then
+      echo "claim-proof-trace: $repo_name $commit_sha -> OK via oid-exact" >&2
       continue
     fi
     if git -C "$repo_dir" merge-base --is-ancestor "$commit_sha" refs/remotes/origin/main 2>/dev/null; then
+      echo "claim-proof-trace: $repo_name $commit_sha -> OK via oid-ancestor" >&2
       continue
     fi
     if _code_branch_claim_has_publish_proof "$semaphore" "$repo_dir" "$commit_sha" "$repo_name"; then
+      echo "claim-proof-trace: $repo_name $commit_sha -> OK via code-branch-claim" >&2
+      continue
+    fi
+    if _publication_receipt_tool verify-review-pr "$semaphore" "$repo_dir" "$repo_name" "$commit_sha" \
+        --workspace "$IWE_ROOT"; then
+      echo "claim-proof-trace: $repo_name $commit_sha -> OK via review-pr" >&2
       continue
     fi
     # isolate-push delivers linear commits by cherry-picking them onto fresh
@@ -7739,17 +7891,29 @@ _claimed_commits_have_publish_proof() {  # <semaphore> [exact claim strings JSON
     if git -C "$repo_dir" rev-parse --verify --quiet "${commit_sha}^1" >/dev/null 2>&1; then
       if git -C "$repo_dir" cherry refs/remotes/origin/main "$commit_sha" "${commit_sha}~1" 2>/dev/null \
           | grep -q '^- '; then
+        echo "claim-proof-trace: $repo_name $commit_sha -> OK via patch-cherry" >&2
         continue
       fi
       local current_remote
       current_remote=$(git -C "$repo_dir" rev-parse --verify 'refs/remotes/origin/main^{commit}' 2>/dev/null) \
         || return 1
-      _commit_current_tree_has_publish_proof "$repo_dir" "$commit_sha" "$current_remote" \
-        || _commit_claim_supersession_has_publish_proof "$repo_dir" "$commit_sha" "$current_remote" "$semaphore" "$repo_name" \
-        || _peer_metadata_claim_has_publish_proof "$repo_dir" "$commit_sha" "$current_remote" "$semaphore" "$repo_name" \
-        || _claimed_source_chain_has_publish_proof "$repo_dir" "$commit_sha" "$current_remote" "$semaphore" "$repo_name" \
-        || _commit_automerge_has_publish_proof "$repo_dir" "$commit_sha" "$current_remote" "$semaphore" "$repo_name" \
-        || { echo "Session CLOSE: claimed commit не имеет OID, patch, точного текущего tree, supersession или точного исторического replay proof в origin/main: $repo_name $commit_sha" >&2; return 1; }
+      # Same short-circuit order as the original `||` chain -- converted to
+      # if/elif only so each branch can name itself in claim-proof-trace.
+      if _commit_current_tree_has_publish_proof "$repo_dir" "$commit_sha" "$current_remote"; then
+        echo "claim-proof-trace: $repo_name $commit_sha -> OK via current-tree" >&2
+      elif _commit_claim_supersession_has_publish_proof "$repo_dir" "$commit_sha" "$current_remote" "$semaphore" "$repo_name"; then
+        echo "claim-proof-trace: $repo_name $commit_sha -> OK via supersession" >&2
+      elif _peer_metadata_claim_has_publish_proof "$repo_dir" "$commit_sha" "$current_remote" "$semaphore" "$repo_name"; then
+        echo "claim-proof-trace: $repo_name $commit_sha -> OK via peer-metadata" >&2
+      elif _claimed_source_chain_has_publish_proof "$repo_dir" "$commit_sha" "$current_remote" "$semaphore" "$repo_name"; then
+        echo "claim-proof-trace: $repo_name $commit_sha -> OK via source-chain" >&2
+      elif _commit_automerge_has_publish_proof "$repo_dir" "$commit_sha" "$current_remote" "$semaphore" "$repo_name"; then
+        echo "claim-proof-trace: $repo_name $commit_sha -> OK via automerge" >&2
+      else
+        echo "claim-proof-trace: $repo_name $commit_sha -> FAIL (none matched)" >&2
+        echo "Session CLOSE: claimed commit не имеет OID, patch, точного текущего tree, supersession или точного исторического replay proof в origin/main: $repo_name $commit_sha" >&2
+        return 1
+      fi
     else
       local wanted_patch candidate candidate_patch matched=0
       wanted_patch=$(git -C "$repo_dir" diff-tree -p --root "$commit_sha" 2>/dev/null \
@@ -7765,8 +7929,13 @@ _claimed_commits_have_publish_proof() {  # <semaphore> [exact claim strings JSON
           break
         fi
       done < <(git -C "$repo_dir" rev-list --max-count=200 refs/remotes/origin/main 2>/dev/null)
-      [ "$matched" -eq 1 ] \
-        || { echo "Session CLOSE: patch-эквивалент корневого claimed commit не найден в origin/main: $repo_name $commit_sha" >&2; return 1; }
+      if [ "$matched" -eq 1 ]; then
+        echo "claim-proof-trace: $repo_name $commit_sha -> OK via patch-id-root" >&2
+      else
+        echo "claim-proof-trace: $repo_name $commit_sha -> FAIL (none matched)" >&2
+        echo "Session CLOSE: patch-эквивалент корневого claimed commit не найден в origin/main: $repo_name $commit_sha" >&2
+        return 1
+      fi
     fi
   done < <(sed -n 's/^commit: //p' "$semaphore")
   return 0
@@ -7950,27 +8119,64 @@ _session_commit_claims_json() {  # <semaphore>
     'import json,sys; print(json.dumps([line for line in sys.stdin.read().splitlines() if line], separators=(",", ":")))'
 }
 
-_worktree_clean_status_sha() {  # <worktree>; prints hash only for exact clean status
-  python3 - "$1" <<'PY' 2>/dev/null
+_worktree_clean_status_sha() {  # <worktree> [exact active RUN card]; prints hash only for clean owned scope
+  python3 - "$1" "${2:-}" <<'PY' 2>/dev/null
 import hashlib
+import os
+from pathlib import Path
+import re
+import stat
 import subprocess
 import sys
 
+worktree, allowed_card = sys.argv[1:]
+allowed_relative = None
+if allowed_card:
+    root = Path(worktree).resolve(strict=True)
+    card = Path(allowed_card)
+    info = card.lstat()
+    if (not re.fullmatch(r"RUN-quick-close-[A-Za-z0-9._-]+\.md", card.name)
+            or not stat.S_ISREG(info.st_mode) or info.st_uid != os.geteuid()
+            or info.st_nlink != 1):
+        raise SystemExit(1)
+    if card.parent == root / "inbox/agent/tasks":
+        allowed_relative = os.fsencode(card.relative_to(root).as_posix())
+    else:
+        # relocate-card moves a waiting RUN card to the canonical checkout
+        # before close removes this isolated worktree. It is outside this
+        # worktree's ignored scope, so that scope must be completely empty.
+        common = subprocess.run(
+            ["git", "-C", worktree, "rev-parse", "--git-common-dir"],
+            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, check=False,
+        )
+        if common.returncode != 0:
+            raise SystemExit(1)
+        common_dir = Path(os.fsdecode(common.stdout.strip()))
+        if not common_dir.is_absolute():
+            common_dir = root / common_dir
+        common_dir = common_dir.resolve(strict=True)
+        if (common_dir.name != ".git"
+                or card.parent != common_dir.parent / "inbox/agent/tasks"):
+            raise SystemExit(1)
+
 status = subprocess.run(
-    ["git", "-C", sys.argv[1], "status", "--porcelain=v2", "-z", "--untracked-files=all"],
+    ["git", "-C", worktree, "status", "--porcelain=v2", "-z", "--untracked-files=all"],
     stdout=subprocess.PIPE,
     stderr=subprocess.DEVNULL,
     check=False,
 )
 ignored = subprocess.run(
-    ["git", "-C", sys.argv[1], "ls-files", "--others", "--ignored", "--exclude-standard", "-z"],
+    ["git", "-C", worktree, "ls-files", "--others", "--ignored", "--exclude-standard", "-z"],
     stdout=subprocess.PIPE,
     stderr=subprocess.DEVNULL,
     check=False,
 )
-if status.returncode != 0 or ignored.returncode != 0 or status.stdout or ignored.stdout:
+ignored_paths = [path for path in ignored.stdout.split(b"\0") if path]
+if (status.returncode != 0 or ignored.returncode != 0 or status.stdout
+        or (allowed_relative is None and ignored_paths)
+        or (allowed_relative is not None and ignored_paths != [allowed_relative])):
     raise SystemExit(1)
-print(hashlib.sha256(b"status-v2\0" + status.stdout + b"ignored\0" + ignored.stdout).hexdigest())
+print(hashlib.sha256(b"status-v2\0" + status.stdout + b"ignored\0").hexdigest())
 PY
 }
 
@@ -9046,7 +9252,11 @@ _prepared_source_snapshot_matches() {  # <semaphore> <worktree>
   actual_origin=$(git -C "$worktree" remote get-url origin 2>/dev/null) || return 1
   actual_origin=$(normalize_remote_url "$actual_origin")
   [ "$actual_origin" = "$expected_origin" ] && [ "$expected_target" = "refs/heads/main" ] || return 1
-  actual_status=$(_worktree_clean_status_sha "$worktree" || true)
+  if [ "$terminal_kind" = "file" ]; then
+    actual_status=$(_worktree_clean_status_sha "$worktree" "$terminal_ref" || true)
+  else
+    actual_status=$(_worktree_clean_status_sha "$worktree" || true)
+  fi
   [ -n "$actual_status" ] && [ "$actual_status" = "$expected_status" ] || return 1
   actual_commits=$(_isolated_source_commits_json "$worktree" "$expected_base" "$expected_head" || true)
   [ "$actual_commits" = "$expected_commits" ] || return 1
@@ -10223,10 +10433,19 @@ _close_delivery_and_transition() {
     # never silently discard something that used to close cleanly.
     # Best-effort by design (matches clean_day_open_ignored_debris) -- a clean
     # failure here just means the check below fails with its normal message.
-    git -C "$CLOSING_WORKTREE" clean -fdX --quiet 2>/dev/null || true
+    # The runner's active card is ignored by Git but is the terminal proof for
+    # this same close. A negative pathspec preserves RUN cards under -X; -e
+    # would mark them ignored and still delete them. A foreign card remains a
+    # dirty-scope refusal instead of being silently deleted.
+    git -C "$CLOSING_WORKTREE" clean -fdX --quiet -- . \
+      ':(exclude)inbox/agent/tasks/RUN-*.md' 2>/dev/null || true
     # Proved clean BEFORE the rebuild below (WP-561 Ч3): a dirty copy is refused
     # here, so the rebase never runs over uncommitted work and never stashes it.
-    source_status=$(_worktree_clean_status_sha "$CLOSING_WORKTREE" || true)
+    if [ "$TERMINAL_PROOF_KIND" = "file" ]; then
+      source_status=$(_worktree_clean_status_sha "$CLOSING_WORKTREE" "$TERMINAL_PROOF_REFERENCE" || true)
+    else
+      source_status=$(_worktree_clean_status_sha "$CLOSING_WORKTREE" || true)
+    fi
     [ -n "$source_status" ] \
       || fail "close: isolated worktree не полностью clean (включая ignored/untracked); PREPARED не пишу" 7
     # WP-561 Ч3: rebuild BEFORE the snapshot below, so PREPARED records the set
@@ -10253,7 +10472,11 @@ _close_delivery_and_transition() {
     target_ref="refs/heads/main"
     # The rebuild above may have moved the copy; PREPARED binds the status of
     # the tree it snapshots (a completed rebase leaves it clean).
-    source_status=$(_worktree_clean_status_sha "$CLOSING_WORKTREE" || true)
+    if [ "$TERMINAL_PROOF_KIND" = "file" ]; then
+      source_status=$(_worktree_clean_status_sha "$CLOSING_WORKTREE" "$TERMINAL_PROOF_REFERENCE" || true)
+    else
+      source_status=$(_worktree_clean_status_sha "$CLOSING_WORKTREE" || true)
+    fi
     [ -n "$source_status" ] \
       || fail "close: isolated worktree не clean после пересборки; PREPARED не пишу" 7
     source_commits=$(_isolated_source_commits_json "$CLOSING_WORKTREE" "$source_base" "$source_head" || true)
@@ -11113,6 +11336,17 @@ print(json.dumps({"wp": sys.argv[1], "slug": sys.argv[2], "agent": sys.argv[3], 
       esac
     fi
   fi
+
+  # WP-484 Ф210: сверка git-рефов с момента открытия. Строго report-only
+  # (Ф185: close никогда не проваливается), до terminal transition, после
+  # всех шагов, способных штатно создавать рефы. Из диффа исключается только
+  # точное имя штатной ветки этой сессии из семафора (не маска session-isolate/*).
+  session_refs_debt_report "$IWE_ROOT/$GOV_REPO" \
+    "$(session_refs_snapshot_file "$AGENT" "$LOCKED_SESSION_ID")" \
+    "$(_unique_record_field "$SEM_FILE" isolated_branch || true)"
+  # Снимок одноразовый: после сверки best-effort убираем, чтобы каталог
+  # не копился бесконечно (потеря rm не валит close).
+  rm -f "$(session_refs_snapshot_file "$AGENT" "$LOCKED_SESSION_ID")" 2>/dev/null || true
 
   # cancel-session and audit above are retry-safe runner operations: their
   # failures either block here (audit) or stay visible warnings (idempotent
@@ -12665,8 +12899,6 @@ if [ "$CMD" = "audit" ]; then
   if [ "$CLEANUP_ORPHANS" -eq 1 ]; then
     sweep_orphaned_semaphores
     echo
-    sweep_stale_open_log_entries
-    echo
   fi
   SINCE="${SINCE:-$(date -v-7d +%Y-%m-%d 2>/dev/null || date -d '7 days ago' +%Y-%m-%d)}"
   echo "=== Session Guard Audit (since $SINCE) ==="
@@ -12691,14 +12923,16 @@ if [ "$CMD" = "audit" ]; then
     echo
   fi
 
-  # 2. Сессии в open-sessions.log без ORZ-файла
-  if [ -f "$OPEN_LOG" ]; then
-    echo "Сессии в open-sessions.log без ORZ (после $SINCE):"
-    awk -v since="$SINCE" '
+  # 2. Open semaphores without an ORZ file.
+  ACTIVE_VIEW=$(bash "$IWE_ROOT/scripts/open-log-snapshot.sh") \
+    || fail 'audit: cannot read active-session view' 1
+  if [ -n "$ACTIVE_VIEW" ]; then
+    echo "Открытые сессии без ORZ (после $SINCE):"
+    printf '%s\n' "$ACTIVE_VIEW" | awk -v since="$SINCE" '
       $1 >= since {
-        wp=$3; gsub(/\|/,"",wp); print $1, wp
+        wp=$4; gsub(/\|/,"",wp); print $1, wp
       }
-    ' "$OPEN_LOG" | sort -u | while read -r dt wp; do
+    ' | sort -u | while read -r dt wp; do
       ORZ=$(ls "$ORZ_DIR/${dt:0:7}/$dt"-*"$wp"*.md 2>/dev/null | head -1 || true)
       if [ -z "$ORZ" ]; then
         echo "  $dt | $wp | ORZ отсутствует"
@@ -14038,6 +14272,21 @@ if [ "$CMD" = "pre-commit-check" ]; then
   # hard block is a separate, later change, not bundled into this commit.
   if [ -n "$ACTIVE" ]; then
     CURRENT_TOPLEVEL=$(git rev-parse --show-toplevel 2>/dev/null || echo "")
+    # WP-530 Ф94 (11.10, root cause of the hard-block revert `9f222ef`):
+    # the repo actually receiving this commit, by identity -- git-common-dir
+    # first (shares the same value between a canonical checkout and any
+    # `git worktree add` copy of it), origin remote as fallback (covers a
+    # worktree created by a fresh clone instead). Computed once, outside the
+    # loop, same two-step comparison `semaphore_governance_worktree` already
+    # uses against its hardcoded canonical -- applied here against THIS
+    # commit's repo instead, because check 6a fires for commits in any repo.
+    CURRENT_COMMON=$(git -C "$CURRENT_TOPLEVEL" rev-parse --git-common-dir 2>/dev/null || echo "")
+    case "$CURRENT_COMMON" in
+      /*|'') ;;
+      *) CURRENT_COMMON="$CURRENT_TOPLEVEL/$CURRENT_COMMON" ;;
+    esac
+    [ -z "$CURRENT_COMMON" ] || CURRENT_COMMON=$(cd "$CURRENT_COMMON" 2>/dev/null && pwd -P) || CURRENT_COMMON=""
+    CURRENT_REMOTE=$(git -C "$CURRENT_TOPLEVEL" remote get-url origin 2>/dev/null || echo "")
     REGISTERED_WORKTREES=""
     MATCHED_TOPLEVEL=0
     for sem in $ACTIVE; do
@@ -14053,6 +14302,33 @@ if [ "$CMD" = "pre-commit-check" ]; then
       sem_toplevel="$sem_dir"
       case "$sem_toplevel" in
         */.claude/worktrees/*|*/.iwe-runtime/isolated-worktrees/*)
+          # Ф94: a registered worktree only counts here if it belongs to the
+          # SAME repository this commit is going into. Before this check, an
+          # active session's isolated copy of an UNRELATED repo (different
+          # git-common-dir, different origin) still landed in
+          # REGISTERED_WORKTREES, so it could never match CURRENT_TOPLEVEL
+          # and flipped the warning for a commit that has nothing to do with
+          # it -- confirmed live with 4+ simultaneous isolated worktrees of
+          # different WPs on one host (routine under WP-520 freeze). The
+          # same defect, escalated to a hard block instead of a warning, is
+          # what commit `825d75b2c` did and `9f222efd7` had to revert.
+          sem_common=$(git -C "$sem_toplevel" rev-parse --git-common-dir 2>/dev/null || echo "")
+          case "$sem_common" in
+            /*|'') ;;
+            *) sem_common="$sem_toplevel/$sem_common" ;;
+          esac
+          [ -z "$sem_common" ] || sem_common=$(cd "$sem_common" 2>/dev/null && pwd -P) || sem_common=""
+          SAME_REPO=0
+          if [ -n "$sem_common" ] && [ -n "$CURRENT_COMMON" ] && [ "$sem_common" = "$CURRENT_COMMON" ]; then
+            SAME_REPO=1
+          else
+            sem_remote=$(git -C "$sem_toplevel" remote get-url origin 2>/dev/null || echo "")
+            if [ -n "$sem_remote" ] && [ -n "$CURRENT_REMOTE" ] \
+               && [ "$(normalize_remote_url "$sem_remote")" = "$(normalize_remote_url "$CURRENT_REMOTE")" ]; then
+              SAME_REPO=1
+            fi
+          fi
+          [ "$SAME_REPO" -eq 1 ] || continue
           REGISTERED_WORKTREES="${REGISTERED_WORKTREES}${sem_toplevel} ($(basename "$sem"))"$'\n'
           [ "$sem_toplevel" = "$CURRENT_TOPLEVEL" ] && MATCHED_TOPLEVEL=1
           ;;

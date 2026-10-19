@@ -321,7 +321,10 @@ export IWE_ROOT="$E2E5" IWE_GOVERNANCE_REPO="DS-strategy" IWE_AGENT="fixture" \
        IWE_SESSIONS_ROOT="$SESS5" IWE_FROZEN_CANONICAL_PATH="" \
        CLAUDE_CODE_SESSION_ID="archive-e2e" IWE_TEST_LEDGER_LOG="$E2E5/ledger.log"
 : > "$IWE_TEST_LEDGER_LOG"
-OPEN_OUT5=$(bash "$GUARD" open --wp WP-561 --task fixture --slug archive-e2e --agent fixture --isolate --force)
+# --isolate resolves its target repo from the caller's cwd (session-guard.sh
+# ISOLATE_BASE_DIR, ~:4700), not from $IWE_ROOT -- subshell cd into $GOV5
+# keeps this test's own cwd untouched (WP-530 Ф91).
+OPEN_OUT5=$(cd "$GOV5" && bash "$GUARD" open --wp WP-561 --task fixture --slug archive-e2e --agent fixture --isolate --force)
 WT5=$(printf '%s\n' "$OPEN_OUT5" | grep -o '"worktree_path": "[^"]*"' | cut -d'"' -f4)
 [ -n "$WT5" ] && [ -d "$WT5" ] || fail_test "T5 setup: open --isolate gave no worktree"
 E2E5_SEM=$(find "$E2E5/.iwe-runtime/sessions" -name 'fixture-*.open' -type f | head -1)
@@ -369,7 +372,8 @@ export IWE_ROOT="$E2E6" IWE_GOVERNANCE_REPO="DS-strategy" IWE_AGENT="fixture" \
        IWE_SESSIONS_ROOT="$SESS6" IWE_FROZEN_CANONICAL_PATH="" \
        CLAUDE_CODE_SESSION_ID="obligation-e2e" IWE_TEST_LEDGER_LOG="$E2E6/ledger.log"
 : > "$IWE_TEST_LEDGER_LOG"
-OPEN_OUT6=$(bash "$GUARD" open --wp WP-561 --task fixture --slug obligation-e2e --agent fixture --isolate --force)
+# Same cwd-dependent --isolate resolution as E2E5 above (WP-530 Ф91).
+OPEN_OUT6=$(cd "$GOV6" && bash "$GUARD" open --wp WP-561 --task fixture --slug obligation-e2e --agent fixture --isolate --force)
 WT6=$(printf '%s\n' "$OPEN_OUT6" | grep -o '"worktree_path": "[^"]*"' | cut -d'"' -f4)
 [ -n "$WT6" ] && [ -d "$WT6" ] || fail_test "T6 setup: open --isolate gave no worktree"
 E2E6_SEM=$(find "$E2E6/.iwe-runtime/sessions" -name 'fixture-*.open' -type f | head -1)
@@ -421,7 +425,8 @@ export IWE_ROOT="$E2E8" IWE_GOVERNANCE_REPO="DS-strategy" IWE_AGENT="fixture" \
        IWE_SESSIONS_ROOT="$SESS8" IWE_FROZEN_CANONICAL_PATH="" \
        CLAUDE_CODE_SESSION_ID="reflection-e2e" IWE_TEST_LEDGER_LOG="$E2E8/ledger.log"
 : > "$IWE_TEST_LEDGER_LOG"
-OPEN_OUT8=$(bash "$GUARD" open --wp WP-561 --task fixture --slug reflection-e2e --agent fixture --isolate --force)
+# Same cwd-dependent --isolate resolution as E2E5 above (WP-530 Ф91).
+OPEN_OUT8=$(cd "$GOV8" && bash "$GUARD" open --wp WP-561 --task fixture --slug reflection-e2e --agent fixture --isolate --force)
 WT8=$(printf '%s\n' "$OPEN_OUT8" | grep -o '"worktree_path": "[^"]*"' | cut -d'"' -f4)
 [ -n "$WT8" ] && [ -d "$WT8" ] || fail_test "T8 setup: open --isolate gave no worktree"
 E2E8_SEM=$(find "$E2E8/.iwe-runtime/sessions" -name 'fixture-*.open' -type f | head -1)
