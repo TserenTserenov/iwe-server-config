@@ -150,7 +150,7 @@ class TurnEvidenceTest(unittest.TestCase):
         self.assertEqual([], result["fatal_diagnostics"])
         self.assertEqual([True, False], [turn["complete"] for turn in result["turns"]])
 
-    def test_claude_interrupted_prompt_does_not_invalidate_later_answer(self):
+    def test_claude_unmarked_interruption_makes_source_uncertain(self):
         result = self.normalize(
             [
                 {"type": "user", "uuid": "u1", "message": {"content": "Первый запрос"}},
@@ -172,9 +172,121 @@ class TurnEvidenceTest(unittest.TestCase):
             ],
             runtime="claude",
         )
-        self.assertEqual([], result["fatal_diagnostics"])
+        self.assertIn("turn_missing_end", " ".join(result["fatal_diagnostics"]))
         self.assertEqual([False, True], [turn["complete"] for turn in result["turns"]])
-        self.assertIn("turn_missing_end", " ".join(result["diagnostics"]))
+
+    def test_claude_meta_and_sidechain_rows_do_not_split_main_turn(self):
+        result = self.normalize(
+            [
+                {"type": "user", "uuid": "u1", "message": {"content": "Прочитай файл"}},
+                {
+                    "type": "assistant",
+                    "message": {
+                        "content": [
+                            {
+                                "type": "tool_use",
+                                "id": "call-1",
+                                "name": "Read",
+                                "input": {"file_path": "proof.txt"},
+                            }
+                        ],
+                        "stop_reason": "tool_use",
+                    },
+                },
+                {
+                    "type": "user",
+                    "uuid": "meta",
+                    "isMeta": True,
+                    "message": {"content": "hook context"},
+                },
+                {
+                    "type": "assistant",
+                    "isSidechain": True,
+                    "message": {
+                        "content": [{"type": "text", "text": "Чужой ответ"}],
+                        "stop_reason": "end_turn",
+                    },
+                },
+                {
+                    "type": "user",
+                    "message": {
+                        "content": [
+                            {
+                                "type": "tool_result",
+                                "tool_use_id": "call-1",
+                                "is_error": False,
+                                "content": "proof",
+                            }
+                        ]
+                    },
+                },
+                {
+                    "type": "assistant",
+                    "message": {
+                        "content": [
+                            {"type": "text", "text": "proof\nДальше: ничего не жду"}
+                        ],
+                        "stop_reason": "end_turn",
+                    },
+                },
+            ],
+            runtime="claude",
+        )
+        self.assertEqual([], result["diagnostics"])
+        self.assertEqual(1, len(result["turns"]))
+        self.assertEqual("u1", result["turns"][0]["id"])
+        self.assertEqual(5, result["turns"][0]["tools"][0]["result_line"])
+
+    def test_claude_orphan_and_unidentified_tool_results_are_diagnosed(self):
+        orphan = self.normalize(
+            [
+                {
+                    "type": "user",
+                    "message": {
+                        "content": [{"type": "tool_result", "tool_use_id": "x"}]
+                    },
+                }
+            ],
+            runtime="claude",
+        )
+        self.assertIn("tool_result_outside_turn", " ".join(orphan["fatal_diagnostics"]))
+        unidentified = self.normalize(
+            [
+                {"type": "user", "uuid": "u1", "message": {"content": "Прочитай файл"}},
+                {
+                    "type": "assistant",
+                    "message": {
+                        "content": [
+                            {
+                                "type": "tool_use",
+                                "id": "x",
+                                "name": "Read",
+                                "input": {"file_path": "proof.txt"},
+                            }
+                        ],
+                        "stop_reason": "tool_use",
+                    },
+                },
+                {
+                    "type": "user",
+                    "message": {
+                        "content": [{"type": "tool_result", "content": "proof"}]
+                    },
+                },
+                {
+                    "type": "assistant",
+                    "message": {
+                        "content": [{"type": "text", "text": "Готово"}],
+                        "stop_reason": "end_turn",
+                    },
+                },
+            ],
+            runtime="claude",
+        )
+        self.assertIn(
+            "unmatched_tool_result", " ".join(unidentified["fatal_diagnostics"])
+        )
+        self.assertIsNone(unidentified["turns"][0]["tools"][0]["result_line"])
 
     def test_codex_success_and_mirror_do_not_double_count(self):
         result = self.normalize(

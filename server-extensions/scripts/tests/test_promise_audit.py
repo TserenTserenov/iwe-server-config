@@ -50,6 +50,9 @@ class PromiseAuditTests(unittest.TestCase):
         self.assertEqual(final_line_form(turn("Готово.\nДальше:")), "malformed")
         self.assertEqual(final_line_form(turn("> Дальше: ничего не жду.")), "missing")
         self.assertEqual(final_line_form(turn("")), "unknown")
+        incomplete = turn("Готово.\nДальше: ничего не жду.")
+        incomplete["complete"] = False
+        self.assertEqual(final_line_form(incomplete), "unknown")
 
     def test_form_counts_do_not_turn_failed_tool_into_semantic_verdict(self):
         failed = tool(error=True, result={"exit_code": 1})

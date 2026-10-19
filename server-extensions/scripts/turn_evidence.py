@@ -94,9 +94,7 @@ class _Journal:
         if fatal and self.active is not None:
             self.bad = True
 
-    def start(
-        self, identifier: object, line: int, *, interrupted_is_fatal: bool = True
-    ) -> None:
+    def start(self, identifier: object, line: int) -> None:
         if identifier is None or isinstance(identifier, (dict, list, bool)):
             self.diagnose(line, "missing_or_invalid_turn_id")
             return
@@ -104,7 +102,7 @@ class _Journal:
         if self.active is not None:
             if self.active["id"] == identifier:
                 return
-            self.diagnose(line, "turn_missing_end", fatal=interrupted_is_fatal)
+            self.diagnose(line, "turn_missing_end")
             self.finish(None, line - 1, False)
         if identifier in self.closed:
             self.diagnose(line, "duplicate_closed_turn")
@@ -439,6 +437,12 @@ def _claude(rows: list[tuple[int, dict]], journal: _Journal) -> None:
         kind = row.get("type")
         if kind not in {"user", "assistant"}:
             continue  # Attachments, titles, and bridge metadata are not turns.
+        if (
+            row.get("isMeta")
+            or row.get("isSidechain")
+            or row.get("agentId") not in (None, "main")
+        ):
+            continue  # Hook/sidechain records are not main-thread user turns.
         message = row.get("message")
         if not isinstance(message, dict):
             journal.diagnose(line, "invalid_message")
@@ -454,17 +458,18 @@ def _claude(rows: list[tuple[int, dict]], journal: _Journal) -> None:
 
         if kind == "user":
             for part in parts:
-                if part.get("type") == "tool_result" and journal.active is not None:
-                    journal.output(part.get("tool_use_id"), part, line)
+                if part.get("type") == "tool_result":
+                    if journal.active is None:
+                        journal.diagnose(line, "tool_result_outside_turn")
+                    else:
+                        journal.output(part.get("tool_use_id"), part, line)
             if any(
                 part.get("type") == "text"
                 and isinstance(part.get("text"), str)
                 and part["text"].strip()
                 for part in parts
             ):
-                journal.start(
-                    row.get("uuid", f"user-{line}"), line, interrupted_is_fatal=False
-                )
+                journal.start(row.get("uuid", f"user-{line}"), line)
             continue
 
         texts = [part.get("text") for part in parts if part.get("type") == "text"]

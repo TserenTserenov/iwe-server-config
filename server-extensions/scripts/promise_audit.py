@@ -18,7 +18,7 @@ from pathlib import Path
 
 from turn_evidence import load_turns
 
-RULE_VERSION = "wp603-v3"
+RULE_VERSION = "wp603-v4"
 FORM_STATES = ("present", "missing", "malformed", "unknown")
 VENDORS = {
     "codex": "codex",
@@ -374,7 +374,7 @@ def closure_after_failed_tool(turn: dict) -> dict | None:
 
 def final_line_form(turn: dict) -> str:
     """Check only visible answer shape, never infer whether the task succeeded."""
-    if not turn.get("boundary", {}).get("completed", turn.get("complete")):
+    if not turn.get("complete"):
         return "unknown"
     final = turn.get("final_text")
     if not isinstance(final, str) or not final.strip():
