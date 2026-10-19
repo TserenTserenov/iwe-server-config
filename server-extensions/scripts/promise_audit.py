@@ -51,27 +51,48 @@ STATES = (
 def returned_ids(value: object) -> set[str]:
     """Recognize IDs in result fields, never in call arguments or model prose."""
     if isinstance(value, dict):
-        return {
+        ids = {
             str(v)
             for k, v in value.items()
             if k in {"session_id", "task_id", "cell_id", "taskId"}
             and isinstance(v, (str, int))
             and not isinstance(v, bool)
         }
+        if (
+            type(value.get("exit_code")) is int
+            and value["exit_code"] == 0
+            and isinstance(value.get("output"), str)
+        ):
+            ids.update(
+                re.findall(
+                    r"^backgrounded · ([a-f0-9]{8})$", value["output"], re.MULTILINE
+                )
+            )
+        return ids
     if isinstance(value, str):
         try:
             decoded = json.loads(value)
         except ValueError:
             if not value.startswith("Chunk ID: "):
                 return set()
-            header = re.split(r"\n(?:Final output|Output):", value, maxsplit=1)[0]
-            return set(
+            parts = re.split(r"\n(?:Final output|Output):(?:\n|$)", value, maxsplit=1)
+            header = parts[0]
+            ids = set(
                 re.findall(
                     r"^Process running with session ID ([A-Za-z0-9_-]+)$",
                     header,
                     re.MULTILINE,
                 )
             )
+            if len(parts) == 2 and re.search(
+                r"^Process exited with code 0$", header, re.MULTILINE
+            ):
+                ids.update(
+                    re.findall(
+                        r"^backgrounded · ([a-f0-9]{8})$", parts[1], re.MULTILINE
+                    )
+                )
+            return ids
         return returned_ids(decoded) if decoded != value else set()
     return set()
 
