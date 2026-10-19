@@ -26,6 +26,7 @@ MAX_CANDIDATES = 256
 MAIN_REF = "refs/heads/main"
 # Delivery evidence only: this policy never authorizes a push or deployment.
 PEER_PRODUCT_REFS = frozenset({"refs/heads/pilot", "refs/heads/new-architecture"})
+PRODUCT_BRANCH_REGISTRY_PATH = Path(__file__).with_name("product-branch-registry.json")
 BOT_REPO = "aist_bot_newarchitecture"
 BOT_REF = "refs/heads/new-architecture"
 BOT_SOURCE = "f058845b20ee134eca5904a7b0dab99f893dc4f3"
@@ -239,10 +240,51 @@ def squash_receipt(repo: Path, raw: bytes, name: str, source: str, anchor: str,
             "series_commits": chain, "series_tip_tree": oid(repo, chain[-1] + "^{tree}")}
 
 
-def tracking_ref(target_ref: str) -> str:
-    if target_ref != MAIN_REF and target_ref not in PEER_PRODUCT_REFS:
+def tracking_ref(repo: Path, target_ref: str) -> str:
+    if (target_ref != MAIN_REF
+            and target_ref not in PEER_PRODUCT_REFS | registered_product_refs(repository_identity(repo)[1])):
         raise ProofError("publication target is outside delivery policy")
     return "refs/remotes/origin/" + target_ref.removeprefix("refs/heads/")
+
+
+def _reject_duplicate_keys(pairs: list[tuple[str, object]]) -> dict:
+    seen = set()
+    result = {}
+    for key, value in pairs:
+        if key in seen:
+            raise ProofError("duplicate key in product branch registry")
+        seen.add(key)
+        result[key] = value
+    return result
+
+
+def registered_product_refs(origin: str) -> frozenset[str]:
+    """Human-curated extra delivery branches, keyed by repository origin.
+
+    Separate from PEER_PRODUCT_REFS (built-in bot refs): adding a branch here
+    is a trust-policy change, not a code change, and must name a full ref,
+    never a wildcard or a pattern.
+    """
+    path = PRODUCT_BRANCH_REGISTRY_PATH
+    try:
+        raw = path.read_bytes()
+    except FileNotFoundError:
+        return frozenset()
+    if path.is_symlink() or not (0 < len(raw) <= MAX_BYTES):
+        raise ProofError("product branch registry unreadable")
+    data = json.loads(raw, object_pairs_hook=_reject_duplicate_keys)
+    if not isinstance(data, dict) or data.get("schema") != "product-branch-registry/v1":
+        raise ProofError("unsupported product branch registry schema")
+    products = data.get("products")
+    if not isinstance(products, dict):
+        raise ProofError("invalid product branch registry")
+    refs = products.get(origin, [])
+    if not isinstance(refs, list) or not all(
+        isinstance(ref, str) and re.fullmatch(r"refs/heads/[A-Za-z0-9._/-]+", ref)
+        for ref in refs
+    ):
+        raise ProofError("invalid product branch registry entry for " + origin)
+    return frozenset(refs)
 
 
 def repository_identity(repo: Path) -> tuple[Path, str]:
@@ -277,7 +319,7 @@ def legacy_product_scope(repo: Path, raw: bytes, common: Path, name: str) -> Non
 
 def product_target(repo: Path, raw: bytes, name: str, root: Path, target_ref: str) -> None:
     """Bind non-main delivery and PREPARED recovery to peer product repositories."""
-    if target_ref not in PEER_PRODUCT_REFS | {MAIN_REF}:
+    if target_ref not in PEER_PRODUCT_REFS | {MAIN_REF} | registered_product_refs(repository_identity(repo)[1]):
         raise ProofError("publication recovery requires a peer product delivery target")
     root = root.resolve(strict=True)
     common, origin = repository_identity(repo)
@@ -393,7 +435,7 @@ def select_checkout(repo: Path, semaphore: Path, name: str, published: str,
 
 
 def fetch_target(repo: Path, target_ref: str) -> str:
-    tracking = tracking_ref(target_ref)
+    tracking = tracking_ref(repo, target_ref)
     # A deleted branch must fail even if its old tracking ref still exists.
     # Network transport needs the user's credential helper. Proof commands
     # still use git_env(), which excludes global configuration and replacements.
@@ -413,6 +455,7 @@ def fetch_target(repo: Path, target_ref: str) -> str:
 
 def verify_product(repo: Path, semaphore: Path, name: str, source: str, root: Path) -> bool:
     raw = snapshot(semaphore)
+    allowed_refs = PEER_PRODUCT_REFS | registered_product_refs(repository_identity(repo)[1])
     targets = set()
     for line in raw.decode().splitlines():
         if not line.startswith(PREFIX):
@@ -421,7 +464,7 @@ def verify_product(repo: Path, semaphore: Path, name: str, source: str, root: Pa
             saved = json.loads(line[len(PREFIX):])
             if (isinstance(saved, dict) and saved.get("repo") == name
                     and saved.get("source_commit") == source
-                    and saved.get("target_ref") in PEER_PRODUCT_REFS):
+                    and saved.get("target_ref") in allowed_refs):
                 targets.add(saved["target_ref"])
         except (TypeError, ValueError):
             continue
@@ -644,7 +687,7 @@ def verify(repo: Path, semaphore: Path, name: str, source: str, remote: str,
                 continue
             if (ancestor(repo, anchor, remote) and
                     saved == reconstruct_receipt(repo, raw, name, source, saved, target_ref) and
-                    oid(repo, tracking_ref(target_ref) + "^{commit}") == remote and
+                    oid(repo, tracking_ref(repo, target_ref) + "^{commit}") == remote and
                     snapshot(semaphore) == raw):
                 return True
         except (KeyError, TypeError, ValueError, ProofError):
@@ -693,7 +736,7 @@ def record(repo: Path, semaphore: Path, name: str, published: str,
             and select_checkout(workspace / name, semaphore, name, published, workspace) != repo):
         raise ProofError("alternative checkout is no longer bound to source claims")
     bindings = file_bindings(raw) if alternate else set()
-    remote = oid(repo, tracking_ref(target_ref) + "^{commit}")
+    remote = oid(repo, tracking_ref(repo, target_ref) + "^{commit}")
     if not ancestor(repo, published, remote):
         raise ProofError("publication is not on fetched " + target_ref)
     sources = claims(raw, name, repo)
@@ -728,7 +771,7 @@ def record(repo: Path, semaphore: Path, name: str, published: str,
             stream.write(updated)
             stream.flush()
             os.fsync(stream.fileno())
-        if snapshot(semaphore) != raw or oid(repo, tracking_ref(target_ref) + "^{commit}") != remote:
+        if snapshot(semaphore) != raw or oid(repo, tracking_ref(repo, target_ref) + "^{commit}") != remote:
             raise ProofError("session or remote changed while recording")
         if (alternate
                 and select_checkout(workspace / name, semaphore, name, published, workspace) != repo):

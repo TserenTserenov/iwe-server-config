@@ -723,6 +723,75 @@ class ProductPublicationReceiptTest(unittest.TestCase):
         self.assertNotEqual(self.verify_cli().returncode, 0)
         self.assertEqual(self.sem.read_bytes(), before)
 
+    def test_registered_product_branch_is_an_explicit_supported_target(self):
+        extra_ref = "refs/heads/wp999/integration-spike"
+        origin = receipt.repository_identity(self.repo)[1]
+        registry = self.root / "registry.json"
+        registry.write_text(json.dumps({
+            "schema": "product-branch-registry/v1",
+            "products": {origin: [extra_ref]},
+        }))
+        self.git("push", "-q", "origin", "HEAD:" + extra_ref)
+        with patch.object(receipt, "PRODUCT_BRANCH_REGISTRY_PATH", registry):
+            receipt.record(self.repo, self.sem, "repo", self.anchor, extra_ref)
+            self.assertTrue(self.verify())
+
+    def test_unregistered_branch_name_is_rejected(self):
+        unregistered_ref = "refs/heads/wp999/not-registered"
+        registry = self.root / "empty-registry.json"
+        registry.write_text(json.dumps({"schema": "product-branch-registry/v1", "products": {}}))
+        self.git("push", "-q", "origin", "HEAD:" + unregistered_ref)
+        with patch.object(receipt, "PRODUCT_BRANCH_REGISTRY_PATH", registry):
+            with self.assertRaises(receipt.ProofError):
+                receipt.record(self.repo, self.sem, "repo", self.anchor, unregistered_ref)
+
+    def test_registry_rejects_duplicate_repository_keys(self):
+        extra_ref = "refs/heads/wp999/integration-spike"
+        origin = receipt.repository_identity(self.repo)[1]
+        registry = self.root / "registry-dup.json"
+        registry.write_text(
+            '{"schema":"product-branch-registry/v1","products":{"%s":["%s"],"%s":[]}}'
+            % (origin, extra_ref, origin))
+        with patch.object(receipt, "PRODUCT_BRANCH_REGISTRY_PATH", registry):
+            with self.assertRaises(receipt.ProofError):
+                receipt.registered_product_refs(origin)
+
+    def test_registry_rejects_symlink(self):
+        real = self.root / "real-registry.json"
+        real.write_text(json.dumps({"schema": "product-branch-registry/v1", "products": {}}))
+        link = self.root / "link-registry.json"
+        link.symlink_to(real)
+        with patch.object(receipt, "PRODUCT_BRANCH_REGISTRY_PATH", link):
+            with self.assertRaises(receipt.ProofError):
+                receipt.registered_product_refs("whatever")
+
+    def test_registry_rejects_wildcard_ref_entry(self):
+        origin = receipt.repository_identity(self.repo)[1]
+        registry = self.root / "registry-wildcard.json"
+        registry.write_text(json.dumps({
+            "schema": "product-branch-registry/v1",
+            "products": {origin: ["refs/heads/wp*"]},
+        }))
+        with patch.object(receipt, "PRODUCT_BRANCH_REGISTRY_PATH", registry):
+            with self.assertRaises(receipt.ProofError):
+                receipt.registered_product_refs(origin)
+
+    def test_registry_rejects_corrupt_json(self):
+        registry = self.root / "registry-corrupt.json"
+        registry.write_text("{not valid json")
+        with patch.object(receipt, "PRODUCT_BRANCH_REGISTRY_PATH", registry):
+            with self.assertRaises(json.JSONDecodeError):
+                receipt.registered_product_refs("whatever")
+
+    def test_registry_rejects_oversized_file(self):
+        registry = self.root / "registry-oversized.json"
+        padding = "x" * (receipt.MAX_BYTES + 1)
+        registry.write_text(
+            '{"schema":"product-branch-registry/v1","products":{},"_pad":"%s"}' % padding)
+        with patch.object(receipt, "PRODUCT_BRANCH_REGISTRY_PATH", registry):
+            with self.assertRaises(receipt.ProofError):
+                receipt.registered_product_refs("whatever")
+
     def test_foreign_session_origin_and_tampered_target_are_rejected(self):
         self.assert_recorded()
         original = self.sem.read_text()
