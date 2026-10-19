@@ -53,6 +53,129 @@ class TurnEvidenceTest(unittest.TestCase):
             self.assertEqual([path], list(Path(directory).iterdir()))
         return result
 
+    def test_claude_completed_answers_and_tool_result_are_distinct(self):
+        result = self.normalize(
+            [
+                {"type": "user", "uuid": "u1", "message": {"content": "Прочитай файл"}},
+                {
+                    "type": "assistant",
+                    "uuid": "a1",
+                    "message": {
+                        "content": [
+                            {
+                                "type": "tool_use",
+                                "id": "call-1",
+                                "name": "Read",
+                                "input": {"file_path": "missing.txt"},
+                            }
+                        ],
+                        "stop_reason": "tool_use",
+                    },
+                },
+                {
+                    "type": "user",
+                    "message": {
+                        "content": [
+                            {
+                                "type": "tool_result",
+                                "tool_use_id": "call-1",
+                                "is_error": True,
+                                "content": "not found",
+                            }
+                        ]
+                    },
+                },
+                {
+                    "type": "assistant",
+                    "uuid": "a2",
+                    "message": {
+                        "content": [
+                            {
+                                "type": "text",
+                                "text": "Файл отсутствует.\nДальше: нужен путь.",
+                            }
+                        ],
+                        "stop_reason": "end_turn",
+                    },
+                },
+                {
+                    "type": "user",
+                    "uuid": "u2",
+                    "message": {"content": "Переведи цитату"},
+                },
+                {
+                    "type": "assistant",
+                    "uuid": "a3",
+                    "message": {
+                        "content": [{"type": "thinking", "thinking": "..."}],
+                        "stop_reason": "end_turn",
+                    },
+                },
+                {
+                    "type": "assistant",
+                    "uuid": "a4",
+                    "message": {
+                        "content": [
+                            {"type": "text", "text": "Done.\nДальше: ничего не жду."}
+                        ],
+                        "stop_reason": "end_turn",
+                    },
+                },
+            ],
+            runtime="claude",
+        )
+        self.assertEqual([], result["fatal_diagnostics"])
+        self.assertEqual(2, len(result["turns"]))
+        self.assertEqual("u1", result["turns"][0]["id"])
+        self.assertTrue(result["turns"][0]["tools"][0]["error"])
+        self.assertEqual(3, result["turns"][0]["tools"][0]["result_line"])
+        self.assertEqual("u2", result["turns"][1]["id"])
+        self.assertTrue(result["turns"][1]["complete"])
+
+    def test_claude_open_tail_does_not_invalidate_completed_answer(self):
+        result = self.normalize(
+            [
+                {"type": "user", "uuid": "u1", "message": {"content": "Первый запрос"}},
+                {
+                    "type": "assistant",
+                    "message": {
+                        "content": [{"type": "text", "text": "Ответ"}],
+                        "stop_reason": "end_turn",
+                    },
+                },
+                {"type": "user", "uuid": "u2", "message": {"content": "Новый запрос"}},
+            ],
+            runtime="claude",
+        )
+        self.assertEqual([], result["fatal_diagnostics"])
+        self.assertEqual([True, False], [turn["complete"] for turn in result["turns"]])
+
+    def test_claude_interrupted_prompt_does_not_invalidate_later_answer(self):
+        result = self.normalize(
+            [
+                {"type": "user", "uuid": "u1", "message": {"content": "Первый запрос"}},
+                {
+                    "type": "assistant",
+                    "message": {
+                        "content": [{"type": "text", "text": "Работаю"}],
+                        "stop_reason": "tool_use",
+                    },
+                },
+                {"type": "user", "uuid": "u2", "message": {"content": "Второй запрос"}},
+                {
+                    "type": "assistant",
+                    "message": {
+                        "content": [{"type": "text", "text": "Готово"}],
+                        "stop_reason": "end_turn",
+                    },
+                },
+            ],
+            runtime="claude",
+        )
+        self.assertEqual([], result["fatal_diagnostics"])
+        self.assertEqual([False, True], [turn["complete"] for turn in result["turns"]])
+        self.assertIn("turn_missing_end", " ".join(result["diagnostics"]))
+
     def test_codex_success_and_mirror_do_not_double_count(self):
         result = self.normalize(
             [

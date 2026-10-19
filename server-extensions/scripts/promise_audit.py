@@ -18,7 +18,8 @@ from pathlib import Path
 
 from turn_evidence import load_turns
 
-RULE_VERSION = "wp603-v2"
+RULE_VERSION = "wp603-v3"
+FORM_STATES = ("present", "missing", "malformed", "unknown")
 VENDORS = {
     "codex": "codex",
     "claude": "claude",
@@ -371,11 +372,25 @@ def closure_after_failed_tool(turn: dict) -> dict | None:
     return None
 
 
+def final_line_form(turn: dict) -> str:
+    """Check only visible answer shape, never infer whether the task succeeded."""
+    if not turn.get("boundary", {}).get("completed", turn.get("complete")):
+        return "unknown"
+    final = turn.get("final_text")
+    if not isinstance(final, str) or not final.strip():
+        return "unknown"
+    last = next(line.strip() for line in reversed(final.splitlines()) if line.strip())
+    if not last.startswith("Дальше:"):
+        return "missing"
+    return "present" if last[len("Дальше:") :].strip() else "malformed"
+
+
 def classify(turn: dict) -> dict:
     base = {
         "turn_id": str(turn["id"]),
         "end_line": turn.get("end_line"),
         "rule_id": RULE_VERSION,
+        "final_line_form": final_line_form(turn),
         "findings": [],
         "quote_exclusions": 0,
     }
@@ -459,9 +474,13 @@ def audit(bundle: dict) -> dict:
     if bundle.get("fatal_diagnostics", bundle.get("diagnostics")):
         for row in rows:
             row.update(status="unknown", reason="source_diagnostics")
+            row["final_line_form"] = "unknown"
     counts = {s: 0 for s in STATES}
     counts.update(Counter(row["status"] for row in rows))
+    form_counts = {s: 0 for s in FORM_STATES}
+    form_counts.update(Counter(row["final_line_form"] for row in rows))
     total = len(rows)
+    form_observed = total - form_counts["unknown"]
     return {
         "schema_version": 1,
         "rule_id": RULE_VERSION,
@@ -474,6 +493,8 @@ def audit(bundle: dict) -> dict:
         ),
         "diagnostic_count": len(bundle.get("diagnostics", [])),
         "counts": counts,
+        "form_counts": form_counts,
+        "form_rate": form_counts["present"] / form_observed if form_observed else None,
         "structural_rate": (
             counts["violation_no_attempt"] + counts["violation_attempt_failed"]
         )
@@ -593,7 +614,7 @@ def apply_reviews(report: dict, bundle: dict, reviews: dict) -> None:
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("journal", type=Path)
-    parser.add_argument("--runtime", choices=("codex", "kimi"), required=True)
+    parser.add_argument("--runtime", choices=("codex", "claude", "kimi"), required=True)
     parser.add_argument(
         "--reviews", type=Path, help="Optional source-pinned semantic review JSON"
     )

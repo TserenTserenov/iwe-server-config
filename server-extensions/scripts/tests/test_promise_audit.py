@@ -6,7 +6,13 @@ import unittest
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from promise_audit import apply_reviews, audit, classify, direct_peer_command
+from promise_audit import (
+    apply_reviews,
+    audit,
+    classify,
+    direct_peer_command,
+    final_line_form,
+)
 
 
 def turn(text="Сейчас вызываю Codex", tools=None):
@@ -36,6 +42,37 @@ def tool(name="Bash", cmd="bash /scripts/codex-peer-adapter.sh", **updates):
 
 
 class PromiseAuditTests(unittest.TestCase):
+    def test_final_line_form_is_separate_from_task_outcome(self):
+        self.assertEqual(
+            final_line_form(turn("Готово.\nДальше: ничего не жду.")), "present"
+        )
+        self.assertEqual(final_line_form(turn("Готово.")), "missing")
+        self.assertEqual(final_line_form(turn("Готово.\nДальше:")), "malformed")
+        self.assertEqual(final_line_form(turn("> Дальше: ничего не жду.")), "missing")
+        self.assertEqual(final_line_form(turn("")), "unknown")
+
+    def test_form_counts_do_not_turn_failed_tool_into_semantic_verdict(self):
+        failed = tool(error=True, result={"exit_code": 1})
+        with_line = turn("Файл отсутствует.\nДальше: ничего не жду.", [failed])
+        with_line.update(
+            final_line=6, text_segments=[{"text": with_line["final_text"], "line": 6}]
+        )
+        without_line = turn("Файл отсутствует.")
+        without_line["id"] = "2"
+        report = audit(
+            {
+                "runtime": "claude",
+                "source_sha256": "fixture",
+                "turns": [with_line, without_line],
+                "diagnostics": [],
+                "fatal_diagnostics": [],
+            }
+        )
+        self.assertEqual(report["form_counts"]["present"], 1)
+        self.assertEqual(report["form_counts"]["missing"], 1)
+        self.assertEqual(report["form_rate"], 0.5)
+        self.assertEqual(report["turns"][0]["status"], "review_required")
+
     def test_failed_tool_then_nothing_wait_needs_review(self):
         failed = tool(error=True, result={"exit_code": 1})
         current = turn("Файл отсутствует.\n\nДальше: ничего не жду.", [failed])

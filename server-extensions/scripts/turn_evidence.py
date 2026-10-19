@@ -1,4 +1,4 @@
-"""Read-only, conservative adapters for Codex rollouts and Kimi wire journals.
+"""Read-only, conservative adapters for Codex, Claude, and Kimi journals.
 
 No journal content is logged or persisted. ``boundary.completed`` records a
 successful terminal event; ``complete`` additionally requires intact parsing.
@@ -94,7 +94,9 @@ class _Journal:
         if fatal and self.active is not None:
             self.bad = True
 
-    def start(self, identifier: object, line: int) -> None:
+    def start(
+        self, identifier: object, line: int, *, interrupted_is_fatal: bool = True
+    ) -> None:
         if identifier is None or isinstance(identifier, (dict, list, bool)):
             self.diagnose(line, "missing_or_invalid_turn_id")
             return
@@ -102,7 +104,7 @@ class _Journal:
         if self.active is not None:
             if self.active["id"] == identifier:
                 return
-            self.diagnose(line, "turn_missing_end")
+            self.diagnose(line, "turn_missing_end", fatal=interrupted_is_fatal)
             self.finish(None, line - 1, False)
         if identifier in self.closed:
             self.diagnose(line, "duplicate_closed_turn")
@@ -431,6 +433,57 @@ def _kimi(rows: list[tuple[int, dict]], journal: _Journal) -> None:
             journal.diagnose(line, "unsupported_record_type")
 
 
+def _claude(rows: list[tuple[int, dict]], journal: _Journal) -> None:
+    """Read native Claude JSONL; a tool-result user row is not a new prompt."""
+    for line, row in rows:
+        kind = row.get("type")
+        if kind not in {"user", "assistant"}:
+            continue  # Attachments, titles, and bridge metadata are not turns.
+        message = row.get("message")
+        if not isinstance(message, dict):
+            journal.diagnose(line, "invalid_message")
+            continue
+        content = message.get("content", [])
+        if isinstance(content, str):
+            parts = [{"type": "text", "text": content}]
+        elif isinstance(content, list) and all(isinstance(x, dict) for x in content):
+            parts = content
+        else:
+            journal.diagnose(line, "unsupported_assistant_content")
+            continue
+
+        if kind == "user":
+            for part in parts:
+                if part.get("type") == "tool_result" and journal.active is not None:
+                    journal.output(part.get("tool_use_id"), part, line)
+            if any(
+                part.get("type") == "text"
+                and isinstance(part.get("text"), str)
+                and part["text"].strip()
+                for part in parts
+            ):
+                journal.start(
+                    row.get("uuid", f"user-{line}"), line, interrupted_is_fatal=False
+                )
+            continue
+
+        texts = [part.get("text") for part in parts if part.get("type") == "text"]
+        calls = [part for part in parts if part.get("type") == "tool_use"]
+        if not texts and not calls:
+            continue  # Thinking-only end_turn can precede the visible answer.
+        if journal.active is None:
+            journal.start(row.get("uuid", f"assistant-{line}"), line)
+        if not all(isinstance(value, str) for value in texts):
+            journal.diagnose(line, "unsupported_assistant_content")
+            continue
+        if texts:
+            journal.text("\n".join(texts), line)
+        for part in calls:
+            journal.call(part.get("id"), part.get("name"), part.get("input"), line)
+        if message.get("stop_reason") == "end_turn" and texts:
+            journal.finish(None, line, True, "end_turn")
+
+
 def load_turns(path: Path, runtime: str) -> dict:
     """Normalize a journal without writing it; return evidence and diagnostics.
 
@@ -438,7 +491,7 @@ def load_turns(path: Path, runtime: str) -> dict:
     it could hide a turn boundary. Unknown runtime raises ValueError; filesystem
     errors propagate. Kimi's mirrored messages are text-only fallback evidence.
     """
-    if runtime not in {"codex", "kimi"}:
+    if runtime not in {"codex", "claude", "kimi"}:
         raise ValueError("unsupported runtime")
     raw = path.read_bytes()
     journal = _Journal(runtime, hashlib.sha256(raw).hexdigest())
@@ -456,10 +509,12 @@ def load_turns(path: Path, runtime: str) -> dict:
             corrupt = True
             continue
         rows.append((line, record))
-    adapter = _codex if runtime == "codex" else _kimi
+    adapter = {"codex": _codex, "claude": _claude, "kimi": _kimi}[runtime]
     adapter(rows, journal)
     if journal.active is not None:
-        journal.diagnose(len(raw.splitlines()), "turn_missing_end")
+        journal.diagnose(
+            len(raw.splitlines()), "turn_missing_end", fatal=runtime != "claude"
+        )
         journal.finish(None, len(raw.splitlines()), False)
     if not journal.result["turns"]:
         journal.diagnose(0, "no_recognized_turns")
