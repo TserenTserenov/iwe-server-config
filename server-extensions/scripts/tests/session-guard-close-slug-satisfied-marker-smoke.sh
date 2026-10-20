@@ -18,6 +18,9 @@
 # now checks owner_session_id and WP the same way Ф28 does, and deletes the
 # marker after a successful match.
 set -euo pipefail
+# Inherited workspace variables would point ORZ files at the real sessions
+# repository (found 20.10: this test left files in the live MC-sessions).
+unset IWE_SESSIONS_ROOT IWE_SCRIPTS IWE_SESSION_ID CLAUDE_CODE_SESSION_ID
 
 ROOT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
 GUARD="$ROOT_DIR/scripts/session-guard.sh"
@@ -248,5 +251,83 @@ if CLAUDE_CODE_SESSION_ID="convo-E" bash "$GUARD" close --wp WP-484 --slug marke
 else
   echo "PASS: marker pointing at a same-owner card for a different WP does not satisfy this WP's close gate"
 fi
+
+# --- Scenario F (WP-484 Ф211, 20.10): two harness owners close the SAME slug.
+# The runner now keys the marker by slug + proved owner + run_id; the legacy
+# bare-slug file holds only the LAST writer (owner F2). Owner F1 must close via
+# its own owner-keyed marker, and its close must not delete owner F2's marker.
+write_owner_marker() {  # <slug> <owner> <run_id>
+  local dir="$TEST_ROOT/.iwe-runtime/quick-close-slug-satisfied"
+  mkdir -p "$dir"
+  printf '%s' "$3" > "$dir/quick-close-$1.$2.$3.satisfied_by"
+}
+for owner in convo-F1 convo-F2; do
+  CLAUDE_CODE_SESSION_ID="$owner" bash "$GUARD" open --wp WP-484 --task fixture --slug "marker-f-shared" --agent fixture >/dev/null
+  sem=$(ls -t $(grep -l '^slug: marker-f-shared$' "$TEST_ROOT"/.iwe-runtime/sessions/fixture-*.open) | head -1)
+  printf '%s' "$(grep '^session_id: ' "$sem" | cut -d' ' -f2-)" > "$TEST_ROOT/sid-$owner"
+  cat > "$REPO/inbox/agent/tasks/RUN-quick-close-marker-f-run-$owner.md" <<EOF
+---
+process_id: quick-close
+status: completed
+run_id: quick-close-marker-f-run-$owner
+requested_slug: marker-f-run-$owner
+current_step: done
+owner_session_id: $owner
+results:
+  gather-session-facts:
+    wp: WP-484
+---
+EOF
+  write_owner_marker "marker-f-shared" "$owner" "quick-close-marker-f-run-$owner"
+done
+SEMS_F=$(grep -l '^slug: marker-f-shared$' "$TEST_ROOT"/.iwe-runtime/sessions/fixture-*.open | wc -l | tr -d ' ')
+[ "$SEMS_F" = "2" ] || { echo "FAIL: fixture expected two open sessions with the shared slug, got $SEMS_F" >&2; exit 1; }
+for sem in $(grep -l '^slug: marker-f-shared$' "$TEST_ROOT"/.iwe-runtime/sessions/fixture-*.open); do
+  orz=$(grep '^orz_file: ' "$sem" | cut -d' ' -f2-)
+  write_orz "$REPO/sessions/$orz"
+  git -C "$REPO" add "sessions/$orz"
+done
+git -C "$REPO" commit -qm "orz marker-f shared slug (two owners)"
+git -C "$REPO" push -q origin HEAD:main
+write_marker "marker-f-shared" "quick-close-marker-f-run-convo-F2"   # legacy: last writer wins
+# An older sibling marker of owner F1 (a previous run of the same conversation)
+# must be consumed by F1's close as well, not left to prove a later close.
+write_owner_marker "marker-f-shared" "convo-F1" "quick-close-marker-f-older-convo-F1"
+MARKER_F1_OLDER="$TEST_ROOT/.iwe-runtime/quick-close-slug-satisfied/quick-close-marker-f-shared.convo-F1.quick-close-marker-f-older-convo-F1.satisfied_by"
+MARKER_F2="$TEST_ROOT/.iwe-runtime/quick-close-slug-satisfied/quick-close-marker-f-shared.convo-F2.quick-close-marker-f-run-convo-F2.satisfied_by"
+
+CLOSE_F1_ERR="$TEST_ROOT/close-f1.err"
+if ! CLAUDE_CODE_SESSION_ID="convo-F1" bash "$GUARD" close --wp WP-484 --slug marker-f-shared --agent fixture --session-id "$(cat "$TEST_ROOT/sid-convo-F1")" 2>"$CLOSE_F1_ERR" \
+   || ! grep -q 'quick-close-marker-f-run-convo-F1' "$CLOSE_F1_ERR"; then
+  cat "$CLOSE_F1_ERR" >&2
+  echo "FAIL: owner F1 could not close the shared slug via its own owner-keyed marker (Ф211)" >&2
+  exit 1
+fi
+[ -f "$MARKER_F2" ] || { echo "FAIL: owner F1's close deleted owner F2's marker (Ф211)" >&2; exit 1; }
+[ ! -f "$MARKER_F1_OLDER" ] || { echo "FAIL: owner F1's older sibling marker survived F1's close" >&2; exit 1; }
+echo "PASS: two owners share a slug -- F1 closes on its own marker, F2's marker survives"
+
+# WP-484 Ф216: a worktree whose directory vanished without `git worktree
+# remove` must lose its bookkeeping after a successful close.
+git -C "$REPO" worktree add -q --detach "$TEST_ROOT/vanished-wt" HEAD
+rm -rf "$TEST_ROOT/vanished-wt"
+git -C "$REPO" worktree list --porcelain | grep -q '^prunable' \
+  || { echo "FAIL: fixture expected a prunable worktree record before close" >&2; exit 1; }
+CLOSE_F2_ERR="$TEST_ROOT/close-f2.err"
+if ! CLAUDE_CODE_SESSION_ID="convo-F2" bash "$GUARD" close --wp WP-484 --slug marker-f-shared --agent fixture --session-id "$(cat "$TEST_ROOT/sid-convo-F2")" 2>"$CLOSE_F2_ERR" \
+   || ! grep -q 'quick-close-marker-f-run-convo-F2' "$CLOSE_F2_ERR"; then
+  cat "$CLOSE_F2_ERR" >&2
+  echo "FAIL: owner F2 could not close the shared slug after F1 (Ф211)" >&2
+  exit 1
+fi
+[ ! -f "$MARKER_F2" ] || { echo "FAIL: owner F2's verified marker was not removed after use" >&2; exit 1; }
+LEFT_F=$(ls "$TEST_ROOT/.iwe-runtime/quick-close-slug-satisfied/" | grep -c '^quick-close-marker-f-shared\.' || true)
+[ "$LEFT_F" = "0" ] || { echo "FAIL: $LEFT_F marker(s) for the shared slug survived both closes (a leftover would prove a later close that never ran)" >&2; exit 1; }
+echo "PASS: second owner closes the shared slug on its own marker, which is then removed"
+if git -C "$REPO" worktree list --porcelain | grep -q '^prunable'; then
+  echo "FAIL: close left a prunable worktree record behind (Ф216)" >&2
+  exit 1
+fi
+echo "PASS: close pruned the bookkeeping of a vanished worktree (Ф216)"
 
 echo "PASS: session-guard slug-satisfied marker fallback (WP-537 Ф29/Ф29.1)"
