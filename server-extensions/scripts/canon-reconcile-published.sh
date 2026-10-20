@@ -244,8 +244,8 @@ runtime_chain_ok() {  # 0 = the runtime directory and every directory above it a
     make_tail "$near" "$RUNTIME_PHYS" || return 1
   fi
   # The check of the path and the write that follows are two steps; what closes the gap is that nobody else can touch
-  # the directory, the file or the way to them. A group is no proof of privacy (the primary group on Tsekh is the shared
-  # "users"), a permission string or an ACL listing that cannot be read is no trust either.
+  # the directory, the file or the way to them. A group is no proof of privacy (the primary group on a shared
+  # multi-user host is often the common "users" group), a permission string or an ACL listing that cannot be read is no trust either.
   if [ ! -d "$RUNTIME_PHYS" ] || [ ! -O "$RUNTIME_PHYS" ] || ! mode_ok "$RUNTIME_PHYS" 1; then
     STREAK_WHY="runtime directory $RUNTIME_PHYS is not a private directory of this user (owner only: no write for group or others, no ACL)"; return 1
   fi
@@ -625,6 +625,7 @@ while IFS= read -r -d '' status && IFS= read -r -d '' p; do
   if [ -n "$on_disk" ] && [ "$on_disk" != "$t_mode $t_hash" ]; then COLLISION="$p (on disk: ${on_disk%% *}, target wants $t_mode $t_hash)"; break; fi
   # case-insensitive filesystem: `-e` matched a differently-cased name; git would write into that inode
   # under the target's spelling and the post-check could only report it afterwards -- refuse up front
+  # shellcheck disable=SC2010  # literal, exact-case name match by design (APFS case folding)
   if [ -n "$on_disk" ] && ! ls -a "$(dirname "$p")" 2>/dev/null | grep -qFx "$(basename "$p")"; then COLLISION="$p (a differently-cased name occupies this path on disk)"; break; fi
   # an ancestor of the new path exists on disk as a symlink (reset would destroy it and create a real
   # directory) or as a plain file that the target does not itself delete (file->dir conversion of a

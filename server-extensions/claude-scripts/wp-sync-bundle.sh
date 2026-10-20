@@ -755,6 +755,66 @@ git_log_for_file() {
   fi
 }
 
+# latest_session_report_excerpt — WP-484 Ф219 (20.10): a pilot catching an
+# agent that opened a Ritual from the card's own prose summary of the last
+# session instead of that session's report.md (live recurrence of F194,
+# 4 days after F194 shipped a text-only reminder for the same gap). The text
+# reminder in protocol-open.md was skippable in practice; this puts the
+# primary source INSIDE the Sync Gate's own mandatory output, where skipping
+# it means not reading the bundle at all. Best-effort, matching the scanner's
+# own "missed hint, not a blocker" discipline -- any failure here prints the
+# fallback line and does not fail the bundle.
+latest_session_report_excerpt() {
+  local wp_num="$1"
+  local gaps_script="${IWE_SCRIPTS:-$IWE_WORKSPACE/scripts}/wp-session-journal-gaps.sh"
+  if [[ ! -x "$gaps_script" ]]; then
+    echo "_сканер report.md (wp-session-journal-gaps.sh) недоступен_"
+    return 0
+  fi
+  local gaps_out
+  gaps_out=$(timeout 5 bash "$gaps_script" "WP-${wp_num}" 2>/dev/null || true)
+  if [[ -z "$gaps_out" ]]; then
+    echo "_нет сессий этого РП за окно сканера — отчёта для цитаты нет_"
+    return 0
+  fi
+  # The scanner always prints the latest session last (by design -- see its
+  # own comment), whatever its report status; take that line, not the first.
+  # Fragile coupling (cold review, 20.10): this parses the scanner's own
+  # stdout format `  [status] <folder> (<when>) -- <rep>`, defined in
+  # scripts/wp-session-journal-gaps.py's report_status()/main() (a different
+  # repo from this file). None of today's report_status() values contain a
+  # space or an em dash, so folder/rep extraction is exact today -- but
+  # nothing enforces that contract across the two files. A format change on
+  # that side degrades silently to a wrong folder/rep here (not a crash: the
+  # file-exists check below just won't find the file and prints the
+  # fallback line).
+  local last_line folder rep
+  last_line=$(echo "$gaps_out" | tail -1)
+  folder=$(echo "$last_line" | sed -E 's/^[[:space:]]*\[[a-zA-Zа-яА-Я]+\][[:space:]]*([^ ]+).*/\1/')
+  rep=$(echo "$last_line" | sed -E 's/.*— //')
+  if [[ "$rep" != "report.md есть" ]]; then
+    echo "_последняя сессия (\`${folder}\`): ${rep} — нет законченного отчёта для цитаты_"
+    return 0
+  fi
+  local report_path="${IWE_SESSIONS_ROOT:-$IWE_WORKSPACE/MC-sessions}/${folder}/report.md"
+  if [[ ! -f "$report_path" ]]; then
+    echo "_последняя сессия (\`${folder}\`): report.md есть по журналу, но файл не найден по пути — проверь путь вручную_"
+    return 0
+  fi
+  echo "**Источник:** \`${folder}/report.md\`"
+  echo ""
+  local section
+  for section in '## 4\.' '## 5\.'; do
+    local excerpt
+    excerpt=$(awk -v start="$section" '
+      $0 ~ "^"start {grabbing=1; print; next}
+      grabbing && /^## [0-9]/ {exit}
+      grabbing {print}
+    ' "$report_path")
+    [[ -n "$excerpt" ]] && { echo "$excerpt"; echo ""; }
+  done
+}
+
 extract_open_phases() {
   local file="$1"
   if has_structured_phases "$file"; then
@@ -1116,6 +1176,13 @@ main() {
       echo "DRIFT: phase_gate_unexpected_output — ${gate_result}" >> "$drift_file"
       ;;
   esac
+  echo ""
+
+  # WP-484 Ф219: цитата §4/§5 последнего отчёта, не только его пересказ в
+  # карточке -- см. комментарий у latest_session_report_excerpt() выше.
+  echo "## Последний отчёт сессии этого РП (цитата §4/§5)"
+  echo ""
+  latest_session_report_excerpt "$wp_num"
   echo ""
 
   # ---------------------------------------------------------------------------
