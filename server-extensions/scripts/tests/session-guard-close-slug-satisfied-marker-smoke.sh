@@ -330,4 +330,47 @@ if git -C "$REPO" worktree list --porcelain | grep -q '^prunable'; then
 fi
 echo "PASS: close pruned the bookkeeping of a vanished worktree (Ф216)"
 
+# --- Scenario G (WP-484 Ф211, M-c fix): close succeeds via its OWN
+# completed quick-close card (not the marker path) while a leftover owner-
+# keyed marker for a DIFFERENT run of the SAME slug/owner still exists --
+# that marker must be consumed too, or it survives to later prove a close
+# that never ran.
+CLAUDE_CODE_SESSION_ID="convo-G" bash "$GUARD" open --wp WP-484 --task fixture --slug marker-g --agent fixture >/dev/null
+SEM_G=$(grep -l '^slug: marker-g$' "$TEST_ROOT"/.iwe-runtime/sessions/fixture-*.open)
+ORZ_G=$(grep '^orz_file: ' "$SEM_G" | cut -d' ' -f2-)
+write_orz "$REPO/sessions/$ORZ_G"
+git -C "$REPO" add "sessions/$ORZ_G"
+git -C "$REPO" commit -qm "orz marker-g"
+git -C "$REPO" push -q origin HEAD:main
+SID_G=$(grep '^session_id: ' "$SEM_G" | cut -d' ' -f2-)
+cat > "$REPO/inbox/agent/tasks/RUN-quick-close-marker-g.md" <<EOF
+---
+process_id: quick-close
+status: completed
+run_id: quick-close-marker-g
+requested_slug: marker-g
+current_step: done
+owner_session_id: convo-G
+results:
+  gather-session-facts:
+    wp: WP-484
+---
+EOF
+# Leftover sibling marker from an earlier already_completed start under the
+# same owner, same slug, different run_id -- never consumed by any close yet.
+write_owner_marker "marker-g" "convo-G" "quick-close-marker-g-older"
+MARKER_G_LEFTOVER="$TEST_ROOT/.iwe-runtime/quick-close-slug-satisfied/quick-close-marker-g.convo-G.quick-close-marker-g-older.satisfied_by"
+
+CLOSE_G_ERR="$TEST_ROOT/close-g.err"
+if ! CLAUDE_CODE_SESSION_ID="convo-G" bash "$GUARD" close --wp WP-484 --slug marker-g --agent fixture --session-id "$SID_G" 2>"$CLOSE_G_ERR"; then
+  cat "$CLOSE_G_ERR" >&2
+  echo "FAIL: close via its own completed card failed" >&2
+  exit 1
+fi
+if [ -f "$MARKER_G_LEFTOVER" ]; then
+  echo "FAIL: a leftover sibling marker survived a close that succeeded via its own card, not the marker path (Ф211 M-c)" >&2
+  exit 1
+fi
+echo "PASS: close via its own card also consumes a leftover sibling marker for the same slug/owner (Ф211 M-c)"
+
 echo "PASS: session-guard slug-satisfied marker fallback (WP-537 Ф29/Ф29.1)"
