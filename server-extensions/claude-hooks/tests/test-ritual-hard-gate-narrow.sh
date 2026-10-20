@@ -109,5 +109,24 @@ PY
 check "old WP mention, unrelated latest message: allows" allow \
   "$(decision_of "$(run_hook "$P7" "$P7/t.jsonl" sess-7 Bash)")"
 
+# === incident 2026-10-20: a tool-injected synthetic "user" turn (Skill
+# output, isMeta=true) mentions a WP number inside its own documentation
+# text -- this is NOT the pilot naming a WP and must not arm the gate. ===
+P8="$TMP_DIR/p8"; mkdir -p "$P8/.claude/state"
+python3 - "$P8/t.jsonl" <<'PY'
+import json, sys
+rows = [
+    {"type": "user", "message": {"content": "давай пройдем полную сессию стратегирования"}},
+    {"type": "assistant", "message": {"content": [{"type": "tool_use", "id": "toolu_1", "name": "Skill", "input": {}}]}},
+    {"type": "user", "isMeta": True, "sourceToolUseID": "toolu_1",
+     "message": {"content": [{"type": "text", "text": "Base directory for this skill: /home/tseren/IWE/.claude/skills/strategy-session\n\nsee WP-481 as an example"}]}},
+]
+with open(sys.argv[1], "w", encoding="utf-8") as f:
+    for r in rows:
+        f.write(json.dumps(r, ensure_ascii=False) + "\n")
+PY
+check "Skill isMeta injection mentions WP, real pilot message does not: allows" allow \
+  "$(decision_of "$(run_hook "$P8" "$P8/t.jsonl" sess-8 Bash)")"
+
 echo "PASS=$PASS FAIL=$FAIL"
 [ "$FAIL" -eq 0 ]
