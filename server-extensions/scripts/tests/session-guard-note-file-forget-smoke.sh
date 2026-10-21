@@ -301,7 +301,8 @@ check "legacy checkout-root claim with no deliverable: forgotten" "0" "$RC"
 check "legacy checkout-root claim removed" "0" "$(claims 'MC-sessions/')"
 check "repair retains ordinary directory scope" "1" "$(claims "$REL/ordinary-directory/")"
 AUDIT="$TEST_ROOT/.iwe-runtime/note-file-forget.log"
-ROOT_AUDITS=$(python3 -c 'import json,sys; print(sum(json.loads(line).get("separate_checkout_roots") == [sys.argv[2]] for line in open(sys.argv[1])))' "$AUDIT" "$SES")
+SES_REAL=$(python3 -c 'import os,sys; print(os.path.realpath(sys.argv[1]))' "$SES")
+ROOT_AUDITS=$(python3 -c 'import json,sys; print(sum(json.loads(line).get("separate_checkout_roots") == [sys.argv[2]] for line in open(sys.argv[1])))' "$AUDIT" "$SES_REAL")
 check "checkout-root repair: both audit records explain the collision" "2" "$ROOT_AUDITS"
 
 # Git represents a file, symlink or submodule at the directory-shaped claim's
