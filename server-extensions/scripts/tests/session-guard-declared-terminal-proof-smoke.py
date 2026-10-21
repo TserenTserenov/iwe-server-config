@@ -203,7 +203,7 @@ class DeclaredTerminalProofTests(unittest.TestCase):
             + "RUNNER_CARD_DIRS=(" + shlex.join(map(str, card_dirs or [self.root])) + ")\n"
         )
         helpers = ["_card_field", "_quick_close_card_wp", "_unique_record_field",
-                   "_terminal_card_snapshot_sha"]
+                   "_terminal_card_snapshot_sha", "consume_owner_slug_markers"]
         script = "\n".join(function_source(name) for name in helpers)
         script += '\nfail() { printf "%s\\n" "$1" >&2; exit "$2"; }\n'
         result = self.shell(script + setup + SELECTION

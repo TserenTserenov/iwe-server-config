@@ -8,6 +8,13 @@
 # any of the RUNNER_OK-selecting branches see them.
 set -euo pipefail
 
+# An operator's interactive shell may export IWE_SESSIONS_ROOT/IWE_ROOT/etc.
+# for everyday use; this fixture must be a closed world regardless (same
+# class of bug as sync-extensions-auto.sh's STRIP_ENV_ARGS, WP-530 Ф90).
+while IFS= read -r ambient_var; do
+  [ -n "$ambient_var" ] && unset "$ambient_var"
+done < <(env | grep -oE '^(IWE|CLAUDE|CODEX)_[A-Za-z0-9_]*' | sort -u)
+
 ROOT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
 GUARD="$ROOT_DIR/scripts/session-guard.sh"
 TEST_ROOT=$(mktemp -d ${TMPDIR:-/tmp}/session-guard-owner-session.XXXXXX)

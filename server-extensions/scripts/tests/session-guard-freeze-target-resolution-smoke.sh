@@ -101,7 +101,9 @@ grep -q 'под freeze' <<<"$OUT_3" || fail "expected the freeze message for a f
 # 4. Positive control: --isolate from the non-git cwd is unaffected --
 #    carve-out #3 in `open` routes around the freeze block entirely before
 #    frozen_checkout_match() is reached for this path.
-if ! OUT_4=$(open_from "$NOT_A_REPO" --wp WP-903 --task fixture --slug isolate-from-non-git --agent fixture --isolate --force 2>&1); then
+if ! OUT_4=$(cd "$NOT_A_REPO" && IWE_ROOT="$TEST_ROOT" IWE_GOVERNANCE_REPO="DS-strategy" \
+    IWE_SESSION_ID="freeze-target-smoke-isolate-from-non-git" \
+    bash "$GUARD" open --wp WP-903 --task fixture --slug isolate-from-non-git --agent fixture --isolate --force 2>&1); then
   fail "--isolate from a non-git cwd must still succeed, got: $OUT_4"
 fi
 grep -q '"worktree_path"' <<<"$OUT_4" || fail "--isolate from a non-git cwd did not report a worktree: $OUT_4"
