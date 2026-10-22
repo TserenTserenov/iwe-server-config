@@ -39,8 +39,16 @@ NEXT_LINE_RE = re.compile(r"^Дальше:\s*(.*)$")
 # Possessive "твой" is listed form by form: a stem match (тво\w*) would also
 # hit "творчество"/"творить". Oblique cases were missing until 22.10 and gave
 # two live false positives ("жду твоего «да»", "Без твоего решения").
+#
+# Polite "вы" forms added 22.10.2026 (РП-605 Ф4, live log finding: "жду вашего
+# решения", "жду вашего «да»", "жду от вас выбор", "нужно ваше решение" all
+# missed by the ты-only lexicon). Same word-list approach, same reason: a stem
+# match on "ваш" would also hit unrelated words sharing the prefix, and \bвы\b
+# as a bare token must not fire inside "выбор"/"вывод" -- \b already excludes
+# those because there is no boundary between "вы" and the rest of those words.
 ADDRESSEE_RE = re.compile(
     r"\bты\b|\bтебе\b|\bтебя\b|\bтво(?:й|я|е|ё|его|ей|ему|ём|ем|им|ими|их|ю|и)\b|от\s+тебя"
+    r"|\bвы\b|\bвас\b|\bвам\b|\bвами\b|\bваш(?:а|е|и|его|ему|ем|им|ей|у|их|ими)?\b|от\s+вас"
     r"|подтверди(?:те)?|выбери(?:те)?|реши(?:те)?|скажи(?:те)?|ответь(?:те)?"
     r"|проверь(?:те)?|посмотри(?:те)?|одобри(?:те)?|согласуй(?:те)?"
     r"|напиши(?:те)?|пришли(?:те)?|дай(?:те)?",
