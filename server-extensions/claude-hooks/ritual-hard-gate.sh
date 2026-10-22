@@ -41,6 +41,12 @@ SESSION_ID=$(printf '%s' "$INPUT" | jq -r '.session_id // empty' 2>/dev/null)
 TRANSCRIPT_PATH=$(printf '%s' "$INPUT" | jq -r '.transcript_path // empty' 2>/dev/null)
 TOOL_NAME=$(printf '%s' "$INPUT" | jq -r '.tool_name // empty' 2>/dev/null)
 [ -n "$SESSION_ID" ] && [ -n "$TRANSCRIPT_PATH" ] && [ -f "$TRANSCRIPT_PATH" ] || exit 0
+# session_id feeds a filesystem path below (CONFIRMED_MARKER) -- reject
+# anything outside the safe charset before that, not after (path traversal,
+# found by peer-session shell-safety-critic 22.10.2026, WP-484).
+case "$SESSION_ID" in
+  *[!A-Za-z0-9._-]*) exit 0 ;;
+esac
 
 PROJECT_DIR="${CLAUDE_PROJECT_DIR:-$HOME/IWE}"
 STATE_DIR="$PROJECT_DIR/.claude/state"
