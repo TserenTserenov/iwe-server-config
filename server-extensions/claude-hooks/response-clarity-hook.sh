@@ -223,7 +223,11 @@ A2_MATCH=$(printf '%s\n' "$A2_BODY" | grep -oE '\b[a-z][a-z0-9]*_[a-z0-9_]+\b' |
 # `тутCommonMark` (кириллица впритык, без пробела) не матчился вообще.
 # perl-lookaround на классах [[:alnum:]_] границу видит независимо от того,
 # какой алфавит стоит по другую сторону.
-A2_CAMEL_EXCEPT='NixOS|PostgreSQL|Aisystant|OpenRouter|GitHub|OpenAI|macOS|LiteLLM|TserenTserenov'
+# Расширено 22.10 (РП-605/РП-388 сверка Ф16, тот же день, несколько часов
+# позже): «ChatGPT» дало 4 срабатывания уже ПОСЛЕ прошлой правки этого же дня —
+# тот же класс (имя собственное), тот же принцип узкого старта (только
+# встреченное имя, не упреждающий список брендов).
+A2_CAMEL_EXCEPT='NixOS|PostgreSQL|Aisystant|OpenRouter|GitHub|OpenAI|macOS|LiteLLM|TserenTserenov|ChatGPT'
 A2_CAMEL_MATCH=$(printf '%s\n' "$A2_BODY" | perl -ne 'while (/(?<![[:alnum:]_])([A-Za-z]*[a-z][A-Z][A-Za-z]*)(?![[:alnum:]_])/g){print "$1\n"}' | grep -vE "^(${A2_CAMEL_EXCEPT})\$" | head -1 || true)
 [ -n "$A2_CAMEL_MATCH" ] && echo "$TIMESTAMP | $AGENT | A2 | untranslated-term-camelcase | $(redact "$A2_CAMEL_MATCH")" >> "$LOG_FILE" 2>/dev/null || true
 

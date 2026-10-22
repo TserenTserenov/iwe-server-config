@@ -1282,6 +1282,37 @@ _write_canonical_owner_identity() {
   printf 'canonical_owner: %s\ncanonical_repo: %s\n' "$CANONICAL_OWNER" "$repo"
 }
 
+# WP-561, peer-session 2026-10-22-17 (Claude+Kimi+Codex): --canonical-owner's
+# own value was never checked against anything but non-empty ("diagnostic
+# only" per its own flag comment) -- two independent callers (a scheduled
+# nightly runner and a manual update.sh delivery run, say) could each open
+# their own canonical-owner semaphore against the SAME checkout at the same
+# time; nothing refused the second one. Found while designing update.sh's
+# freeze bypass (Ф46 tail), not specific to that caller -- applies to every
+# --canonical-owner open. Checked under the same admission lock the caller
+# already holds (both call sites acquire it just before this), so this does
+# not introduce a new race of its own. Scans live housekeeping AND plain
+# semaphores alike (either kind can carry canonical_owner:), for the same
+# physical repo (git rev-parse --show-toplevel, not the raw CANONICAL_OWNER
+# string -- two owners naming the same repo by different paths/symlinks must
+# still collide). Only `close` ever removes a semaphore; a `.closed`/`.stale`
+# terminal file is not live and must not block a new open.
+_refuse_second_canonical_owner() {
+  [ -n "$CANONICAL_OWNER" ] || return 0
+  local repo other_sem other_owner other_repo
+  repo=$(git rev-parse --show-toplevel 2>/dev/null) || return 0
+  while IFS= read -r other_sem; do
+    [ -z "$other_sem" ] && continue
+    [ -f "$other_sem" ] || continue
+    lease_valid "$other_sem" || continue
+    other_owner=$(grep "^canonical_owner: " "$other_sem" | cut -d' ' -f2- || true)
+    [ -n "$other_owner" ] || continue
+    other_repo=$(grep "^canonical_repo: " "$other_sem" | cut -d' ' -f2- || true)
+    [ "$other_repo" = "$repo" ] || continue
+    fail "open --canonical-owner: канон ($repo) уже под эксклюзивным владением '$other_owner' ($(basename "$other_sem")) — подожди close этого держателя или разберись с ним вручную, прежде чем открывать второй" 1
+  done < <(find "$SESSION_DIR" -maxdepth 1 -name '*.open' -type f 2>/dev/null)
+}
+
 _append_scheduled_drain_proof() {  # <sem> <agent> <session> <owner-pid> <run-id> <at>
   python3 - "$@" <<'PY'
 import datetime
@@ -4713,6 +4744,7 @@ if [ "$CMD" = "open" ]; then
       || fail "open --housekeeping: reason должен быть безопасным токеном длиной 1..128" 1
     HK_FILE="$SESSION_DIR/${AGENT}-housekeeping-${HOUSEKEEPING}.open"
     acquire_scheduled_admission_lock
+    _refuse_second_canonical_owner
     acquire_session_transition_lock "$HK_FILE"
     if [ -e "$HK_FILE" ] || [ -L "$HK_FILE" ]; then
       HK_EXISTING_ID=$(_locked_open_identity "$HK_FILE" "$AGENT" "" || true)
@@ -4730,6 +4762,14 @@ if [ "$CMD" = "open" ]; then
       || fail "open --housekeeping: найден неизвестный sibling state; автоматический reclaim запрещён" 1
     HK_SID=$(python3 -c 'import uuid; print(uuid.uuid4())') \
       || fail "open --housekeeping: runtime-neutral session id не создан" 1
+    # WP-561, cold-review (peer-session 2026-10-22-17): session-open-gate.sh's
+    # SEM_MATCHES only ever selects semaphores carrying a literal
+    # `harness_session_id: $SESSION_ID` line (its own PreToolUse session id,
+    # not $HK_SID above) -- without it ALL housekeeping reasons, not just this
+    # one, were silently invisible to that gate (dead carve-out found while
+    # adding update-delivery, not introduced by it). `|| true`: a housekeeping
+    # open outside any harness (cron, bare shell) legitimately has no such id.
+    HK_HARNESS_SESSION_ID=$(_runtime_harness_session_id "$AGENT" || true)
     SEM_TEMP=$(mktemp "$SESSION_DIR/.housekeeping-open.XXXXXX") \
       || fail "open --housekeeping: temporary semaphore не создан" 1
     chmod 600 "$SEM_TEMP" || fail "open --housekeeping: temporary permissions не установлены" 1
@@ -4741,6 +4781,7 @@ if [ "$CMD" = "open" ]; then
       echo "slug: $HOUSEKEEPING"
       echo "created_at: $(now_iso)"
       echo "session_id: $HK_SID"
+      [ -n "$HK_HARNESS_SESSION_ID" ] && echo "harness_session_id: $HK_HARNESS_SESSION_ID"
       [ -n "${OWNER_PID:-${CLAUDE_PID:-}}" ] && echo "pid: ${OWNER_PID:-$CLAUDE_PID}"
       echo "host: $(uname -n)"
       if [ -n "${OWNER_PID:-${CLAUDE_PID:-}}" ]; then
@@ -4787,6 +4828,7 @@ if [ "$CMD" = "open" ]; then
   fi
 
   acquire_scheduled_admission_lock
+  _refuse_second_canonical_owner
   OPEN_HARNESS_SESSION_ID=$(_runtime_harness_session_id "$AGENT") \
     || fail "open: native harness session id is malformed" 1
   # Serialize the logical owner check with publication, before isolation or
