@@ -30,7 +30,10 @@
 
 set -euo pipefail
 
-AGENT="claude-code"
+# AGENT identifies the caller for the shared log (WP-388 Ф17): claude-code
+# when invoked by this hook directly, overridable for the other agents that
+# route through style-check-text.sh (same core, no parallel reimplementation).
+AGENT="${STYLE_AGENT:-claude-code}"
 INPUT=$(cat)
 if [ -z "$INPUT" ]; then exit 0; fi
 
@@ -268,6 +271,17 @@ A12_CLOSE_MATCH=$(python3 "$(dirname "${BASH_SOURCE[0]}")/a12-unsolicited-close.
 # наращивать счётчик сессии и «3+ нарушений». Хвост строки, а не голова: триггер обычно в конце.
 [ -n "$A12_CLOSE_MATCH" ] && echo "$TIMESTAMP | $AGENT | A12_UNSOLICITED_CLOSE_CANDIDATE | close-proposed-without-pilot-intent | $(redact "${A12_CLOSE_MATCH: -100}")" >> "$LOG_FILE" 2>/dev/null || true
 
+# --- A12_NEXT_MISSING / A12_NEXT_NO_PILOT_ADDRESSEE (РП-605 Ф1, 22.10.2026) ---
+# Форма и адресат блока «Дальше» (A12) — не его истинность (та ось живёт в
+# РП-603) и не остальные правила содержимого (A1-A13.1 выше, РП-388). Обе
+# строки warn-only, в BLOCKABLE не входят: a12-next-block.py печатает ровно
+# две строки (пусто = нет сигнала), не ломает ход при сбое.
+A12_NEXT_RESULT=$(python3 "$(dirname "${BASH_SOURCE[0]}")/a12-next-block.py" "$TRANSCRIPT_PATH" 2>/dev/null || echo $'\n')
+A12_NEXT_MISSING_LINE=$(printf '%s\n' "$A12_NEXT_RESULT" | sed -n '1p')
+A12_NEXT_ADDRESSEE_LINE=$(printf '%s\n' "$A12_NEXT_RESULT" | sed -n '2p')
+[ -n "$A12_NEXT_MISSING_LINE" ] && echo "$TIMESTAMP | $AGENT | A12_NEXT_MISSING | no-next-line-in-last-3-lines | -" >> "$LOG_FILE" 2>/dev/null || true
+[ -n "$A12_NEXT_ADDRESSEE_LINE" ] && echo "$TIMESTAMP | $AGENT | A12_NEXT_NO_PILOT_ADDRESSEE | next-line-without-pilot-addressee | $(redact "$A12_NEXT_ADDRESSEE_LINE")" >> "$LOG_FILE" 2>/dev/null || true
+
 # --- A7.1 (стиль): технический журнал в чат под видом <details> ---
 # A7.1 запрещает журнал (SHA, коммиты, итоги peer, пути отчёта) в чате — он идёт
 # в report.md/sessions. Распознаём по ДВУМ независимым признакам внутри спойлера:
@@ -363,7 +377,10 @@ path_re = re.compile(r'[A-Za-z0-9_/.-]+\.(py|md|ts|sh|js|yaml|json)(:[0-9]+)?')
 # ls/cd/rm сознательно исключены (cold-review этой же сессии): двух-трёхбуквенные
 # "команды" совпадают с обычными словами в русской прозе ("использовал ls для
 # просмотра") — ложный позитив без единого технического намерения в тексте.
-cmd_re = re.compile(r'(^|\s)(bash|python3|git|grep|sed|curl|npm|mkdir)\s+\S')
+# Единая константа (РП-388 Ф17): A13.1 ниже строит свой cmd_inline_re из той же
+# строки, второй список команд не завести.
+CMD_WORDS = "bash|python3|git|grep|sed|curl|npm|mkdir"
+cmd_re = re.compile(r'(^|\s)(' + CMD_WORDS + r')\s+\S')
 # Та же пара вариантов "exit 0", что в A10 (bash-уровень, строки выше) — включая
 # вариант без пробела close_exit=0 через negative lookahead, чтобы не ловить
 # close_exit=0.5/exit:0.7 (cold-review этой же сессии, Medium: до этой правки
@@ -390,11 +407,49 @@ if triggered:
     if tech_hits >= 3:
         reason.append(f"{tech_hits} тех.совпадений")
     print("TRIGGERED|" + "; ".join(reason))
+
+# --- A13.1 (РП-388 Ф17, 22.10): техтокен в backtick без русского пояснения ---
+# Дырка, найденная пир-сессией 22.10 (пилот: `ds-publish.sh`/`git apply --3way`
+# без перевода): A2 вырезает весь backtick-спан, поэтому не видит токен внутри;
+# A13 считает его тех.совпадением (path_re идёт по ПОЛНОМУ тексту, включая
+# backtick), но это одно совпадение из трёх нужных для порога — ниже порога
+# и не триггерит. Дыра в ПОРОГЕ A13, не в вырезании A2 (Codex пересчитал живой
+# пример: tech_hits=2, не 3 — cmd_re не засчитывает команду сразу после
+# backtick). Отдельный под-идентификатор A13.1, не расширение A2/A13: другой
+# признак (одиночный токен, не порог по всему тексту), другая фикстура-ось.
+cmd_inline_re = re.compile(r'^(' + CMD_WORDS + r')\s+\S')
+bt_descriptor_re = re.compile(r'(скрипт|команд|файл|пут[ьи]|ветк|директори|папк|каталог|репозитори|хук|сценари)[а-яё]*', re.IGNORECASE)
+# Форма "русское описание (`термин`)" — та же, что уже разрешена A2 выше.
+bt_paren_form_re = re.compile(r'[а-яё][а-яё-]*\s*\($', re.IGNORECASE)
+bt_token = None
+for bt_match in re.finditer(r'`([^`\n]{1,200})`', body_no_fence):
+    content = bt_match.group(1)
+    # snake_case в backtick сознательно не входит в эту фазу (known_gap
+    # A13.1-GAP-SNAKE-01) — только путь или команда в начале токена.
+    if not (path_re.fullmatch(content) or cmd_inline_re.match(content)):
+        continue
+    window_start = max(0, bt_match.start() - 60)
+    window = body_no_fence[window_start:bt_match.start()]
+    newline_pos = window.rfind("\n")
+    if newline_pos != -1:
+        window = window[newline_pos + 1:]
+    if bt_descriptor_re.search(window) or bt_paren_form_re.search(window):
+        continue
+    bt_token = content
+    break
+if bt_token:
+    print("BT|" + bt_token)
 PY
 )
-if [ -n "$A13_RESULT" ]; then
-  A13_DESC="${A13_RESULT#TRIGGERED|}"
+A13_TRIGGERED_LINE=$(printf '%s\n' "$A13_RESULT" | grep '^TRIGGERED|' || true)
+A13_1_LINE=$(printf '%s\n' "$A13_RESULT" | grep '^BT|' || true)
+if [ -n "$A13_TRIGGERED_LINE" ]; then
+  A13_DESC="${A13_TRIGGERED_LINE#TRIGGERED|}"
   log_violation "A13" "long-or-technical-dump" "$A13_DESC"
+fi
+if [ -n "$A13_1_LINE" ]; then
+  A13_1_TOKEN="${A13_1_LINE#BT|}"
+  log_violation "A13.1" "bare-backtick-tech-token" "$A13_1_TOKEN"
 fi
 
 # --- Реакция на нарушения (peer-session 2026-06-08-23) ---

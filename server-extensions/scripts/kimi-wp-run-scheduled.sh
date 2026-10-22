@@ -2609,7 +2609,16 @@ set_status running
 # blocking their cleanup. The four-part liveness proof this flag relies on
 # (dead pid on this host + host match + expired lease + stale/absent
 # heartbeat) is unchanged; only the deny switch moved.
-bash "$IWE_ROOT/scripts/session-guard.sh" audit --cleanup-orphans --quarantine-dead-interactive >>"$LOG" 2>&1 || \
+# WP-484 Ф220 (pilot decision 22.10, peer-session
+# 2026-10-22-06-wp484-f211-live-acceptance): same deny-by-default pattern as
+# --quarantine-dead-interactive above, now flipped the same way for the
+# recovery dry-run -- observe-only (no .orphaned file is ever un-quarantined
+# by this flag alone, see session-guard.sh's own gate at the two call sites),
+# logs candidate/recheck_pass/would_recover/recheck_reject to
+# logs/dead-semaphore-auto-dry-run.jsonl for a >=7-day review before the
+# pilot decides on IWE_DEAD_SEMAPHORE_AUTO_RECOVERY.
+IWE_DEAD_SEMAPHORE_AUTO_DRY_RUN=1 \
+  bash "$IWE_ROOT/scripts/session-guard.sh" audit --cleanup-orphans --quarantine-dead-interactive >>"$LOG" 2>&1 || \
   log "WARN: orphan semaphore sweep failed (non-fatal, continuing)"
 
 # --- dry-run (тестовый режим: не запускает LLM, проверяет launchd+plumbing) ---

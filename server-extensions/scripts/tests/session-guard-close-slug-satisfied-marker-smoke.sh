@@ -373,4 +373,56 @@ if [ -f "$MARKER_G_LEFTOVER" ]; then
 fi
 echo "PASS: close via its own card also consumes a leftover sibling marker for the same slug/owner (Ф211 M-c)"
 
+# --- Scenario H (WP-484 Ф223, 22.10): N>2 -- the SAME owner has two own
+# markers for the same slug (two already_completed starts of different
+# attempts). One run (H1) is still running, the other (H2) is completed.
+# consume_owner_slug_markers() must keep H1's marker (its run is still in
+# flight -- deleting it would let a later close of this owner/slug "steal"
+# the proof a still-running attempt may yet need) and still remove H2's
+# marker (its run is done, same as before this fix).
+CLAUDE_CODE_SESSION_ID="convo-H" bash "$GUARD" open --wp WP-484 --task fixture --slug marker-h --agent fixture >/dev/null
+SEM_H=$(grep -l '^slug: marker-h$' "$TEST_ROOT"/.iwe-runtime/sessions/fixture-*.open)
+ORZ_H=$(grep '^orz_file: ' "$SEM_H" | cut -d' ' -f2-)
+write_orz "$REPO/sessions/$ORZ_H"
+git -C "$REPO" add "sessions/$ORZ_H"
+git -C "$REPO" commit -qm "orz marker-h"
+git -C "$REPO" push -q origin HEAD:main
+SID_H=$(grep '^session_id: ' "$SEM_H" | cut -d' ' -f2-)
+cat > "$REPO/inbox/agent/tasks/RUN-quick-close-marker-h-running.md" <<'EOF'
+---
+process_id: quick-close
+status: running
+run_id: quick-close-marker-h-running
+requested_slug: marker-h-running
+current_step: gather-session-facts
+owner_session_id: convo-H
+EOF
+cat > "$REPO/inbox/agent/tasks/RUN-quick-close-marker-h-done.md" <<'EOF'
+---
+process_id: quick-close
+status: completed
+run_id: quick-close-marker-h-done
+requested_slug: marker-h-done
+current_step: done
+owner_session_id: convo-H
+results:
+  gather-session-facts:
+    wp: WP-484
+---
+EOF
+write_owner_marker "marker-h" "convo-H" "quick-close-marker-h-running"
+write_owner_marker "marker-h" "convo-H" "quick-close-marker-h-done"
+MARKER_H_RUNNING="$TEST_ROOT/.iwe-runtime/quick-close-slug-satisfied/quick-close-marker-h.convo-H.quick-close-marker-h-running.satisfied_by"
+MARKER_H_DONE="$TEST_ROOT/.iwe-runtime/quick-close-slug-satisfied/quick-close-marker-h.convo-H.quick-close-marker-h-done.satisfied_by"
+
+CLOSE_H_ERR="$TEST_ROOT/close-h.err"
+if ! CLAUDE_CODE_SESSION_ID="convo-H" bash "$GUARD" close --wp WP-484 --slug marker-h --agent fixture --session-id "$SID_H" 2>"$CLOSE_H_ERR"; then
+  cat "$CLOSE_H_ERR" >&2
+  echo "FAIL: close via its own completed card failed (Ф223 scenario H)" >&2
+  exit 1
+fi
+[ -f "$MARKER_H_RUNNING" ] || { echo "FAIL: marker for a STILL RUNNING sibling run was deleted (Ф223 regression -- would let a later close steal its proof)" >&2; exit 1; }
+[ ! -f "$MARKER_H_DONE" ] || { echo "FAIL: marker for a completed sibling run survived close (Ф223 should still remove it)" >&2; exit 1; }
+echo "PASS: N>2 same owner -- marker of a still-running sibling run is kept, marker of a completed one is removed (Ф223)"
+
 echo "PASS: session-guard slug-satisfied marker fallback (WP-537 Ф29/Ф29.1)"
