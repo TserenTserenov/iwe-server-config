@@ -6,7 +6,8 @@
 # every "проверено" claim in prior calibration sessions was a one-off manual
 # run quoted in a peer-session transcript, not a repeatable check. Fixtures
 # live in fixtures/response-clarity-fixtures.jsonl: one JSON object per line
-# (id, rule, expected, input, note, optional known_gap). `expected` is the
+# (id, rule, expected, input, note, optional known_gap, optional
+# context — "peer" or "direct" (default), passed to the hook as STYLE_CONTEXT). `expected` is the
 # rule name for a case that must fire, or NOT_<rule> for a case that must not.
 # `known_gap: true` marks a mismatch the team already knows about (open tail,
 # not yet fixed) — it is still counted in precision/recall, but does not fail
@@ -33,7 +34,7 @@ RUN_FAIL=0
 GAP_NOTES=()
 
 run_case() {
-  local id="$1" rule="$2" expected="$3" input="$4" known_gap="$5"
+  local id="$1" rule="$2" expected="$3" input="$4" known_gap="$5" context="$6"
   local case_dir="$TMP/$id"
   mkdir -p "$case_dir/home" "$case_dir/proj"
 
@@ -52,7 +53,7 @@ with open(path, "w", encoding="utf-8") as fh:
 PY
 
   printf '{"transcript_path":"%s","session_id":"%s"}' "$transcript" "$id" \
-    | HOME="$case_dir/home" CLAUDE_PROJECT_DIR="$case_dir/proj" bash "$HOOK" >/dev/null 2>&1
+    | HOME="$case_dir/home" CLAUDE_PROJECT_DIR="$case_dir/proj" STYLE_CONTEXT="$context" bash "$HOOK" >/dev/null 2>&1
   local hook_exit=$?
 
   # A crashing hook and a legitimate "rule did not fire" both leave the log
@@ -114,7 +115,8 @@ while IFS= read -r line; do
   expected=$(printf '%s' "$line" | python3 -c 'import json,sys; print(json.loads(sys.stdin.read())["expected"])')
   input=$(printf '%s' "$line" | python3 -c 'import json,sys; print(json.loads(sys.stdin.read())["input"])')
   known_gap=$(printf '%s' "$line" | python3 -c 'import json,sys; print(str(json.loads(sys.stdin.read()).get("known_gap", False)).lower())')
-  run_case "$id" "$rule" "$expected" "$input" "$known_gap"
+  context=$(printf '%s' "$line" | python3 -c 'import json,sys; print(json.loads(sys.stdin.read()).get("context", "direct"))')
+  run_case "$id" "$rule" "$expected" "$input" "$known_gap" "$context"
 done < "$FIXTURES"
 
 echo "---"

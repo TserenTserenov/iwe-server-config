@@ -80,7 +80,15 @@ if [ -n "$SESSION_ID" ] && [ -f "$OBLIGATION_CLI" ]; then
   OBLIGATION_JSON=$(python3 "$OBLIGATION_CLI" stop-check --session-id "$SESSION_ID" 2>/dev/null) || OBLIGATION_RC=$?
   if [ "$OBLIGATION_RC" -ne 0 ] || [ -z "$OBLIGATION_JSON" ]; then
     # Fail-closed: CLI error/unparseable. Блокируем только если есть close-intent или obligation.
-    CLOSE_INTENT_SENTINEL="/tmp/iwe-close-intent/${SESSION_ID}.flag"
+    # CLOSE_INTENT_SENTINEL embeds SESSION_ID directly in a path (path
+    # traversal, same class as f8a8596d1, WP-484) -- OBLIGATION_FILE below
+    # does not need the same guard, it's keyed by a sha256 hex digest of
+    # SESSION_ID, which is always a safe charset regardless of input.
+    CLOSE_INTENT_SENTINEL=""
+    case "$SESSION_ID" in
+      *[!A-Za-z0-9._-]*) : ;;
+      *) CLOSE_INTENT_SENTINEL="/tmp/iwe-close-intent/${SESSION_ID}.flag" ;;
+    esac
     OBLIGATION_HASH=$(printf '%s' "$SESSION_ID" | python3 -c 'import hashlib,sys; print(hashlib.sha256(sys.stdin.read().encode()).hexdigest()[:32])' 2>/dev/null)
     OBLIGATION_FILE="${IWE_RUNTIME_DIR:-$IWE_ROOT/.iwe-runtime}/close-obligation/${OBLIGATION_HASH}.json"   # same dir close_obligation.py writes; IWE_RUNTIME is the host name
     if [ -f "$CLOSE_INTENT_SENTINEL" ] || [ -f "$OBLIGATION_FILE" ]; then

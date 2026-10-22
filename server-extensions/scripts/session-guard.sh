@@ -401,6 +401,96 @@ clear_peer_session_obligation() {
   return 0
 }
 
+### consume_owner_slug_markers <slug> <harness_session_id> <wp> -- WP-484
+# Ф211 M-c (20.10, cold review before deploy): a close that succeeds via its
+# OWN runner card (TERMINAL_PROOF_MODE=completed) never used to clean up any
+# quick-close-satisfied marker this same owner had written earlier for the
+# same slug (an already_completed start writes one before close ever runs) --
+# only the marker-path close consumed its own markers. A leftover marker
+# would later let a DIFFERENT close of the same slug/owner (a resumed
+# conversation, see the dead-semaphore-reap class) accept a card that
+# close never actually produced. Populates globals SLUG_MARKERS_TO_REMOVE,
+# LEGACY_MARKER_TO_REMOVE, LEGACY_MARKER_RUN_ID (same contract the inline
+# marker-path block already had) -- the actual `rm` stays where it was,
+# right before close's `exit 0`.
+consume_owner_slug_markers() {
+  local slug="$1" harness_session_id="$2" wp="$3"
+  local marker_dir="$IWE_ROOT/.iwe-runtime/quick-close-slug-satisfied"
+  SLUG_MARKERS_TO_REMOVE=()
+  if [[ "$harness_session_id" =~ ^[A-Za-z0-9._-]+$ ]]; then
+    local own_marker marker_name marker_prefix marker_prefix_len marker_run_id
+    local runner_dir marker_card marker_status marker_keep
+    marker_prefix="quick-close-${slug}.${harness_session_id}."
+    marker_prefix_len=${#marker_prefix}
+    shopt -s nullglob
+    for own_marker in "$marker_dir/quick-close-${slug}.${harness_session_id}."*.satisfied_by; do
+      [ -f "$own_marker" ] || continue
+      # WP-484 Ф223 (pilot decision 22.10, peer-session
+      # 2026-10-22-06-wp484-f211-live-acceptance): an own marker used to be
+      # swept unconditionally here, regardless of whether its run_id's own
+      # card was still in flight -- a parallel, not-yet-finished attempt of
+      # the SAME owner/slug could have its proof deleted by an unrelated
+      # close. Keep the marker only when a card for its run_id exists AND is
+      # provably still running/pending; a missing card is removed exactly as
+      # before (Ф211 M-c: a stale marker must not outlive this close).
+      marker_name="${own_marker##*/}"
+      marker_run_id="${marker_name:marker_prefix_len}"
+      marker_run_id="${marker_run_id%.satisfied_by}"
+      [[ "$marker_run_id" =~ ^[A-Za-z0-9._-]+$ ]] || continue
+      marker_keep=0
+      for runner_dir in "${RUNNER_CARD_DIRS[@]}"; do
+        marker_card="$runner_dir/RUN-${marker_run_id}.md"
+        [ -f "$marker_card" ] || continue
+        marker_status=$(_card_field "$marker_card" status)
+        case "$marker_status" in
+          completed|cancelled) ;;
+          *) marker_keep=1 ;;
+        esac
+        break
+      done
+      [ "$marker_keep" -eq 0 ] && SLUG_MARKERS_TO_REMOVE+=("$own_marker")
+    done
+    shopt -u nullglob
+  fi
+  local legacy_marker="$marker_dir/quick-close-${slug}.satisfied_by"
+  [ -f "$legacy_marker" ] || return 0
+  local legacy_run
+  legacy_run=$(cat "$legacy_marker" 2>/dev/null || true)
+  [[ "$legacy_run" =~ ^[A-Za-z0-9._-]+$ ]] || return 0
+  local legacy_dir
+  for legacy_dir in "${RUNNER_CARD_DIRS[@]}"; do
+    if [ -f "$legacy_dir/RUN-${legacy_run}.md" ] \
+       && [ "$(_card_field "$legacy_dir/RUN-${legacy_run}.md" owner_session_id)" = "$harness_session_id" ]; then
+      LEGACY_MARKER_TO_REMOVE="$legacy_marker"
+      LEGACY_MARKER_RUN_ID="$legacy_run"
+      return 0
+    fi
+  done
+}
+
+# prune_closed_session_worktrees <semaphore> -- WP-484 Ф216 (18.10 decision,
+# implemented 20.10, peer session 2026-10-20-16). After a confirmed close, drop
+# git's bookkeeping for worktrees whose directories are already gone (close
+# itself removes a published isolated copy; other paths delete directories
+# without telling git). `git worktree prune` never touches a live directory or
+# its data. Scope is deliberately narrow: only the governance repo and the
+# sessions repo of this session, deduped by common git dir; never the removed
+# isolated copy as -C, never every repo named in `file:` lines. Best-effort:
+# a failure is reported on stderr and never fails the close.
+prune_closed_session_worktrees() {
+  local sem="$1" gov_wt sessions_repo candidate common seen=""
+  gov_wt=$(semaphore_governance_worktree "$sem" 2>/dev/null || true)
+  sessions_repo=$(git -C "${ORZ_SESSIONS_DIR:-${ORZ_DIR:-}}" rev-parse --show-toplevel 2>/dev/null || true)
+  for candidate in "$IWE_ROOT/$GOV_REPO" "$gov_wt" "$sessions_repo"; do
+    [ -n "$candidate" ] && [ -d "$candidate" ] || continue
+    common=$(git -C "$candidate" rev-parse --path-format=absolute --git-common-dir 2>/dev/null) || continue
+    case " $seen " in *" $common "*) continue ;; esac
+    seen="$seen $common"
+    timeout 30 git --git-dir="$common" worktree prune 2>&1 >/dev/null \
+      | sed 's/^/  ⚠️  worktree prune: /' >&2 || true
+  done
+}
+
 # emit_session_closed <channel> <semaphore> <wp> <slug> <agent> -- hours for a
 # close that bypassed process-runner.py (WP-484, 05.09, peer-session
 # 2026-09-05-25 with Kimi). The `session_closed_direct` event written at the end
@@ -566,6 +656,38 @@ resolve_orz_sessions_dir() {
 # compare equal regardless of which protocol either checkout was cloned with.
 normalize_remote_url() {
   sed -E 's#^[a-zA-Z][a-zA-Z0-9+.-]*://##; s#^[^@/]*@##; s#:#/#; s#\.git$##' <<<"$1"
+}
+
+# git_identity_matches candidate canonical -- strict physical identity check
+# for `open --isolate` (WP-530 Ф91, peer-session with Codex 2026-10-19).
+# Deliberately NO origin/basename fallback: an origin fallback would re-open
+# the gap this check closes -- two independent clones can share an origin
+# URL while being physically different repositories. Compares only the two
+# sides' canonical git common-dir (symlinks resolved via `cd && pwd -P`); any
+# git/cd error or empty result is a mismatch, never a silent pass.
+git_identity_matches() {
+  local candidate="$1" canonical="$2"
+  local candidate_common canonical_common
+
+  candidate_common=$(git -C "$candidate" rev-parse --git-common-dir 2>/dev/null) || return 1
+  [ -n "$candidate_common" ] || return 1
+  case "$candidate_common" in
+    /*) ;;
+    *) candidate_common="$candidate/$candidate_common" ;;
+  esac
+  candidate_common=$(cd -- "$candidate_common" 2>/dev/null && pwd -P) || return 1
+  [ -n "$candidate_common" ] || return 1
+
+  canonical_common=$(git -C "$canonical" rev-parse --git-common-dir 2>/dev/null) || return 1
+  [ -n "$canonical_common" ] || return 1
+  case "$canonical_common" in
+    /*) ;;
+    *) canonical_common="$canonical/$canonical_common" ;;
+  esac
+  canonical_common=$(cd -- "$canonical_common" 2>/dev/null && pwd -P) || return 1
+  [ -n "$canonical_common" ] || return 1
+
+  [ "$candidate_common" = "$canonical_common" ]
 }
 
 # gov_repo_dir -- where `open` should actually write the ORZ scaffold: the
@@ -1780,7 +1902,7 @@ try:
     info = path.lstat()
     if (not stat.S_ISREG(info.st_mode) or info.st_uid != os.geteuid()
             or info.st_nlink != 1 or info.st_mode & 0o022 or info.st_size > 65536
-            or path.resolve() != path.absolute()):
+            or path.is_symlink()):
         raise ValueError("unsafe semaphore")
     lines = path.read_text().splitlines()
 
@@ -1822,14 +1944,14 @@ def git(root, *args):
 
 try:
     candidate, canonical = map(Path, sys.argv[1:])
-    if not candidate.is_absolute() or candidate.resolve() != candidate:
+    if not candidate.is_absolute() or candidate.is_symlink():
         raise ValueError("governance worktree must be an exact absolute path")
-    if Path(git(candidate, "rev-parse", "--show-toplevel")) != candidate:
+    if Path(git(candidate, "rev-parse", "--show-toplevel")) != candidate.resolve():
         raise ValueError("declared path is not a worktree root")
     common = (candidate / git(candidate, "rev-parse", "--git-common-dir")).resolve()
     expected = (canonical / git(canonical, "rev-parse", "--git-common-dir")).resolve()
     entries = git(canonical, "worktree", "list", "--porcelain", "-z").split("\0")
-    if common != expected or entries.count("worktree " + str(candidate)) != 1:
+    if common != expected or entries.count("worktree " + str(candidate.resolve())) != 1:
         raise ValueError("declared worktree is not registered in the governance repository")
     print(candidate / "inbox" / "agent" / "tasks")
 except (OSError, ValueError, subprocess.SubprocessError) as exc:
@@ -2767,6 +2889,15 @@ IWE_HEARTBEAT_STALE_SEC="${IWE_HEARTBEAT_STALE_SEC:-1800}"
 [[ "$IWE_HEARTBEAT_STALE_SEC" =~ ^[0-9]+$ ]] \
   || fail "IWE_HEARTBEAT_STALE_SEC должен быть целым числом секунд (получено: '$IWE_HEARTBEAT_STALE_SEC')" 1
 DEAD_INTERACTIVE_SUFFIX=".orphaned-dead-interactive"
+# WP-484 Ф204 п.2 (АрхГейт 18.10, детализация 20.10, peer-session
+# Claude+Kimi+Codex): dead-semaphore auto-recovery is off by default and the
+# dry-run observation pass is separate from actually enabling it -- a sweep
+# that only *watches* must never mutate a single quarantine, even if the
+# recovery flag is mistakenly set at the same time (checked at the call site,
+# not here).
+IWE_DEAD_SEMAPHORE_AUTO_RECOVERY="${IWE_DEAD_SEMAPHORE_AUTO_RECOVERY:-0}"
+IWE_DEAD_SEMAPHORE_AUTO_DRY_RUN="${IWE_DEAD_SEMAPHORE_AUTO_DRY_RUN:-0}"
+DEAD_SEMAPHORE_AUTO_DRY_RUN_LOG="${IWE_DEAD_SEMAPHORE_AUTO_DRY_RUN_LOG:-$IWE_ROOT/logs/dead-semaphore-auto-dry-run.jsonl}"
 
 _semaphore_last_field() {  # <semaphore> <key>
   grep "^$2: " "$1" 2>/dev/null | tail -1 | cut -d' ' -f2- || true
@@ -2781,8 +2912,8 @@ _dead_interactive_refusal() {  # <semaphore> <reason>
   echo "INFO: $(basename -- "$1") not quarantined ($2); remains .open" >&2
 }
 
-_quarantine_dead_interactive() {  # <semaphore> <observed dead pid>
-  local semaphore="$1" pid="$2"
+_quarantine_dead_interactive() {  # <semaphore> <observed dead pid> [out-var for the quarantine path]
+  local semaphore="$1" pid="$2" dest_outvar="${3:-}"
   local host lease_deadline heartbeat_at heartbeat_epoch now snapshot destination epoch age worktree reason
   now=$(date +%s)
   if kill -0 "$pid" 2>/dev/null; then
@@ -2841,6 +2972,12 @@ _quarantine_dead_interactive() {  # <semaphore> <observed dead pid>
       echo "WARN: quarantine of $(basename -- "$semaphore") is done but not recorded in $ZOMBIE_REGISTRY; notification retained for retry" >&2
     }
   echo "QUARANTINED: $(basename -- "$semaphore") -> $(basename -- "$destination") (pid $pid dead, lease expired, heartbeat ${heartbeat_at:-absent}); worktree retained: ${worktree:-unknown}"
+  # WP-484 Ф204 п.2: callers that need the exact quarantine path (sweep
+  # phase 1 below) get it through this out-var, not by capturing stdout --
+  # the echo above is user-facing console output for `audit --cleanup-orphans`
+  # and must stay intact for anyone reading the sweep by eye.
+  [ -n "$dest_outvar" ] && printf -v "$dest_outvar" '%s' "$destination"
+  return 0
 }
 
 notify_dead_quarantine() {  # <quarantined path> <age> <worktree> <pass key> <reason> <original semaphore> <opened epoch>
@@ -3257,6 +3394,82 @@ sweep_orphaned_semaphores() {
   # last-reader-wins gap between a new same-WP open and scheduled quarantine.
   # Lock order is always admission (FD195) -> exact session (FD196).
   with_scheduled_admission_lock _sweep_orphaned_semaphores_body
+  # WP-484 Ф204 п.2: phase 2 runs AFTER the admission lock above is
+  # released -- it must never hold that lock while it (re)checks a
+  # candidate and, in live mode, calls the manual recovery command, which
+  # acquires its own locks. _sweep_orphaned_semaphores_body is called
+  # directly (not through `$(...)`), so its candidate array is still here.
+  _dead_semaphore_auto_recovery_pass
+}
+
+# Phase 2 of WP-484 Ф204 п.2 (see _recover_orphaned_preflight above for
+# phase 1's shared check). Off entirely unless one of the two flags is on.
+# Dry run always wins over live recovery when both are set: this is the
+# >=7 day observation window the ArchGate decision requires before anyone
+# flips IWE_DEAD_SEMAPHORE_AUTO_RECOVERY for real, so it must never mutate
+# a quarantine just because that flag also happens to be "1" already.
+_dead_semaphore_auto_recovery_log() {  # <quarantine path> <stage> [recovery_id] [reason]
+  local base="$1" stage="$2" recovery_id="${3:-}" reason="${4:-}"
+  mkdir -p "$(dirname "$DEAD_SEMAPHORE_AUTO_DRY_RUN_LOG")" 2>/dev/null || true
+  python3 - "$DEAD_SEMAPHORE_AUTO_DRY_RUN_LOG" "$base" "$stage" "$recovery_id" "$reason" "${_SWEEP_PASS_KEY:-}" <<'PY'
+import json
+import os
+import sys
+import time
+
+log_path, base, stage, recovery_id, reason, sweep_id = sys.argv[1:]
+record = {
+    "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+    "sweep_id": sweep_id,
+    "quarantine_path": base,
+    "stage": stage,
+}
+if recovery_id:
+    record["recovery_id"] = recovery_id
+if reason:
+    record["reason"] = reason
+line = (json.dumps(record, ensure_ascii=False, separators=(",", ":")) + "\n").encode("utf-8")
+fd = os.open(log_path, os.O_APPEND | os.O_CREAT | os.O_WRONLY, 0o644)
+try:
+    os.write(fd, line)
+finally:
+    os.close(fd)
+PY
+}
+
+_dead_semaphore_auto_recovery_pass() {
+  local base event_json recovery_id
+  { [ "$IWE_DEAD_SEMAPHORE_AUTO_RECOVERY" = "1" ] || [ "$IWE_DEAD_SEMAPHORE_AUTO_DRY_RUN" = "1" ]; } || return 0
+  [ "${#_SWEEP_AUTO_RECOVERY_CANDIDATE_BASES[@]}" -gt 0 ] || return 0
+  for base in "${_SWEEP_AUTO_RECOVERY_CANDIDATE_BASES[@]}"; do
+    _dead_semaphore_auto_recovery_log "$base" "candidate"
+    # Fresh re-check, not phase 1's result: the owner may have come back
+    # and the sweep lock released this candidate's file to the world
+    # between phase 1 and here. _recover_orphaned_preflight reads disk on
+    # every call and takes no cached state.
+    if ! event_json=$(_recover_orphaned_preflight "$base" "$base"); then
+      _dead_semaphore_auto_recovery_log "$base" "recheck_reject" "" \
+        "preflight failed on recheck (quarantine changed, owner returned, or proof lost)"
+      continue
+    fi
+    recovery_id=$(python3 -c 'import json,sys; print(json.loads(sys.argv[1])["recovery_id"])' "$event_json" 2>/dev/null) || recovery_id=""
+    _dead_semaphore_auto_recovery_log "$base" "recheck_pass" "$recovery_id"
+    if [ "$IWE_DEAD_SEMAPHORE_AUTO_DRY_RUN" = "1" ]; then
+      _dead_semaphore_auto_recovery_log "$base" "would_recover" "$recovery_id"
+      continue
+    fi
+    # Live path (only reachable once dry run is off): shell out to the same
+    # command a human would type, so the mutation sequence -- locks, CAS,
+    # ledger write and its verification -- exists exactly once in this
+    # script. It repeats this preflight itself, under its own locks, before
+    # touching anything; the recheck above is for candidate selection and
+    # metrics, not a substitute for that.
+    if IWE_RECOVER_ORPHANED_TRIGGER=auto bash "$0" recover-orphaned "$base" >/dev/null 2>&1; then
+      _dead_semaphore_auto_recovery_log "$base" "recovered" "$recovery_id"
+    else
+      _dead_semaphore_auto_recovery_log "$base" "recover_failed" "$recovery_id"
+    fi
+  done
 }
 
 _semaphore_transition_lock_id() {  # <absolute semaphore path>
@@ -3383,6 +3596,7 @@ _classify_pid_identity_mismatch() {  # <semaphore> <pid> <observed comm>
 
 _classify_dead_semaphore() {  # <semaphore> <observed pid>
   local semaphore="$1" observed_pid="$2" pid target epoch age
+  local dead_quarantine_path
   [ -f "$semaphore" ] && [ ! -L "$semaphore" ] || return 0
   pid=$(grep '^pid: ' "$semaphore" 2>/dev/null | head -1 | cut -d' ' -f2- || true)
   [ "$pid" = "$observed_pid" ] && [[ "$pid" =~ ^[1-9][0-9]*$ ]] \
@@ -3416,7 +3630,17 @@ _classify_dead_semaphore() {  # <semaphore> <observed pid>
   # WP-530 Ф53: opt-in terminal path, proof and refusal reasons live in
   # _quarantine_dead_interactive; a refusal falls through to escalate-only.
   if [ "${QUARANTINE_DEAD_INTERACTIVE:-0}" = "1" ] \
-    && _quarantine_dead_interactive "$semaphore" "$pid"; then
+    && _quarantine_dead_interactive "$semaphore" "$pid" dead_quarantine_path; then
+    # WP-484 Ф204 п.2: phase 1 of dead-semaphore auto-recovery -- read-only,
+    # runs while this function still holds the sweep's admission lock. It
+    # only records a candidate; phase 2 (after the lock is released, see
+    # sweep_orphaned_semaphores) re-checks fresh from disk before acting.
+    # Skipped entirely unless one of the two flags is on, so a default
+    # (0/0) run does exactly what it did before this phase existed.
+    if { [ "$IWE_DEAD_SEMAPHORE_AUTO_RECOVERY" = "1" ] || [ "$IWE_DEAD_SEMAPHORE_AUTO_DRY_RUN" = "1" ]; } \
+      && _recover_orphaned_preflight "$dead_quarantine_path" "$dead_quarantine_path" >/dev/null; then
+      _SWEEP_AUTO_RECOVERY_CANDIDATE_BASES+=("$dead_quarantine_path")
+    fi
     _SWEEP_DEAD_QUARANTINED=$((_SWEEP_DEAD_QUARANTINED + 1))
     return 0
   fi
@@ -3454,6 +3678,12 @@ _sweep_orphaned_semaphores_body() {
   _SWEEP_SCHEDULED_FROZEN=0
   _SWEEP_ZOMBIES_ESCALATED=0
   _SWEEP_DEAD_QUARANTINED=0
+  # WP-484 Ф204 п.2: phase-1 candidates for dead-semaphore auto-recovery,
+  # filled by _classify_dead_semaphore while this function still holds the
+  # sweep's admission lock. sweep_orphaned_semaphores() consumes these AFTER
+  # releasing that lock (phase 2) -- this function is called directly, not
+  # through a subshell, so the arrays survive past this call.
+  _SWEEP_AUTO_RECOVERY_CANDIDATE_BASES=()
   # WP-538 Ф9 (19.09, Codex plan): one pass used to fire one Telegram message
   # per orphaned/quarantined semaphore -- a night with 26 stale sessions sent
   # 26 separate alerts. _session_guard_notify queues into this array instead
@@ -3845,6 +4075,7 @@ QUARANTINE_DEAD_INTERACTIVE=0
 FORCE_NO_REFLECTION=""
 CANONICAL_OWNER=""
 FORCE_FLAG=0
+FORCE_WP_ELSEWHERE_FLAG=0
 FORGET_FLAG=0
 UNFREEZE_REASON=""
 ISOLATE_FLAG=0
@@ -3964,6 +4195,7 @@ while [[ $# -gt 0 ]]; do
     --cleanup-orphans) CLEANUP_ORPHANS=1; shift ;;
     --quarantine-dead-interactive) QUARANTINE_DEAD_INTERACTIVE=1; shift ;;
     --force)  FORCE_FLAG=1; shift ;;
+    --force-wp-elsewhere) FORCE_WP_ELSEWHERE_FLAG=1; shift ;;
     --forget) FORGET_FLAG=1; shift ;;
     --isolate) ISOLATE_FLAG=1; shift ;;
     # WP-484 (peer-session with Codex): manual recovery for a PREPARED close
@@ -4280,7 +4512,7 @@ def read_raw(path):
                 or not 0 < before.st_size <= 1024 * 1024):
             raise ValueError("unsafe semaphore")
         raw = stream.read(1024 * 1024 + 1)
-        after = path.stat(follow_symlinks=False)
+        after = path.lstat()
     fields = ("st_dev", "st_ino", "st_size", "st_mtime_ns", "st_ctime_ns")
     if (any(getattr(before, key) != getattr(after, key) for key in fields)
             or len(raw) != before.st_size or b"\0" in raw or not raw.endswith(b"\n")):
@@ -4330,7 +4562,7 @@ def identity(raw, basename):
 
 try:
     info = sessions.lstat()
-    if (sessions.resolve(strict=True) != sessions or not stat.S_ISDIR(info.st_mode)
+    if (sessions.is_symlink() or not stat.S_ISDIR(info.st_mode)
             or info.st_uid != os.geteuid() or info.st_mode & 0o022):
         raise ValueError("unsafe sessions directory")
     retired, registry_problem = retired_artifacts(registry)
@@ -4737,6 +4969,43 @@ if [ "$CMD" = "open" ]; then
     # `--wp 289` in MC-sessions/2026-08/2026-08-09-wp289-actualize-closability.md)
     # alongside the "WP-N" form this session used. Check both spellings
     # instead of assuming the caller always types the prefix.
+    # WP-530 Ф91 (2026-10-19, peer-session with Codex): the inbox/-gated check
+    # below only fires when ISOLATE_BASE_DIR "looks like" a governance repo
+    # (has a top-level inbox/). A repo without inbox/ skipped it entirely --
+    # live bug found via session-guard-abandon-prepared-smoke.sh: isolating a
+    # repository that is neither the intended governance repo nor WP-shaped
+    # passed silently, no --force required. This check is independent of
+    # inbox/ and runs first: physical identity mismatch with the configured
+    # governance repo always requires --force, regardless of what the
+    # mismatched repo contains.
+    CANONICAL_GOV_DIR="$IWE_ROOT/$GOV_REPO"
+    ISOLATE_IDENTITY_MATCHES=1
+    git_identity_matches "$ISOLATE_BASE_DIR" "$CANONICAL_GOV_DIR" || ISOLATE_IDENTITY_MATCHES=0
+    if [ "$ISOLATE_IDENTITY_MATCHES" != "1" ] && [ "$FORCE_FLAG" != "1" ]; then
+      fail "--isolate: не удалось подтвердить физическую идентичность репозитория ($ISOLATE_BASE_DIR) и governance-репо ($CANONICAL_GOV_DIR): git common-dir различаются или недоступны. Для изоляции текущего репозитория повтори с --force." 1
+    fi
+
+    # WP-530 Ф91б (2026-10-19, найдено живьём при закрытии РП-385, пир-сессия
+    # с пилотом): --force выше молча разрешал ЛЮБОЙ физически другой репозиторий,
+    # включая случай, где вызывающий ТАКЖЕ передал --wp -- а карточки WP по
+    # конвенции этого скрипта всегда живут в governance-репо ($CANONICAL_GOV_DIR),
+    # не в произвольном изолируемом репозитории. Живой инцидент: `open --wp
+    # WP-385 --isolate --force`, вызванный по ошибке из $IWE_ROOT вместо
+    # DS-my-strategy, тихо создал семафор с governance_worktree, указывающим
+    # на копию БЕЗ DS-my-strategy вообще -- карточку WP-385 невозможно было
+    # отредактировать до конца сессии (wp-card-license-gate.sh и
+    # close_obligation.py оба читают этот путь буквально из семафора, не из
+    # аргументов последующих вызовов). Проверка НЕ дублирует --force identity-
+    # гейт выше (тот решает "эта пара репозиториев физически одна и та же?"
+    # один раз) -- она добавляет вторую, независимую развилку именно для
+    # комбинации identity-mismatch + --wp, где один --force раньше покрывал
+    # оба разных согласия сразу. Identity match (самый частый путь в тестах и
+    # проде, т.к. open обычно запускают из самого governance-репо) эту ветку
+    # не проходит вовсе -- остаётся как было.
+    if [ "$ISOLATE_IDENTITY_MATCHES" != "1" ] && [ -n "$WP" ] && [ "$FORCE_WP_ELSEWHERE_FLAG" != "1" ]; then
+      fail "--isolate --force изолирует $ISOLATE_BASE_DIR, который физически отличается от governance-репо ($CANONICAL_GOV_DIR) -- но передан --wp $WP, чья карточка по конвенции должна жить именно в governance-репо. Эта комбинация создаёт семафор с governance_worktree, непригодным для правки карточки WP до конца сессии (WP-530 Ф91б). Если WP осознанно размещается не в governance-репо -- повтори с --force-wp-elsewhere. Если нет -- перейди в $CANONICAL_GOV_DIR и запусти open оттуда (без --force, идентичность совпадёт сама)." 1
+    fi
+
     if [ -n "$WP" ] && [ -d "$ISOLATE_BASE_DIR/inbox" ] && [ "$FORCE_FLAG" != "1" ]; then
       case "$WP" in
         WP-*) WP_INBOX_ALT="$WP" ;;
@@ -6159,7 +6428,7 @@ def published_untracked_session_file(path):
     directory = None
     descriptor = None
     try:
-        if candidate.resolve(strict=True) != candidate:
+        if candidate.is_symlink():
             return False
         directory = os.open(repo, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
         for component in PurePosixPath(path).parts[:-1]:
@@ -6180,7 +6449,7 @@ def published_untracked_session_file(path):
                 or git("ls-files", "--stage", "-z", "--", path)
                 or git("status", "--porcelain", "-z", "--untracked-files=all", "--", path)
                    != b"?? " + os.fsencode(path) + b"\0"
-                or candidate.resolve(strict=True) != candidate):
+                or candidate.is_symlink()):
             return False
         after = os.fstat(descriptor)
         current = candidate.lstat()
@@ -6266,7 +6535,7 @@ def completed_foreign_runner_card(canonical, path):
         return False
     candidate = canonical / path
     try:
-        if candidate.resolve(strict=True) != candidate:
+        if candidate.is_symlink():
             return False
         descriptor = os.open(candidate, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
         with os.fdopen(descriptor, "rb") as stream:
@@ -6278,7 +6547,7 @@ def completed_foreign_runner_card(canonical, path):
             after = os.fstat(stream.fileno())
         current = candidate.lstat()
         fields = ("st_dev", "st_ino", "st_mode", "st_size", "st_mtime_ns", "st_ctime_ns")
-        if (candidate.resolve(strict=True) != candidate or len(content) > 1048576
+        if (candidate.is_symlink() or len(content) > 1048576
                 or any(getattr(before, field) != getattr(after, field)
                        or getattr(before, field) != getattr(current, field) for field in fields)):
             return False
@@ -7222,7 +7491,7 @@ def clean_files(revision, relevant):
         if not flags or flags[:1].islower() or flags[:1] == b"S":
             return False
         local = Path(repo) / os.fsdecode(path)
-        if local.resolve() != local.absolute() or not local.is_file():
+        if local.is_symlink() or not local.is_file():
             return False
         expected = entry(revision, path)
         if bool(local.lstat().st_mode & stat.S_IXUSR) != (expected[0] == b"100755"):
@@ -7477,7 +7746,7 @@ try:
                 continue
             worktree = root / name
             if (not worktree.is_absolute() or not worktree.exists()
-                    or worktree.resolve() != worktree or registered.count(worktree) != 1):
+                    or worktree.is_symlink() or registered.count(worktree) != 1):
                 continue
             if common(worktree) == repo_common:
                 candidates.append((worktree, sha))
@@ -7572,7 +7841,7 @@ def current_files_match(revision, relevant):
     for path in relevant:
         expected = entry(revision, path)
         local = Path(repo) / os.fsdecode(path)
-        if local.resolve() != local.absolute() or not local.is_file():
+        if local.is_symlink() or not local.is_file():
             return False
         if bool(local.lstat().st_mode & stat.S_IXUSR) != (expected[0] == b"100755"):
             return False
@@ -8119,8 +8388,8 @@ _session_commit_claims_json() {  # <semaphore>
     'import json,sys; print(json.dumps([line for line in sys.stdin.read().splitlines() if line], separators=(",", ":")))'
 }
 
-_worktree_clean_status_sha() {  # <worktree> [exact active RUN card]; prints hash only for clean owned scope
-  python3 - "$1" "${2:-}" <<'PY' 2>/dev/null
+_worktree_clean_status_sha() {  # <worktree> [exact active RUN card] [verified governance cards dir]
+  python3 - "$1" "${2:-}" "${3:-}" <<'PY' 2>/dev/null
 import hashlib
 import os
 from pathlib import Path
@@ -8129,7 +8398,7 @@ import stat
 import subprocess
 import sys
 
-worktree, allowed_card = sys.argv[1:]
+worktree, allowed_card, governance_cards = sys.argv[1:]
 allowed_relative = None
 if allowed_card:
     root = Path(worktree).resolve(strict=True)
@@ -8141,6 +8410,12 @@ if allowed_card:
         raise SystemExit(1)
     if card.parent == root / "inbox/agent/tasks":
         allowed_relative = os.fsencode(card.relative_to(root).as_posix())
+    elif governance_cards and card.parent == Path(governance_cards):
+        # The runner for a product isolate lives in a separately registered
+        # governance worktree. The caller verified this exact cards directory
+        # with _declared_governance_card_dir before passing it here.
+        if Path(governance_cards).is_symlink():
+            raise SystemExit(1)
     else:
         # relocate-card moves a waiting RUN card to the canonical checkout
         # before close removes this isolated worktree. It is outside this
@@ -9211,7 +9486,7 @@ try:
                for item in doc.get("history", [])):
         raise ValueError("no previous release attempt")
     run_id = doc["run_id"]
-    if card.name != "RUN-" + run_id + ".md" or audit_root.resolve() != audit_root:
+    if card.name != "RUN-" + run_id + ".md" or audit_root.is_symlink():
         raise ValueError("audit route changed")
     event = json.loads(owned_bytes(audit_root / (run_id + ".jsonl"), 8 * 1024 * 1024).splitlines()[-1])
     expected = dict(actor="process-runner", event="written", process_id="quick-close",
@@ -9230,6 +9505,7 @@ _prepared_source_snapshot_matches() {  # <semaphore> <worktree>
   local semaphore="$1" worktree="$2" expected_head expected_common expected_status
   local expected_base expected_commits expected_claims terminal_kind terminal_ref terminal_sha
   local expected_origin expected_target actual_common actual_status actual_commits actual_claims actual_terminal actual_origin
+  local governance_cards=""
   [ -d "$worktree" ] && [ ! -L "$worktree" ] || return 1
   expected_head=$(_unique_record_field "$semaphore" close_delivery_source_head) || return 1
   expected_common=$(_unique_record_field "$semaphore" close_delivery_common_dir) || return 1
@@ -9242,6 +9518,11 @@ _prepared_source_snapshot_matches() {  # <semaphore> <worktree>
   terminal_sha=$(_unique_record_field "$semaphore" close_delivery_terminal_sha256) || return 1
   expected_origin=$(_unique_record_field "$semaphore" close_delivery_origin) || return 1
   expected_target=$(_unique_record_field "$semaphore" close_delivery_target_ref) || return 1
+  if [ -n "${IWE_GOVERNANCE_REPO_PATH:-}" ] \
+     && [ "$IWE_GOVERNANCE_REPO_PATH" != "$IWE_ROOT/$GOV_REPO" ]; then
+    governance_cards=$(_declared_governance_card_dir "$IWE_GOVERNANCE_REPO_PATH" "$IWE_ROOT/$GOV_REPO") \
+      || return 1
+  fi
 
   [ "$(git -C "$worktree" rev-parse --verify 'HEAD^{commit}' 2>/dev/null || true)" = "$expected_head" ] \
     || return 1
@@ -9253,7 +9534,7 @@ _prepared_source_snapshot_matches() {  # <semaphore> <worktree>
   actual_origin=$(normalize_remote_url "$actual_origin")
   [ "$actual_origin" = "$expected_origin" ] && [ "$expected_target" = "refs/heads/main" ] || return 1
   if [ "$terminal_kind" = "file" ]; then
-    actual_status=$(_worktree_clean_status_sha "$worktree" "$terminal_ref" || true)
+    actual_status=$(_worktree_clean_status_sha "$worktree" "$terminal_ref" "$governance_cards" || true)
   else
     actual_status=$(_worktree_clean_status_sha "$worktree" || true)
   fi
@@ -10442,7 +10723,7 @@ _close_delivery_and_transition() {
     # Proved clean BEFORE the rebuild below (WP-561 Ч3): a dirty copy is refused
     # here, so the rebase never runs over uncommitted work and never stashes it.
     if [ "$TERMINAL_PROOF_KIND" = "file" ]; then
-      source_status=$(_worktree_clean_status_sha "$CLOSING_WORKTREE" "$TERMINAL_PROOF_REFERENCE" || true)
+      source_status=$(_worktree_clean_status_sha "$CLOSING_WORKTREE" "$TERMINAL_PROOF_REFERENCE" "${DECLARED_CARD_DIR:-}" || true)
     else
       source_status=$(_worktree_clean_status_sha "$CLOSING_WORKTREE" || true)
     fi
@@ -10473,7 +10754,7 @@ _close_delivery_and_transition() {
     # The rebuild above may have moved the copy; PREPARED binds the status of
     # the tree it snapshots (a completed rebase leaves it clean).
     if [ "$TERMINAL_PROOF_KIND" = "file" ]; then
-      source_status=$(_worktree_clean_status_sha "$CLOSING_WORKTREE" "$TERMINAL_PROOF_REFERENCE" || true)
+      source_status=$(_worktree_clean_status_sha "$CLOSING_WORKTREE" "$TERMINAL_PROOF_REFERENCE" "${DECLARED_CARD_DIR:-}" || true)
     else
       source_status=$(_worktree_clean_status_sha "$CLOSING_WORKTREE" || true)
     fi
@@ -10790,7 +11071,9 @@ if [ "$CMD" = "close" ]; then
   fi
 
   DEFERRED_NO_REFLECTION_EVENT=""
-  SLUG_MARKER_TO_REMOVE=""
+  SLUG_MARKERS_TO_REMOVE=()
+  LEGACY_MARKER_TO_REMOVE=""
+  LEGACY_MARKER_RUN_ID=""
   POST_CLOSE_CANCEL_MODE=""
   POST_CLOSE_EXCLUDE_RUN_ID=""
   POST_CLOSE_FORCED_RUN_ID=""
@@ -10940,6 +11223,12 @@ if [ "$CMD" = "close" ]; then
         "${HARNESS_SESSION_ID:-$SESSION_ID}" "$WP" "$SLUG" >/dev/null || continue
       RUNNER_OK="$card"
       TERMINAL_PROOF_MODE="completed"
+      # This close's own card satisfied the obligation directly -- but the
+      # SAME owner/slug may also hold a leftover quick-close-satisfied marker
+      # from an earlier already_completed start (M-c, cold review before
+      # deploy): clean it up here too, not only on the marker-path branch
+      # below, or it survives to wrongly prove a later close.
+      [ -n "$HARNESS_SESSION_ID" ] && consume_owner_slug_markers "$SLUG" "$HARNESS_SESSION_ID" "$WP"
       break
     done
   fi
@@ -11140,29 +11429,54 @@ print(json.dumps({"wp": sys.argv[1], "slug": sys.argv[2], "agent": sys.argv[3], 
   # везде в этом файле); маркер удаляется после успешного использования
   # (best-effort -- падение unlink не должно ронять close), чтобы не жить
   # вечно.
-  if [ -z "$RUNNER_OK" ]; then
-    SLUG_MARKER="$IWE_ROOT/.iwe-runtime/quick-close-slug-satisfied/quick-close-${SLUG}.satisfied_by"
-    if [ -f "$SLUG_MARKER" ] && [ -n "$HARNESS_SESSION_ID" ]; then
-      MARKER_RUN_ID=$(cat "$SLUG_MARKER" 2>/dev/null || true)
-      if [[ "$MARKER_RUN_ID" =~ ^[A-Za-z0-9._-]+$ ]]; then
-        MARKER_WP_NUM=$(printf '%s' "$WP" | sed -E 's/^[Ww][Pp]-//')
-        for runner_dir in "${RUNNER_CARD_DIRS[@]}"; do
-          MARKER_CARD="$runner_dir/RUN-${MARKER_RUN_ID}.md"
-          [ -f "$MARKER_CARD" ] || continue
-          grep -q '^process_id: quick-close$' "$MARKER_CARD" || continue
-          grep -q '^status: completed$' "$MARKER_CARD" || continue
-          [ "$(_card_field "$MARKER_CARD" owner_session_id)" = "$HARNESS_SESSION_ID" ] || continue
-          [ -n "$MARKER_WP_NUM" ] && [ "$(_quick_close_card_wp "$MARKER_CARD")" = "$MARKER_WP_NUM" ] || continue
-          _terminal_card_snapshot_sha "$MARKER_CARD" marker-completed \
-            "${HARNESS_SESSION_ID:-$SESSION_ID}" "$WP" "$SLUG" >/dev/null || continue
-          RUNNER_OK="$MARKER_CARD"
-          TERMINAL_PROOF_MODE="marker-completed"
-          echo "Session CLOSE: у slug '$SLUG' нет своей карточки, но раннер отметил её обязательство удовлетворённым прогоном $MARKER_RUN_ID ($MARKER_CARD) -- признаю терминальным (WP-537 Ф29, slug-satisfied marker)." >&2
-          SLUG_MARKER_TO_REMOVE="$SLUG_MARKER"
-          break 2
-        done
-      fi
+  #
+  # WP-484 Ф211 (20.10, пир-сессия 2026-10-20-16): раннер теперь пишет маркер
+  # с ключом slug + доказанный harness-владелец + run_id, чтобы второй агент с
+  # тем же slug не затирал маркер первого и чужой close не удалял чужой файл.
+  # Сначала перебираем только маркеры СВОЕГО владельца, затем legacy-файл по
+  # голому slug (карточки до этого деплоя или без доказанного владельца) --
+  # проверки карточки одни и те же, удаляется только проверенный файл.
+  if [ -z "$RUNNER_OK" ] && [ -n "$HARNESS_SESSION_ID" ]; then
+    SLUG_MARKER_DIR="$IWE_ROOT/.iwe-runtime/quick-close-slug-satisfied"
+    SLUG_MARKER_CANDIDATES=()
+    if [[ "$HARNESS_SESSION_ID" =~ ^[A-Za-z0-9._-]+$ ]]; then
+      for SLUG_MARKER in "$SLUG_MARKER_DIR/quick-close-${SLUG}.${HARNESS_SESSION_ID}."*.satisfied_by; do
+        [ -f "$SLUG_MARKER" ] && SLUG_MARKER_CANDIDATES+=("$SLUG_MARKER")
+      done
     fi
+    [ -f "$SLUG_MARKER_DIR/quick-close-${SLUG}.satisfied_by" ] \
+      && SLUG_MARKER_CANDIDATES+=("$SLUG_MARKER_DIR/quick-close-${SLUG}.satisfied_by")
+    MARKER_WP_NUM=$(printf '%s' "$WP" | sed -E 's/^[Ww][Pp]-//')
+    for SLUG_MARKER in ${SLUG_MARKER_CANDIDATES[@]+"${SLUG_MARKER_CANDIDATES[@]}"}; do
+      MARKER_RUN_ID=$(cat "$SLUG_MARKER" 2>/dev/null || true)
+      [[ "$MARKER_RUN_ID" =~ ^[A-Za-z0-9._-]+$ ]] || continue
+      # The glob's `*` spans dots, and slugs may contain dots: an owner-keyed
+      # name must end in exactly the run_id it stores, or it is another slug's.
+      case "$SLUG_MARKER" in
+        */"quick-close-${SLUG}.satisfied_by") ;;
+        */"quick-close-${SLUG}.${HARNESS_SESSION_ID}.${MARKER_RUN_ID}.satisfied_by") ;;
+        *) continue ;;
+      esac
+      for runner_dir in "${RUNNER_CARD_DIRS[@]}"; do
+        MARKER_CARD="$runner_dir/RUN-${MARKER_RUN_ID}.md"
+        [ -f "$MARKER_CARD" ] || continue
+        grep -q '^process_id: quick-close$' "$MARKER_CARD" || continue
+        grep -q '^status: completed$' "$MARKER_CARD" || continue
+        [ "$(_card_field "$MARKER_CARD" owner_session_id)" = "$HARNESS_SESSION_ID" ] || continue
+        [ -n "$MARKER_WP_NUM" ] && [ "$(_quick_close_card_wp "$MARKER_CARD")" = "$MARKER_WP_NUM" ] || continue
+        _terminal_card_snapshot_sha "$MARKER_CARD" marker-completed \
+          "${HARNESS_SESSION_ID:-$SESSION_ID}" "$WP" "$SLUG" >/dev/null || continue
+        RUNNER_OK="$MARKER_CARD"
+        TERMINAL_PROOF_MODE="marker-completed"
+        echo "Session CLOSE: у slug '$SLUG' нет своей карточки, но раннер отметил её обязательство удовлетворённым прогоном $MARKER_RUN_ID ($MARKER_CARD) -- признаю терминальным (WP-537 Ф29, slug-satisfied marker)." >&2
+        # Not only the marker used: an owner can hold more than one for the
+        # same slug (an earlier already_completed start writing a sibling) --
+        # see consume_owner_slug_markers for why a leftover is a real risk,
+        # not housekeeping.
+        consume_owner_slug_markers "$SLUG" "$HARNESS_SESSION_ID" "$WP"
+        break 2
+      done
+    done
   fi
 
   # WP-537 Ф25.1/Ф26 -> Ф28 (07.09, пир-сессия 2026-09-07-13, Kimi+Codex).
@@ -11200,6 +11514,11 @@ print(json.dumps({"wp": sys.argv[1], "slug": sys.argv[2], "agent": sys.argv[3], 
           RUNNER_OK="$card"
           TERMINAL_PROOF_MODE="owner-completed"
           echo "Session CLOSE: у slug '$SLUG' нет своей карточки, но обязательство этого разговора для WP-$WP_NUM уже выполнено completed-прогоном под другим слагом ($card) -- признаю терминальным (WP-537 Ф28, owner-terminality)." >&2
+          # Same risk as the marker branch and the direct-card branch above
+          # (M-c, cold review before deploy): this slug may still hold its
+          # own leftover quick-close-satisfied marker from an earlier
+          # already_completed start.
+          [ -n "$HARNESS_SESSION_ID" ] && consume_owner_slug_markers "$SLUG" "$HARNESS_SESSION_ID" "$WP"
           break 2
         done
       done
@@ -11388,7 +11707,13 @@ print(json.dumps({"wp": sys.argv[1], "slug": sys.argv[2], "agent": sys.argv[3], 
       cancel-session quick-close "$SESSION_ID") 2>&1 \
       || echo "cancel-session (force path) не прошёл — terminal close уже завершён" >&2
   fi
-  [ -z "$SLUG_MARKER_TO_REMOVE" ] || rm -f "$SLUG_MARKER_TO_REMOVE" 2>/dev/null || true
+  [ ${#SLUG_MARKERS_TO_REMOVE[@]} -eq 0 ] || rm -f "${SLUG_MARKERS_TO_REMOVE[@]}" 2>/dev/null || true
+  # The legacy file is shared by all owners and may have been rewritten by
+  # another owner's runner since acceptance: remove it only if unchanged.
+  if [ -n "$LEGACY_MARKER_TO_REMOVE" ] \
+     && [ "$(cat "$LEGACY_MARKER_TO_REMOVE" 2>/dev/null || true)" = "$LEGACY_MARKER_RUN_ID" ]; then
+    rm -f "$LEGACY_MARKER_TO_REMOVE" 2>/dev/null || true
+  fi
 
   # Only a completed terminal rename may revoke the lease/pointer and report
   # the agent idle.  These are projections of `.closed`, not its authority.
@@ -11559,6 +11884,8 @@ print(json.dumps({"wp": sys.argv[1], "slug": sys.argv[2], "agent": sys.argv[3], 
   if grep -q '^close_path: peer-session$' "$_sem_read" 2>/dev/null; then
     clear_peer_session_obligation "$_sem_read" "$SLUG"
   fi
+
+  prune_closed_session_worktrees "$_sem_read"
 
   exit 0
 fi
@@ -11741,9 +12068,9 @@ def is_separate_checkout_root(home, path):
     # A directory prefix naming an independent checkout does not cover that
     # checkout's repo-relative files. Ignore only this exact disk collision;
     # the parent may still own the path in its index, trees or history below.
-    target = os.path.abspath(os.path.join(home, path))
+    target = os.path.realpath(os.path.join(home, path))
     if (path.endswith("/") and target in commit_homes
-            and target != os.path.realpath(home) and target == os.path.realpath(target)):
+            and target != os.path.realpath(home)):
         separate_checkout_roots.add(target)
         return True
     return False
@@ -13159,6 +13486,24 @@ raise SystemExit(1)
 PY
 }
 
+
+# WP-484 Ф204 п.2 (АрхГейт 18.10, детализация консенсусом 20.10, peer-session
+# Claude+Kimi+Codex): the one strict check an .open.orphaned-* file must pass
+# before anything may recover it -- exact terminal proof (identity,
+# owner/WP/slug, recovery_id) -- factored out so the manual CLI path below
+# and the sweep's own auto-recovery path (phase 1 candidate check, phase 2
+# fresh recheck) call the literal same function, not two copies that could
+# drift apart. Pure read: takes only paths, re-reads disk on every call,
+# mutates nothing. Prints the full identity event JSON on success (the
+# caller still needs it -- it carries recovery_id *and* feeds the ledger
+# event later) or returns 1.
+_recover_orphaned_preflight() {  # <state_file> <base_quarantine_file>
+  local state_file="$1" base="$2" terminal_sha event_json
+  terminal_sha=$(_orphaned_worktree_terminal_outcome_proven "$base") || return 1
+  event_json=$(_recovery_identity_event "$state_file" "$base" "$terminal_sha") || return 1
+  printf '%s\n' "$event_json"
+}
+
 _recover_orphaned_locked() {
   local event_json recovery_id stored_recovery_id terminal_sha fields_json
   local ledger_script ledger_root ledger_rc=0 snapshot_sha
@@ -13166,13 +13511,12 @@ _recover_orphaned_locked() {
     || fail "recover-orphaned: состояние исчезло или стало небезопасным: $ORPHAN_FILE" 1
 
   if [ "$ORPHAN_FILE" = "$BASE_ORPHAN_FILE" ]; then
-    terminal_sha=$(_orphaned_worktree_terminal_outcome_proven "$ORPHAN_FILE" || true)
-    [ -n "$terminal_sha" ] \
-      || fail "recover-orphaned: exact terminal card+owner+WP+slug proof не найден; карантин оставлен без изменений" 1
-    event_json=$(_recovery_identity_event "$ORPHAN_FILE" "$BASE_ORPHAN_FILE" "$terminal_sha") \
-      || fail "recover-orphaned: identity карантина неполна/неоднозначна; файл оставлен без изменений" 1
+    event_json=$(_recover_orphaned_preflight "$ORPHAN_FILE" "$BASE_ORPHAN_FILE") \
+      || fail "recover-orphaned: preflight (exact terminal proof + identity + recovery_id) не прошёл; карантин оставлен без изменений" 1
     recovery_id=$(python3 -c 'import json,sys; print(json.loads(sys.argv[1])["recovery_id"])' "$event_json") \
       || fail "recover-orphaned: recovery_id не вычислен" 1
+    terminal_sha=$(python3 -c 'import json,sys; print(json.loads(sys.argv[1])["terminal_proof_sha256"])' "$event_json") \
+      || fail "recover-orphaned: terminal_sha не извлечён" 1
     fields_json=$(python3 - "$recovery_id" "$terminal_sha" <<'PY'
 import json
 import sys
@@ -13203,6 +13547,24 @@ PY
     [ "$stored_recovery_id" = "$recovery_id" ] \
       || fail "recover-orphaned: pending recovery_id не связан с exact identity/proof" 1
   fi
+
+  # WP-484 Ф204 п.2: who asked for this recovery -- a human running
+  # `recover-orphaned` by hand (manual, the default) or the sweep's own
+  # phase 2 (auto, set only via IWE_RECOVER_ORPHANED_TRIGGER=auto right
+  # before it shells out to this same command). Added to the ledger event
+  # AFTER recovery_id is already fixed above -- it must never change what
+  # counts as the same recovery, only record who triggered it.
+  case "${IWE_RECOVER_ORPHANED_TRIGGER:-manual}" in
+    manual|auto) : ;;
+    *) fail "recover-orphaned: IWE_RECOVER_ORPHANED_TRIGGER должен быть 'manual' или 'auto'" 1 ;;
+  esac
+  event_json=$(python3 -c '
+import json, sys
+event = json.loads(sys.argv[1])
+event["trigger"] = sys.argv[2]
+print(json.dumps(event, ensure_ascii=False, separators=(",", ":")))
+' "$event_json" "${IWE_RECOVER_ORPHANED_TRIGGER:-manual}") \
+    || fail "recover-orphaned: trigger не присоединён к событию" 1
 
   ledger_script="$IWE_ROOT/$GOV_REPO/scripts/ledger-append.sh"
   [ -f "$ledger_script" ] && [ ! -L "$ledger_script" ] \
@@ -13448,7 +13810,7 @@ if [ "$CMD" = "retire-semaphore-artifact" ]; then
   [ "$(dirname -- "$RETIRE_FILE")" = "$RETIRE_CANON_DIR" ] \
     || fail "retire-semaphore-artifact: '$RETIRE_FILE' должен лежать непосредственно в каталоге семафоров ($SESSION_DIR)" 1
   case "$RETIRE_BASE" in
-    *.open) fail "retire-semaphore-artifact: '$RETIRE_BASE' — активный семафор; его снимает только close или audit --cleanup-orphans" 1 ;;
+    *.open) fail "retire-semaphore-artifact: '$RETIRE_BASE' — активный семафор; его снимает только close или audit --cleanup-orphans. Для незавершённого Quick Close повтори process-runner.py start quick-close --slug <slug>; если уже есть зависшая RUN-карточка, используй process-runner.py cancel <run-id> и повтори close" 1 ;;
     *.open.*) : ;;
     *) fail "retire-semaphore-artifact: '$RETIRE_BASE' не является записью семафора (ожидается <agent>-<id>.open.<состояние>)" 1 ;;
   esac

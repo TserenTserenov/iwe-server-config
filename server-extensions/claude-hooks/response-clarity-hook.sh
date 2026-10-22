@@ -214,12 +214,16 @@ A2_MATCH=$(printf '%s\n' "$A2_BODY" | grep -oE '\b[a-z][a-z0-9]*_[a-z0-9_]+\b' |
 # т.п.) без реального ложного срабатывания — тот же принцип узкого старта,
 # что уже применён к snake_case-ветке выше (P13: не хеджировать воображаемым
 # риском).
+# Расширено 22.10 (РП-388 Ф16 п.3, живой журнал за 2 дня после доставки): из 25
+# срабатываний 21 — имена собственные (OpenRouter 10, GitHub 7, OpenAI, macOS,
+# LiteLLM, логин пилота), а база стиля имена собственные явно разрешает.
+# Добавлены ровно встреченные имена; жаргон (OwnerIntegrity, SoT) по-прежнему ловится.
 # `\b` в grep -E/ugrep ненадёжен на границе с кириллицей без пробела (тот же
 # класс бага, что уже чинили сегодня в hex-детекторе A7.1) — проверено живьём:
 # `тутCommonMark` (кириллица впритык, без пробела) не матчился вообще.
 # perl-lookaround на классах [[:alnum:]_] границу видит независимо от того,
 # какой алфавит стоит по другую сторону.
-A2_CAMEL_EXCEPT='NixOS|PostgreSQL|Aisystant'
+A2_CAMEL_EXCEPT='NixOS|PostgreSQL|Aisystant|OpenRouter|GitHub|OpenAI|macOS|LiteLLM|TserenTserenov'
 A2_CAMEL_MATCH=$(printf '%s\n' "$A2_BODY" | perl -ne 'while (/(?<![[:alnum:]_])([A-Za-z]*[a-z][A-Z][A-Za-z]*)(?![[:alnum:]_])/g){print "$1\n"}' | grep -vE "^(${A2_CAMEL_EXCEPT})\$" | head -1 || true)
 [ -n "$A2_CAMEL_MATCH" ] && echo "$TIMESTAMP | $AGENT | A2 | untranslated-term-camelcase | $(redact "$A2_CAMEL_MATCH")" >> "$LOG_FILE" 2>/dev/null || true
 

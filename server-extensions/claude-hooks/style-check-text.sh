@@ -13,12 +13,18 @@
 # hook on stdin with STYLE_AGENT set, so the shared log carries the right
 # agent column.
 #
+# Optional third argument <context>: "peer" for a peer's turn in a peer
+# session (addressed to the writer, not the pilot), "direct" (default) for a
+# reply to the pilot. Exported as STYLE_CONTEXT; a12-next-block.py skips the
+# pilot-chat "Дальше:" profile for "peer" (РП-605 Ф2).
+#
 # Always exits 0 — this is a style nudge, never a gate.
 
 set -uo pipefail
 
 AGENT_NAME="${1:-}"
 TEXT_FILE="${2:-}"
+CONTEXT="${3:-direct}"
 
 if [ -z "$AGENT_NAME" ] || [ -z "$TEXT_FILE" ] || [ ! -f "$TEXT_FILE" ]; then
   exit 0
@@ -45,6 +51,6 @@ with open(path, "w", encoding="utf-8") as fh:
 PY
 
 printf '{"transcript_path":"%s","session_id":"style-check-%s"}' "$TMP_TRANSCRIPT" "$AGENT_NAME" \
-  | STYLE_AGENT="$AGENT_NAME" bash "$HOOK" >/dev/null 2>&1 || true
+  | STYLE_AGENT="$AGENT_NAME" STYLE_CONTEXT="$CONTEXT" bash "$HOOK" >/dev/null 2>&1 || true
 
 exit 0

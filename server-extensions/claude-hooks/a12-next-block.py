@@ -23,6 +23,7 @@ rather than a plain `import` statement.
 Usage: a12-next-block.py <transcript.jsonl>
 """
 import importlib.util
+import os
 import re
 import sys
 from pathlib import Path
@@ -35,8 +36,11 @@ _SPEC.loader.exec_module(_a12)
 
 NEXT_LINE_RE = re.compile(r"^Дальше:\s*(.*)$")
 
+# Possessive "твой" is listed form by form: a stem match (тво\w*) would also
+# hit "творчество"/"творить". Oblique cases were missing until 22.10 and gave
+# two live false positives ("жду твоего «да»", "Без твоего решения").
 ADDRESSEE_RE = re.compile(
-    r"\bты\b|\bтебе\b|\bтебя\b|тво[йяё]|от\s+тебя"
+    r"\bты\b|\bтебе\b|\bтебя\b|\bтво(?:й|я|е|ё|его|ей|ему|ём|ем|им|ими|их|ю|и)\b|от\s+тебя"
     r"|подтверди(?:те)?|выбери(?:те)?|реши(?:те)?|скажи(?:те)?|ответь(?:те)?"
     r"|проверь(?:те)?|посмотри(?:те)?|одобри(?:те)?|согласуй(?:те)?"
     r"|напиши(?:те)?|пришли(?:те)?|дай(?:те)?",
@@ -61,6 +65,11 @@ def final_assistant_lines(rows, limit=3):
 
 def detect(path):
     """Returns (missing: bool, no_addressee_line: str | None)."""
+    # The profile covers replies to the pilot only. A peer's turn in a peer
+    # session is addressed to the writer, so neither signal applies there
+    # (style-check-text.sh sets STYLE_CONTEXT=peer for peer adapters).
+    if os.environ.get("STYLE_CONTEXT") == "peer":
+        return False, None
     rows = list(_a12._rows(path))
     tail = final_assistant_lines(rows)
     next_line = next((m.group(1) for ln in tail if (m := NEXT_LINE_RE.match(ln))), None)
