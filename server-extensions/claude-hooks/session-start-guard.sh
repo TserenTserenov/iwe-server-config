@@ -40,6 +40,16 @@ if [ -z "$SESSION_ID" ]; then
   echo '{}'
   exit 0
 fi
+# session_id feeds a filesystem path below (MARKER_FILE) -- reject anything
+# outside the safe charset before that, not after (path traversal, same
+# class as f8a8596d1, WP-484).
+case "$SESSION_ID" in
+  *[!A-Za-z0-9._-]*)
+    note_failure "session_id contains unsafe characters — marker not written"
+    echo '{}'
+    exit 0
+    ;;
+esac
 
 if ! mkdir -p "$MARKER_DIR" 2>/dev/null; then
   note_failure "mkdir $MARKER_DIR failed"

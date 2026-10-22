@@ -27,6 +27,12 @@ FILE_PATH=$(echo "$INPUT" | python3 -c 'import sys,json; d=json.loads(sys.stdin.
 
 SESSION_ID=$(echo "$INPUT" | python3 -c 'import sys,json; print(json.loads(sys.stdin.read()).get("session_id",""))' 2>/dev/null)
 [ -z "$SESSION_ID" ] && SESSION_ID="${CLAUDE_SESSION_ID:-default}"
+# session_id feeds a filesystem path below (WARN_LOG) -- reject anything
+# outside the safe charset before that, not after (path traversal, same
+# class as f8a8596d1, WP-484).
+case "$SESSION_ID" in
+  *[!A-Za-z0-9._-]*) exit 0 ;;
+esac
 
 CFG="${SCHEMA_TRIGGERS_CONFIG:-$HOME/IWE/.claude/hooks/schema-triggers.yaml}"
 STATE_DIR="$HOME/.claude/state"

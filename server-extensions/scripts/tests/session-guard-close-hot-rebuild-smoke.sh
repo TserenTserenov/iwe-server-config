@@ -127,6 +127,12 @@ build_sandbox() {  # <name> <foreign old=new>...
   git -C "$GOV" remote add origin "$ORIGIN"
   printf '#!/usr/bin/env python3\nprint("{}")\n' > "$GOV/scripts/process-runner.py"
   cp "$HOT_SCRIPTS_DIR/isolate-push.sh" "$HOT_SCRIPTS_DIR/hot_publish_cas.py" "$GOV/scripts/"
+  # isolate-push.sh resolves guard-archive-commits as $(dirname isolate-push.sh)/lib/...
+  # (added after this fixture was written) -- without the full lib/ copy, the
+  # guard call crashes on a missing module (ledger-source-snapshot.py imports
+  # sibling ledger_path.py), mimicking a ledger-guard refusal instead of
+  # exercising the rebuild-and-resume path this test actually targets.
+  cp -r "$HOT_SCRIPTS_DIR/lib" "$GOV/scripts/lib"
   cat > "$GOV/scripts/ledger-append.sh" <<'EOF2'
 #!/usr/bin/env bash
 printf '%s %s\n' "$3" "$4" >> "${IWE_TEST_LEDGER_LOG:?}"

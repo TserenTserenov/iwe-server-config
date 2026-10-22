@@ -30,6 +30,12 @@ INPUT=$(cat)
 SESSION_ID=$(echo "$INPUT" | jq -r '.session_id // empty' 2>/dev/null)
 TOOL_NAME=$(echo "$INPUT" | jq -r '.tool_name // empty' 2>/dev/null)
 [ -n "$SESSION_ID" ] && [ -n "$TOOL_NAME" ] || exit 0
+# session_id feeds a filesystem path below (DECL_FILE) -- reject anything
+# outside the safe charset before that, not after (path traversal, same
+# class as f8a8596d1, WP-484).
+case "$SESSION_ID" in
+  *[!A-Za-z0-9._-]*) exit 0 ;;
+esac
 
 # C1 (Fable cold review, 13.10): declare-intent.sh itself runs as a Bash
 # call and would otherwise be gated by the check it exists to satisfy --

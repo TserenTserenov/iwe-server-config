@@ -27,7 +27,12 @@ STATUS_SCRIPT="$IWE_ROOT/scripts/agent-status-report.sh"
 INPUT=""
 IFS= read -r -t 1 INPUT 2>/dev/null || true
 SESSION_ID="$(printf '%s' "$INPUT" | jq -r '.session_id // empty' 2>/dev/null || true)"
-[ -n "$SESSION_ID" ] && rm -f "$IWE_ROOT/.iwe-runtime/session-markers/claude-code-${SESSION_ID}.yaml" 2>/dev/null
+# session_id feeds a filesystem path below -- reject empty/unsafe before
+# building it, not after (path traversal, same class as f8a8596d1, WP-484).
+case "$SESSION_ID" in
+  ""|*[!A-Za-z0-9._-]*) : ;;
+  *) rm -f "$IWE_ROOT/.iwe-runtime/session-markers/claude-code-${SESSION_ID}.yaml" 2>/dev/null ;;
+esac
 
 echo '{}'
 exit 0

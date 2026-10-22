@@ -482,10 +482,9 @@ Writer (Kimi) применяет изменения через Edit/Write. За�
 
 Вызов напарника как code reviewer через тот же адаптер что для turn-loop:
 
-```bash
-: "${REVIEW_ITER:=1}"
-REVIEW_FILE="${SESSION_DIR}/review-$(printf '%02d' "$REVIEW_ITER").md"
-REVIEW_PROMPT=$(cat <<EOF
+Каталог для промптов создать один раз: `mkdir -p "$HOME/IWE/.iwe-runtime/peer-prompts"`. Промпт собирается **в файл инструментом записи файлов (WriteFile/Write), не через оболочку**: в диф и фрагменты кода попадают обратные кавычки, `$(...)` и строки `EOF`, которые в heredoc или в двойных кавычках выполнятся или оборвут текст. Путь файла: `$HOME/IWE/.iwe-runtime/peer-prompts/<SESSION_ID>-review-NN.txt`. Содержимое — шаблон ниже с подставленными значениями:
+
+```text
 КРИТИЧНО: НЕ используй Write/Edit. Выводи markdown в stdout.
 Весь твой ответ = один отчёт в stdout. Ничего больше.
 
@@ -511,14 +510,17 @@ Cold-context code review результатов peer-сессии <SESSION_ID>.
 ## High / ## Medium / ## OK
 
 Не предлагай рефакторинг или стиль — только runtime баги и нарушения чек-листа.
-EOF
-)
-
-echo "$REVIEW_PROMPT" | IWE_PEER_PLAIN=1 bash "$HOME/IWE/${IWE_GOVERNANCE_REPO:-DS-strategy}/<ADAPTER>" \
-  > "$REVIEW_FILE" 2> "${REVIEW_FILE%.md}.err"
 ```
 
-Добавь в `REVIEW_PROMPT` точечный diff и нужные фрагменты файлов. Нельзя передавать каталоги: напарник получает только текстовую проекцию.
+Вместо `<CHANGED_FILES>` писатель вставляет точечный diff и нужные фрагменты файлов. Нельзя передавать каталоги: напарник получает только текстовую проекцию. Затем — в оболочку только пути:
+
+```bash
+: "${REVIEW_ITER:=1}"
+REVIEW_FILE="${SESSION_DIR}/review-$(printf '%02d' "$REVIEW_ITER").md"
+REVIEW_PROMPT_FILE="$HOME/IWE/.iwe-runtime/peer-prompts/<SESSION_ID>-review-$(printf '%02d' "$REVIEW_ITER").txt"
+IWE_PEER_PLAIN=1 bash "$HOME/IWE/${IWE_GOVERNANCE_REPO:-DS-strategy}/<ADAPTER>" \
+  < "$REVIEW_PROMPT_FILE" > "$REVIEW_FILE" 2> "${REVIEW_FILE%.md}.err"
+```
 
 ### 3.6.3 Review Outcome
 
@@ -537,46 +539,85 @@ echo "$REVIEW_PROMPT" | IWE_PEER_PLAIN=1 bash "$HOME/IWE/${IWE_GOVERNANCE_REPO:-
 
 ### 3.6.4 Smoke Verification (через bash pipe к напарнику)
 
-Kimi-writer не имеет Skill tool — `/verify` вызывается через напарника как proxy:
+Kimi-writer не имеет Skill tool, а напарник в этом вызове не имеет файловых инструментов и ничего не запускает: он оценивает переданный текст по правилам `/verify` (формат вердикта, условие опровержения). Исполняемые проверки (тесты, smoke) писатель запускает сам локально и вставляет их вывод в промпт как свидетельство.
+
+1. Условие опровержения — инструментом записи файлов в `$HOME/IWE/.iwe-runtime/peer-prompts/<SESSION_ID>-verify.condition.txt`, по одному условию на строку (для каждого инварианта — какое наблюдаемое его нарушило бы, с якорем: код в обратных кавычках, путь, строка, файл:N). Проверить:
+
+```bash
+python3 "$HOME/IWE/.claude/skills/verify/falsification_lint.py" condition \
+  < "$HOME/IWE/.iwe-runtime/peer-prompts/<SESSION_ID>-verify.condition.txt"
+```
+
+Код 1 → исход NOT_VERIFIABLE (условие не сформулировано), напарника не вызывать. Код 2 или программы нет → NOT_VERIFIABLE «проверочная программа недоступна».
+
+2. Промпт — инструментом записи файлов в `$HOME/IWE/.iwe-runtime/peer-prompts/<SESSION_ID>-verify.txt`, не через оболочку:
+
+```text
+КРИТИЧНО: НЕ используй Write/Edit. Весь твой ответ = один отчёт в stdout.
+
+Проверка результатов peer-сессии <SESSION_ID> по правилам /verify (режим code). Ты оцениваешь только переданный ниже текст, ничего не запускаешь.
+
+Изменённые файлы (диф и фрагменты):
+<CHANGED_FILES>
+
+Вывод проверок, запущенных писателем (тесты, smoke):
+<вывод команд>
+
+Инварианты консенсуса:
+<list from 3.5>
+
+Условие опровержения (дословно, не меняй):
+<содержимое файла условия>
+
+Верни ровно в формате:
+## Verdict: PASS | CONDITIONAL | FAIL | UNKNOWN
+### Условие опровержения
+<дословно>
+### Что проверено
+<какие свидетельства из текста выше ты прочитал — без выводов>
+### Несоответствия
+| # | Severity | Файл | Строка | Что |
+### Сводка
+- **Критических:** N
+- **Высоких:** N
+[для UNKNOWN] **Недостающее свидетельство:** … / **Как получить:** …
+Правила: FAIL — сработало условие опровержения или есть критическое; UNKNOWN — критических нет, но по переданному тексту нельзя решить условие; CONDITIONAL — есть высокие, исправимые без новых свидетельств; PASS — ничего из этого. Старшинство: FAIL > UNKNOWN > CONDITIONAL > PASS (высокие при нерешённом условии → UNKNOWN). Severity в таблице — словами: критический / высокий / средний / низкий.
+```
+
+3. Вызов и проверка ответа — в оболочку только пути:
 
 ```bash
 VERIFY_FILE="${SESSION_DIR}/verify-01.md"
-VERIFY_PROMPT=$(cat <<EOF
-КРИТИЧНО: НЕ используй Write/Edit для файлов вне временного smoke-скрипта. Выводи результат в stdout.
-Весь твой ответ = один отчёт в stdout. Ничего больше.
-
-Запусти smoke test для изменений peer-сессии <SESSION_ID>.
-
-Изменённые файлы:
-<CHANGED_FILES>
-
-Инварианты консенсуса (что должно работать):
-<list from 3.5>
-
-Используй встроенный /verify skill (Skill tool: skill=verify, args=...).
-Если /verify не подходит (например, CLI-only без UI) — напиши и запусти точечный smoke (pytest fixture / curl call / минимальный python script).
-Верни:
-- PASS / FAIL
-- При FAIL: traceback + первая строка-причина
-- Команда которую запустил
-EOF
-)
-
-echo "$VERIFY_PROMPT" | IWE_PEER_PLAIN=1 bash "$HOME/IWE/${IWE_GOVERNANCE_REPO:-DS-strategy}/<ADAPTER>" \
+IWE_PEER_PLAIN=1 bash "$HOME/IWE/${IWE_GOVERNANCE_REPO:-DS-strategy}/<ADAPTER>" \
+  < "$HOME/IWE/.iwe-runtime/peer-prompts/<SESSION_ID>-verify.txt" \
   > "$VERIFY_FILE" 2> "${VERIFY_FILE%.md}.err"
+python3 "$HOME/IWE/.claude/skills/verify/falsification_lint.py" verdict \
+  --condition-file "$HOME/IWE/.iwe-runtime/peer-prompts/<SESSION_ID>-verify.condition.txt" \
+  < "$VERIFY_FILE"
 ```
 
-Напарник в этом вызове не запускает smoke-тесты: он может только оценить переданный текст. Исполняемую проверку запускает писатель локально по отдельному протоколу.
+Код 1: напарник вернул FAIL → исход FAIL (провал не понижается), нарушения оформления перечислить; иначе → исход NOT_VERIFIABLE «вердикт невалиден: <вывод программы>». Код 2 → NOT_VERIFIABLE «проверочная программа недоступна».
 
-**Результат:**
+**Результат (все пять исходов `/verify`, ни один не трактуется молча как другой):**
 - PASS → перейти к 3.6.5.
+- CONDITIONAL → показать пилоту высокие замечания, спросить «фиксить сейчас или деплоить с ними?»; без ответа к 3.6.5 не переходить.
 - FAIL → показать traceback пилоту, спросить «фиксить и повторить или escalate?»
   - «фиксить» → Edit → вернуться к 3.6.2 (review после фиксов) или 3.6.4 (если фикс точечный, по согласию пилота).
   - «escalate» → ESCALATE_TO_USER + escalation-NN.md.
+- UNKNOWN → не подтверждено, но и не провал: показать пилоту «Недостающее свидетельство» и «Как получить»; добыть свидетельство и повторить 3.6.4, либо пилот явно принимает деплой без него.
+- NOT_VERIFIABLE → проверка не поставлена: показать «Причину» (обычно — условие опровержения не сформулировано); переформулировать условие и повторить 3.6.4. Не FAIL артефакта, не PASS.
 
 ### 3.6.5 Deploy
 
-Для каждого репо в списке изменённых файлов:
+Для каждого репо в списке изменённых файлов. Сообщение коммита сначала записать инструментом записи файлов (не через оболочку) в `$HOME/IWE/.iwe-runtime/peer-prompts/<SESSION_ID>-commit-msg.txt`:
+
+```text
+<type>(<scope>): <короткое описание>
+
+Refs: peer-session <SESSION_ID>
+Review iters: <REVIEW_ITER>
+Verify: <вердикт /verify из 3.6.4: PASS | CONDITIONAL (принято пилотом) | UNKNOWN (деплой без свидетельства принят пилотом)>
+```
 
 ```bash
 cd <repo path>
@@ -584,11 +625,9 @@ git status --short
 # pathspec после `--`: commit ТОЛЬКО свои файлы. Bare `git commit` сметает
 # чужое pre-staged из общего индекса (mis-attribution, см. 2026-06-20-39).
 git add <specific files — НЕ git add . и НЕ git add -u>
-git commit -m "<type>(<scope>): <короткое описание>
-
-Refs: peer-session <SESSION_ID>
-Review iters: <REVIEW_ITER>
-Verify: PASS" -- <те же specific files>
+# Message text is written to a file with a file-writing tool, never inlined in
+# double quotes: backticks and $(...) in a description would be executed.
+git commit -F "$HOME/IWE/.iwe-runtime/peer-prompts/<SESSION_ID>-commit-msg.txt" -- <те же specific files>
 
 # WP-537: заявить свой коммит в семафоре сессии. Без этой строки закрытие
 # проверяет «моя работа опубликована» по состоянию ВСЕЙ ветки, и один
@@ -1045,7 +1084,11 @@ grep -qF "status: completed" "$DRAFT_FILE" \
 # Коммитим в текущую ветку и публикуем ровно свои коммиты через шлюз (ниже).
 PATHS=("$MONTH/$DAY/$SESSION_ID/" "$MONTH/${TODAY}-${SESSION_SLUG}.md")
 git add "${PATHS[@]}"
-git commit -m "feat(peer): $SESSION_ID (kimi-writer) — <задача кратко>" -- "${PATHS[@]}"
+# Task text: written beforehand with a file-writing tool (not the shell) to
+# $HOME/IWE/.iwe-runtime/peer-prompts/<SESSION_ID>-task.txt — never inline it in quotes.
+TASK_FILE="$HOME/IWE/.iwe-runtime/peer-prompts/$SESSION_ID-task.txt"
+test -s "$TASK_FILE" || { echo "нет файла задачи $TASK_FILE — записать его инструментом записи файлов" >&2; exit 1; }
+{ printf 'feat(peer): %s (kimi-writer) — ' "$SESSION_ID"; cat "$TASK_FILE"; } | git commit -F - -- "${PATHS[@]}"
 OUR_SHAS=("$(git rev-parse HEAD)")   # публикуем ровно свои коммиты по одному
 
 # F1 (пир-сессия 2026-08-21-02-day-close-anomaly-classes): attest-манифест

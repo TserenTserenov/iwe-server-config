@@ -884,23 +884,34 @@ Agent(
 ```
 Skill(
   skill: "verify",
-  args: "Smoke test changes from peer-session <SESSION_ID>. Files: <CHANGED_FILES>. Consensus invariants to check: <list из 3.5 — что должно работать>. Запусти приложение/тесты, проверь поведение, верни PASS/FAIL с traceback при FAIL."
+  args: "code Smoke test changes from peer-session <SESSION_ID>. Files: <CHANGED_FILES>. Consensus invariants to check: <list из 3.5 — что должно работать>. Falsification conditions (одно условие на строку, у каждого свой якорь: код в обратных кавычках, путь, строка, файл:N):\n<для каждого инварианта — какое наблюдаемое его нарушило бы>. Запусти приложение/тесты, проверь поведение, верни вердикт с traceback при FAIL."
 )
 ```
 
-`/verify` сам решит как проверять (запуск приложения, pytest, manual instructions для UI).
+`/verify` сам решит как проверять (запуск приложения, pytest, manual instructions для UI). Условие опровержения — обязательный вход `/verify` (его Шаг 2); формулируется из инвариантов консенсуса, а не после результата.
 
-**Результат:**
+**Результат (все пять исходов `/verify`, ни один не трактуется молча как другой):**
 - PASS → перейти к 3.6.5.
+- CONDITIONAL → показать пилоту высокие замечания, спросить «фиксить сейчас или деплоить с ними?»; без ответа к 3.6.5 не переходить.
 - FAIL → показать traceback пилоту, спросить «фиксить и повторить или escalate?»
   - «фиксить» → Edit → вернуться к 3.6.2 (review после фиксов) или сразу 3.6.4 если фикс точечный (по согласию пилота).
   - «escalate» → ESCALATE_TO_USER + escalation-NN.md.
+- UNKNOWN → не подтверждено, но и не провал: показать пилоту «Недостающее свидетельство» и «Как получить»; добыть свидетельство и повторить 3.6.4, либо пилот явно принимает деплой без него.
+- NOT_VERIFIABLE → проверка не поставлена: показать «Причину» (обычно — условие опровержения не сформулировано); переформулировать условие и повторить 3.6.4. Не FAIL артефакта, не PASS.
 
 Сохранить вывод `/verify` в `${SESSION_DIR}/verify-01.md`.
 
 ### 3.6.5 Deploy
 
-Для каждого репо в списке изменённых файлов:
+Для каждого репо в списке изменённых файлов. Сообщение коммита сначала записать инструментом записи файлов (не через оболочку) в `$HOME/IWE/.iwe-runtime/peer-prompts/<SESSION_ID>-commit-msg.txt`:
+
+```text
+<type>(<scope>): <короткое описание>
+
+Refs: peer-session <SESSION_ID>
+Review iters: <REVIEW_ITER>
+Verify: <вердикт /verify из 3.6.4: PASS | CONDITIONAL (принято пилотом) | UNKNOWN (деплой без свидетельства принят пилотом)>
+```
 
 ```bash
 cd <repo path>
@@ -908,11 +919,9 @@ git status --short
 # pathspec после `--`: commit ТОЛЬКО свои файлы. Bare `git commit` сметает
 # чужое pre-staged из общего индекса (mis-attribution, см. 2026-06-20-39).
 git add <specific files — НЕ git add . и НЕ git add -u>
-git commit -m "<type>(<scope>): <короткое описание>
-
-Refs: peer-session <SESSION_ID>
-Review iters: <REVIEW_ITER>
-Verify: PASS" -- <те же specific files>
+# Message text is written to a file with a file-writing tool, never inlined in
+# double quotes: backticks and $(...) in a description would be executed.
+git commit -F "$HOME/IWE/.iwe-runtime/peer-prompts/<SESSION_ID>-commit-msg.txt" -- <те же specific files>
 
 # WP-537: заявить свой коммит в семафоре сессии. Без этой строки закрытие
 # сессии проверяет «моя работа опубликована» по состоянию ВСЕЙ ветки, и один
@@ -1250,7 +1259,13 @@ session_id: $SESSION_ID
 
 ## Главный инсайт
 
-<1-2 строки из §4 report.md — зафиксированное решение>
+EOF
+# The insight is free text (backticks, $(...), even a line "EOF"): written
+# beforehand with a file-writing tool to the path below, never through the shell.
+INSIGHT_FILE="$HOME/IWE/.iwe-runtime/peer-prompts/$SESSION_ID-insight.txt"
+test -s "$INSIGHT_FILE" || { echo "нет файла инсайта $INSIGHT_FILE — записать его инструментом записи файлов" >&2; exit 1; }
+cat "$INSIGHT_FILE" >> "$GUARD_ORZ"
+cat >> "$GUARD_ORZ" <<EOF
 
 ## Контекст
 
@@ -1287,7 +1302,11 @@ cd "$SESSIONS_DIR"
 # того же общего файла, ровно тот класс бага, который черновик закрывает.
 PATHS=("$MONTH/$DAY/$SESSION_ID/" "$GUARD_ORZ")
 git add "${PATHS[@]}"
-git commit -m "feat(peer): $SESSION_ID — <задача кратко>" -- "${PATHS[@]}"
+# Task text: written beforehand with a file-writing tool (not the shell) to
+# $HOME/IWE/.iwe-runtime/peer-prompts/<SESSION_ID>-task.txt — never inline it in quotes.
+TASK_FILE="$HOME/IWE/.iwe-runtime/peer-prompts/$SESSION_ID-task.txt"
+test -s "$TASK_FILE" || { echo "нет файла задачи $TASK_FILE — записать его инструментом записи файлов" >&2; exit 1; }
+{ printf 'feat(peer): %s — ' "$SESSION_ID"; cat "$TASK_FILE"; } | git commit -F - -- "${PATHS[@]}"
 OUR_SHAS=("$(git -C "$SESSIONS_DIR" rev-parse HEAD)")   # публикуем ровно свои коммиты по одному, см. блок публикации ниже
 
 # WP-537: заявить свой коммит в семафоре — тот же паттерн, что на Шаге 3.6.5,
