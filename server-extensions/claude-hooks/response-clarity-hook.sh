@@ -171,6 +171,16 @@ fi
 if [ -z "$A10_MATCH" ]; then
   A10_MATCH=$(printf '%s\n' "$RESPONSE" | grep -oE '\*\*(PASS|FAIL|PLAUSIBLE|CONFIRMED)\b' | head -1 || true)
 fi
+# Голое PASS/FAIL отдельным словом в прозе («всё PASS», «статус FAIL») — Ф18,
+# живой отчёт пилота 22.10: прежние шаблоны требовали «тест:»/«smoke:» рядом.
+# Код, backtick и цитаты («…»/"…") вырезаны; слово как предмет разговора
+# («слово PASS», «термин FAIL») и дефисные сращения (FAIL-safe) не нарушение.
+if [ -z "$A10_MATCH" ]; then
+  A10_MATCH=$(printf '%s\n' "$RESPONSE" \
+    | perl -CSD -Mutf8 -0777 -pe 's/```.*?```//gs; s/`[^`\n]*`//g; s/«[^»\n]*»//g; s/"[^"\n]*"//g' \
+    | perl -CSD -Mutf8 -ne 's/(слов|термин|метк|маркер|надпис)[а-яё]*\s+\W?(PASS|FAIL)//gi; s/(PASS|FAIL)\W{0,3}(это\s+)?(слов|термин|метк|маркер|надпис)[а-яё]*//gi; if (/(?<![\p{L}\p{N}_-])(PASS|FAIL)(?![\p{L}\p{N}_-])/) { print "$1\n"; last }' \
+    | head -1 || true)
+fi
 [ -n "$A10_MATCH" ] && log_violation "A10" "bare-english-marker" "$A10_MATCH"
 
 # --- A2 (новое правило, РП-388 калибровка 19.10, WARN-ONLY — в BLOCKABLE не
@@ -429,12 +439,28 @@ cmd_inline_re = re.compile(r'^(' + CMD_WORDS + r')\s+\S')
 bt_descriptor_re = re.compile(r'(скрипт|команд|файл|пут[ьи]|ветк|директори|папк|каталог|репозитори|хук|сценари)[а-яё]*', re.IGNORECASE)
 # Форма "русское описание (`термин`)" — та же, что уже разрешена A2 выше.
 bt_paren_form_re = re.compile(r'[а-яё][а-яё-]*\s*\($', re.IGNORECASE)
+# Ф18 (22.10, живой отчёт пилота про `note-commit --forget-unprovable`,
+# `close_delivery_source_commits`, `iwe-local-config@eadd57139`, `PREPARED`):
+# список CMD_WORDS не угнаться за именами команд, поэтому добавлен признак
+# ФОРМЫ — латинский идентификатор без кириллицы с дефисом/подчёркиванием/@/
+# точкой между буквами, флагом `--x` или ВЕРХНИМ регистром ≥4 букв. Только `/`
+# не считается формой (`origin/main` — граница класса, фикстура NEG-04).
+# Исключения для ALLCAPS (TODO/INFO) и дефисных слов в backtick НЕ заводим
+# заранее (P13): сначала живое ложное срабатывание в журнале, потом список.
+bt_cyr_re = re.compile(r'[А-Яа-яЁё]')
+bt_shape_re = re.compile(r'[A-Za-z][-_@][A-Za-z0-9]|[A-Za-z]\.[A-Za-z]|(^|\s)--?[A-Za-z]|\b[A-Z]{4,}\b')
+
+
+def is_bare_tech_token(content):
+    if path_re.fullmatch(content) or cmd_inline_re.match(content):
+        return True
+    return not bt_cyr_re.search(content) and bool(bt_shape_re.search(content))
+
+
 bt_token = None
 for bt_match in re.finditer(r'`([^`\n]{1,200})`', body_no_fence):
     content = bt_match.group(1)
-    # snake_case в backtick сознательно не входит в эту фазу (known_gap
-    # A13.1-GAP-SNAKE-01) — только путь или команда в начале токена.
-    if not (path_re.fullmatch(content) or cmd_inline_re.match(content)):
+    if not is_bare_tech_token(content):
         continue
     window_start = max(0, bt_match.start() - 60)
     window = body_no_fence[window_start:bt_match.start()]
@@ -484,12 +510,15 @@ BLOCKABLE=""
 printf '%s' "$VIOLATIONS" | grep -qE '\bA1\b'  && BLOCKABLE="$BLOCKABLE A1"
 printf '%s' "$VIOLATIONS" | grep -qE '\bA10\b' && BLOCKABLE="$BLOCKABLE A10"
 printf '%s' "$VIOLATIONS" | grep -qE 'A7\.1'   && BLOCKABLE="$BLOCKABLE A7.1"
+# Ф18 (22.10): A13.1 блокирует. Ложный блок стоит одной переписки ответа,
+# пропуск — непонятного пилоту текста; точность перемеряется 27.10, при <0.7 — назад в warn.
+printf '%s' "$VIOLATIONS" | grep -qE 'A13\.1'  && BLOCKABLE="$BLOCKABLE A13.1"
 
 ESC_NOTE=""
 [ "$COUNT" -ge 3 ] && ESC_NOTE=" | 3+ нарушений стиля за сессию (сигнал пилоту)"
 
 if [ "${STYLE_ENFORCE_BLOCK:-0}" = "1" ] && [ -n "$BLOCKABLE" ]; then
-  REASON="Стиль нарушен (правила:${BLOCKABLE} ). Перепиши ответ для пилота. Начни СЛЕДУЮЩЕЕ сообщение со строки коррекции — STYLE_FIX:${BLOCKABLE} «было» → «стало» — затем полезный текст. Правила: A1 путь не подлежащее; A10 без голых маркеров (exit/PASS/SHA); A7.1 техжурнал (хэши коммитов, SHA, пути отчёта) в чат не идёт — даже под <details>, он в report.md.${ESC_NOTE}"
+  REASON="Стиль нарушен (правила:${BLOCKABLE} ). Перепиши ответ для пилота. Начни СЛЕДУЮЩЕЕ сообщение со строки коррекции — STYLE_FIX:${BLOCKABLE} «было» → «стало» — затем полезный текст. Правила: A1 путь не подлежащее; A10 без голых маркеров (exit/PASS/SHA); A7.1 техжурнал (хэши коммитов, SHA, пути отчёта) в чат не идёт — даже под <details>, он в report.md; A13.1 имя команды, файла или идентификатора в обратных кавычках без русского пояснения — опиши по-русски, что оно делает (например: «команда снятия заявок (note-commit --forget-unprovable)» без обратных кавычек) или убери.${ESC_NOTE}"
   jq -n --arg r "$REASON" '{"decision":"block","reason":$r}'
   exit 0
 fi
