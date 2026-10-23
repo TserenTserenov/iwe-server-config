@@ -291,67 +291,99 @@ BASE5_MATCH=$(printf '%s\n' "$RESPONSE" | perl -CSD -Mutf8 -ne '
 # Warn-only: regex cannot settle ontology, the log feeds calibration.
 # Concept lists come from the registry copy (lib/concept-kinds.tsv, generated from
 # PACK-digital-platform concept-kinds-registry.yaml): systems vs non-systems. Collections
-# and ambiguous words are in neither list, so they never trigger A14. No copy -> the
-# built-in lists in the perl block below (fail-open).
+# never trigger A14. Ambiguous words never BLOCK (FPF C.3.2: "unknown" is not a verdict):
+# a part-whole sentence with one is logged as A14_AMBIGUOUS, a warn-only signal that feeds
+# registry calibration. No copy -> the built-in lists in the perl block below (fail-open).
 A14_TSV="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/concept-kinds.tsv"
-A14_NONSYS=""; A14_SYS=""
+A14_NONSYS=""; A14_SYS=""; A14_AMBIG=""
 if [ -r "$A14_TSV" ]; then
   A14_NONSYS=$(awk -F'\t' '!/^#/ && NF==2 && $1!="system" && $1!="ambiguous" && $1!="collection" {print $2}' "$A14_TSV" | paste -sd'|' -)
   A14_SYS=$(awk -F'\t' '!/^#/ && NF==2 && $1=="system" {print $2}' "$A14_TSV" | paste -sd'|' -)
+  A14_AMBIG=$(awk -F'\t' '!/^#/ && NF==2 && $1=="ambiguous" {print $2}' "$A14_TSV" | paste -sd'|' -)
 fi
-export A14_NONSYS A14_SYS
+export A14_NONSYS A14_SYS A14_AMBIG
 A14_MATCH=$(printf '%s\n' "$RESPONSE" | perl -0777 -CSD -Mutf8 -ne '
   s/«[^»]*»//g; s/`[^`]*`//g;
   my $b = qr/(?<![а-яёА-ЯЁ])/;
   # agent nouns built on a description stem are systems: Планировщик, Процессор
   my $notagent = qr/(?![а-яё]*(щик|чик|тель|тор|ор)(?![а-яё]))/i;
-  my $nonsys_src = $ENV{A14_NONSYS} || "инструкци|промпт|метод|процесс|описани|документ|состояни|характеристик|управлени[ея]\\s+выполнени|контекст|памят|правил|ритуал|протокол|знани|карточк|запис|файл|репозитори";
+  my $nonsys_src = $ENV{A14_NONSYS} || "инструкци|промпт|метод|процесс|описани|документ|состояни|характеристик|управлени[ея]\\s+выполнени|контекст|памят|правил|ритуал|протокол|знани|карточк|запис|файл|репозитори|ответ|план|скилл";
   my $sys_src = $ENV{A14_SYS} || "модул|клиент|сервер|сервис|исполнител|хранилищ|баз[аеыу]";
   # %ENV holds raw bytes; decode so the Cyrillic stems match the decoded reply text
   utf8::decode($nonsys_src) if $ENV{A14_NONSYS};
   utf8::decode($sys_src) if $ENV{A14_SYS};
+  my $amb_src = $ENV{A14_AMBIG} || ""; utf8::decode($amb_src);
   my $nonsys = qr/$b($nonsys_src)/i;
   my $syshead = qr/$b($sys_src)\S*/i;
   my $part = qr/$b(входи[тл]|входят|входить|состо[ия]т\s+из|в\s+состав(?![а-яё])|(является|являются|будет|быть)\s+частью|част(ью|ь|и)\s+(агента|системы|программы))/i;
-  my $nonsys_s = qr/$b($nonsys_src)$notagent\S*/i;
+  my $end = qr/[а-яё]{0,3}(?![а-яё])/i;
+  my $nonsys_s = qr/$b($nonsys_src)$notagent$end/i;
+  my $ambw = $amb_src ? qr/$b($amb_src)$notagent$end/i : undef;
+  # a window of up to three words never crosses a comma or semicolon (clause boundary)
+  my $win = qr/(?:\s+[^\s,;]+){0,3}?/;
+  # first real hit wins and is printed at once; an ambiguous-head hit is only held back and
+  # printed (prefixed AMBIG) by END when no real hit exists
+  our ($REAL, $AMB) = (0, "");
+  sub hit { $REAL = 1; print $_[0]; exit }
   my @lines = split /\n/;
   for my $i (0 .. $#lines) {
     my $h = $lines[$i];
     next unless $h =~ /:\s*\**\s*$/
       && $h =~ /$b(состо[ия]т\s+из|входят|компонент|элемент|сло[яёе]в?(?![а-яё])|состав(?![а-яё])|составн\S*\s+част|в\s+(ней|нём|него|неё)\s+(есть|работают|собран\S*)|соединены|к\s+(нему|ней)\s+добавлен)/i;
     next if $h =~ /(^|\s)не\s+(входи|входя|явля|состо)/i;
-    # a header that is itself about a description/method ("Промпт ... несколько слоёв:")
-    # introduces the content parts of that description (ConstituentOf), not system parts
-    next if $h =~ $nonsys;
+    # a header whose SUBJECT (first word) is a description/method ("Промпт ... несколько слоёв:")
+    # introduces the content parts of that description (ConstituentOf), not system parts;
+    # a non-system word elsewhere in the header ("... со своим состоянием ...") does not count
+    next if $h =~ /^\W*$nonsys/;
     for my $j ($i + 1 .. $#lines) {
       my $it = $lines[$j];
       next if $it =~ /^\s*$/;
       last unless $it =~ /^\s*([-*]|\d+[.)]|\*\*\d+[.)])\s*/;
       my $head = $it =~ /\*\*([^*]+)\*\*/ ? $1 : ($it =~ /^\s*(?:[-*]|\d+[.)])\s*([^—:,(]+)/ ? $1 : "");
-      # head noun is the first word: "Модуль памяти" is a system, "Правила пилота" is not
+      # head noun is the first word: "Модуль памяти" is a system or an ambiguous head (decided
+      # by the sentence, not by the word), "Правила пилота" is a plain non-system
       next if $head =~ /^\s*$syshead/;
-      if ($head =~ $nonsys) { $h =~ s/\s+$//; print "$h $it"; exit }
+      # cut an ambiguous head with its one complement word ("Модуль памяти"): what is left decides;
+      # "Контекст и память" keeps "память" and still counts
+      (my $rest = $head) =~ s/^\s*$ambw\s+\S+// if $ambw;
+      $rest = $head unless defined $rest;
+      if ($rest =~ $nonsys) { $h =~ s/\s+$//; hit("$h $it") }
     }
   }
   s/\*\*//g;
   for my $s (split /(?<=[.!?;:])\s+|\n+/) {
-    (my $t = $s) =~ s/(^|\s)не\s+(входи\S*|входя\S*|состо\S*\s+из|явля\S*\s+частью|част\S*)/$1/gi;
+    (my $t = $s) =~ s/(^|\s)не\s+(входи\S*|входя\S*|состо\S*\s+из|явля\S*\s+частью|част\S*)(\s+в\s+состав\S*)?/$1/gi;
+    my $t0 = $t;  # before heads are cut: the ambiguity warning must still see them
     $t =~ s/$syshead\s+\S+//g;
-    if ($t =~ /$nonsys_s(\s+\S+){0,3}?\s+$part/ || $t =~ /$part(\s+\S+){0,3}?\s+$nonsys_s/) {
-      print $s; exit
+    # "модуль памяти": an ambiguous head with its complement is not a verdict, but the link verb
+    # after it ("отчёт входит") must stay visible
+    $t =~ s/$ambw\s+(?!$part)\S+//g if $ambw;
+    if ($t =~ /$nonsys_s$win\s+$part/ || $t =~ /$part$win\s+$nonsys_s/) {
+      hit($s)
     }
-    if ($t =~ /$b(ответ|протокол|документ|описани|метод|инструкци|план|процесс|закрыти|открыти|ритуал|работ|сесси|текст|отч[её]т|скилл)$notagent\S*(\s+\S+){0,3}?\s+(состо[ия]т\s+из|дел[ия]тся\s+на)\s+(\S+\s+)?(част|раздел|этап|шаг)/i) {
-      print $s; exit
+    if ($t =~ /$nonsys_s$win\s+(состо[ия]т\s+из|дел[ия]тся\s+на)\s+(\S+\s+)?(част|раздел|этап|шаг)/i) {
+      hit($s)
+    }
+    if (!$AMB && $ambw
+        && ($t0 =~ /$ambw$win\s+$part/ || $t0 =~ /$part$win\s+$ambw/
+            || $t0 =~ /$ambw$win\s+(состо[ия]т\s+из|дел[ия]тся\s+на)\s+(\S+\s+)?(част|раздел|этап|шаг)/i)) {
+      $AMB = $s
     }
     # "X - это Y" assigns a type; "state is a set of values" names a description, not a type
     if ($t =~ /$b(состояни|систем|агент|метод|работ)\S*\s+[-—–]\s+это\s+(набор|совокупност|множеств|комплекс|сочетани|список|профиль)/i
         || $t =~ /$b(метод)\S*\s+[-—–]\s+это\s+(описани|документ|текст|файл|инструкци)/i
         || $t =~ /$b(протокол|инструкци|описани|документ|файл)\S*\s+[-—–]\s+это\s+метод/i) {
-      print $s; exit
+      hit($s)
     }
   }
+  END { print "AMBIG\t$AMB" if $AMB && !$REAL }
 ' 2>/dev/null || true)
-[ -n "$A14_MATCH" ] && log_violation "A14" "non-system-as-part" "$A14_MATCH"
+if [ -n "$A14_MATCH" ]; then
+  case "$A14_MATCH" in
+    AMBIG$'\t'*) log_violation "A14_AMBIGUOUS" "ambiguous-head-in-part-whole" "${A14_MATCH#AMBIG$'\t'}" ;;
+    *) log_violation "A14" "non-system-as-part" "$A14_MATCH" ;;
+  esac
+fi
 
 # --- B1 (поведение): просит пилота «сделать вручную / дать доступ» до проверки ---
 # Ось ПОВЕДЕНИЯ, не стиля: ловит фразы-маркеры, когда агент перекладывает

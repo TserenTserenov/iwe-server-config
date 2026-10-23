@@ -32,7 +32,8 @@ FUNCTIONS = (
     "_isolated_source_commits_json", "_session_commit_claims_json",
     "_prepared_worktree_status_sha", "_prepared_source_worktree_unchanged",
     "_prepared_source_identity_matches", "_prepared_source_snapshot_matches",
-    "_commit_current_tree_has_publish_proof", "_range_commits_have_publish_proof",
+    "_commit_current_tree_has_publish_proof", "_commit_hot_file_merge_has_publish_proof",
+    "_range_commits_have_publish_proof",
     "_prepared_source_set_has_publish_proof", "_prepared_worktree_removal_proof",
     "_publish_prepared_source", "_claimed_commits_have_publish_proof",
     "_worktree_absent_and_unregistered", "_record_close_cleanup", "_prepare_close_receipt",
@@ -136,6 +137,25 @@ _close_delivery_state "$SEM_FILE" one
         self.run_git(other, "commit", "-qm", "unrelated upstream work")
         self.run_git(other, "push", "-q", "origin", "main")
 
+    def push_hot_file_append(self, name, line):
+        clone = self.root / name
+        self.run_git(self.root, "clone", "-q", str(self.origin), str(clone))
+        self.identity(clone)
+        with (clone / FILE).open("a") as stream:
+            stream.write(line + "\n")
+        self.run_git(clone, "commit", "-qam", "hot-file: " + line)
+        self.run_git(clone, "push", "-q", "origin", "main")
+
+    def push_hot_file_edit(self, name, line_index, suffix):
+        clone = self.root / name
+        self.run_git(self.root, "clone", "-q", str(self.origin), str(clone))
+        self.identity(clone)
+        lines = (clone / FILE).read_text().splitlines()
+        lines[line_index] = lines[line_index] + suffix
+        (clone / FILE).write_text("\n".join(lines) + "\n")
+        self.run_git(clone, "commit", "-qam", "hot-file edit: line " + str(line_index))
+        self.run_git(clone, "push", "-q", "origin", "main")
+
     def drift_to_origin(self):
         self.run_git(self.worktree, "fetch", "-q", "origin", "+refs/heads/main:refs/remotes/origin/main")
         self.run_git(self.worktree, "reset", "-q", "--hard", "origin/main")
@@ -225,6 +245,51 @@ _close_delivery_state "$SEM_FILE" one
         self.assertIsNone(self.field("close_publish_proof"))
         self.assertFalse(self.push_marker.exists())
         self.assertEqual(self.rev(self.worktree, "HEAD"), self.head)
+
+    def pad_hot_file_for_context(self):
+        # diff3 needs surrounding context to merge two independent edits
+        # without conflict; the 2-line fixture file has none at end-of-file.
+        # A realistic hot file (e.g. a long WP card) always has it -- extend
+        # with neutral lines so own's and someone else's edits land on
+        # separate, clearly bounded lines, same as the real case.
+        self.push_hot_file_append("hot-pad", "pad1")
+        self.push_hot_file_append("hot-pad2", "pad2")
+
+    def test_drift_hot_file(self):
+        """(h) live case WP-600 tail: a later own edit on a hot file is
+        patch-delivered, then someone else edits a DIFFERENT line of the SAME
+        file -- byte-exact tree match fails, the 3-way merge fallback must not."""
+        self.deliver_prepared_under_new_oid()
+        self.pad_hot_file_for_context()
+        self.drift_to_origin()
+        own_lines = (self.worktree / FILE).read_text().splitlines()
+        own_lines[1] = own_lines[1] + " OWN EDIT"
+        (self.worktree / FILE).write_text("\n".join(own_lines) + "\n")
+        self.run_git(self.worktree, "commit", "-qam", "own edit to the hot file")
+        # Deliver the exact same edit first (as if an earlier close already
+        # pushed it), then someone else edits a different line on top of that.
+        self.push_hot_file_edit("hot-own", 1, " OWN EDIT")
+        self.push_hot_file_edit("hot-other", 3, " OTHER EDIT")
+        result = self.close()
+        self.assert_closed(result)
+        self.assertFalse(self.push_marker.exists(), "a drifted copy must never be pushed from")
+
+    def test_drift_hot_file_conflict(self):
+        """(i) negative control for (h): someone else's edit on the SAME
+        line (not a different one) must NOT be accepted as a merge."""
+        self.deliver_prepared_under_new_oid()
+        self.pad_hot_file_for_context()
+        self.drift_to_origin()
+        own_lines = (self.worktree / FILE).read_text().splitlines()
+        own_lines[1] = own_lines[1] + " OWN EDIT"
+        (self.worktree / FILE).write_text("\n".join(own_lines) + "\n")
+        self.run_git(self.worktree, "commit", "-qam", "own edit to the hot file")
+        local = self.rev(self.worktree, "HEAD")
+        # A conflicting edit to the SAME line -- own's content never lands.
+        self.push_hot_file_edit("hot-conflict", 1, " A CONFLICTING EDIT, NOT OWN'S")
+        result = self.close()
+        self.assert_retained_published(result, "без доказательства доставки")
+        self.assertEqual(self.rev(self.worktree, "HEAD"), local)
 
     def test_unchanged_path(self):
         """(f) no drift: the ordinary path still proves the set and closes, without replaying it."""

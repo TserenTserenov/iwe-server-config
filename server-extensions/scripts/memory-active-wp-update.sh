@@ -17,10 +17,14 @@
 set -uo pipefail
 
 IWE="${1:-${IWE_ROOT:-$HOME/IWE}}"
+GOV_REPO="${IWE_GOVERNANCE_REPO:-DS-my-strategy}"
 MEMORY_FILE="$IWE/memory/MEMORY.md"
 EXOCORTEX_MEMORY="$IWE/DS-my-strategy/exocortex/MEMORY.md"
 SWEEP_SCRIPT="$IWE/scripts/active-wp-sweep.sh"
-INBOX_DIR="$IWE/DS-my-strategy/inbox"
+# Fallback: template checked out as a nested subdir (author-mode-style layout)
+# instead of being delivered to workspace root by update.sh/setup.sh (#242).
+[ -f "$SWEEP_SCRIPT" ] || SWEEP_SCRIPT="$IWE/FMT-exocortex-template/scripts/active-wp-sweep.sh"
+INBOX_DIR="$IWE/$GOV_REPO/inbox"
 
 START_MARKER="<!-- ACTIVE-WP-START -->"
 END_MARKER="<!-- ACTIVE-WP-END -->"

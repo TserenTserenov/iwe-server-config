@@ -2,21 +2,18 @@
 # kind<TAB>stem; the hook adds a left word boundary to every stem.
 system	агент
 system	инструмент
-system	модул
-system	клиент
 system	сервер
-system	сервис
-system	исполнител
-system	хранилищ
-system	баз[аеыу] данных
 system	бот
 system	шлюз
 system	человек
 system	пилот
+system	молоток
+system	молотк
 system	компьютер
 system	мак(?![а-яё])
 description	промпт
 description	инструкци
+description	ответ
 description	правил
 description	чеклист
 description	критери
@@ -39,13 +36,13 @@ method	ритуал
 method	управлени[ея] выполнени
 work	прогон
 work	запуск
+work	работ[аыуе](?![а-яё])
 work_plan	план
 state	состояни
 characteristic	характеристик
 characteristic_value	показател
 characteristic_value	ступен
 characteristic_value	мультипликатор
-characteristic_value	тир(?![а-яё])
 role_kind	рол[ьиеюя](?![а-яё])
 capability	скилл
 capability	способност
@@ -53,8 +50,6 @@ collection	список
 collection	набор
 collection	перечен
 collection	совокупност
-collection	команд
-collection	групп
 ambiguous	процесс
 ambiguous	функци
 ambiguous	контекст
@@ -70,6 +65,15 @@ ambiguous	закрыти
 ambiguous	открыти
 ambiguous	модел[ьиею]
 ambiguous	платформ
+ambiguous	модул
+ambiguous	баз[аеыу] данных
+ambiguous	хранилищ
+ambiguous	сервис
+ambiguous	услуг
+ambiguous	клиент
+ambiguous	исполнител
+ambiguous	команд
+ambiguous	групп
 ambiguous	iwe
 ambiguous	экзокортекс
 ambiguous	цифров[а-яё]+ двойник

@@ -6,10 +6,14 @@ Copy read by .claude/hooks/response-clarity-hook.sh (rule A14):
 .claude/hooks/lib/concept-kinds.tsv, one `kind<TAB>stem` line per stem.
 
 Usage:
-  build-concept-kinds-tsv.py            write the copy
-  build-concept-kinds-tsv.py --check    exit 1 when the copy differs from the registry
+  build-concept-kinds-tsv.py              write the copy
+  build-concept-kinds-tsv.py --check      exit 1 when the copy differs from the registry
+  build-concept-kinds-tsv.py --check-fpf  exit 1 when a FPF pattern cited in the registry is
+                                          missing from the local FPF copy (a pattern was renamed
+                                          or the registry cites something that never existed)
 
-Env: CONCEPT_KINDS_REGISTRY overrides the registry path, CONCEPT_KINDS_TSV the copy path.
+Env: CONCEPT_KINDS_REGISTRY overrides the registry path, CONCEPT_KINDS_TSV the copy path,
+FPF_SPEC the path of FPF-Spec.md (default <root>/FPF/FPF-Spec.md).
 """
 
 from __future__ import annotations
@@ -33,6 +37,8 @@ TSV = Path(os.environ.get("CONCEPT_KINDS_TSV", ROOT / ".claude/hooks/lib/concept
 # A stem goes straight into a Perl regex: letters, digits, space and a few regex marks only.
 STEM_RE = re.compile(r"^[а-яёa-z0-9 \[\]()?|\-!+]+$")
 STATUSES = {"pilot", "pack", "fpf", "draft"}
+# FPF pattern references written in the registry: A.7:5.6, C.3.2, E.10, A.15.1, B.1.5, A.6.P ...
+FPF_REF_RE = re.compile(r"\b([A-H]\.\d+(?:\.\d+)*(?:\.[A-Z]+)?)(?::(\d+(?:\.\d+)*[a-z]?))?(?![\w.])")
 
 
 def load_registry() -> dict:
@@ -60,14 +66,51 @@ def validate(data: dict) -> list[tuple[str, str]]:
             raise SystemExit(f"term {name!r}: status must be one of {sorted(STATUSES)}")
         if not term.get("basis"):
             raise SystemExit(f"term {name!r}: basis is required (a word alone is not a test)")
+        for also in term.get("also") or []:
+            if also.get("kind") not in kind_ids or not also.get("when"):
+                raise SystemExit(f"term {name!r}: also needs an existing kind and a non-empty when")
         for stem in term.get("stems") or []:
             if not STEM_RE.match(stem):
                 raise SystemExit(f"term {name!r}: stem {stem!r} has characters outside the allowed set")
+            try:
+                compiled = re.compile(stem)
+            except re.error as err:
+                raise SystemExit(f"term {name!r}: stem {stem!r} is not a valid pattern ({err})")
+            if compiled.search(""):
+                raise SystemExit(f"term {name!r}: stem {stem!r} matches the empty string "
+                                 "(empty alternative or fully optional pattern would match every reply)")
             if stem in seen and seen[stem] != term["kind"]:
                 raise SystemExit(f"stem {stem!r} is in kinds {seen[stem]!r} and {term['kind']!r}")
             seen[stem] = term["kind"]
             rows.append((term["kind"], stem))
     return rows
+
+
+def fpf_refs(text: str) -> set[tuple[str, str]]:
+    """(pattern id, section or '') pairs cited in the registry text."""
+    return {(m.group(1), m.group(2) or "") for m in FPF_REF_RE.finditer(text)}
+
+
+def check_fpf() -> int:
+    spec = Path(os.environ.get("FPF_SPEC", ROOT / "FPF/FPF-Spec.md"))
+    if not spec.exists():
+        print(f"{spec} not found: cannot check FPF references (set FPF_SPEC)", file=sys.stderr)
+        return 2
+    spec_text = spec.read_text(encoding="utf-8")
+    missing = []
+    for pattern, section in sorted(fpf_refs(REGISTRY.read_text(encoding="utf-8"))):
+        # pattern: "## A.7 - Title" / "## A.7:End"; section: "#### A.7:5.6 - Title" (the colon form only)
+        tail = rf":{re.escape(section)}(?![\w.])" if section else r"(?![\w.])"
+        head = re.compile(rf"^#{{2,5}} {re.escape(pattern)}{tail}", re.M)
+        if not head.search(spec_text):
+            missing.append(f"{pattern}:{section}" if section else pattern)
+    if missing:
+        print("FPF references in the registry with no matching heading in the FPF copy:", file=sys.stderr)
+        for ref in missing:
+            print(f"  {ref}", file=sys.stderr)
+        return 1
+    print(f"all FPF references in the registry resolve in {spec.name}")
+    return 0
 
 
 def render(rows: list[tuple[str, str]]) -> str:
@@ -80,6 +123,8 @@ def render(rows: list[tuple[str, str]]) -> str:
 
 
 def main() -> int:
+    if "--check-fpf" in sys.argv[1:]:
+        return check_fpf()
     check = "--check" in sys.argv[1:]
     text = render(validate(load_registry()))
     if check:
