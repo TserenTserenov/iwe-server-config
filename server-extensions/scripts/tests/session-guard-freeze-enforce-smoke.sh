@@ -112,6 +112,11 @@ if [ -e "$TEST_ROOT/.iwe-runtime/sessions/hkfixture-housekeeping-hk-probe.open" 
 fi
 
 # 6. ...and the same carve-out as a plain open lets the scheduled runner through.
+# Step 2's own canonical-owner semaphore is done with and still live here; WP-561
+# (22.10, 9bd6352) now refuses a second concurrent canonical owner on the SAME
+# checkout, which this step is NOT exercising (it is the independent-caller
+# case that fix targets) -- clear it first.
+find "$TEST_ROOT/.iwe-runtime/sessions" -maxdepth 1 -name 'scheduler-*.open' -delete
 if ! OUT_7=$(open_frozen --housekeeping hk-probe --agent hkfixture --canonical-owner day-close 2>&1); then
     echo "FAIL: housekeeping open with --canonical-owner must be allowed, got: $OUT_7" >&2
     exit 1

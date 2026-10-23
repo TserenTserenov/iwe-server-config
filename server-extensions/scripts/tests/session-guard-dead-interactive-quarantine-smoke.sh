@@ -17,8 +17,11 @@ SESSION_DIR="$TEST_ROOT/.iwe-runtime/sessions"
 REGISTRY="$TEST_ROOT/.iwe-runtime/zombie-semaphores.jsonl"
 TG_LOG="$TEST_ROOT/iwe-tg.log"
 export IWE_SESSIONS_ROOT="$GOV/sessions"
-mkdir -p "$GOV/scripts" "$GOV/sessions" "$SESSION_DIR" "$TEST_ROOT/bin"
+mkdir -p "$GOV/scripts" "$GOV/sessions" "$SESSION_DIR" "$TEST_ROOT/bin" "$TEST_ROOT/scripts"
 git -C "$GOV" init -q
+# `audit` (any invocation) hard-requires scripts/open-log-snapshot.sh under
+# IWE_ROOT since session-guard.sh 58b6401 ("isolate day-close runtime outputs").
+ln -s "$ROOT_DIR/scripts/open-log-snapshot.sh" "$TEST_ROOT/scripts/open-log-snapshot.sh"
 
 cat > "$TEST_ROOT/bin/iwe-tg" <<EOF
 #!/usr/bin/env bash
@@ -46,6 +49,7 @@ write_semaphore() {  # <path> <session> <pid> [extra frontmatter lines...]
     echo "opened_at: 2000-01-01T00:00:00Z"
     echo "created_at: 2000-01-01T00:00:00Z"
     echo "session_id: $session"
+    echo "task: fixture $session"
     echo "governance_worktree: $TEST_ROOT/.iwe-runtime/isolated-worktrees/$session"
     echo "isolated_worktree: $TEST_ROOT/.iwe-runtime/isolated-worktrees/$session"
     echo "pid: $pid"

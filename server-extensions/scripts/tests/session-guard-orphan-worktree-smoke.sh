@@ -28,8 +28,11 @@ export IWE_GOVERNANCE_REPO=DS-strategy
 # frozen path string verbatim -- disarm freeze explicitly so every `open` call
 # below keeps testing only orphan/scheduled-drain sweep behaviour.
 export IWE_FROZEN_CANONICAL_PATH=""
-mkdir -p "$GOV/scripts" "$GOV/sessions" "$SESSION_DIR" "$MANAGED_WORKTREES" "$TEST_ROOT/bin"
+mkdir -p "$GOV/scripts" "$GOV/sessions" "$SESSION_DIR" "$MANAGED_WORKTREES" "$TEST_ROOT/bin" "$TEST_ROOT/scripts"
 git -C "$GOV" init -q
+# `audit` hard-requires scripts/open-log-snapshot.sh under IWE_ROOT since
+# session-guard.sh 58b6401 ("isolate day-close runtime outputs").
+ln -s "$ROOT_DIR/scripts/open-log-snapshot.sh" "$TEST_ROOT/scripts/open-log-snapshot.sh"
 
 cat > "$TEST_ROOT/bin/iwe-tg" <<'EOF'
 #!/usr/bin/env bash
@@ -106,6 +109,7 @@ ${pid:+pid: $pid
 }opened_at: 2000-01-01T00:00:00Z
 created_at: 2000-01-01T00:00:00Z
 session_id: $session
+task: fixture $session
 ${harness:+harness_session_id: $harness}
 isolated_worktree: $worktree
 ---
@@ -182,6 +186,7 @@ pid: $DEAD_PID
 opened_at: 2026-09-11T20:00:00Z
 created_at: 2026-09-11T20:00:00Z
 session_id: $SCHEDULED_UUID
+task: fixture scheduled-drained
 harness_session_id: harness-scheduled
 isolated_worktree: $SCHEDULED_WORKTREE
 close_path: pipeline
@@ -214,6 +219,7 @@ pid: $DEAD_PID
 opened_at: 2026-09-11T20:00:00Z
 created_at: 2026-09-11T20:00:00Z
 session_id: $MISMATCH_UUID
+task: fixture scheduled-mismatch
 harness_session_id: harness-scheduled-mismatch
 isolated_worktree: $MISMATCH_WORKTREE
 close_path: pipeline
@@ -250,6 +256,7 @@ pid: $DEAD_PID
 opened_at: 2026-09-11T20:00:00Z
 created_at: 2026-09-11T20:00:00Z
 session_id: $RACE_UUID
+task: fixture scheduled-race
 isolated_worktree: $RACE_WORKTREE
 close_path: pipeline
 scheduled_owner: wp-run-scheduled-tsekh1/v1

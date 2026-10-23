@@ -10,6 +10,10 @@ ROOT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
 GUARD="$ROOT_DIR/scripts/session-guard.sh"
 TEST_ROOT=$(mktemp -d ${TMPDIR:-/tmp}/session-guard-runner-session.XXXXXX)
 trap 'rm -rf "$TEST_ROOT"' EXIT
+# Resolved: on macOS $TMPDIR sits under /var, a symlink to /private/var; the
+# guard records git's own realpath()d toplevel, so an unresolved TEST_ROOT
+# mismatches the semaphore's recorded path (not an issue on tsekh-1/Linux).
+TEST_ROOT=$(cd "$TEST_ROOT" && pwd -P)
 
 GOV="$TEST_ROOT/DS-strategy"
 git init -q -b main "$GOV"
@@ -69,7 +73,12 @@ echo "OK: a file outside the declared scope is refused"
 
 # 5. A leftover semaphore of a dead run refuses the fixed name until an exact close.
 if OUT=$(open_runner); then fail "reopening without close must be refused, got: $OUT"; fi
-printf '%s' "$OUT" | grep -q 'уже открыт' || fail "the refusal must say it is already open, got: $OUT"
+# WP-561 (22.10, 9bd6352, "atomic canonical-owner mutual exclusion"): a second
+# --canonical-owner open on the same checkout is now refused earlier, by
+# exclusive ownership, with a different message than the original "already
+# open" -- the refusal itself (no second scope gate owner) is unchanged.
+printf '%s' "$OUT" | grep -qE 'уже открыт|уже под эксклюзивным владением' \
+  || fail "the refusal must say it is already open, got: $OUT"
 runner close --housekeeping week-review --agent "$RUNNER" >/dev/null || fail "an exact close of the leftover must succeed"
 [ ! -e "$SEM" ] || fail "close must remove the semaphore"
 open_runner >/dev/null || fail "open after close must succeed"

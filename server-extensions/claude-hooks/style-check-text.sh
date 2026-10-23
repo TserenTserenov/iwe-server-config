@@ -50,6 +50,17 @@ with open(path, "w", encoding="utf-8") as fh:
         fh.write(json.dumps(r, ensure_ascii=False) + "\n")
 PY
 
+if [ "${STYLE_WRAPPER_EMIT:-0}" = "1" ]; then
+  # Return mode (РП-388 Ф21): the caller is an agent's own end-of-reply hook and
+  # forwards the block decision back to the agent so it rewrites the reply. The
+  # blocking switch is turned on here, once, for every non-Claude agent; peer
+  # adapters (no EMIT) stay log-only. The core prints {} when nothing blocks.
+  printf '{"transcript_path":"%s","session_id":"style-check-%s"}' "$TMP_TRANSCRIPT" "$AGENT_NAME" \
+    | STYLE_AGENT="$AGENT_NAME" STYLE_CONTEXT="$CONTEXT" STYLE_ENFORCE_BLOCK=1 STYLE_BLOCK_A14=1 \
+      bash "$HOOK" 2>/dev/null || true
+  exit 0
+fi
+
 printf '{"transcript_path":"%s","session_id":"style-check-%s"}' "$TMP_TRANSCRIPT" "$AGENT_NAME" \
   | STYLE_AGENT="$AGENT_NAME" STYLE_CONTEXT="$CONTEXT" bash "$HOOK" >/dev/null 2>&1 || true
 

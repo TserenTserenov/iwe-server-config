@@ -28,8 +28,11 @@ GOV="$TEST_ROOT/DS-strategy"
 SESSION_DIR="$TEST_ROOT/.iwe-runtime/sessions"
 TASKS="$GOV/inbox/agent/tasks"
 CARD="$TASKS/RUN-quick-close-fixture.md"
-mkdir -p "$GOV/scripts" "$GOV/sessions" "$TASKS" "$SESSION_DIR" "$TEST_ROOT/bin"
+mkdir -p "$GOV/scripts" "$GOV/sessions" "$TASKS" "$SESSION_DIR" "$TEST_ROOT/bin" "$TEST_ROOT/scripts"
 export IWE_SESSIONS_ROOT="$GOV/sessions"
+# `audit` hard-requires scripts/open-log-snapshot.sh under IWE_ROOT since
+# session-guard.sh 58b6401 ("isolate day-close runtime outputs").
+ln -s "$ROOT_DIR/scripts/open-log-snapshot.sh" "$TEST_ROOT/scripts/open-log-snapshot.sh"
 
 git -C "$GOV" init -q
 git -C "$GOV" config user.email t@example.invalid
@@ -84,6 +87,7 @@ slug: $1
 opened_at: 2000-01-01T00:00:00Z
 created_at: 2000-01-01T00:00:00Z
 session_id: $1
+task: fixture $1
 pid: $FOREIGN_PID
 ---
 file: inbox/WP-530/WP-530.md

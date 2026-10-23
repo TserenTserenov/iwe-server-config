@@ -271,21 +271,62 @@ BASE5_MATCH=$(printf '%s\n' "$RESPONSE" | perl -CSD -Mutf8 -ne '
 [ -n "$BASE5_MATCH" ] && log_violation "BASE5" "em-dash-outside-eto" "$BASE5_MATCH"
 
 # --- A14: part-whole wording applied to a non-system (base style rule 8) ---
-# Per sentence: a part-whole marker ("входит в", "состоит из", "часть") together
-# with a non-system kind (description, document, method, work, state,
-# characteristic). Text in «…» and `…` is stripped first so quoted anti-examples
-# do not fire; parts inside a description-kind (sections of a document, steps of
-# a method) are allowed and skipped. Warn-only: regex cannot settle ontology, the log feeds calibration.
-A14_MATCH=$(printf '%s\n' "$RESPONSE" | perl -CSD -Mutf8 -ne '
+# Three shapes, whole reply at once (-0777), text in «…» and `…` stripped first
+# so quoted anti-examples do not fire:
+#   (1) composition list — a header announcing parts ("состоит из …:", "в ней
+#       есть:", "компонентов:") followed by list items whose head names a
+#       non-system kind (memory, rules, prompt, card…). The live acceptance run
+#       (РП-388 Ф21, 23.10) showed every real violation took this shape, which
+#       the per-sentence check could not see across lines.
+#   (2) per sentence: a part-whole marker with a non-system kind at most three
+#       words away; negated markers ("не входит", "не часть") are removed
+#       first — both false positives of that run were negations — and so are
+#       system heads with a non-system complement ("сервер памяти"). Parts of a
+#       description or document ("ответ делится на две части", "протокол
+#       состоит из шагов") fire too: pilot decision 23.10, part-whole is for
+#       systems only.
+#   (3) "X — это Y" naming a description as a type of a non-description.
+# Every stem has a left word boundary ($b): without it "работ" matched inside
+# "Обработчик" and "план" inside "Планировщик".
+# Warn-only: regex cannot settle ontology, the log feeds calibration.
+A14_MATCH=$(printf '%s\n' "$RESPONSE" | perl -0777 -CSD -Mutf8 -ne '
   s/«[^»]*»//g; s/`[^`]*`//g;
-  for my $s (split /(?<=[.!?;])\s+/) {
-    next if $s =~ /(документ|описани|метод|план|инструкци)\S*\s+(состо[ия]т|входит\s+в\s+(документ|описани|метод|план))/i;
-    if ($s =~ /(входи[тл]|входят|входить|состо[ия]т\s+из|в\s+состав|(является|являются|будет|быть)\s+частью|част(ью|ь|и)\s+(агента|системы|программы))/i
-        && $s =~ /(инструкци|промпт|метод|процесс|описани|документ|состояни|характеристик|управлени[ея]\s+выполнени|контекст|памят)/i) {
+  my $b = qr/(?<![а-яёА-ЯЁ])/;
+  # agent nouns built on a description stem are systems: Планировщик, Процессор
+  my $notagent = qr/(?![а-яё]*(щик|чик|тель|тор|ор)(?![а-яё]))/i;
+  my $nonsys = qr/$b(инструкци|промпт|метод|процесс|описани|документ|состояни|характеристик|управлени[ея]\s+выполнени|контекст|памят|правил|ритуал|протокол|знани|карточк|запис|файл|репозитори)/i;
+  my $syshead = qr/$b(модул|клиент|сервер|сервис|исполнител|хранилищ|баз[аеыу])\S*/i;
+  my $part = qr/$b(входи[тл]|входят|входить|состо[ия]т\s+из|в\s+состав(?![а-яё])|(является|являются|будет|быть)\s+частью|част(ью|ь|и)\s+(агента|системы|программы))/i;
+  my $nonsys_s = qr/$b(инструкци|промпт|метод|процесс|описани|документ|состояни|характеристик|управлени[ея]\s+выполнени|контекст|памят|протокол|план|принцип|знани)$notagent\S*/i;
+  my @lines = split /\n/;
+  for my $i (0 .. $#lines) {
+    my $h = $lines[$i];
+    next unless $h =~ /:\s*\**\s*$/
+      && $h =~ /$b(состо[ия]т\s+из|входят|компонент|элемент|сло[яёе]в?(?![а-яё])|состав(?![а-яё])|составн\S*\s+част|в\s+(ней|нём|него|неё)\s+(есть|работают|собран\S*)|соединены|к\s+(нему|ней)\s+добавлен)/i;
+    next if $h =~ /(^|\s)не\s+(входи|входя|явля|состо)/i;
+    for my $j ($i + 1 .. $#lines) {
+      my $it = $lines[$j];
+      next if $it =~ /^\s*$/;
+      last unless $it =~ /^\s*([-*]|\d+[.)]|\*\*\d+[.)])\s*/;
+      my $head = $it =~ /\*\*([^*]+)\*\*/ ? $1 : ($it =~ /^\s*(?:[-*]|\d+[.)])\s*([^—:,(]+)/ ? $1 : "");
+      next if $head =~ $syshead;
+      if ($head =~ $nonsys) { $h =~ s/\s+$//; print "$h $it"; exit }
+    }
+  }
+  s/\*\*//g;
+  for my $s (split /(?<=[.!?;:])\s+|\n+/) {
+    (my $t = $s) =~ s/(^|\s)не\s+(входи\S*|входя\S*|состо\S*\s+из|явля\S*\s+частью|част\S*)/$1/gi;
+    $t =~ s/$syshead\s+\S+//g;
+    if ($t =~ /$nonsys_s(\s+\S+){0,3}?\s+$part/ || $t =~ /$part(\s+\S+){0,3}?\s+$nonsys_s/) {
+      print $s; exit
+    }
+    if ($t =~ /$b(ответ|протокол|документ|описани|метод|инструкци|план|процесс|закрыти|открыти|ритуал|работ|сесси|текст|отч[её]т|скилл)$notagent\S*(\s+\S+){0,3}?\s+(состо[ия]т\s+из|дел[ия]тся\s+на)\s+(\S+\s+)?(част|раздел|этап|шаг)/i) {
       print $s; exit
     }
     # "X - это Y" assigns a type; "state is a set of values" names a description, not a type
-    if ($s =~ /(состояни|систем|агент|метод|работ)\S*\s+[-—–]\s+это\s+(набор|совокупност|множеств|комплекс|сочетани|список|профиль)/i) {
+    if ($t =~ /$b(состояни|систем|агент|метод|работ)\S*\s+[-—–]\s+это\s+(набор|совокупност|множеств|комплекс|сочетани|список|профиль)/i
+        || $t =~ /$b(метод)\S*\s+[-—–]\s+это\s+(описани|документ|текст|файл|инструкци)/i
+        || $t =~ /$b(протокол|инструкци|описани|документ|файл)\S*\s+[-—–]\s+это\s+метод/i) {
       print $s; exit
     }
   }
@@ -540,12 +581,18 @@ printf '%s' "$VIOLATIONS" | grep -qE 'A7\.1'   && BLOCKABLE="$BLOCKABLE A7.1"
 # Ф18 (22.10): A13.1 блокирует. Ложный блок стоит одной переписки ответа,
 # пропуск — непонятного пилоту текста; точность перемеряется 27.10, при <0.7 — назад в warn.
 printf '%s' "$VIOLATIONS" | grep -qE 'A13\.1'  && BLOCKABLE="$BLOCKABLE A13.1"
+# Ф21 (23.10): A14 блокирует только по явному флагу. Claude остаётся на предупреждении
+# до сверки точности 06.11; Kimi/Codex получают флаг от style-check-text.sh в режиме
+# возврата замечания (одного текста правила им не хватает, см. карточку РП-388).
+if [ "${STYLE_BLOCK_A14:-0}" = "1" ] && printf '%s' "$VIOLATIONS" | grep -qE '\bA14\b'; then
+  BLOCKABLE="$BLOCKABLE A14"
+fi
 
 ESC_NOTE=""
 [ "$COUNT" -ge 3 ] && ESC_NOTE=" | 3+ нарушений стиля за сессию (сигнал пилоту)"
 
 if [ "${STYLE_ENFORCE_BLOCK:-0}" = "1" ] && [ -n "$BLOCKABLE" ]; then
-  REASON="Стиль нарушен (правила:${BLOCKABLE} ). Перепиши ответ для пилота. Начни СЛЕДУЮЩЕЕ сообщение со строки коррекции — STYLE_FIX:${BLOCKABLE} «было» → «стало» — затем полезный текст. Правила: A1 путь не подлежащее; A10 без голых маркеров (exit/PASS/SHA); A7.1 техжурнал (хэши коммитов, SHA, пути отчёта) в чат не идёт — даже под <details>, он в report.md; A13.1 имя команды, файла или идентификатора в обратных кавычках без русского пояснения — опиши по-русски, что оно делает (например: «команда снятия заявок (note-commit --forget-unprovable)» без обратных кавычек) или убери.${ESC_NOTE}"
+  REASON="Стиль нарушен (правила:${BLOCKABLE} ). Перепиши ответ для пилота. Начни СЛЕДУЮЩЕЕ сообщение со строки коррекции — STYLE_FIX:${BLOCKABLE} «было» → «стало» — затем полезный текст. Правила: A1 путь не подлежащее; A10 без голых маркеров (exit/PASS/SHA); A7.1 техжурнал (хэши коммитов, SHA, пути отчёта) в чат не идёт — даже под <details>, он в report.md; A13.1 имя команды, файла или идентификатора в обратных кавычках без русского пояснения — опиши по-русски, что оно делает (например: «команда снятия заявок (note-commit --forget-unprovable)» без обратных кавычек) или убери; A14 «входит в / состоит из / делится на части» только о системах — об описании, документе, методе, состоянии говори глаголами («описывает», «хранит», «работает по»), в одном перечислении один род.${ESC_NOTE}"
   jq -n --arg r "$REASON" '{"decision":"block","reason":$r}'
   exit 0
 fi

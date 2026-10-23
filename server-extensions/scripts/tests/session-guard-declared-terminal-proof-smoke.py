@@ -52,7 +52,10 @@ class DeclaredTerminalProofTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory(prefix="wp484-proof-", dir=os.environ.get("TMPDIR", "/tmp"))
         self.addCleanup(self.temp.cleanup)
-        self.root = Path(self.temp.name)
+        # Resolved: on macOS $TMPDIR sits under /var, a symlink to /private/var;
+        # the guard under test reads realpath()s, so an unresolved root here
+        # mismatches on paths derived from it (not an issue on tsekh-1/Linux).
+        self.root = Path(self.temp.name).resolve()
         self.env = os.environ.copy()
         for key in list(self.env):
             if key.startswith(("IWE_", "CLAUDE_", "GIT_")):
@@ -468,7 +471,12 @@ class DeclaredTerminalProofTests(unittest.TestCase):
         artifact.write_text("own result\n")
         self.git("-C", str(repo), "commit", "-qam", "own result")
         head = self.git("-C", str(repo), "rev-parse", "HEAD").stdout.strip()
-        card = self.root / "RUN-quick-close-fixture.md"
+        # The guard's card-placement rule (session-guard.sh, WP-484 11.10,
+        # d61bd71) only accepts a terminal card inside inbox/agent/tasks of
+        # the checkout itself, ignored there -- not an arbitrary sibling path.
+        (repo / "inbox/agent/tasks").mkdir(parents=True)
+        (repo / ".git/info/exclude").write_text("inbox/agent/tasks/RUN-*.md\n")
+        card = repo / "inbox/agent/tasks/RUN-quick-close-fixture.md"
         doc = dict(kind="process-run", process_id="quick-close", run_id="quick-close-fixture",
                    requested_slug="fixture", owner_session_id="owner-A", status="running",
                    current_step="session-guard-release",
@@ -2116,21 +2124,24 @@ class WorktreeCleanupCwdTests(unittest.TestCase):
         self.sem = self.root / "codex-one.open"
         self.sem.write_text("agent: codex\nsession_id: one\nwp: WP-484\nslug: close-cwd\n"
                             f"isolated_worktree: {self.worktree}\n")
-        self.terminal = self.root / "terminal.txt"
-        self.terminal.write_text("verified terminal result\n")
+        # Sentinel, not a "file" terminal reference: the latter must be a
+        # RUN-quick-close-*.md card inside inbox/agent/tasks of the checkout
+        # (session-guard.sh, WP-484 11.10, d61bd71) -- irrelevant to what this
+        # class actually exercises (cwd handling around cleanup).
+        self.terminal = "declared-peer-session:close-cwd"
         self.env = {key: value for key, value in os.environ.items()
                     if not key.startswith(("GIT_", "IWE_", "CLAUDE_"))}
         self.env.update(IWE_ROOT=str(self.root), GOV_REPO="governance", AGENT="codex",
                         SESSION_ID="one", SEM_FILE=str(self.sem), MACHINE_CLOSE_MODE="1")
         prepared = self.invoke('''
-terminal_sha=$(_terminal_proof_snapshot_sha file "$3")
+terminal_sha=$(_terminal_proof_snapshot_sha sentinel "$3")
 source_status=$(_worktree_clean_status_sha "$1")
 origin=$(normalize_remote_url "$(git -C "$1" remote get-url origin)")
 prepare=$(_record_close_prepared "$SEM_FILE" one "$1" "$2" "$4" "$4" "$source_status" \
-    '[]' '[]' file "$3" "$terminal_sha" "$origin" refs/heads/main)
+    '[]' '[]' sentinel "$3" "$terminal_sha" "$origin" refs/heads/main)
 _record_close_published "$SEM_FILE" one "$prepare" "$4" '[]' "$4" "$source_status" "$terminal_sha"
 _close_delivery_state "$SEM_FILE" one
-''', str(self.worktree), str(self.repo / ".git"), str(self.terminal), self.head)
+''', str(self.worktree), str(self.repo / ".git"), self.terminal, self.head)
         self.assertEqual(prepared.returncode, 0, prepared.stderr)
         self.assertEqual(prepared.stdout.splitlines()[-1], "published")
 

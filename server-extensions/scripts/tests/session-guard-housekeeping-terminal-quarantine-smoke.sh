@@ -15,12 +15,15 @@ trap 'rm -rf "$TEST_ROOT"' EXIT
 
 GOV="$TEST_ROOT/DS-strategy"
 SESSION_DIR="$TEST_ROOT/.iwe-runtime/sessions"
-mkdir -p "$GOV/scripts" "$GOV/sessions" "$SESSION_DIR" "$TEST_ROOT/bin"
+mkdir -p "$GOV/sessions" "$SESSION_DIR" "$TEST_ROOT/bin" "$TEST_ROOT/scripts"
 git -C "$GOV" init -q
 export IWE_SESSIONS_ROOT="$GOV/sessions" IWE_ROOT="$TEST_ROOT" IWE_GOVERNANCE_REPO=DS-strategy
 
 printf '#!/usr/bin/env bash\nexit 0\n' > "$TEST_ROOT/bin/iwe-tg"
 chmod +x "$TEST_ROOT/bin/iwe-tg"
+# `audit` (step 4) hard-requires scripts/open-log-snapshot.sh under IWE_ROOT
+# since session-guard.sh 58b6401 ("isolate day-close runtime outputs").
+ln -s "$ROOT_DIR/scripts/open-log-snapshot.sh" "$TEST_ROOT/scripts/open-log-snapshot.sh"
 
 SEM="$SESSION_DIR/claude-code-housekeeping-day-close.open"
 FIRST="$SEM.orphaned-dead-interactive"
@@ -58,6 +61,11 @@ OUT=$(open_hk day-close) || fail "open must succeed beside a terminal quarantine
 [ -f "$SEM" ] || fail "the fresh semaphore was not created"
 [ "$(shasum -a 256 "$FIRST" | cut -d' ' -f1)" = "$FIRST_SUM" ] || fail "the quarantine evidence must stay byte-identical"
 echo "OK: terminal quarantine file does not block a fresh housekeeping open and stays intact"
+
+# Step 1 left its own live canonical-owner semaphore; WP-561 (22.10, 9bd6352)
+# now refuses a second concurrent canonical owner on the SAME checkout. Step 2
+# below is the unrelated-sibling case, not that one -- clear it first.
+rm -f "$SEM" "$SEM.lease"
 
 # 2. An unknown sibling must still fail closed (the guard is not weakened).
 : > "$SESSION_DIR/claude-code-housekeeping-probe.open.mystery"

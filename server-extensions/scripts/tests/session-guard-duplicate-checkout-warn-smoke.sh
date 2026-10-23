@@ -10,6 +10,10 @@ ROOT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
 GUARD="$ROOT_DIR/scripts/session-guard.sh"
 TEST_ROOT=$(mktemp -d ${TMPDIR:-/tmp}/session-guard-dup-checkout.XXXXXX)
 trap 'rm -rf "$TEST_ROOT"' EXIT
+# Resolved: on macOS $TMPDIR sits under /var, a symlink to /private/var; the
+# guard records git's own realpath()d toplevel, so an unresolved TEST_ROOT
+# mismatches the semaphore's recorded path (not an issue on tsekh-1/Linux).
+TEST_ROOT=$(cd "$TEST_ROOT" && pwd -P)
 
 # gov_repo_dir() (the existing identity mechanism this fix reuses) only
 # trusts a candidate checkout's remote when it can compare it against

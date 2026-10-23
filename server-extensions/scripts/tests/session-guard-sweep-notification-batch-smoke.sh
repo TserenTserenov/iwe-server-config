@@ -32,8 +32,11 @@ REGISTRY="$TEST_ROOT/.iwe-runtime/zombie-semaphores.jsonl"
 PENDING="$TEST_ROOT/.iwe-runtime/sweep-notify-pending.log"
 TG_LOG="$TEST_ROOT/iwe-tg.log"
 export IWE_SESSIONS_ROOT="$GOV/sessions"
-mkdir -p "$GOV/scripts" "$GOV/sessions" "$SESSION_DIR" "$TEST_ROOT/bin"
+mkdir -p "$GOV/scripts" "$GOV/sessions" "$SESSION_DIR" "$TEST_ROOT/bin" "$TEST_ROOT/scripts"
 git -C "$GOV" init -q
+# `audit` hard-requires scripts/open-log-snapshot.sh under IWE_ROOT since
+# session-guard.sh 58b6401 ("isolate day-close runtime outputs").
+ln -s "$ROOT_DIR/scripts/open-log-snapshot.sh" "$TEST_ROOT/scripts/open-log-snapshot.sh"
 
 fail() { echo "FAIL: $*" >&2; exit 1; }
 
@@ -85,12 +88,13 @@ write_semaphore() {  # <path> <session>
   local path="$1" session="$2"
   {
     echo "---"
-    echo "agent: kimi"  # no pid: field -> missing_or_invalid_owner_pid path, ages out fast
+    echo "agent: claude-code"  # no pid: field -> missing_or_invalid_owner_pid path, ages out fast
     echo "wp: WP-538"
     echo "slug: $session"
     echo "opened_at: 2000-01-01T00:00:00Z"
     echo "created_at: 2000-01-01T00:00:00Z"
     echo "session_id: $session"
+    echo "task: fixture $session"
     echo "---"
     echo "file: inbox/WP-538/WP-538.md"
   } > "$path"
