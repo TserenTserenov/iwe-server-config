@@ -24,7 +24,7 @@ set -uo pipefail
 
 AGENT_NAME="${1:-}"
 TEXT_FILE="${2:-}"
-CONTEXT="${3:-direct}"
+CONTEXT="${3:-${IWE_STYLE_CONTEXT:-direct}}"
 
 if [ -z "$AGENT_NAME" ] || [ -z "$TEXT_FILE" ] || [ ! -f "$TEXT_FILE" ]; then
   exit 0
@@ -49,6 +49,14 @@ with open(path, "w", encoding="utf-8") as fh:
     for r in rows:
         fh.write(json.dumps(r, ensure_ascii=False) + "\n")
 PY
+
+if [ "${STYLE_WRAPPER_EMIT:-0}" = "1" ] && [ "$CONTEXT" = "peer" ]; then
+  # Peer-session run (WP-388 Ф24): the reply is read by an adapter, not the pilot,
+  # so the agent's own end-of-reply hook neither blocks nor logs; the adapter runs
+  # the log-only check once after the run (a second log row here would double-count).
+  echo '{}'
+  exit 0
+fi
 
 if [ "${STYLE_WRAPPER_EMIT:-0}" = "1" ]; then
   # Return mode (РП-388 Ф21): the caller is an agent's own end-of-reply hook and

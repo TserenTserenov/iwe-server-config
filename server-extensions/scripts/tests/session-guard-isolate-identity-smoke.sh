@@ -37,7 +37,11 @@ source "$FIXTURE"
 mk_repo() {  # mk_repo <dir> -> inits a git repo with one commit
   local dir="$1"
   mkdir -p "$dir"
-  git init -q "$dir"
+  # -b main: the fixture later pushes "origin main" by name (E/F below) --
+  # without this, the branch name follows the machine's init.defaultBranch,
+  # which is "main" on Apple's git build but not on Homebrew's (CI runner),
+  # and the push then fails with "src refspec main does not match any".
+  git init -q -b main "$dir"
   git -C "$dir" config user.email test@example.com
   git -C "$dir" config user.name Test
   printf 'x\n' > "$dir/f.txt"

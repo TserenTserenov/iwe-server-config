@@ -1907,10 +1907,13 @@ try:
         if native not in values("harness_session_id"):
             continue
         unique("harness_session_id")
-        if unique("host") != host:
-            continue
-        if unique("agent") != agent:
-            refuse(path, "agent не совпадает с именем записи")
+        # wp/slug relevance is checked BEFORE host/agent (WP-485, bug
+        # 2026-10-23: unique("host") used to run unconditionally here and
+        # refuse on a record missing a host: line entirely — e.g. a closed
+        # peer-session semaphore, written by the ORZ scaffold path rather
+        # than `open --wp` — even when that record's wp/slug named unrelated
+        # work. Checking relevance first means an irrelevant record never
+        # reaches the host check at all.
         wp_values = values("wp")
         if not wp_values or normalize_wp(wp) not in {normalize_wp(v) for v in wp_values if v}:
             # Housekeeping semaphores carry no wp: line at all; a present
@@ -1924,6 +1927,23 @@ try:
         recorded_wp, recorded_slug = unique("wp"), unique("slug")
         if normalize_wp(recorded_wp) != normalize_wp(wp) or recorded_slug != slug:
             continue
+        # From here on wp AND slug both match this record — it is
+        # unambiguously about the SAME declared work, so host absence can no
+        # longer be waved through as "irrelevant". A record missing host:
+        # here has undetermined ownership and must refuse, not silently
+        # allow a duplicate open of the same work (peer-session finding,
+        # Codex round 1-2: a blind continue on absent host would have
+        # defeated the double-write protection in exactly this case).
+        host_values = values("host")
+        if len(host_values) > 1:
+            refuse(path, "неоднозначное поле host")
+        elif len(host_values) == 1 and host_values[0]:
+            if host_values[0] != host:
+                continue
+        else:
+            refuse(path, "запись совпадает по wp/slug, но не содержит host — принадлежность неопределена")
+        if unique("agent") != agent:
+            refuse(path, "agent не совпадает с именем записи")
         session = unique("session_id")
         suffix = ".open.closed" if path.name.endswith(".closed") else ".open"
         if path.name != agent + "-" + session + suffix:
@@ -9640,10 +9660,94 @@ _prepared_source_identity_matches() {  # <semaphore> <worktree>
   fi
 }
 
+_commit_hot_file_merge_has_publish_proof() {  # <repo> <linear source commit> <fresh remote OID>
+  # WP-530 Ф61 G5 tail (23.10, live case WP-600): _commit_current_tree_has_publish_proof
+  # requires the path byte-exact on origin now, which a hot file (edited by
+  # other sessions since) will never be even though this commit's own
+  # contribution already landed. Same 3-way merge technique as
+  # path_absorbs_prepared_text, scoped to this one already-ancestor-failed
+  # commit against its own parent.
+  python3 - "$@" <<'PY'
+import subprocess
+import sys
+import tempfile
+from pathlib import Path
+
+repo, commit, remote = sys.argv[1:]
+
+def git(*args):
+    result = subprocess.run(
+        ["git", "--literal-pathspecs", "-C", repo, *args],
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=10,
+    )
+    if result.returncode:
+        raise SystemExit(1)
+    return result.stdout
+
+def entry_fields(revision, path):
+    result = subprocess.run(
+        ["git", "--literal-pathspecs", "-C", repo, "ls-tree", "-z", revision, "--", path],
+        stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, check=False,
+    )
+    if result.returncode != 0 or not result.stdout:
+        return None
+    return result.stdout.split(b"\0", 1)[0].split()
+
+def blob_bytes(oid):
+    result = subprocess.run(
+        ["git", "-C", repo, "cat-file", "blob", oid],
+        stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, check=False,
+    )
+    return result.stdout if result.returncode == 0 else None
+
+git("cat-file", "-e", remote + "^{commit}")
+parents = git("rev-list", "--parents", "-n", "1", commit).split()
+if len(parents) != 2:
+    raise SystemExit(1)
+parent = parents[1].decode()
+paths = [path for path in git(
+    "diff-tree", "--no-commit-id", "--name-only", "--no-renames", "-r", "-z", commit,
+).split(b"\0") if path]
+if not paths:
+    raise SystemExit(1)
+for path in paths:
+    if git("ls-tree", "-z", commit, "--", path) == git("ls-tree", "-z", remote, "--", path):
+        continue
+    base_fields, own_fields, published_fields = (
+        entry_fields(revision, path) for revision in (parent, commit, remote)
+    )
+    if base_fields is None or own_fields is None or published_fields is None:
+        raise SystemExit(1)
+    base_mode, own_mode, published_mode = base_fields[0], own_fields[0], published_fields[0]
+    if not (base_mode == own_mode == published_mode) or base_mode not in (b"100644", b"100755"):
+        raise SystemExit(1)
+    base_blob, own_blob, published_blob = (
+        blob_bytes(fields[2].decode()) for fields in (base_fields, own_fields, published_fields)
+    )
+    if base_blob is None or own_blob is None or published_blob is None:
+        raise SystemExit(1)
+    if any(len(blob) > 1048576 or b"\0" in blob for blob in (base_blob, own_blob, published_blob)):
+        raise SystemExit(1)
+    with tempfile.TemporaryDirectory(prefix="iwe-hot-commit-proof-") as scratch:
+        files = [Path(scratch) / name for name in ("published", "base", "own")]
+        for file_path, blob in zip(files, (published_blob, base_blob, own_blob)):
+            file_path.write_bytes(blob)
+        result = subprocess.run(
+            ["git", "merge-file", "-p", *map(str, files)],
+            stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+            check=False, timeout=3,
+        )
+        if result.returncode != 0 or result.stdout != published_blob:
+            raise SystemExit(1)
+PY
+}
+
 _range_commits_have_publish_proof() {  # <worktree> <fresh remote OID> <excluded rev> <rev>
-  # Every commit of <excluded>..<rev> must be on the remote or have its
-  # current-tree proof there. The listing is captured, not process-substituted,
-  # so a failed rev-list is a refusal rather than an empty, "proven" range.
+  # Every commit of <excluded>..<rev> must be on the remote, have its
+  # current-tree proof there, or (for a hot file edited since by someone
+  # else) its own 3-way merge proof. The listing is captured, not
+  # process-substituted, so a failed rev-list is a refusal rather than an
+  # empty, "proven" range.
   local worktree="$1" remote="$2" listing commit count=0
   listing=$(git -C "$worktree" rev-list --reverse "$3..$4" 2>/dev/null) || return 1
   while IFS= read -r commit; do
@@ -9652,6 +9756,7 @@ _range_commits_have_publish_proof() {  # <worktree> <fresh remote OID> <excluded
     [ "$count" -le 32 ] || return 1
     git -C "$worktree" merge-base --is-ancestor "$commit" "$remote" 2>/dev/null \
       || _commit_current_tree_has_publish_proof "$worktree" "$commit" "$remote" \
+      || _commit_hot_file_merge_has_publish_proof "$worktree" "$commit" "$remote" \
       || return 1
   done <<<"$listing"
 }
