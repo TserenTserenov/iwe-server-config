@@ -244,11 +244,15 @@ let
     done
 
     # TG-алерт при ошибках. exit 0 always — не блокируем scheduler tick.
-    # WP-538, 01.09.2026: не более одного сообщения на один и тот же набор
-    # проблем за DEDUP_TTL_MIN минут (единица — минуты). Отдельный if вместо
-    # вложенной ${iwe} внутри ''${VAR:-...} — вложенная Nix-интерполяция
-    # внутри экранированного bash-выражения технически работает, но ловушка
-    # для будущих правок (найдено пир-сессией с Kimi, 01.09).
+    # WP-568/538, 23.10.2026 (пир-сессия razbor-dampa-bota): до этой правки
+    # дедуп был на уровне ВСЕГО набора failed[] одним общим hash — смена
+    # состава (один repo вылечился, другой заболел) меняла общий hash и
+    # переотправляла алерт по ВСЕМ repo, даже тем, чей dirty-diff не менялся
+    # тиками подряд (живой случай: DS-Knowledge-Index-Tseren слал одно и то
+    # же предупреждение про один и тот же некоммиченный файл 8 раз за ночь).
+    # Теперь дедуп — per-repo: каждый repo дедупится по hash СВОЕЙ записи
+    # отдельно, а при истечении TTL повтор уходит с пометкой возраста
+    # (сколько часов без изменений), не молча и не как будто впервые.
     if [ "''${#failed[@]}" -gt 0 ]; then
       # Некорректный PULL_REPOS_DEDUP_TTL_MIN откатывается на 60 минут по
       # умолчанию (не exit 1 — весь файл держит инвариант "exit 0 всегда, не
@@ -259,39 +263,73 @@ let
         ${pkgs.util-linux}/bin/logger -p user.warning -t iwe-pull-repos "invalid PULL_REPOS_DEDUP_TTL_MIN='$dedup_ttl_min' — используется значение по умолчанию 60 минут"
         dedup_ttl_min=60
       fi
-      dedup_state="''${PULL_REPOS_DEDUP_STATE:-}"
-      if [ -z "$dedup_state" ]; then
-        dedup_state="${iwe}/.iwe-runtime/iwe-pull-repos-dedup.state"
-      fi
-      ${pkgs.coreutils}/bin/mkdir -p "$(${pkgs.coreutils}/bin/dirname "$dedup_state")" 2>/dev/null || true
+      dedup_state_dir="''${PULL_REPOS_DEDUP_STATE_DIR:-${iwe}/.iwe-runtime/iwe-pull-repos-dedup.d}"
+      ${pkgs.coreutils}/bin/mkdir -p "$dedup_state_dir" 2>/dev/null || true
 
-      sig_hash=$(${pkgs.coreutils}/bin/printf '%s\n' "''${failed[@]}" | ${pkgs.coreutils}/bin/sort | ${pkgs.coreutils}/bin/sha256sum | ${pkgs.coreutils}/bin/cut -c1-16)
       now=$(${pkgs.coreutils}/bin/date -u +%s)
-      send_alert=1
-      if [ -f "$dedup_state" ]; then
-        prev_hash="" prev_ts=0
-        read -r prev_hash prev_ts < "$dedup_state" 2>/dev/null || true
-        if [ "$prev_hash" = "$sig_hash" ] && [[ "$prev_ts" =~ ^[0-9]+$ ]] \
+      to_send=()
+      for item in "''${failed[@]}"; do
+        # Санитизация имени repo для state-файла (холодное ревью, 23.10):
+        # 4 из 16 repos в списке выше несут "/" в каноническом имени
+        # (DS-IT-systems/DS-ai-systems и т.п.) — без замены "/" state_file
+        # превращался бы в путь во вложенной, никогда не созданной
+        # директории, printf падал тихо (`|| true`), и именно для этих repo
+        # дедуп вообще не работал бы — тот же класс спама, который эта
+        # правка и закрывает.
+        repo_key="''${item%% *}"
+        repo_key="''${repo_key//\//__}"
+        item_hash=$(${pkgs.coreutils}/bin/printf '%s' "$item" | ${pkgs.coreutils}/bin/sha256sum | ${pkgs.coreutils}/bin/cut -c1-16)
+        state_file="$dedup_state_dir/$repo_key"
+        prev_hash="" prev_ts=0 first_ts=0
+        if [ -f "$state_file" ]; then
+          read -r prev_hash prev_ts first_ts < "$state_file" 2>/dev/null || true
+        fi
+        if [ "$prev_hash" = "$item_hash" ] && [[ "$prev_ts" =~ ^[0-9]+$ ]] \
             && [ "$prev_ts" -le "$now" ] \
             && [ $(( (now - prev_ts) / 60 )) -lt "$dedup_ttl_min" ]; then
-          send_alert=0
+          continue
         fi
-      fi
+        if [ "$prev_hash" = "$item_hash" ] && [[ "$first_ts" =~ ^[0-9]+$ ]] && [ "$first_ts" -gt 0 ]; then
+          age_h=$(( (now - first_ts) / 3600 ))
+          to_send+=("$item [без изменений ''${age_h}ч]")
+        else
+          first_ts=$now
+          to_send+=("$item")
+        fi
+        # Запись state ТОЛЬКО здесь, при фактической отправке этого repo
+        # (тот же мотив, что в прежней версии, WP-538 01.09) — безусловная
+        # запись на каждом тике продлевала бы TTL-окно бесконечно, и
+        # длящаяся проблема замолчала бы навсегда вместо периодического
+        # напоминания раз в dedup_ttl_min минут.
+        ${pkgs.coreutils}/bin/printf '%s %s %s\n' "$item_hash" "$now" "$first_ts" > "$state_file" 2>/dev/null || true
+      done
 
-      if [ "$send_alert" -eq 1 ]; then
-        # Запись state ТОЛЬКО здесь (WP-538, найдено Kimi 01.09) — безусловная
-        # запись на каждом тике (включая подавленные) продлевала бы TTL-окно
-        # бесконечно, и длящаяся проблема замолчала бы навсегда вместо
-        # периодического напоминания раз в dedup_ttl_min минут.
-        ${pkgs.coreutils}/bin/printf '%s %s\n' "$sig_hash" "$now" > "$dedup_state" 2>/dev/null || true
-        msg="⚠️ IWE pull-repos warnings (tsekh-1, $(${pkgs.coreutils}/bin/date '+%Y-%m-%d %H:%M')): ''${failed[*]}"
+      # Уборка state-файлов repo, вылечившихся с прошлого тика — иначе
+      # каталог растёт бесконечно записями о давно решённых проблемах.
+      for sf in "$dedup_state_dir"/*; do
+        [ -e "$sf" ] || continue
+        sf_repo=$(${pkgs.coreutils}/bin/basename "$sf")
+        still_failed=0
+        for item in "''${failed[@]}"; do
+          item_repo_key="''${item%% *}"
+          item_repo_key="''${item_repo_key//\//__}"
+          if [ "$item_repo_key" = "$sf_repo" ]; then
+            still_failed=1
+            break
+          fi
+        done
+        [ "$still_failed" -eq 0 ] && ${pkgs.coreutils}/bin/rm -f "$sf"
+      done
+
+      if [ "''${#to_send[@]}" -gt 0 ]; then
+        msg="⚠️ IWE pull-repos warnings (tsekh-1, $(${pkgs.coreutils}/bin/date '+%Y-%m-%d %H:%M')): ''${to_send[*]}"
         ${pkgs.curl}/bin/curl -s --max-time 10 -X POST \
           "https://api.telegram.org/bot''${TELEGRAM_BOT_TOKEN}/sendMessage" \
           -d "chat_id=''${TELEGRAM_CHAT_ID}" \
           --data-urlencode "text=$msg" \
           > /dev/null || true
       else
-        ${pkgs.util-linux}/bin/logger -t iwe-pull-repos "alert suppressed (dedup): same failed-set within ''${dedup_ttl_min}min"
+        ${pkgs.util-linux}/bin/logger -t iwe-pull-repos "all ''${#failed[@]} problem(s) suppressed (dedup, unchanged within ''${dedup_ttl_min}min)"
       fi
     fi
 
