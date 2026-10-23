@@ -289,27 +289,47 @@ BASE5_MATCH=$(printf '%s\n' "$RESPONSE" | perl -CSD -Mutf8 -ne '
 # Every stem has a left word boundary ($b): without it "работ" matched inside
 # "Обработчик" and "план" inside "Планировщик".
 # Warn-only: regex cannot settle ontology, the log feeds calibration.
+# Concept lists come from the registry copy (lib/concept-kinds.tsv, generated from
+# PACK-digital-platform concept-kinds-registry.yaml): systems vs non-systems. Collections
+# and ambiguous words are in neither list, so they never trigger A14. No copy -> the
+# built-in lists in the perl block below (fail-open).
+A14_TSV="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/concept-kinds.tsv"
+A14_NONSYS=""; A14_SYS=""
+if [ -r "$A14_TSV" ]; then
+  A14_NONSYS=$(awk -F'\t' '!/^#/ && NF==2 && $1!="system" && $1!="ambiguous" && $1!="collection" {print $2}' "$A14_TSV" | paste -sd'|' -)
+  A14_SYS=$(awk -F'\t' '!/^#/ && NF==2 && $1=="system" {print $2}' "$A14_TSV" | paste -sd'|' -)
+fi
+export A14_NONSYS A14_SYS
 A14_MATCH=$(printf '%s\n' "$RESPONSE" | perl -0777 -CSD -Mutf8 -ne '
   s/«[^»]*»//g; s/`[^`]*`//g;
   my $b = qr/(?<![а-яёА-ЯЁ])/;
   # agent nouns built on a description stem are systems: Планировщик, Процессор
   my $notagent = qr/(?![а-яё]*(щик|чик|тель|тор|ор)(?![а-яё]))/i;
-  my $nonsys = qr/$b(инструкци|промпт|метод|процесс|описани|документ|состояни|характеристик|управлени[ея]\s+выполнени|контекст|памят|правил|ритуал|протокол|знани|карточк|запис|файл|репозитори)/i;
-  my $syshead = qr/$b(модул|клиент|сервер|сервис|исполнител|хранилищ|баз[аеыу])\S*/i;
+  my $nonsys_src = $ENV{A14_NONSYS} || "инструкци|промпт|метод|процесс|описани|документ|состояни|характеристик|управлени[ея]\\s+выполнени|контекст|памят|правил|ритуал|протокол|знани|карточк|запис|файл|репозитори";
+  my $sys_src = $ENV{A14_SYS} || "модул|клиент|сервер|сервис|исполнител|хранилищ|баз[аеыу]";
+  # %ENV holds raw bytes; decode so the Cyrillic stems match the decoded reply text
+  utf8::decode($nonsys_src) if $ENV{A14_NONSYS};
+  utf8::decode($sys_src) if $ENV{A14_SYS};
+  my $nonsys = qr/$b($nonsys_src)/i;
+  my $syshead = qr/$b($sys_src)\S*/i;
   my $part = qr/$b(входи[тл]|входят|входить|состо[ия]т\s+из|в\s+состав(?![а-яё])|(является|являются|будет|быть)\s+частью|част(ью|ь|и)\s+(агента|системы|программы))/i;
-  my $nonsys_s = qr/$b(инструкци|промпт|метод|процесс|описани|документ|состояни|характеристик|управлени[ея]\s+выполнени|контекст|памят|протокол|план|принцип|знани)$notagent\S*/i;
+  my $nonsys_s = qr/$b($nonsys_src)$notagent\S*/i;
   my @lines = split /\n/;
   for my $i (0 .. $#lines) {
     my $h = $lines[$i];
     next unless $h =~ /:\s*\**\s*$/
       && $h =~ /$b(состо[ия]т\s+из|входят|компонент|элемент|сло[яёе]в?(?![а-яё])|состав(?![а-яё])|составн\S*\s+част|в\s+(ней|нём|него|неё)\s+(есть|работают|собран\S*)|соединены|к\s+(нему|ней)\s+добавлен)/i;
     next if $h =~ /(^|\s)не\s+(входи|входя|явля|состо)/i;
+    # a header that is itself about a description/method ("Промпт ... несколько слоёв:")
+    # introduces the content parts of that description (ConstituentOf), not system parts
+    next if $h =~ $nonsys;
     for my $j ($i + 1 .. $#lines) {
       my $it = $lines[$j];
       next if $it =~ /^\s*$/;
       last unless $it =~ /^\s*([-*]|\d+[.)]|\*\*\d+[.)])\s*/;
       my $head = $it =~ /\*\*([^*]+)\*\*/ ? $1 : ($it =~ /^\s*(?:[-*]|\d+[.)])\s*([^—:,(]+)/ ? $1 : "");
-      next if $head =~ $syshead;
+      # head noun is the first word: "Модуль памяти" is a system, "Правила пилота" is not
+      next if $head =~ /^\s*$syshead/;
       if ($head =~ $nonsys) { $h =~ s/\s+$//; print "$h $it"; exit }
     }
   }
@@ -571,7 +591,10 @@ mkdir -p "$COUNT_DIR" 2>/dev/null || true
 COUNT=0; [ -f "$COUNT_FILE" ] && COUNT=$(cat "$COUNT_FILE" 2>/dev/null || echo 0)
 COUNT=$((COUNT + 1)); echo "$COUNT" > "$COUNT_FILE" 2>/dev/null || true
 # Cleanup старых счётчиков (>24h)
-find "$COUNT_DIR" -name "style-violations-count-*" -mmin +1440 -delete 2>/dev/null || true
+# -maxdepth 1: the counters sit directly in $COUNT_DIR; a full walk of a state dir
+# with millions of entries cost 8-45 s on every violation (found 23.10, РП-388 Ф21),
+# longer than the 10 s the Kimi/Codex end-of-reply entries wait.
+find "$COUNT_DIR" -maxdepth 1 -name "style-violations-count-*" -mmin +1440 -delete 2>/dev/null || true
 
 # Блокируемые правила высокой уверенности
 BLOCKABLE=""
@@ -592,7 +615,7 @@ ESC_NOTE=""
 [ "$COUNT" -ge 3 ] && ESC_NOTE=" | 3+ нарушений стиля за сессию (сигнал пилоту)"
 
 if [ "${STYLE_ENFORCE_BLOCK:-0}" = "1" ] && [ -n "$BLOCKABLE" ]; then
-  REASON="Стиль нарушен (правила:${BLOCKABLE} ). Перепиши ответ для пилота. Начни СЛЕДУЮЩЕЕ сообщение со строки коррекции — STYLE_FIX:${BLOCKABLE} «было» → «стало» — затем полезный текст. Правила: A1 путь не подлежащее; A10 без голых маркеров (exit/PASS/SHA); A7.1 техжурнал (хэши коммитов, SHA, пути отчёта) в чат не идёт — даже под <details>, он в report.md; A13.1 имя команды, файла или идентификатора в обратных кавычках без русского пояснения — опиши по-русски, что оно делает (например: «команда снятия заявок (note-commit --forget-unprovable)» без обратных кавычек) или убери; A14 «входит в / состоит из / делится на части» только о системах — об описании, документе, методе, состоянии говори глаголами («описывает», «хранит», «работает по»), в одном перечислении один род.${ESC_NOTE}"
+  REASON="Стиль нарушен (правила:${BLOCKABLE} ). НЕ повторяй и не пересказывай предыдущий ответ целиком — пилот его уже видел (найдено 22.10, РП-388 Ф19: буквальное прочтение прежней формулировки давало полный повтор ответа дважды подряд). Начни СЛЕДУЮЩЕЕ сообщение строкой коррекции — STYLE_FIX:${BLOCKABLE} «было» → «стало» — и, только если в прежнем ответе была финальная часть с выводом или следующим шагом, повтори ТОЛЬКО её в чистом виде; остальной текст не повторяй. Правила: A1 путь не подлежащее; A10 без голых маркеров (exit/PASS/SHA); A7.1 техжурнал (хэши коммитов, SHA, пути отчёта) в чат не идёт — даже под <details>, он в report.md; A13.1 имя команды, файла или идентификатора в обратных кавычках без русского пояснения — опиши по-русски, что оно делает (например: «команда снятия заявок (note-commit --forget-unprovable)» без обратных кавычек) или убери; A14 «входит в / состоит из / делится на части» только о системах — об описании, документе, методе, состоянии говори глаголами («описывает», «хранит», «работает по»), в одном перечислении один род.${ESC_NOTE}"
   jq -n --arg r "$REASON" '{"decision":"block","reason":$r}'
   exit 0
 fi

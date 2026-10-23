@@ -112,6 +112,22 @@ runner close --housekeeping week-review-2 --agent "$RUNNER" >/dev/null || fail "
 runner close --housekeeping week-review --agent "$RUNNER" >/dev/null
 echo "OK: with two live sessions the slug selects the run's own one; scope, commit and close land there only"
 
+# 7b. Regression for the fix in scenario 7: the SAME --canonical-owner string
+# from a DIFFERENT --agent is still the two-independent-callers case 9bd6352
+# protects against (e.g. an unrelated script sharing the same generic reason
+# name by coincidence) -- must still refuse, not just "same agent" cases.
+open_runner >/dev/null || fail "7b fixture: first session must open"
+if OUT=$(runner open --housekeeping week-review-foreign --agent foreign-runner \
+    --canonical-owner week-review --owner-pid $$); then
+    fail "7b: a different agent under the SAME canonical-owner reason must refuse, got exit 0: $OUT"
+fi
+printf '%s' "$OUT" | grep -qE 'уже открыт|уже под эксклюзивным владением' \
+    || fail "7b: expected the canonical-owner refusal, got: $OUT"
+[ ! -e "$TEST_ROOT/.iwe-runtime/sessions/foreign-runner-housekeeping-week-review-foreign.open" ] \
+    || fail "7b: a refused open must leave no semaphore"
+runner close --housekeeping week-review --agent "$RUNNER" >/dev/null
+echo "OK: the same canonical-owner reason from a different agent still refuses (two independent callers)"
+
 echo "PASS: a runner-owned housekeeping session authorises another agent's commit inside its scope only"
 
 # Cross-repo integration: pass the candidate DS wrapper explicitly when testing

@@ -1299,7 +1299,7 @@ _write_canonical_owner_identity() {
 # terminal file is not live and must not block a new open.
 _refuse_second_canonical_owner() {
   [ -n "$CANONICAL_OWNER" ] || return 0
-  local repo other_sem other_owner other_repo
+  local repo other_sem other_owner other_repo other_agent
   repo=$(git rev-parse --show-toplevel 2>/dev/null) || return 0
   while IFS= read -r other_sem; do
     [ -z "$other_sem" ] && continue
@@ -1309,6 +1309,15 @@ _refuse_second_canonical_owner() {
     [ -n "$other_owner" ] || continue
     other_repo=$(grep "^canonical_repo: " "$other_sem" | cut -d' ' -f2- || true)
     [ "$other_repo" = "$repo" ] || continue
+    # WP-561 (23.10, bug-2026-10-23-canonical-owner-blocks-same-runner-overlap):
+    # the SAME runner (same --agent) under the SAME --canonical-owner reason is
+    # one logical source legitimately overlapping itself (a run spanning
+    # midnight next to its own live leftover, WP-561 Ф25) -- not the two
+    # INDEPENDENT callers 9bd6352 targets (its own commit message: a scheduler
+    # and a manual update.sh run). Narrower than repo+owner alone: a different
+    # agent sharing the same owner string by coincidence must still collide.
+    other_agent=$(grep "^agent: " "$other_sem" | cut -d' ' -f2- || true)
+    [ "$other_owner" = "$CANONICAL_OWNER" ] && [ "$other_agent" = "$AGENT" ] && continue
     fail "open --canonical-owner: канон ($repo) уже под эксклюзивным владением '$other_owner' ($(basename "$other_sem")) — подожди close этого держателя или разберись с ним вручную, прежде чем открывать второй" 1
   done < <(find "$SESSION_DIR" -maxdepth 1 -name '*.open' -type f 2>/dev/null)
 }
@@ -1902,22 +1911,16 @@ try:
             continue
         if unique("agent") != agent:
             refuse(path, "agent не совпадает с именем записи")
-        # A housekeeping semaphore (Day/Week/Month Close) is never a --wp owner:
-        # it has no `wp:` field at all, so unique("wp") below would always
-        # refuse it. Name and content must agree before either is trusted --
-        # a mismatch (e.g. a housekeeping-looking name carrying a `wp:` field)
-        # stays on the normal fail-closed path below, not a silent skip.
-        housekeeping_values = values("housekeeping")
-        if housekeeping_values:
-            if len(housekeeping_values) != 1 or not housekeeping_values[0]:
-                refuse(path, "неоднозначное поле housekeeping")
-            reason = housekeeping_values[0]
-            slug_values = values("slug")
-            expected_name = agent + "-housekeeping-" + reason
-            if (values("wp") or len(slug_values) != 1 or slug_values[0] != reason
-                    or path.name not in (expected_name + ".open", expected_name + ".open.closed")):
-                refuse(path, "housekeeping-семафор не согласован по имени/содержимому")
-            continue  # well-formed housekeeping semaphore -- never a --wp owner candidate
+        wp_values = values("wp")
+        if not wp_values or normalize_wp(wp) not in {normalize_wp(v) for v in wp_values if v}:
+            # Housekeeping semaphores carry no wp: line at all; a present
+            # one naming different work is equally irrelevant. Either way,
+            # never a reason to refuse (WP-7 Ф247, bug 2026-10-22:
+            # unique("wp") used to refuse unconditionally here, so a
+            # housekeeping record could permanently block a later
+            # `open --wp` of the same conversation). Strict single-value
+            # enforcement below still applies once wp has matched.
+            continue
         recorded_wp, recorded_slug = unique("wp"), unique("slug")
         if normalize_wp(recorded_wp) != normalize_wp(wp) or recorded_slug != slug:
             continue
@@ -4124,6 +4127,7 @@ CANONICAL_OWNER=""
 FORCE_FLAG=0
 FORCE_WP_ELSEWHERE_FLAG=0
 FORGET_FLAG=0
+FORGET_UNPROVABLE_FLAG=0
 UNFREEZE_REASON=""
 ISOLATE_FLAG=0
 ABANDON_PREPARED=0
@@ -4244,6 +4248,7 @@ while [[ $# -gt 0 ]]; do
     --force)  FORCE_FLAG=1; shift ;;
     --force-wp-elsewhere) FORCE_WP_ELSEWHERE_FLAG=1; shift ;;
     --forget) FORGET_FLAG=1; shift ;;
+    --forget-unprovable) FORGET_UNPROVABLE_FLAG=1; shift ;;
     --isolate) ISOLATE_FLAG=1; shift ;;
     # WP-484 (peer-session with Codex): manual recovery for a PREPARED close
     # snapshot whose tree-proof can never pass (a later legitimate REPLACE on
@@ -6986,7 +6991,7 @@ PY
 }
 
 _manual_abandon_cleanup_has_publish_proof() {  # <worktree> <attested source head>
-  local worktree="$1" source_head="$2" remote commit count=0
+  local worktree="$1" source_head="$2" remote
   [ -d "$worktree" ] && [ ! -L "$worktree" ] || return 1
   [ -n "$source_head" ] || return 1
   [ -z "$(git -C "$worktree" status --porcelain=v1 --untracked-files=all 2>/dev/null)" ] \
@@ -6998,16 +7003,7 @@ _manual_abandon_cleanup_has_publish_proof() {  # <worktree> <attested source hea
     || return 1
   remote=$(git -C "$worktree" rev-parse --verify 'refs/remotes/origin/main^{commit}' 2>/dev/null) \
     || return 1
-  while IFS= read -r commit; do
-    [ -n "$commit" ] || continue
-    count=$((count + 1))
-    [ "$count" -le 32 ] || return 1
-    git -C "$worktree" merge-base --is-ancestor "$commit" "$remote" 2>/dev/null \
-      || _commit_current_tree_has_publish_proof "$worktree" "$commit" "$remote" \
-      || return 1
-  done < <(git -C "$worktree" rev-list --reverse "$source_head..HEAD" 2>/dev/null) \
-    || return 1
-  return 0
+  _range_commits_have_publish_proof "$worktree" "$remote" "$source_head" HEAD
 }
 
 _commit_claim_supersession_has_publish_proof() {  # <repo> <source> <remote OID> <semaphore> <repo name>
@@ -8505,16 +8501,26 @@ ignored = subprocess.run(
     check=False,
 )
 ignored_paths = [path for path in ignored.stdout.split(b"\0") if path]
+# allowed_relative names a path PERMITTED to be ignored (the RUN card), not
+# REQUIRED to be: a runner that already committed the card (IWE_CARD_AUTOCOMMIT,
+# process-runner.py) leaves it tracked and clean -- ignored_paths empty, not
+# [allowed_relative]. The committed-and-unchanged case is already proven by
+# status.stdout being empty above; only an ignored path OTHER than the card
+# must still fail closed.
 if (status.returncode != 0 or ignored.returncode != 0 or status.stdout
         or (allowed_relative is None and ignored_paths)
-        or (allowed_relative is not None and ignored_paths != [allowed_relative])):
+        or (allowed_relative is not None and ignored_paths not in ([], [allowed_relative]))):
     raise SystemExit(1)
 print(hashlib.sha256(b"status-v2\0" + status.stdout + b"ignored\0").hexdigest())
 PY
 }
 
 _isolated_source_commits_json() {  # <worktree> <base> <head>
-  git -C "$1" rev-list --reverse "$2..$3" 2>/dev/null | python3 -c '
+  # Captured first: piped straight into python, a failed rev-list read as an
+  # empty, valid "[]" commit set.
+  local listing
+  listing=$(git -C "$1" rev-list --reverse "$2..$3" 2>/dev/null) || return 1
+  printf '%s' "$listing" | python3 -c '
 import json
 import re
 import sys
@@ -8998,6 +9004,8 @@ import sys
 
 session, prepare, remote, verified_json, source_head, source_status, terminal_sha = sys.argv[1:]
 verified = json.loads(verified_json)
+# Historical label: it certifies a delivery proof against `remote` for every
+# verified commit, whether this run pushed or found the set already delivered.
 payload = {
     "proof": "isolate-push-exit0/v1",
     "session_id": session,
@@ -9559,15 +9567,50 @@ PY
   printf '%s\n' "$current_sha"
 }
 
+# WP-530 Ф61 G5: the PREPARED snapshot answers two different questions that
+# used to share one function. Identity (which repo, which immutable commit
+# range, which claims and terminal) does not depend on the worktree's current
+# state; "unchanged" (HEAD and clean status) does. Pushing from the copy and
+# removing it need both; proving that the frozen set was delivered needs only
+# identity -- the copy may have moved on since (live case WP-600).
 _prepared_source_snapshot_matches() {  # <semaphore> <worktree>
-  local semaphore="$1" worktree="$2" expected_head expected_common expected_status
+  _prepared_source_worktree_unchanged "$1" "$2" && _prepared_source_identity_matches "$1" "$2"
+}
+
+_prepared_worktree_status_sha() {  # <semaphore> <worktree>: clean-status digest under PREPARED rules, empty if dirty
+  local semaphore="$1" worktree="$2" terminal_kind terminal_ref governance_cards=""
+  terminal_kind=$(_unique_record_field "$semaphore" close_delivery_terminal_kind) || return 1
+  terminal_ref=$(_unique_record_field "$semaphore" close_delivery_terminal_reference) || return 1
+  if [ -n "${IWE_GOVERNANCE_REPO_PATH:-}" ] \
+     && [ "$IWE_GOVERNANCE_REPO_PATH" != "$IWE_ROOT/$GOV_REPO" ]; then
+    governance_cards=$(_declared_governance_card_dir "$IWE_GOVERNANCE_REPO_PATH" "$IWE_ROOT/$GOV_REPO") \
+      || return 1
+  fi
+  if [ "$terminal_kind" = "file" ]; then
+    _worktree_clean_status_sha "$worktree" "$terminal_ref" "$governance_cards"
+  else
+    _worktree_clean_status_sha "$worktree"
+  fi
+}
+
+_prepared_source_worktree_unchanged() {  # <semaphore> <worktree>
+  local semaphore="$1" worktree="$2" expected_head expected_status actual_status
+  [ -d "$worktree" ] && [ ! -L "$worktree" ] || return 1
+  expected_head=$(_unique_record_field "$semaphore" close_delivery_source_head) || return 1
+  expected_status=$(_unique_record_field "$semaphore" close_delivery_source_status_sha256) || return 1
+  [ "$(git -C "$worktree" rev-parse --verify 'HEAD^{commit}' 2>/dev/null || true)" = "$expected_head" ] \
+    || return 1
+  actual_status=$(_prepared_worktree_status_sha "$semaphore" "$worktree" || true)
+  [ -n "$actual_status" ] && [ "$actual_status" = "$expected_status" ]
+}
+
+_prepared_source_identity_matches() {  # <semaphore> <worktree>
+  local semaphore="$1" worktree="$2" expected_head expected_common
   local expected_base expected_commits expected_claims terminal_kind terminal_ref terminal_sha
-  local expected_origin expected_target actual_common actual_status actual_commits actual_claims actual_terminal actual_origin
-  local governance_cards=""
+  local expected_origin expected_target actual_common actual_commits actual_claims actual_terminal actual_origin
   [ -d "$worktree" ] && [ ! -L "$worktree" ] || return 1
   expected_head=$(_unique_record_field "$semaphore" close_delivery_source_head) || return 1
   expected_common=$(_unique_record_field "$semaphore" close_delivery_common_dir) || return 1
-  expected_status=$(_unique_record_field "$semaphore" close_delivery_source_status_sha256) || return 1
   expected_base=$(_unique_record_field "$semaphore" close_delivery_source_base) || return 1
   expected_commits=$(_unique_record_field "$semaphore" close_delivery_source_commits) || return 1
   expected_claims=$(_unique_record_field "$semaphore" close_delivery_claimed_commits) || return 1
@@ -9576,14 +9619,7 @@ _prepared_source_snapshot_matches() {  # <semaphore> <worktree>
   terminal_sha=$(_unique_record_field "$semaphore" close_delivery_terminal_sha256) || return 1
   expected_origin=$(_unique_record_field "$semaphore" close_delivery_origin) || return 1
   expected_target=$(_unique_record_field "$semaphore" close_delivery_target_ref) || return 1
-  if [ -n "${IWE_GOVERNANCE_REPO_PATH:-}" ] \
-     && [ "$IWE_GOVERNANCE_REPO_PATH" != "$IWE_ROOT/$GOV_REPO" ]; then
-    governance_cards=$(_declared_governance_card_dir "$IWE_GOVERNANCE_REPO_PATH" "$IWE_ROOT/$GOV_REPO") \
-      || return 1
-  fi
 
-  [ "$(git -C "$worktree" rev-parse --verify 'HEAD^{commit}' 2>/dev/null || true)" = "$expected_head" ] \
-    || return 1
   actual_common=$(git -C "$worktree" rev-parse --git-common-dir 2>/dev/null) || return 1
   case "$actual_common" in /*) ;; *) actual_common="$worktree/$actual_common" ;; esac
   actual_common=$(cd "$actual_common" 2>/dev/null && pwd -P) || return 1
@@ -9591,13 +9627,7 @@ _prepared_source_snapshot_matches() {  # <semaphore> <worktree>
   actual_origin=$(git -C "$worktree" remote get-url origin 2>/dev/null) || return 1
   actual_origin=$(normalize_remote_url "$actual_origin")
   [ "$actual_origin" = "$expected_origin" ] && [ "$expected_target" = "refs/heads/main" ] || return 1
-  if [ "$terminal_kind" = "file" ]; then
-    actual_status=$(_worktree_clean_status_sha "$worktree" "$terminal_ref" "$governance_cards" || true)
-  else
-    actual_status=$(_worktree_clean_status_sha "$worktree" || true)
-  fi
-  [ -n "$actual_status" ] && [ "$actual_status" = "$expected_status" ] || return 1
-  actual_commits=$(_isolated_source_commits_json "$worktree" "$expected_base" "$expected_head" || true)
+  actual_commits=$(_isolated_source_commits_json "$worktree" "$expected_base" "$expected_head") || return 1
   [ "$actual_commits" = "$expected_commits" ] || return 1
   actual_claims=$(_session_commit_claims_json "$semaphore" || true)
   [ "$actual_claims" = "$expected_claims" ] || return 1
@@ -9608,6 +9638,47 @@ _prepared_source_snapshot_matches() {  # <semaphore> <worktree>
     [ "$(_runner_release_retry_snapshot_sha "$semaphore" "$terminal_ref" || true)" = "$actual_terminal" ] || return 1
     printf 'Session CLOSE: повторный release подтверждён записью раннера; PREPARED сохранён, current terminal=%s\n' "$actual_terminal" >&2
   fi
+}
+
+_range_commits_have_publish_proof() {  # <worktree> <fresh remote OID> <excluded rev> <rev>
+  # Every commit of <excluded>..<rev> must be on the remote or have its
+  # current-tree proof there. The listing is captured, not process-substituted,
+  # so a failed rev-list is a refusal rather than an empty, "proven" range.
+  local worktree="$1" remote="$2" listing commit count=0
+  listing=$(git -C "$worktree" rev-list --reverse "$3..$4" 2>/dev/null) || return 1
+  while IFS= read -r commit; do
+    [ -n "$commit" ] || continue
+    count=$((count + 1))
+    [ "$count" -le 32 ] || return 1
+    git -C "$worktree" merge-base --is-ancestor "$commit" "$remote" 2>/dev/null \
+      || _commit_current_tree_has_publish_proof "$worktree" "$commit" "$remote" \
+      || return 1
+  done <<<"$listing"
+}
+
+_prepared_worktree_removal_proof() {  # <semaphore> <worktree>: a copy that left its PREPARED snapshot holds only delivered work
+  local semaphore="$1" worktree="$2" remote head branch tip
+  _prepared_source_identity_matches "$semaphore" "$worktree" || {
+    echo "Session CLOSE: PREPARED identity (repo/range/claims/terminal) не совпадает" >&2; return 1; }
+  [ -n "$(_prepared_worktree_status_sha "$semaphore" "$worktree" || true)" ] || {
+    echo "Session CLOSE: рабочая копия не чиста (изменённые, неотслеживаемые или игнорируемые файлы) или её состояние не читается" >&2; return 1; }
+  timeout 10 git -C "$worktree" fetch --quiet origin \
+    '+refs/heads/main:refs/remotes/origin/main' 2>/dev/null || {
+    echo "Session CLOSE: свежий origin/main не получен" >&2; return 1; }
+  remote=$(git -C "$worktree" rev-parse --verify 'refs/remotes/origin/main^{commit}' 2>/dev/null) || return 1
+  _prepared_source_set_has_publish_proof "$semaphore" "$worktree" || {
+    echo "Session CLOSE: доставка PREPARED-набора на свежем origin/main не доказана" >&2; return 1; }
+  head=$(git -C "$worktree" rev-parse --verify 'HEAD^{commit}' 2>/dev/null) || return 1
+  _range_commits_have_publish_proof "$worktree" "$remote" "$remote" "$head" || {
+    echo "Session CLOSE: в копии есть коммиты сверх origin/main без доказательства доставки (или их больше 32)" >&2; return 1; }
+  branch=$(_unique_record_field "$semaphore" isolated_branch 2>/dev/null || true)
+  if [ -n "$branch" ] \
+     && tip=$(git -C "$worktree" rev-parse --verify --quiet "refs/heads/$branch^{commit}" 2>/dev/null) \
+     && [ "$tip" != "$head" ]; then
+    _range_commits_have_publish_proof "$worktree" "$remote" "$remote" "$tip" || {
+      echo "Session CLOSE: на ветке копии $branch есть коммиты без доказательства доставки" >&2; return 1; }
+  fi
+  return 0
 }
 
 _publish_prepared_source() {  # <semaphore> <worktree> <isolate-push-script>
@@ -9754,9 +9825,20 @@ def directly_published(commit):
 # legitimate edit does not make an already delivered patch unpublished.
 # Require direct equivalence for EVERY frozen commit, never a transitive
 # claim through a local successor or an empty/merge patch.
+#
+# WP-530 Ф61 G5 (23.10, live incident WP-600): the worktree's current HEAD is
+# deliberately NOT part of this check. Every commit in `commits` is already
+# proven published on its own (directly_published: ancestor-of or
+# cherry/patch-id-equivalent to a `remote_head` frozen at the top of this
+# proof) -- a worktree that has since moved past `source_head` with later,
+# unrelated work does not make that earlier publication stale. What still
+# must hold: the recorded range still resolves to exactly `commits`
+# (integrity of the prepared set), `origin/main` has not moved since
+# `remote_head` was captured (no TOCTOU on the publication evidence just
+# used), and the semaphore file itself is unchanged (no concurrent writer).
 if all(directly_published(commit) for commit in commits):
     expected = git("rev-list", "--reverse", source_base + ".." + source_head).decode().splitlines()
-    if (expected != commits or git("rev-parse", "HEAD").strip().decode() != source_head
+    if (expected != commits
             or git("rev-parse", "refs/remotes/origin/main").strip().decode() != remote_head
             or Path(semaphore).read_bytes() != snapshot):
         raise SystemExit(1)
@@ -10447,6 +10529,7 @@ _close_delivery_and_transition() {
   local sem_basename close_receipt delivery_state publish_digest="" prepare_digest=""
   local source_base source_head source_status source_commits source_origin actual_origin target_ref common_dir remote_main_sha
   local terminal_kind terminal_ref terminal_sha claims_json verified_json push_status=0
+  local prepared_worktree_drifted=0
   [ -f "$SEM_FILE" ] && [ ! -L "$SEM_FILE" ] \
     || fail "close: точный .open semaphore исчез или стал небезопасным; terminal transition запрещён" 7
   sem_basename=$(basename -- "$SEM_FILE")
@@ -10564,18 +10647,27 @@ _close_delivery_and_transition() {
         delivery_state="published"
         echo "⚠️  session-guard: PREPARED-снимок закрыт ВРУЧНУЮ (--abandon-prepared), без криптографического proof доставки. Коммиты: ${ABANDON_SOURCE_COMMITS[*]}. close_publish_proof=manual-abandon-attestation/v1 в семафоре — постоянный видимый в аудите след." >&2
       else
-        _prepared_source_snapshot_matches "$SEM_FILE" "$CLOSING_WORKTREE" \
+        _prepared_source_identity_matches "$SEM_FILE" "$CLOSING_WORKTREE" \
           || fail "close retry: PREPARED source/head/scope/terminal snapshot изменился; push запрещён" 7
-        isolate_push_script="$IWE_ROOT/$GOV_REPO/scripts/isolate-push.sh"
-        [ -x "$isolate_push_script" ] \
-          || fail "close retry: isolate-push.sh недоступен; PREPARED сохранён" 7
-        push_status=0
-        _publish_prepared_source "$SEM_FILE" "$CLOSING_WORKTREE" "$isolate_push_script" \
-          || push_status=$?
-        [ "$push_status" -eq 0 ] \
-          || fail "close retry: exact prepared commit set не опубликован (код $push_status); PREPARED/worktree сохранены" 7
-        _prepared_source_snapshot_matches "$SEM_FILE" "$CLOSING_WORKTREE" \
-          || fail "close: source/head/scope/terminal изменился во время isolate-push; publish receipt не пишу" 7
+        # WP-530 Ф61 G5: a copy that moved away from its PREPARED snapshot
+        # (live case WP-600: reset to origin/main and reused for other work)
+        # is never pushed from. Its frozen set can only be proven already
+        # delivered, commit by commit, below.
+        if _prepared_source_worktree_unchanged "$SEM_FILE" "$CLOSING_WORKTREE"; then
+          isolate_push_script="$IWE_ROOT/$GOV_REPO/scripts/isolate-push.sh"
+          [ -x "$isolate_push_script" ] \
+            || fail "close retry: isolate-push.sh недоступен; PREPARED сохранён" 7
+          push_status=0
+          _publish_prepared_source "$SEM_FILE" "$CLOSING_WORKTREE" "$isolate_push_script" \
+            || push_status=$?
+          [ "$push_status" -eq 0 ] \
+            || fail "close retry: exact prepared commit set не опубликован (код $push_status); PREPARED/worktree сохранены" 7
+          _prepared_source_snapshot_matches "$SEM_FILE" "$CLOSING_WORKTREE" \
+            || fail "close: source/head/scope/terminal изменился во время isolate-push; publish receipt не пишу" 7
+        else
+          prepared_worktree_drifted=1
+          echo "Session CLOSE: рабочая копия ушла от PREPARED-снимка (HEAD или чистота); push из неё не делаю, проверяю только прямую доставку каждого PREPARED-коммита" >&2
+        fi
         timeout 10 git -C "$CLOSING_WORKTREE" fetch --quiet origin \
           '+refs/heads/main:refs/remotes/origin/main' 2>/dev/null \
           || fail "close: isolate-push завершился, но fresh origin/main proof не получен" 7
@@ -10583,9 +10675,16 @@ _close_delivery_and_transition() {
           || fail "close: remote main SHA после isolate-push не читается" 7
         _record_publication_receipts "$SEM_FILE" "$CLOSING_WORKTREE" "$GOV_REPO" "$remote_main_sha" \
           || echo "WARN: receipt v2 unavailable; retaining legacy publication proof" >&2
-        _receipt_checkout_has_publish_proof "$SEM_FILE" "$CLOSING_WORKTREE" "$remote_main_sha" \
-          || _prepared_source_set_has_publish_proof "$SEM_FILE" "$CLOSING_WORKTREE" \
-          || fail "close: не каждый PREPARED source commit доказан fresh origin/main exact OID или итоговым tree proof (нет доказательства доставки -- если содержимое доставлено, а более поздняя легитимная замена тех же строк ломает byte-exact proof, разбери вручную и рассмотри close --abandon-prepared)" 7
+        if [ "$prepared_worktree_drifted" -eq 1 ]; then
+          # The checkout-receipt proof walks remote..HEAD of the copy; on a
+          # drifted copy that is someone else's line, not the frozen set.
+          _prepared_source_set_has_publish_proof "$SEM_FILE" "$CLOSING_WORKTREE" \
+            || fail "close retry: рабочая копия ушла от PREPARED-снимка, а прямого доказательства доставки каждого PREPARED-коммита на свежем origin/main нет; push из изменённой копии запрещён, PREPARED сохранён" 7
+        else
+          _receipt_checkout_has_publish_proof "$SEM_FILE" "$CLOSING_WORKTREE" "$remote_main_sha" \
+            || _prepared_source_set_has_publish_proof "$SEM_FILE" "$CLOSING_WORKTREE" \
+            || fail "close: не каждый PREPARED source commit доказан fresh origin/main exact OID или итоговым tree proof (нет доказательства доставки -- если содержимое доставлено, а более поздняя легитимная замена тех же строк ломает byte-exact proof, разбери вручную и рассмотри close --abandon-prepared)" 7
+        fi
         _claimed_commits_have_publish_proof "$SEM_FILE" \
           || fail "close: additional note-commit claim не имеет publish proof" 7
         verified_json=$(_unique_record_field "$SEM_FILE" close_delivery_source_commits || true)
@@ -10612,7 +10711,8 @@ _close_delivery_and_transition() {
             || fail "close retry: manual-abandon worktree содержит грязь или недоказанные более поздние коммиты; не удаляю" 7
         else
           _prepared_source_snapshot_matches "$SEM_FILE" "$CLOSING_WORKTREE" \
-            || fail "close retry: worktree/source/terminal изменился после PUBLISHED; не удаляю" 7
+            || _prepared_worktree_removal_proof "$SEM_FILE" "$CLOSING_WORKTREE" \
+            || fail "close retry: рабочая копия ушла от PREPARED-снимка после PUBLISHED и не доказано, что в ней только доставленное (причина выше); не удаляю, .open сохранён" 7
         fi
         # Keep source-relative publication helpers in their original cwd until
         # proof is complete, then leave the directory before removing it.
@@ -12365,8 +12465,17 @@ fi
 # from several repositories with no separator, so a bare `commit: <sha>` would
 # inherit exactly that ambiguity.
 if [ "$CMD" = "note-commit" ]; then
+  # Cold review (22.10, Ф198-А): the two flags are not alternatives of the
+  # same intent (one named SHA vs. a self-discovered batch) -- silently
+  # letting the batch branch win when both are passed would ignore the
+  # caller's explicit --forget <sha> without a word.
+  if [ "$FORGET_FLAG" = "1" ] && [ "$FORGET_UNPROVABLE_FLAG" = "1" ]; then
+    fail "note-commit: --forget и --forget-unprovable взаимно исключающие" 1
+  fi
   COMMIT_SHA="${POSITIONAL[0]:-}"
-  [ -z "$COMMIT_SHA" ] && fail "note-commit: не передан <sha> коммита" 1
+  if [ -z "$COMMIT_SHA" ] && [ "$FORGET_UNPROVABLE_FLAG" != "1" ]; then
+    fail "note-commit: не передан <sha> коммита" 1
+  fi
   NOTE_AGENT="${AGENT:-${IWE_AGENT:-claude-code}}"
   if [ -n "$SESSION_ID_ARG" ]; then
     SEM_FILE=$(resolve_semaphore_by_session_id "$NOTE_AGENT" "$SESSION_ID_ARG" "${WP:-}" "${SLUG:-}") \
@@ -12383,17 +12492,240 @@ if [ "$CMD" = "note-commit" ]; then
   [ -n "$LOCKED_NOTE_SESSION_ID" ] \
     || fail "note-commit: semaphore изменился после resolve или уже закрывается" 1
   NC_STATE=$(_close_delivery_state "$SEM_FILE" "$LOCKED_NOTE_SESSION_ID" || true)
-  if [ "$FORGET_FLAG" = "1" ]; then
+  if [ "$FORGET_FLAG" = "1" ] || [ "$FORGET_UNPROVABLE_FLAG" = "1" ]; then
     # Ф209: forget must also work once PREPARE already froze the claim list --
     # that is exactly the stuck state it exists to recover from. Normal
     # note-commit below keeps requiring "none" unchanged.
     case "$NC_STATE" in
       none|prepared) ;;
-      *) fail "note-commit --forget: close transition в состоянии '$NC_STATE'; снятие заявки возможно только до или во время PREPARE" 1 ;;
+      *) fail "note-commit --forget${FORGET_UNPROVABLE_FLAG:+-unprovable}: close transition в состоянии '$NC_STATE'; снятие заявки возможно только до или во время PREPARE" 1 ;;
     esac
   else
     [ "$NC_STATE" = "none" ] \
       || fail "note-commit: close transition уже подготовлен; commit claims frozen" 1
+  fi
+  if [ "$FORGET_UNPROVABLE_FLAG" = "1" ]; then
+    # Batch sibling of --forget below: scans every existing commit claim
+    # instead of one named by the caller, reusing the same per-claim proof
+    # check (same accepted limitation -- a transient fetch/network failure
+    # folds into "unprovable" the same way a genuinely unpublished claim
+    # does, see the --forget comment further down). Printing the list before
+    # removal is the safeguard a wider blast radius needs (peer-session
+    # consensus, kimi+codex, 2026-10-22, РП-484 Ф198-А).
+    [ -z "$COMMIT_SHA" ] \
+      || fail "note-commit --forget-unprovable: позиционный <sha> не принимается — команда сама находит заявки без доказательства" 1
+    NC_ALL_CLAIMS=$(sed -n 's/^commit: //p' "$SEM_FILE")
+    NC_UNPROVABLE=()
+    if [ -n "$NC_ALL_CLAIMS" ]; then
+      while IFS= read -r nc_claim; do
+        [ -n "$nc_claim" ] || continue
+        nc_others=$(printf '%s\n' "$NC_ALL_CLAIMS" | { grep -vxF "$nc_claim" || true; } | jq -R . | jq -s -c .)
+        _claimed_commits_have_publish_proof "$SEM_FILE" "$nc_others" >/dev/null 2>&1 \
+          || NC_UNPROVABLE+=("$nc_claim")
+      done <<<"$NC_ALL_CLAIMS"
+    fi
+    if [ "${#NC_UNPROVABLE[@]}" -eq 0 ]; then
+      echo "note-commit --forget-unprovable: все заявки имеют доказательство публикации — ничего не снято"
+      exit 0
+    fi
+    # The list is the safeguard this command relies on instead of a
+    # --dry-run flag -- printed to both stderr (interactive) and the
+    # forget-intent audit log (pipeline) before any mutation, not after.
+    echo "note-commit --forget-unprovable: без доказательства публикации, будут сняты:" >&2
+    printf '  commit: %s\n' "${NC_UNPROVABLE[@]}" >&2
+    NC_UNPROVABLE_JSON=$(printf '%s\n' "${NC_UNPROVABLE[@]}" | jq -R . | jq -s -c .)
+    python3 - "$SEM_FILE" "$NC_UNPROVABLE_JSON" "$NC_STATE" <<'PY' || exit $?
+import datetime
+import fcntl
+import hashlib
+import json
+import os
+import re
+import stat
+import sys
+import tempfile
+from pathlib import Path
+
+sem, targets_json, state = sys.argv[1:]
+targets = json.loads(targets_json)
+
+
+def refuse(message):
+    sys.stderr.write("note-commit --forget-unprovable: " + message + "\n")
+    sys.exit(1)
+
+
+fd = os.open(sem, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+try:
+    info = os.fstat(fd)
+    current = os.lstat(sem)
+    if (not stat.S_ISREG(info.st_mode) or info.st_uid != os.geteuid()
+            or info.st_nlink != 1 or info.st_size <= 0 or info.st_size > 1024 * 1024
+            or stat.S_ISLNK(current.st_mode)
+            or (current.st_dev, current.st_ino) != (info.st_dev, info.st_ino)):
+        refuse("небезопасная запись семафора")
+    raw = b""
+    while True:
+        chunk = os.read(fd, 65536)
+        if not chunk:
+            break
+        raw += chunk
+    if len(raw) != info.st_size or b"\0" in raw or not raw.endswith(b"\n"):
+        refuse("повреждённая запись семафора")
+finally:
+    os.close(fd)
+
+snapshot = raw
+lines = snapshot.decode("utf-8").split("\n")
+
+
+def field(name):
+    return [line[len(name) + 2:] for line in lines if line.startswith(name + ": ")]
+
+
+raw_claims = [line[len("commit: "):] for line in lines if line.startswith("commit: ")]
+for claim in raw_claims:
+    if not re.fullmatch(r"[A-Za-z0-9._-]+ [0-9a-fA-F]{40,64}", claim):
+        refuse("неоднозначная заявка коммита в семафоре ('commit: " + claim + "'): заявка остаётся, снятие остановлено")
+
+missing = [t for t in targets if t not in raw_claims]
+if missing:
+    refuse("заявка на '" + missing[0] + "' в семафоре не найдена (список успел измениться) — повтори")
+
+claims_after = sorted(claim for claim in raw_claims if claim not in targets)
+
+replacements = {}
+if state == "prepared":
+    prepare_keys = (
+        "close_delivery_version", "close_attempt_id", "close_delivery_session_id",
+        "close_delivery_worktree", "close_delivery_common_dir",
+        "close_delivery_origin", "close_delivery_target_ref",
+        "close_delivery_source_base", "close_delivery_source_head",
+        "close_delivery_source_commits", "close_delivery_source_commits_digest",
+        "close_delivery_source_status_sha256", "close_delivery_expected_commits",
+        "close_delivery_claimed_commits",
+        "close_delivery_terminal_kind", "close_delivery_terminal_reference",
+        "close_delivery_terminal_sha256", "close_delivery_semaphore_sha256",
+        "close_delivery_prepare_digest",
+    )
+    fields = {}
+    for key in prepare_keys:
+        found = field(key)
+        if len(found) != 1 or not found[0]:
+            refuse("PREPARED-снимок семафора повреждён: поле '" + key + "' не единственное")
+        fields[key] = found[0]
+
+    source_commits = json.loads(fields["close_delivery_source_commits"])
+    expected_commits = json.loads(fields["close_delivery_expected_commits"])
+    claimed_commits = json.loads(fields["close_delivery_claimed_commits"])
+    if sorted(claimed_commits) != sorted(raw_claims):
+        refuse("JSON-снимок close_delivery_claimed_commits разошёлся с сырыми заявками семафора; снятие остановлено до починки рассинхрона")
+
+    source_shas = {s.lower() for s in source_commits}
+    expected_shas = {s.lower() for s in expected_commits}
+    for target in targets:
+        target_sha = target.rsplit(" ", 1)[-1].lower()
+        if target_sha in source_shas:
+            refuse("'" + target + "' входит в close_delivery_source_commits -- снятие ослабило бы доказательство финальной доставки; батч остановлен целиком")
+        if target_sha in expected_shas:
+            refuse("'" + target + "' входит в close_delivery_expected_commits -- снятие ослабило бы доказательство финальной доставки; батч остановлен целиком")
+
+    payload = {
+        "version": fields["close_delivery_version"],
+        "close_attempt_id": fields["close_attempt_id"],
+        "session_id": fields["close_delivery_session_id"],
+        "worktree": fields["close_delivery_worktree"],
+        "common_dir": fields["close_delivery_common_dir"],
+        "origin": fields["close_delivery_origin"],
+        "target_ref": fields["close_delivery_target_ref"],
+        "source_base": fields["close_delivery_source_base"],
+        "source_head": fields["close_delivery_source_head"],
+        "source_commits": source_commits,
+        "source_commits_digest": fields["close_delivery_source_commits_digest"],
+        "source_status_sha256": fields["close_delivery_source_status_sha256"],
+        "expected_commits": expected_commits,
+        "claimed_commits": claims_after,
+        "terminal_kind": fields["close_delivery_terminal_kind"],
+        "terminal_reference": fields["close_delivery_terminal_reference"],
+        "terminal_sha256": fields["close_delivery_terminal_sha256"],
+        "semaphore_sha256": fields["close_delivery_semaphore_sha256"],
+    }
+    new_digest = hashlib.sha256(
+        json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
+    replacements["close_delivery_claimed_commits"] = json.dumps(claims_after, separators=(",", ":"))
+    replacements["close_delivery_prepare_digest"] = new_digest
+
+target_set = set(targets)
+kept = []
+replaced_keys = set()
+for line in lines:
+    if line.startswith("commit: ") and line[len("commit: "):] in target_set:
+        continue
+    matched_key = next((key for key in replacements if line.startswith(key + ": ")), None)
+    if matched_key:
+        kept.append(matched_key + ": " + replacements[matched_key])
+        replaced_keys.add(matched_key)
+    else:
+        kept.append(line)
+if set(replacements) - replaced_keys:
+    refuse("не удалось найти строку для замены: " + ", ".join(sorted(set(replacements) - replaced_keys)))
+
+candidate = "\n".join(kept).encode("utf-8")
+
+sem_dir = os.path.dirname(os.path.abspath(sem))
+audit_path = os.path.join(os.path.dirname(sem_dir), "note-commit-forget.log")
+
+
+def audit_event(event, target):
+    record = json.dumps({
+        "at": datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "event": event,
+        "session_id": (field("session_id") or [""])[0],
+        "slug": (field("slug") or [""])[0],
+        "target": target,
+        "state": state,
+        "batch": True,
+    }, ensure_ascii=False)
+    data = (record + "\n").encode("utf-8")
+    afd = os.open(audit_path, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o644)
+    try:
+        fcntl.flock(afd, fcntl.LOCK_EX)
+        view = memoryview(data)
+        while view:
+            view = view[os.write(afd, view):]
+        os.fsync(afd)
+    finally:
+        os.close(afd)
+
+
+for target in targets:
+    audit_event("forget-intent", target)
+mode = os.stat(sem).st_mode & 0o7777
+fd2, tmp = tempfile.mkstemp(dir=sem_dir, prefix=".commit-forget-")
+try:
+    with os.fdopen(fd2, "wb") as handle:
+        handle.write(candidate)
+        handle.flush()
+        os.fchmod(handle.fileno(), mode)
+        os.fsync(handle.fileno())
+    if Path(sem).read_bytes() != snapshot:
+        refuse("семафор изменился во время проверки, повтори")
+    os.replace(tmp, sem)
+finally:
+    if os.path.exists(tmp):
+        os.unlink(tmp)
+dir_fd = os.open(sem_dir, os.O_RDONLY)
+try:
+    os.fsync(dir_fd)
+finally:
+    os.close(dir_fd)
+for target in targets:
+    audit_event("forget-done", target)
+for target in targets:
+    print("Forgot commit: " + target)
+PY
+    exit 0
   fi
   # WP-530 Ф61: a commit is at least as strong a liveness signal as note-file
   # -- same fix, same already-held lock, see _refresh_owner_pid above.
