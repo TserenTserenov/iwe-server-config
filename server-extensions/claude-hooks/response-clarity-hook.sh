@@ -270,6 +270,28 @@ BASE5_MATCH=$(printf '%s\n' "$RESPONSE" | perl -CSD -Mutf8 -ne '
 ' 2>/dev/null || true)
 [ -n "$BASE5_MATCH" ] && log_violation "BASE5" "em-dash-outside-eto" "$BASE5_MATCH"
 
+# --- A14: part-whole wording applied to a non-system (base style rule 8) ---
+# Per sentence: a part-whole marker ("входит в", "состоит из", "часть") together
+# with a non-system kind (description, document, method, work, state,
+# characteristic). Text in «…» and `…` is stripped first so quoted anti-examples
+# do not fire; parts inside a description-kind (sections of a document, steps of
+# a method) are allowed and skipped. Warn-only: regex cannot settle ontology, the log feeds calibration.
+A14_MATCH=$(printf '%s\n' "$RESPONSE" | perl -CSD -Mutf8 -ne '
+  s/«[^»]*»//g; s/`[^`]*`//g;
+  for my $s (split /(?<=[.!?;])\s+/) {
+    next if $s =~ /(документ|описани|метод|план|инструкци)\S*\s+(состо[ия]т|входит\s+в\s+(документ|описани|метод|план))/i;
+    if ($s =~ /(входи[тл]|входят|входить|состо[ия]т\s+из|в\s+состав|(является|являются|будет|быть)\s+частью|част(ью|ь|и)\s+(агента|системы|программы))/i
+        && $s =~ /(инструкци|промпт|метод|процесс|описани|документ|состояни|характеристик|управлени[ея]\s+выполнени|контекст|памят)/i) {
+      print $s; exit
+    }
+    # "X - это Y" assigns a type; "state is a set of values" names a description, not a type
+    if ($s =~ /(состояни|систем|агент|метод|работ)\S*\s+[-—–]\s+это\s+(набор|совокупност|множеств|комплекс|сочетани|список|профиль)/i) {
+      print $s; exit
+    }
+  }
+' 2>/dev/null || true)
+[ -n "$A14_MATCH" ] && log_violation "A14" "non-system-as-part" "$A14_MATCH"
+
 # --- B1 (поведение): просит пилота «сделать вручную / дать доступ» до проверки ---
 # Ось ПОВЕДЕНИЯ, не стиля: ловит фразы-маркеры, когда агент перекладывает
 # действие на пилота вместо вызова доступного инструмента (MCP/Bash). Счётчик

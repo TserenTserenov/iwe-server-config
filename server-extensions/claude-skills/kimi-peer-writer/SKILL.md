@@ -185,6 +185,14 @@ python3 ~/IWE/DS-my-strategy/scripts/resolve-personality-by-host.py \
 
 Найти WP по задаче: прочитать `${IWE_GOVERNANCE_REPO:-DS-strategy}/WP-REGISTRY.md` (grep по ключевым словам) и `${IWE_GOVERNANCE_REPO:-DS-strategy}/current/WeekPlan W{N}.md`.
 
+После нахождения РП, до выбора фазы выполнить Sync Gate — тот же вызов и разбор exit-кодов, что в `memory/protocol-open.md` Шаг 3a и в `peer-conversation/SKILL.md` §0б (РП-484 Ф224, 22.10 — эта секция до правки не вызывала Sync Gate вообще, не только словесно, а никак):
+
+```bash
+bash "${IWE_WORKSPACE:-$HOME/IWE}/.claude/scripts/wp-sync-bundle.sh" WP-N > /tmp/wp-sync-bundle-$$.md; BUNDLE_RC=$?; head -3 /tmp/wp-sync-bundle-$$.md; echo "bundle_rc=$BUNDLE_RC"
+```
+
+Разбор `BUNDLE_RC` и `CARD_SOURCE` — та же таблица, что в `memory/protocol-open.md` Шаг 3a. Прочитать секцию «## Последний отчёт сессии этого РП» из вывода — первоисточник report.md последней сессии, не пересказ из карточки; отдельно проверить отчёты текущего дня по этому РП в `MC-sessions`. `rm -f /tmp/wp-sync-bundle-$$.md` после использования. Exit 3 (свежесть не подтверждена) — переход в изолированную копию, по отстающей локальной карточке фазу не выбирать.
+
 Анонс пилоту:
 ```
 Открываю peer-сессию (DP.SC.154)

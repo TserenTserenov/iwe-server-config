@@ -495,7 +495,9 @@ class DeclaredTerminalProofTests(unittest.TestCase):
         before = semaphore.read_bytes()
         helpers = ["_unique_record_field", "normalize_remote_url", "_worktree_clean_status_sha",
                    "_isolated_source_commits_json", "_session_commit_claims_json", "_terminal_proof_snapshot_sha",
-                   "_terminal_card_snapshot_sha", "_runner_release_retry_snapshot_sha", "_prepared_source_snapshot_matches"]
+                   "_terminal_card_snapshot_sha", "_runner_release_retry_snapshot_sha", "_prepared_worktree_status_sha",
+                   "_prepared_source_worktree_unchanged", "_prepared_source_identity_matches",
+                   "_prepared_source_snapshot_matches"]
         script = "\n".join(function_source(name) for name in helpers)
         script += "\nIWE_ROOT=" + shlex.quote(str(self.root))
         script += "\n_prepared_source_snapshot_matches " + shlex.join([str(semaphore), str(repo)])
@@ -2082,7 +2084,11 @@ class WorktreeCleanupCwdTests(unittest.TestCase):
             "_owned_semaphore_snapshot_sha", "_append_close_fields_atomic", "_record_close_prepared",
             "_record_close_published", "_close_delivery_state", "_worktree_clean_status_sha",
             "_isolated_source_commits_json", "_session_commit_claims_json",
-            "_prepared_source_snapshot_matches", "_worktree_absent_and_unregistered",
+            "_prepared_worktree_status_sha", "_prepared_source_worktree_unchanged",
+            "_prepared_source_identity_matches", "_prepared_source_snapshot_matches",
+            "_commit_current_tree_has_publish_proof", "_range_commits_have_publish_proof",
+            "_prepared_source_set_has_publish_proof", "_prepared_worktree_removal_proof",
+            "_worktree_absent_and_unregistered",
             "_record_close_cleanup", "_prepare_close_receipt", "_rename_open_to_closed",
             "_close_delivery_and_transition", "_reap_orphaned_worktree",
         )
