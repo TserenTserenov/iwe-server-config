@@ -37,7 +37,7 @@ FUNCTIONS = (
     "_prepared_source_set_has_publish_proof", "_prepared_worktree_removal_proof",
     "_publish_prepared_source", "_claimed_commits_have_publish_proof",
     "_worktree_absent_and_unregistered", "_record_close_cleanup", "_prepare_close_receipt",
-    "_rename_open_to_closed", "_close_delivery_and_transition", "_reap_orphaned_worktree",
+    "_rename_open_to_closed", "_close_delivery_and_transition", "_reap_orphaned_worktree", "_local_release_mutation_allowed",
 )
 SENTINEL = "declared-peer-session:drift-fixture"
 FILE = "notes/card.md"

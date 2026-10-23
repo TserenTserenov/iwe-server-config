@@ -2098,7 +2098,7 @@ class WorktreeCleanupCwdTests(unittest.TestCase):
             "_prepared_source_set_has_publish_proof", "_prepared_worktree_removal_proof",
             "_worktree_absent_and_unregistered",
             "_record_close_cleanup", "_prepare_close_receipt", "_rename_open_to_closed",
-            "_close_delivery_and_transition", "_reap_orphaned_worktree",
+            "_close_delivery_and_transition", "_reap_orphaned_worktree", "_local_release_mutation_allowed",
         )
         cls.functions = "\n".join(extract_function(SOURCE, name) for name in names)
         cls.functions += '\nfail() { printf "%s\\n" "$1" >&2; exit "${2:-1}"; }\n'

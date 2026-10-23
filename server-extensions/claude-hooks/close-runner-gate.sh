@@ -72,6 +72,17 @@ case "$SESSION_ID" in
   *[!A-Za-z0-9._-]*) exit 0 ;;
 esac
 SESSION_ID_SAFE="$SESSION_ID"
+# F228: serialize this entire producer with release, including sentinel writes
+# outside close_obligation. An inherited FD is checked, never just an env flag.
+LOCAL_RELEASE_CLI="$IWE_ROOT/${IWE_GOVERNANCE_REPO:-DS-my-strategy}/scripts/session_local_release.py"
+if [ -n "$SESSION_ID" ] && [ "$SESSION_ID" != unknown ] && [ -f "$LOCAL_RELEASE_CLI" ]; then
+  if ! IWE_ROOT="$IWE_ROOT" python3 "$LOCAL_RELEASE_CLI" hook-check --agent claude-code --harness-session-id "$SESSION_ID" >/dev/null 2>&1; then
+    printf '%s' "$INPUT" | IWE_ROOT="$IWE_ROOT" python3 "$LOCAL_RELEASE_CLI" hook \
+      --agent claude-code --harness-session-id "$SESSION_ID" --event PreToolUse -- bash "$0"
+    exit $?
+  fi
+fi
+
 
 # WP-484 Ф118 (19.08, пир-сессия с Codex, живой рецидив: пир-сессия закрывалась
 # через "close_obligation.py cancel --action close-override" + "git commit
