@@ -1902,6 +1902,22 @@ try:
             continue
         if unique("agent") != agent:
             refuse(path, "agent не совпадает с именем записи")
+        # A housekeeping semaphore (Day/Week/Month Close) is never a --wp owner:
+        # it has no `wp:` field at all, so unique("wp") below would always
+        # refuse it. Name and content must agree before either is trusted --
+        # a mismatch (e.g. a housekeeping-looking name carrying a `wp:` field)
+        # stays on the normal fail-closed path below, not a silent skip.
+        housekeeping_values = values("housekeeping")
+        if housekeeping_values:
+            if len(housekeeping_values) != 1 or not housekeeping_values[0]:
+                refuse(path, "неоднозначное поле housekeeping")
+            reason = housekeeping_values[0]
+            slug_values = values("slug")
+            expected_name = agent + "-housekeeping-" + reason
+            if (values("wp") or len(slug_values) != 1 or slug_values[0] != reason
+                    or path.name not in (expected_name + ".open", expected_name + ".open.closed")):
+                refuse(path, "housekeeping-семафор не согласован по имени/содержимому")
+            continue  # well-formed housekeeping semaphore -- never a --wp owner candidate
         recorded_wp, recorded_slug = unique("wp"), unique("slug")
         if normalize_wp(recorded_wp) != normalize_wp(wp) or recorded_slug != slug:
             continue
