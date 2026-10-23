@@ -289,15 +289,20 @@ A12_CLOSE_MATCH=$(python3 "$(dirname "${BASH_SOURCE[0]}")/a12-unsolicited-close.
 # наращивать счётчик сессии и «3+ нарушений». Хвост строки, а не голова: триггер обычно в конце.
 [ -n "$A12_CLOSE_MATCH" ] && echo "$TIMESTAMP | $AGENT | A12_UNSOLICITED_CLOSE_CANDIDATE | close-proposed-without-pilot-intent | $(redact "${A12_CLOSE_MATCH: -100}")" >> "$LOG_FILE" 2>/dev/null || true
 
-# --- A12_NEXT_MISSING / A12_NEXT_NO_PILOT_ADDRESSEE (РП-605 Ф1, 22.10.2026) ---
+# --- A12_NEXT_MISSING / A12_NEXT_EMPTY_CONTENT / A12_NEXT_NO_PILOT_ADDRESSEE (РП-605 Ф1/Ф5, 22.10.2026) ---
 # Форма и адресат блока «Дальше» (A12) — не его истинность (та ось живёт в
-# РП-603) и не остальные правила содержимого (A1-A13.1 выше, РП-388). Обе
+# РП-603) и не остальные правила содержимого (A1-A13.1 выше, РП-388). Все три
 # строки warn-only, в BLOCKABLE не входят: a12-next-block.py печатает ровно
-# две строки (пусто = нет сигнала), не ломает ход при сбое.
-A12_NEXT_RESULT=$(python3 "$(dirname "${BASH_SOURCE[0]}")/a12-next-block.py" "$TRANSCRIPT_PATH" 2>/dev/null || echo $'\n')
+# три строки (пусто = нет сигнала), не ломает ход при сбое. EMPTY_CONTENT
+# (Ф5, живой случай "Дальше: 👉"/"Дальше: 🏃" -- пустая клауза без единого
+# слова) и NO_PILOT_ADDRESSEE взаимоисключающие -- детектор репортит одно
+# или другое, не оба сразу.
+A12_NEXT_RESULT=$(python3 "$(dirname "${BASH_SOURCE[0]}")/a12-next-block.py" "$TRANSCRIPT_PATH" 2>/dev/null || printf '\n\n\n')
 A12_NEXT_MISSING_LINE=$(printf '%s\n' "$A12_NEXT_RESULT" | sed -n '1p')
-A12_NEXT_ADDRESSEE_LINE=$(printf '%s\n' "$A12_NEXT_RESULT" | sed -n '2p')
+A12_NEXT_EMPTY_LINE=$(printf '%s\n' "$A12_NEXT_RESULT" | sed -n '2p')
+A12_NEXT_ADDRESSEE_LINE=$(printf '%s\n' "$A12_NEXT_RESULT" | sed -n '3p')
 [ -n "$A12_NEXT_MISSING_LINE" ] && echo "$TIMESTAMP | $AGENT | A12_NEXT_MISSING | no-next-line-in-last-3-lines | -" >> "$LOG_FILE" 2>/dev/null || true
+[ -n "$A12_NEXT_EMPTY_LINE" ] && echo "$TIMESTAMP | $AGENT | A12_NEXT_EMPTY_CONTENT | next-line-emoji-or-punctuation-only | $(redact "$A12_NEXT_EMPTY_LINE")" >> "$LOG_FILE" 2>/dev/null || true
 [ -n "$A12_NEXT_ADDRESSEE_LINE" ] && echo "$TIMESTAMP | $AGENT | A12_NEXT_NO_PILOT_ADDRESSEE | next-line-without-pilot-addressee | $(redact "$A12_NEXT_ADDRESSEE_LINE")" >> "$LOG_FILE" 2>/dev/null || true
 
 # --- A7.1 (стиль): технический журнал в чат под видом <details> ---

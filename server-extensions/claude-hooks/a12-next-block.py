@@ -59,6 +59,17 @@ GLOBAL_NO_EXPECTATION_RE = re.compile(
     re.IGNORECASE,
 )
 
+# A12_NEXT_EMPTY_CONTENT (РП-605, 22.10.2026, пир-сессия Claude+Kimi+Codex
+# 2026-10-22-23-codex-hook-gap-next): live case "Дальше: 👉" / "Дальше: 🏃" --
+# a line that technically starts with "Дальше:" but carries zero letters, only
+# emoji/punctuation/whitespace. ADDRESSEE_RE/GLOBAL_NO_EXPECTATION_RE already
+# fail this (no match either way, same as a text clause missing the
+# addressee), but the two cases are qualitatively different: one forgot the
+# addressee wording, the other wrote no clause at all. Separate signal for
+# that distinction in telemetry, not a stricter gate class -- still warn-only,
+# see CONSENSUS in that session's report.md for the revisit criterion.
+LETTER_RE = re.compile(r"[A-Za-zА-Яа-яЁё]")
+
 
 def final_assistant_lines(rows, limit=3):
     """Last `limit` non-empty lines of the assistant's final-turn text."""
@@ -72,24 +83,33 @@ def final_assistant_lines(rows, limit=3):
 
 
 def detect(path):
-    """Returns (missing: bool, no_addressee_line: str | None)."""
+    """Returns (missing, empty_content_line, no_addressee_line).
+
+    `empty_content_line` and `no_addressee_line` are mutually exclusive: an
+    emoji/punctuation-only clause is a stricter failure than one that has
+    words but forgot the addressee, so it is reported once under its own
+    signal, not double-counted under both.
+    """
     # The profile covers replies to the pilot only. A peer's turn in a peer
     # session is addressed to the writer, so neither signal applies there
     # (style-check-text.sh sets STYLE_CONTEXT=peer for peer adapters).
     if os.environ.get("STYLE_CONTEXT") == "peer":
-        return False, None
+        return False, None, None
     rows = list(_a12._rows(path))
     tail = final_assistant_lines(rows)
     next_line = next((m.group(1) for ln in tail if (m := NEXT_LINE_RE.match(ln))), None)
     if next_line is None:
-        return True, None
+        return True, None, None
+    if not LETTER_RE.search(next_line):
+        return False, next_line, None
     has_signal = ADDRESSEE_RE.search(next_line) or GLOBAL_NO_EXPECTATION_RE.search(next_line)
-    return False, (None if has_signal else next_line)
+    return False, None, (None if has_signal else next_line)
 
 
 if __name__ == "__main__":
     if len(sys.argv) != 2:
         sys.exit("usage: a12-next-block.py <transcript.jsonl>")
-    missing, no_addressee_line = detect(sys.argv[1])
+    missing, empty_content_line, no_addressee_line = detect(sys.argv[1])
     print("MISSING" if missing else "")
+    print(empty_content_line or "")
     print(no_addressee_line or "")
