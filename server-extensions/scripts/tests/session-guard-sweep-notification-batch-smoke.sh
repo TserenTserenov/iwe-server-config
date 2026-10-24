@@ -112,7 +112,7 @@ grep -q 'zombies_escalated=3' <<<"$OUT" || fail "sweep did not count all 3 escal
 [ "$(call_count)" -eq 1 ] || fail "mass pass sent $(call_count) Telegram messages, want 1"
 grep -q -- '--admission-key unexpected:session-guard:sweep-' "$TG_LOG" \
   || fail "sweep summary bypassed the shared notification admission key"
-grep -q '3 событий за проход' "$TG_LOG" || fail "summary header missing the event count"
+grep -q '3 события за проход' "$TG_LOG" || fail "summary header missing the event count"
 for n in a b c; do
   grep -q "mass-$n" "$TG_LOG" || fail "summary is missing session mass-$n"
 done
@@ -239,7 +239,7 @@ write_iwe_tg 0
 OUT=$(run_audit --cleanup-orphans)
 [ "$(call_count)" -eq 1 ] || fail "recovery pass after a real kill sent $(call_count) messages, want 1"
 grep -q 'killed-mid-write' "$TG_LOG" || fail "notification lost across a real SIGKILL, not just recovered from a simulated failure"
-grep -q '1 событий за проход' "$TG_LOG" \
+grep -q '1 событие за проход' "$TG_LOG" \
   || fail "recovered event was duplicated inside the one Telegram summary: $(cat "$TG_LOG")"
 [ "$(grep -o 'killed-mid-write' "$TG_LOG" | wc -l | tr -d ' ')" -eq 1 ] \
   || fail "recovered semaphore appears more than once inside the summary body: $(cat "$TG_LOG")"

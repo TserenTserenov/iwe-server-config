@@ -147,7 +147,7 @@ fi
 - [ ] **4 вопроса заданы:** мир/сообщество/человек/личное
 - [ ] **Ответы добавлены в черновик:** строки `[День]` обновлены
 - [ ] **Метрики дня записаны:** `week-draft-append.sh` (WakaTime/коммиты/РП) + вручную (бюджет/прогресс месяца)
-- [ ] **Черновик закоммичен:** `git -C ~/IWE/DS-Knowledge-Index-Tseren add docs/ && git commit -m "docs: week-draft W{NN} update"`
+- [ ] **Черновик закоммичен:** строку метрик `week-draft-append.sh` коммитит и отправляет сам; ответы на 4 вопроса — `git -C ~/IWE/DS-Knowledge-Index-Tseren add docs/ && git commit -m "docs: week-draft W{NN} update" && git push`
 
 ### Рефлексия дня — прямой опрос (WP-484, второй канал получения рядом с ботовым `/reflect`)
 

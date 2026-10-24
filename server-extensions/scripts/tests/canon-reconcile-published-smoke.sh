@@ -160,6 +160,9 @@ fresh s8; echo one > "$CANON/b.txt"; commit_in "$CANON" "local"; C=$(git -C "$CA
 printf 'agent: claude-code\npid: %s\n' "$$" > "$IWE_RUNTIME_DIR/sessions/claude-code-writer.open"; H=$(git -C "$CANON" rev-parse HEAD)
 bash "$SCRIPT" "$CANON" main >/dev/null 2>&1; rc=$?
 assert "$rc" "1" "exit 1 with live writer"; assert "$(git -C "$CANON" rev-parse HEAD)" "$H" "HEAD unchanged"
+# WP-568: the ALERT names the writer in a detail tail; the class (streak key) stays without it
+o8=$(env CANON_RECONCILE_ALERT_AFTER_SEC=0 CANON_RECONCILE_ALERT_MIN_COUNT=1 CANON_RECONCILE_ALERT_REPEAT_SEC=0 bash "$SCRIPT" "$CANON" main 2>&1)
+assert "$(printf '%s' "$o8" | grep -c "refusals 'live canonical writer(s)', .* -- detail: claude-code-writer$")" "1" "the ALERT carries the writer's semaphore name as detail, outside the class"
 rm -f "$IWE_RUNTIME_DIR/sessions/claude-code-writer.open"   # only the pid-less semaphore may count from here (otherwise the previous live one would satisfy the check)
 printf 'agent: codex\n' > "$IWE_RUNTIME_DIR/sessions/codex-nopid.open"; H=$(git -C "$CANON" rev-parse HEAD)
 bash "$SCRIPT" "$CANON" main >/dev/null 2>&1; rc=$?

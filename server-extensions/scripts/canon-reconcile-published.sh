@@ -367,7 +367,17 @@ refuse_report() {  # <reason> -- the whole report of one refusal: message, strea
   [ -z "$warn" ] || echo "$warn" >&2
   log_line "${REPORT_WORD:-refused}" "$reason"
   if [ "$due" -eq 1 ]; then
-    echo "canon-reconcile-published: ALERT canon $(oneline "$REPO") not reconciled for $((a_age / 60)) min: $a_count refusals '$class', $dirty dirty tracked path(s) -- an owner must clear the blocking state; next alert in $((ALERT_REPEAT_SEC / 60)) min" >&2
+    # The class is cut at the first colon so the streak key stays stable; what
+    # follows it (for "live canonical writer(s)" -- the semaphore names) is
+    # what the pilot needs to act, so it rides along as an optional tail
+    # (WP-568, peer-session 2026-10-24-07). Readers must accept its absence.
+    local detail="" detail_tail=""
+    if [ "$reason" != "$class" ]; then
+      detail="${reason#*:}"; detail="${detail%% -- *}"; detail="${detail# }"
+      [ "${#detail}" -le 1000 ] || { detail="${detail:0:1000}"; detail="${detail% *}"; }   # never a half name
+      [ -z "$detail" ] || detail_tail=" -- detail: $detail"
+    fi
+    echo "canon-reconcile-published: ALERT canon $(oneline "$REPO") not reconciled for $((a_age / 60)) min: $a_count refusals '$class', $dirty dirty tracked path(s) -- an owner must clear the blocking state; next alert in $((ALERT_REPEAT_SEC / 60)) min$detail_tail" >&2
     log_line alert "class=$class count=$a_count age_s=$a_age dirty=$dirty"
   fi
   return 0

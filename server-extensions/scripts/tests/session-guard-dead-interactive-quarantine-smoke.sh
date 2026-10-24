@@ -16,6 +16,7 @@ GOV="$TEST_ROOT/DS-strategy"
 SESSION_DIR="$TEST_ROOT/.iwe-runtime/sessions"
 REGISTRY="$TEST_ROOT/.iwe-runtime/zombie-semaphores.jsonl"
 TG_LOG="$TEST_ROOT/iwe-tg.log"
+export DS_PUBLISH_DIGEST_DIR="$TEST_ROOT/notify-digest"   # never the pilot's real day-close digest
 export IWE_SESSIONS_ROOT="$GOV/sessions"
 mkdir -p "$GOV/scripts" "$GOV/sessions" "$SESSION_DIR" "$TEST_ROOT/bin" "$TEST_ROOT/scripts"
 git -C "$GOV" init -q
@@ -98,7 +99,7 @@ grep -q '"action":"escalated"' "$REGISTRY" || fail "escalation was not recorded 
 
 # 2. With the flag the same semaphore is quarantined: renamed, body intact,
 #    registry action recorded, human notice sent, no other file created.
-BODY_BEFORE=$(cat "$BASE")
+BODY_BEFORE=$(cat "$BASE"); : > "$TG_LOG"   # scenario 1 escalated the same file loudly
 OUT=$(run_audit --cleanup-orphans --quarantine-dead-interactive)
 [ ! -e "$BASE" ] || fail "quarantined semaphore still present as .open"
 [ -f "$BASE.orphaned-dead-interactive" ] || fail "quarantine destination missing"
@@ -108,8 +109,37 @@ grep -q '^QUARANTINED: claude-code-dead-base.open -> claude-code-dead-base.open.
   || fail "quarantine line not printed: $OUT"
 grep -q '"action":"quarantined"' "$REGISTRY" || fail "quarantine was not recorded in the zombie registry"
 grep -q 'dead_interactive_owner_proven:pid=99999999:lease_expired=' "$REGISTRY" || fail "quarantine reason lacks the proof fields"
-grep -q 'переведена в карантин' "$TG_LOG" || fail "human notice about the quarantine was not sent"
-grep -q "isolated-worktrees/dead-base" "$TG_LOG" || fail "notice does not name the retained worktree"
+# WP-568: the copy of this fixture does not exist, so nothing can be lost ->
+# the notice goes to the day-close digest, not to Telegram, and names the
+# work product instead of the semaphore file.
+[ ! -s "$TG_LOG" ] || fail "a quarantine with nothing left behind still went to Telegram: $(cat "$TG_LOG")"
+grep -q 'снята с учёта' "$DS_PUBLISH_DIGEST_DIR"/*.jsonl || fail "quiet quarantine notice missing from the digest"
+grep -q 'по WP-530 «fixture dead-base»' "$DS_PUBLISH_DIGEST_DIR"/*.jsonl || fail "digest notice does not name the work product and task"
+grep -q '1 событие за проход' "$DS_PUBLISH_DIGEST_DIR"/*.jsonl || fail "summary header has the wrong plural form"
+
+# 2b. A dead session whose copy still holds a changed file: Telegram, with the
+#     count and the retained copy, because that work could be lost.
+DIRTY_WT="$TEST_ROOT/.iwe-runtime/isolated-worktrees/dead-dirty"
+mkdir -p "$DIRTY_WT"; git -C "$DIRTY_WT" init -q
+git -C "$DIRTY_WT" -c user.email=t@t -c user.name=t commit -q --allow-empty -m base
+git -C "$DIRTY_WT" update-ref refs/remotes/origin/main HEAD   # published base: only the draft below is unsaved
+echo draft > "$DIRTY_WT/note.md"
+DIRTY="$SESSION_DIR/claude-code-dead-dirty.open"
+write_semaphore "$DIRTY" dead-dirty "$DEAD_PID"
+run_audit --cleanup-orphans --quarantine-dead-interactive >/dev/null
+[ -f "$DIRTY.orphaned-dead-interactive" ] || fail "dirty-copy semaphore was not quarantined"
+grep -q 'изменённых файлов 1' "$TG_LOG" || fail "notice about a copy with unsaved work was not sent to Telegram"
+grep -q "isolated-worktrees/dead-dirty" "$TG_LOG" || fail "notice does not name the retained copy"
+
+# 2c. No copy recorded at all (the session wrote in a canonical checkout):
+#     the guard cannot prove nothing is lost, so it stays loud.
+: > "$TG_LOG"
+NOCOPY="$SESSION_DIR/claude-code-dead-nocopy.open"
+write_semaphore "$NOCOPY" dead-nocopy "$DEAD_PID"
+sed -i.bak '/_worktree: /d' "$NOCOPY" && rm -f "$NOCOPY.bak"
+run_audit --cleanup-orphans --quarantine-dead-interactive >/dev/null
+grep -q 'не смог' "$TG_LOG" || fail "a quarantine whose copy could not be checked was not sent to Telegram"
+: > "$TG_LOG"
 
 # 3. A quarantined semaphore no longer shows up as an active session: at this
 #    point it is the only semaphore in the directory, so the whole "active

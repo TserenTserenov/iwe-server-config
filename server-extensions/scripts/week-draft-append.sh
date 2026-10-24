@@ -149,3 +149,26 @@ else
   echo "ERR: не нашёл строку для ${DOW_LABEL} в таблице черновика" >&2
   exit 1
 fi
+
+# Commit and push the metrics row right here, not as a separate step of the
+# Day Close instructions: on 22.10 the LLM-driven Day Close on tsekh-1 skipped
+# that step, the row stayed uncommitted, and pull-repos reported the repo as
+# dirty to the pilot every hour for two days (WP-568, peer-session
+# 2026-10-24-07). Only this one file is staged; a failed push keeps the local
+# commit and only warns -- the row is already saved, pull-repos rebases it.
+publish_metrics_row() {
+  local rel
+  git -C "$KNOWLEDGE" rev-parse --is-inside-work-tree >/dev/null 2>&1 || return 0
+  rel="${DRAFT_FILE#"$KNOWLEDGE"/}"
+  [ -n "$(git -C "$KNOWLEDGE" status --porcelain -- "$rel")" ] || return 0   # also catches a draft that was never committed
+  if ! { git -C "$KNOWLEDGE" add -- "$rel" \
+      && git -C "$KNOWLEDGE" commit -q -m "docs: week-draft W${WEEK} metrics ${DOW_LABEL}" -- "$rel"; }; then
+    echo "WARN: строка метрик записана, но не закоммичена (см. вывод git выше)" >&2
+    return 0
+  fi
+  if ! git -C "$KNOWLEDGE" push -q 2>/dev/null; then
+    git -C "$KNOWLEDGE" pull -q --rebase 2>/dev/null && git -C "$KNOWLEDGE" push -q 2>/dev/null \
+      || echo "WARN: строка метрик сохранена локальным коммитом, но не отправлена на GitHub" >&2
+  fi
+}
+publish_metrics_row
