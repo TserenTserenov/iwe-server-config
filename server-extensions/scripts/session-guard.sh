@@ -1170,7 +1170,20 @@ with_session_transition_lock() {  # <original .open path> <callback...>
   return "$rc"
 }
 
+# F228: the RUN receipt fences even a partially finished local release.
+_local_release_mutation_allowed() {
+  local cli="$IWE_ROOT/$GOV_REPO/scripts/session_local_release.py"
+  if [ -f "$cli" ]; then
+    python3 "$cli" semaphore-available "$1" >&2
+  else
+    # An older installation without local-release records keeps its behavior.
+    # A partially deployed installation must never mutate retained evidence.
+    [ -z "$(find "$IWE_ROOT/$GOV_REPO/inbox/agent/tasks" -maxdepth 1 -name 'RUN-local-release-*.md' -print -quit 2>/dev/null)" ]
+  fi
+}
+
 _locked_open_identity() {  # <open path> <expected agent> [expected session] [allow terminal hardlink 0|1]
+  _local_release_mutation_allowed "$1" || return 1
   python3 - "$1" "$2" "${3:-}" "${4:-0}" <<'PY' 2>/dev/null
 import os
 import stat
@@ -2983,6 +2996,7 @@ _dead_interactive_refusal() {  # <semaphore> <reason>
 }
 
 _quarantine_dead_interactive() {  # <semaphore> <observed dead pid> [out-var for the quarantine path]
+  _local_release_mutation_allowed "$1" || return 1
   local semaphore="$1" pid="$2" dest_outvar="${3:-}"
   local host lease_deadline heartbeat_at heartbeat_epoch now snapshot destination epoch age worktree reason
   now=$(date +%s)
@@ -3050,12 +3064,45 @@ _quarantine_dead_interactive() {  # <semaphore> <observed dead pid> [out-var for
   return 0
 }
 
+# unsaved_work_in_worktree <worktree>: prints "gone", "unknown", or
+# "<changed files> <unpublished commits>". Only a path that does not exist is
+# "gone"; no path at all (the session wrote in a canonical checkout), a git
+# error or a missing origin/main is "unknown", which the caller keeps loud.
+# Commits are compared by patch-id with origin/main (`git cherry`), because
+# isolate-push delivers by cherry-pick and a published commit lives there
+# under another SHA.
+unsaved_work_in_worktree() {
+  local wt="$1" status cherry changed unpublished
+  [ -n "$wt" ] || { echo unknown; return 0; }
+  [ -e "$wt" ] || { echo gone; return 0; }
+  status=$(git -C "$wt" status --porcelain 2>/dev/null) || { echo unknown; return 0; }
+  git -C "$wt" rev-parse --verify -q origin/main >/dev/null 2>&1 || { echo unknown; return 0; }
+  cherry=$(git -C "$wt" cherry origin/main HEAD 2>/dev/null) || { echo unknown; return 0; }
+  changed=$(printf '%s' "$status" | grep -c . || true)
+  unpublished=$(printf '%s' "$cherry" | grep -c '^+' || true)
+  printf '%s %s\n' "${changed:-0}" "${unpublished:-0}"
+}
+
 notify_dead_quarantine() {  # <quarantined path> <age> <worktree> <pass key> <reason> <original semaphore> <opened epoch>
-  local age_h=$(( $2 / 3600 ))
-  # "разобрать вручную" без ответа кто и когда -- тот же пробел, что у
-  # сводки нескольких событий (_sweep_flush_notify_queue, то же 09.10).
-  _session_guard_notify "Мёртвая сессия IWE переведена в карантин: $(basename -- "$1") (возраст ${age_h}ч; процесс-владелец не существует, аренда истекла, пульса нет). Барьер на коммиты снят, файл и улики сохранены. Незакоммиченная работа, если была, лежит в ${3:-неизвестной копии}. Дальше: от тебя сейчас ничего не нужно -- агент сверит эту сессию при следующей работе по её рабочему продукту; если хочешь раньше, скажи." \
-    "$6" "quarantined" "$4" "$5" "$7" "$2" "quarantined"
+  local age_h=$(( $2 / 3600 )) wp task agent host work changed=0 unpublished=0 who left msg
+  # The pilot acts on "which work, is anything lost", not on a semaphore
+  # file name and a worktree path (WP-568, peer-session 2026-10-24-07): the
+  # guard checks the copy itself instead of saying "if there was any".
+  wp=$(_semaphore_last_field "$1" wp); task=$(_semaphore_last_field "$1" task)
+  agent=$(_semaphore_last_field "$1" agent); host=$(_semaphore_last_field "$1" host)
+  who="сессия ${agent:-агента} по ${wp:-неизвестному РП}${task:+ «${task}»}${host:+ на ${host}}"
+  work=$(unsaved_work_in_worktree "$3")
+  case "$work" in gone|unknown) ;; *) read -r changed unpublished <<< "$work" ;; esac
+  if [ "$work" = unknown ]; then
+    msg="Умершая ${age_h}ч назад ${who} снята с учёта (процесса нет, аренда истекла). Проверить, осталась ли в ней несохранённая работа, я не смог${3:+ (копия: ${3})}. Делать сейчас ничего не нужно: агент сверит её при следующей работе по ${wp:-этому РП}; если работа срочная - скажите агенту «проверь умершую сессию по ${wp:-РП}»."
+  elif [ "$work" = gone ] || { [ "$changed" = 0 ] && [ "$unpublished" = 0 ]; }; then
+    [ "$work" = gone ] && left="Её рабочей копии уже нет, терять нечего." || left="Несохранённой работы в ней нет."
+    msg="Умершая ${age_h}ч назад ${who} снята с учёта (процесса нет, аренда истекла). ${left} Делать ничего не нужно."
+    declare -p _SWEEP_NOTIFY_QUEUE >/dev/null 2>&1 && _SWEEP_NOTIFY_QUIET_COUNT=$((_SWEEP_NOTIFY_QUIET_COUNT + 1))
+  else
+    msg="Умершая ${age_h}ч назад ${who} снята с учёта (процесса нет, аренда истекла). В её копии осталось: изменённых файлов ${changed}, неотправленных коммитов ${unpublished} - копия сохранена (${3}). Делать сейчас ничего не нужно: агент подберёт это при следующей работе по ${wp:-этому РП}; если работа срочная - скажите агенту «подбери работу умершей сессии по ${wp:-РП}»."
+  fi
+  _session_guard_notify "$msg" "$6" "quarantined" "$4" "$5" "$7" "$2" "quarantined"
 }
 
 # WP-484 (session-close-hygiene peer-session, 2026-08-20, consensus Claude+
@@ -3074,6 +3121,7 @@ _reap_orphaned_worktree() {
   # The caller may still be inside the orphan: removal must not delete our cwd.
   cd -- "$IWE_ROOT" || { echo "WARNING: stable workspace unavailable; orphan worktree retained" >&2; return 1; }
   local quarantined_semaphore="$1"
+  _local_release_mutation_allowed "$quarantined_semaphore" || return 1
   local worktree_path
   worktree_path=$(grep '^isolated_worktree: ' "$quarantined_semaphore" 2>/dev/null | head -1 | cut -d' ' -f2- || true)
   [ -n "$worktree_path" ] || return 0
@@ -3773,12 +3821,18 @@ _sweep_orphaned_semaphores_body() {
   # that produced zero fresh classifications of its own.
   _SWEEP_NOTIFY_ESCALATED_COUNT=0
   _SWEEP_NOTIFY_QUARANTINED_COUNT=0
+  # Quarantines proven to leave no unsaved work behind (notify_dead_quarantine).
+  # A pass made only of those goes to the day-close digest, not to Telegram;
+  # anything recovered from an interrupted pass is not counted here, so it
+  # stays loud (WP-568, peer-session 2026-10-24-07).
+  _SWEEP_NOTIFY_QUIET_COUNT=0
   _SWEEP_NOTIFY_PASS_KEYS=()
   _SWEEP_NOTIFY_CAN_FLUSH=1
   _SWEEP_PASS_KEY=$(date -u +%Y%m%dT%H%M%SZ)
   _sweep_notify_pending_load
   while IFS= read -r semaphore; do
     [ -f "$semaphore" ] || continue
+    _local_release_mutation_allowed "$semaphore" || continue
     pid=$(grep '^pid: ' "$semaphore" | head -1 | cut -d' ' -f2- || true)
     # WP-484 code review (2026-08-18, Codex): `pid: 0` matches ^[0-9]+$, and
     # `kill -0 0` sends signal 0 to this shell's own process GROUP, which
@@ -3872,6 +3926,12 @@ _sweep_orphaned_semaphores_body() {
 # message as noisy as the many it replaces.
 _SWEEP_QUARANTINE_SUMMARY_THRESHOLD=5
 
+_ru_events() {  # <n> -- "1 событие", "3 события", "5 событий"
+  local n="$1" word=событий
+  case "$((n % 100))" in 11|12|13|14) ;; *) case "$((n % 10))" in 1) word=событие ;; 2|3|4) word=события ;; esac ;; esac
+  printf '%s %s' "$n" "$word"
+}
+
 _sweep_flush_notify_queue() {
   local total=${#_SWEEP_NOTIFY_QUEUE[@]}
   [ "$total" -gt 0 ] || return 0
@@ -3926,13 +3986,13 @@ print(hashlib.sha256(sys.stdin.buffer.read()).hexdigest()[:16])
   # that's the still-open WP-538 Ф12 escalation-by-age item, not solved here.
   if command -v notification_center_bridge_send >/dev/null 2>&1; then
     notification_center_bridge_send session-guard yellow \
-      "Карантин сессий: $total событий $pass_scope" \
+      "Карантин сессий: $(_ru_events "$total") $pass_scope" \
       "осиротевшие: $_SWEEP_NOTIFY_ESCALATED_COUNT, в карантине: $_SWEEP_NOTIFY_QUARANTINED_COUNT" \
       0 "session-guard:quarantine:open"
   fi
   if [ "$total" -le "$_SWEEP_QUARANTINE_SUMMARY_THRESHOLD" ]; then
-    summary=$(printf '🔔 Сторож сессий: %d событий %s\n\n%s' \
-      "$total" "$pass_scope" "$(printf '%s\n\n' "${_SWEEP_NOTIFY_QUEUE[@]}")")
+    summary=$(printf '🔔 Сторож сессий: %s %s\n\n%s' \
+      "$(_ru_events "$total")" "$pass_scope" "$(printf '%s\n\n' "${_SWEEP_NOTIFY_QUEUE[@]}")")
   else
     # WP-538 Ф9 cold-review (Codex, 19.09): a bare count + "see the registry"
     # gave no way to find which registry entries belong to THIS pass, or
@@ -3955,7 +4015,21 @@ print(hashlib.sha256(sys.stdin.buffer.read()).hexdigest()[:16])
     # следующей работе по затронутому РП, а не пилот прямо сейчас -- честно
     # (это НЕ гарантия, что каждая сессия будет проверена сегодня же), без
     # обещания "всё починено" (WP-538 Ф9).
-    summary="🔔 Сторож сессий: $total событий $pass_scope (осиротевшие: $_SWEEP_NOTIFY_ESCALATED_COUNT, в карантине: $_SWEEP_NOTIFY_QUARANTINED_COUNT). Карантин не значит, что незакоммиченная работа этих сессий опубликована. Дальше: от тебя сейчас ничего не нужно -- агент сверит каждую с опубликованной версией при следующей работе по её рабочему продукту; если хочешь проверить раньше, назови ключ прохода в чате, и я посмотрю в $ZOMBIE_REGISTRY."
+    summary="🔔 Сторож сессий: $(_ru_events "$total") $pass_scope (осиротевшие: $_SWEEP_NOTIFY_ESCALATED_COUNT, в карантине: $_SWEEP_NOTIFY_QUARANTINED_COUNT). Карантин не значит, что незакоммиченная работа этих сессий опубликована. Дальше: от тебя сейчас ничего не нужно -- агент сверит каждую с опубликованной версией при следующей работе по её рабочему продукту; если хочешь проверить раньше, назови ключ прохода в чате, и я посмотрю в $ZOMBIE_REGISTRY."
+  fi
+  if [ "${_SWEEP_NOTIFY_QUIET_COUNT:-0}" -gt 0 ] && [ "${_SWEEP_NOTIFY_QUIET_COUNT:-0}" -eq "$total" ]; then
+    # Nothing for the pilot to do in this pass: the day-close digest, same
+    # JSONL row shape as notify_digest_append (DS-my-strategy lib).
+    local digest_dir="${DS_PUBLISH_DIGEST_DIR:-$HOME/IWE/.claude/state/notify-digest}"
+    if mkdir -p "$digest_dir" 2>/dev/null && python3 -c '
+import json, sys
+print(json.dumps({"ts": sys.argv[1], "status": "notice", "label": "Сторож сессий", "detail": sys.argv[2]}, ensure_ascii=False))
+' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$summary" >> "$digest_dir/$(date -u +%Y-%m-%d).jsonl"; then
+      rm -f "$_SWEEP_NOTIFY_PENDING_FILE"
+    else
+      echo "WARN: sweep summary could not be written to the digest, retained for retry on the next pass" >&2
+    fi
+    return 0
   fi
   if command -v iwe-tg >/dev/null 2>&1; then
     local tg_rc=0
@@ -4477,6 +4551,14 @@ if value.version != 4 or str(value) != sys.argv[1]:
 PY
 fi
 
+# --- RELEASE-LOCAL (explicit native owner; no publication or Git mutation) ---
+if [ "$CMD" = "release-local" ]; then
+  [ -z "$WP$SLUG$SESSION_ID_ARG" ] && [ "${#POSITIONAL[@]}" -eq 0 ] \
+    || fail "release-local uses native harness identity, not wp/slug/session selectors" 7
+  cd -- "$IWE_ROOT/$GOV_REPO" || fail "release-local: governance repository unavailable" 7
+  exec python3 "$IWE_ROOT/$GOV_REPO/scripts/process-runner.py" release-local --agent "$AGENT"
+fi
+
 # --- OWNER-STATUS (read-only absence evidence, never a close) ---
 if [ "$CMD" = "owner-status" ]; then
   [[ "$OWNER_SESSION_ID_ARG" =~ ^[a-zA-Z0-9][a-zA-Z0-9._-]{0,255}$ ]] \
@@ -4495,7 +4577,7 @@ if [ "$CMD" = "owner-status" ]; then
   # verdict can honour `retired` records written by retire-semaphore-artifact.
   # Read once as a snapshot under the same admission lock; never appended to
   # from here (the probe stays mutation-free).
-  python3 - "$SESSION_DIR" "$OWNER_SESSION_ID_ARG" "$OWNER_AGENT_ARG" "$ZOMBIE_REGISTRY" <<'PY_OWNER_STATUS'
+  python3 - "$SESSION_DIR" "$OWNER_SESSION_ID_ARG" "$OWNER_AGENT_ARG" "$ZOMBIE_REGISTRY" "$IWE_ROOT/$GOV_REPO/scripts" <<'PY_OWNER_STATUS'
 import hashlib
 import json
 import os
@@ -4510,6 +4592,10 @@ sessions = Path(sys.argv[1])
 owner = sys.argv[2]
 owner_agent = sys.argv[3]
 registry = Path(sys.argv[4])
+sys.path.insert(0, sys.argv[5])
+local_release = None
+if (Path(sys.argv[5]) / "session_local_release.py").is_file():
+    import session_local_release as local_release
 token = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,255}\Z")
 
 
@@ -4658,6 +4744,12 @@ try:
                 continue  # Projections and terminal receipts cannot be active sessions.
             raw = read_raw(path)
             if suffix:
+                if local_release is not None:
+                    try:
+                        if local_release.completed_artifact(path, raw):
+                            continue  # Exact retained sibling has no active ownership.
+                    except local_release.ReleaseError as error:
+                        raise ValueError(str(error)) from error
                 # A quarantined or manually renamed record can never be selected
                 # by `close` (list_candidates matches *.open only). It leaves the
                 # absence verdict alone once retire-semaphore-artifact recorded
@@ -13152,7 +13244,10 @@ if [ "$CMD" = "note-publication" ]; then
   else
     SEM_FILE=$(select_semaphore "$NOTE_AGENT" "${WP:-}" "${SLUG:-}") || exit 1
   fi
-  acquire_session_transition_lock "$SEM_FILE"
+  # Publishers hold the worktree lock; close holds transition then requests
+  # worktree. Never wait on this inverse edge. The publisher records a durable
+  # receipt gap on refusal, preserving its existing recovery/proof behavior.
+  IWE_SESSION_TRANSITION_WAIT_SEC=0 acquire_session_transition_lock "$SEM_FILE"
   LOCKED_NOTE_SESSION_ID=$(_locked_open_identity "$SEM_FILE" "$NOTE_AGENT" "${SESSION_ID_ARG:-}") || exit 1
   PUBLICATION_CLOSE_STATE=$(_close_delivery_state "$SEM_FILE" "$LOCKED_NOTE_SESSION_ID" || true)
   case "$PUBLICATION_CLOSE_STATE:$PUBLICATION_TARGET_REF" in
@@ -14133,6 +14228,7 @@ if [ "$CMD" = "recover-orphaned" ]; then
     && fail "recover-orphaned: '$ORPHAN_FILE' — символическая ссылка, не карантинный файл" 1
   ORIGINAL_OPEN_FILE="${BASE_ORPHAN_FILE%%.orphaned-*}"
   acquire_session_transition_lock "$ORIGINAL_OPEN_FILE"
+  _local_release_mutation_allowed "$ORPHAN_FILE" || fail "recover-orphaned: local result is retained" 7
   _recover_orphaned_locked
   release_session_transition_lock \
     || fail "recover-orphaned: terminal state записан, но exact session lock не освободился" 1
@@ -14321,6 +14417,7 @@ if [ "$CMD" = "retire-semaphore-artifact" ]; then
   # `fail` exits with both locks still held; the EXIT trap releases them.
   acquire_scheduled_admission_lock
   acquire_session_transition_lock "$RETIRE_ORIGINAL_OPEN"
+  _local_release_mutation_allowed "$RETIRE_FILE" || fail "retire: local result is intentionally retained" 7
   if [ -e "$RETIRE_ORIGINAL_OPEN" ] || [ -L "$RETIRE_ORIGINAL_OPEN" ]; then
     fail "retire-semaphore-artifact: рядом существует живой $(basename -- "$RETIRE_ORIGINAL_OPEN") — у этого поколения есть активный семафор, вывод из обращения запрещён" 1
   fi
@@ -15067,6 +15164,14 @@ emit_merge_scope_widened() {
 
 # --- GIT PRE-COMMIT CHECK ---
 if [ "$CMD" = "pre-commit-check" ]; then
+  LOCAL_RELEASE_CLI="$IWE_ROOT/$GOV_REPO/scripts/session_local_release.py"
+  if [ -f "$LOCAL_RELEASE_CLI" ]; then
+    LOCAL_RELEASE_CWD=$(git rev-parse --show-toplevel 2>/dev/null || true)
+    if [ -n "$LOCAL_RELEASE_CWD" ]; then
+      python3 "$LOCAL_RELEASE_CLI" worktree-available "$LOCAL_RELEASE_CWD" \
+        || fail "pre-commit: worktree intentionally retained after local release" 7
+    fi
+  fi
   # WP-484 Ф49: право разрешать коммит истекает по аренде и отзывается у ВСЕГО
   # набора файлов семафора сразу. Частичный отзыв (запретить только новые
   # `file:`) дыру WP-507 не закрывает: уже перечисленные пути продолжали бы

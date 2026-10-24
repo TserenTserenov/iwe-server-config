@@ -9,6 +9,8 @@
 # Защита от infinite loop: переменная STOP_HOOK_ACTIVE.
 # Read-only кроме gate_log.jsonl.
 
+# lower_text: Unicode-safe lowercasing (GNU tr does not fold Cyrillic); tr if the lib is absent.
+. "${BASH_SOURCE[0]%/*}/lib/text-lower.sh" 2>/dev/null || lower_text() { tr '[:upper:]' '[:lower:]'; }
 set -uo pipefail
 export PATH="/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin:${PATH:-}"
 
@@ -57,6 +59,17 @@ HOOK_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CLAUDE_DIR="$(cd "${HOOK_DIR}/.." && pwd)"
 # shellcheck source=../lib/iwe-env-bootstrap.sh
 source "$CLAUDE_DIR/lib/iwe-env-bootstrap.sh" || exit 1
+# F228: serialize this entire producer with release, including sentinel writes
+# outside close_obligation. An inherited FD is checked, never just an env flag.
+LOCAL_RELEASE_CLI="$IWE_ROOT/${IWE_GOVERNANCE_REPO:-DS-my-strategy}/scripts/session_local_release.py"
+if [ -n "$SESSION_ID" ] && [ "$SESSION_ID" != unknown ] && [ -f "$LOCAL_RELEASE_CLI" ]; then
+  if ! IWE_ROOT="$IWE_ROOT" python3 "$LOCAL_RELEASE_CLI" hook-check --agent claude-code --harness-session-id "$SESSION_ID" >/dev/null 2>&1; then
+    printf '%s' "$INPUT" | IWE_ROOT="$IWE_ROOT" python3 "$LOCAL_RELEASE_CLI" hook \
+      --agent claude-code --harness-session-id "$SESSION_ID" --event Stop -- bash "$0"
+    exit $?
+  fi
+fi
+
 GATE_LOG="$IWE_ROOT/.claude/logs/gate_log.jsonl"
 mkdir -p "$(dirname "$GATE_LOG")" 2>/dev/null || true
 
@@ -122,17 +135,9 @@ if [ -n "$SESSION_ID" ] && [ -f "$OBLIGATION_CLI" ]; then
   fi
 fi
 
-# --- Шаг 1: был ли вызов протокольного скилла? ---
-PROTOCOL_SKILL=$(jq -r '
-  select(.type == "tool_use" and .name == "Skill")
-  | .input.skill // empty
-' "$TRANSCRIPT_PATH" 2>/dev/null \
-  | grep -E '^(day-open|day-close|run-protocol|wp-new)$' \
-  | head -1)
-
-if [ -z "$PROTOCOL_SKILL" ]; then
-  # Протокольный скилл не запускался — gate не нужен, но если есть контекст
-  # обязательства (note/warn), его всё равно нужно передать пилоту.
+# Exit without a protocol verdict: still hand the obligation context (note/warn)
+# to the pilot if there is one.
+emit_obligation_only() {
   if [ -n "$OBLIGATION_CTX" ]; then
     jq -nc --arg ctx "$OBLIGATION_CTX" \
       '{hookSpecificOutput: {hookEventName: "Stop", additionalContext: $ctx}}'
@@ -140,23 +145,116 @@ if [ -z "$PROTOCOL_SKILL" ]; then
     echo '{}'
   fi
   exit 0
+}
+
+# --- Шаг 1: был ли вызов протокольного скилла? ---
+# Порт из FMT-exocortex-template (issues #758, #862, #1311; WP-568, 24.10):
+# в транскрипте Claude Code tool_use лежит в .message.content[], транскрипт —
+# JSONL (jq -s). До порта корневой хук искал tool_use на верхнем уровне строки
+# и не находил протокольный скилл ни в одной реальной сессии (гейт был мёртв
+# с 08.08). Skill и args берутся из ОДНОГО, последнего вызова.
+PROTOCOL_CALL_JSON=$(jq -s -c '
+  [.[] | select((.message.role // "assistant") == "assistant") | .message.content[]?]
+  | map(select(.type == "tool_use" and .name == "Skill"))
+  | map(select((.input.skill // "") | test("^(day-open|day-close|run-protocol|wp-new)$")))
+  | .[-1] // empty
+' "$TRANSCRIPT_PATH" 2>/dev/null)
+
+if [ -z "$PROTOCOL_CALL_JSON" ] || [ "$PROTOCOL_CALL_JSON" = "null" ]; then
+  emit_obligation_only
 fi
 
-# --- Шаг 2: был ли TodoWrite с ≥3 items? ---
-TODO_MAX=$(jq -r '
-  select(.type == "tool_use" and .name == "TodoWrite")
+PROTOCOL_SKILL=$(printf '%s' "$PROTOCOL_CALL_JSON" | jq -r '.input.skill // empty')
+
+# --- Шаг 1б: Quick Close без таск-листа по дизайну (issue #1311) ---
+# Отсутствующий args = Quick Close; нестроковый args — не Quick Close (fail-closed).
+IS_QUICK_CLOSE=0
+if [ "$PROTOCOL_SKILL" = "run-protocol" ]; then
+  ARGS_KIND=$(printf '%s' "$PROTOCOL_CALL_JSON" | jq -r '.input.args | type')
+  ARGS_NORM=""
+  if [ "$ARGS_KIND" = "string" ]; then
+    ARGS_NORM=$(printf '%s' "$PROTOCOL_CALL_JSON" | jq -r '.input.args' \
+      | lower_text \
+      | sed -E 's/^[[:space:]]+//; s/[[:space:]]+$//; s/[[:space:]]+/ /g')
+  fi
+  # Root practice also passes flags or a note after "close" ("close --skip-reflection",
+  # "close --wp WP-N", "close — <пояснение>"; the ПСЗ/СЗ shorthand). Template matches only
+  # bare "close"/"close session"; here the first word decides, unless it names a heavier
+  # scale (WP-568, 24.10: replaying real transcripts, the bare match blocked 3 of 8 Quick Closes).
+  if [ "$ARGS_KIND" = "null" ] || [ "$ARGS_KIND" = "string" ]; then
+    read -r ARGS_W1 ARGS_W2 _ <<< "$ARGS_NORM"
+    if [ -z "$ARGS_W1" ]; then
+      IS_QUICK_CLOSE=1
+    elif [ "$ARGS_W1" = "close" ]; then
+      case "${ARGS_W2:-}" in
+        day|week|month|день|неделя|неделю|месяц) ;;
+        *) IS_QUICK_CLOSE=1 ;;
+      esac
+    fi
+  fi
+fi
+[ "$IS_QUICK_CLOSE" = "1" ] && emit_obligation_only
+
+# --- Шаг 2: был ли таск-лист с ≥3 items? ---
+# TodoWrite заменён TaskCreate/TaskUpdate (issue #862); явная нумерация
+# «Шаг N из M» в ответах ассистента — равноправный признак. Считаем только
+# сообщения ассистента.
+# $1 = tool name; prints one count per tool_use (batch length, or 1 for a single task).
+count_task_tool() {
+  jq -s -r --arg tool "$1" '
+    [.[] | select((.message.role // "assistant") == "assistant") | .message]
+    | .[] | .content[]?
+    | select(.type == "tool_use" and .name == $tool)
+    | .input
+    | if (.tasks // .task_list // .items) | type == "array" then
+        (.tasks // .task_list // .items) | length
+      elif (.tasks // .task_list // .items) != null then
+        1
+      elif (.name // .title // .description // .status) then
+        1
+      else
+        0
+      end
+  ' "$TRANSCRIPT_PATH" 2>/dev/null
+}
+
+TODO_MAX=$(jq -s -r '
+  [.[] | select((.message.role // "assistant") == "assistant") | .message]
+  | .[] | .content[]?
+  | select(.type == "tool_use" and .name == "TodoWrite")
   | .input.todos
   | if type == "array" then length else 0 end
 ' "$TRANSCRIPT_PATH" 2>/dev/null \
   | sort -n | tail -1)
-
 TODO_MAX="${TODO_MAX:-0}"
+
+# Separate TaskCreate calls are separate steps (sum); TaskUpdate calls may
+# repeat one task (max).
+TASK_CREATE_MAX=$(count_task_tool TaskCreate | awk '{s+=$1} END {print s+0}')
+TASK_UPDATE_MAX=$(count_task_tool TaskUpdate | sort -n | tail -1)
+TASK_UPDATE_MAX="${TASK_UPDATE_MAX:-0}"
+
+STEP_MAX=$(jq -s -r '
+  [.[] | select((.message.role // "assistant") == "assistant") | .message]
+  | .[] | .content[]?
+  | select(.type == "text" and (.text // "") != "")
+  | .text
+' "$TRANSCRIPT_PATH" 2>/dev/null \
+  | grep -oiE '(шаг|step)[[:space:]]+[0-9]+[[:space:]]+(из|of)[[:space:]]+[0-9]+' \
+  | grep -oiE '[0-9]+$' \
+  | sort -n | tail -1)
+STEP_MAX="${STEP_MAX:-0}"
+
+LIST_MAX=$(( TODO_MAX + TASK_CREATE_MAX ))
+if [ "$TASK_UPDATE_MAX" -gt "$LIST_MAX" ]; then LIST_MAX="$TASK_UPDATE_MAX"; fi
+if [ "$STEP_MAX" -gt "$LIST_MAX" ]; then LIST_MAX="$STEP_MAX"; fi
+
 THRESHOLD=3
 
 # --- Шаг 3: логировать событие ---
 TIMESTAMP=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
 FIRED=0
-if [ "$TODO_MAX" -lt "$THRESHOLD" ]; then
+if [ "$LIST_MAX" -lt "$THRESHOLD" ]; then
   FIRED=1
 fi
 
@@ -165,10 +263,11 @@ LOG_ENTRY=$(jq -nc \
   --arg sid "$SESSION_ID" \
   --arg skill "$PROTOCOL_SKILL" \
   --arg todo_max "$TODO_MAX" \
+  --arg list_max "$LIST_MAX" \
   --arg threshold "$THRESHOLD" \
   --arg fired "$FIRED" \
   '{ts: $ts, gate: "protocol-stop-gate", session_id: $sid, skill: $skill,
-    todo_max: ($todo_max|tonumber), threshold: ($threshold|tonumber),
+    todo_max: ($todo_max|tonumber), list_max: ($list_max|tonumber), threshold: ($threshold|tonumber),
     fired: ($fired == "1"), action: "warn",
     pattern: "P9"}' 2>/dev/null || true)
 
@@ -180,7 +279,7 @@ fi
 # Всегда объединяем с контекстом обязательства, если он есть. Если protocol fired,
 # возвращаем decision:block; если obligation дал warn/note, добавляем additionalContext.
 if [ "$FIRED" = "1" ]; then
-  PROTOCOL_REASON="⚠️ PROTOCOL-STOP-GATE [warn]: Скилл '$PROTOCOL_SKILL' был вызван, но TodoWrite с ≥$THRESHOLD задачами не найден (найдено: $TODO_MAX). Протокол требует таск-лист ДО начала исполнения. Действие: создай TodoWrite с шагами скилла и пройди протокол заново. (gate_log: $GATE_LOG)"
+  PROTOCOL_REASON="⚠️ PROTOCOL-STOP-GATE [warn]: Скилл '$PROTOCOL_SKILL' был вызван, но таск-лист с ≥$THRESHOLD задачами (TodoWrite/TaskCreate или «Шаг N из M») не найден (найдено: $LIST_MAX). Протокол требует таск-лист ДО начала исполнения. Действие: создай таск-лист с шагами скилла и пройди протокол заново. (gate_log: $GATE_LOG)"
   if [ -n "$OBLIGATION_CTX" ]; then
     jq -nc \
       --arg reason "$PROTOCOL_REASON" \
@@ -188,9 +287,7 @@ if [ "$FIRED" = "1" ]; then
       '{decision: "block", reason: $reason,
         hookSpecificOutput: {hookEventName: "Stop", additionalContext: $ctx}}'
   else
-    cat <<EOF
-{"decision": "block", "reason": "$PROTOCOL_REASON"}
-EOF
+    jq -nc --arg reason "$PROTOCOL_REASON" '{decision: "block", reason: $reason}'
   fi
 else
   if [ -n "$OBLIGATION_CTX" ]; then
