@@ -26,11 +26,21 @@ UNPUSHED=0
 # 3.2 on macOS, which has no associative arrays.
 SEEN_TOPLEVELS="|"
 
+# Репозитории, исключённые из скана: известное постоянное состояние, не долг.
+# DS-MCP/personal-knowledge-mcp — архивный (read-only) на GitHub с 24.10.2026
+# (решение пилота: остаётся архивным), единственный локальный коммит физически
+# не пушится — флаг «незапушено» там постоянный шум, а не сигнал.
+SKIP_REPOS="|DS-MCP/personal-knowledge-mcp|"
+
 check_repo() {
     local dir="$1"
     local name="$2"
 
     if [ ! -d "$dir/.git" ]; then return; fi
+
+    case "$SKIP_REPOS" in
+        *"|$name|"*) return ;;
+    esac
 
     local toplevel
     toplevel=$(cd "$dir" && git rev-parse --show-toplevel 2>/dev/null) || toplevel="${dir%/}"
