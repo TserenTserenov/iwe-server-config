@@ -855,8 +855,14 @@ in
         ExecStart = "${pkgs.bash}/bin/bash ${iwe}/DS-my-strategy/scripts/tsekh1-git-sync.sh";
         TimeoutStartSec = 120;
       };
-      path = commonPath ++ [ pkgs.util-linux ];
-      environment = commonEnv;
+      # hostname labels sync state; cmp proves that a dirty mirror matches the
+      # published path list before canon-refresh may recover it. Neither tool
+      # is provided by commonPath on NixOS.
+      path = commonPath ++ [ pkgs.util-linux pkgs.nettools pkgs.diffutils ];
+      # The system service launches a transient user unit for wp-pool wake.
+      # Without the user runtime directory, systemd-run --user cannot reach
+      # tseren's lingering user manager and silently skips every wake.
+      environment = commonEnv // { XDG_RUNTIME_DIR = "/run/user/1000"; };
     };
 
     systemd.timers."iwe-tsekh1-sync" = {
