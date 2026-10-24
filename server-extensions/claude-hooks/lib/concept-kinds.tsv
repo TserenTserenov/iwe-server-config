@@ -38,6 +38,10 @@ work	прогон
 work	запуск
 work	работ[аыуе](?![а-яё])
 work_plan	план
+activity	проект(а|у|ом|е|ы|ов|ам|ами|ах)?(?![а-яё])
+activity	процесс
+activity	деятельност
+activity	жизн(ь|и|ью|ей)(?![а-яё])
 state	состояни
 characteristic	характеристик
 characteristic_value	показател
@@ -50,7 +54,6 @@ collection	список
 collection	набор
 collection	перечен
 collection	совокупност
-ambiguous	процесс
 ambiguous	функци
 ambiguous	контекст
 ambiguous	результат

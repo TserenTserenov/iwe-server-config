@@ -295,6 +295,9 @@ BASE5_MATCH=$(printf '%s\n' "$RESPONSE" | perl -CSD -Mutf8 -ne '
 #       состоит из шагов") fire too: pilot decision 23.10, part-whole is for
 #       systems only.
 #   (3) "X — это Y" naming a description as a type of a non-description.
+#   (4) a non-system called a system ("проект как систему", "процесс — это система",
+#       "назвал проект системой"); pilot decision 24.10: project, process, method, life and
+#       any activity are not systems (registry rule 6).
 # Every stem has a left word boundary ($b): without it "работ" matched inside
 # "Обработчик" and "план" inside "Планировщик".
 # Warn-only: regex cannot settle ontology, the log feeds calibration.
@@ -377,6 +380,18 @@ A14_MATCH=$(printf '%s\n' "$RESPONSE" | perl -0777 -CSD -Mutf8 -ne '
         && ($t0 =~ /$ambw$win\s+$part/ || $t0 =~ /$part$win\s+$ambw/
             || $t0 =~ /$ambw$win\s+(состо[ия]т\s+из|дел[ия]тся\s+на)\s+(\S+\s+)?(част|раздел|этап|шаг)/i)) {
       $AMB = $s
+    }
+    # (4) a non-system called a system ("проект как систему", "процесс — это система",
+    # "назвал проект системой"): only the system kind is a system (pilot decision 24.10,
+    # registry rule 6).
+    # A negation anywhere in the sentence ("нельзя назвать", "не стоит называть",
+    # "как система не рассматривается") says the opposite, so the check is skipped.
+    my $n = $t;
+    $n = "" if $n =~ /$b(нельзя|не\s+(стоит|надо|нужно|следует|можно|как|явля\S*|назыв\S*|назва\S*|счита\S*|рассматрива\S*))/i;
+    if ($n =~ /$nonsys_s$win\s+(как\s+систем\S*|явля\S+\s+систем\S*|назва\S+\s+систем\S*|назыв\S+\s+систем\S*)/
+        || $n =~ /$nonsys_s\s*[-—–]\s+это\s+систем/i
+        || $n =~ /$b(назва\S*|назыв\S*|счита\S*|рассматрива\S*)\s+$nonsys_s$win\s+систем/i) {
+      hit($s)
     }
     # "X - это Y" assigns a type; "state is a set of values" names a description, not a type
     if ($t =~ /$b(состояни|систем|агент|метод|работ)\S*\s+[-—–]\s+это\s+(набор|совокупност|множеств|комплекс|сочетани|список|профиль)/i
