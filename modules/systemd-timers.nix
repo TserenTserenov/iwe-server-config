@@ -202,9 +202,9 @@ let
         echo "DIRTY: $repo (transient? grace 30s)"
         ${pkgs.coreutils}/bin/sleep 30
         if [ "$repo" = "DS-agent-workspace" ]; then
-          dirty_non_triage_after=$(${pkgs.git}/bin/git status --porcelain 2>/dev/null | ${pkgs.gnugrep}/bin/grep -v '^?? scheduler/feedback-triage/' || true)
+          dirty_non_triage_after=$(${pkgs.git}/bin/git -c core.quotePath=false status --porcelain 2>/dev/null | ${pkgs.gnugrep}/bin/grep -v '^?? scheduler/feedback-triage/' || true)
         else
-          dirty_non_triage_after=$(${pkgs.git}/bin/git status --porcelain 2>/dev/null)
+          dirty_non_triage_after=$(${pkgs.git}/bin/git -c core.quotePath=false status --porcelain 2>/dev/null)
         fi
         if [ -n "$dirty_non_triage_after" ]; then
           # Включаем `git status --porcelain` вывод (первые 5 путей) в failed[],
@@ -213,7 +213,7 @@ let
           dirty_paths=$(echo "$dirty_non_triage_after" | ${pkgs.coreutils}/bin/head -3 | ${pkgs.coreutils}/bin/tr '\n' '|')
           dirty_paths="''${dirty_paths%|}"
           echo "DIRTY: $repo (uncommitted changes — пропускаю pull): $dirty_paths"
-          failed+=("$repo (dirty: $dirty_paths)")
+          failed+=("$repo (несохранённые правки, обновление пропущено: $dirty_paths)")
           continue
         fi
         echo "RECOVERED: $repo (был транзиентный dirty, продолжаю pull)"
@@ -254,14 +254,18 @@ let
     # отдельно, а при истечении TTL повтор уходит с пометкой возраста
     # (сколько часов без изменений), не молча и не как будто впервые.
     if [ "''${#failed[@]}" -gt 0 ]; then
-      # Некорректный PULL_REPOS_DEDUP_TTL_MIN откатывается на 60 минут по
+      # Одна и та же неизменная проблема repo напоминается раз в сутки, не раз
+      # в час (WP-568, peer-session 2026-10-24-07: тот же dirty-файл приходил
+      # пилоту каждый тик 26-27ч подряд). Новая или изменившаяся проблема
+      # (другой набор путей/статус) имеет другой хэш и уходит сразу.
+      # Некорректный PULL_REPOS_DEDUP_TTL_MIN откатывается на 1440 минут по
       # умолчанию (не exit 1 — весь файл держит инвариант "exit 0 всегда, не
       # блокируем тик планировщика"), но сигнал не тихий: логируется с
       # приоритетом user.warning, заметным в `journalctl -p warning`.
-      dedup_ttl_min="''${PULL_REPOS_DEDUP_TTL_MIN:-60}"
+      dedup_ttl_min="''${PULL_REPOS_DEDUP_TTL_MIN:-1440}"
       if ! [[ "$dedup_ttl_min" =~ ^[0-9]+$ ]]; then
-        ${pkgs.util-linux}/bin/logger -p user.warning -t iwe-pull-repos "invalid PULL_REPOS_DEDUP_TTL_MIN='$dedup_ttl_min' — используется значение по умолчанию 60 минут"
-        dedup_ttl_min=60
+        ${pkgs.util-linux}/bin/logger -p user.warning -t iwe-pull-repos "invalid PULL_REPOS_DEDUP_TTL_MIN='$dedup_ttl_min' — используется значение по умолчанию 1440 минут"
+        dedup_ttl_min=1440
       fi
       dedup_state_dir="''${PULL_REPOS_DEDUP_STATE_DIR:-${iwe}/.iwe-runtime/iwe-pull-repos-dedup.d}"
       ${pkgs.coreutils}/bin/mkdir -p "$dedup_state_dir" 2>/dev/null || true
@@ -322,7 +326,7 @@ let
       done
 
       if [ "''${#to_send[@]}" -gt 0 ]; then
-        msg="⚠️ IWE pull-repos warnings (tsekh-1, $(${pkgs.coreutils}/bin/date '+%Y-%m-%d %H:%M')): ''${to_send[*]}"
+        msg="⚠️ Сервер (tsekh-1, $(${pkgs.coreutils}/bin/date '+%Y-%m-%d %H:%M')): не обновились с GitHub: ''${to_send[*]}. Ничего не удалено и не потеряно, это не срочно. Что делать: если это ваша незаконченная работа на сервере - сохраните её; если нет - попросите агента разобрать. Повтор этой же проблемы - не чаще раза в сутки."
         ${pkgs.curl}/bin/curl -s --max-time 10 -X POST \
           "https://api.telegram.org/bot''${TELEGRAM_BOT_TOKEN}/sendMessage" \
           -d "chat_id=''${TELEGRAM_CHAT_ID}" \
