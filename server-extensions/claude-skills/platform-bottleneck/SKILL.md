@@ -6,7 +6,11 @@ layer: L3
 status: active
 triggers:
   slash: [/platform-bottleneck]
-  phrases: []
+  phrases:
+    - "в чём ограничение платформы"
+    - "бутылочное горлышко платформы"
+    - "что сдерживает платформу"
+    - "скилл ограничение платформы"
 routing:
   executor: sonnet
   deterministic: false

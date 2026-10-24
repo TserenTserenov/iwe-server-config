@@ -5,13 +5,15 @@
 # Правило: не более 1 файла на промпт (не перегружать контекст).
 # Добавлено: 2026-06-23
 
+# lower_text: Unicode-safe lowercasing (GNU tr does not fold Cyrillic); tr if the lib is absent.
+. "${BASH_SOURCE[0]%/*}/lib/text-lower.sh" 2>/dev/null || lower_text() { tr '[:upper:]' '[:lower:]'; }
 set -uo pipefail
 
 MEM_DIR="${CLAUDE_PROJECT_DIR}/memory"
 INPUT=$(cat)
 SANITIZED=$(printf '%s' "$INPUT" | LC_ALL=C tr '\n\r\t' '   ')
 PROMPT=$(printf '%s' "$SANITIZED" | jq -r '.prompt // empty' 2>/dev/null || echo "")
-PROMPT_LOWER=$(printf '%s' "$PROMPT" | tr '[:upper:]' '[:lower:]')
+PROMPT_LOWER=$(printf '%s' "$PROMPT" | lower_text)
 
 inject() {
   local file="$1" label="$2"

@@ -18,6 +18,7 @@ triggers:
   phrases:
     - "Создатель паков, "
     - "Pack Creator, "
+    - "скилл создатель паков"
 routing:
   executor: sonnet
   deterministic: false

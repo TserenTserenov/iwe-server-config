@@ -7,7 +7,9 @@ layer: L1
 status: active
 triggers:
   slash: [/run-protocol]
-  phrases: []
+  phrases:
+    - "выполни протокол ОРЗ"
+    - "скилл выполнение протокола"
 routing:
   executor: sonnet
   deterministic: false

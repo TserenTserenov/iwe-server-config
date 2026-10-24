@@ -10,7 +10,11 @@ layer: L3
 status: active
 triggers:
   slash: [/connect-guide]
-  phrases: []
+  phrases:
+    - "подключи руководство"
+    - "установи app персонального руководства"
+    - "настрой репо руководства"
+    - "скилл подключение персонального руководства"
 routing:
   executor: sonnet
   deterministic: false

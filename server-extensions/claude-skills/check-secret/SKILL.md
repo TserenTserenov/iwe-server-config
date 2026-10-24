@@ -7,7 +7,11 @@ layer: L3
 status: active
 triggers:
   slash: [/check-secret]
-  phrases: []
+  phrases:
+    - "проверь на секреты"
+    - "нет ли здесь токена или пароля"
+    - "можно это публиковать"
+    - "скилл проверка на секреты"
 routing:
   executor: script
   deterministic: true

@@ -8,7 +8,12 @@ status: active
 browser_safe: false
 triggers:
   slash: [/peer-writer]
-  phrases: ["начни peer-сессию", "запусти диалог с Клодом", "peer-сессия", "вместе с Клодом", "с Клодом", "привлеки Клода"]
+  phrases:
+    - "запусти диалог с Клодом"
+    - "вместе с Клодом"
+    - "с Клодом"
+    - "привлеки Клода"
+    - "скилл пир-сессия с Кими-писателем"
 routing:
   executor: sonnet
   deterministic: false

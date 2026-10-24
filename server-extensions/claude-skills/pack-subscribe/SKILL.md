@@ -6,7 +6,12 @@ layer: L3
 status: experimental
 triggers:
   slash: [/pack-subscribe]
-  phrases: ["подключи пак", "какие паки есть", "подписка на пак", "подпиши на пак"]
+  phrases:
+    - "подключи пак"
+    - "какие паки есть"
+    - "подписка на пак"
+    - "подпиши на пак"
+    - "скилл подписка на чужой pack"
 owner_role: R6
 argument-hint: "[имя пака или пусто для витрины]"
 annotations:

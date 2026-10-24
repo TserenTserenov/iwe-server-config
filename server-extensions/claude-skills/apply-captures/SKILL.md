@@ -10,7 +10,11 @@ agents: single
 interaction: multi-step
 triggers:
   slash: [/apply-captures]
-  phrases: []
+  phrases:
+    - "разбери отчёты на проверку"
+    - "посмотри pending-review"
+    - "разбери extraction-report"
+    - "скилл разбор кандидатов экстрактора"
 gates_required: []
 gates_enforced: []
 gates_rationale: "операционный скилл разбора очереди; WP Gate не нужен — вызывается автоматически из Close Gate"

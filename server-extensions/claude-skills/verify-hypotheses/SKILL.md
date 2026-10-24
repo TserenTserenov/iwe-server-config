@@ -11,7 +11,10 @@ gates_enforced: []
 gates_rationale: "IntegrationGate пропущен явным разрешением пилота 19.07 (РП-496 Ф3) — роль-носитель для гипотез ещё не выбрана (Ф4 не завершена), Service Clause/Role заводить преждевременно до этого решения"
 triggers:
   slash: [/verify-hypotheses]
-  phrases: ["сверь гипотезы недели", "сверь гипотезы"]
+  phrases:
+    - "сверь гипотезы недели"
+    - "сверь гипотезы"
+    - "скилл сверка гипотез"
 ---
 
 # /verify-hypotheses

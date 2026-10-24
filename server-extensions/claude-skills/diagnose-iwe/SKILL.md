@@ -8,7 +8,11 @@ layer: L3
 status: active
 triggers:
   slash: [/diagnose, /diagnose-iwe]
-  phrases: []
+  phrases:
+    - "диагностика прямо в VS Code"
+    - "пройди диагностику в редакторе"
+    - "diagnose iwe"
+    - "скилл диагностика мастерства в редакторе"
 routing:
   executor: sonnet
   deterministic: false

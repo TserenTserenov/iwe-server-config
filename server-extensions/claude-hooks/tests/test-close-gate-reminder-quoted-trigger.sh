@@ -48,6 +48,10 @@ class QuotedTriggerTests(unittest.TestCase):
         # symlink would use the real ledger writer. The stub makes cancel-close succeed in the
         # fixture; without it cancel fails on the ledger append and changes nothing.
         shutil.copy(CLOSE_CLI, self.cli)
+        # close_obligation.py imports this sibling module (WP-484 F228); without
+        # it every arm fails with ModuleNotFoundError and no state is left.
+        shutil.copy(Path(CLOSE_CLI).with_name("session_local_release.py"),
+                    self.cli.with_name("session_local_release.py"))
         stub = self.cli.with_name("ledger-append.sh")
         stub.write_text("#!/bin/bash\nexit 0\n")
         stub.chmod(0o755)

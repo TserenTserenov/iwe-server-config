@@ -7,7 +7,11 @@ layer: L1
 status: active
 triggers:
   slash: [/month-close]
-  phrases: []
+  phrases:
+    - "закрывай месяц"
+    - "закрой месяц"
+    - "итоги месяца"
+    - "скилл закрытие месяца"
 routing:
   executor: opus
   deterministic: false

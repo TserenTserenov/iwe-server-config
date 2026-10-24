@@ -7,7 +7,10 @@ layer: L3
 status: active
 triggers:
   slash: [/w-reflection]
-  phrases: []
+  phrases:
+    - "запиши W-рефлексию"
+    - "зафиксируй мировоззренческую рефлексию"
+    - "скилл мировоззренческая рефлексия"
 routing:
   executor: script
   deterministic: true

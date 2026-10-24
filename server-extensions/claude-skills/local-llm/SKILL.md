@@ -17,6 +17,7 @@ triggers:
     - "переключи на 14B"
     - "какие новые модели вышли"
     - "проверь новые модели"
+    - "скилл локальный LLM-стек"
 routing:
   executor: script+judgment
   deterministic: false

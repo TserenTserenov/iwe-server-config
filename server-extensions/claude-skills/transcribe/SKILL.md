@@ -7,7 +7,11 @@ layer: L3
 status: active
 triggers:
   slash: [/transcribe]
-  phrases: []
+  phrases:
+    - "расшифруй аудио"
+    - "транскрибируй это видео"
+    - "сделай транскрипт записи"
+    - "скилл транскрипция аудио"
 routing:
   executor: script
   deterministic: true

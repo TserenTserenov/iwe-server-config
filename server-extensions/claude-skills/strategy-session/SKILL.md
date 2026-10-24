@@ -7,7 +7,11 @@ status: active
 browser_safe: false
 triggers:
   slash: [/strategy-session]
-  phrases: []
+  phrases:
+    - "проведём стратегическую сессию"
+    - "первая стратегическая сессия"
+    - "давай стратегировать"
+    - "скилл стратегическая сессия"
 routing:
   executor: opus
   deterministic: false

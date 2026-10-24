@@ -7,7 +7,11 @@ layer: L1
 status: active
 triggers:
   slash: [/verify]
-  phrases: []
+  phrases:
+    - "сверь результат с эталоном"
+    - "верифицируй артефакт"
+    - "проверь готовый результат по Pack"
+    - "скилл верификация артефакта"
 routing:
   executor: sonnet
   deterministic: false

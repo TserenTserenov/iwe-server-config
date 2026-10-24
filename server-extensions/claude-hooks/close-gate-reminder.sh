@@ -26,12 +26,14 @@
 # («закрывай/закрой») → mode=block; широкая эвристика («заливай/запуши») →
 # mode=warn (консенсус пир-сессии 2026-08-07-08, ход 4-6).
 
+# lower_text: Unicode-safe lowercasing (GNU tr does not fold Cyrillic); tr if the lib is absent.
+. "${BASH_SOURCE[0]%/*}/lib/text-lower.sh" 2>/dev/null || lower_text() { tr '[:upper:]' '[:lower:]'; }
 INPUT=$(cat)
 # Устойчивость к многострочным промптам: literal \n в JSON value
 # невалиден для jq. Заменяем все control chars на пробелы до парсинга.
 SANITIZED=$(printf '%s' "$INPUT" | LC_ALL=C tr '\n\r\t' '   ')
 PROMPT_ORIGINAL_CASE=$(printf '%s' "$SANITIZED" | jq -r '.prompt // empty')
-PROMPT=$(printf '%s' "$PROMPT_ORIGINAL_CASE" | tr '[:upper:]' '[:lower:]')
+PROMPT=$(printf '%s' "$PROMPT_ORIGINAL_CASE" | lower_text)
 SESSION_ID=$(printf '%s' "$INPUT" | jq -r '.session_id // empty' 2>/dev/null)
 # Fallback + exact-reject (WP-484 Ф148, cold-context review 31.08, peer-session
 # 2026-08-31-40-close-runner-gate-session): this hook (UserPromptSubmit) writes
@@ -53,6 +55,17 @@ case "$SESSION_ID" in
 esac
 
 IWE_ROOT="${CLAUDE_PROJECT_DIR:-$HOME/IWE}"
+# F228: serialize this entire producer with release, including sentinel writes
+# outside close_obligation. An inherited FD is checked, never just an env flag.
+LOCAL_RELEASE_CLI="$IWE_ROOT/${IWE_GOVERNANCE_REPO:-DS-my-strategy}/scripts/session_local_release.py"
+if [ -n "$SESSION_ID" ] && [ "$SESSION_ID" != unknown ] && [ -f "$LOCAL_RELEASE_CLI" ]; then
+  if ! IWE_ROOT="$IWE_ROOT" python3 "$LOCAL_RELEASE_CLI" hook-check --agent claude-code --harness-session-id "$SESSION_ID" >/dev/null 2>&1; then
+    printf '%s' "$INPUT" | IWE_ROOT="$IWE_ROOT" python3 "$LOCAL_RELEASE_CLI" hook \
+      --agent claude-code --harness-session-id "$SESSION_ID" --event UserPromptSubmit -- bash "$0"
+    exit $?
+  fi
+fi
+
 OBLIGATION_CLI="$IWE_ROOT/${IWE_GOVERNANCE_REPO:-DS-my-strategy}/scripts/close_obligation.py"
 SENTINEL_DIR="/tmp/iwe-close-intent"
 REASON=$(printf '%s' "$PROMPT" | cut -c1-200)

@@ -8,7 +8,11 @@ layer: L1
 status: active
 triggers:
   slash: [/iwe-update]
-  phrases: []
+  phrases:
+    - "обнови IWE"
+    - "накати обновление платформы"
+    - "что нового в обновлении"
+    - "скилл обновление IWE"
 routing:
   executor: haiku
   deterministic: false

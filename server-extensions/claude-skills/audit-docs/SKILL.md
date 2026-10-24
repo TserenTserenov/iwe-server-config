@@ -7,7 +7,11 @@ layer: L3
 status: active
 triggers:
   slash: [/audit-docs]
-  phrases: []
+  phrases:
+    - "проверь документацию на расхождение"
+    - "аудит документации"
+    - "сверь код с docs"
+    - "скилл аудит документации"
 routing:
   executor: sonnet
   deterministic: false

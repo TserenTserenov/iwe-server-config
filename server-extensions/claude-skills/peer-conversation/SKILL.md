@@ -8,7 +8,12 @@ status: active
 browser_safe: false
 triggers:
   slash: [/peer-conversation]
-  phrases: ["начни peer-сессию", "запусти диалог с Кими", "запусти диалог с Codex", "peer-сессия"]
+  phrases:
+    - "начни peer-сессию"
+    - "запусти диалог с Кими"
+    - "запусти диалог с Codex"
+    - "peer-сессия"
+    - "скилл пир-беседа"
 routing:
   executor: sonnet
   deterministic: false

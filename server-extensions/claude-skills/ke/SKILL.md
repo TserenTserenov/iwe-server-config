@@ -8,7 +8,11 @@ layer: L1
 status: active
 triggers:
   slash: [/ke]
-  phrases: []
+  phrases:
+    - "нашёл различение"
+    - "это решение надо зафиксировать"
+    - "извлеки знание из рубежа"
+    - "скилл извлечение знания"
 routing:
   executor: sonnet
   deterministic: false

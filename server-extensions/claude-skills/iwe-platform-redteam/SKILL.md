@@ -7,7 +7,11 @@ layer: L1
 status: experimental
 triggers:
   slash: [/iwe-platform-redteam]
-  phrases: []
+  phrases:
+    - "проведи редтим платформы"
+    - "аудит безопасности IWE перед релизом"
+    - "redteam платформы"
+    - "скилл редтим платформы"
 routing:
   executor: sonnet
   deterministic: false

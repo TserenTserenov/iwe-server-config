@@ -7,7 +7,14 @@ layer: L1
 status: active
 triggers:
   slash: [/fpf]
-  phrases: ["по FPF", "сверь с FPF", "что говорит FPF", "какие принципы", "по принципам", "первые принципы"]
+  phrases:
+    - "по FPF"
+    - "сверь с FPF"
+    - "что говорит FPF"
+    - "какие принципы"
+    - "по принципам"
+    - "первые принципы"
+    - "скилл загрузка принципов FPF"
 routing:
   executor: haiku
   deterministic: false

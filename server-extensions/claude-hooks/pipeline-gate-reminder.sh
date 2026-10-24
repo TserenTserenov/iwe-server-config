@@ -19,10 +19,12 @@
 # уже принял для broad-triggers (заливай/запуши -> mode=warn вместо жёсткого
 # block, если фраза неоднозначна).
 
+# lower_text: Unicode-safe lowercasing (GNU tr does not fold Cyrillic); tr if the lib is absent.
+. "${BASH_SOURCE[0]%/*}/lib/text-lower.sh" 2>/dev/null || lower_text() { tr '[:upper:]' '[:lower:]'; }
 INPUT=$(cat)
 SANITIZED=$(printf '%s' "$INPUT" | LC_ALL=C tr '\n\r\t' '   ')
 PROMPT_ORIGINAL_CASE=$(printf '%s' "$SANITIZED" | jq -r '.prompt // empty')
-PROMPT=$(printf '%s' "$PROMPT_ORIGINAL_CASE" | tr '[:upper:]' '[:lower:]')
+PROMPT=$(printf '%s' "$PROMPT_ORIGINAL_CASE" | lower_text)
 SESSION_ID=$(printf '%s' "$INPUT" | jq -r '.session_id // "unknown"' 2>/dev/null)
 [ -n "$SESSION_ID" ] || SESSION_ID="unknown"
 SESSION_ID=$(printf '%s' "$SESSION_ID" | tr -cd 'A-Za-z0-9._-')

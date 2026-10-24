@@ -7,7 +7,11 @@ layer: L3
 status: active
 triggers:
   slash: [/consent]
-  phrases: []
+  phrases:
+    - "включи согласие на трекинг"
+    - "отключи согласие на трекинг"
+    - "проверь статус consent"
+    - "скилл управление согласием на трекинг"
 routing:
   executor: script
   deterministic: true

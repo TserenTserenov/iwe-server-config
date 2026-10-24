@@ -10,7 +10,11 @@ layer: L3
 status: active
 triggers:
   slash: [/lesson-close]
-  phrases: []
+  phrases:
+    - "закрываем занятие"
+    - "закончили занятие"
+    - "закрой занятие"
+    - "скилл закрытие занятия"
 routing:
   executor: script
   deterministic: true

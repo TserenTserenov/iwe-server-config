@@ -8,7 +8,11 @@ status: active
 browser_safe: false
 triggers:
   slash: [/artifactor]
-  phrases: []
+  phrases:
+    - "классифицируй мой запрос"
+    - "определи класс задачи"
+    - "разбери сырой запрос пилота"
+    - "скилл артефактор"
 owner_role: DP.ROLE.058
 related:
   - DP.SC.160

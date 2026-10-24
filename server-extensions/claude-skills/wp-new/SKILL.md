@@ -7,7 +7,11 @@ layer: L1
 status: active
 triggers:
   slash: [/wp-new]
-  phrases: []
+  phrases:
+    - "новый РП"
+    - "заведи рабочий продукт"
+    - "этой задачи нет в плане недели"
+    - "скилл создание нового РП"
 routing:
   executor: haiku
   deterministic: false

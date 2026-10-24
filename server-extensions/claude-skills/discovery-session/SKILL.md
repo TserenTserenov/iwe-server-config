@@ -8,7 +8,11 @@ status: active
 argument-hint: "[сырьё: заметки/рефлексия, опционально]"
 triggers:
   slash: [/discovery-session]
-  phrases: []
+  phrases:
+    - "разбери неудовлетворённости"
+    - "помоги со стратегией месяца"
+    - "что для меня сейчас важно"
+    - "скилл дискавери-сессия"
 routing:
   executor: opus
   deterministic: false

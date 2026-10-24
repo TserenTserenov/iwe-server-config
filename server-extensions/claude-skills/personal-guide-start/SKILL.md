@@ -10,7 +10,11 @@ layer: L1
 status: active
 triggers:
   slash: [/personal-guide-start]
-  phrases: []
+  phrases:
+    - "создай мне персональное руководство"
+    - "хочу начать программу личного развития"
+    - "собери мне стартовый план"
+    - "скилл создание персонального руководства"
 routing:
   executor: sonnet
   deterministic: false

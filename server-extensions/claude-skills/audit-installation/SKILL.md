@@ -8,7 +8,11 @@ status: active
 browser_safe: false
 triggers:
   slash: [/audit-installation]
-  phrases: []
+  phrases:
+    - "проверь инсталляцию IWE"
+    - "аудит установки"
+    - "проверь здоровье платформы после восстановления"
+    - "скилл аудит инсталляции IWE"
 routing:
   executor: haiku
   deterministic: false

@@ -5,9 +5,18 @@ description: "Восстановление памяти IWE из exocortex-бэ�
 version: 1.0.0
 layer: L1
 status: active
+browser_safe: false
 triggers:
   slash: [/restore-exocortex]
-  phrases: ["восстанови экзокортекс", "восстанови память", "восстановить exocortex", "restore exocortex", "подними память на новом устройстве"]
+  phrases:
+    - "восстанови экзокортекс"
+    - "восстанови память"
+    - "восстановить exocortex"
+    - "restore exocortex"
+    - "подними память на новом устройстве"
+    - "восстановить IWE"
+    - "перенести на новое устройство"
+    - "скилл восстановление экзокортекса"
 owner_role: R6
 annotations:
   destructive: true

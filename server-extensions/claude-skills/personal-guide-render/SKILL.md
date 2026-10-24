@@ -10,7 +10,11 @@ status: active
 supersedes: "v1.0.0 (personal-guide-render-v1-archive.md в inbox/WP-149/)"
 triggers:
   slash: [/personal-guide-render]
-  phrases: []
+  phrases:
+    - "пересобери руководство"
+    - "обнови мой план"
+    - "собери руководство на сегодня"
+    - "скилл сборка персонального руководства"
 routing:
   executor: sonnet
   deterministic: false

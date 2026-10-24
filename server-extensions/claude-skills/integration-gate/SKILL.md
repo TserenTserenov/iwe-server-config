@@ -14,6 +14,7 @@ triggers:
     - "новый метод"
     - "integration gate"
     - "IntegrationGate"
+    - "скилл интеграционный гейт"
 related: [archgate]
 ---
 

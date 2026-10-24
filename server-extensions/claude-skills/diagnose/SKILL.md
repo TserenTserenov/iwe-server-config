@@ -8,7 +8,11 @@ layer: L1
 status: active
 triggers:
   slash: [/diagnose]
-  phrases: []
+  phrases:
+    - "пройди диагностику"
+    - "какая у меня ступень мастерства"
+    - "диагностика ступени"
+    - "скилл диагностика мастерства"
 routing:
   executor: sonnet
   deterministic: false

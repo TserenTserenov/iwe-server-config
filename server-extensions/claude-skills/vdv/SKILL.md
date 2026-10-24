@@ -8,7 +8,11 @@ status: active
 service_clause: DP.SC.052
 triggers:
   slash: [/vdv, /vdv build, /vdv audit]
-  phrases: ["проверь процесс по ВДВ", "построй описание процесса", "аудит стадийного процесса"]
+  phrases:
+    - "проверь процесс по ВДВ"
+    - "построй описание процесса"
+    - "аудит стадийного процесса"
+    - "скилл ВДВ"
 tests: ./test_cases.md
 routing:
   executor: sonnet

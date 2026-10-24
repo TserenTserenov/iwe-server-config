@@ -10,7 +10,11 @@ layer: L3
 status: active
 triggers:
   slash: [/lesson]
-  phrases: []
+  phrases:
+    - "начнём занятие"
+    - "открой занятие"
+    - "давай заниматься"
+    - "скилл занятие"
 routing:
   executor: sonnet
   deterministic: false

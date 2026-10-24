@@ -20,6 +20,7 @@ triggers:
   phrases:
     - "создай скилл <name>"
     - "новый скилл <name>"
+    - "скилл создание скилла"
 ---
 
 # /skill-creator — create an IWE skill

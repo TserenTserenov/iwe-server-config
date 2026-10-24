@@ -9,7 +9,11 @@ interaction: multi-step
 related: [WP-516, WP-545, DP.SC.008, DP.ROLE.001]
 triggers:
   slash: [/remediate]
-  phrases: []
+  phrases:
+    - "занеси починку в каталог"
+    - "зарегистрируй ремедиацию"
+    - "это повторяющийся инцидент, почини"
+    - "скилл каталог починок Наладчика"
 routing:
   executor: opus
   deterministic: false

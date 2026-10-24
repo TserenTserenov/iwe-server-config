@@ -17,6 +17,8 @@
 # Log: memory/fpf-usage.log, event "nudge" (one JSON line per injection).
 # Non-blocking: any failure -> '{}' (valid empty hook output).
 
+# lower_text: Unicode-safe lowercasing (GNU tr does not fold Cyrillic); tr if the lib is absent.
+. "${BASH_SOURCE[0]%/*}/lib/text-lower.sh" 2>/dev/null || lower_text() { tr '[:upper:]' '[:lower:]'; }
 set -uo pipefail
 umask 077
 export PATH="/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin:${PATH:-}"
@@ -116,7 +118,7 @@ rm -f "$CONTEXT_FILE" 2>/dev/null || { echo '{}'; exit 0; }
 rm -f "$CONTEXT_BLOCK_FILE" 2>/dev/null || { echo '{}'; exit 0; }
 PROMPT=$(printf '%s' "$INPUT" | jq -r '.prompt // ""' 2>/dev/null)
 [ -n "$PROMPT" ] || { echo '{}'; exit 0; }
-PROMPT_LOWER=$(printf '%s' "$PROMPT" | tr '[:upper:]' '[:lower:]')
+PROMPT_LOWER=$(printf '%s' "$PROMPT" | lower_text)
 
 # Word boundaries are checked with the host grep (covered by the macOS test).
 # Closing a peer conversation, negated commands, and calendar reminders are

@@ -6,7 +6,9 @@ layer: L3
 status: active
 triggers:
   slash: [/week-close-pilot]
-  phrases: []
+  phrases:
+    - "закрой неделю пилота личного руководства"
+    - "скилл закрытие недели пилота руководства"
 routing:
   executor: sonnet
   deterministic: false

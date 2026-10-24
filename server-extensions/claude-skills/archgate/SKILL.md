@@ -7,7 +7,12 @@ layer: L1
 status: active
 triggers:
   slash: [/archgate]
-  phrases: []
+  phrases:
+    - "оцени архитектуру"
+    - "это архитектурное решение"
+    - "прогони через архгейт"
+    - "нужен архитектурный гейт"
+    - "скилл архгейт"
 routing:
   executor: opus
   deterministic: false

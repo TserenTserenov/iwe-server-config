@@ -2,6 +2,16 @@
 name: pack-new
 description: "Create a new Pack — guided flow through SPF: choose domain, name Pack, scaffold structure, fill roadmap."
 argument-hint: "[область знания или домен]"
+version: 1.0.0
+layer: L1
+status: active
+triggers:
+  slash: [/pack-new]
+  phrases:
+    - "создай новый pack"
+    - "заведи pack для домена"
+    - "нужен новый pack"
+    - "скилл создание нового pack"
 realized_by:
   - DP.SC.048
 ---

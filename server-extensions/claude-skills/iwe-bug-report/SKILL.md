@@ -7,7 +7,11 @@ layer: L1
 status: active
 triggers:
   slash: [/iwe-bug-report]
-  phrases: []
+  phrases:
+    - "сообщи об ошибке IWE"
+    - "заведи баг-репорт платформы"
+    - "это похоже на баг IWE"
+    - "скилл отчёт об ошибке платформы"
 routing:
   executor: agent
   model: sonnet

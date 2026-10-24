@@ -7,7 +7,11 @@ layer: L1
 status: active
 triggers:
   slash: [/week-close]
-  phrases: []
+  phrases:
+    - "закрывай неделю"
+    - "закрой неделю"
+    - "ретро недели"
+    - "скилл закрытие недели"
 routing:
   executor: sonnet
   deterministic: false

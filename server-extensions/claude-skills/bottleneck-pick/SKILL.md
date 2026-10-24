@@ -11,6 +11,7 @@ triggers:
     - "какое ограничение сейчас"
     - "горлышко системы"
     - "bottleneck-pick"
+    - "скилл анализ ограничения"
 routing:
   executor: sonnet
   deterministic: false

@@ -18,6 +18,8 @@
 # — addressing "Кир" on a Claude Code session must not fake Кир's passport
 # just because the name is reserved somewhere in the registry).
 
+# lower_text: Unicode-safe lowercasing (GNU tr does not fold Cyrillic); tr if the lib is absent.
+. "${BASH_SOURCE[0]%/*}/lib/text-lower.sh" 2>/dev/null || lower_text() { tr '[:upper:]' '[:lower:]'; }
 set -uo pipefail
 export PATH="/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin:${PATH:-}"
 
@@ -71,7 +73,7 @@ PROJECTION=$(python3 "$PROJECTOR" --personality-id "$PID" --task "$PROMPT" --rol
 BOUND_FIRST_NAME=$(printf '%s' "$PROJECTION" | jq -r '.core.name // empty' 2>/dev/null | awk '{print $1}')
 [ -n "$BOUND_FIRST_NAME" ] || { echo '{}'; exit 0; }
 
-if [ "$(printf '%s' "$MATCHED_NAME" | tr '[:upper:]' '[:lower:]')" != "$(printf '%s' "$BOUND_FIRST_NAME" | tr '[:upper:]' '[:lower:]')" ]; then
+if [ "$(printf '%s' "$MATCHED_NAME" | lower_text)" != "$(printf '%s' "$BOUND_FIRST_NAME" | lower_text)" ]; then
   echo '{}'
   exit 0
 fi

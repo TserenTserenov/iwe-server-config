@@ -16,6 +16,8 @@
 #   - Идемпотентен (external_id = event_type + session_id)
 #   - Non-blocking (exit 0 всегда)
 
+# lower_text: Unicode-safe lowercasing (GNU tr does not fold Cyrillic); tr if the lib is absent.
+. "${BASH_SOURCE[0]%/*}/lib/text-lower.sh" 2>/dev/null || lower_text() { tr '[:upper:]' '[:lower:]'; }
 set -uo pipefail
 export PATH="/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin:${PATH:-}"
 
@@ -46,7 +48,7 @@ AGENT_TEXT=$(jq -r '
       .content
     else empty
     end
-' "$TRANSCRIPT_PATH" 2>/dev/null | tr '[:upper:]' '[:lower:]' | tail -c 4000)
+' "$TRANSCRIPT_PATH" 2>/dev/null | lower_text | tail -c 4000)
 
 HUMAN_TEXT=$(jq -r '
   select(.role == "user")
@@ -56,7 +58,7 @@ HUMAN_TEXT=$(jq -r '
       .content
     else empty
     end
-' "$TRANSCRIPT_PATH" 2>/dev/null | tr '[:upper:]' '[:lower:]' | tail -c 2000)
+' "$TRANSCRIPT_PATH" 2>/dev/null | lower_text | tail -c 2000)
 
 ALL_TEXT="${AGENT_TEXT} ${HUMAN_TEXT}"
 

@@ -7,7 +7,11 @@ layer: L1
 status: active
 triggers:
   slash: [/day-close]
-  phrases: []
+  phrases:
+    - "закрывай день"
+    - "закрой день"
+    - "день закончен"
+    - "скилл закрытие дня"
 routing:
   executor: haiku
   deterministic: false

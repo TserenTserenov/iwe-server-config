@@ -8,7 +8,11 @@ layer: L1
 status: active
 triggers:
   slash: [/extend]
-  phrases: []
+  phrases:
+    - "что можно настроить в IWE"
+    - "какие есть extension points"
+    - "как подключить чужое расширение"
+    - "скилл каталог расширяемости IWE"
 routing:
   executor: sonnet
   deterministic: false

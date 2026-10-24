@@ -7,7 +7,11 @@ layer: L1
 status: active
 triggers:
   slash: [/think]
-  phrases: []
+  phrases:
+    - "рассмотри несколько гипотез"
+    - "сравни варианты по одним критериям"
+    - "проведи ADI-разбор"
+    - "скилл цикл рассуждения"
 routing:
   executor: opus
   deterministic: false

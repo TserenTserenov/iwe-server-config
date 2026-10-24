@@ -7,7 +7,11 @@ layer: L1
 status: active
 triggers:
   slash: [/setup-wakatime]
-  phrases: []
+  phrases:
+    - "настрой wakatime"
+    - "подключи трекинг времени"
+    - "включи wakatime"
+    - "скилл настройка WakaTime"
 routing:
   executor: sonnet
   deterministic: false

@@ -7,7 +7,11 @@ layer: L1
 status: active
 triggers:
   slash: [/day-open]
-  phrases: []
+  phrases:
+    - "открывай день"
+    - "открой день"
+    - "начни день"
+    - "скилл открытие дня"
 routing:
   executor: sonnet
   deterministic: false

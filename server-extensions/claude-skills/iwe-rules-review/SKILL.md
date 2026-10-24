@@ -7,7 +7,11 @@ layer: L1
 status: active
 triggers:
   slash: [/iwe-rules-review]
-  phrases: []
+  phrases:
+    - "ревью правил IWE"
+    - "проверь культуру работы платформы"
+    - "еженедельное ревью правил"
+    - "скилл ревью правил IWE"
 routing:
   executor: haiku
   deterministic: false

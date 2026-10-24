@@ -6,7 +6,11 @@ layer: L3
 status: active
 triggers:
   slash: [/decompose]
-  phrases: []
+  phrases:
+    - "разложи на этапы"
+    - "декомпозируй работу"
+    - "разбей на шаги с критериями приёмки"
+    - "скилл декомпозиция работы"
 routing:
   executor: sonnet
   deterministic: false
