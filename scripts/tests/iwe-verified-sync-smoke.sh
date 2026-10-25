@@ -72,9 +72,9 @@ echo local > "$SERVER/f"
 echo four > "$WORK/author/f"; git -C "$WORK/author" commit -qam c4; git -C "$WORK/author" push -q origin main
 sync_it 2>/dev/null; RC=$?
 if [ "$RC" = 1 ] && [ "$(state_get status)" = refused ] && [ "$(state_get last_success_ts)" = "$PREV_OK" ] && [ "$(git -C "$SERVER" rev-parse HEAD)" = "$EXPECT" ]; then ok "dirty → refused, provenance kept"; else bad "dirty → refused" "rc=$RC status=$(state_get status)"; fi
-if [ "$(alerts | grep -c 'несохранённые правки')" = 1 ]; then ok "one dirty alert"; else bad "one dirty alert" "$(alerts)"; fi
+if [ "$(alerts | grep -c 'в рабочей копии есть локальные правки')" = 1 ]; then ok "one dirty alert"; else bad "one dirty alert" "$(alerts)"; fi
 sync_it 2>/dev/null; RC2=$?
-if [ "$RC2" = 1 ] && [ "$(alerts | grep -c 'несохранённые правки')" = 1 ]; then ok "second dirty tick refused again, alert deduplicated"; else bad "second dirty tick deduplicated" "rc=$RC2 $(alerts)"; fi
+if [ "$RC2" = 1 ] && [ "$(alerts | grep -c 'в рабочей копии есть локальные правки')" = 1 ]; then ok "second dirty tick refused again, alert deduplicated"; else bad "second dirty tick deduplicated" "rc=$RC2 $(alerts)"; fi
 if [ "$(bash "$SUT" read --state demo 2>/dev/null | grep -c '^last_error=dirty: ')" = 1 ]; then ok "read returns the refusal reason"; else bad "read returns the refusal reason" "$(bash "$SUT" read --state demo 2>&1 | grep last_error)"; fi
 
 echo "5. fresh on a dirty tree → exit 1 class dirty; clean tree with refused state → passes on last-known-good"
@@ -147,6 +147,32 @@ if [ "$(bash "$SUT" read --state demo 2>/dev/null | grep -c '^status=ok$')" = 1 
 echo "15. usage errors exit 2 (no --branch default on purpose)"
 bash "$SUT" sync --repo "$SERVER" --state demo 2>/dev/null; RC=$?
 if [ "$RC" = 2 ]; then ok "missing --branch → exit 2"; else bad "missing --branch → exit 2" "rc=$RC"; fi
+
+echo "16. index digest owns idx-* alerts without changing refusal or recovery state"
+echo local > "$SERVER/f"
+ALERTS_BEFORE=$(wc -l < "$ALERT_CAPTURE")
+IWE_VERIFIED_SYNC_ALERT_ROUTE=index-digest bash "$SUT" sync --repo "$SERVER" --branch main --state idx-demo 2>/dev/null; RC=$?
+if [ "$RC" = 1 ] && grep -q '^last_error=dirty:' "$WORK/state/idx-demo.state" \
+  && [ "$(wc -l < "$ALERT_CAPTURE")" -eq "$ALERTS_BEFORE" ] \
+  && [ ! -e "$WORK/state/idx-demo.alert" ]; then
+  ok "index refusal remains visible in state but sends no duplicate alert"
+else
+  bad "index digest route" "rc=$RC alerts=$(alerts)"
+fi
+IWE_VERIFIED_SYNC_ALERT_ROUTE=index-digest bash "$SUT" sync --repo "$SERVER" --branch main --state other-demo 2>/dev/null; RC=$?
+if [ "$RC" = 1 ] && [ "$(wc -l < "$ALERT_CAPTURE")" -eq $((ALERTS_BEFORE + 1)) ]; then
+  ok "non-index caller still alerts"
+else
+  bad "non-index alert route" "rc=$RC alerts=$(alerts)"
+fi
+git -C "$SERVER" restore --worktree -- f
+IWE_VERIFIED_SYNC_ALERT_ROUTE=index-digest bash "$SUT" sync --repo "$SERVER" --branch main --state idx-demo 2>/dev/null; RC=$?
+if [ "$RC" = 0 ] && [ ! -e "$WORK/state/idx-demo.alert" ] \
+  && [ "$(wc -l < "$ALERT_CAPTURE")" -eq $((ALERTS_BEFORE + 1)) ]; then
+  ok "index recovery leaves delivery to the acknowledged scheduler digest"
+else
+  bad "index recovery route" "rc=$RC alerts=$(alerts)"
+fi
 
 echo
 echo "итог: ✅ $PASS  ❌ $FAIL"

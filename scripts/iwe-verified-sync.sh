@@ -136,14 +136,14 @@ human_repo_name() {
 # Unknown classes fall back to a generic line; the class itself stays in the journal.
 describe_failure() {
   case "$1" in
-    dirty)               DESCRIBE_REASON="в рабочей копии лежат несохранённые правки"
-                         DESCRIBE_ACTION="Пока они там, копию не обновить: их нужно сохранить или убрать." ;;
+    dirty)               DESCRIBE_REASON="в рабочей копии есть локальные правки"
+                         DESCRIBE_ACTION="Дальше: попросите агента проверить владельца правок и сохранить работу до решения об обновлении." ;;
     diverged)            DESCRIBE_REASON="история копии разошлась с общей версией"
                          DESCRIBE_ACTION="Часто это коммиты, которые уже есть в общей версии под другими номерами; нужна проверка агентом." ;;
     fetch-failed)        DESCRIBE_REASON="не удалось получить обновления с GitHub"
                          DESCRIBE_ACTION="Если это повторяется больше часа, нужно проверить связь сервера с GitHub." ;;
-    wrong-branch)        DESCRIBE_REASON="копия стоит не на основной ветке"
-                         DESCRIBE_ACTION="Нужно вернуть её на основную ветку." ;;
+    wrong-branch)        DESCRIBE_REASON="в копии открыта другая ветка"
+                         DESCRIBE_ACTION="Дальше: попросите агента проверить, кому принадлежит ветка, прежде чем её переключать." ;;
     missing)             DESCRIBE_REASON="копии репозитория нет на сервере"
                          DESCRIBE_ACTION="Нужно склонировать её заново." ;;
     no-upstream)         DESCRIBE_REASON="на GitHub не нашлась нужная ветка"
@@ -161,6 +161,14 @@ describe_failure() {
   esac
 }
 
+# The index scheduler sends one daily digest for idx-* states. Keep the
+# verifier's refusal and journal intact, but do not send the same failure again
+# from this lower-level producer. The scheduler reports recoveries only for
+# failures confirmed in a delivered digest.
+index_digest_owns_alert() {
+  [ "${IWE_VERIFIED_SYNC_ALERT_ROUTE:-}" = index-digest ] && [[ "$1" == idx-* ]]
+}
+
 # describe_recovery MESSAGE — the two recovery messages the script emits, in words.
 describe_recovery() {
   case "$1" in
@@ -176,6 +184,10 @@ describe_recovery() {
 alert_fail() {
   local name="$1" class="$2" message="$3"
   local apath now prev_class prev_ts
+  if index_digest_owns_alert "$name"; then
+    log "alert routed to index digest (${name}:${class}): $message"
+    return 0
+  fi
   apath=$(alert_path "$name")
   now=$(date -u +%s)
   prev_class=""; prev_ts=0
@@ -213,6 +225,7 @@ alert_recovered() {
   [ -f "$apath" ] || return 0
   rm -f "$apath"
   log "recovered ${name}: ${message}"
+  index_digest_owns_alert "$name" && return 0
   if [[ "$name" == *.gate ]]; then
     send_telegram "✅ Проверка свежести копии «$(human_repo_name "$name")» на сервере ${HOST} снова проходит: $(describe_recovery "$message") ($(date '+%d.%m %H:%M'))"
   else
