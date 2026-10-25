@@ -36,6 +36,16 @@ fi
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 LOG_PREFIX="[sync-extensions-auto]"
+RUN_ID="$(date -u +%Y%m%dT%H%M%SZ)-$$"
+RUN_STARTED_EPOCH="$(date +%s)"
+PUSH_COMPLETED=false
+log_event() {
+  local event="$1"
+  shift
+  printf '%s run_id=%s event=%s at=%s' "$LOG_PREFIX" "$RUN_ID" "$event" "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  [ "$#" -eq 0 ] || printf ' %s' "$@"
+  printf '\n'
+}
 LOCK_KEY="repo:iwe-server-config"
 GATEWAY_LOCK_PY="$HOME/IWE/DS-my-strategy/scripts/lib/gateway-lock.py"
 # WP-538 (06.10, пир-сессия с Codex): полный вывод тестового гейта раньше
@@ -186,7 +196,11 @@ lock_acquire() {
   case "$rc" in
     0) return 0 ;;
     2) echo "$LOG_PREFIX WARN gateway unreachable — proceeding without lock"; return 0 ;;
-    *) echo "$LOG_PREFIX lock collision on $LOCK_KEY — другая сессия пишет в репозиторий, тихо пропускаю тик"; return 1 ;;
+    *)
+      echo "$LOG_PREFIX lock collision on $LOCK_KEY — другая сессия пишет в репозиторий, тихо пропускаю тик"
+      log_event lock_busy_skip
+      return 1
+      ;;
   esac
 }
 lock_release() {
@@ -248,13 +262,16 @@ cleanup_test_env() {
 }
 
 on_exit() {
+  local exit_status=$?
   [ -n "$SYNC_LOG" ] && rm -f "$SYNC_LOG"
   [ -n "$SOURCE_CLONE_LOG" ] && rm -f "$SOURCE_CLONE_LOG"
   [ -n "$SOURCE_SNAPSHOT" ] && rm -rf "$SOURCE_SNAPSHOT"
   cleanup_test_env
   lock_release
+  log_event tick_finished "exit_code=$exit_status" "elapsed_sec=$(($(date +%s) - RUN_STARTED_EPOCH))" "push_completed=$PUSH_COMPLETED"
 }
 trap on_exit EXIT
+log_event tick_started
 
 cd "$REPO_ROOT" || { alert cd "🚨 sync-extensions-auto: cd в $REPO_ROOT провалился"; exit 1; }
 
@@ -284,6 +301,11 @@ if ! git clone --quiet --depth 1 --branch main "$SOURCE_REMOTE" "$SOURCE_SNAPSHO
   alert source-snapshot "🚨 sync-extensions-auto: не удалось получить чистый снимок origin/main для ~/IWE — auto-sync пропущен"
   exit 1
 fi
+SOURCE_SHA=$(git -C "$SOURCE_SNAPSHOT" rev-parse HEAD) || {
+  alert source-snapshot "🚨 sync-extensions-auto: чистый снимок источника не содержит HEAD — auto-sync пропущен"
+  exit 1
+}
+log_event source_observed "source_sha=$SOURCE_SHA"
 
 SYNC_LOG="$(mktemp)"
 if ! IWE_EXTENSIONS_SOURCE_ROOT="$SOURCE_SNAPSHOT" \
@@ -295,6 +317,7 @@ fi
 
 CHANGED=$(git status --porcelain server-extensions/)
 if [ -z "$CHANGED" ]; then
+  log_event no_changes "source_sha=$SOURCE_SHA"
   echo "$LOG_PREFIX нет изменений, выход"
   exit 0
 fi
@@ -518,10 +541,13 @@ if ! git commit -m "sync: auto extensions (${FILE_COUNT} файлов) [sync-ext
 fi
 
 PUSH_OUT=""
+log_event copy_committed "source_sha=$SOURCE_SHA" "config_sha=$(git rev-parse HEAD)" "file_count=$FILE_COUNT" "gate_partial=$GATE_FAILED"
 if ! PUSH_OUT=$(git push 2>&1); then
   echo "$LOG_PREFIX push error tail: $(echo "$PUSH_OUT" | tail -3 | tr '\n' ' ')"
   alert push "🚨 sync-extensions-auto: коммит создан локально, но push провалился (${FILE_COUNT} файлов: ${FILE_LIST}...) — требуется ручное вмешательство, подробности в логе на Маке"
   exit 1
 fi
+PUSH_COMPLETED=true
+log_event push_completed "source_sha=$SOURCE_SHA" "config_sha=$(git rev-parse HEAD)" "file_count=$FILE_COUNT" "gate_partial=$GATE_FAILED"
 
 alert_ok "✅ Автосинк конфигурации на сервер: ${FILE_COUNT} файлов (${FILE_LIST}...) — деплой на tsekh-1 запущен"
