@@ -1,74 +1,61 @@
-# Auto-pull репо на сервере
+# Сторож копий репозиториев на tsekh-1
 
-> Source-of-truth runbook для механизма pre-tick git pull в `iwe-scheduler.service`.
-> WP-7 фаза S-A (7 мая 2026), iwe-server-config commit `970ee31`.
+> Порядок работы `iwe-pull-repos` и связанных уведомлений. Актуальная конфигурация — `modules/systemd-timers.nix`.
 
 ## Зачем это
 
-Закрывает архитектурную дыру **«GitHub ≠ сервер»**: на NixOS-сервере (`tsekh-1`) systemd-таймер `iwe-scheduler.timer` запускает `iwe-scheduler.service` 11 раз/день. До auto-pull код-обновления в репо (например, `DS-IT-systems/DS-ai-systems/synchronizer/scripts/*.sh`) не доезжали до сервера автоматически — кто-то должен был вручную делать `git pull`. В результате: сервер запускал устаревший код, фиксы лежали в GitHub, но не работали в проде.
+Сторож проверяет доступность удалённых версий 16 репозиториев и сообщает о проблемах, не меняя их рабочие файлы. Код и источники индекса продвигают отдельные проверенные синхронизаторы, описанные ниже. Поэтому успех `iwe-pull-repos` сам по себе не доказывает, что рабочая копия свежая.
 
 ## Как это работает
 
 ### Механика
 
-В `modules/systemd-timers.nix` определён `pullScript` через `pkgs.writeShellScript`. Он:
+`pullScript` запускается отдельным `iwe-pull-repos.timer` примерно раз в два часа и перед `iwe-scheduler.service` (13 ежедневных запусков, плюс недельный запуск по воскресеньям). Службы используют общий файловый замок с `iwe-push-ahead`: при занятом замке сторож пропускает попытку и пишет причину в журнал. Перед планировщиком его отказ не останавливает основную работу; общий предел времени планировщика — 2700 секунд.
 
-1. Читает фиксированный список `repos[]` (см. ниже)
-2. Для каждого репо:
-   - Проверяет существование `$dir/.git` — если нет, `SKIP: не клонирован`
-   - `git status --porcelain` — если есть uncommitted changes, `DIRTY: skip` (защита локальных правок)
-   - `timeout 60s git pull --ff-only` — fast-forward only (без rebase, без merge-коммитов)
-3. Накапливает `failed[]` для DIRTY и FAIL'ов
-4. При непустом `failed[]` шлёт TG-уведомление через `TELEGRAM_BOT_TOKEN`/`CHAT_ID` из `/etc/iwe/env`
-5. **`exit 0` always** — не блокирует scheduler-tick
+Для каждой существующей Git-копии сторож проверяет локальные изменения, при их обнаружении ждёт 30 секунд и проверяет повторно. Если файлы всё ещё изменены, он записывает причину и пути в журнал, не выполняя `fetch`. Для чистой копии он выполняет `git fetch --prune` с пределом 60 секунд. `fetch` обновляет сведения об удалённой версии, но не двигает текущую ветку и не изменяет рабочие файлы. Отсутствующие копии он пропускает. Ошибки разных репозиториев учитываются отдельно; неизменная проблема напоминается не чаще раза в сутки.
 
-Интеграция в сервис:
-
-```nix
-systemd.services."iwe-scheduler" = {
-  serviceConfig = commonServiceConfig // {
-    ExecStartPre = "-${pullScript}";   # `-` → fail в pull НЕ блокирует ExecStart
-    ExecStart    = "...scheduler.sh dispatch";
-    TimeoutSec   = 1800;               # 30 мин включая pull
-  };
-};
-```
+Проблемы `DS-agent-workspace` остаются в журнале сторожа и попадают в суточную сводку источников индекса. Отдельное сообщение сторожа по этому репозиторию не отправляется. Другие отказы сторож сообщает как отказ проверки с просьбой агенту выяснить причину. По одному такому сигналу пилоту не предлагается решать судьбу локальных файлов.
 
 ### Защиты
 
 | Риск | Защита |
 |------|--------|
-| Network hang | `timeout 60s` на `git pull` |
-| Password prompt | `GIT_TERMINAL_PROMPT=0` + `GIT_SSH_COMMAND="ssh -o BatchMode=yes"` |
-| Потеря локальных правок | `git status --porcelain` → skip dirty + `--ff-only` (без rebase) |
-| Merge-коммит при divergent | `--ff-only` отказывается, помечает FAIL |
-| Pull падает → блокирует scheduler | `ExecStartPre = "-${...}"` (минус-префикс игнорирует exit code) + сам скрипт `exit 0` always |
-| Шум при штатных DIRTY | Текущая стратегия: TG-алерт при ANY failed. Может потребоваться different-strategy если DIRTY становится рутинным |
+| Зависшая сеть | Предел 60 секунд на `git fetch --prune` |
+| Запрос пароля | `GIT_TERMINAL_PROMPT=0` и SSH в пакетном режиме |
+| Потеря локальных правок | Проверка чистоты перед `fetch`; сам `fetch` не меняет рабочие файлы |
+| Одновременные Git-операции | Общий файловый замок; при коллизии попытка пропускается |
+| Повторяющиеся предупреждения | Учёт отдельно по репозиторию, повтор неизменного состояния не чаще раза в сутки; `DS-agent-workspace` направлен в сводку индекса |
 
 ## Список репо
 
 ```
 DS-IT-systems/DS-ai-systems       # scheduler-код, pack-project, template-sync
-DS-IT-systems/activity-hub         # профилировщик данных
-DS-MCP/knowledge-mcp               # knowledge-mcp runtime (DS-MCP — родительская папка)
-DS-agent-workspace                 # workspace агентов
-DS-autonomous-agents               # overnight-scout, render-pilot-guides
-DS-Knowledge-Index-Tseren          # знания пилота
-PACK-personal                      # Pack-источник для PACK-personal-агентов
+DS-IT-systems/activity-hub
+DS-IT-systems/iwe-server
+DS-MCP/knowledge-mcp
+DS-agent-workspace
+DS-autonomous-agents
+DS-ecosystem-development
+DS-Knowledge-Index-Tseren
+DS-principles-curriculum
+PACK-MIM
+PACK-agent-rules
+PACK-autonomous-agents
+PACK-digital-platform
+PACK-ecosystem
+PACK-personal
+PACK-verification
 ```
 
 ### Исключения
 
-- **DS-my-strategy** — почти всегда DIRTY из-за `iwe-sync-fleeting-notes.timer` (каждые 2 мин правит `inbox/fleeting-notes.md`). Точечная синхронизация уже делается через `sync-files.sh`. **Mini-debt:** расширить `sync-files.sh` на `inbox/WP-*.md` и `current/*.md`.
-- **FMT-exocortex-template** — на сервере не git-репо (runtime-копия, обновляется через template-sync flow).
-- **PACK-MIM, PACK-agent-rules, PACK-autonomous-agents, PACK-digital-platform, PACK-ecosystem, PACK-verification** — не клонированы на сервер. **PACK-digital-platform склонирован 7 мая** в рамках S-B (для pack-project), может быть добавлен в pullScript после первого штатного цикла. Остальные — по мере появления потребителей runtime.
+- **DS-my-strategy** обслуживает собственная защищённая синхронизация `iwe-tsekh1-sync`; она не входит в список сторожа.
+- **FMT-exocortex-template** существует на сервере как Git-копия, но обновляется как источник индекса по своим правилам. На проверке 25 октября копия была на рабочей ветке.
+- Перечень выше задаёт наблюдение, а не обещает, что каждый репозиторий уже клонирован или что его рабочая ветка продвинута.
 
 ## Расписание
 
-`iwe-scheduler.timer` запускает каждый день:
-- 00:00, 02:00, 03:00, 04:00, 06:00, 09:00, 12:00, 15:00, 18:00, 21:00, 23:00 (МСК / Europe/Helsinki)
-
-**11 пуллов в день × 7 репо = 77 fetch/день.** GitHub лимит 5000/час для аутентифицированных — порядок ничтожный, не риск.
+`iwe-scheduler.timer` запускается в 00:00, 02:00, 03:00, 04:30, 06:20, 06:30, 08:00, 09:00, 12:00, 15:00, 18:00, 21:00 и 23:00 по часовому поясу хоста (`Europe/Helsinki`); по воскресеньям добавлен недельный запуск в 23:50 по Москве. При переходе на зимнее время ежедневные часы уже не совпадают с московскими. Отдельный `iwe-pull-repos.timer` запускается каждые два часа после предыдущего запуска; точное время следует смотреть в `systemctl list-timers`. Число сетевых запросов зависит от отсутствующих и изменённых копий, занятости общего замка и пересечений запусков.
 
 ## Verified sync — продвижение клонов, которые читают headless-процессы (WP-545 Ф12)
 
@@ -87,50 +74,22 @@ PACK-personal                      # Pack-источник для PACK-personal-
 
 **Известная двойная тревога:** отказ `fresh` в `ExecStartPre` роняет юнит → общий `OnFailure`-обработчик шлёт своё сообщение (без дедупа) вдобавок к тревоге самого гейта (с дедупом 4 ч). Принято осознанно: потребители запускаются ≤3 раз в сутки; если включать таймер с частым тиком (`iwe-render-pilot-guides-queue`), сначала решить это.
 
-**Алерты (текст для пилота по-русски, класс и сырое сообщение git пишутся в журнал сервера):** `⚠️ На сервере <хост> не обновилась копия репозитория «<имя>»: <причина>. <что делать>` — первый сразу, напоминание раз в 4 ч; `✅ Копия репозитория «<имя>» … снова обновляется` один раз после восстановления; для ворот `.gate` - `⚠️ … не пройдена проверка свежести копии «<имя>»` и `✅ Проверка свежести копии «<имя>» … снова проходит`. Классы (в журнале): `dirty`, `diverged`, `fetch-failed`, `missing`, `wrong-branch`, `no-upstream`, `post-merge-mismatch`, `stale`, `identity`, `future`, `unknown`; тексты - функция `describe_failure` в `scripts/iwe-verified-sync.sh`. Состояние: `iwe-verified-sync read --state <имя>`; имена state — `ds-ai-systems`, `activity-hub`, `iwe-server`, `knowledge-mcp`, `ds-autonomous-agents`, для источников индекса `idx-<имя клона>`.
+**Алерты (текст для пилота по-русски, класс и сырое сообщение git пишутся в журнал сервера):** для обычных вызовов `iwe-verified-sync` первый отказ отправляется сразу, напоминание — не чаще раза в 4 ч, восстановление — один раз. Ворота `.gate` отдельно сообщают об отказе и восстановлении проверки свежести. При обновлении источников индекса `scheduler.sh` передаёт `IWE_VERIFIED_SYNC_ALERT_ROUTE=index-digest`: состояния `idx-<имя клона>` сохраняют отказ и восстановление, но не отправляют адресные уведомления. Планировщик собирает одну суточную сводку на русском, помечает её отправленной только после подтверждения Telegram и сообщает о восстановлении ранее объявленных источников. Для отсутствующей копии он не обещает наличие прежних данных. Классы причин в журнале: `dirty`, `diverged`, `fetch-failed`, `missing`, `wrong-branch`, `no-upstream`, `post-merge-mismatch`, `stale`, `identity`, `future`, `unknown`; тексты обычных адресных уведомлений формирует `describe_failure` в `scripts/iwe-verified-sync.sh`. Состояние читается через `iwe-verified-sync read --state <имя>`; имена state — `ds-ai-systems`, `activity-hub`, `iwe-server`, `knowledge-mcp`, `ds-autonomous-agents`, для источников индекса `idx-<имя клона>`.
 
-**Политика `frozen` в реестре:** источник не fetch-ится, индексируется как есть (PACK-education: репозитория на GitHub больше нет). **Что делать при алерте:** `dirty` — на сервере кто-то правил руками, `git -C <клон> status`; `diverged` — история переписана (force-push?), сверить `git log origin/<ветка>` и решить вручную; `missing`/`config-error` в дневной сводке — клон не создан или нет строки в `server-clones.tsv` (клонирование — ручная операция с подтверждённым URL/веткой, автоматика никогда не клонирует); `stale` при зелёном sync — сверить часы.
+**Политика `frozen` в реестре:** источник не fetch-ится, индексируется как есть (PACK-education: репозитория на GitHub больше нет). **Что делать при алерте:** `dirty` — агент проверяет локальные правки и их владельца, не удаляя их по одному сигналу; `wrong-branch` — агент выясняет, кому нужна рабочая ветка, прежде чем переключать копию; `diverged` — агент сверяет историю с общей версией и выясняет причину расхождения; `missing`/`config-error` в дневной сводке — агент проверяет отсутствующую копию или строку в `server-clones.tsv` (автоматика не клонирует); `stale` при зелёном sync — агент сверяет часы. Решение пилота требуется только после проверки конкретного выбора, который нельзя разрешить автоматически.
 
 ## Troubleshooting
 
-### Симптом: TG-шум «IWE pull-repos warnings»
+### Пришло предупреждение сторожа
 
-```
-⚠️ IWE pull-repos warnings (tsekh-1, ...): DS-IT-systems/DS-ai-systems (dirty)
-```
+Сначала агент сверяет время предупреждения с `journalctl -u iwe-pull-repos.service -u iwe-scheduler.service` и проверяет `git status --short` соответствующей копии на tsekh-1. При `dirty` он выясняет источник и владельца локальных файлов; при ошибке `fetch` проверяет сеть и доступ; при занятом общем замке проверяет следующий запуск. Сторож ничего не удаляет и не продвигает.
 
-**Что делать:**
-1. SSH на сервер: `ssh tsekh-1 "sudo -u tseren git -C /home/tseren/IWE/<repo> status --short"`
-2. Если файлы должны быть в `.gitignore` — добавить и запушить
-3. Если runtime-артефакт (state-файл) — переместить в `.gitignore` или другой path
-4. Если ручная правка (нежелательная на сервере) — `git stash` или `git checkout --` чтобы убрать
-5. После очистки на следующем tick'е репо подхватится OK
+Если в суточной сводке индекса назван тот же репозиторий, агент использует её статус и журнал проверки источников. Для `DS-agent-workspace` отдельного сообщения сторожа быть не должно. Пилоту передают только подтверждённый выбор между конкретными безопасными действиями, когда владелец работы не может решить его сам.
 
-### Симптом: pull медленный или висит
+### Проверка не завершилась или запуск пропущен
 
-1. Проверить network: `ssh tsekh-1 "ping -c 3 github.com"`
-2. Проверить SSH auth: `ssh tsekh-1 "sudo -u tseren ssh -T -o BatchMode=yes git@github.com"` — должно быть `successfully authenticated`
-3. Если SSH-ключ умер — обновить deploy key в `~tseren/.ssh/`
-
-### Симптом: scheduler-tick пропустил (не запустился)
-
-1. `systemctl list-timers iwe-scheduler.timer` — проверить NEXT и LAST
-2. `journalctl -u iwe-scheduler.service --since '24h ago'` — логи последних tick'ов
-3. Если ExecStartPre упал и `-` префикс не сработал — должен сработать; если нет, проверить версию systemd (`systemctl --version`)
-
-### Симптом: отстала ветка iwe-server-config на сервере
-
-```bash
-ssh tsekh-1 "cd /home/tseren/iwe-server-config && git branch -v"
-```
-
-Если ветка `master` (не `main`) или отстаёт — `git checkout -B main origin/main` (как было сделано 7 мая 2026).
+`systemctl list-timers iwe-pull-repos.timer iwe-scheduler.timer` показывает последние и следующие запуски. `journalctl -u iwe-pull-repos.service -u iwe-scheduler.service --since '24 hours ago'` показывает отказы `fetch`, занятый замок и время выполнения. По одному пропущенному запуску нельзя заключить, что рабочая копия устарела: её фактическую свежесть проверяет соответствующий потребитель или `iwe-verified-sync`.
 
 ## Verification
 
-После любых изменений pullScript или списка репо:
-
-1. `nix flake check --no-build` — синтаксис
-2. `nixos-rebuild switch --flake .#tsekh-1 --target-host root@95.216.75.148` (с локали) ИЛИ `ssh tsekh-1 "cd /home/tseren/iwe-server-config && git pull && nixos-rebuild switch --flake .#tsekh-1"` (на сервере)
-3. `ssh tsekh-1 "systemctl cat iwe-scheduler.service | grep ExecStartPre"` — проверить новый путь pullScript
-4. `ssh tsekh-1 "systemctl start iwe-scheduler.service"` + `journalctl -u iwe-scheduler.service --since '1 minute ago' | grep -E 'OK:|SKIP:|DIRTY:|FAIL:'` — увидеть результат
+После изменения `pullScript` или списка репозиториев проверить синтаксис Nix и `nix flake check`. Штатная публикация ветки `main` запускает `.github/workflows/deploy.yml`, где конфигурация разворачивается на сервере и проверяется состояние служб. После успешного прогона сверить `systemctl cat iwe-pull-repos.service iwe-scheduler.service`, `systemctl list-timers` и свежие записи `journalctl` на tsekh-1. Не запускать планировщик вручную только ради проверки текста уведомления: это запускает и его рабочие задания.

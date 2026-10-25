@@ -106,13 +106,13 @@ let
     OnFailure = "iwe-failure-alert@%n.service";
   };
 
-  # Pre-tick auto-pull репозиториев — закрывает дыру «GitHub ≠ сервер».
+  # Pre-tick fetch-сторож репозиториев — сообщает о возможном разрыве «GitHub ≠ сервер».
   # Запускается как ExecStartPre перед iwe-scheduler.service. Префикс `-` в ExecStartPre
-  # → fail в pull НЕ блокирует ExecStart (scheduler стартует с тем кодом что есть).
+  # → отказ сторожа НЕ блокирует ExecStart (scheduler стартует с тем кодом что есть).
   # WP-7 фаза S-A (7 мая 2026, см. inbox/WP-7-platform-tech-debt.md «Server (sync infra)»).
   #
   # Стратегия:
-  #   - --ff-only (без rebase, divergent → fail-fast → TG-алерт)
+  #   - fetch --prune (не меняет рабочее дерево; продвижение HEAD — у verified-sync)
   #   - timeout 60s per repo (защита от network hang)
   #   - GIT_TERMINAL_PROMPT=0 + BatchMode=yes (детерминированный fail без password prompt)
   #   - skip dirty репо (защита локальных правок) + grace-період 30s + retry,
@@ -120,11 +120,8 @@ let
   #     (synchronizer пишет sync-hashes/pulse state, knowledge-mcp reindex и т.п.)
   #   - exit 0 always (не блокирует scheduler tick)
   #
-  # Исключения:
-  #   - DS-my-strategy: dirty почти всегда из-за iwe-sync-fleeting-notes (точечный sync inbox/fleeting-notes.md)
-  #     → отдельная задача расширить sync-files.sh для inbox/WP-*.md и current/
-  #   - FMT-exocortex-template: на сервере не git-репо (runtime-копия)
-  # Все 8 PACK склонированы 7 мая в S-E (PACK-digital-platform склонирован в S-B).
+  # Исключения: DS-my-strategy обновляет собственный защищённый сервис;
+  # FMT-exocortex-template не входит в список этого сторожа.
   pullScript = pkgs.writeShellScript "iwe-pull-repos" ''
     set -uo pipefail
     export GIT_TERMINAL_PROMPT=0
@@ -136,7 +133,7 @@ let
     # OnBootSec-сдвиг между двумя таймерами (5min vs 20min) переживает
     # только до первого рестарта/rebuild любого из них — за 72 дня аптайма
     # сдвиг схлопнулся, оба сервиса стартовали в одну секунду, конкурентный
-    # `git fetch`/`git pull` на одном working tree задваивал FETCH_HEAD →
+    # прежний `git pull` на одном working tree задваивал FETCH_HEAD →
     # `fatal: Cannot rebase onto multiple branches` (peer-session
     # 2026-07-10-01-tsekh-timer-race, воспроизведено живьём). Non-blocking
     # flock на общий лок-файл сериализует все четыре источника разом; при
@@ -243,7 +240,8 @@ let
       fi
     done
 
-    # TG-алерт при ошибках. exit 0 always — не блокируем scheduler tick.
+    # Telegram-алерт для отдельных отказов, кроме DS-agent-workspace.
+    # exit 0 always — не блокируем scheduler tick.
     # WP-568/538, 23.10.2026 (пир-сессия razbor-dampa-bota): до этой правки
     # дедуп был на уровне ВСЕГО набора failed[] одним общим hash — смена
     # состава (один repo вылечился, другой заболел) меняла общий hash и
@@ -273,6 +271,12 @@ let
       now=$(${pkgs.coreutils}/bin/date -u +%s)
       to_send=()
       for item in "''${failed[@]}"; do
+        # DS-agent-workspace уже присутствует в суточной сводке источников
+        # индекса. Сторож сохраняет причину в журнале, но не дублирует её в TG.
+        if [[ "$item" == 'DS-agent-workspace '* ]]; then
+          ${pkgs.util-linux}/bin/logger -t iwe-pull-repos "DS-agent-workspace routed to index digest: $item"
+          continue
+        fi
         # Санитизация имени repo для state-файла (холодное ревью, 23.10):
         # 4 из 16 repos в списке выше несут "/" в каноническом имени
         # (DS-IT-systems/DS-ai-systems и т.п.) — без замены "/" state_file
@@ -313,6 +317,10 @@ let
       for sf in "$dedup_state_dir"/*; do
         [ -e "$sf" ] || continue
         sf_repo=$(${pkgs.coreutils}/bin/basename "$sf")
+        if [ "$sf_repo" = DS-agent-workspace ]; then
+          ${pkgs.coreutils}/bin/rm -f "$sf"
+          continue
+        fi
         still_failed=0
         for item in "''${failed[@]}"; do
           item_repo_key="''${item%% *}"
@@ -326,14 +334,14 @@ let
       done
 
       if [ "''${#to_send[@]}" -gt 0 ]; then
-        msg="⚠️ Сервер (tsekh-1, $(${pkgs.coreutils}/bin/date '+%Y-%m-%d %H:%M')): не обновились с GitHub: ''${to_send[*]}. Ничего не удалено и не потеряно, это не срочно. Что делать: если это ваша незаконченная работа на сервере - сохраните её; если нет - попросите агента разобрать. Повтор этой же проблемы - не чаще раза в сутки."
+        msg="⚠️ На tsekh-1 сторож свежести не завершил проверку: ''${to_send[*]}. Рабочие файлы не менялись. Дальше: поручите агенту проверить журнал и владельцев локальных правок. Решение от вас пока не требуется. Повтор той же проблемы — не чаще раза в сутки."
         ${pkgs.curl}/bin/curl -s --max-time 10 -X POST \
           "https://api.telegram.org/bot''${TELEGRAM_BOT_TOKEN}/sendMessage" \
           -d "chat_id=''${TELEGRAM_CHAT_ID}" \
           --data-urlencode "text=$msg" \
           > /dev/null || true
       else
-        ${pkgs.util-linux}/bin/logger -t iwe-pull-repos "all ''${#failed[@]} problem(s) suppressed (dedup, unchanged within ''${dedup_ttl_min}min)"
+        ${pkgs.util-linux}/bin/logger -t iwe-pull-repos "all ''${#failed[@]} problem(s) withheld from Telegram (dedup or index-digest route)"
       fi
     fi
 
@@ -651,7 +659,7 @@ in
       description = "IWE Scheduler — центральный диспетчер агентов";
       unitConfig   = commonUnitConfig;
       serviceConfig = commonServiceConfig // {
-        # WP-7 S-A: pre-tick git pull для IWE-репо (сторож-наблюдатель). Префикс `-` → fail не блокирует ExecStart.
+        # WP-7 S-A: pre-tick git fetch для IWE-репо (сторож-наблюдатель). Префикс `-` → fail не блокирует ExecStart.
         # peer-session 2026-06-11-01: push-ahead доставляет clean+ahead коммиты сессий (commit-without-push fix).
         # WP-545 Ф12 (08.09): verified-sync advances the three clones this
         # dispatcher runs code from (DS-ai-systems, knowledge-mcp,
@@ -687,7 +695,7 @@ in
 
     systemd.timers."iwe-scheduler" = {
       wantedBy    = [ "timers.target" ];
-      description = "IWE Scheduler — 11 точек пробуждения (00:00–23:00 MSK)";
+      description = "IWE Scheduler — 13 ежедневных запусков и недельный запуск в воскресенье";
       timerConfig = {
         # Соответствует plist com.exocortex.scheduler:
         # 00:00 code-scan+update+week-review(Пн)+unsatisfied-report
@@ -826,8 +834,10 @@ in
       wantedBy    = [ "timers.target" ];
       description = "IWE strategy-files sync — каждые 10 мин (WP-538 Ф5а: снова включён, canon-refresh.sh теперь безопасно разрешает зеркало)";
       timerConfig = {
-        OnBootSec       = "5min";
-        OnUnitActiveSec = "10min";
+        # Фиксированные минуты не дают таймеру уплыть к git-sync после долгого прогона.
+        # Git-sync стартует через 3 мин после каждого второго тика этой службы.
+        OnCalendar = "*-*-* *:04,14,24,34,44,54:00";
+        AccuracySec = "1s";
       };
     };
 
@@ -853,7 +863,8 @@ in
       serviceConfig = commonServiceConfig // {
         WorkingDirectory = "${iwe}/DS-my-strategy";
         ExecStart = "${pkgs.bash}/bin/bash ${iwe}/DS-my-strategy/scripts/tsekh1-git-sync.sh";
-        TimeoutStartSec = 120;
+        # У guard есть общий бюджет до 15 с на повтор занятой блокировки.
+        TimeoutStartSec = 150;
       };
       # hostname labels sync state; cmp proves that a dirty mirror matches the
       # published path list before canon-refresh may recover it. Neither tool
@@ -869,9 +880,12 @@ in
       wantedBy    = [ "timers.target" ];
       description = "IWE DS-my-strategy git sync — каждые 20 мин";
       timerConfig = {
-        OnBootSec       = "2min";
-        OnUnitActiveSec = "20min";
-        Persistent      = true;
+        # 07/27/47 отделены на 3 мин от sync-strategy-files (04/24/44):
+        # обе службы используют общий dirty-guard.lock. Проверено по живым
+        # журналам 25.10.2026: прежние таймеры сталкивались в 07:14 и 08:34.
+        OnCalendar = "*-*-* *:07,27,47:00";
+        AccuracySec = "1s";
+        Persistent = true;
       };
     };
 
@@ -952,15 +966,14 @@ in
     # =========================================================
     # 6b. IWE PULL REPOS — каждые 2 часа (WP-7 S-A, peer 2026-06-11-01)
     # =========================================================
-    # Синхронизирует все IWE-репо (DS-IT-systems, PACK-*, DS-*) с GitHub.
-    # --ff-only (fail-fast на divergence → TG-алерт), grace-период для фоновых синхронизаторов.
+    # Проверяет 16 IWE-репо через fetch --prune без продвижения рабочих копий.
 
     systemd.services."iwe-pull-repos" = {
-      description = "IWE — git pull всех репо (каждые 2 часа)";
+      description = "IWE — fetch-сторож репозиториев (каждые 2 часа)";
       unitConfig   = commonUnitConfig;
       serviceConfig = commonServiceConfig // {
         ExecStart  = "${pullScript}";
-        TimeoutSec = 900;  # 15 мин (14 репо × 60s timeout + margin)
+        TimeoutSec = 900;  # 15 мин на 16 наблюдаемых репозиториев
       };
       path = commonPath;
       environment = commonEnv;
@@ -1028,7 +1041,7 @@ in
     # оставлено отключённым, НЕ переназначено. Первая гипотеза этой сессии была
     # "week-open-orchestrator.sh не подключён ни к одному триггеру, значит нужно
     # включить этот таймер обратно" — отвергнута после дальнейшей проверки: у
-    # `iwe-scheduler.timer` (отдельный, уже активный юнит, 11 пробуждений/сутки) есть
+    # `iwe-scheduler.timer` (отдельный, уже активный юнит, 13 ежедневных запусков) есть
     # СОБСТВЕННЫЙ блок в scheduler.sh (`dispatch()`, "Недельный оркестратор WP-484
     # Ф16.3", условие Вс час≥23), который уже вызывает week-open-orchestrator.sh —
     # и `night_cycle.ticks.week` в params.yaml включён с 31.07 (пир-сессия
