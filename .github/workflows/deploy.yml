@@ -94,6 +94,27 @@ jobs:
           fi
           echo "Release receipt matches config and root revisions"
 
+      - name: Verify managed instructions in the live workspace
+        run: |
+          set -euo pipefail
+          verify_instruction() {
+            local staged="$1" live="$2" expected actual
+            expected=$(sha256sum "server-extensions/$staged" | cut -d' ' -f1)
+            actual=$(ssh -o StrictHostKeyChecking=yes root@95.216.75.148 \
+              sha256sum "$live" | cut -d' ' -f1)
+            if [ "$expected" != "$actual" ]; then
+              echo "::error::Instruction content mismatch: $staged"
+              exit 1
+            fi
+          }
+
+          verify_instruction CLAUDE.md /home/tseren/IWE/CLAUDE.md
+          verify_instruction AGENTS.md /home/tseren/IWE/AGENTS.md
+          verify_instruction AGENTS-agent-blocks.md /home/tseren/IWE/AGENTS-agent-blocks.md
+          verify_instruction claude-rules/wp-scope.md /home/tseren/IWE/.claude/rules/wp-scope.md
+          verify_instruction memory/protocol-open.md /home/tseren/.claude/projects/-home-tseren-IWE/memory/protocol-open.md
+          echo "Managed instructions match the deployed revision"
+
       - name: Smoke test — /health endpoint (post-deploy)
         run: |
           # deploy-rs уже подтвердил активацию через SSH. /health — финальный sanity.
