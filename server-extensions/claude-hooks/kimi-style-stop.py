@@ -26,6 +26,7 @@ import sys
 import tempfile
 
 WRAPPER = os.path.expanduser("~/IWE/.claude/hooks/style-check-text.sh")
+ORTHO = os.path.expanduser("~/IWE/.claude/hooks/ortho-check.py")
 SESSIONS = os.path.expanduser("~/.kimi/sessions")
 
 
@@ -72,6 +73,35 @@ def main() -> int:
     text = last_assistant_text(journals[0])
     if not text:
         return 0
+
+    # РП-388 Ф26: орфография — журнал + напоминание, без блока (решение пилота
+    # 25.10). До стилевой проверки: даже ответ, который стиль заблокирует,
+    # должен попасть в орфо-журнал. В пир-режиме ortho-check.py сам молчит
+    # (проверку там делает адаптер, Ф24). Fail-open внутри, timeout 8с, чтобы
+    # вместе со стилем (10с) уложиться в лимит хука (20с).
+    if os.path.isfile(ORTHO):
+        ortho_tmp = None
+        try:
+            with tempfile.NamedTemporaryFile(
+                mode="w", encoding="utf-8", suffix=".txt", delete=False
+            ) as of:
+                of.write(text)
+                ortho_tmp = of.name
+            subprocess.run(
+                ["python3", ORTHO, "kimi", ortho_tmp],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=8,
+                check=False,
+            )
+        except Exception:
+            pass
+        finally:
+            if ortho_tmp:
+                try:
+                    os.unlink(ortho_tmp)
+                except OSError:
+                    pass
 
     tmp_path = None
     try:
