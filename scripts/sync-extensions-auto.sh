@@ -208,17 +208,66 @@ lock_release() {
   python3 "$GATEWAY_LOCK_PY" release "$LOCK_KEY" >/dev/null 2>&1 || true
 }
 
-# gate_detail_text: текст для вставки в алерт теста-гейта — ссылается на
+# gate_detail_text: ссылка на полный вывод гейта для журнала/дайджеста — на
 # постоянный файл ($GATE_LOG_PERSISTED_PATH), либо, если сохранение не
 # удалось, честно называет временный ($GATE_LOG) с оговоркой о его сроке
 # жизни (peer-review с Codex, WP-538, 06.10 — не обещать постоянство того,
-# чего не гарантировали).
+# чего не гарантировали). В текст пилоту в Telegram больше не вставляется
+# (пир-сессия WP-568, 26.10: путь к логу в сообщении — шум, полный вывод
+# остаётся на диске и в журнале).
 gate_detail_text() {
   if [ -n "${GATE_LOG_PERSISTED_PATH:-}" ]; then
     printf 'полный вывод: %s' "$GATE_LOG_PERSISTED_PATH"
   else
     printf 'полный вывод не сохранён постоянно, временный лог: %s (может не прожить до следующего тика)' "$GATE_LOG"
   fi
+}
+
+# file_list_brief <общее-число> <путь>... — «первые переданные имени полностью,
+# дальше "и ещё N"», без многоточий: обрезанное «...» читается как битый путь
+# и не даёт понять, что именно стоит (пир-сессия WP-538/WP-568, 26.10).
+# Вызывать с первыми тремя путями: file_list_brief "$N" "${arr[@]:0:3}".
+# Переводы строк внутри имени (допустимы в git) заменяются на ⏎ — иначе одно
+# имя распадётся на несколько строк алерта (холодное ревью Codex, 26.10, ит.3).
+file_list_brief() {
+  local total="$1"; shift
+  local shown="" p
+  for p in "$@"; do
+    p="${p//$'\n'/⏎}"
+    if [ -z "$shown" ]; then shown="$p"; else shown="$shown, $p"; fi
+  done
+  if [ "$total" -gt "$#" ]; then
+    printf '%s и ещё %s' "$shown" $((total - $#))
+  else
+    printf '%s' "$shown"
+  fi
+}
+
+# changed_paths — пути изменённых файлов server-extensions/, NUL-записи.
+# Разбор через `git status --porcelain -z`: awk '{print $2}' ломался
+# на именах с пробелами (путь обрезался на первом пробеле) и на
+# переименованиях (статус "R  старый -> новый", холодное ревью Codex 26.10).
+# Запись переименования в -z — две NUL-записи (новый путь, затем исходный);
+# исходную пропускаем: гейту нужен доставляемый путь. Вывод NUL-разделённый
+# до самого читателя (read -d ''): имя файла с переводом строки допустимо
+# и не должно распадаться на два пути (холодное ревью Codex, 26.10, итерация 2).
+# Сырой вывод git сначала пишется во временный файл: код возврата git status
+# внутри process substitution теряется, и ошибка читалась бы как «нет
+# изменений» → ложный чистый тик (холодное ревью Codex, 26.10, итерация 3).
+changed_paths() {
+  local raw rec status skip_next=0
+  raw=$(mktemp) || return 1
+  if ! git status --porcelain -z -- server-extensions/ > "$raw" 2>/dev/null; then
+    rm -f "$raw"
+    return 1
+  fi
+  while IFS= read -r -d '' rec; do
+    if [ "$skip_next" = 1 ]; then skip_next=0; continue; fi
+    status="${rec:0:2}"
+    case "$status" in *R*|*C*) skip_next=1 ;; esac
+    printf '%s\0' "${rec:3}" || { rm -f "$raw"; return 1; }
+  done < "$raw"
+  rm -f "$raw"
 }
 
 SYNC_LOG=""
@@ -315,15 +364,23 @@ if ! IWE_EXTENSIONS_SOURCE_ROOT="$SOURCE_SNAPSHOT" \
   exit 1
 fi
 
-CHANGED=$(git status --porcelain server-extensions/)
-if [ -z "$CHANGED" ]; then
+CHANGED_PATHS=()
+CHANGED_TMP=$(mktemp) || { alert test-env "🚨 sync-extensions-auto: не удалось подготовить временный файл — auto-sync пропущен"; exit 1; }
+if ! changed_paths > "$CHANGED_TMP"; then
+  rm -f "$CHANGED_TMP"
+  alert test-env "🚨 sync-extensions-auto: git status провалился — состояние репозитория не проверено, тик прерван (это НЕ «нет изменений»)"
+  exit 1
+fi
+while IFS= read -r -d '' p; do CHANGED_PATHS+=("$p"); done < "$CHANGED_TMP"
+rm -f "$CHANGED_TMP"
+if [ "${#CHANGED_PATHS[@]}" -eq 0 ]; then
   log_event no_changes "source_sha=$SOURCE_SHA"
   echo "$LOG_PREFIX нет изменений, выход"
   exit 0
 fi
 
-FILE_COUNT=$(echo "$CHANGED" | wc -l | tr -d ' ')
-FILE_LIST=$(echo "$CHANGED" | awk '{print $2}' | head -5 | tr '\n' ', ')
+FILE_COUNT=${#CHANGED_PATHS[@]}
+FILE_LIST=$(printf '%s\n' "${CHANGED_PATHS[@]}" | head -5 | tr '\n' ', ')
 
 # Test gate (WP-7 Ф111, живой инцидент 06.09: черновик хука со всеми
 # известными позже дефектами уехал на сервер через 5 минут после написания,
@@ -409,9 +466,7 @@ delivery_source_path() {
     *) return 1 ;;
   esac
 }
-while IFS= read -r changed_line; do
-  [ -n "$changed_line" ] || continue
-  rel_path=$(echo "$changed_line" | awk '{print $2}')
+for rel_path in "${CHANGED_PATHS[@]}"; do
   [ -n "$rel_path" ] || continue
   case "$rel_path" in
     */tests/*) continue ;;  # тест сам себя не тестирует
@@ -436,7 +491,7 @@ while IFS= read -r changed_line; do
       FAILED_PATHS+=("$rel_path")
     fi
   done <<< "$found_tests"
-done <<< "$CHANGED"
+done
 
 if [ "$GATE_FAILED" = true ]; then
   # Раньше в лог (и в Telegram) шёл tail -5 всего GATE_LOG — при нескольких
@@ -515,17 +570,46 @@ cleanup_test_env
 # Пересчитываем diff уже ПОСЛЕ отката провалившихся файлов выше — FILE_COUNT/
 # FILE_LIST ниже (коммит, алерты) должны описывать то, что реально едет, а не
 # исходный, ещё не просеянный гейтом список.
-CHANGED=$(git status --porcelain server-extensions/)
-if [ -z "$CHANGED" ]; then
-  alert test-gate "🚨 sync-extensions-auto: тестовый гейт нашёл провал во всех ${FILE_COUNT} изменённых файлах (${FILE_LIST}...) — доставлять на этом тике нечего, $(gate_detail_text)"
+DELIVERED_PATHS=()
+DELIVERED_TMP=$(mktemp) || { alert test-env "🚨 sync-extensions-auto: не удалось подготовить временный файл — auto-sync пропущен"; exit 1; }
+if ! changed_paths > "$DELIVERED_TMP"; then
+  rm -f "$DELIVERED_TMP"
+  alert test-env "🚨 sync-extensions-auto: git status провалился после отката — состояние репозитория не проверено, тик прерван"
+  exit 1
+fi
+while IFS= read -r -d '' p; do DELIVERED_PATHS+=("$p"); done < "$DELIVERED_TMP"
+rm -f "$DELIVERED_TMP"
+if [ "${#DELIVERED_PATHS[@]}" -eq 0 ]; then
+  # Первые три УНИКАЛЬНЫХ пути — массивом, не строковым конвейером:
+  # имя с переводом строки не должно распадаться на несколько (Codex, ит.3).
+  FAILED_UNIQ=()
+  declare -A _fp_seen=()
+  for p in ${FAILED_PATHS[@]+"${FAILED_PATHS[@]}"}; do
+    [ -n "${_fp_seen[$p]:-}" ] && continue
+    _fp_seen[$p]=1
+    FAILED_UNIQ+=("$p")
+  done
+  FAILED_TOP3=("${FAILED_UNIQ[@]:0:3}")
+  FAILED_BRIEF=$(file_list_brief "${#FAILED_UNIQ[@]}" "${FAILED_TOP3[@]}")
+  alert test-gate "🚨 sync-extensions-auto: тестовый гейт нашёл провал во всех ${FILE_COUNT} изменённых файлах (${FAILED_BRIEF}) — доставлять на этом тике нечего. Сторож продолжит попытки по расписанию; вмешательство нужно, только если придёт отдельный сигнал 🆘 о затяжном простое"
   exit 0
 fi
-FILE_COUNT=$(echo "$CHANGED" | wc -l | tr -d ' ')
-FILE_LIST=$(echo "$CHANGED" | awk '{print $2}' | head -5 | tr '\n' ', ')
+FILE_COUNT=${#DELIVERED_PATHS[@]}
+FILE_LIST=$(printf '%s\n' "${DELIVERED_PATHS[@]}" | head -5 | tr '\n' ', ')
 
 if [ "$GATE_FAILED" = true ]; then
-  EXCLUDED_LIST=$(printf '%s\n' "${FAILED_PATHS[@]}" | sort -u | tr '\n' ', ')
-  alert test-gate-partial "⚠️ sync-extensions-auto: тестовый гейт исключил часть файлов (${EXCLUDED_LIST%, }) — они пересоберутся на следующем тике; остальные ${FILE_COUNT} файлов (${FILE_LIST}...) доставляются как обычно; $(gate_detail_text)"
+  EXCLUDED_UNIQ=()
+  declare -A _fx_seen=()
+  for p in ${FAILED_PATHS[@]+"${FAILED_PATHS[@]}"}; do
+    [ -n "${_fx_seen[$p]:-}" ] && continue
+    _fx_seen[$p]=1
+    EXCLUDED_UNIQ+=("$p")
+  done
+  EXCLUDED_TOP3=("${EXCLUDED_UNIQ[@]:0:3}")
+  EXCLUDED_BRIEF=$(file_list_brief "${#EXCLUDED_UNIQ[@]}" "${EXCLUDED_TOP3[@]}")
+  DELIVERED_TOP3=("${DELIVERED_PATHS[@]:0:3}")
+  DELIVERED_BRIEF=$(file_list_brief "$FILE_COUNT" "${DELIVERED_TOP3[@]}")
+  alert test-gate-partial "⚠️ sync-extensions-auto: тестовый гейт исключил ${#EXCLUDED_UNIQ[@]} файлов (${EXCLUDED_BRIEF}) — они пересоберутся на следующем тике; остальные ${FILE_COUNT} файлов (${DELIVERED_BRIEF}) доставляются как обычно. Сторож продолжит попытки по расписанию; вмешательство нужно, только если придёт отдельный сигнал 🆘 о затяжном простое"
 fi
 
 # Pathspec на commit (не только на add) — если параллельная сессия уже держит

@@ -52,7 +52,11 @@ run_tick() {  # <repo-dir> <source-dir> [gate-failure-log-dir] -> запуска
     echo "GATE_FAILURE_LOG_DIR=\"$gate_log_dir\""
     # WP-538 (06.10): gate_detail_text() — реальная функция скрипта, не
     # переписанная заново (тот же принцип, что у GATE_BLOCK выше).
+    # 26.10 (WP-568): то же для file_list_brief() — используется в текстах
+    # алертов гейта внутри GATE_BLOCK.
     sed -n '/^gate_detail_text() {/,/^}/p' "$SCRIPT_SRC"
+    sed -n '/^file_list_brief() {/,/^}/p' "$SCRIPT_SRC"
+    sed -n '/^changed_paths() {/,/^}/p' "$SCRIPT_SRC"
     # cold-review (06.10, High): trap EXIT, не строка после cat "$GATE_BLOCK"
     # -- живой дефект первой версии фикса: GATE_BLOCK содержит собственный
     # "exit 0" на ветке "все файлы исключены" (test-gate), который обходил
@@ -61,9 +65,10 @@ run_tick() {  # <repo-dir> <source-dir> [gate-failure-log-dir] -> запуска
     # завершение скрипта.
     echo "trap 'echo \"\${GATE_LOG:-}\" > \"$WORKDIR/last-gate-log-path.txt\"' EXIT"
     echo 'cd "$REPO_ROOT"'
-    echo 'CHANGED=$(git status --porcelain server-extensions/)'
-    echo 'FILE_COUNT=$(echo "$CHANGED" | wc -l | tr -d " ")'
-    echo 'FILE_LIST=$(echo "$CHANGED" | awk "{print \$2}" | head -5 | tr "\n" ", ")'
+    echo 'CHANGED_PATHS=()'
+    echo 'while IFS= read -r -d "" p; do CHANGED_PATHS+=("$p"); done < <(changed_paths)'
+    echo 'FILE_COUNT=${#CHANGED_PATHS[@]}'
+    echo 'FILE_LIST=$(printf "%s\n" "${CHANGED_PATHS[@]}" | head -5 | tr "\n" ", ")'
     cat "$GATE_BLOCK"
   } > "$WORKDIR/tick.sh"
   bash "$WORKDIR/tick.sh" > "$WORKDIR/tick.out" 2>&1
@@ -114,15 +119,21 @@ git -C "$S1_REPO" show --stat HEAD | grep -q "foo.sh" \
   && ok "смешанный тик: коммит реально содержит прошедший файл" \
   || bad "смешанный тик: коммит содержит foo.sh" "$(git -C "$S1_REPO" show --stat HEAD)"
 
-# WP-538 (06.10): полный вывод провалившегося теста сохраняется постоянно,
-# и алерт test-gate-partial ссылается на тот же файл.
+# WP-538 (06.10): полный вывод провалившегося теста сохраняется постоянно.
+# 26.10 (WP-568): алерт пилоту путь к нему больше не содержит — только
+# полные имена файлов и «что делать»; путь остаётся в журнале/дайджесте.
 S1_PERSISTED=$(find "${S1_REPO}-gate-failures" -maxdepth 1 -name '*.log' 2>/dev/null | head -1)
 [ -n "$S1_PERSISTED" ] && grep -q "GATE FAIL:" "$S1_PERSISTED" \
   && ok "смешанный тик: полный вывод провалившегося теста сохранён в постоянный файл" \
   || bad "смешанный тик: полный вывод сохранён" "${S1_PERSISTED:-(файл не создан)}"
-[ -n "$S1_PERSISTED" ] && grep -F "ALERT[test-gate-partial]" "$WORKDIR/tick.out" | grep -qF "$S1_PERSISTED" \
-  && ok "смешанный тик: алерт test-gate-partial ссылается на сохранённый файл" \
-  || bad "смешанный тик: алерт ссылается на файл" "$(grep -F 'ALERT[test-gate-partial]' "$WORKDIR/tick.out")"
+# 26.10 (WP-568): алерт больше не содержит пути к логу — он остаётся в
+# журнале/дайджесте; в тексте — полные имена файлов и честное «что делать».
+grep -F "ALERT[test-gate-partial]" "$WORKDIR/tick.out" | grep -qF "server-extensions/scripts/bar.sh" \
+  && ok "смешанный тик: алерт test-gate-partial называет исключённый файл полным именем" \
+  || bad "смешанный тик: алерт называет исключённый файл" "$(grep -F 'ALERT[test-gate-partial]' "$WORKDIR/tick.out")"
+[ -n "$S1_PERSISTED" ] && ! grep -F "ALERT[test-gate-partial]" "$WORKDIR/tick.out" | grep -qF "$S1_PERSISTED" \
+  && ok "смешанный тик: алерт test-gate-partial не тащит путь к логу в Telegram" \
+  || bad "смешанный тик: алерт без пути к логу" "$(grep -F 'ALERT[test-gate-partial]' "$WORKDIR/tick.out")"
 
 # --- Сценарий 2: провалились ВСЕ изменённые файлы — тик завершается чисто --
 #     (exit 0, не ошибка), коммита нет вообще.
@@ -151,14 +162,23 @@ S2_PERSISTED=$(find "${S2_REPO}-gate-failures" -maxdepth 1 -name '*.log' 2>/dev/
 [ -n "$S2_PERSISTED" ] && grep -q "GATE FAIL:" "$S2_PERSISTED" \
   && ok "все файлы провалились: полный вывод сохранён в постоянный файл" \
   || bad "все файлы провалились: полный вывод сохранён" "${S2_PERSISTED:-(файл не создан)}"
-[ -n "$S2_PERSISTED" ] && grep -F "ALERT[test-gate]" "$WORKDIR/tick.out" | grep -qF "$S2_PERSISTED" \
-  && ok "все файлы провалились: алерт test-gate ссылается на сохранённый файл" \
-  || bad "все файлы провалились: алерт ссылается на файл" "$(grep -F 'ALERT[test-gate]' "$WORKDIR/tick.out")"
+# 26.10 (WP-568): то же для ветки "все файлы исключены" (класс алерта test-gate) —
+# имя файла есть, пути к логу нет, есть честное «что делать» без обещания времени.
+grep -F "ALERT[test-gate]" "$WORKDIR/tick.out" | grep -qF "server-extensions/scripts/bar.sh" \
+  && ok "все файлы провалились: алерт test-gate называет файл полным именем" \
+  || bad "все файлы провалились: алерт называет файл" "$(grep -F 'ALERT[test-gate]' "$WORKDIR/tick.out")"
+[ -n "$S2_PERSISTED" ] && ! grep -F "ALERT[test-gate]" "$WORKDIR/tick.out" | grep -qF "$S2_PERSISTED" \
+  && ok "все файлы провалились: алерт test-gate не тащит путь к логу в Telegram" \
+  || bad "все файлы провалились: алерт без пути к логу" "$(grep -F 'ALERT[test-gate]' "$WORKDIR/tick.out")"
+grep -F "ALERT[test-gate]" "$WORKDIR/tick.out" | grep -qF "продолжит попытки по расписанию" \
+  && ok "все файлы провалились: алерт честно говорит, что делать (без обещания времени тика)" \
+  || bad "все файлы провалились: алерт с «что делать»" "$(grep -F 'ALERT[test-gate]' "$WORKDIR/tick.out")"
 
 # --- Сценарий 6 (WP-538, 06.10, требование Codex peer-review): постоянное
 #     сохранение не удалось (директория недоступна для записи) -- временный
-#     $GATE_LOG не должен удаляться, алерт должен честно сослаться на него
-#     с оговоркой о недолгом сроке жизни, не на несуществующий постоянный путь.
+#     $GATE_LOG не должен удаляться. 26.10 (WP-568): алерт пилоту больше не
+#     ссылается ни на какой путь к логу; честность про судьбу вывода — WARN
+#     в журнале.
 S6_SRC="$WORKDIR/s6-source"; S6_REPO="$WORKDIR/s6-repo"
 mkdir -p "$S6_REPO/server-extensions/scripts"
 make_source_file "$S6_SRC" bar 1
@@ -190,9 +210,12 @@ S6_GATE_LOG=$(cat "$WORKDIR/last-gate-log-path.txt" 2>/dev/null)
 grep -qF "WARN: не удалось сохранить полный вывод гейта" "$WORKDIR/tick.out" \
   && ok "сохранение не удалось: скрипт честно предупредил в лог" \
   || bad "сохранение не удалось: предупреждение в лог" "$(cat "$WORKDIR/tick.out")"
-grep -F "ALERT[test-gate]" "$WORKDIR/tick.out" | grep -qF "полный вывод не сохранён постоянно" \
-  && ok "сохранение не удалось: алерт честно говорит про временный путь, не про несуществующий постоянный" \
-  || bad "сохранение не удалось: алерт честен" "$(grep -F 'ALERT[test-gate]' "$WORKDIR/tick.out")"
+# 26.10 (WP-568): в текст пилоту путь к логу (ни постоянный, ни временный)
+# больше не попадает вовсе — честность про судьбу полного вывода остаётся
+# в журнале (WARN выше), не в Telegram.
+! grep -F "ALERT[test-gate]" "$WORKDIR/tick.out" | grep -qF "полный вывод" \
+  && ok "сохранение не удалось: алерт не ссылается ни на какой путь к логу" \
+  || bad "сохранение не удалось: алерт без путей к логу" "$(grep -F 'ALERT[test-gate]' "$WORKDIR/tick.out")"
 
 # --- Сценарий 7 (WP-538, 06.10): ротация 14 дней -- старый файл удаляется,
 #     свежий (только что сохранённый этим же тиком) остаётся.
@@ -304,14 +327,17 @@ if [ -f "$NOTIFY_LIB" ]; then
     sed -n '/^alert() {/,/^}/p' "$SCRIPT_SRC"
     sed -n '/^alert_ok() {/,/^}/p' "$SCRIPT_SRC"
     sed -n '/^gate_detail_text() {/,/^}/p' "$SCRIPT_SRC"
+    sed -n '/^file_list_brief() {/,/^}/p' "$SCRIPT_SRC"
+    sed -n '/^changed_paths() {/,/^}/p' "$SCRIPT_SRC"
     echo "REPO_ROOT=\"$S5_REPO\""
     echo "SOURCE_SNAPSHOT=\"$S5_SRC\""
     echo "GATE_FAILURE_LOG_DIR=\"${S5_REPO}-gate-failures\""
     echo 'cd "$REPO_ROOT"'
     echo 'cleanup_test_env() { :; }'
-    echo 'CHANGED=$(git status --porcelain server-extensions/)'
-    echo 'FILE_COUNT=$(echo "$CHANGED" | wc -l | tr -d " ")'
-    echo 'FILE_LIST=$(echo "$CHANGED" | awk "{print \$2}" | head -5 | tr "\n" ", ")'
+    echo 'CHANGED_PATHS=()'
+    echo 'while IFS= read -r -d "" p; do CHANGED_PATHS+=("$p"); done < <(changed_paths)'
+    echo 'FILE_COUNT=${#CHANGED_PATHS[@]}'
+    echo 'FILE_LIST=$(printf "%s\n" "${CHANGED_PATHS[@]}" | head -5 | tr "\n" ", ")'
     cat "$GATE_BLOCK"
     echo 'alert_ok "success"'
   } > "$WORKDIR/tick5.sh"
@@ -322,6 +348,29 @@ if [ -f "$NOTIFY_LIB" ]; then
 else
   echo "  (пропущено: не найдена $NOTIFY_LIB на этой машине)"
 fi
+
+# --- Сценарий 8 (26.10, холодное ревью Codex): имя файла с пробелом --
+#     porcelain-разбор обязан отдать полный путь (а не обрезок до первого
+#     пробела), файл с провалившимся тестом откатывается и попадает в алерт
+#     полным именем.
+S8_SRC="$WORKDIR/s8-source"; S8_REPO="$WORKDIR/s8-repo"
+mkdir -p "$S8_REPO/server-extensions/scripts"
+make_source_file "$S8_SRC" "spaced name" 1
+git -C "$S8_REPO" init -q
+git -C "$S8_REPO" config user.email t@t.local
+git -C "$S8_REPO" config user.name t
+echo "spaced old" > "$S8_REPO/server-extensions/scripts/spaced name.sh"
+git -C "$S8_REPO" add "server-extensions/scripts/spaced name.sh"
+git -C "$S8_REPO" commit -q -m baseline
+echo "spaced name content" > "$S8_REPO/server-extensions/scripts/spaced name.sh"
+
+run_tick "$S8_REPO" "$S8_SRC"
+[ "$(cat "$S8_REPO/server-extensions/scripts/spaced name.sh")" = "spaced old" ] \
+  && ok "пробел в имени: провалившийся файл откачен к старому" \
+  || bad "пробел в имени: файл откачен" "$(cat "$S8_REPO/server-extensions/scripts/spaced name.sh" 2>&1)"
+grep -F "ALERT[test-gate]" "$WORKDIR/tick.out" | grep -qF "server-extensions/scripts/spaced name.sh" \
+  && ok "пробел в имени: алерт называет файл ПОЛНЫМ именем" \
+  || bad "пробел в имени: полное имя в алерте" "$(grep -F 'ALERT[test-gate]' "$WORKDIR/tick.out")"
 
 echo "---"
 echo "PASS=$PASS FAIL=$FAIL"
