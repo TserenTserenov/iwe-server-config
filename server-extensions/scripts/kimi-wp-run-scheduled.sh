@@ -2727,7 +2727,21 @@ case "$AGENT" in
       cleanup; exit 1
     fi
     # preflight: проверяет, что сессия открыта (мы только что открыли)
-    bash "$IWE_ROOT/scripts/kimi-standalone-preflight.sh" >>"$LOG" 2>&1 || log "WARN: preflight non-zero, continuing"
+    # Both open branches above register slug "sched-$ID" (a housekeeping reason is stored as slug):
+    # the preflight must find exactly that semaphore, otherwise stop (WP-561 isolate incident).
+    PREFLIGHT_ARGS=(--slug "sched-$ID")
+    [ "$IS_TASK" = "1" ] || PREFLIGHT_ARGS+=(--wp "$WP")
+    if ! bash "$IWE_ROOT/scripts/kimi-standalone-preflight.sh" "${PREFLIGHT_ARGS[@]}" >>"$LOG" 2>&1; then
+      log "ERROR: preflight did not find this run's own semaphore"
+      set_status failed; report_line failed "preflight: own session semaphore not found"
+      # Close only this run's own session: a bare `close --agent` could pick another live Kimi session.
+      if [ "$IS_TASK" = "1" ]; then
+        bash "$IWE_ROOT/scripts/session-guard.sh" close --housekeeping "sched-$ID" --agent "$AGENT" >>"$LOG" 2>&1
+      else
+        bash "$IWE_ROOT/scripts/session-guard.sh" close --wp "$WP" --slug "sched-$ID" --agent "$AGENT" >>"$LOG" 2>&1
+      fi
+      cleanup; exit 1
+    fi
     log "starting kimi with crash-safe OAuth lineage supervisor (timeout ${TIMEOUT_SEC}s, max-steps 100)"
     run_kimi_with_oauth_lineage "$TIMEOUT_SEC" "$PROMPT_FILE" "$LOG" \
       "$KIMI_BIN" --quiet --yolo \
