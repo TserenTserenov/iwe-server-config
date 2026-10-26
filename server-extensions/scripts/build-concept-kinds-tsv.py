@@ -33,6 +33,7 @@ REGISTRY = Path(
     )
 )
 TSV = Path(os.environ.get("CONCEPT_KINDS_TSV", ROOT / ".claude/hooks/lib/concept-kinds.tsv"))
+MD = Path(os.environ.get("CONCEPT_KINDS_MD", REGISTRY.with_suffix(".md")))
 
 # A stem goes straight into a Perl regex: letters, digits, space and a few regex marks only.
 STEM_RE = re.compile(r"^[а-яёa-z0-9 \[\]()?|\-!+]+$")
@@ -122,20 +123,69 @@ def render(rows: list[tuple[str, str]]) -> str:
     return header + "".join(f"{kind}\t{stem}\n" for kind, stem in rows)
 
 
+def cell(text: str) -> str:
+    return " ".join(str(text).split()).replace("|", "\\|")
+
+
+def render_md(data: dict) -> str:
+    """Markdown copy for agents without a shell (Hermes via knowledge_search): the search index reads .md only."""
+    kinds = {k["id"]: k for k in data["kinds"]}
+    lines = [
+        "---",
+        "name: concept-kinds-registry",
+        'description: "Реестр понятий и родов — читаемая копия YAML-первоисточника для поиска по базе знаний"',
+        "type: reference",
+        "generated_from: concept-kinds-registry.yaml",
+        "---",
+        "",
+        "# Реестр понятий и родов",
+        "",
+        (
+            "> Сгенерировано из `concept-kinds-registry.yaml` скриптом"
+            " `scripts/build-concept-kinds-tsv.py` — руками не править. Первоисточник — YAML."
+        ),
+        "",
+        (
+            "Как пользоваться: перед утверждением «X — это Y» найди X в таблице понятий и ответь на"
+            " проверочный вопрос рода Y. Слова нет в реестре — род не установлен: ответь на вопрос"
+            " заявленного рода, слово в реестр не добавляй (новые записи решает пилот)."
+        ),
+        "",
+        "## Роды",
+        "",
+        "| Род | Проверочный вопрос | Отношение «часть» |",
+        "|---|---|---|",
+    ]
+    lines += [
+        f"| {cell(k['name'])} (`{k['id']}`) | {cell(k['test'])} | {cell(k.get('part_relation', ''))} |"
+        for k in data["kinds"]
+    ]
+    lines += ["", "## Понятия", "", "| Понятие | Род | Основание | Также |", "|---|---|---|---|"]
+    for term in data["terms"]:
+        also = "; ".join(f"{kinds[a['kind']]['name']}: {a['when']}" for a in term.get("also") or [])
+        lines.append(
+            f"| {cell(term['term'])} | {cell(kinds[term['kind']]['name'])} | "
+            f"{cell(term['basis'])} ({term['status']}) | {cell(also)} |"
+        )
+    return "\n".join(lines) + "\n"
+
+
 def main() -> int:
     if "--check-fpf" in sys.argv[1:]:
         return check_fpf()
     check = "--check" in sys.argv[1:]
-    text = render(validate(load_registry()))
+    data = load_registry()
+    copies = {TSV: render(validate(data)), MD: render_md(data)}
     if check:
-        current = TSV.read_text(encoding="utf-8") if TSV.exists() else ""
-        if current != text:
-            print(f"{TSV} is out of date with {REGISTRY}; run {Path(__file__).name}", file=sys.stderr)
-            return 1
-        return 0
-    TSV.parent.mkdir(parents=True, exist_ok=True)
-    TSV.write_text(text, encoding="utf-8")
-    print(f"wrote {TSV} ({text.count(chr(10)) - 2} stems)")
+        stale = [path for path, text in copies.items()
+                 if not path.exists() or path.read_text(encoding="utf-8") != text]
+        for path in stale:
+            print(f"{path} is out of date with {REGISTRY}; run {Path(__file__).name}", file=sys.stderr)
+        return 1 if stale else 0
+    for path, text in copies.items():
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text, encoding="utf-8")
+        print(f"wrote {path}")
     return 0
 
 
