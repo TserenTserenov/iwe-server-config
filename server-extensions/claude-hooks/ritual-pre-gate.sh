@@ -72,9 +72,33 @@ if [ "$RITUAL_STATUS" != "absent" ] && [ -n "$RITUAL_STATUS" ]; then
 fi
 [ "$RITUAL_STATUS" = "absent" ] || exit 0
 
-# Warn-only: log what WOULD have blocked. No ledger write here -- the Stop
-# hook already owns ritual_shown/ritual_status in the ledger; duplicating
-# the same fact from a second source would create two writers for one
-# event (the exact race the peer-session flagged for the real gate).
+# Warn-only: log what WOULD have blocked. Персистентный журнал WOULD BLOCK
+# (разрешение пилота 26.10.2026, S-33; повод — флип-анализ WP-484 25.10
+# показал, что ретроспективных данных недостаточно, нужен учёт вперёд):
+# одна JSONL-запись на событие в logs/ritual-pre-gate-would-block.jsonl.
+# Это НЕ дневной ledger -- там ritual_status по-прежнему пишет только
+# Stop-хук; здесь отдельный событийный журнал именно этого гейта, два
+# писателя одного факта не появляются.
 echo "ritual-pre-gate: WOULD BLOCK tool=$TOOL_NAME session=$SESSION_ID -- Ритуал согласования не найден в стенограмме (warn-only, DP.SC.204 rollout)" >&2
+WOULD_BLOCK_LOG="${IWE_RITUAL_PRE_GATE_LOG:-$HOME/IWE/logs/ritual-pre-gate-would-block.jsonl}"
+python3 - "$WOULD_BLOCK_LOG" "$SESSION_ID" "$TOOL_NAME" <<'PY' 2>/dev/null || true
+import json
+import os
+import sys
+import time
+
+log_path, session_id, tool = sys.argv[1:4]
+os.makedirs(os.path.dirname(log_path), exist_ok=True)
+record = {
+    "ts": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+    "event": "would_block",
+    "session_id": session_id,
+    "tool": tool,
+}
+fd = os.open(log_path, os.O_APPEND | os.O_CREAT | os.O_WRONLY, 0o644)
+try:
+    os.write(fd, (json.dumps(record, ensure_ascii=False) + "\n").encode("utf-8"))
+finally:
+    os.close(fd)
+PY
 exit 0
