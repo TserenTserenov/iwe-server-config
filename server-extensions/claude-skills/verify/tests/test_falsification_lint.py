@@ -498,3 +498,60 @@ def test_english_and_worded_severity_are_counted():
 
 def test_emoji_after_colon_is_accepted():
     assert check_verdict("## Verdict: ✅ PASS\n" + VALID_BODY) == []
+
+
+# --- WP-595 Ф16: условия опровержения для rubric/ontological/pack режимов ---
+
+ONTOLOGICAL_CONDITION = (
+    "FAIL, если specificity-скор PACK-personal/pack/personal-development "
+    "по шкале verify-ontological-adequacy.md ниже 40%"
+)
+
+ONTOLOGICAL_ANSWER = """
+### Условие опровержения
+FAIL, если specificity-скор PACK-personal/pack/personal-development по шкале verify-ontological-adequacy.md ниже 40%
+
+### Что проверено
+Прочитан 00-pack-manifest.md и 01B-distinctions.md, разобрано 14 claim'ов.
+
+### Несоответствия
+| # | Severity |
+"""
+
+
+def test_new_style_condition_with_anchor_path_passes_condition_lint():
+    assert check_condition(ONTOLOGICAL_CONDITION) == []
+
+
+def test_assembled_verdict_with_verbatim_condition_passes_verdict_lint(tmp_path):
+    import io
+
+    condition_file = tmp_path / "check.condition.txt"
+    condition_file.write_text(ONTOLOGICAL_CONDITION, encoding="utf-8")
+    monkeypatch_stdin = io.StringIO("## Verdict: PASS\n" + ONTOLOGICAL_ANSWER)
+    old_stdin = sys.stdin
+    try:
+        sys.stdin = monkeypatch_stdin
+        assert main(["verdict", "--condition-file", str(condition_file)]) == 0
+    finally:
+        sys.stdin = old_stdin
+
+
+def test_unknown_without_evidence_lines_is_rejected_new_modes():
+    text = "## Verdict: UNKNOWN\n" + ONTOLOGICAL_ANSWER
+    problems = check_verdict(text)
+    assert problems == [
+        "UNKNOWN без непустой строки «Недостающее свидетельство:»",
+        "UNKNOWN без непустой строки «Как получить:»",
+    ]
+
+
+def test_broken_section_order_is_rejected_new_modes():
+    text = (
+        "## Verdict: CONDITIONAL\n### Что проверено\nПрочитан 00-pack-manifest.md\n"
+        "### Условие опровержения\n" + ONTOLOGICAL_CONDITION + "\n### Несоответствия\n"
+        "| 1 | высокий | 00-pack-manifest.md | 5 | x |\n"
+    )
+    assert check_verdict(text) == [
+        "«Условие опровержения» должно стоять до «Что проверено»"
+    ]

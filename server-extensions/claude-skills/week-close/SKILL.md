@@ -125,9 +125,11 @@ monday = date.fromisocalendar(*[int(x) if i==0 else int(x[1:]) for i,x in enumer
 months = sorted({(monday + timedelta(days=i)).strftime('%Y-%m') for i in range(7)})
 print(json.dumps(months))
 ")
-SUMMARY_JSON="{\"effective_week\": \"$WEEK\", \"effective_months\": $EFFECTIVE_MONTHS, \"what_worked\": <ретро-ответ шага 1, экранированный>, \"what_didnt\": <ретро-ответ шага 1, экранированный>, \"carry_over\": <carry-over-решение шага 1, экранированное>, \"r_verdict\": <3 R-ответа шага 1, экранированные как массив>}"
+SUMMARY_JSON="{\"effective_week\": \"$WEEK\", \"effective_months\": $EFFECTIVE_MONTHS, \"what_worked\": <ретро-ответ шага 1, экранированный>, \"what_didnt\": <ретро-ответ шага 1, экранированный>, \"carry_over\": <carry-over-решение шага 1, экранированное>, \"carry_over_wps\": <номера РП, которые пилот в шаге 1 переносит на следующую неделю или назвал главными, JSON-массив чисел; ни одного — []>, \"r_verdict\": <3 R-ответа шага 1, экранированные как массив>}"
 bash ~/IWE/DS-my-strategy/scripts/ledger-append.sh week "$WEEK" week_summary "$SUMMARY_JSON" week-close
 ```
+
+`carry_over_wps` — единственный источник переноса для пула следующей недели (`week_pool_manifest.py`, WP-518 Ф21): номера из свободного текста `carry_over` пул не берёт — там упоминаются и РП, которые не переносятся.
 
 ### 3. «Ты свободен» [[gate]]
 
