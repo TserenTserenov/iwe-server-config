@@ -1051,18 +1051,33 @@ Slug-часть (без даты и номера): `SESSION_SLUG=$(echo "$SESSIO
 ---
 date: <TODAY>
 type: peer-session
+agent: kimi-headless
 writer: kimi-headless
 peer: <PEER_AGENT_ID>
 duration_h: <(end_time - start_time) в часах, 1 знак>
-artifacts: <MONTH>/<DAY>/<SESSION_ID>/report.md
+artifacts: [<MONTH>/<DAY>/<SESSION_ID>/report.md]
 session_id: <SESSION_ID>
 wp: <WP-NNN или unknown>
 ---
 
-# Главный инсайт
+## Главный инсайт
 
 <1-2 строки из §4 report.md — зафиксированное решение>
+
+## Контекст
+
+<одной строкой: задача сессии и кто участвовал>
+
+## Достигнуто
+
+<что изменилось: файлы, коммиты, решения; «ничего» тоже ответ>
+
+## Ключевые решения
+
+См. report.md §4.
 ```
+
+> **Схема обязательна (WP-484, 26.10, peer-session 2026-10-26-19).** До этой правки шаблон давал `# Главный инсайт` (заголовок первого уровня), не имел ключа `agent:` и трёх остальных разделов: 4 из 4 дефектных закрывающих файлов за 26.10 писал этот шаблон. `session-guard.sh` проверяет ключи `date: type: wp: duration_h: artifacts: agent:` и разделы `## Главный инсайт`, `## Контекст`, `## Достигнуто`, `## Ключевые решения` (`validate_orz`); Kimi-писатель `close` не вызывает, поэтому дефект всплывал только позже, в аудите. Ту же проверку делает защитный блок Шага 4.5 ниже.
 
 ### 4.5 Commit + push
 
@@ -1080,6 +1095,17 @@ test -f "$SESSION_DIR/report.md" \
 CLOSE_FILE="$SESSIONS_DIR/$MONTH/${TODAY}-${SESSION_SLUG}.md"
 test -f "$CLOSE_FILE" \
   || { echo "FAIL: close-файл $CLOSE_FILE отсутствует"; exit 1; }
+# Same schema session-guard.sh validate_orz enforces (this skill never calls `close`,
+# so without this check a malformed close file is found only by a later audit).
+FRONTMATTER=$(awk 'NR == 1 && $0 != "---" { exit } NR > 1 && $0 == "---" { exit } NR > 1 { print }' "$CLOSE_FILE")
+for key in date type wp duration_h artifacts agent; do
+  printf '%s\n' "$FRONTMATTER" | grep -q "^${key}:" \
+    || { echo "FAIL: в $CLOSE_FILE нет ключа ${key}: во frontmatter"; exit 1; }
+done
+for section in "## Главный инсайт" "## Контекст" "## Достигнуто" "## Ключевые решения"; do
+  grep -q "^${section}\$" "$CLOSE_FILE" \
+    || { echo "FAIL: в $CLOSE_FILE нет раздела '$section'"; exit 1; }
+done
 # WP-537 Ф4: индекс-черновик, не 00-index.md — эта сессия больше не
 # пишет git-tracked файл напрямую (session-index-snapshot.sh единственный писатель).
 DRAFT_FILE="$HOME/IWE/.iwe-runtime/session-index-drafts/${SESSION_ID}.yaml"
