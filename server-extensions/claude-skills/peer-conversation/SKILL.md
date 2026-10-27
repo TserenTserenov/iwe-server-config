@@ -1398,23 +1398,23 @@ if [ -n "${CLAUDE_CODE_SESSION_ID:-}" ]; then
 fi
 ```
 
-**4.5.4 Приёмка закрытия такта «сессия»** (WP-561 Ф6-а, design/impl peer-session `2026-09-03-14-wp561-continue-tacts`, Kimi critic-consistency). До этой фазы закрытие через пир-сессию не имело НИКАКОЙ механической проверки — `close-runner-gate.sh` явно пропускает типизированный раннер (и его шаг R23-чеклиста) для `close_path: peer-session`, значит закрытие полагалось только на то, что 4.5.0-4.5.3 не упали. Три факта, которые TACT-02 (`docs/orz-pipeline-registry.yaml`) считает признаком «зелёного» закрытия, здесь никогда не сверялись вместе явно. Проверка читает **сам файл журнала на диске**, не git-версию — диск всегда ≥ того, что уже опубликовано (периодическая публикация читает С диска и коммитит, не наоборот), гонка «git опередил диск» исключена по построению (согласовано с Kimi, ход 2 сессии выше). Best-effort в том смысле, что сбой этой проверки НЕ откатывает уже сделанное закрытие (семафор уже закрыт на 4.5.2) — но расхождение эскалируется громко, тем же `ESCALATE_TO_USER`-механизмом, что и остальной скилл, а не тонет в stderr как обычный `|| echo warning`. Жёсткий блок здесь сознательно не сделан: у этого же РП уже было минимум два инцидента с зависающими закрытиями сессии от новых, необстрелянных gate (карантин семафора терял исключение peer-session; `close_obligation` застревал в armed) — риск добавить третий такой способ застрять выше риска пропустить одно расхождение.
+**4.5.4 Приёмка закрытия такта «сессия»** (WP-561 Ф6-а, design/impl peer-session `2026-09-03-14-wp561-continue-tacts`, Kimi critic-consistency). До этой фазы закрытие через пир-сессию не имело НИКАКОЙ механической проверки — `close-runner-gate.sh` явно пропускает типизированный раннер (и его шаг R23-чеклиста) для `close_path: peer-session`, значит закрытие полагалось только на то, что 4.5.0-4.5.3 не упали. Три факта, которые TACT-02 (`docs/orz-pipeline-registry.yaml`) считает признаком «зелёного» закрытия, здесь никогда не сверялись вместе явно. Проверка читает общий вид опубликованного журнала и локального буфера через `ledger_read_yaml`, чтобы событие закрытия было видно до публикации. Best-effort в том смысле, что сбой этой проверки НЕ откатывает уже сделанное закрытие (семафор уже закрыт на 4.5.2) — но расхождение эскалируется громко, тем же `ESCALATE_TO_USER`-механизмом, что и остальной скилл, а не тонет в stderr как обычный `|| echo warning`. Жёсткий блок здесь сознательно не сделан: у этого же РП уже было минимум два инцидента с зависающими закрытиями сессии от новых, необстрелянных gate (карантин семафора терял исключение peer-session; `close_obligation` застревал в armed) — риск добавить третий такой способ застрять выше риска пропустить одно расхождение.
 
 > **Cold-review фиксы (та же сессия, до деплоя):** (1) дата journal-файла — локальное время, как `now_date()` в `session-guard.sh`, не `date -u` (UTC-вычисление ночью давало ложный «нет события», уже был класс инцидента «ночная сессия» в этом РП); (2) `git ls-remote` обёрнут в `timeout` (тот же риск зависания, из-за которого сам этот шаг не делает жёсткий блок); (3) journal-путь — канонический `$HOME/IWE/DS-my-strategy`, не `$GOV_REPO_ROOT` (в isolate/freeze-сценарии тот указывает на изолированную копию СОВСЕМ ДРУГОГО репозитория — `session-guard.sh` пишет ledger-событие всегда в канонический governance-репо через свой собственный `$IWE_ROOT/$GOV_REPO`, а не через переменную этого скилла); (4) значения в Python — через переменные окружения, не строковой интерполяцией в исходный код (slug формируется словесной инструкцией агенту, не санитируется регуляркой); (5) сам файл эскалации получает отдельный маленький коммит+push — без этого он остаётся незакоммиченным после единственного commit+push Шага 4.5.1 и никогда не публикуется, вопреки заявленному «эскалируется громко».
 
 ```bash
-LEDGER_DAY_FILE=$(date +%Y/%m/day-%Y-%m-%d.yaml)
-LEDGER_PATH="$HOME/IWE/${IWE_GOVERNANCE_REPO:-DS-strategy}/machine/ledger/day/$LEDGER_DAY_FILE"
+LEDGER_DAY=$(date +%Y-%m-%d)
+LEDGER_REPO="$HOME/IWE/${IWE_GOVERNANCE_REPO:-DS-strategy}"
+. "$LEDGER_REPO/scripts/lib/ledger-path.sh"
 ACCEPTANCE_ISSUES=()
 
-# Факт 1: событие session_closed* с этим slug — на диске, не в git.
-if [ -f "$LEDGER_PATH" ]; then
-  HAS_EVENT=$(LEDGER_PATH_ENV="$LEDGER_PATH" SESSION_ID_ENV="$SESSION_ID" python3 -c "
-import os
+# Факт 1: событие session_closed* с этим slug — в опубликованном журнале или буфере.
+if LEDGER_DOC=$(ledger_read_yaml day "$LEDGER_DAY" "$LEDGER_REPO/machine/ledger" "$LEDGER_REPO/archive/ledger"); then
+  HAS_EVENT=$(printf '%s\n' "$LEDGER_DOC" | SESSION_ID_ENV="$SESSION_ID" python3 -c "
+import os, sys
 try:
     import yaml
-    with open(os.environ['LEDGER_PATH_ENV']) as f:
-        data = yaml.safe_load(f) or {}
+    data = yaml.safe_load(sys.stdin) or {}
     events = data.get('events', [])
     slug = os.environ['SESSION_ID_ENV']
     found = any(
@@ -1426,9 +1426,9 @@ try:
 except Exception as exc:
     print('error:' + str(exc))
 ")
-  [ "$HAS_EVENT" = "yes" ] || ACCEPTANCE_ISSUES+=("нет события session_closed* со slug=$SESSION_ID в $LEDGER_PATH (нашёл: $HAS_EVENT)")
+  [ "$HAS_EVENT" = "yes" ] || ACCEPTANCE_ISSUES+=("нет события session_closed* со slug=$SESSION_ID в журнале за $LEDGER_DAY (нашёл: $HAS_EVENT)")
 else
-  ACCEPTANCE_ISSUES+=("файл журнала $LEDGER_PATH не найден")
+  ACCEPTANCE_ISSUES+=("журнал за $LEDGER_DAY не удалось прочитать")
 fi
 
 # Факт 2: закрывающий ОРЗ-файл действительно закоммичен (не только записан на диск).
