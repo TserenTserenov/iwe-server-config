@@ -471,12 +471,28 @@ pidless_semaphore_lease_expired() {  # <semaphore> -- 0 (expired, safe to not co
   [ -n "$renewed_epoch" ] && [ "$renewed_epoch" -gt "$base_epoch" ] && base_epoch="$renewed_epoch"
   [ "$(date +%s)" -ge $(( base_epoch + lease_sec )) ]
 }
+# WP-484 Ф250 (measure 2): a hand-made copy opened without --isolate records
+# `governance_worktree:` but no `isolated_worktree:`, so the check below used to
+# count it as a canonical writer and fence reconcile for as long as it lived.
+# Its writes land in its own checkout when that checkout is a worktree
+# registered in THIS repository (same criterion as _root_route_registered in
+# process-runner.py: exact, unique entry in `git worktree list`) and is not the
+# canon itself. Stricter than the unconditional trust in `isolated_worktree:`.
+registered_noncanon_worktree() {  # <semaphore> -- 0 when its governance_worktree is a registered worktree other than the canon
+  local gw gw_real
+  gw=$(awk '$1=="governance_worktree:"{sub(/^governance_worktree:[ ]*/, ""); print; exit}' "$1")
+  [ -n "$gw" ] && [ -d "$gw" ] || return 1
+  gw_real=$(cd "$gw" 2>/dev/null && pwd -P) || return 1
+  [ "$gw_real" != "$REPO_TOP" ] || return 1
+  [ "$(git worktree list --porcelain 2>/dev/null | grep -cFx "worktree $gw_real")" = "1" ]
+}
 live_canonical_writers() {  # prints " name name ..." or nothing
   local sem sem_pid sem_host out=""
   local self_pid="${OWNER_PID:-${CLAUDE_PID:-}}" self_host="$(uname -n)"
   for sem in "$RUNTIME_DIR"/sessions/*.open; do
     [ -f "$sem" ] || continue
     grep -q '^isolated_worktree:' "$sem" && continue
+    registered_noncanon_worktree "$sem" && continue
     sem_pid=$(awk '$1=="pid:"{print $2; exit}' "$sem")
     sem_host=$(awk '$1=="host:"{print $2; exit}' "$sem")
     # Same pid as ours (OWNER_PID/CLAUDE_PID, the env var session-guard wrote

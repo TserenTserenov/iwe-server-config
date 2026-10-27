@@ -173,6 +173,21 @@ git -C "$CANON" fetch -q origin
 assert "$rc" "0" "isolated session does not block"; assert "$(git -C "$CANON" rev-parse HEAD)" "$(git -C "$CANON" rev-parse origin/main)" "replaced once only isolated sessions are live"
 rm -f "$IWE_RUNTIME_DIR/sessions/claude-code-writer.open"
 
+echo "scenario 8b: hand-made registered worktree copy (governance_worktree, no isolated_worktree) is not a canonical writer; the canon itself and an unregistered path still are"
+fresh s8b; echo one > "$CANON/b.txt"; commit_in "$CANON" "local"; C=$(git -C "$CANON" rev-parse HEAD); republish_on_origin "$CANON" "$C"
+HAND="$SANDBOX/s8b-hand-copy"; git -C "$CANON" worktree add -q --detach "$HAND"
+printf 'agent: claude-code\npid: %s\ngovernance_worktree: %s\n' "$$" "$CANON" > "$IWE_RUNTIME_DIR/sessions/claude-code-writer.open"; H=$(git -C "$CANON" rev-parse HEAD)
+bash "$SCRIPT" "$CANON" main >/dev/null 2>&1; rc=$?
+assert "$rc" "1" "governance_worktree equal to the canon still blocks"; assert "$(git -C "$CANON" rev-parse HEAD)" "$H" "HEAD unchanged (canon as governance_worktree)"
+printf 'agent: claude-code\npid: %s\ngovernance_worktree: %s\n' "$$" "$SANDBOX/s8b-not-a-worktree" > "$IWE_RUNTIME_DIR/sessions/claude-code-writer.open"; mkdir -p "$SANDBOX/s8b-not-a-worktree"
+bash "$SCRIPT" "$CANON" main >/dev/null 2>&1; rc=$?
+assert "$rc" "1" "an existing directory that is not a registered worktree still blocks"; assert "$(git -C "$CANON" rev-parse HEAD)" "$H" "HEAD unchanged (unregistered path)"
+printf 'agent: claude-code\npid: %s\ngovernance_worktree: %s\n' "$$" "$HAND" > "$IWE_RUNTIME_DIR/sessions/claude-code-writer.open"
+bash "$SCRIPT" "$CANON" main >/dev/null 2>&1; rc=$?
+git -C "$CANON" fetch -q origin
+assert "$rc" "0" "a registered non-canon worktree does not block"; assert "$(git -C "$CANON" rev-parse HEAD)" "$(git -C "$CANON" rev-parse origin/main)" "replaced once only a registered worktree copy is live"
+rm -f "$IWE_RUNTIME_DIR/sessions/claude-code-writer.open"
+
 echo "scenario 9: origin advanced past the caller's pinned oid -> targets the live tip"
 fresh s9; echo one > "$CANON/b.txt"; commit_in "$CANON" "local"; C=$(git -C "$CANON" rev-parse HEAD); republish_on_origin "$CANON" "$C"
 P1=$(git -C "$CANON" ls-remote origin refs/heads/main | cut -c1-40)
