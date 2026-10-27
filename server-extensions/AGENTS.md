@@ -115,6 +115,8 @@ Respond in Russian unless the user writes in English.
 
 **Standalone-сессия:** перед первым заданием — `bash ~/IWE/scripts/kimi-standalone-preflight.sh` (код ≠0 → стоп) → `session-guard.sh open --agent kimi` (маяк запускается автоматически хуком SessionStart — `agent-session-hooks.sh heartbeat-start`, РП-544 Ф8.7, текстовый вызов `kimi-auto-heartbeat.sh &` больше не нужен). Закрытие — по-прежнему текстом (`session-guard.sh close --agent kimi`, ORZ + agent_status idle): автоматический вызов из хука проверялся и отклонён (Ф8.7) — close требует уже закоммиченного ORZ-файла с содержательной рефлексией, а её умеет писать только сам агент внутри разговора, не хук.
 
+**Новая задача после служебного протокола (РП-561 Ф51, решение пилота 25.10).** Служебный семафор (`session-guard.sh open --housekeeping day-close|week-close|month-close|day-open`) покрывает только сам протокол. После его закрытия новая задача пилота = повторный `kimi-standalone-preflight.sh` + обычное `session-guard.sh open --agent kimi --wp N --task "…"` (под заморозкой канона с `--isolate`, как подсказывает сам preflight) ДО первого коммита; пока обычная сессия не открыта, разрешены только чтение, inventory и обратимые локальные проверки. Самооткрытие задним числом запрещено, а `/session-close` без открытой сессии отказывает. Живой инцидент 24→25.10: закрытие дня прошло по housekeeping-семафору, дальнейшие задачи шли без сессии.
+
 Полный текст (таблица типов операций, watchdog, whisper-gate, абрупт-завершение) → `memory/reference/kimi-session-protocol.md`.
 
 ## Self-check после peer-сессии

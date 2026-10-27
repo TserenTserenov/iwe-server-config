@@ -295,8 +295,8 @@ new_ledger_case() {
 }
 
 if [ -z "$LEDGER_TOOL_SRC" ] || ! command -v flock >/dev/null 2>&1; then
-  echo "SKIP: scenarios 11-19 (need ledger-event-diff.py next to this checkout or in ~/IWE/DS-my-strategy, and flock)"
-  echo "PASS: canon-reconcile-smoke.sh (10 scenarios, 9 skipped)"
+  echo "SKIP: scenarios 11-30 (need ledger-event-diff.py next to this checkout or in ~/IWE/DS-my-strategy, and flock)"
+  echo "PASS: canon-reconcile-smoke.sh (10 scenarios, 20 skipped)"
   exit 0
 fi
 
@@ -354,19 +354,204 @@ assert_eq "case13 HEAD untouched" "$LOCAL_HEAD13" "$("$REAL_GIT" -C "$CLONE13" r
 assert_eq "case13 ledger untouched" "$LOCAL_CONTENT13" "$(cat "$CLONE13/$LEDGER_REL")"
 assert_eq "case13 no stash created" "" "$("$REAL_GIT" -C "$CLONE13" stash list)"
 
-# 14: no flock on this machine -> a dirty ledger is not touched at all.
+# 14: no flock binary for this script -> it still takes the flock (through python3) and
+# the writer's mkdir lock; reconciled, both locks free afterwards.
 new_ledger_case case14
 CLONE14="$TEST_ROOT/case14-clone"
-LOCAL_HEAD14=$("$REAL_GIT" -C "$CLONE14" rev-parse HEAD)
+REMOTE_HEAD14=$("$REAL_GIT" -C "$TEST_ROOT/case14-seed" rev-parse HEAD)
 set +e
 out14=$(CANON_RECONCILE_FLOCK=no-such-flock-binary CANON_RECONCILE_LEDGER_TOOL="$LEDGER_TOOL_SRC" bash "$SCRIPT" "$CLONE14" main 2>&1)
 rc14=$?
 set -e
-assert_eq "case14 exit code" "1" "$rc14"
-assert_contains "case14 diagnostic" "$out14" "is not available"
-assert_eq "case14 HEAD untouched" "$LOCAL_HEAD14" "$("$REAL_GIT" -C "$CLONE14" rev-parse HEAD)"
-assert_contains "case14 local event still on disk" "$(cat "$CLONE14/$LEDGER_REL")" "ts: '2026-10-26T05:00:00Z'"
-assert_eq "case14 no stash created" "" "$("$REAL_GIT" -C "$CLONE14" stash list)"
+assert_eq "case14 exit code" "0" "$rc14"
+assert_contains "case14 diagnostic" "$out14" "merged back"
+assert_eq "case14 HEAD advanced" "$REMOTE_HEAD14" "$("$REAL_GIT" -C "$CLONE14" rev-parse HEAD)"
+assert_eq "case14 each event once" "3" "$(grep -c '^- ts:' "$CLONE14/$LEDGER_REL")"
+assert_eq "case14 no stash left behind" "" "$("$REAL_GIT" -C "$CLONE14" stash list)"
+[ ! -e "$CLONE14/$LEDGER_REL.lockdir" ] || fail "case14 lock directory must be removed after the run"
+flock -n -E 75 "$CLONE14/$LEDGER_REL.lock" true || fail "case14 the python-held flock must be free after the run"
+
+# 14a: no flock, a live writer holds the mkdir lock -> skip the cycle, nothing touched,
+# the writer's lock directory is left alone.
+new_ledger_case case14a
+CLONE14A="$TEST_ROOT/case14a-clone"
+LOCAL_HEAD14A=$("$REAL_GIT" -C "$CLONE14A" rev-parse HEAD)
+LOCAL_CONTENT14A=$(cat "$CLONE14A/$LEDGER_REL")
+mkdir "$CLONE14A/$LEDGER_REL.lockdir"
+printf 'host=%s\npid=%s\n' "${HOSTNAME:-$(cat /proc/sys/kernel/hostname 2>/dev/null || echo unknown)}" "$$" > "$CLONE14A/$LEDGER_REL.lockdir/owner"
+set +e
+out14a=$(CANON_RECONCILE_FLOCK=no-such-flock-binary CANON_RECONCILE_LEDGER_TOOL="$LEDGER_TOOL_SRC" CANON_RECONCILE_LEDGER_LOCK_WAIT=1 bash "$SCRIPT" "$CLONE14A" main 2>&1)
+rc14a=$?
+set -e
+assert_eq "case14a exit code" "0" "$rc14a"
+assert_contains "case14a diagnostic" "$out14a" "holds the lock directory"
+assert_eq "case14a HEAD untouched" "$LOCAL_HEAD14A" "$("$REAL_GIT" -C "$CLONE14A" rev-parse HEAD)"
+assert_eq "case14a ledger untouched" "$LOCAL_CONTENT14A" "$(cat "$CLONE14A/$LEDGER_REL")"
+assert_eq "case14a no stash created" "" "$("$REAL_GIT" -C "$CLONE14A" stash list)"
+assert_eq "case14a writer's lock untouched" "$$" "$(awk -F= '$1=="pid"{print $2}' "$CLONE14A/$LEDGER_REL.lockdir/owner")"
+rm -rf "$CLONE14A/$LEDGER_REL.lockdir"
+
+# 14b: a lock directory left by a dead process on this host is taken over (the same rule
+# ledger-append.sh applies) and the run reconciles.
+new_ledger_case case14b
+CLONE14B="$TEST_ROOT/case14b-clone"
+sh -c 'exit 0' & DEAD14B=$!; wait "$DEAD14B"
+mkdir "$CLONE14B/$LEDGER_REL.lockdir"
+printf 'host=%s\npid=%s\n' "${HOSTNAME:-$(cat /proc/sys/kernel/hostname 2>/dev/null || echo unknown)}" "$DEAD14B" > "$CLONE14B/$LEDGER_REL.lockdir/owner"
+set +e
+out14b=$(CANON_RECONCILE_FLOCK=no-such-flock-binary CANON_RECONCILE_LEDGER_TOOL="$LEDGER_TOOL_SRC" CANON_RECONCILE_LEDGER_LOCK_WAIT=2 bash "$SCRIPT" "$CLONE14B" main 2>&1)
+rc14b=$?
+set -e
+assert_eq "case14b exit code" "0" "$rc14b"
+assert_contains "case14b diagnostic" "$out14b" "merged back"
+[ ! -e "$CLONE14B/$LEDGER_REL.lockdir" ] || fail "case14b lock directory must be removed after the run"
+
+# 14c: flock IS available, but a writer without flock on its PATH holds the mkdir lock ->
+# the script waits for that lock too and skips the cycle; nothing touched.
+new_ledger_case case14c
+CLONE14C="$TEST_ROOT/case14c-clone"
+LOCAL_HEAD14C=$("$REAL_GIT" -C "$CLONE14C" rev-parse HEAD)
+mkdir "$CLONE14C/$LEDGER_REL.lockdir"
+printf 'host=%s\npid=%s\n' "${HOSTNAME:-$(cat /proc/sys/kernel/hostname 2>/dev/null || echo unknown)}" "$$" > "$CLONE14C/$LEDGER_REL.lockdir/owner"
+set +e
+out14c=$(CANON_RECONCILE_LEDGER_TOOL="$LEDGER_TOOL_SRC" CANON_RECONCILE_LEDGER_LOCK_WAIT=1 bash "$SCRIPT" "$CLONE14C" main 2>&1)
+rc14c=$?
+set -e
+assert_eq "case14c exit code" "0" "$rc14c"
+assert_contains "case14c diagnostic" "$out14c" "holds the lock directory"
+assert_eq "case14c HEAD untouched" "$LOCAL_HEAD14C" "$("$REAL_GIT" -C "$CLONE14C" rev-parse HEAD)"
+assert_eq "case14c no stash created" "" "$("$REAL_GIT" -C "$CLONE14C" stash list)"
+flock -n -E 75 "$CLONE14C/$LEDGER_REL.lock" true || fail "case14c flock must be released after the skip"
+rm -rf "$CLONE14C/$LEDGER_REL.lockdir"
+
+# 14d: no flock binary for this script, but a writer WITH flock holds `.lock` -> the
+# python-taken flock sees it: skip the cycle, nothing touched.
+new_ledger_case case14d
+CLONE14D="$TEST_ROOT/case14d-clone"
+LOCAL_HEAD14D=$("$REAL_GIT" -C "$CLONE14D" rev-parse HEAD)
+LOCAL_CONTENT14D=$(cat "$CLONE14D/$LEDGER_REL")
+: > "$CLONE14D/$LEDGER_REL.lock"
+flock -x "$CLONE14D/$LEDGER_REL.lock" sleep 20 &
+HOLDER14D=$!
+sleep 1
+set +e
+out14d=$(CANON_RECONCILE_FLOCK=no-such-flock-binary CANON_RECONCILE_LEDGER_TOOL="$LEDGER_TOOL_SRC" CANON_RECONCILE_LEDGER_LOCK_WAIT=1 bash "$SCRIPT" "$CLONE14D" main 2>&1)
+rc14d=$?
+set -e
+kill "$HOLDER14D" 2>/dev/null || true
+wait "$HOLDER14D" 2>/dev/null || true
+assert_eq "case14d exit code" "0" "$rc14d"
+assert_contains "case14d diagnostic" "$out14d" "holds the lock of"
+assert_eq "case14d HEAD untouched" "$LOCAL_HEAD14D" "$("$REAL_GIT" -C "$CLONE14D" rev-parse HEAD)"
+assert_eq "case14d ledger untouched" "$LOCAL_CONTENT14D" "$(cat "$CLONE14D/$LEDGER_REL")"
+assert_eq "case14d no stash created" "" "$("$REAL_GIT" -C "$CLONE14D" stash list)"
+
+# 14e: an ownerless lock directory older than two minutes is never taken over and never
+# waited on silently: loud refusal, nothing touched, the directory left for a human.
+new_ledger_case case14e
+CLONE14E="$TEST_ROOT/case14e-clone"
+LOCAL_HEAD14E=$("$REAL_GIT" -C "$CLONE14E" rev-parse HEAD)
+mkdir "$CLONE14E/$LEDGER_REL.lockdir"
+touch -t 202001010000 "$CLONE14E/$LEDGER_REL.lockdir"
+set +e
+out14e=$(CANON_RECONCILE_LEDGER_TOOL="$LEDGER_TOOL_SRC" CANON_RECONCILE_LEDGER_LOCK_WAIT=1 bash "$SCRIPT" "$CLONE14E" main 2>&1)
+rc14e=$?
+set -e
+assert_eq "case14e exit code" "1" "$rc14e"
+assert_contains "case14e diagnostic" "$out14e" "has no owner pid"
+assert_eq "case14e HEAD untouched" "$LOCAL_HEAD14E" "$("$REAL_GIT" -C "$CLONE14E" rev-parse HEAD)"
+[ -d "$CLONE14E/$LEDGER_REL.lockdir" ] || fail "case14e the ownerless directory must be left in place"
+rm -rf "$CLONE14E/$LEDGER_REL.lockdir"
+
+# 14f: a fresh ownerless lock directory (a writer between its mkdir and its owner record)
+# is waited on, not taken over: skip the cycle.
+new_ledger_case case14f
+CLONE14F="$TEST_ROOT/case14f-clone"
+mkdir "$CLONE14F/$LEDGER_REL.lockdir"
+set +e
+out14f=$(CANON_RECONCILE_LEDGER_TOOL="$LEDGER_TOOL_SRC" CANON_RECONCILE_LEDGER_LOCK_WAIT=1 bash "$SCRIPT" "$CLONE14F" main 2>&1)
+rc14f=$?
+set -e
+assert_eq "case14f exit code" "0" "$rc14f"
+assert_contains "case14f diagnostic" "$out14f" "holds the lock directory"
+[ -d "$CLONE14F/$LEDGER_REL.lockdir" ] || fail "case14f the writer's directory must be left in place"
+assert_eq "case14f no stash created" "" "$("$REAL_GIT" -C "$CLONE14F" stash list)"
+rm -rf "$CLONE14F/$LEDGER_REL.lockdir"
+
+# 14g: a lock directory owned on ANOTHER host is never taken over, even with a dead-looking pid.
+new_ledger_case case14g
+CLONE14G="$TEST_ROOT/case14g-clone"
+sh -c 'exit 0' & DEAD14G=$!; wait "$DEAD14G"
+mkdir "$CLONE14G/$LEDGER_REL.lockdir"
+printf 'host=some-other-host\npid=%s\n' "$DEAD14G" > "$CLONE14G/$LEDGER_REL.lockdir/owner"
+set +e
+out14g=$(CANON_RECONCILE_LEDGER_TOOL="$LEDGER_TOOL_SRC" CANON_RECONCILE_LEDGER_LOCK_WAIT=1 bash "$SCRIPT" "$CLONE14G" main 2>&1)
+rc14g=$?
+set -e
+assert_eq "case14g exit code" "0" "$rc14g"
+assert_contains "case14g diagnostic" "$out14g" "holds the lock directory"
+assert_eq "case14g foreign owner untouched" "some-other-host" "$(awk -F= '$1=="host"{print $2}' "$CLONE14G/$LEDGER_REL.lockdir/owner")"
+rm -rf "$CLONE14G/$LEDGER_REL.lockdir"
+
+# 14h: a malformed wait setting is refused loudly, not mistaken for a busy writer.
+new_ledger_case case14h
+CLONE14H="$TEST_ROOT/case14h-clone"
+LOCAL_HEAD14H=$("$REAL_GIT" -C "$CLONE14H" rev-parse HEAD)
+set +e
+out14h=$(CANON_RECONCILE_LEDGER_TOOL="$LEDGER_TOOL_SRC" CANON_RECONCILE_LEDGER_LOCK_WAIT=abc bash "$SCRIPT" "$CLONE14H" main 2>&1)
+rc14h=$?
+set -e
+assert_eq "case14h exit code" "1" "$rc14h"
+assert_contains "case14h diagnostic" "$out14h" "whole number of seconds 1..30"
+assert_eq "case14h HEAD untouched" "$LOCAL_HEAD14H" "$("$REAL_GIT" -C "$CLONE14H" rev-parse HEAD)"
+
+# 14i: a half-written owner record (host only, the writer killed between two writes)
+# older than two minutes -> loud refusal, never a silent skip forever.
+new_ledger_case case14i
+CLONE14I="$TEST_ROOT/case14i-clone"
+mkdir "$CLONE14I/$LEDGER_REL.lockdir"
+printf 'host=%s\n' "${HOSTNAME:-$(cat /proc/sys/kernel/hostname 2>/dev/null || echo unknown)}" > "$CLONE14I/$LEDGER_REL.lockdir/owner"
+touch -t 202001010000 "$CLONE14I/$LEDGER_REL.lockdir"
+set +e
+out14i=$(CANON_RECONCILE_LEDGER_TOOL="$LEDGER_TOOL_SRC" CANON_RECONCILE_LEDGER_LOCK_WAIT=1 bash "$SCRIPT" "$CLONE14I" main 2>&1)
+rc14i=$?
+set -e
+assert_eq "case14i exit code" "1" "$rc14i"
+assert_contains "case14i diagnostic" "$out14i" "has no owner pid"
+rm -rf "$CLONE14I/$LEDGER_REL.lockdir"
+
+# 14j: a dead owner AND a leftover takeover lock (`.reclaim`, older than a minute, from a
+# killed takeover) -> the leftover is cleared, the stale lock taken over, reconciled.
+new_ledger_case case14j
+CLONE14J="$TEST_ROOT/case14j-clone"
+sh -c 'exit 0' & DEAD14J=$!; wait "$DEAD14J"
+mkdir "$CLONE14J/$LEDGER_REL.lockdir" "$CLONE14J/$LEDGER_REL.lockdir.reclaim"
+printf 'host=%s\npid=%s\n' "${HOSTNAME:-$(cat /proc/sys/kernel/hostname 2>/dev/null || echo unknown)}" "$DEAD14J" > "$CLONE14J/$LEDGER_REL.lockdir/owner"
+touch -t 202001010000 "$CLONE14J/$LEDGER_REL.lockdir.reclaim"
+set +e
+out14j=$(CANON_RECONCILE_LEDGER_TOOL="$LEDGER_TOOL_SRC" CANON_RECONCILE_LEDGER_LOCK_WAIT=2 bash "$SCRIPT" "$CLONE14J" main 2>&1)
+rc14j=$?
+set -e
+assert_eq "case14j exit code" "0" "$rc14j"
+assert_contains "case14j diagnostic" "$out14j" "merged back"
+[ ! -e "$CLONE14J/$LEDGER_REL.lockdir" ] || fail "case14j lock directory must be removed after the run"
+[ ! -e "$CLONE14J/$LEDGER_REL.lockdir.reclaim" ] || fail "case14j takeover lock must be gone"
+
+# 14k: a dead owner, but another takeover is in progress (fresh `.reclaim`) -> this run
+# does not touch the stale lock behind the other's back: skip the cycle.
+new_ledger_case case14k
+CLONE14K="$TEST_ROOT/case14k-clone"
+sh -c 'exit 0' & DEAD14K=$!; wait "$DEAD14K"
+mkdir "$CLONE14K/$LEDGER_REL.lockdir" "$CLONE14K/$LEDGER_REL.lockdir.reclaim"
+printf 'host=%s\npid=%s\n' "${HOSTNAME:-$(cat /proc/sys/kernel/hostname 2>/dev/null || echo unknown)}" "$DEAD14K" > "$CLONE14K/$LEDGER_REL.lockdir/owner"
+set +e
+out14k=$(CANON_RECONCILE_LEDGER_TOOL="$LEDGER_TOOL_SRC" CANON_RECONCILE_LEDGER_LOCK_WAIT=1 bash "$SCRIPT" "$CLONE14K" main 2>&1)
+rc14k=$?
+set -e
+assert_eq "case14k exit code" "0" "$rc14k"
+assert_contains "case14k diagnostic" "$out14k" "holds the lock directory"
+assert_eq "case14k stale owner left to the other takeover" "$DEAD14K" "$(awk -F= '$1=="pid"{print $2}' "$CLONE14K/$LEDGER_REL.lockdir/owner")"
+rm -rf "$CLONE14K/$LEDGER_REL.lockdir" "$CLONE14K/$LEDGER_REL.lockdir.reclaim"
 
 # 15: the dirty file does not match the ledger header (another period) -> the dry run
 # refuses, tree untouched.
@@ -435,11 +620,15 @@ sleep 1
 set +e
 flock -n -E 75 "$CLONE18/$LEDGER_REL.lock" true
 probe18=$?
+[ -d "$CLONE18/$LEDGER_REL.lockdir" ]
+probe18dir=$?
 wait "$RECONCILE18"
 rc18=$?
 set -e
 assert_eq "case18 outside writer is kept out while the work runs" "75" "$probe18"
 assert_eq "case18 reconcile itself succeeded" "0" "$rc18"
+assert_eq "case18 mkdir-lock writers are kept out too" "0" "$probe18dir"
+[ ! -e "$CLONE18/$LEDGER_REL.lockdir" ] || fail "case18 lock directory must be removed after the run"
 flock -n -E 75 "$CLONE18/$LEDGER_REL.lock" true || fail "case18 lock must be free after the run"
 assert_eq "case18 each event once" "3" "$(grep -c '^- ts:' "$CLONE18/$LEDGER_REL")"
 
@@ -461,4 +650,4 @@ assert_eq "case19 HEAD advanced" "$REMOTE_HEAD19" "$("$REAL_GIT" -C "$CLONE19" r
 assert_eq "case19 disk shows origin's version" "2" "$(grep -c '^- ts:' "$CLONE19/$LEDGER_REL")"
 assert_contains "case19 tail preserved in the stash" "$("$REAL_GIT" -C "$CLONE19" show "stash@{0}:$LEDGER_REL")" "ts: '2026-10-26T05:00:00Z'"
 
-echo "PASS: canon-reconcile-smoke.sh (19 scenarios)"
+echo "PASS: canon-reconcile-smoke.sh (30 scenarios)"

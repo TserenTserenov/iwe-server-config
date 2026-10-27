@@ -17,7 +17,8 @@
 # yet published, and the stash route lost them (26.10.2026: 152 events, 15 of
 # them session closures, sat in 28 forgotten stashes and every consumer saw
 # the sessions as closed without a record, WP-484 Ф251/Ф255). So for ledger
-# paths this script (1) holds the same flock the ledger writer takes for the
+# paths this script (1) holds both locks the ledger writer may take (flock and
+# its mkdir fallback) for the
 # whole dry run -> stash -> fast-forward -> merge-back window, so no event lands
 # in between; (2) does a dry run of the merge BEFORE touching anything and
 # refuses with "ledger tail NOT safe to reconcile" (tree untouched) if it cannot
@@ -215,34 +216,187 @@ done <<CONFLICTS_EOF
 $CONFLICTS
 CONFLICTS_EOF
 
+# ledger-append.sh has two locks and picks one by whether `flock` is on ITS
+# PATH: `<file>.lock` (flock) or `<file>.lockdir` (mkdir, owner record
+# host=/pid=). Writers on one host can differ (a systemd unit's PATH= lacks
+# flock while an interactive shell has it, ledger-append.sh mkdir-fallback
+# comment), so this script always takes BOTH (WP-530, peer session
+# 2026-10-27-03). Without the flock binary it takes the same flock(2) lock
+# through python3, which the merge tool needs anyway. A writer only ever holds
+# one of the two and never waits for the other, so taking both cannot deadlock
+# against it. All acquisitions share ONE budget (LEDGER_LOCK_WAIT seconds in
+# total), because every second spent waiting here, while earlier locks are
+# already held, counts against a waiting writer's own 60 s budget.
+LEDGER_LOCKDIRS=""
+HOSTNAME_NOW="${HOSTNAME:-$(cat /proc/sys/kernel/hostname 2>/dev/null || echo unknown)}"   # same derivation as ledger-append.sh, so its stale-owner check matches ours
+
+# Removes only lock directories this run created: the owner record is ours, or
+# not written yet (interrupted right after our mkdir; nobody else steals an
+# ownerless directory, so it can only be ours).
+ledger_lockdir_release() {
+  local dir owner_pid
+  while IFS= read -r dir; do
+    [ -n "$dir" ] || continue
+    owner_pid=$(awk -F= '$1=="pid"{print $2}' "$dir/owner" 2>/dev/null)
+    if [ -z "$owner_pid" ] || [ "$owner_pid" = "$$" ]; then
+      rm -rf "$dir"
+    fi
+  done <<LOCKDIRS_EOF
+$LEDGER_LOCKDIRS
+LOCKDIRS_EOF
+}
+
+wait_one_second() {
+  sleep 1 2>/dev/null && return 0
+  local wait_until=$(( SECONDS + 1 ))   # no sleep on a minimal PATH: the same builtin-only wait ledger-append.sh uses
+  while [ "$SECONDS" -lt "$wait_until" ]; do :; done
+}
+
+lock_budget_left() {
+  local left=$(( LOCK_BUDGET_END - SECONDS ))
+  [ "$left" -gt 0 ] || left=0
+  echo "$left"
+}
+
+# pid_gone <pid>: true only when the process provably does not exist. A failed
+# `kill -0` alone is not proof: it also fails with EPERM for a live process of
+# another user. Without /proc and without ps it answers "not gone" (a stale lock
+# is then waited out, never taken). Known limit: /proc mounted with hidepid=2
+# hides other users' live processes.
+pid_gone() {
+  kill -0 "$1" 2>/dev/null && return 1
+  if [ -d /proc/self ]; then
+    [ ! -d "/proc/$1" ]
+  else
+    command -v ps >/dev/null 2>&1 || return 1
+    ! ps -p "$1" >/dev/null 2>&1
+  fi
+}
+
+# ledger_flock <fd>: exclusive flock(2) on an already open descriptor within the
+# remaining budget. 0 = held, 75 = timed out, anything else = a broken call.
+ledger_flock() {
+  local fd="$1" left
+  left=$(lock_budget_left)
+  if command -v "$FLOCK_BIN" >/dev/null 2>&1; then
+    "$FLOCK_BIN" -x -w "$left" -E 75 "$fd"
+    return $?
+  fi
+  # The lock belongs to the open file description, which this shell keeps open
+  # after python exits, so it stays held exactly as with flock(1) on an fd.
+  python3 -c '
+import fcntl, sys, time
+fd, end = int(sys.argv[1]), time.monotonic() + float(sys.argv[2])
+while True:
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        sys.exit(0)
+    except BlockingIOError:
+        if time.monotonic() >= end:
+            sys.exit(75)
+        time.sleep(0.2)
+' "$fd" "$left"
+}
+
+# ledger_lockdir_reclaim <dir> <dead pid>: removes a stale lock directory, but
+# only under `<dir>.reclaim`, the takeover lock ledger-append.sh takes too, and
+# only if the owner is still that dead pid when re-read under it. A new
+# `mkdir <dir>` cannot succeed while the stale one exists and only a holder of
+# `.reclaim` removes it, so two takeovers can never interleave. Nothing is ever
+# moved back (a rename onto an existing directory nests instead of failing). A
+# `.reclaim` older than a minute is a leftover of a killed takeover (the
+# critical section takes milliseconds) and is cleared.
+ledger_lockdir_reclaim() {
+  local dir="$1" dead_pid="$2"
+  find "$dir.reclaim" -maxdepth 0 -mmin +1 -exec rm -rf {} + 2>/dev/null
+  mkdir "$dir.reclaim" 2>/dev/null || return 0
+  if [ "$(awk -F= '$1=="pid"{print $2}' "$dir/owner" 2>/dev/null)" = "$dead_pid" ] && pid_gone "$dead_pid"; then
+    rm -rf "$dir"
+  fi
+  rm -rf "$dir.reclaim"
+}
+
+# ledger_lockdir_acquire <dir>: 0 = held, 75 = a live owner kept it past the
+# budget, 1 = cannot create it, 2 = needs a human: a directory older than two
+# minutes whose owner record has no pid (missing or half-written: neither this
+# script nor ledger-append.sh ever takes one over, so waiting would skip every
+# cycle silently). Takes over only what ledger-append.sh itself would: same
+# host, owner PID proven gone. Tries at least once even with no budget left.
+ledger_lockdir_acquire() {
+  local dir="$1" reclaims=0 owner_host owner_pid
+  [ -d "${dir%/*}" ] && [ -w "${dir%/*}" ] || return 1
+  while :; do
+    if mkdir "$dir" 2>/dev/null; then
+      LEDGER_LOCKDIRS="${LEDGER_LOCKDIRS}${dir}"$'\n'
+      printf 'host=%s\npid=%s\n' "$HOSTNAME_NOW" "$$" > "$dir/owner" || return 1
+      return 0
+    fi
+    owner_host=$(awk -F= '$1=="host"{print $2}' "$dir/owner" 2>/dev/null)
+    owner_pid=$(awk -F= '$1=="pid"{print $2}' "$dir/owner" 2>/dev/null)
+    case "$owner_pid" in
+      ''|*[!0-9]*)
+        if [ -d "$dir" ] && [ -n "$(find "$dir" -maxdepth 0 -mmin +2 2>/dev/null)" ]; then
+          LEDGER_LOCKDIR_PROBLEM="$dir has no owner pid and is older than 2 minutes"
+          return 2
+        fi ;;
+      *)
+        if [ "$owner_host" = "$HOSTNAME_NOW" ] && [ "$reclaims" -lt 3 ] && pid_gone "$owner_pid"; then
+          ledger_lockdir_reclaim "$dir" "$owner_pid"
+          reclaims=$((reclaims + 1))
+          continue
+        fi ;;
+    esac
+    reclaims=0
+    [ "$(lock_budget_left)" -gt 0 ] || return 75
+    wait_one_second
+  done
+}
+
 LOCK_T0=0
 if [ -n "$LEDGER_CONFLICTS" ]; then
-  if ! command -v "$FLOCK_BIN" >/dev/null 2>&1; then
-    echo "$LEDGER_UNSAFE — '$FLOCK_BIN' is not available, so a concurrent writer cannot be kept out; refusing, tree untouched:" >&2
+  # 1..30 without leading zeros (bash reads 08 as bad octal); the cap leaves a
+  # waiting writer's 60 s budget room for the dry run, ff and merge-back.
+  case "$LEDGER_LOCK_WAIT" in
+    [1-9]|[12][0-9]|30) ;;
+    *) echo "$LEDGER_UNSAFE — CANON_RECONCILE_LEDGER_LOCK_WAIT must be a whole number of seconds 1..30 (a writer gives up after 60 s), got '$LEDGER_LOCK_WAIT'; refusing, tree untouched" >&2; exit 1 ;;
+  esac
+  if ! command -v "$FLOCK_BIN" >/dev/null 2>&1 && ! command -v python3 >/dev/null 2>&1; then
+    echo "$LEDGER_UNSAFE — neither '$FLOCK_BIN' nor python3 is available, so a flock writer cannot be kept out; refusing, tree untouched:" >&2
     printf '%s' "$LEDGER_CONFLICTS" >&2
     exit 1
   fi
-  # Hold the ledger writer's lock (`<ledger file>.lock`, the file ledger-append.sh
-  # flocks) from before the dry run until the merge-back is done. Descriptors are
-  # numbered by hand: bash 3.2 on macOS has no `exec {fd}>`. Exit 75 is "timed
-  # out" (the same convention as ledger-append.sh); any other failure is a broken
-  # lock call and must not pass for a busy writer.
+  trap 'ledger_lockdir_release; dglock_release' EXIT
+  LOCK_BUDGET_END=$(( SECONDS + LEDGER_LOCK_WAIT ))
+  # Hold the ledger writer's locks from before the dry run until the merge-back
+  # is done. Descriptors are numbered by hand: bash 3.2 on macOS has no
+  # `exec {fd}>`. Exit 75 is "timed out" (the same convention as
+  # ledger-append.sh); any other failure is a broken lock call and must not pass
+  # for a busy writer.
   lock_fd=200
   while IFS= read -r path; do
     [ -n "$path" ] || continue
     eval "exec $lock_fd<>\"./\$path.lock\"" 2>/dev/null || { echo "$LEDGER_UNSAFE — cannot open the lock file of $path; refusing, tree untouched" >&2; exit 1; }
     lock_rc=0
-    "$FLOCK_BIN" -x -w "$LEDGER_LOCK_WAIT" -E 75 "$lock_fd" || lock_rc=$?
+    ledger_flock "$lock_fd" || lock_rc=$?
     case "$lock_rc" in
       0) ;;
-      75) echo "canon-reconcile: a ledger writer holds the lock of $path for more than ${LEDGER_LOCK_WAIT}s, skipping this cycle (tree untouched)"; exit 0 ;;
+      75) echo "canon-reconcile: a ledger writer holds the lock of $path past the ${LEDGER_LOCK_WAIT}s budget, skipping this cycle (tree untouched)"; exit 0 ;;
       *) echo "$LEDGER_UNSAFE — the lock call on $path failed with code $lock_rc; refusing, tree untouched" >&2; exit 1 ;;
     esac
+    [ "$LOCK_T0" -gt 0 ] || LOCK_T0=$(date +%s)
     lock_fd=$((lock_fd + 1))
+    lock_rc=0
+    LEDGER_LOCKDIR_PROBLEM=""
+    ledger_lockdir_acquire "./$path.lockdir" || lock_rc=$?
+    case "$lock_rc" in
+      0) ;;
+      75) echo "canon-reconcile: a ledger writer holds the lock directory of $path past the ${LEDGER_LOCK_WAIT}s budget, skipping this cycle (tree untouched)"; exit 0 ;;
+      2) echo "$LEDGER_UNSAFE — $LEDGER_LOCKDIR_PROBLEM; check it by hand, refusing, tree untouched" >&2; exit 1 ;;
+      *) echo "$LEDGER_UNSAFE — cannot create the lock directory of $path; refusing, tree untouched" >&2; exit 1 ;;
+    esac
   done <<LEDGER_EOF
 $LEDGER_CONFLICTS
 LEDGER_EOF
-  LOCK_T0=$(date +%s)
 
   # Dry run, before anything moves: the same merge the real step will do, on the
   # dirty file as it is now against origin's tip. Any refusal here leaves the
