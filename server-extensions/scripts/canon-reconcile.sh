@@ -12,6 +12,22 @@
 # path where that isn't true is left in the stash for a human/agent to look
 # at by hand.
 #
+# The one exception is the event ledger (machine/ledger/*.yaml). Its dirty
+# tail is not a stray edit: it is the day's events that were written but not
+# yet published, and the stash route lost them (26.10.2026: 152 events, 15 of
+# them session closures, sat in 28 forgotten stashes and every consumer saw
+# the sessions as closed without a record, WP-484 Ф251/Ф255). So for ledger
+# paths this script (1) holds the same flock the ledger writer takes for the
+# whole dry run -> stash -> fast-forward -> merge-back window, so no event lands
+# in between; (2) does a dry run of the merge BEFORE touching anything and
+# refuses with "ledger tail NOT safe to reconcile" (tree untouched) if it cannot
+# be proven lossless; and (3) after the fast-forward merges the stashed events
+# back into the working file, three-way (base = the HEAD this run started from,
+# so an event origin deliberately deleted does not come back), through
+# ledger-event-diff.py --merge-driver. The tail then stays as an ordinary
+# unpublished diff for the ledger publisher. If the merge-back still fails after
+# the fast-forward, the stash stays and the exit code is 1.
+#
 # Wired into ds-publish.sh's post-publish step, right after canon-refresh.sh
 # (WP-530 Ф33): that script already handles the clean-tree case; this one
 # covers what it deliberately leaves alone. Also safe to run by hand any time
@@ -151,6 +167,101 @@ if [ -n "$UNTRACKED_BLOCKERS" ]; then
   exit 1
 fi
 
+is_ledger_path() {
+  case "$1" in
+    machine/ledger/*.yaml) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+# A dirty ledger tail is carried over, never set aside and forgotten (see the
+# header). Three parts: the writer's lock, a dry run BEFORE anything moves, and
+# the real merge-back after the fast-forward.
+FLOCK_BIN="${CANON_RECONCILE_FLOCK:-flock}"
+LEDGER_LOCK_WAIT="${CANON_RECONCILE_LEDGER_LOCK_WAIT:-30}"
+LEDGER_TOOL="${CANON_RECONCILE_LEDGER_TOOL:-./scripts/lib/ledger-event-diff.py}"
+LEDGER_UNSAFE="canon-reconcile: ledger tail NOT safe to reconcile"
+
+# ledger_carry <path> <theirs file> <ours ref> <out file>: three-way merge of the
+# event sets (base = the HEAD this run started from, ours = the file at <ours
+# ref>, theirs = the dirty copy) by the ledger's own merge driver, so an event
+# that origin deliberately deleted does not come back. The result counts only if
+# it parses strictly and holds every event of the dirty copy: a deletion on
+# origin of an event the dirty copy still has fails this check on purpose and
+# leaves the decision to a human.
+ledger_carry() {
+  local path="$1" theirs="$2" ours_ref="$3" out="$4" work rc=1
+  [ -r "$LEDGER_TOOL" ] || { echo "canon-reconcile: the ledger merge tool is missing: $LEDGER_TOOL" >&2; return 1; }
+  work=$(mktemp -d "${TMPDIR:-/tmp}/canon-reconcile-ledger.XXXXXX") || return 1
+  if git show "$HEAD_OID:$path" > "$work/base.yaml" 2>"$work/err" \
+     && git show "$ours_ref:$path" > "$work/ours.yaml" 2>>"$work/err" \
+     && python3 "$LEDGER_TOOL" --merge-driver "$work/base.yaml" "$work/ours.yaml" "$theirs" 2>>"$work/err" \
+     && python3 "$LEDGER_TOOL" --validate "$work/ours.yaml" >/dev/null 2>>"$work/err" \
+     && python3 "$LEDGER_TOOL" --source-subset "$theirs" "$work/ours.yaml" >/dev/null 2>>"$work/err" \
+     && cp "$work/ours.yaml" "$out" 2>>"$work/err"; then
+    rc=0
+  else
+    cat "$work/err" >&2
+  fi
+  rm -rf "$work"
+  return $rc
+}
+
+LEDGER_CONFLICTS=""
+while IFS= read -r path; do
+  [ -n "$path" ] || continue
+  is_ledger_path "$path" && LEDGER_CONFLICTS="${LEDGER_CONFLICTS}${path}"$'\n'
+done <<CONFLICTS_EOF
+$CONFLICTS
+CONFLICTS_EOF
+
+LOCK_T0=0
+if [ -n "$LEDGER_CONFLICTS" ]; then
+  if ! command -v "$FLOCK_BIN" >/dev/null 2>&1; then
+    echo "$LEDGER_UNSAFE — '$FLOCK_BIN' is not available, so a concurrent writer cannot be kept out; refusing, tree untouched:" >&2
+    printf '%s' "$LEDGER_CONFLICTS" >&2
+    exit 1
+  fi
+  # Hold the ledger writer's lock (`<ledger file>.lock`, the file ledger-append.sh
+  # flocks) from before the dry run until the merge-back is done. Descriptors are
+  # numbered by hand: bash 3.2 on macOS has no `exec {fd}>`. Exit 75 is "timed
+  # out" (the same convention as ledger-append.sh); any other failure is a broken
+  # lock call and must not pass for a busy writer.
+  lock_fd=200
+  while IFS= read -r path; do
+    [ -n "$path" ] || continue
+    eval "exec $lock_fd<>\"./\$path.lock\"" 2>/dev/null || { echo "$LEDGER_UNSAFE — cannot open the lock file of $path; refusing, tree untouched" >&2; exit 1; }
+    lock_rc=0
+    "$FLOCK_BIN" -x -w "$LEDGER_LOCK_WAIT" -E 75 "$lock_fd" || lock_rc=$?
+    case "$lock_rc" in
+      0) ;;
+      75) echo "canon-reconcile: a ledger writer holds the lock of $path for more than ${LEDGER_LOCK_WAIT}s, skipping this cycle (tree untouched)"; exit 0 ;;
+      *) echo "$LEDGER_UNSAFE — the lock call on $path failed with code $lock_rc; refusing, tree untouched" >&2; exit 1 ;;
+    esac
+    lock_fd=$((lock_fd + 1))
+  done <<LEDGER_EOF
+$LEDGER_CONFLICTS
+LEDGER_EOF
+  LOCK_T0=$(date +%s)
+
+  # Dry run, before anything moves: the same merge the real step will do, on the
+  # dirty file as it is now against origin's tip. Any refusal here leaves the
+  # tree exactly as it was, instead of failing after the stash and the
+  # fast-forward have already taken the tail off the disk.
+  PRE_DIR=$(mktemp -d "${TMPDIR:-/tmp}/canon-reconcile-pre.XXXXXX") || { echo "$LEDGER_UNSAFE — no scratch directory; refusing, tree untouched" >&2; exit 1; }
+  while IFS= read -r path; do
+    [ -n "$path" ] || continue
+    if ! ledger_carry "$path" "./$path" "origin/$BRANCH" "$PRE_DIR/dry-run.yaml"; then
+      rm -rf "$PRE_DIR"
+      echo "$LEDGER_UNSAFE — $path cannot be merged with origin without loss (details above); refusing, tree untouched" >&2
+      exit 1
+    fi
+  done <<LEDGER_EOF
+$LEDGER_CONFLICTS
+LEDGER_EOF
+  rm -rf "$PRE_DIR"
+fi
+
 STASH_MARKER="canon-reconcile $(date -u +%FT%TZ)"
 STASH_ARGS=(stash push -m "$STASH_MARKER" --)
 while IFS= read -r path; do
@@ -163,7 +274,7 @@ if ! git "${STASH_ARGS[@]}" >/dev/null 2>&1; then
   echo "canon-reconcile: could not stash the blocking paths — leaving tree untouched" >&2
   exit 1
 fi
-STASH_OID=$(git rev-parse stash@{0})
+STASH_OID=$(git rev-parse "stash@{0}")
 
 if ! git merge --ff-only -q "origin/$BRANCH" 2>/dev/null; then
   git stash pop -q 2>/dev/null || echo "canon-reconcile: fast-forward still failed AND stash pop failed — check 'git stash list' by hand" >&2
@@ -185,13 +296,67 @@ done <<EOF
 $CONFLICTS
 EOF
 
+# Merge-back of the ledger tail. Every step must prove itself before a path
+# counts as resolved; the file is replaced through a temporary neighbour, so an
+# interrupted run never leaves a half-written ledger.
+LEDGER_MERGED=""
+merge_ledger_path() {
+  local path="$1" work
+  work=$(mktemp -d "${TMPDIR:-/tmp}/canon-reconcile-ledger.XXXXXX") || return 1
+  if git show "$STASH_OID:$path" > "$work/stash.yaml" 2>"$work/err" \
+     && ledger_carry "$path" "$work/stash.yaml" HEAD "$work/merged.yaml" \
+     && cp "$work/merged.yaml" "$path.tmp.$$" 2>>"$work/err" \
+     && mv -f "$path.tmp.$$" "$path" 2>>"$work/err"; then
+    rm -rf "$work"
+    return 0
+  fi
+  cat "$work/err" >&2
+  rm -f "$path.tmp.$$"
+  rm -rf "$work"
+  return 1
+}
+
+if [ -n "$STILL_DIFFERS" ]; then
+  REMAINING=""
+  while IFS= read -r path; do
+    [ -n "$path" ] || continue
+    if is_ledger_path "$path" && merge_ledger_path "$path"; then
+      LEDGER_MERGED="${LEDGER_MERGED}${path}"$'\n'
+      echo "canon-reconcile: $path — unpublished ledger events merged back into the fast-forwarded file (three-way with origin, nothing lost)"
+    else
+      REMAINING="${REMAINING}${path}"$'\n'
+    fi
+  done <<EOF
+$STILL_DIFFERS
+EOF
+  STILL_DIFFERS="$REMAINING"
+fi
+
+# The writer's budget for the lock is 60 s (ledger-append.sh): a longer window loses its event.
+if [ "$LOCK_T0" -gt 0 ] && [ $(( $(date +%s) - LOCK_T0 )) -gt 30 ]; then
+  echo "canon-reconcile: WARN the ledger lock was held for $(( $(date +%s) - LOCK_T0 )) s (a waiting writer gives up after 60 s)" >&2
+fi
+
 if [ -z "$STILL_DIFFERS" ]; then
+  # Never drop an entry someone else pushed since ours.
+  if [ "$(git rev-parse "stash@{0}" 2>/dev/null)" != "$STASH_OID" ]; then
+    echo "canon-reconcile: stash@{0} is no longer the entry made by this run — not dropping anything, check 'git stash list' by hand" >&2
+    exit 1
+  fi
   git stash drop -q
-  echo "canon-reconcile: $REPO synced to origin/$BRANCH (local content was already superseded, stash dropped)"
+  if [ -n "$LEDGER_MERGED" ]; then
+    echo "canon-reconcile: $REPO synced to origin/$BRANCH (ledger tail carried over as an unpublished diff, stash dropped)"
+  else
+    echo "canon-reconcile: $REPO synced to origin/$BRANCH (local content was already superseded, stash dropped)"
+  fi
   exit 0
 fi
 
 echo "canon-reconcile: fast-forwarded, but these paths still differ from what's now on origin — real content, left in stash for manual review:" >&2
 printf '%s' "$STILL_DIFFERS" >&2
+if [ -n "$LEDGER_MERGED" ]; then
+  echo "canon-reconcile: the ledger file(s) below are ALREADY merged back on disk — take only the paths above from the stash (git checkout stash@{0} -- <path>), do not pop the ledger:" >&2
+  printf '%s' "$LEDGER_MERGED" >&2
+fi
 echo "canon-reconcile: run 'git stash show -p' in $REPO to inspect before deciding pop/drop" >&2
 exit 1

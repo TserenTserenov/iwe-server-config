@@ -254,4 +254,211 @@ assert_eq "case10 untracked file untouched" "untracked real content" "$(cat "$CL
 assert_eq "case10 HEAD unchanged" "$LOCAL_HEAD10" "$("$REAL_GIT" -C "$CLONE10" rev-parse HEAD)"
 assert_eq "case10 no stash created" "" "$("$REAL_GIT" -C "$CLONE10" stash list)"
 
-echo "PASS: canon-reconcile-smoke.sh (10 scenarios)"
+# --- Scenarios 11-14: the event ledger (WP-484 Ф255). A dirty ledger tail is
+# written-but-unpublished events, not a stray edit: the stash route lost 152 of
+# them on 26.10.2026. The ledger merge tool lives in DS-my-strategy, so the
+# scenarios borrow a copy of it; without one they are skipped loudly.
+LEDGER_REL="machine/ledger/day/2026/10/day-2026-10-26.yaml"
+LEDGER_TOOL_SRC=""
+for candidate in "$ROOT_DIR/DS-my-strategy/scripts/lib/ledger-event-diff.py" \
+                 "$HOME/IWE/DS-my-strategy/scripts/lib/ledger-event-diff.py"; do
+  if [ -r "$candidate" ]; then LEDGER_TOOL_SRC="$candidate"; break; fi
+done
+
+ledger_doc() {
+  # ledger_doc <ts>... -> a ledger/v1 day document with one session_closed event per ts
+  printf 'schema: ledger/v1\nscale: day\nperiod: '"'"'2026-10-26'"'"'\nevents:\n'
+  local ts
+  for ts in "$@"; do
+    printf -- "- ts: '%s'\n  source: fixture\n  kind: session_closed\n  data:\n    wp: WP-1\n" "$ts"
+  done
+}
+
+new_ledger_case() {
+  # new_ledger_case <name>: seed and clone both hold the ledger with event e1;
+  # origin then gains e2 (published by someone else), the clone gains an
+  # unpublished local event e-local on disk.
+  local name="$1" seed
+  new_origin_and_clone "$name"
+  seed="$TEST_ROOT/$name-seed"
+  mkdir -p "$seed/$(dirname "$LEDGER_REL")" "$TEST_ROOT/$name-clone/$(dirname "$LEDGER_REL")"
+  ledger_doc 2026-10-26T01:00:00Z > "$seed/$LEDGER_REL"
+  "$REAL_GIT" -C "$seed" add "$LEDGER_REL"
+  "$REAL_GIT" -C "$seed" commit -qm "ledger with e1"
+  "$REAL_GIT" -C "$seed" push -q
+  "$REAL_GIT" -C "$TEST_ROOT/$name-clone" pull -q
+  ledger_doc 2026-10-26T01:00:00Z 2026-10-26T05:00:00Z > "$TEST_ROOT/$name-clone/$LEDGER_REL"
+  ledger_doc 2026-10-26T01:00:00Z 2026-10-26T03:00:00Z > "$seed/$LEDGER_REL"
+  "$REAL_GIT" -C "$seed" add "$LEDGER_REL"
+  "$REAL_GIT" -C "$seed" commit -qm "origin publishes e2"
+  "$REAL_GIT" -C "$seed" push -q
+}
+
+if [ -z "$LEDGER_TOOL_SRC" ] || ! command -v flock >/dev/null 2>&1; then
+  echo "SKIP: scenarios 11-19 (need ledger-event-diff.py next to this checkout or in ~/IWE/DS-my-strategy, and flock)"
+  echo "PASS: canon-reconcile-smoke.sh (10 scenarios, 9 skipped)"
+  exit 0
+fi
+
+# 11: unpublished local event survives the fast-forward as a union, no stash left.
+new_ledger_case case11
+CLONE11="$TEST_ROOT/case11-clone"
+REMOTE_HEAD11=$("$REAL_GIT" -C "$TEST_ROOT/case11-seed" rev-parse HEAD)
+set +e
+out11=$(CANON_RECONCILE_LEDGER_TOOL="$LEDGER_TOOL_SRC" bash "$SCRIPT" "$CLONE11" main 2>&1)
+rc11=$?
+set -e
+assert_eq "case11 exit code" "0" "$rc11"
+assert_contains "case11 diagnostic" "$out11" "merged back"
+assert_eq "case11 HEAD advanced" "$REMOTE_HEAD11" "$("$REAL_GIT" -C "$CLONE11" rev-parse HEAD)"
+assert_eq "case11 no stash left behind" "" "$("$REAL_GIT" -C "$CLONE11" stash list)"
+for ts in 2026-10-26T01:00:00Z 2026-10-26T03:00:00Z 2026-10-26T05:00:00Z; do
+  assert_contains "case11 event $ts on disk" "$(cat "$CLONE11/$LEDGER_REL")" "ts: '$ts'"
+done
+assert_eq "case11 each event once" "3" "$(grep -c '^- ts:' "$CLONE11/$LEDGER_REL")"
+assert_contains "case11 tail stays a pending diff" "$("$REAL_GIT" -C "$CLONE11" status --porcelain)" "$LEDGER_REL"
+rm -f "$CLONE11/$LEDGER_REL.lock"
+
+# 12: the merge tool is unavailable -> refused BEFORE anything moves (dry run), tree untouched.
+new_ledger_case case12
+CLONE12="$TEST_ROOT/case12-clone"
+LOCAL_HEAD12=$("$REAL_GIT" -C "$CLONE12" rev-parse HEAD)
+set +e
+out12=$(CANON_RECONCILE_LEDGER_TOOL="$TEST_ROOT/no-such-tool.py" bash "$SCRIPT" "$CLONE12" main 2>&1)
+rc12=$?
+set -e
+assert_eq "case12 exit code" "1" "$rc12"
+assert_contains "case12 diagnostic" "$out12" "ledger tail NOT safe to reconcile"
+assert_eq "case12 HEAD untouched" "$LOCAL_HEAD12" "$("$REAL_GIT" -C "$CLONE12" rev-parse HEAD)"
+assert_eq "case12 no stash created" "" "$("$REAL_GIT" -C "$CLONE12" stash list)"
+assert_contains "case12 local event still on disk" "$(cat "$CLONE12/$LEDGER_REL")" "ts: '2026-10-26T05:00:00Z'"
+
+# 13: a ledger writer holds the lock -> skip the cycle, nothing touched.
+new_ledger_case case13
+CLONE13="$TEST_ROOT/case13-clone"
+LOCAL_HEAD13=$("$REAL_GIT" -C "$CLONE13" rev-parse HEAD)
+LOCAL_CONTENT13=$(cat "$CLONE13/$LEDGER_REL")
+: > "$CLONE13/$LEDGER_REL.lock"
+flock -x "$CLONE13/$LEDGER_REL.lock" sleep 20 &   # the same flock the script uses (skip guard above)
+HOLDER13=$!
+sleep 1
+set +e
+out13=$(CANON_RECONCILE_LEDGER_TOOL="$LEDGER_TOOL_SRC" CANON_RECONCILE_LEDGER_LOCK_WAIT=1 bash "$SCRIPT" "$CLONE13" main 2>&1)
+rc13=$?
+set -e
+kill "$HOLDER13" 2>/dev/null || true
+wait "$HOLDER13" 2>/dev/null || true
+assert_eq "case13 exit code" "0" "$rc13"
+assert_contains "case13 diagnostic" "$out13" "holds the lock"
+assert_eq "case13 HEAD untouched" "$LOCAL_HEAD13" "$("$REAL_GIT" -C "$CLONE13" rev-parse HEAD)"
+assert_eq "case13 ledger untouched" "$LOCAL_CONTENT13" "$(cat "$CLONE13/$LEDGER_REL")"
+assert_eq "case13 no stash created" "" "$("$REAL_GIT" -C "$CLONE13" stash list)"
+
+# 14: no flock on this machine -> a dirty ledger is not touched at all.
+new_ledger_case case14
+CLONE14="$TEST_ROOT/case14-clone"
+LOCAL_HEAD14=$("$REAL_GIT" -C "$CLONE14" rev-parse HEAD)
+set +e
+out14=$(CANON_RECONCILE_FLOCK=no-such-flock-binary CANON_RECONCILE_LEDGER_TOOL="$LEDGER_TOOL_SRC" bash "$SCRIPT" "$CLONE14" main 2>&1)
+rc14=$?
+set -e
+assert_eq "case14 exit code" "1" "$rc14"
+assert_contains "case14 diagnostic" "$out14" "is not available"
+assert_eq "case14 HEAD untouched" "$LOCAL_HEAD14" "$("$REAL_GIT" -C "$CLONE14" rev-parse HEAD)"
+assert_contains "case14 local event still on disk" "$(cat "$CLONE14/$LEDGER_REL")" "ts: '2026-10-26T05:00:00Z'"
+assert_eq "case14 no stash created" "" "$("$REAL_GIT" -C "$CLONE14" stash list)"
+
+# 15: the dirty file does not match the ledger header (another period) -> the dry run
+# refuses, tree untouched.
+new_ledger_case case15
+CLONE15="$TEST_ROOT/case15-clone"
+LOCAL_HEAD15=$("$REAL_GIT" -C "$CLONE15" rev-parse HEAD)
+sed -i.bak "s/^period: .*/period: '2027-01-01'/" "$CLONE15/$LEDGER_REL" && rm -f "$CLONE15/$LEDGER_REL.bak"
+set +e
+out15=$(CANON_RECONCILE_LEDGER_TOOL="$LEDGER_TOOL_SRC" bash "$SCRIPT" "$CLONE15" main 2>&1)
+rc15=$?
+set -e
+assert_eq "case15 exit code" "1" "$rc15"
+assert_contains "case15 diagnostic" "$out15" "ledger tail NOT safe to reconcile"
+assert_eq "case15 HEAD untouched" "$LOCAL_HEAD15" "$("$REAL_GIT" -C "$CLONE15" rev-parse HEAD)"
+assert_eq "case15 no stash created" "" "$("$REAL_GIT" -C "$CLONE15" stash list)"
+
+# 16: a ledger path AND another real dirty path together. The ledger tail is merged on
+# disk, the stash keeps everything, and the output lists only the other path as the one
+# to review, saying the ledger is already merged back.
+new_ledger_case case16
+CLONE16="$TEST_ROOT/case16-clone"
+printf 'a local draft nobody published\n' > "$CLONE16/file.md"
+advance_seed "$TEST_ROOT/case16-seed" "origin changed file.md too" "origin changes the other file"
+set +e
+out16=$(CANON_RECONCILE_LEDGER_TOOL="$LEDGER_TOOL_SRC" bash "$SCRIPT" "$CLONE16" main 2>&1)
+rc16=$?
+set -e
+assert_eq "case16 exit code" "1" "$rc16"
+assert_contains "case16 names the other path" "$out16" "file.md"
+assert_contains "case16 says the ledger is already merged" "$out16" "ALREADY merged back"
+assert_eq "case16 ledger tail merged on disk" "3" "$(grep -c '^- ts:' "$CLONE16/$LEDGER_REL")"
+assert_contains "case16 stash keeps the draft" "$("$REAL_GIT" -C "$CLONE16" show 'stash@{0}:file.md')" "a local draft nobody published"
+assert_contains "case16 stash keeps the ledger tail" "$("$REAL_GIT" -C "$CLONE16" show "stash@{0}:$LEDGER_REL")" "ts: '2026-10-26T05:00:00Z'"
+
+# 17: origin deliberately deleted an event the dirty copy still has -> not resurrected
+# silently: the dry run cannot prove a lossless merge and refuses, tree untouched.
+new_origin_and_clone case17
+SEED17="$TEST_ROOT/case17-seed"; CLONE17="$TEST_ROOT/case17-clone"
+mkdir -p "$SEED17/$(dirname "$LEDGER_REL")"
+ledger_doc 2026-10-26T01:00:00Z 2026-10-26T02:00:00Z > "$SEED17/$LEDGER_REL"
+"$REAL_GIT" -C "$SEED17" add "$LEDGER_REL"; "$REAL_GIT" -C "$SEED17" commit -qm "ledger e1 e2"; "$REAL_GIT" -C "$SEED17" push -q
+"$REAL_GIT" -C "$CLONE17" pull -q
+ledger_doc 2026-10-26T01:00:00Z 2026-10-26T02:00:00Z 2026-10-26T05:00:00Z > "$CLONE17/$LEDGER_REL"
+ledger_doc 2026-10-26T02:00:00Z > "$SEED17/$LEDGER_REL"
+"$REAL_GIT" -C "$SEED17" add "$LEDGER_REL"; "$REAL_GIT" -C "$SEED17" commit -qm "origin deletes e1"; "$REAL_GIT" -C "$SEED17" push -q
+LOCAL_HEAD17=$("$REAL_GIT" -C "$CLONE17" rev-parse HEAD)
+set +e
+out17=$(CANON_RECONCILE_LEDGER_TOOL="$LEDGER_TOOL_SRC" bash "$SCRIPT" "$CLONE17" main 2>&1)
+rc17=$?
+set -e
+assert_eq "case17 exit code" "1" "$rc17"
+assert_contains "case17 diagnostic" "$out17" "ledger tail NOT safe to reconcile"
+assert_eq "case17 HEAD untouched" "$LOCAL_HEAD17" "$("$REAL_GIT" -C "$CLONE17" rev-parse HEAD)"
+assert_eq "case17 no stash created" "" "$("$REAL_GIT" -C "$CLONE17" stash list)"
+assert_eq "case17 dirty copy untouched" "3" "$(grep -c '^- ts:' "$CLONE17/$LEDGER_REL")"
+
+# 18: the writer's lock is really held while the work runs: a slow merge tool, and a
+# non-blocking lock attempt from outside during it must be refused (exit 75).
+new_ledger_case case18
+CLONE18="$TEST_ROOT/case18-clone"
+SLOW_TOOL="$TEST_ROOT/slow-tool.py"
+printf 'import runpy, sys, time\ntime.sleep(2)\nsys.argv[0] = %s\nrunpy.run_path(%s, run_name="__main__")\n' "'$LEDGER_TOOL_SRC'" "'$LEDGER_TOOL_SRC'" > "$SLOW_TOOL"
+CANON_RECONCILE_LEDGER_TOOL="$SLOW_TOOL" bash "$SCRIPT" "$CLONE18" main > "$TEST_ROOT/case18.out" 2>&1 &
+RECONCILE18=$!
+sleep 1
+set +e
+flock -n -E 75 "$CLONE18/$LEDGER_REL.lock" true
+probe18=$?
+wait "$RECONCILE18"
+rc18=$?
+set -e
+assert_eq "case18 outside writer is kept out while the work runs" "75" "$probe18"
+assert_eq "case18 reconcile itself succeeded" "0" "$rc18"
+flock -n -E 75 "$CLONE18/$LEDGER_REL.lock" true || fail "case18 lock must be free after the run"
+assert_eq "case18 each event once" "3" "$(grep -c '^- ts:' "$CLONE18/$LEDGER_REL")"
+
+# 19: the merge works in the dry run but fails after the fast-forward (the tool dies on its
+# 4th call) -> nothing may be dropped: HEAD moved, disk shows origin, the tail is in the stash.
+new_ledger_case case19
+CLONE19="$TEST_ROOT/case19-clone"
+FLAKY_TOOL="$TEST_ROOT/flaky-tool.py"
+COUNTER19="$TEST_ROOT/case19.calls"; : > "$COUNTER19"
+printf 'import runpy, sys\nwith open(%s, "a") as f:\n    f.write("x")\nif len(open(%s).read()) > 3:\n    sys.exit(1)\nsys.argv[0] = %s\nrunpy.run_path(%s, run_name="__main__")\n' "'$COUNTER19'" "'$COUNTER19'" "'$LEDGER_TOOL_SRC'" "'$LEDGER_TOOL_SRC'" > "$FLAKY_TOOL"
+REMOTE_HEAD19=$("$REAL_GIT" -C "$TEST_ROOT/case19-seed" rev-parse HEAD)
+set +e
+out19=$(CANON_RECONCILE_LEDGER_TOOL="$FLAKY_TOOL" bash "$SCRIPT" "$CLONE19" main 2>&1)
+rc19=$?
+set -e
+assert_eq "case19 exit code" "1" "$rc19"
+assert_contains "case19 diagnostic" "$out19" "left in stash for manual review"
+assert_eq "case19 HEAD advanced" "$REMOTE_HEAD19" "$("$REAL_GIT" -C "$CLONE19" rev-parse HEAD)"
+assert_eq "case19 disk shows origin's version" "2" "$(grep -c '^- ts:' "$CLONE19/$LEDGER_REL")"
+assert_contains "case19 tail preserved in the stash" "$("$REAL_GIT" -C "$CLONE19" show "stash@{0}:$LEDGER_REL")" "ts: '2026-10-26T05:00:00Z'"
+
+echo "PASS: canon-reconcile-smoke.sh (19 scenarios)"
