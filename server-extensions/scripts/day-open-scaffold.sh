@@ -1372,7 +1372,7 @@ $SELF_DEV_BLOCK
 После priorities.yaml — дополнить из carry-over и SWEEP_WP_LIST теми РП, которых нет в priorities.yaml и которые ещё open.
 Применить mandatory_daily_wps + daily_checkpoint_wps из day-rhythm-config.yaml.
 KE-строка: bash $IWE/${IWE_GOVERNANCE_REPO:-DS-strategy}/scripts/ke-queue-stats.sh --dayplan-row (реальный бюджет, не литерал «1h»).
-Active WPs to include (из sweep + WeekPlan union): $SWEEP_WP_LIST
+Active WPs to include (открытые карточки из inbox, не план недели; сверку с планом недели делает шаг 4.45): $SWEEP_WP_LIST
 -->
 
 **Утренние приоритеты (priorities.yaml):**

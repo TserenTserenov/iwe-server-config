@@ -41,6 +41,9 @@ LOG_FILE="$IWE_ROOT/.claude/logs/wp-card-read-gate.jsonl"
 CACHE_DIR="$IWE_ROOT/.claude/state/wp-card-read-gate"
 CACHE_TTL_SEC="${WP_CARD_READ_GATE_CACHE_TTL:-300}"
 GIT_SYNC_LIB="$IWE_ROOT/scripts/lib/git-sync-status.sh"
+# A recognised card read whose repository cannot be resolved: allow (logged) or deny.
+# Default allow until the pilot decides (S-33): the log shows how often it happens.
+UNRESOLVED_DECISION="${WP_CARD_READ_GATE_UNRESOLVED:-allow}"
 
 log_decision() {
   local decision="$1" target="${2:-}" detail="${3:-}"
@@ -74,6 +77,30 @@ card_path_in() {
     | sed -E 's/^.//' | head -1
 }
 
+# card_abs_in <text>: prints the first ABSOLUTE card path in <text>, if any. Kept
+# separate from card_path_in, which strips everything before inbox/ or archive/ and
+# so turned an absolute path into a relative one (M0, WP-484 Ф257: the relative
+# form was then glued to the hook's own $PWD and resolved to a directory that does
+# not exist, which ended in a silent allow).
+card_abs_in() {
+  printf '%s\n' "$1" | grep -oE "(^|[[:space:]'\"=:(])/[A-Za-z0-9_./~+-]*(inbox/WP-[0-9]+/WP-[0-9]+\\.md|archive/wp-contexts/[A-Za-z0-9_./-]+\\.md)" \
+    | sed -E "s/^[[:space:]'\"=:(]//" | head -1
+}
+
+# bash_base_dir <payload_cwd> <command>: the directory a RELATIVE card path in a Bash
+# command is read from. A literal `cd /abs/dir` in the command wins (the payload's cwd
+# is where the tool call started, not where `cd` moved it); otherwise the payload's cwd.
+# Prints nothing when neither is usable.
+bash_base_dir() {
+  local payload_cwd="$1" cmd="$2" cd_dir before
+  # Only a `cd` that comes BEFORE the card path can change where it is read from.
+  before="${cmd%%inbox/WP-*}"
+  before="${before%%archive/wp-contexts/*}"
+  cd_dir=$(printf '%s\n' "$before" | sed -nE 's/(^|.*[;&|([:space:]])cd[[:space:]]+"?(\/[^[:space:]";&|"]+)"?.*/\2/p' | head -1)
+  if [ -n "$cd_dir" ] && [ -d "$cd_dir" ]; then printf '%s' "$cd_dir"; return 0; fi
+  if [ -n "$payload_cwd" ] && [ -d "$payload_cwd" ]; then printf '%s' "$payload_cwd"; fi
+}
+
 # target_path_for <tool_name> <tool_input_json>: prints the path this call
 # would read, or nothing if the tool/call is out of this gate's scope.
 target_path_for() {
@@ -86,13 +113,20 @@ target_path_for() {
       printf '%s' "$tool_input" | jq -r '.path // empty' 2>/dev/null
       ;;
     Bash)
-      local cmd
+      local cmd abs
       cmd=$(printf '%s' "$tool_input" | jq -r '.command // empty' 2>/dev/null) || return 0
       [ -n "$cmd" ] || return 0
       # Only explicit single-file read verbs; anything else (pipes into other
       # commands, variables, globs) is the honest limit of this scope.
-      printf '%s' "$cmd" | grep -qE '(^|[;&|[:space:]])(cat|sed|head|tail|grep)([[:space:]]|$)' || return 0
-      card_path_in "$cmd"
+      # The original five verbs keep their loose match (anywhere in the command). The
+      # added ones must open a command segment: words like `more` or `nl` occur in commit
+      # messages and must not turn `git commit -m '...'` into a card read.
+      printf '%s' "$cmd" | grep -qE '(^|[;&|[:space:]])(cat|sed|head|tail|grep)([[:space:]]|$)' \
+        || printf '%s' "$cmd" | grep -qE '(^|[;&|(])[[:space:]]*(egrep|rg|awk)([[:space:]]|$)' || return 0
+      # `git show <ref>:<card>` is the read this gate's own deny text recommends.
+      printf '%s' "$cmd" | grep -qE '(^|[;&|(])[[:space:]]*git[[:space:]]+(show|cat-file)([[:space:]]|$)' && return 0
+      abs=$(card_abs_in "$cmd")
+      if [ -n "$abs" ]; then printf '%s\n' "$abs"; else card_path_in "$cmd"; fi
       ;;
     *) return 0 ;;
   esac
@@ -244,14 +278,33 @@ TARGET=$(target_path_for "$TOOL_NAME" "$TOOL_INPUT") || exit 0
 CARD_REL=$(card_path_in "$TARGET")
 [ -n "$CARD_REL" ] || exit 0
 
+PAYLOAD_CWD=$(printf '%s' "$INPUT" | jq -r '.cwd // empty' 2>/dev/null || true)
 ABS_TARGET="$TARGET"
-case "$ABS_TARGET" in /*) ;; *) ABS_TARGET="$PWD/$TARGET" ;; esac
+case "$ABS_TARGET" in
+  /*) ;;
+  *)
+    BASE_DIR=""
+    if [ "$TOOL_NAME" = "Bash" ]; then
+      BASE_DIR=$(bash_base_dir "$PAYLOAD_CWD" "$(printf '%s' "$TOOL_INPUT" | jq -r '.command // empty' 2>/dev/null)")
+    fi
+    ABS_TARGET="${BASE_DIR:-$PWD}/$TARGET"
+    ;;
+esac
 if is_isolate_path "$ABS_TARGET"; then
   exit 0
 fi
 
 TARGET_DIR=$(dirname -- "$ABS_TARGET")
-TOPLEVEL=$(git -C "$TARGET_DIR" rev-parse --show-toplevel 2>/dev/null) || exit 0
+TOPLEVEL=$(git -C "$TARGET_DIR" rev-parse --show-toplevel 2>/dev/null) || {
+  # A recognised card read whose repository cannot be found is NOT a quiet allow
+  # (that was the M0 hole): it is logged, so the gap is countable. The verdict is
+  # UNRESOLVED_DECISION (default allow, the pilot's call to flip).
+  log_decision "unresolved" "$CARD_REL" "репозиторий карточки не найден от ${TARGET_DIR}"
+  if [ "$UNRESOLVED_DECISION" = "deny" ]; then
+    deny_json "Карточка ${CARD_REL}: не удалось определить репозиторий от ${TARGET_DIR}; читай через wp-sync-bundle.sh WP-N или git show origin/main:${CARD_REL}, либо укажи абсолютный путь."
+  fi
+  exit 0
+}
 TOPLEVEL_REAL=$(cd "$TOPLEVEL" 2>/dev/null && pwd -P) || exit 0
 if is_isolate_path "$TOPLEVEL_REAL"; then
   exit 0
