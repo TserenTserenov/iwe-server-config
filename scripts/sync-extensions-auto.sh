@@ -470,6 +470,12 @@ delivery_source_path() {
 # голый python3 после обновления homebrew остаётся без пакетов и валит gate. Нет среды (сервер) — прежний python3.
 GATE_TEST_PYTHON="${IWE_GATE_PYTHON:-$HOME/.iwe-venv/common/bin/python}"
 [ -x "$GATE_TEST_PYTHON" ] || GATE_TEST_PYTHON=python3
+# Оболочечные тесты зовут python3 из PATH; под launchd первым стоит системный 3.9 (сторож сессий на нём не работает) —
+# общая среда идёт в PATH первой. Нет среды — PATH не меняется.
+GATE_TEST_PATH="$PATH"
+case "$GATE_TEST_PYTHON" in
+  /*) GATE_TEST_PATH="$(dirname "$GATE_TEST_PYTHON"):$PATH" ;;
+esac
 for rel_path in "${CHANGED_PATHS[@]}"; do
   [ -n "$rel_path" ] || continue
   case "$rel_path" in
@@ -489,7 +495,7 @@ for rel_path in "${CHANGED_PATHS[@]}"; do
       *.py) test_runner=("$GATE_TEST_PYTHON" "$test_file") ;;
       *)    test_runner=(bash "$test_file") ;;
     esac
-    if ! env "${STRIP_ENV_ARGS[@]}" "${test_runner[@]}" >> "$GATE_LOG" 2>&1; then
+    if ! env "${STRIP_ENV_ARGS[@]}" PATH="$GATE_TEST_PATH" "${test_runner[@]}" >> "$GATE_LOG" 2>&1; then
       echo "GATE FAIL: $test_file (для $rel_path)" >> "$GATE_LOG"
       GATE_FAILED=true
       FAILED_PATHS+=("$rel_path")
