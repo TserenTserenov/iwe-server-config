@@ -4,7 +4,7 @@
 Keyword-based task classifier for IWE Artifactor skill.
 
 Exit codes:
-  0 — keyword match, JSON on stdout (schema_version 3, WP-575 Ф2)
+  0 — keyword match, JSON on stdout (schema_version 4, WP-575 Ф4)
   1 — INSUFFICIENT_INPUT (< 5 words)
   2 — NO_KEYWORD_MATCH (needs LLM fallback)
   3 — CONFIG_ERROR (PACK-digital-platform установлен, но result-kinds-registry.yaml
@@ -44,6 +44,14 @@ wp_close/wp_implement из "миграция" исключение — там р
 и кодом, и документом в зависимости от конкретного РП) — форсирует уточнение
 у пилота на WP Gate, не угадывается (тот же принцип, что hypothesis_relation:
 "unclassified").
+
+pair_link (WP-575 Ф4, пир-сессия 2026-10-27-06 с Kimi и Codex): связка «документ ↔
+производящая система». Документ называет производителя (сессию пилота или
+систему), система называет наблюдаемый результат срабатывания. Проверка идёт по
+ЗАКАЗАННОМУ результату и по предмету приёмки, а не по всем его будущим экземплярам.
+Keyword-путь не рассуждает, поэтому всегда возвращает status
+"agent_check_required": потребитель (wp-new) сам проверяет связку по тексту
+запроса. Остальные статусы заполняет только LLM-путь скилла (Шаг 2.1).
 """
 
 import os
@@ -153,6 +161,201 @@ for _kw, _entry in KEYWORD_MAP.items():
         raise AssertionError(f"KEYWORD_MAP[{_kw!r}]: invalid result_type {_entry[4]!r}")
 del _kw, _entry
 
+# Статусы связки «документ ↔ производитель» (WP-575 Ф4). Блокирующие для
+# регистрации РП — mismatch, needs_result, unresolved (решает потребитель).
+VALID_PAIR_STATUSES = (
+    "ok",
+    "mismatch",
+    "recurring_no_producer",
+    "needs_result",
+    "unresolved",
+    "agent_check_required",
+)
+
+# Keyword-путь не рассуждает: связку проверяет потребитель по тексту запроса.
+KEYWORD_PAIR_LINK = {"status": "agent_check_required", "producer": None, "output": None}
+
+# --- Жёсткая сверка названия с Реестром понятий и родов (WP-575 Ф5) -----------
+# Решение пилота 27.10: блок на всё, что реестр не подтвердил; обход — только
+# флагом --registry-waiver скрипта create-wp.sh с причиной в карточке.
+# Для системы совместим один род «система» (правило реестра: системой называется
+# только он); для документа — описание, документ, план работ, набор.
+REGISTRY_COMPAT = {
+    "system": ("system",),
+    "episteme": ("description", "document", "work_plan", "collection"),
+}
+# Название лучше начинать с существительного — предмета результата (пожелание пилота 27.10).
+# Первое слово-прилагательное, местоимение, число, предлог, союз или приставка
+# («Системный журнал», «Нового реестр», «Для реестра», «Мини реестр») даёт предупреждение
+# и требует ответа ИИ о предмете результата; это не отказ — списки окончаний и служебных
+# слов неполны и ошибаются на существительных («Описание», «Решение», «Пост», «Слой»).
+INTRODUCTORY_WORDS = frozenset((
+    # местоимения и определители
+    "мой", "моя", "моё", "мои", "наш", "наша", "наше", "наши", "ваш", "ваша", "ваше", "ваши",
+    "свой", "своя", "своё", "свои", "этот", "эта", "это", "эти", "тот", "та", "то", "те",
+    "один", "одна", "одно", "одни", "весь", "вся", "всё", "все", "всех", "каждый", "любой", "такой",
+    "его", "её", "ее", "их", "сам", "сама", "само", "сами", "какой", "какая", "какое", "какие",
+    # числительные словами
+    "два", "две", "три", "четыре", "пять", "шесть", "семь", "восемь", "девять", "десять", "сто",
+    "двух", "трёх", "трех", "первый", "второй", "третий",
+    # предлоги, союзы, частицы
+    "для", "по", "из", "в", "на", "с", "со", "к", "о", "об", "от", "при", "без", "через", "между",
+    "над", "под", "за", "у", "про", "не", "что", "как", "ещё", "еще", "или", "и", "либо", "а", "но",
+    # приставки, стоящие отдельным словом
+    "мини", "микро", "мета", "супер", "ультра", "авто", "пост", "пре", "нано", "макро", "псевдо",
+    "квази", "анти", "мульти",
+))
+# Окончания прилагательных, в том числе косвенных форм. Окончания, которыми часто оканчиваются
+# существительные (им, ем, ом, ым: «режим», «дым»), сюда намеренно не входят.
+ADJECTIVE_END_RE = re.compile(r"(?:ый|ий|ой|ая|яя|ое|ее|ую|юю|ые|ие|ого|его|ому|ему|ых|их|ыми|ими)$")
+NUMERAL_RE = re.compile(r"^\d+(?:-[а-яa-z]+)?$", re.IGNORECASE)
+WORD_RE = re.compile(r"[а-яёa-z0-9]+(?:-[а-яёa-z0-9]+)*", re.IGNORECASE)
+
+
+def load_concept_kinds():
+    """Модуль поиска рода (имя файла с дефисом — грузим по пути). Нет PyYAML или
+    реестра — исключение: вызывающий превращает его в блок (fail-closed)."""
+    import importlib.util
+
+    os.environ.setdefault(
+        "CONCEPT_KINDS_REGISTRY",
+        os.path.join(resolve_iwe_root(), PACK_ROOT_REL, "pack", "digital-platform",
+                     "concept-kinds-registry.yaml"),
+    )
+    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "concept-kind.py")
+    spec = importlib.util.spec_from_file_location("concept_kind", path)
+    module = importlib.util.module_from_spec(spec)
+    try:
+        spec.loader.exec_module(module)  # без PyYAML модуль завершается через SystemExit(0)
+    except SystemExit as exc:
+        raise RuntimeError("нет модуля PyYAML для чтения реестра понятий") from exc
+    return module
+
+
+def name_words(name: str) -> list[str]:
+    """Слова всего названия в нижнем регистре. Знаки препинания, скобки и кавычки слова
+    не скрывают: голову ищет pick_head, а не обрезка по запятой."""
+    return WORD_RE.findall(name.lower())
+
+
+COORDINATORS = ("и", "или", "либо")
+
+
+def introductory_word(word: str) -> bool:
+    """Слово, с которого название начинаться не должно (не существительное-предмет)."""
+    return bool(word in INTRODUCTORY_WORDS or ADJECTIVE_END_RE.search(word) or NUMERAL_RE.match(word))
+
+
+def stem_remainder(term: dict, word: str) -> int:
+    """Сколько букв слова остаётся после основы записи реестра (0 — основа и есть слово)."""
+    ends = [re.match(stem, word).end() for stem in term.get("stems") or [] if re.match(stem, word)]
+    return len(word) - max(ends) if ends else len(word)
+
+
+def close_kind_by_name(data: dict, word: str) -> dict | None:
+    """Род, чьё название слово повторяет почти точно (падежное окончание, не суффикс
+    прилагательного: «описание» — да, «системный» — нет). Как kind_by_name утилиты, но строже."""
+    for kind in data["kinds"]:
+        if kind["id"] == "ambiguous":
+            continue
+        head = kind["name"].split()[0]
+        prefix = head[:-1] if len(head) > 4 else head[:3]
+        if word.startswith(prefix) and len(word) - len(prefix) <= 1:
+            return kind
+    return None
+
+
+def ai_verdict(known_kinds, head, outcome, why, result_type, compatible, ai):
+    """Слова нет в реестре или оно неоднозначно: решает ИИ по проверочному вопросу
+    рода, ответ обязателен и пишется в карточку. Неуверенность (флаг ИИ или
+    неоднозначность в реестре) уходит пилоту: без его решения РП не создаётся."""
+    kind = (ai.get("kind") or "").strip()
+    if not kind:
+        return 4, f"{why}; нужен ответ ИИ на проверочный вопрос рода (род и обоснование)"
+    if kind not in known_kinds:
+        return 4, f"род «{kind}» не из реестра (допустимы: {', '.join(sorted(known_kinds))})"
+    if kind not in compatible:
+        return 4, f"ответ ИИ: слово «{head}» — род «{kind}», а результат — {result_type} (допустимо: {', '.join(compatible)})"
+    answer = (ai.get("answer") or "").strip()
+    if not answer:
+        return 4, f"нет ответа на проверочный вопрос рода «{kind}»"
+    if ai.get("unsure") or outcome == "ambiguous":
+        pilot = (ai.get("pilot") or "").strip()
+        if not pilot:
+            return 5, f"{why}; ИИ не уверен, что «{head}» — род «{kind}»: нужно решение пилота"
+        return 0, f"pilot {head}/{kind}: {pilot}"
+    return 0, f"ai {head}/{kind}: {answer}"
+
+
+def registry_verdict(ck, data, digest, name, result_type, compatible, ai):
+    """Вердикт по загруженному реестру: (код, пояснение). Любое исключение отсюда
+    превращает check_registry в закрытый отказ."""
+    words = name_words(name)
+    warning = None
+    if not words:
+        head, outcome, why = "", "ambiguous", "в названии нет слов, по которым можно найти голову"
+    else:
+        head = words[0]
+        warning = None
+        if introductory_word(head):
+            warning = (f"название начинается не с существительного, а с «{head}»: лучше назвать предмет "
+                       f"результата первым словом (не «Системный журнал», а «Журнал системы»)")
+        if words[1:2] and words[1] in COORDINATORS:
+            outcome, why = "ambiguous", f"составная голова «{' '.join(words[:4])}» не разобрана"
+        else:
+            # Реестр спрашиваем первым: «Описание», «Решение» похожи на прилагательные по
+            # окончанию, но реестр знает их род, и конфликт с типом результата остаётся жёстким.
+            hits = ck.term_kind(data, head)
+            if warning:  # «системный», «платформенный» только начинаются как слово реестра
+                hits = [t for t in hits if stem_remainder(t, head) <= 2]
+            kinds = sorted({t["kind"] for t in hits})
+            by_name = close_kind_by_name if warning else ck.kind_by_name
+            named_kind = None if hits else by_name(data, head)  # «Система …», «Описание …»
+            if named_kind is not None:
+                hits, kinds = [{"term": named_kind["name"]}], [named_kind["id"]]
+            if not hits:
+                outcome = "modifier" if warning else "miss"
+                why = warning or f"слова «{head}» нет в реестре понятий и родов"
+            elif len(kinds) > 1 or kinds == ["ambiguous"]:
+                outcome, why = "ambiguous", f"слово «{head}» неоднозначно в реестре ({', '.join(kinds)})"
+            elif kinds[0] not in compatible:
+                outcome = "conflict"
+                why = f"слово «{head}» — род «{kinds[0]}», а результат — {result_type} (допустимо: {', '.join(compatible)})"
+            else:
+                outcome, why = "hit", f"{hits[0]['term']}/{kinds[0]}"
+    if outcome == "hit":
+        code, text = 0, f"registry {why}" + (f" ⚠ {warning}" if warning else "")
+    elif outcome == "conflict":
+        code, text = 4, why
+    else:
+        known = {k for k in ck.kind_index(data) if k != "ambiguous"}
+        code, text = ai_verdict(known, head, outcome, why, result_type, compatible, ai)
+        if code == 0 and outcome == "modifier":
+            text += f" ⚠ {why}"  # предупреждение, не отказ: решает ответ ИИ
+    ck.log("artifactor", digest, "gate", head, f"{outcome}->{code}", ai.get("kind") or result_type)
+    return code, text
+
+
+def check_registry(result: dict, title: str | None = None, ai: dict | None = None) -> tuple[int, str]:
+    """(код, пояснение): 0 — пропущено, 4 — блок, 5 — нужно решение пилота.
+    Блок без обхода — только когда реестр знает слово и род противоречит типу результата.
+    Реестр не читается или имеет неожиданную структуру — закрытый отказ (4), не трассировка."""
+    name = title or result.get("artifact") or ""
+    result_type = result.get("result_type")
+    compatible = REGISTRY_COMPAT.get(result_type)
+    if compatible is None:
+        return 4, f"тип результата «{result_type}» не определён (нужен system или episteme)"
+    try:
+        ck = load_concept_kinds()
+        data, digest = ck.load()
+    except Exception as exc:  # noqa: BLE001 — любой сбой загрузки = отказ, замок не открывается
+        return 4, f"реестр понятий не читается или повреждён ({type(exc).__name__}: {exc})"
+    try:
+        return registry_verdict(ck, data, digest, name, result_type, compatible, ai or {})
+    except Exception as exc:  # noqa: BLE001 — своя ошибка проверки не должна открыть замок
+        return 4, f"внутренняя ошибка проверки названия ({type(exc).__name__}: {exc}); реестр загружен"
+
+
 # task_type → почему expected_result_kind = None. Единственное легитимное
 # основание для None — одна из этих двух причин, не «забыли решить».
 SPECIAL_RESOLUTION = {
@@ -223,7 +426,62 @@ def resolve_result_kind(task_type: str, kind_id: str | None) -> tuple[str | None
     return kind_id, "static"
 
 
+def producer_advice(result: dict, producer: str | None) -> str | None:
+    """Рекомендательная (не блокирующая) подсказка для документа: его создаёт
+    система, в простом случае — сессия пилота с агентом. Подсказки нет, если
+    результат не документ или производитель уже назван (WP-575 Ф5)."""
+    if result.get("result_type") != "episteme" or (producer or "").strip():
+        return None
+    return (
+        "Документ не появляется сам: его создаёт система (в простом случае — ваша сессия с агентом). "
+        "Назовите производителя флагом --producer: «session» или имя существующей системы. "
+        "Если такие документы нужны регулярно, а системы нет, подумайте о системе-производителе отдельным РП."
+    )
+
+
+def run_advice(args: list[str]) -> None:
+    """artifactor.py --advice <result.json> [--producer П]: печатает подсказку или ничего; всегда код 0."""
+    producer = args[args.index("--producer") + 1] if "--producer" in args and args.index("--producer") + 1 < len(args) else None
+    try:
+        with open(args[0], encoding="utf-8") as fh:
+            advice = producer_advice(json.load(fh), producer)
+    except (OSError, json.JSONDecodeError):
+        advice = None  # без читаемого результата подсказывать нечего: замок уже отказал бы выше
+    if advice:
+        print(advice)
+    sys.exit(0)
+
+
+def run_registry_check(args: list[str]) -> None:
+    """artifactor.py --check-registry <result.json> [--title Т] [--ai-kind К --ai-answer О
+    [--ai-unsure] [--pilot-decision Р]]: 0 — REGISTRY_OK <источник> <запись>,
+    4 — REGISTRY_BLOCK <причина>, 5 — REGISTRY_ASK <вопрос к пилоту>."""
+    def option(flag):
+        return args[args.index(flag) + 1] if flag in args and args.index(flag) + 1 < len(args) else None
+
+    ai = {
+        "kind": option("--ai-kind"),
+        "answer": option("--ai-answer"),
+        "unsure": "--ai-unsure" in args,
+        "pilot": option("--pilot-decision"),
+    }
+    try:
+        with open(args[0], encoding="utf-8") as fh:
+            result = json.load(fh)
+    except (OSError, json.JSONDecodeError) as exc:
+        print(f"REGISTRY_BLOCK результат Артефактора не читается ({exc})")
+        sys.exit(4)
+    code, detail = check_registry(result, option("--title"), ai)
+    label = {0: "OK", 4: "BLOCK", 5: "ASK"}[code]
+    print(f"REGISTRY_{label} {detail}")
+    sys.exit(code)
+
+
 def main() -> None:
+    if len(sys.argv) > 2 and sys.argv[1] == "--check-registry":
+        run_registry_check(sys.argv[2:])
+    if len(sys.argv) > 2 and sys.argv[1] == "--advice":
+        run_advice(sys.argv[2:])
     if len(sys.argv) > 1:
         text = " ".join(sys.argv[1:])
     else:
@@ -244,8 +502,9 @@ def main() -> None:
             "confidence": "high",
             "routing_tag": task_type,
             "resolution_path": "keyword",
-            "schema_version": 3,
+            "schema_version": 4,
             "result_type": result_type,
+            "pair_link": dict(KEYWORD_PAIR_LINK),
             "expected_result_kind": expected_result_kind,
             "result_kind_resolution": result_kind_resolution,
             # Стратегическая связь не выводится из ключевых слов: Артефактор
