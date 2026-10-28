@@ -25,8 +25,12 @@
 #     allow без проверки (не канонический чекаут governance-репо).
 #
 # Честный предел гарантии: Bash-ветка матчит только явные cat/sed/head/tail/
-# grep с литеральным путём карточки в тексте команды -- динамические команды
-# (переменные, конкатенация пути) не распознаются и проходят как allow.
+# grep/less с литеральным путём карточки в тексте команды -- динамические
+# команды (переменные, конкатенация пути) не распознаются и проходят как
+# allow. General-purpose interpreters (python3 and the like) are the same
+# known gap on purpose: whether a `python3 -c '...'` command actually reads
+# the card cannot be decided by a bash regex without false positives, so no
+# attempt is made here (WP-484 F257 M5, consensus with Kimi+Codex, 28.10).
 #
 # Кэш свежести: ls-remote -- сетевой вызов, не на каждое чтение (Codex,
 # та же пир-сессия). Ключ -- toplevel репозитория + HEAD; TTL ниже.
@@ -126,7 +130,7 @@ target_path_for() {
       # The original five verbs keep their loose match (anywhere in the command). The
       # added ones must open a command segment: words like `more` or `nl` occur in commit
       # messages and must not turn `git commit -m '...'` into a card read.
-      printf '%s' "$cmd" | grep -qE '(^|[;&|[:space:]])(cat|sed|head|tail|grep)([[:space:]]|$)' \
+      printf '%s' "$cmd" | grep -qE '(^|[;&|[:space:]])(cat|sed|head|tail|grep|less)([[:space:]]|$)' \
         || printf '%s' "$cmd" | grep -qE '(^|[;&|(])[[:space:]]*(egrep|rg|awk)([[:space:]]|$)' || return 0
       # `git show <ref>:<card>` is the read this gate's own deny text recommends.
       printf '%s' "$cmd" | grep -qE '(^|[;&|(])[[:space:]]*git[[:space:]]+(show|cat-file)([[:space:]]|$)' && return 0

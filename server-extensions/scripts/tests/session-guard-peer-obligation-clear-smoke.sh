@@ -37,6 +37,10 @@ GOV_REPO="$GOV_REPO_REAL"
 export IWE_ROOT IWE_GOVERNANCE_REPO="$GOV_REPO"
 mkdir -p "$IWE_ROOT/$GOV_REPO/scripts"
 cp "$OBLIGATION_CLI_REAL" "$IWE_ROOT/$GOV_REPO/scripts/"
+# close_obligation.py imports sibling modules (some lazily, inside functions); copying the CLI
+# alone fails with ModuleNotFoundError, so take every sibling module and lib/ instead of a list
+cp "$(dirname "$OBLIGATION_CLI_REAL")"/*.py "$IWE_ROOT/$GOV_REPO/scripts/"
+cp -R "$(dirname "$OBLIGATION_CLI_REAL")/lib" "$IWE_ROOT/$GOV_REPO/scripts/lib"
 cat > "$IWE_ROOT/$GOV_REPO/scripts/ledger-append.sh" <<'SH'
 #!/usr/bin/env bash
 python3 - "$@" <<'PY'
