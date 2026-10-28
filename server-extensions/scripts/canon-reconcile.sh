@@ -228,7 +228,7 @@ CONFLICTS_EOF
 # total), because every second spent waiting here, while earlier locks are
 # already held, counts against a waiting writer's own 60 s budget.
 LEDGER_LOCKDIRS=""
-HOSTNAME_NOW="${HOSTNAME:-$(cat /proc/sys/kernel/hostname 2>/dev/null || echo unknown)}"   # same derivation as ledger-append.sh, so its stale-owner check matches ours
+HOSTNAME_NOW="${HOSTNAME:-$(python3 -c 'import socket; print(socket.gethostname())' 2>/dev/null || echo unknown)}"   # same derivation as ledger-append.sh, including macOS without /proc
 
 # Removes only lock directories this run created: the owner record is ours, or
 # not written yet (interrupted right after our mkdir; nobody else steals an
@@ -259,18 +259,24 @@ lock_budget_left() {
 }
 
 # pid_gone <pid>: true only when the process provably does not exist. A failed
-# `kill -0` alone is not proof: it also fails with EPERM for a live process of
-# another user. Without /proc and without ps it answers "not gone" (a stale lock
-# is then waited out, never taken). Known limit: /proc mounted with hidepid=2
-# hides other users' live processes.
+# `kill -0` in Bash cannot distinguish ESRCH from EPERM for a live process of
+# another user. Python is already required by this script and exposes both.
 pid_gone() {
-  kill -0 "$1" 2>/dev/null && return 1
-  if [ -d /proc/self ]; then
-    [ ! -d "/proc/$1" ]
-  else
-    command -v ps >/dev/null 2>&1 || return 1
-    ! ps -p "$1" >/dev/null 2>&1
-  fi
+  python3 - "$1" <<'PYEOF'
+import os
+import sys
+
+raw = sys.argv[1]
+if not raw.isdecimal() or int(raw) <= 0:
+    raise SystemExit(1)
+try:
+    os.kill(int(raw), 0)
+except ProcessLookupError:
+    raise SystemExit(0)
+except OSError:
+    raise SystemExit(1)
+raise SystemExit(1)
+PYEOF
 }
 
 # ledger_flock <fd>: exclusive flock(2) on an already open descriptor within the

@@ -18,6 +18,11 @@ import re
 import sys
 
 FILE_LINE_RE = re.compile(r"^(\d{4}-\d{2}/\d{2}/[^/]+)/")
+# Quick Close sessions leave no folder, only a flat ORZ file <YYYY-MM>/<name>.md (WP-484 F257 M4a).
+FLAT_ORZ_RE = re.compile(r"^\d{4}-\d{2}/[^/]+\.md$")
+FLAT_FINAL = "ОРЗ-файл есть (Quick Close)"
+FLAT_SCAFFOLD = "ОРЗ-заготовка не заполнена"
+FLAT_MISSING = "ОРЗ-файл не читается"
 
 
 def classify_semaphore(name: str) -> str | None:
@@ -85,7 +90,37 @@ def resolve_peer_folders(fields: dict, sessions_dir: str) -> list[str]:
     return []
 
 
+def resolve_flat_orz(fields: dict, sessions_dir: str) -> list[str]:
+    """Flat ORZ file named by the semaphore's `orz_file:` for a session without a folder.
+
+    A missing file is still returned (reported as absent), so a session that opened
+    but never wrote its ORZ file is not invisible.
+    """
+    orz = fields.get("orz_file", "")
+    if not FLAT_ORZ_RE.match(orz) or ".." in orz.split("/"):
+        return []
+    return [orz]
+
+
+def flat_orz_candidates(slug: str, ts: str) -> list[str]:
+    """Flat ORZ paths a closed session with this slug may have left (month taken from the event)."""
+    if not slug or len(ts) < 10 or "/" in slug or ".." in slug:
+        return []
+    month, day = ts[0:7], ts[0:10]
+    return [f"{month}/{slug}.md", f"{month}/{day}-{slug}.md"]
+
+
 def report_status(folder_path: str) -> str:
+    if os.path.isfile(folder_path):
+        # `open` writes a scaffold with `duration_h: ~`; a closed session replaces it.
+        try:
+            with open(folder_path, encoding="utf-8", errors="replace") as handle:
+                head = handle.read(4000)
+        except OSError:
+            return FLAT_MISSING
+        if re.search(r"^duration_h:\s*~\s*$", head, flags=re.MULTILINE):
+            return FLAT_SCAFFOLD
+        return FLAT_FINAL
     if os.path.isfile(os.path.join(folder_path, "report.md")):
         return "report.md есть"
     if os.path.isfile(os.path.join(folder_path, "report-draft.md")):
@@ -121,7 +156,10 @@ def scan_semaphores(wp: str, sem_dir: str, sessions_dir: str, exclude_session_id
         opened_at = fields.get("opened_at") or fields.get("created_at") or ""
         if opened_at and opened_at < cutoff:
             continue  # outside the reporting window -- an old unresolved gap belongs to Day/Week Close triage, not here
-        for folder in resolve_peer_folders(fields, sessions_dir):
+        # A session with a folder is listed by the folder (its ORZ file is the same session);
+        # only a folderless Quick Close session falls back to the flat ORZ file.
+        folders = resolve_peer_folders(fields, sessions_dir) or resolve_flat_orz(fields, sessions_dir)
+        for folder in folders:
             existing = found.get(folder)
             if existing is None or opened_at > existing.get("opened_at", ""):
                 found[folder] = {"status": status, "opened_at": opened_at, "source": "semaphore"}
@@ -172,6 +210,9 @@ def scan_ledger(wp: str, ledger_dir: str, sessions_dir: str, days: int = 7):
                 if kind in CLOSE_KINDS and data.get("wp") == wp and data.get("slug"):
                     slug = data["slug"]
                     ts = data.get("ts", "")
+                    for flat in flat_orz_candidates(slug, ts):
+                        if os.path.isfile(os.path.join(sessions_dir, flat)) and flat not in found:
+                            found[flat] = {"status": "closed (ledger)", "opened_at": ts, "source": "ledger"}
                     for month_dirname in os.listdir(sessions_dir) if os.path.isdir(sessions_dir) else []:
                         candidate_root = os.path.join(sessions_dir, month_dirname)
                         if not os.path.isdir(candidate_root):
@@ -231,7 +272,7 @@ def main():
     # gap (missing/draft report, or still open) -- that keeps a busy WP's
     # output from scrolling through its entire closed, reported history.
     latest = all_rows[-1]
-    rows = [r for r in all_rows[:-1] if r[2] != "report.md есть" or r[1]["status"].split(" ")[0] == "open"]
+    rows = [r for r in all_rows[:-1] if r[2] not in ("report.md есть", FLAT_FINAL) or r[1]["status"].split(" ")[0] == "open"]
     rows.append(latest)
 
     print(f"WP-SESSIONS {args.wp}: {len(rows)} сессия(й) за {args.window_days} дней (последняя + оставшиеся без финализированного отчёта/ещё открытые)")

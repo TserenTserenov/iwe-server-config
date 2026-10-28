@@ -529,6 +529,47 @@ if [ -n "$ADD_SEGMENT" ]; then
   fi
 fi
 
+# git add <path> / git restore --staged в замороженном каноне (РП-561 Ф54, 28.10).
+# Заморозка (РП-520/РП-484 Ф104) запрещает прямую запись в канонические чекауты
+# $WORKSPACE_ROOT и $WORKSPACE_ROOT/DS-my-strategy: правка идёт из изолированной
+# копии. Стейдж в каноне молча пачкает общий индекс, и чужой коммит заберёт
+# файлы этого агента. Набор путей повторяет политику session-guard.sh:
+# IWE_FROZEN_CANONICAL_PATH не задана — оба пути; задана непустой — только он;
+# задана пустой — заморозки нет. Изолированная копия — другой toplevel, не блокируется.
+stage_repo_of() {  # <segment> -> toplevel of the repo the git call targets
+  local seg="$1" dir="${CWD:-$PWD}" c
+  c=$(printf '%s' "$seg" | sed -nE 's/.*(^|[[:space:]])-C[[:space:]]+("([^"]*)"|'"'"'([^'"'"']*)'"'"'|[^[:space:]]+).*/\2/p' | head -1 | tr -d "\"'")
+  if [ -n "$c" ]; then
+    case "$c" in /*) dir="$c" ;; *) dir="$dir/$c" ;; esac
+  fi
+  (cd "$dir" 2>/dev/null && git rev-parse --show-toplevel 2>/dev/null | { read -r t && (cd "$t" && pwd -P); }) || true
+}
+frozen_canon_paths() {
+  if [ -z "${IWE_FROZEN_CANONICAL_PATH+x}" ]; then
+    printf '%s\n' "$WORKSPACE_ROOT/DS-my-strategy" "$WORKSPACE_ROOT"
+  elif [ -n "$IWE_FROZEN_CANONICAL_PATH" ]; then
+    printf '%s\n' "$IWE_FROZEN_CANONICAL_PATH"
+  fi
+}
+STAGE_SEGMENT="$(git_segment add)"
+RESTORE_SEGMENT=$(git_segment restore)
+if [ -n "$RESTORE_SEGMENT" ] && echo "$RESTORE_SEGMENT" | grep -qE -- '(^|[[:space:]])(--staged|-[a-zA-Z]*S[a-zA-Z]*)([[:space:]]|$)'; then
+  STAGE_SEGMENT+="${STAGE_SEGMENT:+$'\n'}$RESTORE_SEGMENT"
+fi
+if [ -n "$STAGE_SEGMENT" ]; then
+  while IFS= read -r seg; do
+    [ -n "$seg" ] || continue
+    top=$(stage_repo_of "$seg")
+    [ -n "$top" ] || continue
+    while IFS= read -r frozen; do
+      [ -n "$frozen" ] || continue
+      if [ "$top" = "$(cd "$frozen" 2>/dev/null && pwd -P || printf '%s' "$frozen")" ]; then
+        block "git add / git restore --staged в замороженном каноне ($top) запрещён: индекс общий, чужой коммит заберёт твои файлы. Открой изолированную копию ((cd DS-my-strategy && bash ../scripts/session-guard.sh open --isolate --wp WP-N …)) и стейдж там; для чужого репозитория — git -C <путь> add."
+      fi
+    done < <(frozen_canon_paths)
+  done <<< "$STAGE_SEGMENT"
+fi
+
 # git stash pop/apply возвращает содержимое чужой заначки целиком, без разбора по
 # файлам — слепой pop/apply молча теряет уже закоммиченные/задеплоенные артефакты,
 # если заначка содержит удаления (WP-547, 03.09: именно так был утерян файл уже

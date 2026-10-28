@@ -1300,6 +1300,17 @@ EOF
 
 Если запись упала (директория недоступна, диск полон) — не блокировать финализацию: сообщить пилоту одной строкой и продолжить, Шаг 4.5.1 подхватит `$GUARD_ORZ` в PATHS независимо от результата.
 
+**4.5.0а Поле «Следующий шаг» карточки РП (WP-484 Ф257, M2/M6).** Пир-сессия закрывается мимо раннера Quick Close, поэтому поле, с которого начнётся следующая сессия, обновляет писатель сам, ДО коммита:
+
+1. В карточке РП (`inbox/WP-N/WP-N.md`, секция `## Осталось`) переписать на месте поле «Следующий шаг»: одна строка на фазу, `ФN — первое действие`; параллельные сессии того же РП — своя строка фазы заменяется, строки других фаз остаются. Не «продолжай по плану», не «см. фазы», не прежнее значение. Формат и стоп-фразы — `protocol-close.md` § «Формат «Осталось»». Карточку закоммитить и опубликовать в репозитории управления тем же путём, что остальные изменения РП (Шаг 3.6.5).
+2. Прогнать проверку (режим наблюдения: предупреждает, не блокирует; `session-guard.sh close` на Шаге 4.5.2 вызывает ту же проверку ещё раз):
+
+```bash
+bash "${IWE_SCRIPTS:-$HOME/IWE/scripts}/wp-handoff-peer-check.sh" --agent claude-code --slug "$SESSION_ID" || true
+```
+
+Предупреждение `HANDOFF_*` → поправить поле и повторить проверку, прежде чем идти к 4.5.1. Читатель на следующей сессии: `wp-handoff-show.sh WP-N` (его вызывает `declare-intent.sh`).
+
 **4.5.1 Commit + push:**
 
 ```bash
@@ -1317,11 +1328,22 @@ cd "$SESSIONS_DIR"
 # того же общего файла, ровно тот класс бага, который черновик закрывает.
 PATHS=("$MONTH/$DAY/$SESSION_ID/" "$GUARD_ORZ")
 git add "${PATHS[@]}"
+# Заявка файлов ИЗНУТРИ репозитория сессий (РП-484 Ф257, 28.10): охранник берёт репозиторий
+# заявки из текущего каталога; заявка из корня IWE записывается за корневым репозиторием,
+# и закрытие отказывает «commit changes an unclaimed sessions path». Здесь cwd уже $SESSIONS_DIR.
+for CLAIM in "$GUARD_ORZ" $(git diff --cached --name-only -- "$MONTH/$DAY/$SESSION_ID/"); do
+  bash "${IWE_SCRIPTS:-$HOME/IWE/scripts}/session-guard.sh" note-file "${CLAIM#"$SESSIONS_DIR"/}" --wp "<WP-NNN>" --slug "$SESSION_ID" --agent claude-code \
+    || { echo "заявка файла $CLAIM не прошла" >&2; exit 1; }
+done
 # Task text: written beforehand with a file-writing tool (not the shell) to
 # $HOME/IWE/.iwe-runtime/peer-prompts/<SESSION_ID>-task.txt — never inline it in quotes.
 TASK_FILE="$HOME/IWE/.iwe-runtime/peer-prompts/$SESSION_ID-task.txt"
 test -s "$TASK_FILE" || { echo "нет файла задачи $TASK_FILE — записать его инструментом записи файлов" >&2; exit 1; }
-{ printf 'feat(peer): %s — ' "$SESSION_ID"; cat "$TASK_FILE"; } | git commit -F - -- "${PATHS[@]}"
+# Заявлять коммит только после УСПЕШНОГО коммита: при отказе HEAD чужой, и note-commit заявил бы
+# чужой коммит (РП-484 Ф257, 27.10) — после публикации такую заявку снимает только
+# `note-commit --forget` для коммита, не пересекающегося с файлами сессии.
+{ printf 'feat(peer): %s — ' "$SESSION_ID"; cat "$TASK_FILE"; } | git commit -F - -- "${PATHS[@]}" \
+  || { echo "коммит сессии отклонён — note-commit НЕ вызывать, разобрать причину" >&2; exit 1; }
 OUR_SHAS=("$(git -C "$SESSIONS_DIR" rev-parse HEAD)")   # публикуем ровно свои коммиты по одному, см. блок публикации ниже
 
 # WP-537: заявить свой коммит в семафоре — тот же паттерн, что на Шаге 3.6.5,
@@ -1361,7 +1383,9 @@ bash "${IWE_SCRIPTS:-$HOME/IWE/scripts}/session-guard.sh" note-publication "$PUB
 REPO_ROOT=$(git rev-parse --show-toplevel)
 git -C "$REPO_ROOT" fetch -q origin main
 for SHA in "${OUR_SHAS[@]}"; do
-    IWE_AGENT=claude-code bash "$HOME/IWE/DS-my-strategy/scripts/ds-publish.sh" "$REPO_ROOT" high \
+    # IWE_PUBLICATION_SESSION_ID обязателен: без него квитанция публикации (v2) не записывается
+    # (в журнале пропусков «session=none»), и закрытие отказывает «lacks exact publication receipt».
+    IWE_AGENT=claude-code IWE_PUBLICATION_SESSION_ID="$SESSION_ID" bash "$HOME/IWE/DS-my-strategy/scripts/ds-publish.sh" "$REPO_ROOT" high \
         --from-commit "$SHA" --exact-commit "$SHA" --reason "peer-session $SESSION_ID close" \
         || { echo "ds-publish --exact-commit не удался для $SHA — см. вывод шлюза" >&2; exit 1; }
 done

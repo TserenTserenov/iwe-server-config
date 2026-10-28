@@ -1081,6 +1081,14 @@ wp: <WP-NNN или unknown>
 
 ### 4.5 Commit + push
 
+**Поле «Следующий шаг» карточки РП (WP-484 Ф257, M2/M6) — до коммита.** Этот скилл не вызывает `session-guard.sh close`, поэтому проверку поля, которую у Claude-писателя запускает `close`, здесь запускаешь сам. Сначала переписать на месте поле «Следующий шаг» в `## Осталось` карточки РП: одна строка на фазу, `ФN — первое действие`; параллельные сессии того же РП — своя строка фазы заменяется, чужие остаются; не «продолжай по плану», не прежнее значение (формат — `protocol-close.md` § «Формат «Осталось»»). Затем проверка (режим наблюдения: предупреждает, не блокирует):
+
+```bash
+bash "${IWE_SCRIPTS:-$HOME/IWE/scripts}/wp-handoff-peer-check.sh" --agent kimi --wp "$PEER_WP" || true
+```
+
+Предупреждение `HANDOFF_*` → поправить поле и повторить проверку. Семафор Kimi ищется по номеру РП; два открытых семафора пир-сессии на один РП скрипт не угадывает, а пишет `SEMAPHORE_AMBIGUOUS` в журнал наблюдения.
+
 ```bash
 # WP-526 Ф2: коммит и push сессии идут в MC-sessions ($SESSIONS_DIR), не
 # в governance-репо. session-manifest-write.sh живёт в DS-my-strategy
@@ -1152,7 +1160,8 @@ bash "$HOME/IWE/${IWE_GOVERNANCE_REPO:-DS-strategy}/scripts/session-manifest-wri
 REPO_ROOT=$(git rev-parse --show-toplevel)
 git -C "$REPO_ROOT" fetch -q origin main
 for SHA in "${OUR_SHAS[@]}"; do
-  bash "$HOME/IWE/DS-my-strategy/scripts/ds-publish.sh" "$REPO_ROOT" high \
+  # IWE_PUBLICATION_SESSION_ID обязателен: без него квитанция публикации (v2) не записывается
+  IWE_PUBLICATION_SESSION_ID="$SESSION_ID" bash "$HOME/IWE/DS-my-strategy/scripts/ds-publish.sh" "$REPO_ROOT" high \
     --from-commit "$SHA" --exact-commit "$SHA" --reason "peer-session $SESSION_ID close" \
     || { echo "ds-publish --exact-commit не удался для $SHA — см. вывод шлюза" >&2; exit 1; }
 done

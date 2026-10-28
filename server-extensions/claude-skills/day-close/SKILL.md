@@ -50,6 +50,16 @@ Day Close — кросс-РП инфраструктурная операция.
 
 **Правило корня.** Все изменения планов, карточек и итогов выполняются в `$GOV_REPO_ROOT`. Относительные пути `DS-my-strategy/…` ниже означают этот корень. Переход к каноническим правкам при ошибке подготовки запрещён.
 
+**Правило путей записи (РП-561 Ф32, 27.10, пир-сессия `2026-10-27-22-wp561-f32-day-close-paths`).** Инструмент Edit/Write не раскрывает переменные оболочки и не знает, куда ведёт путь. Поэтому ПЕРЕД КАЖДОЙ записью файла репозитория планов (Edit, Write, перенос) выполнить в том же шаге, после префикса `--context`, проверку реального каталога и подставлять в Edit/Write только выведенный ею абсолютный путь; значение не пересчитывать и не подменять после проверки:
+```bash
+GOV_REAL=$(realpath "${GOV_REPO_ROOT:?}") && ISO_REAL=$(realpath "$HOME/IWE/.iwe-runtime/isolated-worktrees") && CANON_REAL=$(realpath "$HOME/IWE/DS-my-strategy") && case "$GOV_REAL/" in "$ISO_REAL"/*) [ "$GOV_REAL" != "$CANON_REAL" ] ;; *) false ;; esac || { echo "STOP: корень копии не проверен"; exit 1; }
+printf '%s\n' "$GOV_REAL"
+# целевой файл не выходит за копию (символические ссылки и «..» разрешаются):
+TARGET_REAL=$(python3 -c 'import os,sys; print(os.path.realpath(sys.argv[1]))' "$GOV_REAL/<относительный путь файла>") && case "$TARGET_REAL/" in "$GOV_REAL"/*) ;; *) echo "STOP: цель вне копии"; exit 1 ;; esac
+printf '%s\n' "$TARGET_REAL"
+```
+Писать ровно в выведенный `TARGET_REAL` (не в исходный путь). Проверка не прошла (пусто, канон, символическая ссылка на канон, цель вне копии) → СТОП, ничего не писать, сообщить пилоту. Граница правила: оно защищает от ошибки агента (пустая переменная, путь от канона, ссылка), а не от замены каталога другим процессом между проверкой и записью и не от жёсткой ссылки на файл канона; такую гарантию даст только записывающий механизм с проверкой при открытии файла (по образцу `wp-context-guarded-edit` для карточек РП) — отдельная работа, не часть этого правила. Дальше в шагах «`$GOV_REPO_ROOT/...`» значит этот проверенный абсолютный путь; путь вида `DS-my-strategy/...` без корня копии в общий каталог не использовать.
+
 **Граница мостика (РП-561 Ф32).** Записи своего запуска Claude Code идут через `IWE_LEDGER_WRITE_DIR` во внешнюю очередь, а чтение старой истории пока использует `IWE_LEDGER_DIR`. Закреплённый помощник связывает родной идентификатор с очередью; перед завершением `--finish` требует подтверждение публикации её стабильного снимка. Поздние хуки той же сессии сохраняют привязку и отдельно публикуют свои записи. Маршрут только для своего запуска; остальные производители и читатели не объявлены перенесёнными. `$IWE_OPEN_SESSIONS_LOG` указывает на снимок открытых сессий в изолированной копии; `day-close.sh` пишет `exocortex/` и `current/sessions-today.md` туда же. Успешный `--finish` сохраняет эти выходы в `.iwe-runtime/day-close-backups/` вне удаляемых рабочих копий и обновляет указатель последнего завершённого снимка. Штатное восстановление без явного пути читает этот снимок; после отказа или отмены можно проверить сохранённую копию: `bash ~/IWE/FMT-exocortex-template/scripts/restore-from-exocortex.sh "$DAY_CLOSE_WORKTREE" --dry-run`.
 
 **Владение запуском.** После успешного `--prepare` сохранить токен из вывода как неизменяемое значение этой сессии. Во всех командах ниже вместо `<токен из шага 0.5>` подставлять именно его, не перечитывать новый токен из общего файла. `--context` проверяет владельца, ветку и принадлежность копии репозиторию; только затем возвращает окружение. В новом Bash-вызове сначала выполнить этот префикс, в том числе перед одиночными командами из текста. При отказе остановить затронутый шаг. Для Edit/Write использовать корень из последней успешной проверки и проверить владение непосредственно перед записью. Дата `$IWE_CLOSE_DATE` фиксируется при подготовке и не меняется после полуночи.
@@ -163,7 +173,7 @@ bash ${GOV_REPO_ROOT:?}/scripts/ledger-append.sh day "$IWE_CLOSE_DATE" pilot_ans
 ```
 Формулировка и поля идентичны `scripts/day-preclose.sh` — тот же скрипт остаётся терминальным запасным путём.
 
-**2. Приоритеты → `current/priorities.yaml`** (пропущено пилотом → файл не трогать; Day Open покажет stale-предупреждение при устаревании ≥3 дня):
+**2. Приоритеты → `$GOV_REPO_ROOT/current/priorities.yaml`** (пропущено пилотом → файл не трогать; Day Open покажет stale-предупреждение при устаревании ≥3 дня):
 ```yaml
 # Утренние приоритеты на сегодня — обновлять вечером или утром
 # Порядок = убывающий приоритет (первый = самый важный)
@@ -195,20 +205,20 @@ bash ${GOV_REPO_ROOT:?}/scripts/ledger-append.sh day "$IWE_CLOSE_DATE" conversat
 
 ### 5. Governance batch
 
-**5a.** `bash ~/IWE/scripts/day-close-step-log.sh start 2a` — Обновить WeekPlan (`DS-my-strategy/current/Plan W{N}...`): статусы РП. **Grep по номеру РП** — обновить ВСЕ упоминания. `bash ~/IWE/scripts/day-close-step-log.sh end 2a` [[gate]]
+**5a.** `bash ~/IWE/scripts/day-close-step-log.sh start 2a` — Обновить WeekPlan (`$GOV_REPO_ROOT/current/Plan W{N}...`): статусы РП. **Grep по номеру РП** — обновить ВСЕ упоминания. `bash ~/IWE/scripts/day-close-step-log.sh end 2a` [[gate]]
 
-**5b.** `bash ~/IWE/scripts/day-close-step-log.sh start 2b` — Обновить DayPlan `DS-my-strategy/current/DayPlan YYYY-MM-DD.md`: статусы ВСЕХ строк (РП + ad-hoc). Done → зачеркнуть. Для строк с номером РП — сформировать список «РП → новый статус», затем по возрастанию номера вызывать `DC_CONTEXT=$(bash "$HOME/IWE/.iwe-runtime/day-close-interactive.sh" --context '<токен из шага 0.5>') || exit 1; eval "$DC_CONTEXT"; bash "${GOV_REPO_ROOT:?}/scripts/wp-status-patch.sh" <N> --dayplan-path "$GOV_REPO_ROOT/current/DayPlan $IWE_CLOSE_DATE.md" --dayplan-status <статус>` (WP-484 Ф14) вместо ручного Edit; ad-hoc строки без номера РП — по-прежнему Edit. Любой ненулевой exit — остановиться на этом РП, НЕ вызывать `end 2b`, зафиксировать номер и код ошибки, доисправить Edit-ом вручную; скрипт идемпотентен — после исправления безопасно повторить весь список с начала. `bash ~/IWE/scripts/day-close-step-log.sh end 2b` [[gate]]
+**5b.** `bash ~/IWE/scripts/day-close-step-log.sh start 2b` — Обновить DayPlan `$GOV_REPO_ROOT/current/DayPlan YYYY-MM-DD.md`: статусы ВСЕХ строк (РП + ad-hoc). Done → зачеркнуть. Для строк с номером РП — сформировать список «РП → новый статус», затем по возрастанию номера вызывать `DC_CONTEXT=$(bash "$HOME/IWE/.iwe-runtime/day-close-interactive.sh" --context '<токен из шага 0.5>') || exit 1; eval "$DC_CONTEXT"; bash "${GOV_REPO_ROOT:?}/scripts/wp-status-patch.sh" <N> --dayplan-path "$GOV_REPO_ROOT/current/DayPlan $IWE_CLOSE_DATE.md" --dayplan-status <статус>` (WP-484 Ф14) вместо ручного Edit; ad-hoc строки без номера РП — по-прежнему Edit. Любой ненулевой exit — остановиться на этом РП, НЕ вызывать `end 2b`, зафиксировать номер и код ошибки, доисправить Edit-ом вручную; скрипт идемпотентен — после исправления безопасно повторить весь список с начала. `bash ~/IWE/scripts/day-close-step-log.sh end 2b` [[gate]]
 
-**5c.** `bash ~/IWE/scripts/day-close-step-log.sh start 2c` — Обновить `DS-my-strategy/docs/WP-REGISTRY.md`: статусы + даты + **done-форматирование**. Для того же списка «РП → новый статус» — вызывать `DC_CONTEXT=$(bash "$HOME/IWE/.iwe-runtime/day-close-interactive.sh" --context '<токен из шага 0.5>') || exit 1; eval "$DC_CONTEXT"; bash "${GOV_REPO_ROOT:?}/scripts/wp-status-patch.sh" <N> --dayplan-path "$GOV_REPO_ROOT/current/DayPlan $IWE_CLOSE_DATE.md" --registry-status <emoji>` (или `--done`, закрывая сразу оба файла одним вызовом, если РП завершён) вместо ручного Edit статуса; та же обработка сбоя, что в 5b (стоп без `end 2c`, фиксация, ручной фикс, безопасный повтор всего списка). Скрипт не создаёт зачёркивание — done-РП по-прежнему требует отдельного Edit: зачеркнуть номер, приоритет, название, репо, бюджет (`~~...~~`); снять bold с названия; эмодзи ✅ НЕ зачёркивать (см. `.claude/rules/formatting.md §Таблицы с РП`). Тильду внутри ячеек заменить (`~6.5h` → `6.5h`). `bash ~/IWE/scripts/day-close-step-log.sh end 2c` [[gate]]
+**5c.** `bash ~/IWE/scripts/day-close-step-log.sh start 2c` — Обновить `$GOV_REPO_ROOT/docs/WP-REGISTRY.md`: статусы + даты + **done-форматирование**. Для того же списка «РП → новый статус» — вызывать `DC_CONTEXT=$(bash "$HOME/IWE/.iwe-runtime/day-close-interactive.sh" --context '<токен из шага 0.5>') || exit 1; eval "$DC_CONTEXT"; bash "${GOV_REPO_ROOT:?}/scripts/wp-status-patch.sh" <N> --dayplan-path "$GOV_REPO_ROOT/current/DayPlan $IWE_CLOSE_DATE.md" --registry-status <emoji>` (или `--done`, закрывая сразу оба файла одним вызовом, если РП завершён) вместо ручного Edit статуса; та же обработка сбоя, что в 5b (стоп без `end 2c`, фиксация, ручной фикс, безопасный повтор всего списка). Скрипт не создаёт зачёркивание — done-РП по-прежнему требует отдельного Edit: зачеркнуть номер, приоритет, название, репо, бюджет (`~~...~~`); снять bold с названия; эмодзи ✅ НЕ зачёркивать (см. `.claude/rules/formatting.md §Таблицы с РП`). Тильду внутри ячеек заменить (`~6.5h` → `6.5h`). `bash ~/IWE/scripts/day-close-step-log.sh end 2c` [[gate]]
 
 **5d.** `bash ~/IWE/scripts/day-close-step-log.sh start 2d` — Обновить снимок открытых сессий в проверенной копии: `bash "$DAY_CLOSE_WRAPPER" --refresh-sessions "<токен из шага 0.5>"`. Обёртка повторно проверяет владельца, рабочую копию и каталог назначения. При ошибке остановиться и сохранить копию для повтора. Не удалять строки из общего журнала по дате: открытые сессии определяются по действующим семафорам. `bash ~/IWE/scripts/day-close-step-log.sh end 2d` [[gate]]
 
 **5d.1 Зависшие семафоры (WP-484 Ф207, 17.10).** `bash ~/IWE/scripts/stale-sessions-report.sh` — таблица открытых сессий старше 30 мин с причиной (`expired`/`invalid-timestamp`/`long-running-valid`). Непустой вывод → показать пилоту, решение close/renew по каждой строке — его, не авто-закрывать (возраст не доказывает смерть сессии, WP-484 Ф49). [[narrative]]
 
-**5e.** Governance-синхронизация: новые репо/сервисы за день? → REPOSITORY-REGISTRY, navigation.md, MAP.002. [[narrative]]
+**5e.** Governance-синхронизация: новые репо/сервисы за день? → REPOSITORY-REGISTRY, navigation.md, MAP.002. Файл в репозитории планов — править в `$GOV_REPO_ROOT` и добавить в `DC_FILES`; файл в другом репозитории или в личной памяти — не править посреди закрытия в общем каталоге, записать в «Требует внимания». [[narrative]]
 
 **5f. WeekReport — ФАКТЫ ДНЯ (новый шаг, ОПТ-5):** [[narrative]] Если Week Open завершена (есть WeekReport W{N}.md):
-  - Открыть `DS-my-strategy/current/WeekReport W{N} YYYY-MM-DD.md`
+  - Открыть `$GOV_REPO_ROOT/current/WeekReport W{N} YYYY-MM-DD.md`
   - Добавить новый раздел `<details><summary><b>Итоги {День} {Дата}</b></summary>` **перед** `Итоги Пн-Вс` (в обратном порядке дат: сегодня → старше)
   - Содержимое: коммиты по репо, РП-статусы за день, carry-over блокеры
   - Формат: смотреть существующие разделы в WeekReport (таблицы, метрики, мультипликатор)
@@ -246,7 +256,7 @@ python3 ${GOV_REPO_ROOT:?}/scripts/day-close-weekstate-fill.py \
 - **Done WP context files (WP-530 "Осталось после Ф9", 19.08 peer-session с Codex).** Голый `mv` обходил `wp-context-guarded-edit` (защиту от гонки, поставленную 17.08) — параллельная сессия, тронувшая тот же файл между чтением статуса и переносом, теряла свою правку молча. Для каждой реально существующей папки `inbox/WP-{N}/WP-{N}.md`, у которой `status: done` находится именно в первом YAML frontmatter-блоке файла (не в тексте карточки — иначе ложные совпадения на цитаты статуса), вызвать:
   ```bash
   DC_CONTEXT=$(bash "$HOME/IWE/.iwe-runtime/day-close-interactive.sh" --context '<токен из шага 0.5>') || exit 1; eval "$DC_CONTEXT"
-  bash "$HOME/IWE/scripts/archive-done-wp.sh" {N}
+  bash "$HOME/IWE/scripts/archive-done-wp.sh" --day-close {N}
   ```
   `archive-done-wp.sh` сам находит `inbox/WP-{N}/WP-{N}.md`, обновляет frontmatter, делает `git mv` через `wp-context-guarded-edit`. Уже заархивированные РП автоматически не подхватятся повторно — их папки физически отсутствуют в `inbox/` после переноса.
 - Done РП → удалить строку из MEMORY.md (они уже в WP-REGISTRY и WeekPlan)
@@ -420,13 +430,13 @@ printf '%s\n' "${DIGEST_JSON:-digest не записан}"
 **в) Похвала:** что получилось, что было непросто но сделано.
 
 **г) Не забыто?**
-- Незакоммиченные изменения: `${IWE_SCRIPTS}/check-dirty-repos.sh` (сканирует ВСЕ репо, включая вложенные DS-IT-systems/*, DS-MCP/*). Если есть грязные → закоммитить и запушить ДО продолжения. [[gate]]
+- Незакоммиченные изменения: `${IWE_SCRIPTS}/check-dirty-repos.sh` (сканирует ВСЕ репо, включая вложенные DS-IT-systems/*, DS-MCP/*). Грязные репозитории: закоммитить и опубликовать ДО продолжения только изменения, сделанные в этой сессии (конкретные файлы, не `git add -A`); чужие и внесессионные изменения не стейджить, назвать их в «Требует внимания». Публикация: репозитории планов (DS) — только через `ds-publish.sh` из изолированной копии; остальные репозитории — штатным маршрутом публикации этого репозитория, проверенным до отправки (обычную отправку ветки без проверки маршрута не использовать). [[gate]]
 - **EXTENSION POINT (day-close checks):** `bash .claude/scripts/load-extensions.sh day-close checks` — exit 0 → `Read` каждый файл из вывода (alphabetic) → выполнить. Exit 1 → пропустить. Поддерживает `extensions/day-close.checks.md` И `extensions/day-close.checks.<suffix>.md`.
 - Незаписанные мысли / обещания кому-то — если упоминались раньше в сессии, зафиксировать в «Требует внимания», не спрашивать (пилот свободен).
 
 **д) Видео за день:** если `video.enabled: true` → проверить новые видео. [[narrative]]
 
-**е) Draft-list:** Pack обогащён за день → записать кандидата в `drafts/draft-list.md` (пилот уже свободен — не спрашивать вживую, зафиксировать как candidate на следующий разбор). [[narrative]]
+**е) Draft-list:** Pack обогащён за день → записать кандидата в `$GOV_REPO_ROOT/drafts/draft-list.md` (файл лежит в репозитории планов; добавить его в `DC_FILES` шага 15) (пилот уже свободен — не спрашивать вживую, зафиксировать как candidate на следующий разбор). [[narrative]]
 
 **ж) Задел на завтра:** [[narrative]]
 - С чего начать утром
@@ -438,7 +448,7 @@ printf '%s\n' "${DIGEST_JSON:-digest не записан}"
 
 `bash ~/IWE/scripts/day-close-step-log.sh start 9a`
 
-**14a.** [[gate]] Дописать секцию «Итоги дня» в DayPlan (шаблон — см. `memory/templates-dayplan.md § Шаблон итогов дня`), включая строку «Направления недели» из 13з.
+**14a.** [[gate]] Дописать секцию «Итоги дня» в DayPlan (файл — от `$GOV_REPO_ROOT`, по правилу путей записи; шаблон — см. `memory/templates-dayplan.md § Шаблон итогов дня`), включая строку «Направления недели» из 13з.
 
 **Валидация «Завтра начать с» (ADR-207):** поле не пустое + каждый pending РП упомянут + каждый содержит конкретный next action (не «продолжить работу»).
 
@@ -456,7 +466,7 @@ bash ${GOV_REPO_ROOT:?}/scripts/day-close-prepare.sh --verify-dayplan --for-date
 `bash ~/IWE/scripts/day-close-step-log.sh start 9b`
 
 **14b.** [[gate]] Дописать сводку итогов в WeekReport (split, ОПТ-5 WP-297):
-- Файл: `DS-my-strategy/current/WeekReport W{N} YYYY-MM-DD.md` (дата = первый день недели)
+- Файл: `$GOV_REPO_ROOT/current/WeekReport W{N} YYYY-MM-DD.md` (дата = первый день недели)
 - Если файла нет (старый цикл) — fallback в WeekPlan, пометить «требует split в session-prep следующей недели»
 - Формат: `<details><summary><b>Итоги {день} {дата}</b></summary>...</details>`
 - Порядок: свежие итоги СВЕРХУ (обратная хронология). Проверять: вставлять сразу ниже `</details>` последнего W18-summary, а не в конец файла.

@@ -49,9 +49,14 @@ log_decision() {
   local decision="$1" target="${2:-}" detail="${3:-}"
   local ts; ts=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
   mkdir -p "$(dirname "$LOG_FILE")" 2>/dev/null || return 0
+  # agent_id / agent_type / payload_keys: whether the hook sees subagent calls is read off
+  # this journal, not assumed (WP-484 F257 M5); empty when the payload does not carry them.
+  local who
+  who=$(printf '%s' "${INPUT:-}" | jq -c '{agent_id:(.agent_id // ""), agent_type:(.agent_type // ""), payload_keys:(keys? // [])}' 2>/dev/null) || who='{}'
+  [ -n "$who" ] || who='{}'
   jq -nc --arg ts "$ts" --arg sid "${CLAUDE_SESSION_ID:-}" --arg dec "$decision" \
-    --arg target "$target" --arg detail "$detail" \
-    '{ts:$ts, hook:"wp-card-read-gate", session_id:$sid, decision:$dec, target:$target, detail:$detail}' \
+    --arg target "$target" --arg detail "$detail" --argjson who "$who" \
+    '{ts:$ts, hook:"wp-card-read-gate", session_id:$sid, decision:$dec, target:$target, detail:$detail} + $who' \
     >> "$LOG_FILE" 2>/dev/null || true
 }
 
@@ -147,9 +152,12 @@ is_isolate_path() {
 # invalidated by HEAD moving (a stale cache keyed only by toplevel would
 # keep answering for an old HEAD after a local commit).
 sync_state_for() {
-  local toplevel="$1" head_oid cache_key cache_file now cached_head cached_at
+  # The optional branch names the server branch to compare with.  An isolated copy sits
+  # on its own session branch that does not exist on the server, so its freshness is asked
+  # about main (where the cards live); the canonical checkout keeps its current branch.
+  local toplevel="$1" branch="${2:-}" head_oid cache_key cache_file now cached_head cached_at
   head_oid=$(git -C "$toplevel" rev-parse HEAD 2>/dev/null) || { GATE_SYNC_STATUS="checker_unavailable"; return 0; }
-  cache_key=$(printf '%s' "$toplevel" | cksum | awk '{print $1}')
+  cache_key=$(printf '%s|%s' "$toplevel" "$branch" | cksum | awk '{print $1}')
   cache_file="$CACHE_DIR/$cache_key.cache"
   now=$(date +%s)
   if [ -f "$cache_file" ]; then
@@ -164,7 +172,7 @@ sync_state_for() {
   if [ -r "$GIT_SYNC_LIB" ]; then
     # shellcheck source=../../scripts/lib/git-sync-status.sh
     . "$GIT_SYNC_LIB"
-    check_git_sync_status "$toplevel" "" 8
+    check_git_sync_status "$toplevel" "$branch" 8
     GATE_SYNC_STATUS="$GIT_SYNC_STATUS"
     GATE_REMOTE_OID="$GIT_SYNC_REMOTE_OID"
   else
@@ -222,6 +230,96 @@ decide() {
   printf 'deny:отличается от снимка origin/main@%s' "${GATE_REMOTE_OID:0:12}"
 }
 
+# decide_isolate <toplevel> <relpath>: verdict for a card read inside a session's
+# isolated copy (WP-484 F257 M5).  Freshness is the server commit id from ls-remote
+# (sync_state_for), never the local origin/main, which can lag itself.  Prints
+#   allow | allow:<note> | unknown:<why> | deny:<why>
+# «unknown» is a distinct outcome (logged as unresolved): a missing server object is not
+# proof that the copy is current, and not proof that it is stale.
+decide_isolate() {
+  local toplevel="$1" relpath="$2" origin_content head_content origin_rc
+  GATE_REMOTE_OID="" GATE_HEAD_OID="" GATE_SYNC_STATUS=""
+  sync_state_for "$toplevel" main
+  case "$GATE_SYNC_STATUS" in
+    checker_unavailable|fetch_failed|NO_UPSTREAM|NOT_A_REPO)
+      printf 'unknown:статус свежести %s' "$GATE_SYNC_STATUS"; return 0 ;;
+  esac
+  [ -n "$GATE_REMOTE_OID" ] || { printf 'unknown:коммит сервера не определён'; return 0; }
+  if ! git -C "$toplevel" cat-file -e "${GATE_REMOTE_OID}^{commit}" 2>/dev/null; then
+    printf 'unknown:коммит сервера %s отсутствует в этой копии' "${GATE_REMOTE_OID:0:12}"; return 0
+  fi
+  origin_content=$(git -C "$toplevel" show "${GATE_REMOTE_OID}:${relpath}" 2>/dev/null); origin_rc=$?
+  # Not on the server at all: a card created in this copy, nothing to be stale against.
+  [ "$origin_rc" -eq 0 ] || { printf 'allow'; return 0; }
+  head_content=$(git -C "$toplevel" show "HEAD:${relpath}" 2>/dev/null) || head_content=""
+  if [ "$origin_content" = "$head_content" ]; then
+    if git -C "$toplevel" diff --quiet HEAD -- "$relpath" 2>/dev/null; then
+      printf 'allow'
+    else
+      printf 'allow:правка в работе (база карточки свежая, изменено рабочее дерево этой копии)'
+    fi
+    return 0
+  fi
+  if git -C "$toplevel" merge-base --is-ancestor "$GATE_REMOTE_OID" HEAD 2>/dev/null; then
+    printf 'allow:копия впереди сервера своими коммитами'; return 0
+  fi
+  printf 'deny:копия отстаёт, карточка отличается от серверной версии origin/main@%s' "${GATE_REMOTE_OID:0:12}"
+}
+
+# grep_card_area <tool_input_json> <payload_cwd>: for a Grep over a DIRECTORY that can
+# reach cards, prints that directory (symlinks and `..` resolved); prints nothing for
+# anything else.  `path` and `glob` are judged together: a card glob or a path inside the
+# card area.
+grep_card_area() {
+  local ti="$1" cwd="$2" p g base norm cardish=0
+  p=$(printf '%s' "$ti" | jq -r '.path // empty' 2>/dev/null)
+  g=$(printf '%s' "$ti" | jq -r '.glob // empty' 2>/dev/null)
+  if [ -z "$p" ]; then base="${cwd:-$PWD}"; else
+    case "$p" in /*) base="$p" ;; *) base="${cwd:-$PWD}/$p" ;; esac
+  fi
+  [ -d "$base" ] || return 0
+  norm=$(cd "$base" 2>/dev/null && pwd -P) || return 0
+  case "$norm" in
+    */inbox|*/inbox/WP-*|*/archive/wp-contexts|*/archive/wp-contexts/*) cardish=1 ;;
+  esac
+  if [ -n "$g" ]; then
+    case "$g" in *WP-*|*inbox*|*wp-contexts*) cardish=1 ;; esac
+  fi
+  # A search from a repo root without a card glob is not a card read (it is usually a code
+  # or script search): no verdict, so no false deny when a parallel session pushed a card.
+  [ "$cardish" = 1 ] && printf '%s' "$norm"
+  return 0
+}
+
+# decide_area <toplevel>: verdict for a directory-wide card search.  Prints
+#   allow | unknown:<why> | deny:<why>
+# deny only when the server version differs from this checkout in at least one card.
+decide_area() {
+  local toplevel="$1" changed count
+  # A repository that tracks no cards has nothing to be stale: no network call for it.
+  if [ -z "$(git -C "$toplevel" ls-files -- 'inbox/WP-*/WP-*.md' 'archive/wp-contexts' 2>/dev/null | head -1)" ]; then
+    printf 'allow'; return 0
+  fi
+  GATE_REMOTE_OID="" GATE_HEAD_OID="" GATE_SYNC_STATUS=""
+  sync_state_for "$toplevel" main
+  case "$GATE_SYNC_STATUS" in
+    checker_unavailable|fetch_failed|NO_UPSTREAM|NOT_A_REPO)
+      printf 'unknown:статус свежести %s' "$GATE_SYNC_STATUS"; return 0 ;;
+  esac
+  [ -n "$GATE_REMOTE_OID" ] || { printf 'unknown:коммит сервера не определён'; return 0; }
+  if ! git -C "$toplevel" cat-file -e "${GATE_REMOTE_OID}^{commit}" 2>/dev/null; then
+    printf 'unknown:коммит сервера %s отсутствует в этой копии' "${GATE_REMOTE_OID:0:12}"; return 0
+  fi
+  if git -C "$toplevel" merge-base --is-ancestor "$GATE_REMOTE_OID" HEAD 2>/dev/null; then
+    printf 'allow'; return 0
+  fi
+  changed=$(git -C "$toplevel" diff --name-only "$GATE_HEAD_OID" "$GATE_REMOTE_OID" -- 'inbox/WP-*/WP-*.md' 'archive/wp-contexts' 2>/dev/null)
+  if [ -z "$changed" ]; then printf 'allow'; return 0; fi
+  count=$(printf '%s\n' "$changed" | wc -l | tr -d ' ')
+  printf 'deny:%s карточек отличаются от серверной версии origin/main@%s (например %s)' \
+    "$count" "${GATE_REMOTE_OID:0:12}" "$(printf '%s\n' "$changed" | head -1)"
+}
+
 # ---------------------------------------------------------------- self-test
 self_test() {
   local failures=0
@@ -272,6 +370,28 @@ CLAUDE_SESSION_ID=$(printf '%s' "$INPUT" | jq -r '.session_id // empty' 2>/dev/n
 
 case "$TOOL_NAME" in Read|Grep|Bash) ;; *) exit 0 ;; esac
 
+if [ "$TOOL_NAME" = "Grep" ]; then
+  AREA_DIR=$(grep_card_area "$TOOL_INPUT" "$(printf '%s' "$INPUT" | jq -r '.cwd // empty' 2>/dev/null || true)")
+  if [ -n "$AREA_DIR" ]; then
+    AREA_TOP=$(git -C "$AREA_DIR" rev-parse --show-toplevel 2>/dev/null) || {
+      log_decision "unresolved" "$AREA_DIR" "поиск по каталогу карточек: репозиторий не найден"
+      exit 0
+    }
+    AREA_RESULT=$(decide_area "$AREA_TOP")
+    case "$AREA_RESULT" in
+      deny:*)
+        log_decision "deny" "$AREA_DIR" "${AREA_RESULT#deny:}"
+        deny_json "Поиск по каталогу карточек ${AREA_DIR}: ${AREA_RESULT#deny:}; читай через wp-sync-bundle.sh WP-N или git show origin/main:<карточка>. Результатам этого поиска доверять нельзя."
+        ;;
+      unknown:*)
+        log_decision "unresolved" "$AREA_DIR" "${AREA_RESULT#unknown:}"
+        ;;
+      *) log_decision "allow" "$AREA_DIR" "${GATE_SYNC_STATUS:-}" ;;
+    esac
+    exit 0
+  fi
+fi
+
 TARGET=$(target_path_for "$TOOL_NAME" "$TOOL_INPUT") || exit 0
 [ -n "$TARGET" ] || exit 0
 
@@ -290,11 +410,11 @@ case "$ABS_TARGET" in
     ABS_TARGET="${BASE_DIR:-$PWD}/$TARGET"
     ;;
 esac
-if is_isolate_path "$ABS_TARGET"; then
-  exit 0
-fi
-
 TARGET_DIR=$(dirname -- "$ABS_TARGET")
+# Symlinks and `..` are resolved before anything is judged by its path.
+if [ -d "$TARGET_DIR" ]; then
+  TARGET_DIR_REAL=$(cd "$TARGET_DIR" 2>/dev/null && pwd -P) && ABS_TARGET="${TARGET_DIR_REAL}/$(basename -- "$ABS_TARGET")" && TARGET_DIR="$TARGET_DIR_REAL"
+fi
 TOPLEVEL=$(git -C "$TARGET_DIR" rev-parse --show-toplevel 2>/dev/null) || {
   # A recognised card read whose repository cannot be found is NOT a quiet allow
   # (that was the M0 hole): it is logged, so the gap is countable. The verdict is
@@ -306,15 +426,31 @@ TOPLEVEL=$(git -C "$TARGET_DIR" rev-parse --show-toplevel 2>/dev/null) || {
   exit 0
 }
 TOPLEVEL_REAL=$(cd "$TOPLEVEL" 2>/dev/null && pwd -P) || exit 0
-if is_isolate_path "$TOPLEVEL_REAL"; then
-  exit 0
-fi
 
 RELPATH=$(git -C "$TOPLEVEL" ls-files --full-name -- "$ABS_TARGET" 2>/dev/null | head -1)
 if [ -z "$RELPATH" ]; then
   # Not a tracked path in this repo (new/untracked card, or a path outside
   # the repo despite matching the card pattern lexically) -- nothing to
   # compare against origin, allow.
+  exit 0
+fi
+
+if is_isolate_path "$TOPLEVEL_REAL"; then
+  ISO_RESULT=$(decide_isolate "$TOPLEVEL" "$RELPATH")
+  case "$ISO_RESULT" in
+    allow) log_decision "allow" "$RELPATH" "isolate ${GATE_SYNC_STATUS:-}" ;;
+    allow:*) log_decision "allow" "$RELPATH" "isolate: ${ISO_RESULT#allow:}" ;;
+    unknown:*)
+      log_decision "unresolved" "$RELPATH" "изолированная копия, свежесть неизвестна: ${ISO_RESULT#unknown:}"
+      if [ "$UNRESOLVED_DECISION" = "deny" ]; then
+        deny_json "Карточка ${RELPATH} в изолированной копии: свежесть не определить (${ISO_RESULT#unknown:}); читай через wp-sync-bundle.sh WP-N или git show origin/main:${RELPATH}."
+      fi
+      ;;
+    deny:*)
+      log_decision "deny" "$RELPATH" "isolate: ${ISO_RESULT#deny:}"
+      deny_json "Карточка ${RELPATH} в изолированной копии ${ISO_RESULT#deny:}; читай через wp-sync-bundle.sh WP-N (CARD_SOURCE: origin-pinned) или git show origin/main:${RELPATH}. Эту копию не использовать для выводов по карточке."
+      ;;
+  esac
   exit 0
 fi
 

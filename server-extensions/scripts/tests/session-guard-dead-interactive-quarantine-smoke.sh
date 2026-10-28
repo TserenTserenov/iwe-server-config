@@ -117,8 +117,9 @@ grep -q 'снята с учёта' "$DS_PUBLISH_DIGEST_DIR"/*.jsonl || fail "qui
 grep -q 'по WP-530 «fixture dead-base»' "$DS_PUBLISH_DIGEST_DIR"/*.jsonl || fail "digest notice does not name the work product and task"
 grep -q '1 событие за проход' "$DS_PUBLISH_DIGEST_DIR"/*.jsonl || fail "summary header has the wrong plural form"
 
-# 2b. A dead session whose copy still holds a changed file: Telegram, with the
-#     count and the retained copy, because that work could be lost.
+# 2b. A dead session whose copy still holds a changed file: Telegram, marked ⚠️,
+#     with the count and the retained copy (kept in the chat until the nightly
+#     digest drain is confirmed, WP-568 peer-session 2026-10-28-01).
 DIRTY_WT="$TEST_ROOT/.iwe-runtime/isolated-worktrees/dead-dirty"
 mkdir -p "$DIRTY_WT"; git -C "$DIRTY_WT" init -q
 git -C "$DIRTY_WT" -c user.email=t@t -c user.name=t commit -q --allow-empty -m base
@@ -130,15 +131,17 @@ run_audit --cleanup-orphans --quarantine-dead-interactive >/dev/null
 [ -f "$DIRTY.orphaned-dead-interactive" ] || fail "dirty-copy semaphore was not quarantined"
 grep -q 'изменённых файлов 1' "$TG_LOG" || fail "notice about a copy with unsaved work was not sent to Telegram"
 grep -q "isolated-worktrees/dead-dirty" "$TG_LOG" || fail "notice does not name the retained copy"
+grep -q '⚠️ Умершая' "$TG_LOG" || fail "unsaved-work notice is not marked ⚠️"
 
 # 2c. No copy recorded at all (the session wrote in a canonical checkout):
-#     the guard cannot prove nothing is lost, so it stays loud.
+#     the guard cannot prove nothing is lost, so it stays loud and marked ⚠️.
 : > "$TG_LOG"
 NOCOPY="$SESSION_DIR/claude-code-dead-nocopy.open"
 write_semaphore "$NOCOPY" dead-nocopy "$DEAD_PID"
 sed -i.bak '/_worktree: /d' "$NOCOPY" && rm -f "$NOCOPY.bak"
 run_audit --cleanup-orphans --quarantine-dead-interactive >/dev/null
 grep -q 'не смог' "$TG_LOG" || fail "a quarantine whose copy could not be checked was not sent to Telegram"
+grep -q '⚠️ Умершая' "$TG_LOG" || fail "unverifiable quarantine is not marked ⚠️"
 : > "$TG_LOG"
 
 # 3. A quarantined semaphore no longer shows up as an active session: at this

@@ -47,6 +47,21 @@ assert "$rc" "0" "exit 0"
 assert "$(line 1)" "GIT_SYNC_STATUS: OK" "status OK"
 assert "$(line 3)" "CARD_SOURCE: worktree" "cards read from the working copy"
 
+echo "scenario A2 (WP-484 F257 M4b): the handoff section is the first one after the three status lines"
+# No reader in the sandbox: the section says so, honestly.  IWE_SCRIPTS is pinned so that
+# the host's real scripts directory never leaks into the fixture.
+IWE_SCRIPTS="$WS/no-scripts" IWE_WORKSPACE="$WS" IWE_GOVERNANCE_REPO="$GOV" WP_SYNC_GIT_TIMEOUT=5 bash "$BUNDLE" WP-9101 > "$OUT" 2> "$ERR"
+head_pos=$(grep -n '^=== Передача работы по WP-9101 ===' "$OUT" | head -1 | cut -d: -f1)
+bundle_pos=$(grep -n '^# WP Sync Bundle' "$OUT" | head -1 | cut -d: -f1)
+assert "$head_pos" "5" "handoff heading right after the status block (blank line 4)"
+assert "$([ "$head_pos" -lt "$bundle_pos" ] && echo before || echo after)" "before" "handoff section precedes the bundle sections"
+assert "$(grep -c 'Читатель передачи недоступен на этом хосте' "$OUT")" "1" "missing reader is reported, not skipped silently"
+mkdir -p "$WS/scripts"
+printf '#!/usr/bin/env bash\necho "=== Передача работы по $1 ==="\necho "Следующий шаг: Ф1 — маркер читателя"\n' > "$WS/scripts/wp-handoff-show.sh"
+IWE_SCRIPTS="$WS/scripts" IWE_WORKSPACE="$WS" IWE_GOVERNANCE_REPO="$GOV" WP_SYNC_GIT_TIMEOUT=5 bash "$BUNDLE" WP-9101 > "$OUT" 2> "$ERR"
+assert "$(sed -n 5,6p "$OUT" | tr '\n' '|')" "=== Передача работы по WP-9101 ===|Следующий шаг: Ф1 — маркер читателя|" "reader output is inserted as is"
+rm -rf "$WS/scripts"
+
 echo "scenario B: origin advanced (card edited + new card), ref fetched but not merged -> STALE, origin-pinned, exit 0"
 printf -- '- [ ] ORIGIN-ONLY-TASK-9101\n' >> "$PUB/inbox/WP-9101/WP-9101.md"
 card "$PUB" 9103 "WP-9101" "origin-only card 9103"

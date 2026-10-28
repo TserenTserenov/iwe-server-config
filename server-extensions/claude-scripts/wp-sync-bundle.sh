@@ -893,6 +893,28 @@ main() {
     } >&2
   fi
 
+  # WP-484 F257 M4б: what the previous session left in the card comes first, taken
+  # from the origin snapshot by the shared reader (a call, not a copy of its logic);
+  # the quoted §4/§5 of the last report further down is the second source.  Optional:
+  # an unavailable or slow reader never stops the bundle.
+  local handoff_script="${IWE_SCRIPTS:-$IWE_WORKSPACE/scripts}/wp-handoff-show.sh"
+  local handoff_limit_lib
+  handoff_limit_lib="$(dirname "$handoff_script")/lib/run-limited.sh"
+  if [[ -r "$handoff_script" ]]; then
+    echo ""
+    if [[ -r "$handoff_limit_lib" ]]; then
+      # shellcheck source=/dev/null
+      . "$handoff_limit_lib"
+      run_limited 25 bash "$handoff_script" "WP-${wp_num}" </dev/null || echo "Передача работы: читатель не ответил вовремя."
+    else
+      bash "$handoff_script" "WP-${wp_num}" </dev/null || echo "Передача работы: читатель завершился с ошибкой."
+    fi
+  else
+    echo ""
+    echo "=== Передача работы по WP-${wp_num} ==="
+    echo "Читатель передачи недоступен на этом хосте (wp-handoff-show.sh не найден): поле «Следующий шаг» карточки читать со снимка origin вручную."
+  fi
+
   local wp_file
   wp_file=$(find_wp_file "$wp_num")
 

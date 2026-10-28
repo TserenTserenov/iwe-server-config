@@ -43,3 +43,24 @@ jq -nc --arg session "$SESSION_ID" --arg agent "$AGENT" --arg intent "$INTENT" -
 mv -f "$TMP_FILE" "$INTENT_DIR/$SESSION_ID.json"
 
 echo "Намерение записано: $INTENT (сессия $SESSION_ID, агент $AGENT)"
+
+# WP-484 F257 M3: show where the previous session stopped, straight after the
+# intent is recorded.  Optional: a slow or failing reader never blocks the
+# declaration (`|| true`), and `outside-wp` has no card to read.
+case "$INTENT" in
+  WP-*)
+    SHOW_SCRIPT="${IWE_SCRIPTS:-$HOME/IWE/scripts}/wp-handoff-show.sh"
+    if [ -x "$SHOW_SCRIPT" ]; then
+      # The reader's own network check is limited to 10 s; this outer limit is longer
+      # so a hanging network still lets it print the card fields before it is cut.
+      LIMIT_LIB="$(dirname "$SHOW_SCRIPT")/lib/run-limited.sh"
+      if [ -r "$LIMIT_LIB" ]; then
+        # shellcheck source=lib/run-limited.sh
+        . "$LIMIT_LIB"
+        run_limited 20 bash "$SHOW_SCRIPT" "$INTENT" </dev/null || true
+      else
+        bash "$SHOW_SCRIPT" "$INTENT" </dev/null || true
+      fi
+    fi
+    ;;
+esac

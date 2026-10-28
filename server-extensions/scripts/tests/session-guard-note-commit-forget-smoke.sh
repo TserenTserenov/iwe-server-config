@@ -86,10 +86,27 @@ git -C "$ORIGIN" init -q --bare
 git -C "$WORK" remote add origin "$ORIGIN" 2>/dev/null || git -C "$WORK" remote set-url origin "$ORIGIN"
 git -C "$WORK" push -q origin HEAD:refs/heads/main
 SHA_PUBLISHED=$(git -C "$WORK" rev-parse HEAD)
+# The session's own commit always touches a file the session claimed.
+printf 'file: two.txt\n' >> "$SEM"
 guard note-commit "$SHA_PUBLISHED" --repo work-repo --agent fixture --slug forget >/dev/null 2>&1
 guard note-commit --forget "$SHA_PUBLISHED" --repo work-repo --agent fixture --slug forget >/dev/null 2>&1; RC=$?
 check "claim already on origin/main: refused (has independent proof)" "1" "$RC"
 check "claim already on origin/main: claim kept" "1" "$(claims "$SHA_PUBLISHED")"
+
+# --- published claim of a FOREIGN commit (no claimed file touched) is withdrawn -
+# WP-484 F257 (28.10): note-commit after a refused commit claimed another
+# session's HEAD; its publish proof made the claim unremovable and blocked close.
+echo three > "$WORK/three.txt"
+git -C "$WORK" add three.txt
+git -C "$WORK" commit -q -m three
+git -C "$WORK" push -q origin HEAD:refs/heads/main
+SHA_FOREIGN=$(git -C "$WORK" rev-parse HEAD)
+guard note-commit "$SHA_FOREIGN" --repo work-repo --agent fixture --slug forget >/dev/null 2>&1
+check "foreign claim recorded" "1" "$(claims "$SHA_FOREIGN")"
+guard note-commit --forget "$SHA_FOREIGN" --repo work-repo --agent fixture --slug forget >/dev/null 2>&1; RC=$?
+check "published foreign claim (no claimed file touched): forget succeeds" "0" "$RC"
+check "published foreign claim: claim removed" "0" "$(claims "$SHA_FOREIGN")"
+check "own published claim survives the foreign forget" "1" "$(claims "$SHA_PUBLISHED")"
 
 # --- ordinary note-commit still requires state=none (gate unchanged) -----------
 # Remove the proven claim via the one withdrawal path that does not itself

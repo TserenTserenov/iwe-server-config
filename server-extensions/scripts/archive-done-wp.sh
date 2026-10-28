@@ -15,17 +15,29 @@
 #   4. git mv папку (или файл) inbox/ → archive/wp-contexts/.
 #
 # Использование:
-#   bash archive-done-wp.sh <WP_NUM> [IWE_ROOT]
+#   bash archive-done-wp.sh [--day-close] <WP_NUM> [IWE_ROOT]
 #
 # Совместимость: bash 3.2+ (macOS), bash 4+ (Linux)
 
 set -uo pipefail
 
+# --day-close: Day Close mode (РП-561 Ф32) — the repo must be an explicit isolated
+# copy, never the shared checkout the default below would silently pick.
+DAY_CLOSE_MODE=0
+if [[ "${1:-}" == "--day-close" ]]; then DAY_CLOSE_MODE=1; shift; fi
 WP_NUM="${1:-}"
 IWE="${2:-${IWE_ROOT:-$HOME/IWE}}"
 GOV_REPO="${IWE_GOVERNANCE_REPO:-DS-strategy}"
 # IWE_GOVERNANCE_REPO_PATH: the repo to archive in (an isolated Day Close copy, WP-530); unset = the shared checkout.
 STRATEGY_REPO="${IWE_GOVERNANCE_REPO_PATH:-$IWE/$GOV_REPO}"
+if [[ "$DAY_CLOSE_MODE" == 1 ]]; then
+  if [[ -z "${IWE_GOVERNANCE_REPO_PATH:-}" ]]; then
+    echo "STOP: --day-close требует IWE_GOVERNANCE_REPO_PATH (корень изолированной копии)" >&2; exit 1
+  fi
+  if [[ "$(realpath "$IWE_GOVERNANCE_REPO_PATH")" == "$(realpath "$IWE/$GOV_REPO" 2>/dev/null)" ]]; then
+    echo "STOP: --day-close: путь копии совпадает с общим каталогом планов" >&2; exit 1
+  fi
+fi
 INBOX="$STRATEGY_REPO/inbox"
 ARCHIVE="$STRATEGY_REPO/archive/wp-contexts"
 # check-wp-transfer-completeness.sh lives next to this script — resolve relative to
