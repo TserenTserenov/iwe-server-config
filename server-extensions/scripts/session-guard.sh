@@ -13,7 +13,7 @@
 #                                                      # только если раннер стоит именно на
 #                                                      # blocked-witness-unavailable И push уже
 #                                                      # подтверждён (all_pushed: true)
-#   close --housekeeping <reason> [--agent ...]       # закрыть housekeeping-сессию
+#   close --housekeeping <reason> [--agent ...] [--expect-session-id <id>]  # закрыть housekeeping-сессию (с id: только если открыт именно этот запуск)
 #   close --abandon-prepared --i-understand-loss-risk --reason "<why>" # manual recovery (WP-484, peer-session
 #         --source-commit <oid> [--source-commit ...] # with Codex): PREPARED tree-proof cannot
 #                                                      # pass when a later legitimate REPLACE lands
@@ -46,6 +46,23 @@
 #                                      # record binds the exact path: after
 #                                      # recover-orphaned renames the file
 #                                      # (.recovery-pending/.recovered) retire again.
+#   heal <slug> [--apply --reason "<why>" [--discard-unpublished]]
+#                                      # WP-484 Ф250: one command for a stuck session on THIS
+#                                      # host. Default is a DRY RUN (changes nothing): owner
+#                                      # state, unsaved work, the exact steps and the single
+#                                      # command for the live run. --apply moves the semaphore
+#                                      # to quarantine, ATTEMPTS to cancel the session's runner
+#                                      # cards (the runner may refuse a non-owner caller; the
+#                                      # cards then stay for reap-orphans, exit 0 with the exact
+#                                      # command), cancels the close obligation, voids tickets.
+#                                      # Dead owner + the four quarantine conditions need no
+#                                      # extra word; otherwise (live owner, unmet conditions,
+#                                      # unsaved work) the pilot must have typed
+#                                      # `heal <slug> <code>` in THIS conversation -- read from
+#                                      # the pilot-witness log, never from an argument. This is a
+#                                      # reflex against self-approval, not a privilege boundary
+#                                      # (a headless child `claude -p` can still plant the line;
+#                                      # cheap filters only raise the price); Claude-only proof.
 #   audit [--since YYYY-MM-DD] [--cleanup-orphans [--quarantine-dead-interactive]]
 #                                                      # --quarantine-dead-interactive (WP-530 Ф53):
 #                                                      # opt-in terminal path for ordinary semaphores
@@ -349,6 +366,46 @@ except ImportError:
     raise SystemExit(0)
 sys.stdout.write(yaml.safe_dump({"task": value}, allow_unicode=True, default_flow_style=False, width=10**7).rstrip("\n"))
 ' "$1"
+}
+
+# WP-484 (26.10, peer-session 2026-10-26-19): close_path=peer-session is a
+# declaration made at open and never checked. 3 of the 9 such closes on 26.10 were
+# ordinary work sessions using it to get around a runner that cannot close an
+# isolated copy. This reports whether the declaration has any trace of a real peer
+# session: a journal folder <orz-dir>/<YYYY-MM>/<DD>/<slug>/ holding 00-writer.md
+# or meta.yaml, or an ORZ file of `type: peer-session`.
+# Prints yes | no | n/a (the close path is not peer-session). Warn-only on purpose:
+# blocking before the regular path is proven for isolated sessions would leave them
+# unable to close at all; session-close-quality.py counts the "no" cases and the
+# pilot flips this to a block once that count is zero.
+peer_session_evidence() { # <close_path> <semaphore> <slug> <orz-dir>
+  local close_path="$1" semaphore="$2" slug="$3" orz_dir="$4" dir orz_name
+  if [ "$close_path" != "peer-session" ]; then
+    echo "n/a"
+    return 0
+  fi
+  # A slug is one path component: "." / ".." / "a/b" would walk out of the day folder.
+  case "$slug" in
+    ''|.|..|*/*) echo "no"; return 0 ;;
+  esac
+  # Any day on purpose: a session opened before midnight may close after it.
+  for dir in "$orz_dir"/[0-9][0-9][0-9][0-9]-[0-9][0-9]/[0-9][0-9]/"$slug"; do
+    if [ -f "$dir/00-writer.md" ] || [ -f "$dir/meta.yaml" ]; then
+      echo "yes"
+      return 0
+    fi
+  done
+  orz_name=$(grep '^orz_file: ' "$semaphore" 2>/dev/null | cut -d' ' -f2- | sed 's/^[[:space:]]*//' || true)
+  # `type:` counts only inside the frontmatter -- the body may quote the line.
+  if [ -n "$orz_name" ] && awk '
+      NR == 1 && $0 != "---" { exit 1 }
+      NR > 1 && $0 == "---" { exit !found }
+      /^type: peer-session[[:space:]]*$/ { found = 1 }
+      END { exit !found }' "$orz_dir/$orz_name" 2>/dev/null; then
+    echo "yes"
+    return 0
+  fi
+  echo "no"
 }
 
 # clear_peer_session_obligation <semaphore> <slug> -- release the conversation's
@@ -2130,23 +2187,24 @@ PY
 }
 
 _new_open_has_no_prior_state() {  # <future .open path>
-  python3 - "$1" "${DEAD_INTERACTIVE_SUFFIX:-.orphaned-dead-interactive}" <<'PY' 2>/dev/null
+  python3 - "$1" "${DEAD_INTERACTIVE_SUFFIX:-.orphaned-dead-interactive}" "${HEAL_PILOT_SUFFIX:-.orphaned-pilot-healed}" <<'PY' 2>/dev/null
 import glob
 import os
 import re
 import stat
 import sys
 
-path, terminal_suffix = sys.argv[1:]
-# `<sem>.orphaned-dead-interactive` or, for a repeated death of the same fixed
-# name, `<sem>.orphaned-dead-interactive-<epoch>` (the `.open.orphaned-` prefix
-# is what owner-status and recover-orphaned key on).
-terminal_name = re.compile(re.escape(terminal_suffix) + r"(-[0-9]+)?\Z")
+path, *terminal_suffixes = sys.argv[1:]
+# `<sem>.orphaned-dead-interactive` or `<sem>.orphaned-pilot-healed` (heal on
+# the pilot's word) or, for a repeated death/heal of the same fixed name, the
+# same with `-<epoch>` appended (the `.open.orphaned-` prefix is what
+# owner-status and recover-orphaned key on).
+terminal_name = re.compile("(?:" + "|".join(re.escape(item) for item in terminal_suffixes) + r")(-[0-9]+)?\Z")
 
 
 def is_terminal_quarantine(sibling):
-    # A dead-interactive quarantine (WP-530 F53) is terminal evidence: the
-    # fence is already lifted and the file is kept only for review. It must not
+    # A dead-interactive (WP-530 F53) or pilot-healed (WP-484 F250) quarantine
+    # is terminal evidence: the fence is already lifted and the file is kept only for review. It must not
     # lock a fixed-name semaphore (housekeeping day-close/day-open) forever.
     return bool(terminal_name.search(sibling)) and stat.S_ISREG(os.lstat(sibling).st_mode)
 
@@ -2652,7 +2710,7 @@ _refresh_owner_pid() {  # <semaphore file>, called under an already-held session
   recorded_pid=$(grep '^pid: ' "$semaphore" 2>/dev/null | head -1 | cut -d' ' -f2- || true)
   [ -n "$recorded_pid" ] || return 0
   [ "$recorded_pid" = "$current_pid" ] && return 0
-  pid_start=$(ps -p "$current_pid" -o lstart= 2>/dev/null | sed 's/^ *//; s/ *$//' || true)
+  pid_start=$(LC_ALL=C ps -p "$current_pid" -o lstart= 2>/dev/null | sed 's/^ *//; s/ *$//' || true)
   [ -n "$pid_start" ] || return 0
   # `grep -c` already prints "0" on a clean no-match; `|| echo 0` here would
   # concatenate a SECOND "0" onto that output instead of replacing it
@@ -2724,6 +2782,10 @@ raise SystemExit(1)
 PY
 }
 
+# Registry `source` label; `heal` overrides it so its records are not
+# attributed to the sweep.
+ZOMBIE_EVENT_SOURCE="session-guard.sh audit --cleanup-orphans"
+
 append_zombie_event() {
   # WP-538 Ф9 cold-review round 2 (Codex, 19.09): the compact sweep summary
   # tells the pilot to "search by pass key" in $ZOMBIE_REGISTRY, but nothing
@@ -2739,16 +2801,16 @@ append_zombie_event() {
 
   # The enclosing orphan-sweep lock makes check-then-append idempotent.
   python3 - "$ZOMBIE_REGISTRY" "$reason" "$semaphore" \
-    "$opened_epoch" "$age_seconds" "$action" "$pass_key" <<'PY'
+    "$opened_epoch" "$age_seconds" "$action" "$pass_key" "$ZOMBIE_EVENT_SOURCE" <<'PY'
 import datetime as dt
 import json
 import sys
 
-path, reason, semaphore, opened_epoch, age_seconds, action, pass_key = sys.argv[1:]
+path, reason, semaphore, opened_epoch, age_seconds, action, pass_key, source = sys.argv[1:]
 event = {
     "recorded_at": dt.datetime.now(dt.timezone.utc).isoformat().replace("+00:00", "Z"),
     "reason": reason,
-    "source": "session-guard.sh audit --cleanup-orphans",
+    "source": source,
     "semaphore": semaphore,
     "opened_epoch": int(opened_epoch),
     "age_seconds": int(age_seconds),
@@ -2941,8 +3003,28 @@ notify_zombie_escalation() {  # <semaphore> <age seconds> <pass key> <reason> <o
   # happened, who owns the next step, when it resolves on its own -- this is
   # a fully automatic transition (see the comment above ZOMBIE_REGISTRY), so
   # the pilot owns nothing here beyond "read if curious".
-  local age_h=$(( age_seconds / 3600 ))
-  _session_guard_notify "Осиротевшая сессия IWE: $(basename -- "$semaphore") уже ${age_h}ч не подтверждает, что за ней кто-то следит. Защитный барьер оставлен на месте: нужен точный terminal/drain proof или ручной разбор." \
+  local age_h=$(( age_seconds / 3600 )) wp task agent host work changed=0 unpublished=0 who age_txt msg
+  # The pilot acts on "which work, is anything lost", not on a semaphore file
+  # name (WP-568/538, peer-session 2026-10-27-12): same facts and the same
+  # unsaved-work check as notify_dead_quarantine. The owner is NOT proven dead
+  # here, so the text never says the session is finished.
+  wp=$(_semaphore_last_field "$semaphore" wp); task=$(_semaphore_last_field "$semaphore" task)
+  agent=$(_semaphore_last_field "$semaphore" agent); host=$(_semaphore_last_field "$semaphore" host)
+  who="сессия ${agent:-агента} по ${wp:-неизвестному РП}${task:+ «${task}»}${host:+ на ${host}}"
+  [ "$age_h" -ge 1 ] && age_txt="${age_h}ч" || age_txt="менее часа"
+  work=$(unsaved_work_in_worktree "$(_semaphore_last_field "$semaphore" isolated_worktree)")
+  case "$work" in gone|unknown) ;; *) read -r changed unpublished <<< "$work" ;; esac
+  if [ "$work" = unknown ]; then
+    msg="⚠️ Не подаёт признаков жизни ${age_txt}: ${who}. Закончилась ли она, доказать не могу, поэтому блокировку не снимал. Проверить, есть ли несохранённая работа, не смог. Делать сейчас ничего не нужно: агент сверит её при следующей работе по ${wp:-этому РП}; если сессия у вас ещё открыта - закройте её, если нет и работа срочная - скажите агенту «проверь осиротевшую сессию по ${wp:-РП}»."
+    _sweep_count_quiet_notice 1
+  elif [ "$work" = gone ] || { [ "$changed" = 0 ] && [ "$unpublished" = 0 ]; }; then
+    msg="Не подаёт признаков жизни ${age_txt}: ${who}. Несохранённой работы в ней нет, терять нечего. Блокировку я не снимал, пока не докажу, что сессия закончилась. Делать ничего не нужно."
+    _sweep_count_quiet_notice 0
+  else
+    msg="⚠️ Не подаёт признаков жизни ${age_txt}: ${who}. В её копии осталось: изменённых файлов ${changed}, неотправленных коммитов ${unpublished}. Блокировку я не снимал. Делать сейчас ничего не нужно: агент подберёт это при следующей работе по ${wp:-этому РП}; если работа срочная - скажите агенту «подбери работу осиротевшей сессии по ${wp:-РП}»."
+    _sweep_count_quiet_notice 1
+  fi
+  _session_guard_notify "$msg" \
     "$semaphore" "escalated" "$pass_key" "$reason" "$opened_epoch" "$age_seconds" "escalated"
 }
 
@@ -2972,6 +3054,8 @@ IWE_HEARTBEAT_STALE_SEC="${IWE_HEARTBEAT_STALE_SEC:-1800}"
 [[ "$IWE_HEARTBEAT_STALE_SEC" =~ ^[0-9]+$ ]] \
   || fail "IWE_HEARTBEAT_STALE_SEC должен быть целым числом секунд (получено: '$IWE_HEARTBEAT_STALE_SEC')" 1
 DEAD_INTERACTIVE_SUFFIX=".orphaned-dead-interactive"
+# Quarantine written by `heal` on the pilot's word (also terminal evidence).
+HEAL_PILOT_SUFFIX=".orphaned-pilot-healed"
 # WP-484 Ф204 п.2 (АрхГейт 18.10, детализация 20.10, peer-session
 # Claude+Kimi+Codex): dead-semaphore auto-recovery is off by default and the
 # dry-run observation pass is separate from actually enabling it -- a sweep
@@ -2995,33 +3079,53 @@ _dead_interactive_refusal() {  # <semaphore> <reason>
   echo "INFO: $(basename -- "$1") not quarantined ($2); remains .open" >&2
 }
 
-_quarantine_dead_interactive() {  # <semaphore> <observed dead pid> [out-var for the quarantine path]
-  _local_release_mutation_allowed "$1" || return 1
-  local semaphore="$1" pid="$2" dest_outvar="${3:-}"
-  local host lease_deadline heartbeat_at heartbeat_epoch now snapshot destination epoch age worktree reason
+# Read-only half of the four-condition liveness proof below, shared with
+# `heal` so its dry run reports exactly what the quarantine would decide.
+# Returns 0 when all four conditions hold; otherwise 1 with the refusal reason
+# in _DI_REFUSAL. On success _DI_LEASE_DEADLINE and _DI_HEARTBEAT_AT carry the
+# evidence the caller records. Globals, not stdout: a subshell would lose them.
+_DI_REFUSAL=""
+_DI_LEASE_DEADLINE=""
+_DI_HEARTBEAT_AT=""
+_dead_interactive_proof() {  # <semaphore> <observed dead pid>
+  local semaphore="$1" pid="$2" host heartbeat_epoch now
+  _DI_REFUSAL=""; _DI_LEASE_DEADLINE=""; _DI_HEARTBEAT_AT=""
   now=$(date +%s)
   if kill -0 "$pid" 2>/dev/null; then
-    _dead_interactive_refusal "$semaphore" "pid $pid is alive again"; return 1
+    _DI_REFUSAL="pid $pid is alive again"; return 1
   fi
   host=$(_semaphore_last_field "$semaphore" host)
   if [ -n "$host" ] && [ "$host" != "$(uname -n)" ]; then
-    _dead_interactive_refusal "$semaphore" "recorded host $host is not $(uname -n)"; return 1
+    _DI_REFUSAL="recorded host $host is not $(uname -n)"; return 1
   fi
-  lease_deadline=$(lease_deadline_epoch "$semaphore") \
-    || { _dead_interactive_refusal "$semaphore" "no parseable opened_at"; return 1; }
-  if [ "$now" -lt "$lease_deadline" ]; then
-    _dead_interactive_refusal "$semaphore" "lease still valid for $(( lease_deadline - now ))s"; return 1
+  _DI_LEASE_DEADLINE=$(lease_deadline_epoch "$semaphore") \
+    || { _DI_REFUSAL="no parseable opened_at"; return 1; }
+  if [ "$now" -lt "$_DI_LEASE_DEADLINE" ]; then
+    _DI_REFUSAL="lease still valid for $(( _DI_LEASE_DEADLINE - now ))s"; return 1
   fi
-  heartbeat_at=$(_semaphore_last_field "$semaphore" heartbeat_at)
-  if [ -n "$heartbeat_at" ]; then
-    heartbeat_epoch=$(_iso_to_epoch "$heartbeat_at")
+  _DI_HEARTBEAT_AT=$(_semaphore_last_field "$semaphore" heartbeat_at)
+  if [ -n "$_DI_HEARTBEAT_AT" ]; then
+    heartbeat_epoch=$(_iso_to_epoch "$_DI_HEARTBEAT_AT")
     if [ -z "$heartbeat_epoch" ]; then
-      _dead_interactive_refusal "$semaphore" "unparseable heartbeat_at $heartbeat_at"; return 1
+      _DI_REFUSAL="unparseable heartbeat_at $_DI_HEARTBEAT_AT"; return 1
     fi
     if [ $(( now - heartbeat_epoch )) -lt "$IWE_HEARTBEAT_STALE_SEC" ]; then
-      _dead_interactive_refusal "$semaphore" "heartbeat $heartbeat_at is fresh"; return 1
+      _DI_REFUSAL="heartbeat $_DI_HEARTBEAT_AT is fresh"; return 1
     fi
   fi
+  return 0
+}
+
+_quarantine_dead_interactive() {  # <semaphore> <observed dead pid> [out-var for the quarantine path]
+  _local_release_mutation_allowed "$1" || return 1
+  local semaphore="$1" pid="$2" dest_outvar="${3:-}"
+  local lease_deadline heartbeat_at now snapshot destination epoch age worktree reason
+  now=$(date +%s)
+  if ! _dead_interactive_proof "$semaphore" "$pid"; then
+    _dead_interactive_refusal "$semaphore" "$_DI_REFUSAL"; return 1
+  fi
+  lease_deadline="$_DI_LEASE_DEADLINE"
+  heartbeat_at="$_DI_HEARTBEAT_AT"
   snapshot=$(_owned_semaphore_snapshot_sha "$semaphore" 0) \
     || { _dead_interactive_refusal "$semaphore" "no exclusive owned snapshot (close in progress or foreign file)"; return 1; }
   destination="${semaphore}${DEAD_INTERACTIVE_SUFFIX}"
@@ -3075,7 +3179,7 @@ unsaved_work_in_worktree() {
   local wt="$1" status cherry changed unpublished
   [ -n "$wt" ] || { echo unknown; return 0; }
   [ -e "$wt" ] || { echo gone; return 0; }
-  status=$(git -C "$wt" status --porcelain 2>/dev/null) || { echo unknown; return 0; }
+  status=$(git --no-optional-locks -C "$wt" status --porcelain 2>/dev/null) || { echo unknown; return 0; }
   git -C "$wt" rev-parse --verify -q origin/main >/dev/null 2>&1 || { echo unknown; return 0; }
   cherry=$(git -C "$wt" cherry origin/main HEAD 2>/dev/null) || { echo unknown; return 0; }
   changed=$(printf '%s' "$status" | grep -c . || true)
@@ -3094,15 +3198,27 @@ notify_dead_quarantine() {  # <quarantined path> <age> <worktree> <pass key> <re
   work=$(unsaved_work_in_worktree "$3")
   case "$work" in gone|unknown) ;; *) read -r changed unpublished <<< "$work" ;; esac
   if [ "$work" = unknown ]; then
-    msg="Умершая ${age_h}ч назад ${who} снята с учёта (процесса нет, аренда истекла). Проверить, осталась ли в ней несохранённая работа, я не смог${3:+ (копия: ${3})}. Делать сейчас ничего не нужно: агент сверит её при следующей работе по ${wp:-этому РП}; если работа срочная - скажите агенту «проверь умершую сессию по ${wp:-РП}»."
+    msg="⚠️ Умершая ${age_h}ч назад ${who} снята с учёта (процесса нет, аренда истекла). Проверить, осталась ли в ней несохранённая работа, я не смог${3:+ (копия: ${3})}. Делать сейчас ничего не нужно: агент сверит её при следующей работе по ${wp:-этому РП}; если работа срочная - скажите агенту «проверь умершую сессию по ${wp:-РП}»."
+    _sweep_count_quiet_notice 1
   elif [ "$work" = gone ] || { [ "$changed" = 0 ] && [ "$unpublished" = 0 ]; }; then
     [ "$work" = gone ] && left="Её рабочей копии уже нет, терять нечего." || left="Несохранённой работы в ней нет."
     msg="Умершая ${age_h}ч назад ${who} снята с учёта (процесса нет, аренда истекла). ${left} Делать ничего не нужно."
-    declare -p _SWEEP_NOTIFY_QUEUE >/dev/null 2>&1 && _SWEEP_NOTIFY_QUIET_COUNT=$((_SWEEP_NOTIFY_QUIET_COUNT + 1))
+    _sweep_count_quiet_notice 0
   else
-    msg="Умершая ${age_h}ч назад ${who} снята с учёта (процесса нет, аренда истекла). В её копии осталось: изменённых файлов ${changed}, неотправленных коммитов ${unpublished} - копия сохранена (${3}). Делать сейчас ничего не нужно: агент подберёт это при следующей работе по ${wp:-этому РП}; если работа срочная - скажите агенту «подбери работу умершей сессии по ${wp:-РП}»."
+    msg="⚠️ Умершая ${age_h}ч назад ${who} снята с учёта (процесса нет, аренда истекла). В её копии осталось: изменённых файлов ${changed}, неотправленных коммитов ${unpublished} - копия сохранена (${3}). Делать сейчас ничего не нужно: агент подберёт это при следующей работе по ${wp:-этому РП}; если работа срочная - скажите агенту «подбери работу умершей сессии по ${wp:-РП}»."
+    _sweep_count_quiet_notice 1
   fi
   _session_guard_notify "$msg" "$6" "quarantined" "$4" "$5" "$7" "$2" "quarantined"
+}
+
+# Every escalation/quarantine text says "nothing to do now" (WP-568 Ф8 п.3,
+# peer-session 2026-10-28-01). <attention:0|1> = unsaved work left or the copy
+# could not be checked: such a pass is kept in the chat (_sweep_flush_notify_queue).
+_sweep_count_quiet_notice() {
+  declare -p _SWEEP_NOTIFY_QUEUE >/dev/null 2>&1 || return 0
+  _SWEEP_NOTIFY_QUIET_COUNT=$((_SWEEP_NOTIFY_QUIET_COUNT + 1))
+  [ "$1" = 1 ] && _SWEEP_NOTIFY_ATTENTION_COUNT=$((${_SWEEP_NOTIFY_ATTENTION_COUNT:-0} + 1))
+  return 0
 }
 
 # WP-484 (session-close-hygiene peer-session, 2026-08-20, consensus Claude+
@@ -3594,7 +3710,7 @@ _semaphore_transition_lock_id() {  # <absolute semaphore path>
   python3 -c 'import hashlib,sys; print("semaphore-" + hashlib.sha256(sys.argv[1].encode()).hexdigest())' "$1"
 }
 
-_cancel_dead_session_quick_close_runs() {  # <semaphore>
+_cancel_dead_session_quick_close_runs() {  # <semaphore> [cards root: governance checkout or isolated worktree] [owner id: default = session_id of the semaphore]
   # Ф42/Ф43 (2026-09-15, peer-session with Kimi, canon-sync-prevention):
   # the semaphore itself stays .open (dead-PID evidence is never fencing --
   # see the callers below), but any quick-close run this dead owner started
@@ -3606,8 +3722,8 @@ _cancel_dead_session_quick_close_runs() {  # <semaphore>
   # only cancels non-terminal cards it can prove belong to this session_id
   # -- it never touches the semaphore, so this stays exactly as
   # conservative as the escalation at each call site.
-  local semaphore="$1" session_id runner
-  session_id=$(grep '^session_id: ' "$semaphore" 2>/dev/null | head -1 | cut -d' ' -f2- || true)
+  local semaphore="$1" cards_root="${2:-$IWE_ROOT/$GOV_REPO}" session_id="${3:-}" runner
+  [ -n "$session_id" ] || session_id=$(grep '^session_id: ' "$semaphore" 2>/dev/null | head -1 | cut -d' ' -f2- || true)
   [ -n "$session_id" ] || return 0
   runner="$IWE_ROOT/$GOV_REPO/scripts/process-runner.py"
   [ -f "$runner" ] || return 0
@@ -3623,7 +3739,7 @@ _cancel_dead_session_quick_close_runs() {  # <semaphore>
     echo "WARNING: process-runner без IWE_CARD_AUTOCOMMIT -- cancel-session для $session_id пропущен (автокоммит тронул бы замороженный канон)" >&2
     return 0
   fi
-  (cd "$IWE_ROOT/$GOV_REPO" && IWE_CARD_AUTOCOMMIT=0 python3 "$runner" cancel-session quick-close "$session_id") \
+  (cd "$cards_root" && IWE_CARD_AUTOCOMMIT=0 python3 "$runner" cancel-session quick-close "$session_id") \
     2>&1 || echo "WARNING: cancel-session для мёртвой сессии $session_id не прошёл (не блокирует sweep)" >&2
 }
 
@@ -3821,11 +3937,14 @@ _sweep_orphaned_semaphores_body() {
   # that produced zero fresh classifications of its own.
   _SWEEP_NOTIFY_ESCALATED_COUNT=0
   _SWEEP_NOTIFY_QUARANTINED_COUNT=0
-  # Quarantines proven to leave no unsaved work behind (notify_dead_quarantine).
-  # A pass made only of those goes to the day-close digest, not to Telegram;
-  # anything recovered from an interrupted pass is not counted here, so it
-  # stays loud (WP-568, peer-session 2026-10-24-07).
+  # Escalations/quarantines whose text says "nothing to do now" (all variants
+  # of notify_zombie_escalation/notify_dead_quarantine). A pass made only of
+  # those goes to the day-close digest, not to Telegram; anything recovered
+  # from an interrupted pass is not counted here, so it stays loud (WP-568,
+  # peer-sessions 2026-10-24-07, 2026-10-28-01). ATTENTION = unsaved work left
+  # or the copy could not be checked; such a pass still goes to the chat.
   _SWEEP_NOTIFY_QUIET_COUNT=0
+  _SWEEP_NOTIFY_ATTENTION_COUNT=0
   _SWEEP_NOTIFY_PASS_KEYS=()
   _SWEEP_NOTIFY_CAN_FLUSH=1
   _SWEEP_PASS_KEY=$(date -u +%Y%m%dT%H%M%SZ)
@@ -4017,7 +4136,11 @@ print(hashlib.sha256(sys.stdin.buffer.read()).hexdigest()[:16])
     # обещания "всё починено" (WP-538 Ф9).
     summary="🔔 Сторож сессий: $(_ru_events "$total") $pass_scope (осиротевшие: $_SWEEP_NOTIFY_ESCALATED_COUNT, в карантине: $_SWEEP_NOTIFY_QUARANTINED_COUNT). Карантин не значит, что незакоммиченная работа этих сессий опубликована. Дальше: от тебя сейчас ничего не нужно -- агент сверит каждую с опубликованной версией при следующей работе по её рабочему продукту; если хочешь проверить раньше, назови ключ прохода в чате, и я посмотрю в $ZOMBIE_REGISTRY."
   fi
-  if [ "${_SWEEP_NOTIFY_QUIET_COUNT:-0}" -gt 0 ] && [ "${_SWEEP_NOTIFY_QUIET_COUNT:-0}" -eq "$total" ]; then
+  # ⚠️ notices (unsaved work / copy not checked) stay in the chat until the
+  # nightly digest drain (notify-digest-drain.sh) is confirmed on the server
+  # (WP-568, peer-session 2026-10-28-01: the digest there was never delivered).
+  if [ "${_SWEEP_NOTIFY_QUIET_COUNT:-0}" -gt 0 ] && [ "${_SWEEP_NOTIFY_QUIET_COUNT:-0}" -eq "$total" ] \
+      && [ "${_SWEEP_NOTIFY_ATTENTION_COUNT:-0}" -eq 0 ]; then
     # Nothing for the pilot to do in this pass: the day-close digest, same
     # JSONL row shape as notify_digest_append (DS-my-strategy lib).
     local digest_dir="${DS_PUBLISH_DIGEST_DIR:-$HOME/IWE/.claude/state/notify-digest}"
@@ -4218,6 +4341,8 @@ CLEANUP_ORPHANS=0
 QUARANTINE_DEAD_INTERACTIVE=0
 FORCE_NO_REFLECTION=""
 CANONICAL_OWNER=""
+EXPECT_SESSION_ID_SET=""
+EXPECT_SESSION_ID=""  # close --housekeeping: close only the open with this session_id (compare-and-close)
 FORCE_FLAG=0
 FORCE_WP_ELSEWHERE_FLAG=0
 FORGET_FLAG=0
@@ -4234,6 +4359,8 @@ HOT_LOCK_TOKEN=""
 BASE_SHA=""
 RENEW_FOREIGN=0
 RETIRE_CONFIRM_NO_LIVE_OWNER=0
+HEAL_APPLY=0
+HEAL_DISCARD_UNPUBLISHED=0
 POSITIONAL=()
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -4259,6 +4386,12 @@ while [[ $# -gt 0 ]]; do
     # in `audit`), not checked against a fixed set -- the freeze-block below
     # only tests non-empty.
     --canonical-owner) CANONICAL_OWNER="$2"; shift 2 ;;
+    # WP-7 Ф265: lets a scheduled runner reclaim a dead owner's barrier without
+    # racing a fresh open -- the compare happens under the transition lock.
+    --expect-session-id)
+      # An empty value must not read as "option absent" and silently skip the compare.
+      [ -n "${2:-}" ] || fail "--expect-session-id требует непустой session_id" 1
+      EXPECT_SESSION_ID="$2"; EXPECT_SESSION_ID_SET=1; shift 2 ;;
     # WP-545 (2026-09-05): `renew --session-id <X>` без `--foreign` продлевает
     # ЧУЖОЙ семафор (другого agent/session_id) молча — использовано как обход
     # lease-гейта живым инцидентом накануне (peer-session
@@ -4357,6 +4490,10 @@ while [[ $# -gt 0 ]]; do
     # `quarantined` registry record binds the artifact's generation (manual
     # `.bak-*` copies never have one). Validated against CMD below.
     --i-confirm-no-live-owner) RETIRE_CONFIRM_NO_LIVE_OWNER=1; shift ;;
+    # WP-484 Ф250: heal is a dry run unless --apply is given. Validated
+    # against CMD below (no flag is ever silently ignored).
+    --apply) HEAL_APPLY=1; shift ;;
+    --discard-unpublished) HEAL_DISCARD_UNPUBLISHED=1; shift ;;
     --source-commit)
       if [[ $# -lt 2 || -z "$2" ]]; then
         fail "--source-commit требует непустое значение (SHA из close_delivery_source_commits)" 1
@@ -4393,6 +4530,13 @@ if [ -n "$OWNER_AGENT_ARG" ] && [ "$CMD" != "owner-status" ]; then
 fi
 if [ "$RETIRE_CONFIRM_NO_LIVE_OWNER" -eq 1 ] && [ "$CMD" != "retire-semaphore-artifact" ]; then
   fail "--i-confirm-no-live-owner применим только к retire-semaphore-artifact" 1
+fi
+
+if { [ "$HEAL_APPLY" -eq 1 ] || [ "$HEAL_DISCARD_UNPUBLISHED" -eq 1 ]; } && [ "$CMD" != "heal" ]; then
+  fail "--apply и --discard-unpublished применимы только к heal" 1
+fi
+if [ "$HEAL_DISCARD_UNPUBLISHED" -eq 1 ] && [ "$HEAL_APPLY" -ne 1 ]; then
+  fail "--discard-unpublished имеет смысл только вместе с --apply" 1
 fi
 
 # WP-530 Ф53: the quarantine flag is meaningless anywhere else; refusing keeps
@@ -4809,7 +4953,8 @@ try:
     elif blockers:
         for blocker in blockers:
             if blocker["file"].endswith(".open"):
-                hint = "активная запись: закрывает её владелец (close) или audit --cleanup-orphans"
+                hint = ("активная запись: закрывает её владелец (close) или audit --cleanup-orphans; "
+                        "зависшую сессию лечит session-guard.sh heal <slug сессии> (по умолчанию сухой прогон)")
             else:
                 hint = ("если это не живая сессия: session-guard.sh retire-semaphore-artifact "
                         f"{sessions / blocker['file']} --reason \"<почему запись не обязательство>\"")
@@ -4918,7 +5063,7 @@ if [ "$CMD" = "open" ]; then
       [ -n "${OWNER_PID:-${CLAUDE_PID:-}}" ] && echo "pid: ${OWNER_PID:-$CLAUDE_PID}"
       echo "host: $(uname -n)"
       if [ -n "${OWNER_PID:-${CLAUDE_PID:-}}" ]; then
-        OWNER_PID_START=$(ps -p "${OWNER_PID:-$CLAUDE_PID}" -o lstart= 2>/dev/null | sed 's/^ *//; s/ *$//' || true)
+        OWNER_PID_START=$(LC_ALL=C ps -p "${OWNER_PID:-$CLAUDE_PID}" -o lstart= 2>/dev/null | sed 's/^ *//; s/ *$//' || true)
         [ -n "$OWNER_PID_START" ] && echo "pid_start: $OWNER_PID_START"
       fi
       _write_canonical_owner_identity
@@ -5073,6 +5218,29 @@ if [ "$CMD" = "open" ]; then
         fail "этот checkout ($ACTUAL_CWD_TOPLEVEL) под freeze (WP-520/WP-484 Ф104) — прямая запись не разрешена до отдельного решения. Используй изолированный worktree: EnterWorktree или 'git worktree add' от свежего origin/main. Плановому раннеру: добавь --canonical-owner <reason>." 1
       fi
     fi
+  fi
+
+  # WP-561 (26.10): `open` without --isolate from inside ANOTHER live session's
+  # isolated worktree records that worktree as this session's governance
+  # checkout and lets both sessions write into it. Same-WP+slug re-entry of the
+  # owner itself stays allowed.
+  if [ "$ISOLATE_FLAG" != "1" ] && [ -z "$CANONICAL_OWNER" ]; then
+    FOREIGN_CWD_TOPLEVEL=$(git rev-parse --show-toplevel 2>/dev/null || true)
+    [ -z "$FOREIGN_CWD_TOPLEVEL" ] || FOREIGN_CWD_TOPLEVEL=$(realpath "$FOREIGN_CWD_TOPLEVEL" 2>/dev/null || echo "$FOREIGN_CWD_TOPLEVEL")
+    FOREIGN_STORE=$(realpath "$IWE_ROOT/.iwe-runtime/isolated-worktrees" 2>/dev/null || echo "$IWE_ROOT/.iwe-runtime/isolated-worktrees")
+    case "$FOREIGN_CWD_TOPLEVEL" in
+      "$FOREIGN_STORE"/*)
+        FOREIGN_OWNER_SEM="$SESSION_DIR/$(basename "$FOREIGN_CWD_TOPLEVEL").open"
+        if [ -f "$FOREIGN_OWNER_SEM" ] \
+           && lease_valid "$FOREIGN_OWNER_SEM" \
+           && ! { [ -n "$SLUG" ] \
+                  && [ "$(grep "^agent: " "$FOREIGN_OWNER_SEM" | cut -d' ' -f2-)" = "$AGENT" ] \
+                  && [ "$(grep "^wp: " "$FOREIGN_OWNER_SEM" | cut -d' ' -f2-)" = "$WP" ] \
+                  && [ "$(grep "^slug: " "$FOREIGN_OWNER_SEM" | cut -d' ' -f2-)" = "$SLUG" ]; }; then
+          fail "open: cwd ($FOREIGN_CWD_TOPLEVEL) — изолят чужой живой сессии ($(basename "$FOREIGN_OWNER_SEM")). Не открывай сессию отсюда: перейди в свой каталог и используй --isolate, иначе обе сессии будут писать в одну рабочую копию." 1
+        fi
+        ;;
+    esac
   fi
 
   # --isolate: session-owned git worktree, created here so the caller never
@@ -5689,6 +5857,35 @@ $isolate_status_code $isolate_status_path"
   fi
 
   if [ "$REUSE_EXISTING_SEMAPHORE" -eq 0 ]; then
+    # WP-484 F257 M2: remember which revision of the WP card origin held when the
+    # session opened.  The peer-session close check (wp-handoff-peer-check.sh)
+    # compares «Следующий шаг» against it; time-based reconstruction is not reliable.
+    # Empty when there is no card or no origin ref -- the check then reports the
+    # baseline as unavailable instead of failing.
+    BASELINE_CARD_OID=""
+    BASELINE_SOURCE="local-unfetched"
+    case "$WP" in
+      WP-[0-9]*)
+        # One bounded fetch of origin/main right before the id is taken, so that the id
+        # names the card the server really held at open (refs/remotes only; the
+        # worktree is untouched).  Failure keeps the local ref and says so in
+        # baseline_source: all later checks of this session use this one recorded id.
+        BASELINE_LIMIT_LIB="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/run-limited.sh"
+        if [ -r "$BASELINE_LIMIT_LIB" ]; then
+          # shellcheck source=lib/run-limited.sh
+          . "$BASELINE_LIMIT_LIB"
+          if run_limited 20 git -C "${ISOLATED_WORKTREE_PATH:-$CURRENT_REPO_DIR}" fetch -q origin main </dev/null 2>/dev/null; then
+            BASELINE_SOURCE="fetched"
+          fi
+        fi
+        BASELINE_CARD_OID=$(git -C "${ISOLATED_WORKTREE_PATH:-$CURRENT_REPO_DIR}" \
+          rev-parse --verify -q "origin/main:inbox/$WP/$WP.md" 2>/dev/null || true)
+        ;;
+    esac
+    # Only a bare object id goes into the semaphore (it is read back by git later).
+    case "$BASELINE_CARD_OID" in
+      *[!0-9a-f]*) BASELINE_CARD_OID="" ;;
+    esac
     SEM_TEMP=$(mktemp "$SESSION_DIR/.session-open.XXXXXX") \
       || fail "open: temporary semaphore не создан" 1
     chmod 600 "$SEM_TEMP" || fail "open: temporary semaphore permissions не установлены" 1
@@ -5723,6 +5920,10 @@ $isolate_status_code $isolate_status_path"
     [ -n "$ISOLATED_WORKTREE_BRANCH" ] && echo "isolated_branch: $ISOLATED_WORKTREE_BRANCH"
     echo "orz_file: $ORZ_BASENAME"
     echo "orz_sessions_dir: $ORZ_SESSIONS_DIR"
+    if [ -n "$BASELINE_CARD_OID" ]; then
+      echo "baseline_card_oid: $BASELINE_CARD_OID"
+      echo "baseline_source: $BASELINE_SOURCE"
+    fi
     # WP-484 (08.08, Kimi diagnosis + pilot report): regular sessions never
     # recorded a pid at all, so sweep_orphaned_semaphores()'s dead-pid check —
     # the only auto-detection left since age-based quarantine was retired
@@ -5738,7 +5939,7 @@ $isolate_status_code $isolate_status_path"
     echo "host: $(uname -n)"
     _write_canonical_owner_identity
     if [ -n "${OWNER_PID:-${CLAUDE_PID:-}}" ]; then
-      OWNER_PID_START=$(ps -p "${OWNER_PID:-$CLAUDE_PID}" -o lstart= 2>/dev/null | sed 's/^ *//; s/ *$//' || true)
+      OWNER_PID_START=$(LC_ALL=C ps -p "${OWNER_PID:-$CLAUDE_PID}" -o lstart= 2>/dev/null | sed 's/^ *//; s/ *$//' || true)
       [ -n "$OWNER_PID_START" ] && echo "pid_start: $OWNER_PID_START"
     fi
     echo "---"
@@ -5878,8 +6079,6 @@ artifacts: []
 |----------|----------|
 
 ## Ключевые решения
-
-## Следующий шаг
 
 EOF
     echo "ORZ scaffold создан: $ORZ_FILE"
@@ -8245,6 +8444,21 @@ _receipt_checkout_has_publish_proof() {  # <semaphore> <checkout> <fresh remote>
     _publication_receipt_tool verify-checkout "$1" "$2" "$name" "$3" && return 0
   done < <({ sed -n 's/^commit: \([^ ]*\) .*/\1/p' "$1"; printf '%s\n' "$GOV_REPO"; } | sort -u)
   return 1
+}
+
+# True when the commit changes at least one path and none of its paths is a file
+# claim of this session: a session's own commit always touches a claimed file,
+# so such a commit cannot be its work (a claim made by mistake).
+_commit_is_foreign_to_session() {  # <semaphore> <repo dir> <full sha>
+  local changed path
+  changed=$(git -C "$2" diff-tree --no-commit-id --name-only -r -m --root "$3" 2>/dev/null) || return 1
+  [ -n "$changed" ] || return 1
+  while IFS= read -r path; do
+    grep -qxF "file: $path" "$1" 2>/dev/null && return 1
+  done <<EOF
+$changed
+EOF
+  return 0
 }
 
 _claimed_commits_have_publish_proof() {  # <semaphore> [exact claim strings JSON to exclude]
@@ -11276,6 +11490,8 @@ if [ "$CMD" = "close" ]; then
     HK_LOCKED_ID=$(_locked_open_identity "$HK_FILE" "$AGENT" "" 1 || true)
     [ -n "$HK_LOCKED_ID" ] \
       || fail "close --housekeeping: identity изменилась после lock; mutation запрещена" 1
+    [ -z "$EXPECT_SESSION_ID_SET" ] || [ "$HK_LOCKED_ID" = "$EXPECT_SESSION_ID" ] \
+      || fail "close --housekeeping: открыт другой запуск (ожидался $EXPECT_SESSION_ID, найден $HK_LOCKED_ID); закрытие запрещено" 1
     HK_SNAPSHOT=$(_owned_semaphore_snapshot_sha "$HK_FILE" 1 || true)
     [ -n "$HK_SNAPSHOT" ] \
       || fail "close --housekeeping: exact immutable snapshot не получен" 1
@@ -11423,6 +11639,14 @@ if [ "$CMD" = "close" ]; then
   echo "Session CLOSE: проверяю ORZ $ORZ_FILE ..."
   if ! validate_orz "$ORZ_FILE" "$AGENT" "$ORZ_SESSIONS_DIR"; then
     fail "ORZ не прошёл валидацию. Исправь замечания выше и повтори close. Семафор остаётся активным." 5
+  fi
+
+  # WP-484 F257 M2: the peer-session path has no runner, so the card field
+  # «Следующий шаг» is checked here (shadow mode: warns, never blocks).
+  # Optional by design: a failure of the check must not stop a close.
+  # Called only for a peer-session close: other sessions have no use for the check.
+  if [ -n "${SEM_FILE:-}" ] && grep -qx 'close_path: peer-session' "$SEM_FILE" 2>/dev/null; then
+    bash "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/wp-handoff-peer-check.sh" --sem "$SEM_FILE" </dev/null || true
   fi
 
   DEFERRED_NO_REFLECTION_EVENT=""
@@ -11757,9 +11981,9 @@ print(json.dumps({"wp": sys.argv[1], "slug": sys.argv[2], "agent": sys.argv[3], 
     # плейсхолдером вместо ID нечестно (агент-исполнитель может выполнить её
     # буквально) -- отдельная ветка без готовой к копипасту команды.
     if [ -n "$CANCEL_LOOKUP_ID" ]; then
-      CANCEL_HINT="попроси пилота об явной отмене: python3 close_obligation.py cancel --session-id '$CANCEL_LOOKUP_ID' --action cancel-close. Сессия неинтерактивная/плановая (launchd) -- для таких close-обязательство обычно не заводится вовсе, отмена вернёт \"нечего отменять\": используй process-runner.py cancel <run-id> или ручной карантин семафора (S-33)"
+      CANCEL_HINT="попроси пилота об явной отмене: python3 close_obligation.py cancel --session-id '$CANCEL_LOOKUP_ID' --action cancel-close. Сессия неинтерактивная/плановая (launchd) -- для таких close-обязательство обычно не заводится вовсе, отмена вернёт \"нечего отменять\": используй session-guard.sh heal <slug> (сухой прогон покажет шаги; карточку раннера, обязательство и семафор снимает одной командой)"
     else
-      CANCEL_HINT="явная отмена через close_obligation.py недоступна -- у этой сессии не определился ни harness_session_id, ни session_id семафора. Попроси пилота о ручном карантине семафора (S-33) или используй process-runner.py cancel <run-id>"
+      CANCEL_HINT="явная отмена через close_obligation.py недоступна -- у этой сессии не определился ни harness_session_id, ни session_id семафора. Используй session-guard.sh heal <slug> (сухой прогон покажет шаги и нужное слово пилота)"
     fi
   fi
 
@@ -12183,10 +12407,15 @@ print(json.dumps({"wp": sys.argv[1], "slug": sys.argv[2], "agent": sys.argv[3], 
   # проваливает close.
   if [ -n "${FORCED_CARD:-}" ] && [ -f "$IWE_ROOT/$GOV_REPO/scripts/ledger-append.sh" ]; then
     _cp_from_sem=$(grep "^close_path: " "$_sem_read" 2>/dev/null | cut -d' ' -f2- || echo "unknown")
+    # peer_evidence: see peer_session_evidence() -- warn-only, counted by session-close-quality.py.
+    _peer_evidence=$(peer_session_evidence "$_cp_from_sem" "$_sem_read" "$SLUG" "${ORZ_SESSIONS_DIR:-$ORZ_DIR}")
+    if [ "$_peer_evidence" = "no" ]; then
+      echo "  ⚠️  close_path=peer-session объявлен, но следов пир-сессии нет (папка сессии с 00-writer.md/meta.yaml или ORZ type: peer-session). Закрытие записано как обход штатного раннера (peer_evidence=no)." >&2
+    fi
     _direct_event=$(python3 -c '
 import json, sys
-print(json.dumps({"wp": sys.argv[1], "slug": sys.argv[2], "agent": sys.argv[3], "close_path": sys.argv[4]}))
-' "$WP" "$SLUG" "$AGENT" "$_cp_from_sem" 2>/dev/null) || _direct_event=""
+print(json.dumps({"wp": sys.argv[1], "slug": sys.argv[2], "agent": sys.argv[3], "close_path": sys.argv[4], "peer_evidence": sys.argv[5]}))
+' "$WP" "$SLUG" "$AGENT" "$_cp_from_sem" "$_peer_evidence" 2>/dev/null) || _direct_event=""
     if [ -n "$_direct_event" ]; then
       bash "$IWE_ROOT/$GOV_REPO/scripts/ledger-append.sh" day "$(now_date)" session_closed_direct "$_direct_event" session-guard \
         >/dev/null 2>&1 || echo "  ⚠️  ledger session_closed_direct не записан (best-effort, не блокирует close)" >&2
@@ -13022,7 +13251,11 @@ PY
     # nothing left to exclude is a valid, expected case under set -e, not a
     # failure to mask with it (live, found running this script's own test).
     NC_FORGET_OTHER_CLAIMS=$(sed -n 's/^commit: //p' "$SEM_FILE" | { grep -vxF "$NC_REPO_NAME $NC_FULL_SHA" || true; } | jq -R . | jq -s -c .)
-    if _claimed_commits_have_publish_proof "$SEM_FILE" "$NC_FORGET_OTHER_CLAIMS" >/dev/null 2>&1; then
+    # A published claim stays unremovable unless the commit is provably not this
+    # session's work (WP-484 F257): note-commit after a refused commit once
+    # claimed a foreign HEAD, and that claim blocked the close for good.
+    if _claimed_commits_have_publish_proof "$SEM_FILE" "$NC_FORGET_OTHER_CLAIMS" >/dev/null 2>&1 \
+       && ! _commit_is_foreign_to_session "$SEM_FILE" "$NC_REPO_DIR" "$NC_FULL_SHA"; then
       fail "note-commit --forget: '$NC_ENTRY' уже имеет независимое доказательство публикации; снятие запрещено" 1
     fi
     python3 - "$SEM_FILE" "$NC_REPO_NAME" "$NC_FULL_SHA" "$NC_STATE" <<'PY' || exit $?
@@ -14034,8 +14267,9 @@ PY
 }
 
 _recovery_event_in_ledger() {  # <ledger-root> <recovery-id>: 0 found, 1 absent, 2 unreadable
-  python3 - "$1" "$2" <<'PY'
+  python3 - "$1" "$2" "$IWE_ROOT/$GOV_REPO/scripts/lib/ledger_path.py" <<'PY'
 import os
+import re
 import stat
 import sys
 
@@ -14045,33 +14279,57 @@ except ImportError as error:
     print("PyYAML unavailable: %s" % error, file=sys.stderr)
     raise SystemExit(2)
 
-root, recovery_id = sys.argv[1:]
+root, recovery_id, reader = sys.argv[1:]
 day_root = os.path.join(root, "day")
-if not os.path.isdir(day_root):
+buffer_root = os.environ.get("IWE_LEDGER_BUFFER_DIR")
+if buffer_root:
+    if not os.path.isabs(buffer_root) or os.path.islink(buffer_root) or not os.path.isdir(buffer_root):
+        print("cannot verify recovery ledger: buffer root is unavailable", file=sys.stderr)
+        raise SystemExit(2)
+    try:
+        sys.path.insert(0, os.path.dirname(reader))
+        from ledger_path import read_ledger_document
+    except ImportError as error:
+        print("cannot load shared ledger reader: %s" % error, file=sys.stderr)
+        raise SystemExit(2)
+scan_roots = [day_root]
+if buffer_root:
+    scan_roots.append(os.path.join(buffer_root, "day"))
+if not any(os.path.isdir(path) for path in scan_roots):
     raise SystemExit(1)
-for directory, names, files in os.walk(day_root):
-    names.sort()
-    for name in sorted(files):
-        if not name.endswith(".yaml"):
-            continue
-        path = os.path.join(directory, name)
-        try:
-            info = os.lstat(path)
-            if not stat.S_ISREG(info.st_mode):
-                raise ValueError("not a regular ledger file")
-            with open(path, encoding="utf-8") as source:
-                document = yaml.safe_load(source)
-            if not isinstance(document, dict) or not isinstance(document.get("events"), list):
-                raise ValueError("invalid ledger structure")
-        except Exception as error:
-            print("cannot verify recovery ledger %s: %s" % (path, error), file=sys.stderr)
-            raise SystemExit(2)
-        for event in document["events"]:
-            if not isinstance(event, dict) or event.get("kind") != "session_recovered_closed":
+seen = set()
+for scan_root in scan_roots:
+    for directory, names, files in os.walk(scan_root):
+        names.sort()
+        for name in sorted(files):
+            match = re.fullmatch(r"day-(\d{4}-\d{2}-\d{2})\.yaml", name)
+            if match is None:
                 continue
-            data = event.get("data")
-            if isinstance(data, dict) and data.get("recovery_id") == recovery_id:
-                raise SystemExit(0)
+            path = os.path.join(directory, name)
+            period = match.group(1)
+            try:
+                info = os.lstat(path)
+                if not stat.S_ISREG(info.st_mode):
+                    raise ValueError("not a regular ledger file")
+                if period in seen:
+                    continue
+                seen.add(period)
+                if buffer_root:
+                    document = read_ledger_document("day", period, root, buffer_root=buffer_root)
+                else:
+                    with open(path, encoding="utf-8") as source:
+                        document = yaml.safe_load(source)
+                if not isinstance(document, dict) or not isinstance(document.get("events"), list):
+                    raise ValueError("invalid ledger structure")
+            except Exception as error:
+                print("cannot verify recovery ledger %s: %s" % (path, error), file=sys.stderr)
+                raise SystemExit(2)
+            for event in document["events"]:
+                if not isinstance(event, dict) or event.get("kind") != "session_recovered_closed":
+                    continue
+                data = event.get("data")
+                if isinstance(data, dict) and data.get("recovery_id") == recovery_id:
+                    raise SystemExit(0)
 raise SystemExit(1)
 PY
 }
@@ -14401,7 +14659,7 @@ if [ "$CMD" = "retire-semaphore-artifact" ]; then
   [ "$(dirname -- "$RETIRE_FILE")" = "$RETIRE_CANON_DIR" ] \
     || fail "retire-semaphore-artifact: '$RETIRE_FILE' должен лежать непосредственно в каталоге семафоров ($SESSION_DIR)" 1
   case "$RETIRE_BASE" in
-    *.open) fail "retire-semaphore-artifact: '$RETIRE_BASE' — активный семафор; его снимает только close или audit --cleanup-orphans. Для незавершённого Quick Close повтори process-runner.py start quick-close --slug <slug>; если уже есть зависшая RUN-карточка, используй process-runner.py cancel <run-id> и повтори close" 1 ;;
+    *.open) fail "retire-semaphore-artifact: '$RETIRE_BASE' — активный семафор; его снимает только close или audit --cleanup-orphans. Для незавершённого Quick Close повтори process-runner.py start quick-close --slug <slug>; если уже есть зависшая RUN-карточка, используй process-runner.py cancel <run-id> и повтори close. Зависшую целиком сессию лечит session-guard.sh heal <slug> (по умолчанию сухой прогон)" 1 ;;
     *.open.*) : ;;
     *) fail "retire-semaphore-artifact: '$RETIRE_BASE' не является записью семафора (ожидается <agent>-<id>.open.<состояние>)" 1 ;;
   esac
@@ -14466,6 +14724,524 @@ if [ "$CMD" = "retire-semaphore-artifact" ]; then
   release_scheduled_admission_lock \
     || fail "retire-semaphore-artifact: запись сделана, но admission lock не освободился" 1
   echo "Retired: $RETIRE_BASE (basis=$RETIRE_BASIS, sha256=${RETIRE_SHA:0:12}…) — файл не тронут, owner-status больше не считает его обязательством"
+  exit 0
+fi
+
+# --- HEAL (WP-484 Ф250, мера 3) ---
+# One command for a session stuck on THIS host. The manual cure used to be a
+# chain of service-file edits and four separate CLIs (retire-semaphore-artifact
+# refuses *.open by design; the dead-owner quarantine only runs globally from
+# audit; the runner and close_obligation each cancel their own record). heal
+# composes the existing primitives and adds no new way around them:
+#   - the dead-owner path IS _quarantine_dead_interactive (same four
+#     conditions, same lease/heartbeat evidence);
+#   - the pilot-word path applies only when that proof is unavailable or the
+#     session holds unsaved work, and the word is looked up ONLY in the
+#     pilot-witness log of the CALLING conversation (written by the
+#     UserPromptSubmit hook), never taken from a CLI argument or from a
+#     challenge the agent could answer for itself. This is a reflex against
+#     casual self-approval, NOT a privilege boundary: see the limits at
+#     _heal_pilot_word_proven;
+#   - _local_release_mutation_allowed fences every mutation, and the Ф220
+#     auto-recovery flags are neither read nor changed.
+# Default is a DRY RUN with no side effects (no lock files, no registry, no
+# ledger).
+HEAL_WORD_WINDOW_SEC=7200
+
+_heal_code() {  # <slug> <semaphore> <hour bucket>
+  python3 - "$1" "$(_semaphore_last_field "$2" session_id)" "$(_semaphore_last_field "$2" opened_at)" \
+    "$(_semaphore_last_field "$2" pid)" "$(_semaphore_last_field "$2" host)" "$3" <<'PY'
+import hashlib
+import sys
+
+print(hashlib.sha256("heal|".encode("utf-8") + "|".join(sys.argv[1:]).encode("utf-8")).hexdigest()[:6])
+PY
+}
+
+# Every conversation identity the caller carries, one per line: the single
+# source for the self-heal refusal and for the pilot-word lookup.
+_heal_caller_ids() {
+  local caller_id
+  for caller_id in "$(_runtime_harness_session_id "${HEAL_ACTOR:-unknown}" 2>/dev/null || true)" \
+    "${IWE_SESSION_ID:-}" "${CLAUDE_CODE_SESSION_ID:-}" "${CODEX_THREAD_ID:-}"; do
+    [ -z "$caller_id" ] || printf '%s\n' "$caller_id"
+  done
+}
+
+# 0 when the caller's conversation id owns a live `.open` semaphore on this
+# host other than the target (a real, registered session of its own).
+_heal_caller_has_live_open() {  # <caller harness id> <target semaphore>
+  local candidate pid host
+  for candidate in "$SESSION_DIR"/*.open; do
+    [ -f "$candidate" ] && [ ! -L "$candidate" ] || continue
+    [ "$candidate" != "$2" ] || continue
+    [ "$(_semaphore_last_field "$candidate" harness_session_id)" = "$1" ] || continue
+    host=$(_semaphore_last_field "$candidate" host)
+    [ -z "$host" ] || [ "$host" = "$(uname -n)" ] || continue
+    pid=$(_semaphore_last_field "$candidate" pid)
+    if [[ "$pid" =~ ^[1-9][0-9]*$ ]] && kill -0 "$pid" 2>/dev/null; then return 0; fi
+  done
+  return 1
+}
+
+# Honest limits (same register as witness-write-guard.sh). The pilot-witness
+# recorder logs EVERY UserPromptSubmit of EVERY Claude session as the pilot's
+# line, and witness-write-guard.sh only blocks a literal mention of the path in
+# the agent's own Bash/Write call. So an agent can start a headless child
+# (`claude -p "heal <slug> <code>"`, scripts/headless-runner.sh): the child's
+# hook records the prompt as a "pilot" line, and `CLAUDE_CODE_SESSION_ID=<child>
+# session-guard.sh heal ... --apply` would read it back; the same env guess
+# reads any other session's log. There is no privilege boundary between the
+# hook and an agent under the same unix user, so the check is a reflex against
+# casual self-approval, not a guarantee against a deliberate bypass. Three
+# cheap filters raise the price of that path (they do not remove it):
+#   - the line must not be the ONLY non-heal evidence of a conversation: the
+#     log needs an earlier record that is not a heal command (a headless child
+#     has exactly one, its own prompt);
+#   - the caller's conversation id must own a live `.open` semaphore of its own
+#     on this host (a registered session, not an anonymous id);
+#   - the witness file the word came from is written to the ledger and the
+#     registry, so a reviewer can see exactly which log was trusted.
+# The code binds the message to ONE target (slug + owner + open time) and to a
+# two-hour window; it is derived, not stored, because the dry run must leave no
+# trace -- so "newer than the dry run" is approximated by "inside the window".
+# The line must be the whole message (optionally prefixed with "подтверждаю"),
+# so a message that merely quotes agent output does not count. Only the Claude
+# hook writes witness logs: for Codex/Kimi the pilot's word cannot be proven.
+# Returns 0 proven, 1 not found, 2 the caller's conversation identity is
+# unknown, 3 unprovable for this agent, 4 the line is the only record,
+# 5 the caller has no live semaphore of its own.
+HEAL_WORD_TS=""
+HEAL_WORD_FILE=""
+_heal_pilot_word_proven() {  # <slug> <code now> <code previous> <target semaphore>
+  local native="${CLAUDE_CODE_SESSION_ID:-}" safe witness word_rc=0 witness_dir
+  if [ -z "$native" ]; then
+    if [ -n "${CODEX_THREAD_ID:-}" ] || { [ -n "${AGENT:-${IWE_AGENT:-}}" ] && [ "${AGENT:-${IWE_AGENT:-}}" != "claude-code" ]; }; then
+      return 3
+    fi
+    return 2
+  fi
+  [[ "$native" =~ ^[a-zA-Z0-9][a-zA-Z0-9._-]{0,255}$ ]] || return 2
+  safe=$(printf '%s' "$native" | tr -cd 'A-Za-z0-9._-')
+  witness_dir="$IWE_ROOT/.iwe-runtime/pilot-witness"
+  witness="$witness_dir/$safe.jsonl"
+  [ -s "$witness" ] || return 1
+  HEAL_WORD_TS=$(python3 - "$witness" "$1" "$2" "$3" "$HEAL_WORD_WINDOW_SEC" <<'PY'
+import datetime as dt
+import json
+import re
+import sys
+
+path, slug, code_now, code_prev, window = sys.argv[1:]
+heal_command = re.compile(r"(?:подтверждаю\s+)?heal\b", re.IGNORECASE)
+pattern = re.compile(
+    r"(?:подтверждаю\s+)?heal\s+" + re.escape(slug) + r"\s+(?:" + re.escape(code_now) + "|" + re.escape(code_prev) + ")",
+    re.IGNORECASE,
+)
+now = dt.datetime.now(dt.timezone.utc)
+records = []
+with open(path, encoding="utf-8") as stream:
+    for number, line in enumerate(stream, 1):
+        if not line.strip():
+            continue
+        try:
+            record = json.loads(line)
+            stamp = dt.datetime.strptime(record["ts"], "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=dt.timezone.utc)
+            text = str(record.get("text", "")).strip()
+        except (ValueError, KeyError, TypeError) as error:
+            print("heal: строка %d журнала реплик пилота не разобрана (%s), пропущена" % (number, error), file=sys.stderr)
+            continue
+        records.append((stamp, record["ts"], text))
+matched = [item for item in records if (now - item[0]).total_seconds() <= int(window) and pattern.fullmatch(item[2])]
+if not matched:
+    raise SystemExit(1)
+stamp, found, _ = max(matched, key=lambda item: item[0])
+if not any(other < stamp and not heal_command.match(text) for other, _, text in records):
+    print("heal: единственная реплика в журнале — сама команда heal; так выглядит дочерний headless-разговор, слово не принято", file=sys.stderr)
+    raise SystemExit(4)
+print(found)
+PY
+  ) || word_rc=$?
+  if [ "$word_rc" -ne 0 ]; then
+    [ "$word_rc" -eq 4 ] && return 4
+    return 1
+  fi
+  _heal_caller_has_live_open "$native" "$4" || return 5
+  HEAL_WORD_FILE=$(basename -- "$witness")
+  return 0
+}
+
+_heal_scan_cards() {  # <slug> <session_id> <harness id or -> <cards dir>...; read-only
+  python3 - "$@" <<'PY'
+import os
+import sys
+
+slug, session_id, harness_id = sys.argv[1:4]
+ids = {value for value in (session_id, harness_id) if value and value != "-"}
+
+
+def frontmatter(text):
+    lines = text.splitlines()
+    fields = {}
+    if not lines or lines[0] != "---":
+        return fields
+    for line in lines[1:]:
+        if line == "---":
+            break
+        key, separator, value = line.partition(": ")
+        if separator:
+            fields[key.strip()] = value.strip().strip("'\"")
+    return fields
+
+
+seen = set()
+for directory in sys.argv[4:]:
+    try:
+        names = sorted(os.listdir(directory))
+    except FileNotFoundError:
+        continue
+    for name in names:
+        if not (name.startswith("RUN-") and name.endswith(".md")):
+            continue
+        path = os.path.join(directory, name)
+        try:
+            with open(path, encoding="utf-8") as stream:
+                text = stream.read(65536)
+        except (OSError, UnicodeError) as error:
+            print("heal: карточка %s не читается (%s)" % (path, error), file=sys.stderr)
+            continue
+        if "status: running" not in text and "status: waiting" not in text:
+            continue
+        card = frontmatter(text)
+        if card.get("process_id") != "quick-close" or card.get("status") not in ("running", "waiting"):
+            continue
+        owner = card.get("owner_session_id", "")
+        if owner in ids:
+            kind = "own"
+        elif card.get("requested_slug") == slug:
+            kind = "foreign"
+        else:
+            continue
+        key = (directory, card.get("run_id", name))
+        if key not in seen:
+            seen.add(key)
+            print("\t".join([kind, card.get("run_id", name), owner or "-", directory]))
+PY
+}
+
+_heal_tickets() {  # <session id>...; prints "<nonce>\t<session id>" of pending close tickets
+  # Same directory resolution as close_obligation.py (IWE_RUNTIME_DIR override).
+  python3 - "${IWE_RUNTIME_DIR:-$IWE_ROOT/.iwe-runtime}/close-tickets" "$@" <<'PY'
+import json
+import os
+import sys
+
+directory, ids = sys.argv[1], {value for value in sys.argv[2:] if value}
+try:
+    names = sorted(os.listdir(directory))
+except FileNotFoundError:
+    raise SystemExit(0)
+for name in names:
+    if not name.endswith(".json") or name.startswith("."):
+        continue
+    try:
+        with open(os.path.join(directory, name), encoding="utf-8") as stream:
+            ticket = json.load(stream)
+    except (OSError, ValueError) as error:
+        print("heal: билет %s не читается (%s)" % (name, error), file=sys.stderr)
+        continue
+    if isinstance(ticket, dict) and str(ticket.get("session_id", "")) in ids:
+        print("%s\t%s" % (name[:-len(".json")], ticket["session_id"]))
+PY
+}
+
+_heal_obligation_mode() {  # <session id>; prints the obligation mode or nothing
+  local cli="$IWE_ROOT/$GOV_REPO/scripts/close_obligation.py"
+  [ -f "$cli" ] || return 0
+  python3 "$cli" mode --session-id "$1" 2>/dev/null | tr -d '[:space:]' || true
+}
+
+if [ "$CMD" = "heal" ]; then
+  HEAL_SLUG="${POSITIONAL[0]:-}"
+  [ -n "$HEAL_SLUG" ] || fail "heal: нужен slug зависшей сессии (поле slug: в её семафоре). Список активных: ls $SESSION_DIR/*.open" 1
+  [ "${#POSITIONAL[@]}" -eq 1 ] || fail "heal: ожидается ровно один аргумент — slug" 1
+  [[ "$HEAL_SLUG" =~ ^[a-zA-Z0-9][a-zA-Z0-9._-]{0,255}$ ]] \
+    || fail "heal: slug '$HEAL_SLUG' недопустим (буквы, цифры, . _ -)" 1
+  if [ "$HEAL_APPLY" -eq 1 ]; then
+    [ -n "$UNFREEZE_REASON" ] || fail "heal --apply: --reason обязателен (что случилось и почему сессию можно снять)" 1
+  elif [ -n "$UNFREEZE_REASON" ]; then
+    fail "heal: --reason имеет смысл только вместе с --apply" 1
+  fi
+  HEAL_ACTOR="${AGENT:-${IWE_AGENT:-unknown}}"
+  ZOMBIE_EVENT_SOURCE="session-guard.sh heal"
+
+  # 1. Find the session: an active semaphore, else a quarantine left by an
+  # earlier (possibly interrupted) heal, so a rerun finishes the remaining steps.
+  HEAL_SEM=""; HEAL_ACTIVE=0; HEAL_MATCHES=""
+  for HEAL_CAND in "$SESSION_DIR"/*.open; do
+    [ -f "$HEAL_CAND" ] || continue
+    if [ "$(_semaphore_last_field "$HEAL_CAND" slug)" = "$HEAL_SLUG" ] \
+      || [ "$(_semaphore_last_field "$HEAL_CAND" session_id)" = "$HEAL_SLUG" ]; then
+      HEAL_MATCHES="${HEAL_MATCHES}${HEAL_CAND}"$'\n'
+    fi
+  done
+  if [ -n "$HEAL_MATCHES" ]; then
+    [ "$(printf '%s' "$HEAL_MATCHES" | grep -c .)" -eq 1 ] \
+      || fail "heal: slug '$HEAL_SLUG' совпал с несколькими активными семафорами, не лечу вслепую:
+$HEAL_MATCHES" 1
+    HEAL_SEM=$(printf '%s' "$HEAL_MATCHES" | head -1); HEAL_ACTIVE=1
+  else
+    # Recovery receipts (.recovery-pending, .recovered) and leases are not
+    # quarantines of the session itself, and two quarantines of one slug mean
+    # the target is ambiguous: refuse instead of silently taking the last one.
+    HEAL_QUARANTINES=""
+    for HEAL_CAND in "$SESSION_DIR"/*.open.orphaned-*; do
+      [ -f "$HEAL_CAND" ] || continue
+      case "$HEAL_CAND" in *.lease|*.recovery-pending|*.recovered) continue ;; esac
+      if [ "$(_semaphore_last_field "$HEAL_CAND" slug)" = "$HEAL_SLUG" ] \
+        || [ "$(_semaphore_last_field "$HEAL_CAND" session_id)" = "$HEAL_SLUG" ]; then
+        HEAL_QUARANTINES="${HEAL_QUARANTINES}${HEAL_CAND}"$'\n'
+      fi
+    done
+    if [ -n "$HEAL_QUARANTINES" ]; then
+      [ "$(printf '%s' "$HEAL_QUARANTINES" | grep -c .)" -eq 1 ] \
+        || fail "heal: slug '$HEAL_SLUG' совпал с несколькими карантинами, цель неоднозначна, не лечу вслепую (оставшиеся карточки и обязательство сними вручную):
+$HEAL_QUARANTINES" 1
+      HEAL_SEM=$(printf '%s' "$HEAL_QUARANTINES" | head -1)
+    fi
+  fi
+  [ -n "$HEAL_SEM" ] \
+    || fail "heal: нет семафора со slug '$HEAL_SLUG' ни активного, ни в карантине в $SESSION_DIR. Проверь написание slug (поле slug: или session_id: в файле) и что команда запущена на хосте этой сессии: ls $SESSION_DIR" 1
+
+  HEAL_BASE=$(basename -- "$HEAL_SEM")
+  HEAL_SID=$(_semaphore_last_field "$HEAL_SEM" session_id)
+  HEAL_HID=$(_semaphore_last_field "$HEAL_SEM" harness_session_id)
+  HEAL_HOST=$(_semaphore_last_field "$HEAL_SEM" host)
+  HEAL_PID=$(_semaphore_last_field "$HEAL_SEM" pid)
+  if [ -n "$HEAL_HOST" ] && [ "$HEAL_HOST" != "$(uname -n)" ]; then
+    fail "heal: семафор $HEAL_BASE принадлежит хосту $HEAL_HOST, а это $(uname -n). Чужой хост не лечу: процесс владельца и рабочие копии видны только там. Выполни на $HEAL_HOST: session-guard.sh heal $HEAL_SLUG" 1
+  fi
+  while IFS= read -r HEAL_OWN; do
+    [ -n "$HEAL_OWN" ] || continue
+    if [ "$HEAL_OWN" = "$HEAL_SID" ] || [ "$HEAL_OWN" = "$HEAL_HID" ]; then
+      fail "heal: $HEAL_BASE принадлежит ЭТОМУ разговору ($HEAL_OWN) — свою сессию снимает close, а не heal" 1
+    fi
+  done <<< "$(_heal_caller_ids)"
+
+  # 2. Facts (read-only).
+  HEAL_ALIVE="не записан"; HEAL_DEAD_PROVEN=0; HEAL_DEAD_WHY=""
+  if [ "$HEAL_ACTIVE" -eq 0 ]; then
+    HEAL_ALIVE="не применимо (семафор уже в карантине)"; HEAL_DEAD_PROVEN=1
+  elif [[ "$HEAL_PID" =~ ^[1-9][0-9]*$ ]]; then
+    if kill -0 "$HEAL_PID" 2>/dev/null; then HEAL_ALIVE="жив"; else HEAL_ALIVE="мёртв"; fi
+    if _dead_interactive_proof "$HEAL_SEM" "$HEAL_PID"; then
+      HEAL_DEAD_PROVEN=1
+    else
+      HEAL_DEAD_WHY="$_DI_REFUSAL"
+    fi
+  else
+    HEAL_DEAD_WHY="в семафоре нет числового pid"
+  fi
+  HEAL_WT=$(_semaphore_last_field "$HEAL_SEM" isolated_worktree)
+  if [ -z "$HEAL_WT" ]; then
+    HEAL_WT=$(_semaphore_last_field "$HEAL_SEM" governance_worktree)
+    # The canonical checkout is shared by every session: its dirt is not this session's.
+    [ "$(realpath "$HEAL_WT" 2>/dev/null || echo "$HEAL_WT")" != "$(realpath "$IWE_ROOT/$GOV_REPO" 2>/dev/null || echo x)" ] || HEAL_WT=""
+  fi
+  HEAL_CHANGED=0; HEAL_UNPUBLISHED=0; HEAL_WORK="не проверялась (семафор уже в карантине)"
+  if [ "$HEAL_ACTIVE" -eq 1 ]; then
+    HEAL_WORK_RAW=$(unsaved_work_in_worktree "$HEAL_WT")
+    case "$HEAL_WORK_RAW" in
+      gone) HEAL_WORK="рабочей копии уже нет" ;;
+      unknown) HEAL_WORK="проверить не удалось (копии нет в семафоре, git-ошибка или нет origin/main)" ;;
+      *) read -r HEAL_CHANGED HEAL_UNPUBLISHED <<< "$HEAL_WORK_RAW"
+         HEAL_WORK="изменённых файлов $HEAL_CHANGED, неопубликованных коммитов $HEAL_UNPUBLISHED (копия: $HEAL_WT)" ;;
+    esac
+  fi
+  HEAL_UNSAVED=$(( HEAL_CHANGED + HEAL_UNPUBLISHED ))
+
+  HEAL_CARD_DIRS="$IWE_ROOT/$GOV_REPO/inbox/agent/tasks"
+  for HEAL_DIR_ROOT in "$(_semaphore_last_field "$HEAL_SEM" isolated_worktree)" "$(_semaphore_last_field "$HEAL_SEM" governance_worktree)"; do
+    [ -n "$HEAL_DIR_ROOT" ] && [ -d "$HEAL_DIR_ROOT/inbox/agent/tasks" ] || continue
+    case " $HEAL_CARD_DIRS " in *" $HEAL_DIR_ROOT/inbox/agent/tasks "*) ;; *) HEAL_CARD_DIRS="$HEAL_CARD_DIRS $HEAL_DIR_ROOT/inbox/agent/tasks" ;; esac
+  done
+  # shellcheck disable=SC2086
+  HEAL_CARDS=$(_heal_scan_cards "$HEAL_SLUG" "$HEAL_SID" "${HEAL_HID:--}" $HEAL_CARD_DIRS)
+  HEAL_OWN_CARDS=$(printf '%s\n' "$HEAL_CARDS" | grep '^own' || true)
+  HEAL_FOREIGN_CARDS=$(printf '%s\n' "$HEAL_CARDS" | grep '^foreign' || true)
+  HEAL_OBLIGATION=""
+  for HEAL_ID in "$HEAL_HID" "$HEAL_SID"; do
+    [ -n "$HEAL_ID" ] || continue
+    HEAL_MODE=$(_heal_obligation_mode "$HEAL_ID")
+    [ -z "$HEAL_MODE" ] || HEAL_OBLIGATION="${HEAL_OBLIGATION}${HEAL_ID} ($HEAL_MODE)"$'\n'
+  done
+  HEAL_TICKETS=$(_heal_tickets "$HEAL_HID" "$HEAL_SID")
+
+  HEAL_NEEDS_WORD=0
+  [ "$HEAL_DEAD_PROVEN" -eq 1 ] || HEAL_NEEDS_WORD=1
+  [ "$HEAL_UNSAVED" -eq 0 ] || HEAL_NEEDS_WORD=1
+  HEAL_BUCKET=$(( $(date +%s) / 3600 ))
+  HEAL_CODE_NOW=$(_heal_code "$HEAL_SLUG" "$HEAL_SEM" "$HEAL_BUCKET")
+  HEAL_CODE_PREV=$(_heal_code "$HEAL_SLUG" "$HEAL_SEM" "$((HEAL_BUCKET - 1))")
+  HEAL_APPLY_CMD="session-guard.sh heal $HEAL_SLUG --apply --reason \"<что случилось>\""
+  [ "$HEAL_UNSAVED" -eq 0 ] || HEAL_APPLY_CMD="$HEAL_APPLY_CMD --discard-unpublished"
+
+  if [ "$HEAL_APPLY" -eq 0 ]; then
+    echo "heal $HEAL_SLUG — СУХОЙ ПРОГОН, ничего не изменено"
+    echo "Запись: $HEAL_BASE ($([ "$HEAL_ACTIVE" -eq 1 ] && echo "активный семафор" || echo "уже в карантине"))"
+    echo "Владелец: pid ${HEAL_PID:-—} на ${HEAL_HOST:-хост не записан}, процесс: $HEAL_ALIVE"
+    if [ "$HEAL_ACTIVE" -eq 1 ]; then
+      if [ "$HEAL_DEAD_PROVEN" -eq 1 ]; then
+        echo "Смерть владельца доказана: да (pid нет, аренда истекла, heartbeat устарел) — слово пилота не нужно"
+      else
+        echo "Смерть владельца доказана: нет ($HEAL_DEAD_WHY)"
+      fi
+      echo "Несохранённая работа: $HEAL_WORK"
+    fi
+    echo "Что сделает --apply, по шагам:"
+    if [ "$HEAL_ACTIVE" -eq 1 ]; then echo "  1. семафор -> карантин (файл останется на диске как улика)"; else echo "  1. семафор: уже в карантине, шаг не нужен"; fi
+    if [ -n "$HEAL_OWN_CARDS" ]; then
+      echo "  2. карточки раннера этой сессии — ПОПЫТКА отмены через process-runner cancel-session; раннер вправе отказать (owner identity: вызывающий не владелец карточки) — тогда карточки останутся и их снимет reap-orphans по возрасту, heal напечатает точную команду и завершится кодом 0:"
+      printf '%s\n' "$HEAL_OWN_CARDS" | cut -f2,4 | sed 's/^/       /'
+    else
+      echo "  2. карточки раннера: открытых нет"
+    fi
+    if [ -n "$HEAL_OBLIGATION" ]; then echo "  3. close-обязательство -> cancel-close:"; printf '%s' "$HEAL_OBLIGATION" | sed 's/^/       /'; else echo "  3. close-обязательство: не взведено"; fi
+    if [ -n "$HEAL_TICKETS" ]; then echo "  4. аннулировать билеты закрытия: $(printf '%s\n' "$HEAL_TICKETS" | cut -f1 | tr '\n' ' ')"; else echo "  4. билеты закрытия: ожидающих нет"; fi
+    if [ -n "$HEAL_FOREIGN_CARDS" ]; then
+      echo "Не трогаю (карточки со slug этой сессии, но с другим владельцем):"
+      printf '%s\n' "$HEAL_FOREIGN_CARDS" | cut -f2,3 | sed 's/^/  /'
+    fi
+    if [ "$HEAL_NEEDS_WORD" -eq 1 ]; then
+      echo "Слово пилота: ТРЕБУЕТСЯ. Пилот пишет в чат ровно эту строку (код действует 1-2 часа): heal $HEAL_SLUG $HEAL_CODE_NOW"
+      echo "  Условия: у разговора, из которого идёт --apply, есть свой живой семафор; в журнале его реплик перед этой строкой есть хотя бы одна другая реплика пилота. Слово пилота доказуемо только для Claude (запись ведёт его хук); для Codex/Kimi — недоказуемо, лечи из окна Claude."
+      echo "  Ограничение: это рефлекс против самоодобрения, а не граница привилегий — агент того же пользователя может обойти его через дочерний headless-разговор (claude -p) или подбор чужого журнала; фильтры выше лишь удорожают обход."
+    else
+      echo "Слово пилота: не требуется"
+    fi
+    [ "$HEAL_UNSAVED" -eq 0 ] || echo "Нужен флаг --discard-unpublished: да (есть несохранённая работа; файлы копии heal не удаляет, но сессия перестанет быть обязательством)"
+    echo "Боевой запуск: $HEAL_APPLY_CMD"
+    exit 0
+  fi
+
+  # 3. Apply. Refusals first, before any lock or mutation.
+  if [ "$HEAL_UNSAVED" -gt 0 ] && [ "$HEAL_DISCARD_UNPUBLISHED" -ne 1 ]; then
+    fail "heal --apply: в копии сессии есть несохранённая работа ($HEAL_WORK). Без явного --discard-unpublished и слова пилота не лечу. Сначала собери работу (isolate-push) либо повтори сухой прогон" 1
+  fi
+  HEAL_WORD_TS=""
+  if [ "$HEAL_NEEDS_WORD" -eq 1 ]; then
+    HEAL_WORD_RC=0
+    _heal_pilot_word_proven "$HEAL_SLUG" "$HEAL_CODE_NOW" "$HEAL_CODE_PREV" "$HEAL_SEM" || HEAL_WORD_RC=$?
+    case "$HEAL_WORD_RC" in
+      0) : ;;
+      2) fail "heal --apply: нужно слово пилота, но у вызывающего разговора нет собственной идентичности (CLAUDE_CODE_SESSION_ID), журнал реплик пилота не найти. Лечить из этого окружения нельзя" 1 ;;
+      3) fail "heal --apply: нужно слово пилота, но для Codex/Kimi оно недоказуемо — журнал реплик пилота ведёт только хук Claude. Выполни heal из окна Claude" 1 ;;
+      4) fail "heal --apply: слово не принято — в журнале разговора нет ни одной другой реплики пилота перед командой heal (так выглядит дочерний headless-разговор). Пилот должен написать слово в обычном окне, где уже шёл разговор" 1 ;;
+      5) fail "heal --apply: слово не принято — у вызывающего разговора нет собственного живого семафора на этом хосте. Открой сессию (protocol-open) в этом окне и повтори" 1 ;;
+      *) fail "heal --apply: слова пилота нет. Нужна реплика пилота в ЭТОМ разговоре, целиком: heal $HEAL_SLUG $HEAL_CODE_NOW (причина: ${HEAL_DEAD_WHY:-есть несохранённая работа}). Слово не принимается ни аргументом, ни от самого агента; проверка — рефлекс против самоодобрения, не граница привилегий" 1 ;;
+    esac
+  fi
+  HEAL_DESTINATION="$HEAL_SEM"
+  HEAL_BASIS="already-quarantined"
+  if [ "$HEAL_ACTIVE" -eq 1 ]; then
+    acquire_scheduled_admission_lock
+    acquire_session_transition_lock "$HEAL_SEM"
+    _local_release_mutation_allowed "$HEAL_SEM" || fail "heal: local result is intentionally retained" 7
+    [ -f "$HEAL_SEM" ] && [ ! -L "$HEAL_SEM" ] \
+      || fail "heal: семафор $HEAL_BASE исчез или подменён между сухим прогоном и применением; повтори сухой прогон" 1
+    if [ "$HEAL_DEAD_PROVEN" -eq 1 ]; then
+      HEAL_BASIS="dead-owner-proof"
+      _quarantine_dead_interactive "$HEAL_SEM" "$HEAL_PID" HEAL_DESTINATION \
+        || fail "heal: доказательство смерти владельца перестало выполняться под замком (причина — строка INFO выше); ничего не изменено, повтори сухой прогон" 1
+    else
+      HEAL_BASIS="pilot-word:ts=$HEAL_WORD_TS:witness=$HEAL_WORD_FILE:owner=$HEAL_ALIVE"
+      HEAL_SNAPSHOT=$(_owned_semaphore_snapshot_sha "$HEAL_SEM" 0) \
+        || fail "heal: нет эксклюзивного снимка семафора (идёт close или чужой файл); ничего не изменено" 1
+      HEAL_DESTINATION="${HEAL_SEM}${HEAL_PILOT_SUFFIX}"
+      if [ -e "$HEAL_DESTINATION" ] || [ -L "$HEAL_DESTINATION" ]; then
+        HEAL_DESTINATION="${HEAL_DESTINATION}-$(date +%s)"
+      fi
+      _rename_owned_semaphore_cas "$HEAL_SEM" "$HEAL_DESTINATION" "$HEAL_SNAPSHOT" \
+        || fail "heal: семафор изменился во время переименования; ничего не изменено, повтори сухой прогон" 1
+      HEAL_EPOCH=$(semaphore_epoch "$HEAL_DESTINATION" || echo 0)
+      HEAL_AGE=$(( $(date +%s) - HEAL_EPOCH )); [ "$HEAL_AGE" -ge 0 ] || HEAL_AGE=0
+      append_zombie_event "pilot_heal:actor=$HEAL_ACTOR:word_ts=$HEAL_WORD_TS:witness=$HEAL_WORD_FILE:owner=$HEAL_ALIVE:snapshot=$HEAL_SNAPSHOT:reason=$UNFREEZE_REASON" \
+        "$HEAL_SEM" "$HEAL_EPOCH" "$HEAL_AGE" "quarantined" "" \
+        || echo "WARN: карантин выполнен, но не записан в $ZOMBIE_REGISTRY" >&2
+      echo "QUARANTINED: $HEAL_BASE -> $(basename -- "$HEAL_DESTINATION") (по слову пилота; рабочая копия осталась на диске: ${HEAL_WT:-неизвестна})"
+    fi
+    # The runner and close_obligation take their own locks and the runner reads
+    # semaphores through owner-status (admission lock): never call them while
+    # holding ours.
+    release_session_transition_lock \
+      || fail "heal: карантин выполнен, но exact session lock не освободился" 1
+    release_scheduled_admission_lock \
+      || fail "heal: карантин выполнен, но admission lock не освободился" 1
+  fi
+
+  # 4. Runner cards, close obligation, tickets: each step is idempotent and
+  # verified afterwards, so an interrupted heal is finished by simply rerunning.
+  HEAL_LEFT=""
+  # The scan treats a card as the session's when its owner is the guard
+  # session_id OR the harness id, so the cancel is attempted under both keys.
+  # The runner refuses a caller that is not the card owner (owner identity, by
+  # design): that outcome is expected for a healing conversation and is handled
+  # below, not forced.
+  for HEAL_DIR_ROOT in $(printf '%s\n' "$HEAL_OWN_CARDS" | cut -f4 | sort -u); do
+    for HEAL_OWNER_KEY in $(printf '%s\n%s\n' "$HEAL_SID" "$HEAL_HID" | awk 'NF && !seen[$0]++'); do
+      _cancel_dead_session_quick_close_runs "$HEAL_DESTINATION" "${HEAL_DIR_ROOT%/inbox/agent/tasks}" "$HEAL_OWNER_KEY"
+    done
+  done
+  # shellcheck disable=SC2086
+  HEAL_CARDS_AFTER=$(_heal_scan_cards "$HEAL_SLUG" "$HEAL_SID" "${HEAL_HID:--}" $HEAL_CARD_DIRS | grep '^own' || true)
+  # Runner cards alone do not block the close: heal does not force them and
+  # the runner's own age sweep removes them. They are reported, not failed.
+  HEAL_LEFT_CARDS=""
+  if [ -n "$HEAL_CARDS_AFTER" ]; then
+    HEAL_LEFT_CARDS="осталось: карточки раннера (снимет reap-orphans): $(printf '%s\n' "$HEAL_CARDS_AFTER" | cut -f2 | tr '\n' ' ')"
+  fi
+  HEAL_OBLIGATION_CLI="$IWE_ROOT/$GOV_REPO/scripts/close_obligation.py"
+  for HEAL_ID in "$HEAL_HID" "$HEAL_SID"; do
+    [ -n "$HEAL_ID" ] || continue
+    [ -n "$(_heal_obligation_mode "$HEAL_ID")" ] || continue
+    python3 "$HEAL_OBLIGATION_CLI" cancel --session-id "$HEAL_ID" --action cancel-close \
+      --actor "session-guard-heal:$HEAL_ACTOR" --reason "heal $HEAL_SLUG: $UNFREEZE_REASON" >&2 \
+      || HEAL_LEFT="${HEAL_LEFT}close-обязательство $HEAL_ID не отменено (см. ошибку выше). "$'\n'
+    [ -z "$(_heal_obligation_mode "$HEAL_ID")" ] \
+      || HEAL_LEFT="${HEAL_LEFT}close-обязательство $HEAL_ID всё ещё взведено. "$'\n'
+  done
+  while IFS=$'\t' read -r HEAL_NONCE HEAL_TICKET_SESSION; do
+    [ -n "$HEAL_NONCE" ] || continue
+    python3 "$HEAL_OBLIGATION_CLI" void-ticket --nonce "$HEAL_NONCE" --reason other >&2 \
+      || HEAL_LEFT="${HEAL_LEFT}билет $HEAL_NONCE не аннулирован. "$'\n'
+  done <<< "$(_heal_tickets "$HEAL_HID" "$HEAL_SID")"
+  [ -z "$(_heal_tickets "$HEAL_HID" "$HEAL_SID")" ] || HEAL_LEFT="${HEAL_LEFT}билеты остались: $(_heal_tickets "$HEAL_HID" "$HEAL_SID" | cut -f1 | tr '\n' ' ')"$'\n'
+
+  # 5. Ledger: every applied action, with reason and actor (best-effort like renew --foreign).
+  if [ -f "$IWE_ROOT/$GOV_REPO/scripts/ledger-append.sh" ]; then
+    HEAL_EVENT=$(python3 -c '
+import json, sys
+print(json.dumps({"slug": sys.argv[1], "semaphore": sys.argv[2], "actor": sys.argv[3], "reason": sys.argv[4],
+                  "basis": sys.argv[5], "unsaved_discarded": sys.argv[6] == "1", "left": sys.argv[7]}, ensure_ascii=False))
+' "$HEAL_SLUG" "$HEAL_BASE" "$HEAL_ACTOR" "$UNFREEZE_REASON" "$HEAL_BASIS" "$HEAL_DISCARD_UNPUBLISHED" "${HEAL_LEFT}${HEAL_LEFT_CARDS}" 2>/dev/null) || HEAL_EVENT=""
+    { [ -n "$HEAL_EVENT" ] && bash "$IWE_ROOT/$GOV_REPO/scripts/ledger-append.sh" day "$(now_date)" session_healed "$HEAL_EVENT" session-guard >/dev/null 2>&1; } \
+      || echo "  ⚠️  ledger session_healed не записан (best-effort, лечение выполнено)" >&2
+  fi
+  if [ -n "$HEAL_LEFT" ]; then
+    echo "heal $HEAL_SLUG: семафор снят, но осталось:" >&2
+    printf '%s' "$HEAL_LEFT" | sed 's/^/  - /' >&2
+    [ -z "$HEAL_LEFT_CARDS" ] || echo "  - $HEAL_LEFT_CARDS" >&2
+    exit 7
+  fi
+  if [ -n "$HEAL_LEFT_CARDS" ]; then
+    echo "heal $HEAL_SLUG: готово (основание: $HEAL_BASIS); $HEAL_LEFT_CARDS"
+    echo "  Раннер не отдал карточки вызывающему (owner identity). Они блокируют только лимит запусков и снимаются по возрасту, закрытию семафором это не мешает. Снять сейчас:"
+    for HEAL_DIR_ROOT in $(printf '%s\n' "$HEAL_CARDS_AFTER" | cut -f4 | sort -u); do
+      echo "    (cd ${HEAL_DIR_ROOT%/inbox/agent/tasks} && IWE_CARD_AUTOCOMMIT=0 python3 $IWE_ROOT/$GOV_REPO/scripts/process-runner.py reap-orphans quick-close)"
+    done
+    exit 0
+  fi
+  echo "heal $HEAL_SLUG: готово (основание: $HEAL_BASIS)"
   exit 0
 fi
 
@@ -14714,13 +15490,13 @@ for path in active_paths:
             refuse_unclassifiable(
                 path,
                 "в семафоре поле wp: отсутствует, пусто или задано дважды; допустимо %s" % allowed,
-                "закрой или убери эту сессию (session-guard.sh audit --cleanup-orphans "
+                "закрой или убери эту сессию (session-guard.sh heal <slug> — сухой прогон по умолчанию; либо audit --cleanup-orphans "
                 "--quarantine-dead-interactive, после истечения аренды); новую открывай с допустимым --wp")
         refuse_unclassifiable(
             path,
             "в семафоре wp: %r; допустимо %s" % (str(exc), allowed),
             "закрой эту сессию (session-guard.sh close --wp %r%s); если её владелец мёртв, "
-            "session-guard.sh audit --cleanup-orphans --quarantine-dead-interactive (после истечения аренды); "
+            "session-guard.sh heal <slug> (сухой прогон по умолчанию) или audit --cleanup-orphans --quarantine-dead-interactive (после истечения аренды); "
             "новую сессию открывай с допустимым --wp" % (str(exc), owner_flag(text)))
     except SentinelEvasion as exc:
         refuse_unclassifiable(
@@ -14734,14 +15510,14 @@ for path in active_paths:
             path,
             "housekeeping-семафор %s нарушает свой формат (имя файла, лишние поля wp:/scheduled_owner:, "
             "повторный или пустой session_id:)" % str(exc),
-            "убери этот семафор (session-guard.sh audit --cleanup-orphans "
+            "убери этот семафор (session-guard.sh heal <slug> — сухой прогон по умолчанию; либо audit --cleanup-orphans "
             "--quarantine-dead-interactive), затем повтори коммит")
     except (OSError, UnicodeError, ValueError) as exc:
         refuse_unclassifiable(
             path,
             "область семафора неизвестна (файл нечитаем или повреждён: %s); доказать, что он не пересекается "
             "с индексом, нельзя, поэтому коммит блокируется" % exc,
-            "разобрать или убрать этот семафор (session-guard.sh audit --cleanup-orphans "
+            "разобрать или убрать этот семафор (session-guard.sh heal <slug> — сухой прогон по умолчанию; либо audit --cleanup-orphans "
             "--quarantine-dead-interactive), затем повторить коммит")
 
 
@@ -15584,4 +16360,4 @@ if [ "$CMD" = "post-merge-check" ]; then
   exit 0
 fi
 
-fail "Unknown command: $CMD (use: open, close, audit, renew, note-file, note-commit, recover-orphaned, retire-semaphore-artifact, owner-status, pre-commit-check, post-merge-check)"
+fail "Unknown command: $CMD (use: open, close, audit, renew, note-file, note-commit, recover-orphaned, retire-semaphore-artifact, heal, owner-status, pre-commit-check, post-merge-check)"
