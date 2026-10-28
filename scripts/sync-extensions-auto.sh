@@ -466,6 +466,10 @@ delivery_source_path() {
     *) return 1 ;;
   esac
 }
+# Тесты .py идут в общей среде с jsonschema/PyYAML/pytest (памятка пакетов — DS-my-strategy/scripts/iwe-requirements.txt);
+# голый python3 после обновления homebrew остаётся без пакетов и валит gate. Нет среды (сервер) — прежний python3.
+GATE_TEST_PYTHON="${IWE_GATE_PYTHON:-$HOME/.iwe-venv/common/bin/python}"
+[ -x "$GATE_TEST_PYTHON" ] || GATE_TEST_PYTHON=python3
 for rel_path in "${CHANGED_PATHS[@]}"; do
   [ -n "$rel_path" ] || continue
   case "$rel_path" in
@@ -482,7 +486,7 @@ for rel_path in "${CHANGED_PATHS[@]}"; do
   while IFS= read -r test_file; do
     [ -n "$test_file" ] || continue
     case "$test_file" in
-      *.py) test_runner=(python3 "$test_file") ;;
+      *.py) test_runner=("$GATE_TEST_PYTHON" "$test_file") ;;
       *)    test_runner=(bash "$test_file") ;;
     esac
     if ! env "${STRIP_ENV_ARGS[@]}" "${test_runner[@]}" >> "$GATE_LOG" 2>&1; then
