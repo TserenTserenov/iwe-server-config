@@ -239,7 +239,19 @@ print("1" if safe_tail else "0")
 MARKER_VARNAME_RE='[A-Z][A-Z0-9_]*(PERSONA|JOURNAL|PAYMENT|SUBSCRIPTION|INDICATORS|LEARNING|KNOWLEDGE|REFERENCE|PUBLICATION|COMMUNITY|LEAD|REWARDS|SECRETS|METABASE|HEALTH)[A-Z0-9_]*|NEON[A-Z0-9_]*(URL|DSN|DIRECT)|PRIVACY_DELETION_URL|AIST_BOT_DIRECT|AISYSTANT_PG_URL|DATABASE_URL|DIRECT_URL|POOLED_URL|TARGET_URL'
 MARKER_ID_RE='br-lingering-cake-aggtcdft|ep-dark-hall-ag8bo8lf'
 
-printf '%s' "$COMMAND_SCAN" | grep -qE "$MARKER_VARNAME_RE" || \
+# IWE_PUBLICATION_* (service variable of the peer-conversation publication
+# receipt, e.g. IWE_PUBLICATION_SESSION_ID) is not a Neon marker, but its
+# name contains PUBLICATION -- one of the 12 canonical DB words above -- and
+# used to false-positive this gate (bug-2026-10-28-neon-guard-blocks-iwe-
+# publication-session-id.md, consensus WP-484 F262, peer session with
+# Kimi+Codex, 28.10). Strip whole IWE_PUBLICATION_* identifiers before the
+# marker check only (MARKER_ID_RE below stays on the untouched scan -- it is
+# a different, independent detection channel). No \b: BSD sed (this host's
+# /usr/bin/sed) silently no-ops on \b, so a first draft with it looked fixed
+# but never substituted anything -- verified live.
+SCAN_FOR_PUBLICATION_MARKER=$(printf '%s' "$COMMAND_SCAN" | sed -E 's/(^|[^A-Za-z0-9_])IWE_PUBLICATION_[A-Za-z0-9_]*/\1/g')
+
+printf '%s' "$SCAN_FOR_PUBLICATION_MARKER" | grep -qE "$MARKER_VARNAME_RE" || \
   printf '%s' "$COMMAND_SCAN" | grep -qiE "$MARKER_ID_RE" || exit 0
 
 # Для psql нет надёжного локального способа доказать read-only: SELECT может

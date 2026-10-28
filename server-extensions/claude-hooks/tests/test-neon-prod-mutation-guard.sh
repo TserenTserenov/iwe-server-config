@@ -590,8 +590,8 @@ check_src() {  # $1 desc, $2 grep-паттерн, $3 ожидание найде
 }
 # WP-530 Ф24 п.1: подсказку acquire теперь даёт единая команда neon-prod-lease.sh
 # (два уровня одной строкой). Требование к identity никуда не делось -- оно
-# переехало вместе с вызовом: суффикс сессии добавляет сам резолвер, поэтому
-# передавать надо базу.
+# переехало вместе с вызовом: CLI аренды разрешает identity один раз через
+# резолвер и гасит вход суффикса сессии, чтобы шлюз не добавил его второй раз.
 check_src_file() {  # check_src_file <описание> <файл> <строка> <ожидание 0|1>
   local desc="$1" file="$2" needle="$3" want="$4" got=0
   grep -qF "$needle" "$file" && got=1
@@ -604,13 +604,17 @@ check_src_file() {  # check_src_file <описание> <файл> <строка
 }
 LEASE_SRC="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)/DS-my-strategy/scripts/lib/neon-prod-lease.sh"
 if [ -f "$LEASE_SRC" ]; then
-  check_src_file "CLI аренды передаёт шлюзу БАЗУ identity, суффикс добавляет резолвер" \
-    "$LEASE_SRC" 'IWE_AGENT_ID="claude-code" python3 "$GATEWAY_LOCK"' 1
-  check_src_file "CLI аренды не изобретает собственную суффиксацию сессии" \
-    "$LEASE_SRC" 'CLAUDE_CODE_SESSION_ID' 0
-else
+  check_src_file "CLI аренды передаёт шлюзу уже разрешённую identity и гасит вход суффикса сессии (без двойного суффикса)" \
+    "$LEASE_SRC" 'IWE_AGENT_ID="$AGENT_IDENTITY" CLAUDE_CODE_SESSION_ID=""' 1
+  check_src_file "CLI аренды берёт identity у резолвера, а не собирает её сам" \
+    "$LEASE_SRC" 'IDENTITY_RESOLVER" claude-code' 1
+elif [ -d "$(dirname "$LEASE_SRC")/../.." ]; then
+  # Репозиторий стратегии есть, а CLI аренды в нём пропал или переименован -- это поломка, не пропуск.
   echo "  FAIL: не найден CLI межмашинной аренды ($LEASE_SRC)"
   FAIL=$((FAIL + 1))
+else
+  # Репозиторий стратегии лежит рядом только в полном рабочем каталоге; в снимке для тестового гейта автосинхронизации его нет.
+  echo "  SKIP: репозитория стратегии рядом нет ($LEASE_SRC) -- две проверки текста CLI аренды пропущены"
 fi
 check_src "подсказка хука ведёт на единую команду двух уровней (neon-prod-lease.sh acquire)" \
   'bash $CROSS_HOST_LEASE acquire' 1
