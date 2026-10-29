@@ -7040,13 +7040,15 @@ def claimed_other_owners(path):
     def declared_owner(checkout, commits):
         if known_path(checkout, path):
             return True
-        if checkout in other_repos:
-            # The root/sessions checkouts lag behind origin, so a path may be
-            # absent there yet legitimately delivered. Here the declared commit
-            # must itself ADD or CHANGE the path: a bare "the tree contains it"
-            # would let a stale or historical commit own a path it never touched.
-            return commit_touched_path(checkout, commits, path)
-        return any(git_at(checkout, "ls-tree", "-z", commit, "--", path) for commit in commits)
+        # Any declared checkout -- root/sessions or a third repository alike --
+        # may lag behind origin, so a path may be absent there yet legitimately
+        # delivered. The declared commit must itself ADD, CHANGE or DELETE the
+        # path: a bare "the tree AT that commit still contains it" (the former
+        # ls-tree check here) answers False for a commit that deletes the path,
+        # which is exactly backwards (WP-484 Ф265, peer-session
+        # 2026-10-28-13-wp529-release-notice-check: a claimed commit deleting a
+        # third-repo file read as "path not found in any checked checkout").
+        return commit_touched_path(checkout, commits, path)
 
     owning = {checkout: commits for checkout, commits in resolve_other_claims().items()
               if declared_owner(checkout, commits)}
@@ -7199,7 +7201,7 @@ PY
 # same as the claim proof. The governance checkout keeps the strict ancestry
 # proof -- the caller gates this fallback to the sessions-checkout role.
 _repo_head_is_patch_equivalent() {  # <root> <fresh origin OID>
-  local root="$1" origin_ref="$2" merges cherry_out
+  local root="$1" origin_ref="$2" merges cherry_out line sha
   merges=$(git -C "$root" rev-list --merges "${origin_ref}..HEAD" 2>/dev/null) || return 1
   if [ -n "$merges" ]; then
     echo "Session CLOSE: publish proof: merge commits in origin/main..HEAD are not allowed: $root" >&2
@@ -7211,9 +7213,26 @@ _repo_head_is_patch_equivalent() {  # <root> <fresh origin OID>
   cherry_out=$(timeout 30 git -C "$root" cherry "$origin_ref" HEAD 2>/dev/null) || return 1
   # No `printf | grep -q` here: under pipefail a SIGPIPE'd printf could turn a
   # `+` match into a non-zero pipeline status and, negated, into a false pass.
-  case "$cherry_out" in
-    +*|*$'\n'+*) return 1 ;;
-  esac
+  while IFS= read -r line; do
+    [ -n "$line" ] || continue
+    case "$line" in
+      +\ *)
+        # A `+` only means no PATCH-ID match -- WP-484 Ф265 (peer-session
+        # 2026-10-28-13-wp529-release-notice-check): another session's commit
+        # in this shared checkout bundled its changed paths differently from
+        # how origin/main actually received them (e.g. split across two
+        # commits there), so the diff text differs although the bytes at
+        # every touched path end up identical. Require exact CURRENT content
+        # at every path this commit touched before accepting it as delivered
+        # -- never infer that from the differing patch alone.
+        sha="${line#+ }"
+        _commit_current_tree_has_publish_proof "$root" "$sha" "$origin_ref" || return 1
+        echo "Session CLOSE: publish proof: local commit $sha has no patch-id match but its current content matches origin/main at every changed path (content-equivalence fallback): $root" >&2
+        ;;
+      -\ *) ;;
+      *) return 1 ;;
+    esac
+  done <<<"$cherry_out"
   return 0
 }
 

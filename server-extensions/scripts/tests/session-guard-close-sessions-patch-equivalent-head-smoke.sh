@@ -14,6 +14,15 @@
 #   R: a merge commit inside origin/main..HEAD                              -> close 7
 #   S: the SAME shape on the GOVERNANCE checkout must NOT be rescued        -> close 7
 #      (the fallback is gated to the sessions-checkout role; cold review Ф67)
+#
+# WP-484 Ф265 (peer-session 2026-10-28-13-wp529-release-notice-check, live
+# session-guard-release log): a foreign commit in the shared checkout bundled
+# its changed paths differently from how origin/main received the SAME bytes
+# (two separate commits there), so `git cherry` reports `+` (no patch-id
+# match) even though every touched path is byte-identical on origin/main.
+#   T: a foreign bundled commit whose content matches origin/main            -> close 0
+#      split across two differently-bundled commits (content-equivalence
+#      fallback, distinct from the patch-equivalence fallback P exercises)
 set -euo pipefail
 
 ROOT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
@@ -27,6 +36,7 @@ fail() { echo "FAIL: $*" >&2; exit 1; }
 # not on the exit code alone (P1 of DP.SC.172: a test must check the observable
 # result, not just "it did not crash").
 FALLBACK_MARK='patch-эквивалентны свежему origin/main (cherry-pick delivery fallback)'
+CONTENT_FALLBACK_MARK='content-equivalence fallback'
 ANCESTRY_REFUSAL='HEAD sessions checkout не достижим из origin/main; есть неподтверждённая доставка'
 GOVERNANCE_REFUSAL='HEAD governance checkout не достижим из origin/main; есть неподтверждённая доставка'
 SCOPE_REFUSAL='scoped publish proof: нет полного repo-qualified commit scope'
@@ -295,4 +305,49 @@ grep -qF "$FALLBACK_MARK" <<<"$OUT_S" \
 grep -qF "$GOVERNANCE_REFUSAL" <<<"$OUT_S" || fail "S: governance ancestry refusal missing: $OUT_S"
 echo "PASS: S -- the same diverged-but-equivalent shape on the governance checkout is still refused (fallback gated to sessions role)"
 
-echo "OK: session-guard sessions-checkout patch-equivalence fallback (P/Q/R/S)"
+# --- T: a foreign commit in the shared checkout bundles two files in ONE
+# commit; origin/main received the SAME bytes at both paths but as TWO
+# separate commits -- `git cherry` reports `+` for the foreign commit (no
+# patch-id match) although its current content is byte-identical on origin.
+foreign_bundle_commit() {  # -> own sha on stdout; bundles two files in one commit
+  echo "line A" > "$SESSIONS/foreign-foo-t.md"
+  echo "line B" > "$SESSIONS/foreign-bar-t.md"
+  git -C "$SESSIONS" add foreign-foo-t.md foreign-bar-t.md
+  git -C "$SESSIONS" commit -qm "foreign session bundled commit (T)"
+  git -C "$SESSIONS" rev-parse HEAD
+}
+
+republish_split_content() {  # the SAME bytes as foreign_bundle_commit, as two commits
+  local clone="$TEST_ROOT/republish-split-t"
+  git clone -q "$SESSIONS_ORIGIN" "$clone"
+  git -C "$clone" config user.email republish@test
+  git -C "$clone" config user.name republish
+  echo "line A" > "$clone/foreign-foo-t.md"
+  git -C "$clone" add foreign-foo-t.md
+  git -C "$clone" commit -qm "foreign content delivered as two commits (T) - part 1"
+  echo "line B" > "$clone/foreign-bar-t.md"
+  git -C "$clone" add foreign-bar-t.md
+  git -C "$clone" commit -qm "foreign content delivered as two commits (T) - part 2"
+  git -C "$clone" push -q origin HEAD:main
+}
+
+make_fixture "$TEST_ROOT/f3"
+SEM_T=$(open_session patch-equiv-t session-T)
+ORZ_T=$(orz_of "$SEM_T")
+FC_T=$(foreign_bundle_commit)
+republish_split_content
+OWN_T=$(commit_own_work "$ORZ_T" "peer-reply-t.md" "own work after foreign bundle (T)")
+republish_same_content t "$ORZ_T" "peer-reply-t.md"
+assert_diverged "$SESSIONS" T
+git -C "$SESSIONS" cherry origin/main "$FC_T" "${FC_T}~1" | grep -q '^+ ' \
+  || fail "T: fixture setup -- foreign bundled commit unexpectedly patch-equivalent on origin/main"
+write_run_card patch-equiv-t session-T
+claim_incomplete_scope "$SEM_T" patch-equiv-t "$ORZ_T" "$(basename "$SESSIONS")" "$OWN_T"
+
+close_session patch-equiv-t session-T; OUT_T=$CLOSE_OUT
+[ "$CLOSE_RC" -eq 0 ] || fail "T: close refused a foreign bundled-but-content-equivalent commit (rc $CLOSE_RC): $OUT_T"
+grep -qF "$CONTENT_FALLBACK_MARK" <<<"$OUT_T" \
+  || fail "T: close passed but not through the content-equivalence fallback: $OUT_T"
+echo "PASS: T -- a foreign commit bundled differently from origin/main's delivery still closes when every touched path matches byte-for-byte"
+
+echo "OK: session-guard sessions-checkout patch-equivalence fallback (P/Q/R/S/T)"

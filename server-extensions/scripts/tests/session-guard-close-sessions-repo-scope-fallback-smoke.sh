@@ -752,9 +752,18 @@ class ClaimedRepositoryFallback(unittest.TestCase):
         result = self.run_proof()
         self.assertEqual(result.returncode, 0, result.stderr)
 
-    def test_undeclared_history_does_not_attribute_deleted_path(self):
+    def test_undeclared_history_still_attributes_via_the_claimed_deleting_commit(self):
+        # WP-484 Ф265 (peer-session 2026-10-28-13-wp529-release-notice-check):
+        # this used to require the historical ADD commit to be claimed too --
+        # before the fix, declared_owner() asked "does the tree AT the claimed
+        # commit still contain the path", which a deleting commit answers
+        # False to by definition. self.claim_sha (always claimed, see setUp)
+        # IS the deleting commit here; its diff touching the path is now
+        # itself sufficient, matching the other declared-checkout branch just
+        # above it in the source (root/sessions already worked this way).
         self.prepare_historical_path()
-        self.assert_refused(self.run_proof(), "путь не найден")
+        result = self.run_proof()
+        self.assertEqual(result.returncode, 0, result.stderr)
 
     def test_multiple_claim_trees_of_same_repo_do_not_count_twice(self):
         self.extra_claims.append("commit: knowledge-mcp " + self.code_sha)
