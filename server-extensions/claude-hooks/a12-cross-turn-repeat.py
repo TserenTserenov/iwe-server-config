@@ -103,6 +103,13 @@ def _has_tool_result(row):
     )
 
 
+def _has_attachment_block(row):
+    content = _a12._content(row)
+    return isinstance(content, list) and any(
+        isinstance(b, dict) and b.get("type") in ("image", "document") for b in content
+    )
+
+
 def _queued_prompt(row):
     """Text of a `queued_command` attachment record, else None.
 
@@ -154,7 +161,8 @@ def opener_kind(row):
         return None
     texts = [t for t in _a12._text_blocks(row) if t.strip()]
     if not texts:
-        return None
+        # A pilot message made of an image or a document only still breaks the pair.
+        return "human" if _has_attachment_block(row) and not _has_tool_result(row) else None
     if all(_is_service_text(t) for t in texts):
         return "service"
     if row.get("isMeta"):

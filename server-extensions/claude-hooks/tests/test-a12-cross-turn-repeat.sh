@@ -33,6 +33,8 @@ def QC(text):
     return {"type": "attachment", "attachment": {"type": "queued_command", "prompt": text}}
 def FB(text="Stop hook feedback:\nСтиль нарушен (правила: A13.1 ). Перепиши финальную часть."):
     return {"type": "user", "isMeta": True, "message": {"content": text}}
+def IMG():
+    return {"type": "user", "message": {"content": [{"type": "image", "source": {"type": "base64", "data": "x"}}]}}
 def TR():
     return {"type": "user", "message": {"content": [{"type": "tool_result", "tool_use_id": "t1", "content": "ok"}]}}
 def A(text):
@@ -190,7 +192,10 @@ check stop-hook-feedback-different-reply quiet \
 # 27. Other isMeta records (loop prompts, skill expansions) stay unknown: never compared.
 check ismeta-string-without-known-prefix-unknown quiet \
   '[U("Что?"), A(BLOCK), FB("# Autonomous loop check\nпроверь очередь"), A(BLOCK)]'
-# 28. Garbage in the transcript never raises (a Stop hook must not break the turn).
+# 28. A pilot message with only an image breaks the pair (no text block to open an episode otherwise).
+check image-only-pilot-message-breaks-pair quiet \
+  '[U("Что?"), A(BLOCK), IMG(), A(BLOCK)]'
+# 29. Garbage in the transcript never raises (a Stop hook must not break the turn).
 printf 'not json\n{"type":"user"}\n[]\n' > "$TMP/garbage.jsonl"
 if [ -z "$(STYLE_CONTEXT=direct python3 "$DETECTOR" "$TMP/garbage.jsonl" 2>&1)" ]; then
   PASS=$((PASS + 1))

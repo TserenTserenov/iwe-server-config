@@ -4,7 +4,8 @@
 # session-open-gate.sh (mask `claude-code-*`) nor the native-identity re-open check (prefix of its
 # own agent) could see, so one conversation ended up with two live semaphores and no way to drop
 # the extra one. Covers: alias normalization, the re-open check in both directions, the hook mask,
-# and `release-duplicate` (own conversation only, never the last copy, explicit target).
+# and `release-duplicate` (WP-484 Ф267 п.1: any conversation may release when the records prove the
+# same work and nothing claimed by the target is lost; never the last copy; explicit target).
 # All artifacts live in mktemp; nothing real is touched.
 set -euo pipefail
 
@@ -101,17 +102,42 @@ echo "OK: session-open-gate sees alias-named and claude-code-named semaphores"
 reset_runtime
 
 # 6. release-duplicate: two live copies of one work.
-guard "$NATIVE_A" open --wp WP-999 --agent claude-code --slug alias-test >/dev/null 2>&1
+guard "$NATIVE_A" open --wp WP-999 --agent claude-code --slug alias-test --task "duplicate fixture" >/dev/null 2>&1
 KEEP=$(live | head -1); KEEP_ID=$(sed -n 's/^session_id: //p' "$KEEP")
 make_alias_copy "dupdupdup1"
 [ "$(live_count)" = 2 ] || fail "fixture must hold two live copies, got: $(live)"
 
-if guard "$NATIVE_B" release-duplicate --guard-id dupdupdup1 --reason "foreign" >"$TEST_ROOT/r1.out" 2>&1; then
-    fail "another conversation must not be able to release the copy"
+# 6a. Records that disagree on the task, or a target that claims what the kept copy lacks, are not duplicates.
+cp "$SEM_DIR/claude-dupdupdup1.open" "$TEST_ROOT/dup1.bak"
+sed -i.bak "s/^task: .*/task: 'other task'/" "$SEM_DIR/claude-dupdupdup1.open"; rm -f "$SEM_DIR/claude-dupdupdup1.open.bak"
+if guard "$NATIVE_B" release-duplicate --guard-id dupdupdup1 --reason "task differs" >"$TEST_ROOT/r1a.out" 2>&1; then
+    fail "a copy with another task must not be released"
 fi
-grep -q 'другому разговору' "$TEST_ROOT/r1.out" || fail "foreign release must say the copy belongs to another conversation"
+grep -q 'единственная живая копия' "$TEST_ROOT/r1a.out" || { cat "$TEST_ROOT/r1a.out" >&2; fail "task mismatch must leave the target without a twin"; }
+cp "$TEST_ROOT/dup1.bak" "$SEM_DIR/claude-dupdupdup1.open"
+printf 'file: private/only-in-target.md\n' >> "$SEM_DIR/claude-dupdupdup1.open"
+if guard "$NATIVE_B" release-duplicate --guard-id dupdupdup1 --reason "extra claim" >"$TEST_ROOT/r1b.out" 2>&1; then
+    fail "a target with a claim the kept copy lacks must not be released"
+fi
+grep -q 'работа потеряется' "$TEST_ROOT/r1b.out" || { cat "$TEST_ROOT/r1b.out" >&2; fail "extra-claim refusal must name the lost claim"; }
+grep -q 'only-in-target.md' "$TEST_ROOT/r1b.out" || fail "refusal must show the lost claim"
+cp "$TEST_ROOT/dup1.bak" "$SEM_DIR/claude-dupdupdup1.open"
+[ "$(live_count)" = 2 ] || fail "refused releases must leave both copies"
+echo "OK: release-duplicate refuses another task and a target with claims the kept copy lacks"
+
+# 6b. A kept copy that a plain close is renaming (exclusive lock) stops the release.
+KEEP_FILE=$(live | grep -v dupdupdup1 | head -1)
+"$(command -v flock)" -x "$KEEP_FILE" -c 'sleep 4' &
+HOLDER=$!
+sleep 1
+if guard "$NATIVE_B" release-duplicate --guard-id dupdupdup1 --reason "kept is busy" >"$TEST_ROOT/r1c.out" 2>&1; then
+    kill "$HOLDER" 2>/dev/null || true
+    fail "release must refuse while the kept copy is locked by a close"
+fi
+wait "$HOLDER" 2>/dev/null || true
+grep -q 'замок на оставляемой копии не взят' "$TEST_ROOT/r1c.out" || { cat "$TEST_ROOT/r1c.out" >&2; fail "busy kept copy refusal must say so"; }
 [ "$(live_count)" = 2 ] || fail "refused release must leave both copies"
-echo "OK: release-duplicate refuses a copy of another conversation"
+echo "OK: a locked kept copy blocks the release"
 
 if guard "$NATIVE_A" release-duplicate --guard-id dupdupdup1 >"$TEST_ROOT/r2.out" 2>&1; then
     fail "release-duplicate without --reason must be refused"
@@ -124,14 +150,15 @@ if guard "$NATIVE_A" release-duplicate --guard-id no-such-guard --reason "x" >"$
 fi
 echo "OK: release-duplicate needs an explicit existing target and a reason"
 
-guard "$NATIVE_A" release-duplicate --guard-id dupdupdup1 --reason "duplicate open" >"$TEST_ROOT/r3.out" 2>&1 \
-    || { cat "$TEST_ROOT/r3.out" >&2; fail "release of own duplicate must succeed"; }
+guard "$NATIVE_B" release-duplicate --guard-id dupdupdup1 --reason "duplicate open" >"$TEST_ROOT/r3.out" 2>&1 \
+    || { cat "$TEST_ROOT/r3.out" >&2; fail "release of a proven duplicate from another conversation must succeed"; }
 [ -f "$SEM_DIR/claude-dupdupdup1.open.closed" ] || fail "released copy must become .open.closed"
 [ ! -e "$SEM_DIR/claude-dupdupdup1.open" ] || fail "released copy must no longer be live"
 [ "$(basename "$(live)")" = "$(basename "$KEEP")" ] || fail "the other copy must stay live, got: $(live)"
-grep -q 'dupdupdup1' "$TEST_ROOT/.iwe-runtime/duplicate-release.log" || fail "release must be written to duplicate-release.log"
+grep -q "intent.*dupdupdup1.*$NATIVE_B" "$TEST_ROOT/.iwe-runtime/duplicate-release.log" || fail "release must write an intent line with the caller"
+grep -q "done.*dupdupdup1.*$NATIVE_B" "$TEST_ROOT/.iwe-runtime/duplicate-release.log" || fail "release must write a done line with the caller"
 grep -q "$KEEP_ID" "$TEST_ROOT/r3.out" || fail "output must name the copy that stays"
-echo "OK: own duplicate is released, the other copy stays, the audit line is written"
+echo "OK: a proven duplicate is released from another conversation, the other copy stays, intent and done lines are written"
 
 if guard "$NATIVE_A" release-duplicate --guard-id "$KEEP_ID" --reason "last" >"$TEST_ROOT/r4.out" 2>&1; then
     fail "the last live copy must never be released"
@@ -148,9 +175,18 @@ guard "$NATIVE_A" release-duplicate --guard-id dupdupdup2 --reason "three copies
 [ "$(live_count)" = 2 ] || fail "exactly one copy must go, got: $(live)"
 echo "OK: with three copies only the named one goes"
 
+# 7b. A caller without any conversation id is only labelled, never refused for it.
+make_alias_copy "nocaller01"
+IWE_ROOT="$TEST_ROOT" IWE_GOVERNANCE_REPO="DS-strategy" IWE_FROZEN_CANONICAL_PATH="" \
+    CLAUDE_CODE_SESSION_ID="" CODEX_THREAD_ID="" IWE_SESSION_ID="" IWE_AGENT="" \
+    bash "$GUARD" release-duplicate --guard-id nocaller01 --reason "no caller id" >"$TEST_ROOT/r6.out" 2>&1 \
+    || { cat "$TEST_ROOT/r6.out" >&2; fail "a caller without a conversation id must still release a proven duplicate"; }
+grep -q 'done.*nocaller01.*unknown-caller' "$TEST_ROOT/.iwe-runtime/duplicate-release.log" || fail "journal must label the caller unknown-caller"
+echo "OK: a caller without a conversation id is journalled as unknown-caller"
+
 # 8. A copy of another work in the same conversation does not count as "another copy".
 reset_runtime
-guard "$NATIVE_A" open --wp WP-999 --agent claude-code --slug work-one >/dev/null 2>&1
+guard "$NATIVE_A" open --wp WP-999 --agent claude-code --slug work-one --task "duplicate fixture" >/dev/null 2>&1
 ONLY=$(live | head -1); ONLY_ID=$(sed -n 's/^session_id: //p' "$ONLY")
 make_alias_copy "otherwork1"
 sed -i.bak "s/^slug: .*/slug: work-two/" "$SEM_DIR/claude-otherwork1.open"; rm -f "$SEM_DIR/claude-otherwork1.open.bak"
