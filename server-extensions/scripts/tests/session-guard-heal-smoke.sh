@@ -241,6 +241,7 @@ if OUT=$(sg -- heal live-1 --apply --reason x --confirm "$CODE"); then fail "--c
 grep -q 'неизвестный флаг' <<<"$OUT" || fail "--confirm should be an unknown flag: $OUT"
 if OUT=$(sg -- heal live-1 --apply --reason x); then fail "healed with no conversation identity"; fi
 grep -q 'нет собственной идентичности' <<<"$OUT" || fail "missing-identity refusal absent: $OUT"
+grep -q 'session-guard.sh heal live-1' <<<"$OUT" || fail "missing-identity refusal must name the command to run in a Claude window: $OUT"
 
 # 5. Witness lines that must NOT count.
 write_caller_semaphore caller-1
@@ -346,11 +347,15 @@ write_caller_semaphore caller-3
 write_witness caller-3 -5 "heal live-3 $CODE"
 if OUT=$(sg CLAUDE_CODE_SESSION_ID=caller-3 -- heal live-3 --apply --reason r); then fail "a single-record log healed"; fi
 grep -q 'нет ни одной другой реплики' <<<"$OUT" || fail "single-record refusal unclear: $OUT"
+grep -q 'session-guard.sh heal live-3 --apply' <<<"$OUT" || fail "single-record refusal must name the command to repeat: $OUT"
 [ -f "$SESSION_DIR/claude-code-live-3.open" ] || fail "semaphore moved on a single-record log"
 write_witness caller-4 -20 "обычная реплика"
 write_witness caller-4 -5 "heal live-3 $CODE"          # a good log, but caller-4 owns no live semaphore
 if OUT=$(sg CLAUDE_CODE_SESSION_ID=caller-4 -- heal live-3 --apply --reason r); then fail "a caller without a live semaphore healed"; fi
 grep -q 'нет собственного живого семафора' <<<"$OUT" || fail "no-semaphore refusal unclear: $OUT"
+grep -q 'session-guard.sh open --wp' <<<"$OUT" && grep -q -- '--close-path no-code-changes' <<<"$OUT" \
+  || fail "no-semaphore refusal must name the open command of a light healing session: $OUT"
+grep -q 'session-guard.sh heal live-3 --apply' <<<"$OUT" || fail "no-semaphore refusal must name the heal command to repeat: $OUT"
 write_caller_semaphore caller-5                         # owns a semaphore but has no log of its own: caller-4's log must not count
 if OUT=$(sg CLAUDE_CODE_SESSION_ID=caller-5 -- heal live-3 --apply --reason r); then fail "another conversation's log was accepted"; fi
 grep -q 'слова пилота нет' <<<"$OUT" || fail "foreign-log refusal unclear: $OUT"

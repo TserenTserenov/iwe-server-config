@@ -164,6 +164,7 @@ if guard "$NATIVE_A" release-duplicate --guard-id "$KEEP_ID" --reason "last" >"$
     fail "the last live copy must never be released"
 fi
 grep -q 'единственная живая копия' "$TEST_ROOT/r4.out" || fail "last-copy refusal must say so"
+grep -q 'session-guard.sh close --agent' "$TEST_ROOT/r4.out" || fail "last-copy refusal must name the close command"
 [ "$(live_count)" = 1 ] || fail "refused release of the last copy must leave it live"
 echo "OK: the last live copy is never released"
 
