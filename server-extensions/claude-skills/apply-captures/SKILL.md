@@ -2,7 +2,7 @@
 name: apply-captures
 description: Разбор extraction-reports со status pending-review — решение R15 (accept/reject/defer) ЖИВЫМ ПИЛОТОМ, запись в Pack, обновление статуса, коммит. Вызывать при Close при наличии N>0 pending-review отчётов.
 argument-hint: "[путь к конкретному отчёту | пусто = все pending-review]"
-version: 1.3.1
+version: 1.3.2
 layer: L1
 status: active
 browser_safe: false
@@ -514,7 +514,9 @@ feedback-log (Шаг 5в, в том числе ранний выход из Ша
 
 ```bash
 M9_GOV_DIR="${IWE_WORKSPACE:-$HOME/IWE}/${IWE_GOVERNANCE_REPO:-DS-my-strategy}"
-python3 "$M9_GOV_DIR/scripts/post-culture-fact.py" \
+# The wrapper loads the owner identifier (IWE_OWNER_ORY_UUID); without it the
+# script refuses to post and every fact is lost silently (109 log lines on the Mac).
+bash "${IWE_WORKSPACE:-$HOME/IWE}/scripts/with-aist-env.sh" python3 "$M9_GOV_DIR/scripts/post-culture-fact.py" \
   --element M9 --mode record --evidence "<id> из <filename>" \
   >/dev/null 2>>"${IWE_RUNTIME_DIR:-$HOME/IWE/.iwe-runtime}/culture-fact-errors.log" || true
 ```

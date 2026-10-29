@@ -2532,6 +2532,11 @@ fi
 
 ID="${1:-}"
 [ -n "$ID" ] || { echo "ERROR: usage: kimi-wp-run-scheduled.sh <id>" >&2; exit 1; }
+# Only the shape kimi-wp-queue.sh `add` produces: <wp-n|task-slug>-YYYYMMDD-HHMM. The id names the
+# `sched-<id>` session that session-open-gate.sh lets commit without a WP (WP-7 Ф274), and is used
+# unescaped in a grep pattern and in file paths below; checked before anything is read or written.
+[[ "$ID" =~ ^(wp-[1-9][0-9]*|task-[a-z0-9-]+)-[0-9]{8}-[0-9]{4}$ ]] \
+  || { echo "ERROR: id '$ID' is not a queue id (expected wp-<n>-YYYYMMDD-HHMM or task-<slug>-YYYYMMDD-HHMM)" >&2; exit 1; }
 
 IWE_ROOT="${IWE_ROOT:-$HOME/IWE}"
 # launchd runs this with a bare environment (no .claude/settings.json injection) —

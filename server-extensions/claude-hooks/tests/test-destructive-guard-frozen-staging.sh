@@ -22,6 +22,10 @@ OTHER="$TMP_DIR/other"
 git init -q "$OTHER"
 WT="$TMP_DIR/worktree"
 git -C "$ROOT" worktree add -q --detach "$WT" HEAD 2>/dev/null
+# Real git-dir of the frozen checkout (a file `.git` in a linked worktree, a directory otherwise).
+ROOTGIT="$(git -C "$ROOT" rev-parse --absolute-git-dir)"
+SPACED="$TMP_DIR/dir with space"
+git init -q "$SPACED"
 
 # expect $1=desc $2=want(block|pass) $3=cwd $4=command [$5=env assignment]
 expect() {
@@ -48,6 +52,51 @@ expect "freeze switched off by empty override"    pass  "$ROOT" "git add scripts
 expect "git status is not staging"                pass  "$ROOT" "git status"
 expect "git restore without --staged"             pass  "$ROOT" "git restore file.txt"
 expect "quoted text is not a git call"            pass  "$ROOT" "echo git add foo"
+
+# РП-561 Ф54, 29.10: the target is the real index file, not the hook's cwd.
+# False block: the staging happens in another repo inside a subshell.
+expect "subshell cd to another repo (was a false block)" pass  "$ROOT" "(cd $OTHER && git add a.md)"
+expect "subshell cd to linked worktree"                  pass  "$ROOT" "(cd $WT && git add a.md)"
+expect "-C chain stays relative to the previous -C"      pass  "$ROOT" "git -C $TMP_DIR -C other add a.md"
+expect "path with spaces in -C"                          pass  "$ROOT" "git -C '$SPACED' add a.md"
+expect "'-C' as a pathspec is not an option"             pass  "$OTHER" "git add -- -C"
+expect "assigned variable resolves to another repo"      pass  "$ROOT" "T=$OTHER; git -C \"\$T\" add a.md"
+# Bypass: the staging reaches the frozen index from outside.
+expect "subshell cd into the frozen checkout"            block "$OTHER" "(cd $ROOT && git add a.md)"
+expect "cd to other repo, then -C back to the canon"     block "$OTHER" "(cd $OTHER && git -C $ROOT add a.md)"
+expect "cd with ';' may have failed: cwd stays possible" block "$ROOT" "(cd $OTHER; git add a.md)"
+expect "subshell cd is lost after the parenthesis"       block "$ROOT" "(cd $OTHER && true); git add a.md"
+expect "subshell cd into the canon is lost afterwards"   pass  "$OTHER" "(cd $ROOT); git add a.md"
+expect "GIT_DIR prefix aims at the frozen git-dir"       block "$OTHER" "GIT_DIR=$ROOTGIT git add a.md"
+expect "--git-dir aims at the frozen git-dir"            block "$OTHER" "git --git-dir=$ROOTGIT add a.md"
+expect "--git-dir with a foreign --work-tree"            block "$OTHER" "git --git-dir $ROOTGIT --work-tree=$OTHER add a.md"
+expect "GIT_INDEX_FILE aims at the frozen index"         block "$OTHER" "GIT_INDEX_FILE=$ROOTGIT/index git add a.md"
+expect "exported GIT_DIR aims at the frozen git-dir"     block "$OTHER" "export GIT_DIR=$ROOTGIT; git add a.md"
+expect "env wrapper sets GIT_DIR"                        block "$OTHER" "env GIT_DIR=$ROOTGIT git add a.md"
+expect "assigned variable resolves to the canon"         block "$OTHER" "T=$ROOT; git -C \"\$T\" add a.md"
+expect "staging at the end of a pipeline"                block "$ROOT" "echo a.md | git add --pathspec-from-file=-"
+# Unknown target: blocked (pilot decision 29.10), whatever the cwd.
+expect "-C with an unknown shell variable"               block "$OTHER" 'git -C "$TARGET" add a.md'
+expect "-C with a command substitution"                  block "$OTHER" 'git -C $(pwd) add a.md'
+expect "loop variable in -C"                             block "$OTHER" 'for r in a b; do git -C "$r" add f; done'
+expect "unknown GIT_DIR value"                           block "$OTHER" 'GIT_DIR=$X git add a.md'
+expect "unknown global option before add"                block "$OTHER" 'git $OPTS add a.md'
+expect "unknown global option, no staging"               pass  "$OTHER" 'git $OPTS status'
+expect "freeze off: unknown target is allowed"           pass  "$OTHER" 'git -C "$TARGET" add a.md' "IWE_FROZEN_CANONICAL_PATH="
+# Cold review by Codex (round 4): forms found to slip through the first version.
+expect "-C joined with its path"                         block "$OTHER" "git -C$ROOT add a.md"
+expect "bash -c runs staging in the canon"               block "$ROOT" "bash -c 'git add a.md'"
+expect "bash -c with cd to another repo"                 pass  "$ROOT" "bash -c 'cd $OTHER && git add a.md'"
+expect "sh -c with -C into the canon"                    block "$OTHER" "sh -c \"git -C $ROOT add a.md\""
+expect "eval of a staging call in the canon"             block "$ROOT" "eval 'git add a.md'"
+expect "bash -c with an unknown command text"            block "$OTHER" 'bash -c "$CMD"; git add a.md'
+expect "conditional export of GIT_INDEX_FILE"            block "$ROOT" "false && export GIT_INDEX_FILE=/tmp/alt-index; git add a.md"
+expect "export inside a pipeline is lost"                block "$ROOT" "export GIT_INDEX_FILE=/tmp/alt-index | cat; git add a.md"
+expect "env -u removes the exported GIT_INDEX_FILE"      block "$ROOT" "export GIT_INDEX_FILE=/tmp/alt-index; env -u GIT_INDEX_FILE git add a.md"
+expect "cd -- <other repo>"                              pass  "$ROOT" "(cd -- $OTHER && git add a.md)"
+expect "cd -P -- <canon> from elsewhere"                 block "$OTHER" "(cd -P -- $ROOT && git add a.md)"
+expect "inherited GIT_INDEX_FILE aims at the canon"      block "$OTHER" "git add a.md" "GIT_INDEX_FILE=$ROOTGIT/index"
+expect "benign assignment before -C"                     pass  "$ROOT" "D=$OTHER; git -C \"\$D\" add a.md"
 
 git -C "$ROOT" worktree remove --force "$WT" 2>/dev/null
 

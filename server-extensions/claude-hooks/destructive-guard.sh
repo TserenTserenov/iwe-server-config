@@ -535,15 +535,12 @@ fi
 # копии. Стейдж в каноне молча пачкает общий индекс, и чужой коммит заберёт
 # файлы этого агента. Набор путей повторяет политику session-guard.sh:
 # IWE_FROZEN_CANONICAL_PATH не задана — оба пути; задана непустой — только он;
-# задана пустой — заморозки нет. Изолированная копия — другой toplevel, не блокируется.
-stage_repo_of() {  # <segment> -> toplevel of the repo the git call targets
-  local seg="$1" dir="${CWD:-$PWD}" c
-  c=$(printf '%s' "$seg" | sed -nE 's/.*(^|[[:space:]])-C[[:space:]]+("([^"]*)"|'"'"'([^'"'"']*)'"'"'|[^[:space:]]+).*/\2/p' | head -1 | tr -d "\"'")
-  if [ -n "$c" ]; then
-    case "$c" in /*) dir="$c" ;; *) dir="$dir/$c" ;; esac
-  fi
-  (cd "$dir" 2>/dev/null && git rev-parse --show-toplevel 2>/dev/null | { read -r t && (cd "$t" && pwd -P); }) || true
-}
+# задана пустой — заморозки нет.
+# Цель вызова определяет stage-target.py по ФАКТИЧЕСКОМУ файлу индекса (РП-561 Ф54,
+# 29.10, пир-сессия Claude+Kimi+Codex, решение пилота «неопределённость = блок»):
+# `(cd <другой репо> && git add)` больше не блокируется ложно, а `GIT_DIR=`,
+# `--git-dir`, `GIT_INDEX_FILE`, цепочка `-C` и переменные оболочки не дают обхода.
+# Изолированная копия, связанный worktree и подмодуль имеют другой индекс — не блокируются.
 frozen_canon_paths() {
   if [ -z "${IWE_FROZEN_CANONICAL_PATH+x}" ]; then
     printf '%s\n' "$WORKSPACE_ROOT/DS-my-strategy" "$WORKSPACE_ROOT"
@@ -551,23 +548,30 @@ frozen_canon_paths() {
     printf '%s\n' "$IWE_FROZEN_CANONICAL_PATH"
   fi
 }
-STAGE_SEGMENT="$(git_segment add)"
-RESTORE_SEGMENT=$(git_segment restore)
-if [ -n "$RESTORE_SEGMENT" ] && echo "$RESTORE_SEGMENT" | grep -qE -- '(^|[[:space:]])(--staged|-[a-zA-Z]*S[a-zA-Z]*)([[:space:]]|$)'; then
-  STAGE_SEGMENT+="${STAGE_SEGMENT:+$'\n'}$RESTORE_SEGMENT"
-fi
-if [ -n "$STAGE_SEGMENT" ]; then
-  while IFS= read -r seg; do
-    [ -n "$seg" ] || continue
-    top=$(stage_repo_of "$seg")
-    [ -n "$top" ] || continue
-    while IFS= read -r frozen; do
-      [ -n "$frozen" ] || continue
-      if [ "$top" = "$(cd "$frozen" 2>/dev/null && pwd -P || printf '%s' "$frozen")" ]; then
-        block "git add / git restore --staged в замороженном каноне ($top) запрещён: индекс общий, чужой коммит заберёт твои файлы. Открой изолированную копию ((cd DS-my-strategy && bash ../scripts/session-guard.sh open --isolate --wp WP-N …)) и стейдж там; для чужого репозитория — git -C <путь> add."
-      fi
-    done < <(frozen_canon_paths)
-  done <<< "$STAGE_SEGMENT"
+# The cheap trigger is "the words git and add|stage|restore both occur": git_segment
+# does not see a call behind `$(...)`, `do`, or an unresolved global option, and those
+# are exactly the forms the helper must judge. The helper lexes quotes, so prose such as
+# `git commit -m "add x"` comes back ALLOW.
+if printf '%s' "$CMD_EXEC" | grep -qE '(^|[^[:alnum:]_.-])git([^[:alnum:]_-]|$)' \
+   && printf '%s' "$CMD_EXEC" | grep -qE '(^|[^[:alnum:]_-])(add|stage|restore)([^[:alnum:]_-]|$)'; then
+  FROZEN_ARGS=()
+  while IFS= read -r frozen; do
+    [ -n "$frozen" ] && FROZEN_ARGS+=(--frozen "$frozen")
+  done < <(frozen_canon_paths)
+  if [ "${#FROZEN_ARGS[@]}" -gt 0 ]; then
+    STAGE_VERDICT=$(printf '%s' "$CMD_EXEC" | python3 "$HOOK_DIR/stage-target.py" --cwd "${CWD:-$PWD}" "${FROZEN_ARGS[@]}" 2>/dev/null) || STAGE_VERDICT=""
+    case "${STAGE_VERDICT%%$'\t'*}" in
+      ALLOW) ;;
+      FROZEN)
+        block "git add / git restore --staged в замороженном каноне (${STAGE_VERDICT#*$'\t'}) запрещён: индекс общий, чужой коммит заберёт твои файлы. Открой изолированную копию ((cd DS-my-strategy && bash ../scripts/session-guard.sh open --isolate --wp WP-N …)) и стейдж там; для чужого репозитория — git -C <путь> add."
+        ;;
+      *)
+        STAGE_WHY="${STAGE_VERDICT#*$'\t'}"
+        [ "$STAGE_WHY" != "$STAGE_VERDICT" ] || STAGE_WHY="помощник stage-target.py не вернул ответ"
+        block "git add / git restore --staged: не удалось определить, какой индекс изменяет вызов ($STAGE_WHY). Канон заморожен, поэтому неопределённость блокируется: укажи репозиторий литерально — git -C /абсолютный/путь add … (переменные оболочки из прошлых вызовов хук не раскрывает; присвоение в этой же команде раскрывает)."
+        ;;
+    esac
+  fi
 fi
 
 # git stash pop/apply возвращает содержимое чужой заначки целиком, без разбора по
