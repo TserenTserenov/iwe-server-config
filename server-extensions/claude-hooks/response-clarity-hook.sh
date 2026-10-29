@@ -46,6 +46,25 @@ export STYLE_CONTEXT
 INPUT=$(cat)
 if [ -z "$INPUT" ]; then exit 0; fi
 
+# --- A12_CROSS_TURN_REPEAT (РП-605 Ф6, 29.10.2026): повтор между ходами после служебной записи ---
+# Два соседних ответа без сообщения пилота между ними: возврат из фоновой работы или
+# переписанный ответ после блокировки этого же хука (обратная связь стража — служебная
+# запись). Стоит ДО защиты от рекурсии нарочно: переписанный после блокировки ответ идёт
+# с stop_hook_active=true, и ниже хук выходит раньше всех детекторов — повтор, о котором
+# пилот и сообщил, иначе был бы невидим. Диагностика, warn-only: в BLOCKABLE не входит,
+# счётчик нарушений не наращивает, сбой детектора не ломает ход. Живёт в уже
+# зарегистрированной команде, а файл на диске читается при каждом вызове — так сигнал
+# доходит и до давно идущих (--resume) разговоров.
+CROSS_TURN_TRANSCRIPT=$(printf '%s' "$INPUT" | jq -r '.transcript_path // empty' 2>/dev/null || echo "")
+if [ -n "$CROSS_TURN_TRANSCRIPT" ] && [ -f "$CROSS_TURN_TRANSCRIPT" ]; then
+  CROSS_TURN_MATCH=$(python3 "$(dirname "${BASH_SOURCE[0]}")/a12-cross-turn-repeat.py" "$CROSS_TURN_TRANSCRIPT" 2>/dev/null || true)
+  if [ -n "$CROSS_TURN_MATCH" ]; then
+    CROSS_TURN_LOG="${HOME}/.claude/logs/style-violations.log"
+    mkdir -p "$(dirname "$CROSS_TURN_LOG")" 2>/dev/null || true
+    echo "$(date +"%Y-%m-%d %H:%M:%S") | $AGENT | A12_CROSS_TURN_REPEAT | repeat-after-service-record | $CROSS_TURN_MATCH" >> "$CROSS_TURN_LOG" 2>/dev/null || true
+  fi
+fi
+
 # Guard от рекурсии: если хук уже активен — выходим
 STOP_HOOK_ACTIVE=$(printf '%s' "$INPUT" | jq -r '.stop_hook_active // false' 2>/dev/null || echo false)
 if [ "$STOP_HOOK_ACTIVE" = "true" ]; then exit 0; fi
