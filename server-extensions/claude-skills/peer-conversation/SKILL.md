@@ -1382,10 +1382,22 @@ bash "${IWE_SCRIPTS:-$HOME/IWE/scripts}/session-guard.sh" note-publication "$PUB
 ```bash
 REPO_ROOT=$(git rev-parse --show-toplevel)
 git -C "$REPO_ROOT" fetch -q origin main
+# Служебный id охранника = имя файла семафора `claude-code-<id>.open`. Дата-слаг пир-сессии
+# ($SESSION_ID) им НЕ является: с слагом квитанция отказывала «нет открытой сессии claude-code-<слаг>»
+# (WP-539 Ф21 Б5, 15 отказов за 29.10). Ищем семафор по полю slug; ровно один, иначе стоп.
+if [ -f "$HOME/IWE/.iwe-runtime/sessions/claude-code-${SESSION_ID}.open" ]; then
+    GUARD_SESSION_ID="$SESSION_ID"   # уже служебный id
+else
+    GUARD_SEM_MATCHES=$(grep -lxF "slug: ${SESSION_ID}" "$HOME"/IWE/.iwe-runtime/sessions/claude-code-*.open 2>/dev/null)
+    [ "$(printf '%s\n' "$GUARD_SEM_MATCHES" | grep -c .)" -eq 1 ] \
+        || { echo "семафор сессии $SESSION_ID не найден или не единственный: $GUARD_SEM_MATCHES" >&2; exit 1; }
+    GUARD_SESSION_ID=$(basename "$GUARD_SEM_MATCHES" .open)
+    GUARD_SESSION_ID="${GUARD_SESSION_ID#claude-code-}"
+fi
 for SHA in "${OUR_SHAS[@]}"; do
     # IWE_PUBLICATION_SESSION_ID обязателен: без него квитанция публикации (v2) не записывается
     # (в журнале пропусков «session=none»), и закрытие отказывает «lacks exact publication receipt».
-    IWE_AGENT=claude-code IWE_PUBLICATION_SESSION_ID="$SESSION_ID" bash "$HOME/IWE/DS-my-strategy/scripts/ds-publish.sh" "$REPO_ROOT" high \
+    IWE_AGENT=claude-code IWE_PUBLICATION_SESSION_ID="$GUARD_SESSION_ID" bash "$HOME/IWE/DS-my-strategy/scripts/ds-publish.sh" "$REPO_ROOT" high \
         --from-commit "$SHA" --exact-commit "$SHA" --reason "peer-session $SESSION_ID close" \
         || { echo "ds-publish --exact-commit не удался для $SHA — см. вывод шлюза" >&2; exit 1; }
 done

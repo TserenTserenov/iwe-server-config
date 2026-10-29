@@ -99,7 +99,11 @@ SESSION_DIR="$IWE_ROOT/.iwe-runtime/sessions"
 if [ "$AGENT_KEYED" = 1 ]; then
   SEM_MATCHES=$(ls "$SESSION_DIR/${AGENT}"-*.open 2>/dev/null)
 else
-  SEM_MATCHES=$(grep -lxF "harness_session_id: $SESSION_ID" "$SESSION_DIR/${AGENT}"-*.open 2>/dev/null)
+  # WP-484 Ф261: `claude` and `claude-code` are one agent; `claude-*.open` also
+  # matches claude-code-*.open and the alias-named records opened before the fix.
+  SEM_GLOB="${AGENT}-*.open"
+  [ "$AGENT" = "claude-code" ] && SEM_GLOB="claude-*.open"
+  SEM_MATCHES=$(grep -lxF "harness_session_id: $SESSION_ID" "$SESSION_DIR"/$SEM_GLOB 2>/dev/null)
 fi
 WP_BOUND=0
 while IFS= read -r sem_file; do

@@ -1159,9 +1159,26 @@ bash "$HOME/IWE/${IWE_GOVERNANCE_REPO:-DS-strategy}/scripts/session-manifest-wri
 # не атомарно — при сбое между ними повторить цикл, он безопасен.
 REPO_ROOT=$(git rev-parse --show-toplevel)
 git -C "$REPO_ROOT" fetch -q origin main
+# Служебный id охранника = имя файла семафора `kimi-<id>.open`; дата-слаг пир-сессии им не является
+# (WP-539 Ф21 Б5: с слагом квитанция отказывала «нет открытой сессии»). Ищем семафор по полю slug;
+# ровно один. Семафор Kimi открывается снаружи, и его slug бывает номером РП, а не слагом сессии:
+# не нашли однозначно — публикуем без квитанции (как раньше), но громко предупреждаем, не стоп.
+# Без IWE_AGENT квитанция тоже не пишется — задаём его явно.
+if [ -f "$HOME/IWE/.iwe-runtime/sessions/kimi-${SESSION_ID}.open" ]; then
+  GUARD_SESSION_ID="$SESSION_ID"
+else
+  GUARD_SEM_MATCHES=$(grep -lxF "slug: ${SESSION_ID}" "$HOME"/IWE/.iwe-runtime/sessions/kimi-*.open 2>/dev/null)
+  if [ "$(printf '%s\n' "$GUARD_SEM_MATCHES" | grep -c .)" -eq 1 ]; then
+    GUARD_SESSION_ID=$(basename "$GUARD_SEM_MATCHES" .open)
+    GUARD_SESSION_ID="${GUARD_SESSION_ID#kimi-}"
+  else
+    GUARD_SESSION_ID=""
+    echo "WARN: семафор Kimi для $SESSION_ID не найден однозначно — публикую без квитанции v2" >&2
+  fi
+fi
 for SHA in "${OUR_SHAS[@]}"; do
   # IWE_PUBLICATION_SESSION_ID обязателен: без него квитанция публикации (v2) не записывается
-  IWE_PUBLICATION_SESSION_ID="$SESSION_ID" bash "$HOME/IWE/DS-my-strategy/scripts/ds-publish.sh" "$REPO_ROOT" high \
+  IWE_AGENT=kimi IWE_PUBLICATION_SESSION_ID="$GUARD_SESSION_ID" bash "$HOME/IWE/DS-my-strategy/scripts/ds-publish.sh" "$REPO_ROOT" high \
     --from-commit "$SHA" --exact-commit "$SHA" --reason "peer-session $SESSION_ID close" \
     || { echo "ds-publish --exact-commit не удался для $SHA — см. вывод шлюза" >&2; exit 1; }
 done
