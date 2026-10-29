@@ -80,11 +80,11 @@ class ConvergenceReportTest(unittest.TestCase):
     def tearDown(self):
         self.tmp.cleanup()
 
-    def run_report(self, *extra):
+    def run_report(self, *extra, host_id="mac", label="t"):
         proc = subprocess.run(
-            [sys.executable, str(SCRIPT), "--root", str(self.root), "--host", "t",
+            [sys.executable, str(SCRIPT), "--root", str(self.root), "--host", label,
              "--state-file", str(self.state), *extra],
-            capture_output=True, text=True, env=dict(os.environ))
+            capture_output=True, text=True, env=dict(os.environ, CONVERGENCE_HOST_ID=host_id))
         return proc
 
     def rows(self):
@@ -137,6 +137,63 @@ class ConvergenceReportTest(unittest.TestCase):
         self.assertEqual(rows["DS-my-strategy"]["block"], "состояние синхронизатора не читается")
         self.assertIn("состояние синхронизатора: ошибка (ValueError)", sources)
         self.assertEqual(rows["equal"]["relation"], "equal")  # rest of the report survives
+
+    def write_registry(self, text):
+        path = Path(self.tmp.name) / "registry.yaml"
+        path.write_text(text)
+        return str(path)
+
+    def test_registry_categories_and_coverage_note(self):
+        registry = self.write_registry(
+            "version: 1\nrepos:\n"
+            "  - {repo_id: equal, class: undecided, checkouts: [{host: mac, path: equal}]}\n"
+            "  - {repo_id: ghost, class: undecided, checkouts: [{host: mac, path: ghost}]}\n"
+            "  - {repo_id: cech, class: undecided, checkouts: [{host: tsekh-1, path: behind}]}\n")
+        proc = self.run_report("--registry", registry)
+        out = proc.stdout
+        self.assertIn("реестр сходимости: записей 3; найдено в реестре 1", out)
+        self.assertIn("в реестре, но не найдено: ghost", out)
+        self.assertIn("присутствие на этом хосте не ожидается: behind", out)
+        self.assertRegex(out, r"вне реестра \d+: .*unconfirmed")
+        self.assertNotRegex(out, r"вне реестра \d+: .*\bbehind\b")  # registered for the other host only
+        self.assertIn("полнота обхода: корень и каталоги первого уровня; вложенные репозитории не видны", out)
+
+    def test_registry_host_comes_from_the_machine_not_the_display_label(self):
+        """Regression: the digest labels the server 'Цех'; matching on that label made it read as the Mac."""
+        registry = self.write_registry(
+            "version: 1\nrepos:\n"
+            "  - {repo_id: equal, class: undecided,"
+            " checkouts: [{host: mac, path: equal}, {host: tsekh-1, path: behind}]}\n")
+        out = self.run_report("--registry", registry, host_id="tsekh-1", label="Цех").stdout
+        self.assertIn("найдено в реестре 1", out)           # 'behind' is this host's checkout
+        self.assertIn("присутствие на этом хосте не ожидается: equal", out)
+        self.assertNotIn("в реестре, но не найдено", out)
+
+    def test_missing_registry_is_loud_and_rest_of_report_survives(self):
+        proc = self.run_report("--registry", str(Path(self.tmp.name) / "nope.yaml"))
+        self.assertIn("реестр сходимости НЕ РАБОТАЕТ (1 ош.): нет файла реестра: nope.yaml", proc.stdout)
+        self.assertIn("полнота обхода:", proc.stdout)
+        self.assertIn("найдено 9", proc.stdout)
+
+    def test_script_piped_on_stdin_reports_registry_unavailable_not_crash(self):
+        """The old morning digest feeds the script on stdin (`python3 -`): no __file__, no siblings."""
+        proc = subprocess.run(
+            [sys.executable, "-", "--root", str(self.root), "--host", "t", "--state-file", str(self.state)],
+            input=SCRIPT.read_text(encoding="utf-8"), capture_output=True, text=True)
+        self.assertIn(proc.returncode, (0, 1), proc.stderr)
+        self.assertIn("реестр сходимости НЕ РАБОТАЕТ", proc.stdout)
+        self.assertIn("со стандартного ввода", proc.stdout)
+        self.assertIn("найдено 9", proc.stdout)
+
+    def test_registry_with_fetch_permission_is_rejected_in_report(self):
+        registry = self.write_registry(
+            "version: 1\nrepos:\n"
+            "  - {repo_id: equal, class: undecided, fetch_allowed: true,"
+            " checkouts: [{host: mac, path: equal}]}\n")
+        data = json.loads(self.run_report("--registry", registry, "--json").stdout)
+        self.assertEqual(data["registry"]["state"], "unavailable")
+        self.assertTrue(any("fetch_allowed здесь запрещён" in e for e in data["registry"]["errors"]))
+        self.assertEqual(len(data["repos"]), 9)  # per-repo facts are not replaced by registry state
 
 
 if __name__ == "__main__":

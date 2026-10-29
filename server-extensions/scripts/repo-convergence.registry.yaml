@@ -1,0 +1,52 @@
+# Реестр сходимости git-копий: КАК каждая копия репозитория сходится со своим upstream на каждом хосте.
+# WP-539 Ф21 Б1; решение — DRR-f21-b1-repo-registry (DS-my-strategy/inbox/WP-539/).
+#
+# Три реестра, три разных вопроса (каждый факт — в одном месте):
+#   * этот файл                       — как копия сходится с upstream (класс, владелец решения, пороги);
+#   * scripts/refs-sync-broker.repos.yaml — в каких копиях брокеру РАЗРЕШЕНО делать fetch (права живут только там;
+#                                       поле fetch_allowed в этом файле запрещено проверкой);
+#   * repo-registry/repos.md          — в какой организации GitHub живёт репозиторий и куда он должен переехать.
+#
+# Правила:
+#   * class: undecided — решение пилота не принято (это явное значение, не пропуск). canon / reader / working
+#     допустимы только с decision_owner = {ref, scope}; смена класса — решение пилота.
+#   * Копия на хосте — path относительно корня IWE; purpose: copy — каталог-копия, не сходится с upstream, но
+#     присутствие и ошибки чтения остаются видимыми.
+#   * Пороги (thresholds): null = не задан (не ноль). Начало отсчёта у каждого своё; «неизвестно» показывается как неизвестно.
+#   * Присутствие в этом файле НЕ даёт права на fetch и не включает копию в брокер.
+#   * Обход сводки видит корень и каталоги первого уровня: вложенные репозитории не видны, полнота не заявляется.
+version: 1
+repos:
+  - repo_id: DS-my-strategy
+    class: canon
+    checkouts:
+      - {host: mac, path: DS-my-strategy}
+      - {host: tsekh-1, path: DS-my-strategy}
+    expected_branch: main
+    upstream: origin/main
+    decision_owner: {ref: "WP-539 Ф21 (диагноз 29.10, заморозка канона WP-520/WP-484 Ф104)", scope: repo}
+    executor: "Цех — синхронизатор канона (tsekh1-git-sync.sh); Мак — страховочный проход (backstop)"
+    mutation_mechanism: "ff-only синхронизатором под замком; сессии пишут только в изолированной копии"
+    thresholds: {fetch_max_age_min: 120, behind_max_commits: null, behind_observed_for_min: null, block_resolution_max_age_min: null}
+  - repo_id: MC-sessions
+    class: undecided
+    checkouts:
+      - {host: mac, path: MC-sessions}
+      - {host: tsekh-1, path: MC-sessions}
+    expected_branch: main
+    upstream: origin/main
+    decision_owner: null
+    executor: null
+    mutation_mechanism: "ожидает Б4 (общий замок)"
+    note: "Мак: diverged +3/-8 на 29.10; Цех: копию никто не двигает (брокер обновляет только ссылки)"
+  - repo_id: iwe-root
+    class: undecided
+    checkouts:
+      - {host: mac, path: "."}
+      - {host: tsekh-1, path: ".", optional: true}
+    expected_branch: main
+    upstream: origin/main
+    decision_owner: null
+    executor: null
+    mutation_mechanism: "ожидает Б4 (общий замок); на Цехе корень — зеркало Nix, не git-копия"
+    note: "постоянного исполнителя синхронизации корня Мака нет; владелец решения — РП-539, механизм после Б4"

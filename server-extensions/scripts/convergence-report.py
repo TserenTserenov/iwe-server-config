@@ -22,7 +22,17 @@ import subprocess
 import sys
 from pathlib import Path
 
+HERE = Path(__file__).resolve().parent
+sys.path.insert(0, str(HERE))
+try:
+    import repo_registry  # sibling module
+except ImportError:  # `python3 -` (script piped on stdin): __file__ is "<stdin>", no sibling next to it
+    repo_registry = None
+
 GIT_ENV = dict(os.environ, GIT_OPTIONAL_LOCKS="0", LC_ALL="C")
+DEFAULT_REGISTRY = str(HERE / "repo-convergence.registry.yaml") if repo_registry else ""
+REGISTRY_NAMES_SHOWN = 15
+COVERAGE_NOTE = "полнота обхода: корень и каталоги первого уровня; вложенные репозитории не видны"
 SKIP_DIRS = {".iwe-runtime", ".worktrees", ".claude", "node_modules"}
 # "<ts> OK <path> <- <remote> +<src>:<dst>" -- refs-sync-broker.sh success line.
 BROKER_OK_RE = re.compile(r"^(\S+) OK (\S+) <- \S+ \+?[^:\s]+:(\S+)$")
@@ -158,6 +168,50 @@ def scan(root, state_file):
     return rows, [broker_note, state_note]
 
 
+def host_id():
+    """Registry host id of THIS machine, from its network name (--host is only a display label).
+
+    CONVERGENCE_HOST_ID overrides the guess."""
+    explicit = os.environ.get("CONVERGENCE_HOST_ID")
+    if explicit:
+        return explicit
+    return "tsekh-1" if socket.gethostname().lower().startswith("tsekh") else "mac"
+
+
+def registry_section(rows, registry_path):
+    """Registry view of the same repos; a broken/missing registry is reported, never silent."""
+    if repo_registry is None:
+        return {"state": "unavailable",
+                "errors": ["сводка запущена со стандартного ввода: модуль реестра недоступен"]}
+    registry, errors = repo_registry.load(registry_path)
+    if registry is None:
+        return {"state": "unavailable", "errors": errors}
+    result = repo_registry.compare(registry, [r["repo"] for r in rows], host_id())
+    result.update(state="ok", entries=len(registry["repos"]))
+    return result
+
+
+def _names(items):
+    shown = ", ".join(items[:REGISTRY_NAMES_SHOWN])
+    rest = len(items) - REGISTRY_NAMES_SHOWN
+    return shown + (f" и ещё {rest}" if rest > 0 else "")
+
+
+def render_registry(section):
+    if section["state"] != "ok":
+        first = section["errors"][0] if section["errors"] else "причина не указана"
+        return [f"реестр сходимости НЕ РАБОТАЕТ ({len(section['errors'])} ош.): {first}", COVERAGE_NOTE]
+    out = [f"реестр сходимости: записей {section['entries']}; найдено в реестре {len(section['registered'])}"]
+    if section["outside"]:
+        out.append(f"вне реестра {len(section['outside'])}: {_names(section['outside'])}")
+    if section["absent"]:
+        out.append(f"в реестре, но не найдено: {_names(section['absent'])}")
+    if section["not_expected"]:
+        out.append(f"присутствие на этом хосте не ожидается: {_names(section['not_expected'])}")
+    out.append(COVERAGE_NOTE)
+    return out
+
+
 def classify(row):
     # An old confirmation is not a current one: equal on stale data is a problem.
     if row["error"] or row["block"] or row["relation"] != "equal" or row["fetch_stale"]:
@@ -165,7 +219,7 @@ def classify(row):
     return "confirmed" if row["fetch"] != "unknown" else "unconfirmed"
 
 
-def render(rows, sources, host, problems_only):
+def render(rows, sources, host, problems_only, registry=None):
     groups = {"problem": [], "confirmed": [], "unconfirmed": []}
     for row in rows:
         groups[classify(row)].append(row)
@@ -178,6 +232,8 @@ def render(rows, sources, host, problems_only):
         f"совпадает, но получение с сервера не подтверждено {len(groups['unconfirmed'])}",
         "источники: " + "; ".join(sources),
     ]
+    if registry is not None:
+        out += render_registry(registry)
     for r in sorted(groups["problem"], key=lambda r: (not r["error"], not r["block"], r["repo"])):
         fetched = r["fetch"] + (" (устарело)" if r["fetch_stale"] else "")
         line = f"- {r['repo']}: {r['relation']}; данные с сервера получены: {fetched}"
@@ -197,6 +253,8 @@ def main():
     parser.add_argument("--host", default=socket.gethostname().split(".")[0])
     parser.add_argument("--state-file",
                         default=str(Path.home() / ".claude" / "state" / "tsekh1-git-sync-state.json"))
+    parser.add_argument("--registry", default=DEFAULT_REGISTRY,
+                        help="convergence registry (repo-convergence.registry.yaml)")
     parser.add_argument("--problems-only", action="store_true")
     parser.add_argument("--json", action="store_true")
     args = parser.parse_args()
@@ -206,10 +264,12 @@ def main():
         print(f"convergence-report: root not found: {root}", file=sys.stderr)
         return 2
     rows, sources = scan(root, Path(args.state_file))
+    registry = registry_section(rows, args.registry)
     if args.json:
-        print(json.dumps({"host": args.host, "sources": sources, "repos": rows}, ensure_ascii=False))
+        print(json.dumps({"host": args.host, "sources": sources, "repos": rows, "registry": registry},
+                         ensure_ascii=False))
     else:
-        print(render(rows, sources, args.host, args.problems_only))
+        print(render(rows, sources, args.host, args.problems_only, registry))
     return 1 if any(r["error"] for r in rows) else 0
 
 
