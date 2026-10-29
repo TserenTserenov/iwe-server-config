@@ -829,10 +829,16 @@ in
       environment = commonEnv;
     };
 
+    # Disabled again by WP-539 F21 B2a (2026-10-29): iwe-tsekh1-sync now
+    # fast-forwards the whole canon every 20 min, and this job's per-file
+    # mirrors were the index dirt that canon-refresh kept discarding (55x in
+    # 3 days) and that blocked the guard. Consumer audit: the only card reader
+    # that needed fresher data, wp-pool-cascade, now skips on stale cards like
+    # wp-secretary-queue. Re-enable by flipping `enable` back.
     systemd.timers."iwe-sync-strategy-files" = {
-      enable      = true;
+      enable      = false;
       wantedBy    = [ "timers.target" ];
-      description = "IWE strategy-files sync — каждые 10 мин (WP-538 Ф5а: снова включён, canon-refresh.sh теперь безопасно разрешает зеркало)";
+      description = "IWE strategy-files sync — каждые 10 мин (выключен РП-539 Ф21: канон перематывается целиком, копии давали грязь в индексе)";
       timerConfig = {
         # Фиксированные минуты не дают таймеру уплыть к git-sync после долгого прогона.
         # Git-sync стартует через 3 мин после каждого второго тика этой службы.
