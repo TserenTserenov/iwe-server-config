@@ -140,6 +140,27 @@ nixos-rebuild --rollback --target-host root@95.216.75.148
 
 Восстановление: 4-6h.
 
+### Служба Image (РП-614): генерация картинок и видео для Zulip и @aist_me_bot
+
+Работает пользовательскими службами `tseren` (не в `.nix` — долг: перенести в модуль), автозапуск через linger.
+
+| Служба | Что делает |
+|--------|-----------|
+| `image-service` | API заданий на 127.0.0.1:8790, лимиты, допуск по окнам |
+| `image-bot` | окно Zulip (бот image-bot@chat.aisystant.ai) |
+| `image-tunnel` | Cloudflare-туннель `image-bot` → https://image.aisystant.ai (только пути `/v1/`) |
+
+Код и юниты — `~/image-bot` (локальная git-история). Секреты (не в git): `~/.config/image-bot/zuliprc` (ключ бота Zulip), `~/.config/image-bot/windows.json` (токены окон и список допуска Telegram), `~/.config/higgsfield/credentials.json` (вход в Higgsfield под учёткой Tseren), `~/.cloudflared/` (сертификат зоны aisystant.ai и учётка туннеля).
+
+Восстановление на чистом сервере:
+1. Вернуть `~/image-bot`, `npm ci` в нём, затем `node node_modules/@higgsfield/cli/install.js`.
+2. Higgsfield: `higgsfield auth login --port 8765` с пробросом `ssh -L 8765:127.0.0.1:8765`, ссылку открыть на машине с браузером; затем `higgsfield workspace set <id>`.
+3. Zulip: новый ключ бота в настройках Zulip → `zuliprc`. Токены окон: при перевыпуске обновить `IMAGE_SERVICE_TOKEN` у пилотного бота на Railway.
+4. Туннель: `cloudflared tunnel login` (выбрать aisystant.ai), учётка туннеля — `cloudflared tunnel token`/пересоздание `image-bot` и `route dns`.
+5. `cp ~/image-bot/*.service ~/.config/systemd/user/ && systemctl --user enable --now image-service image-bot image-tunnel`.
+
+Проверка: `curl https://image.aisystant.ai/v1/health` → `{"ok": true}`.
+
 ## Где что искать
 
 | Что | Где |
