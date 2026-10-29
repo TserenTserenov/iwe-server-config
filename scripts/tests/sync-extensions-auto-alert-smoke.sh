@@ -43,24 +43,20 @@ TG_LOG="$WORKDIR/tg.log"
 # shellcheck disable=SC2034  # используется внутри извлечённого alert() (echo "$LOG_PREFIX ...")
 LOG_PREFIX="[test]"
 touch "$TG_LOG"
-FIX_BIN="$WORKDIR/bin"
-mkdir -p "$FIX_BIN"
-cat > "$FIX_BIN/curl" <<STUB
-#!/bin/bash
-# захватываем именно --data-urlencode "text=..." — тот же аргумент, что
-# реальный send_telegram передаёт curl; отвечаем правдоподобным успехом
-# Telegram API, иначе send_telegram()'s "ok":true check (WP-7 Ф174,
-# 24.09.2026) логировал бы WARN на каждый сценарий этого теста.
-for a in "\$@"; do
-  case "\$a" in
-    text=*) printf '%s\n' "\${a#text=}" >> "$TG_LOG" ;;
-  esac
-done
-echo '{"ok":true,"result":{}}'
+# WP-568 Ф10: the script sends through the shared Telegram library
+# (SYNC_EXTENSIONS_TG_LIB). A stub library captures the text and whether the
+# send was marked as needing the pilot's decision (the live-chat ticket).
+DECISION_LOG="$WORKDIR/decision.log"
+touch "$DECISION_LOG"
+STUB_LIB="$WORKDIR/telegram-stub.sh"
+cat > "$STUB_LIB" <<STUB
+telegram_send() {
+  printf '%s\\n' "\$1" >> "$TG_LOG"
+  printf '%s\\t%s\\n' "\${TELEGRAM_SOURCE_ID:-}" "\${TELEGRAM_NEEDS_DECISION:-0}" >> "$DECISION_LOG"
+  TELEGRAM_SEND_OUTCOME=sent
+}
 STUB
-chmod +x "$FIX_BIN/curl"
-
-export PATH="$FIX_BIN:$PATH"
+export SYNC_EXTENSIONS_TG_LIB="$STUB_LIB"
 export TELEGRAM_BOT_TOKEN="test-token"
 export TELEGRAM_CHAT_ID="test-chat"
 export DS_PUBLISH_ADMISSION_DIR="$WORKDIR/notify-admission"
@@ -155,12 +151,16 @@ printf '%s:%s:%s' "$OLD_TS_URGENT" "$OLD_TS_URGENT" "$COUNT_URGENT" > "$STATE_FI
 alert sync-script "🚨 test: sync-extensions.sh упал (попытка N)"
 grep -q "🆘" "$TG_LOG" && ok "urgent: сообщение помечено как требующее вмешательства (🆘)" \
     || bad "urgent: 🆘 в тексте" "$(cat "$TG_LOG")"
-grep -qE "стоит уже [0-9]+ч" "$TG_LOG" && ok "urgent: названа длительность простоя в часах (с момента последнего успеха, не первого отказа)" \
+grep -qE "так уже [0-9]+ч" "$TG_LOG" && ok "urgent: названа длительность простоя в часах (с момента последнего успеха, не первого отказа)" \
     || bad "urgent: длительность в часах" "$(cat "$TG_LOG")"
 grep -qE "[0-9]+ попыт.* подряд" "$TG_LOG" && ok "urgent: названо число попыток подряд" \
     || bad "urgent: число попыток подряд" "$(cat "$TG_LOG")"
-grep -q "нужно ручное вмешательство" "$TG_LOG" && ok "urgent: явно назван следующий шаг (ручное вмешательство)" \
+grep -q "разбери доставку расширений" "$TG_LOG" && ok "urgent: явно назван следующий шаг (фраза для агента)" \
     || bad "urgent: назван следующий шаг" "$(cat "$TG_LOG")"
+[ "$(tail -1 "$DECISION_LOG")" = "$(printf 'sync-extensions-auto\t1')" ] && ok "urgent: отправка помечена «нужно решение пилота» (пропуск в живой чат)" \
+    || bad "urgent: флаг решения" "$(tail -1 "$DECISION_LOG")"
+head -1 "$DECISION_LOG" | grep -q "	0$" && ok "первый сбой: без флага решения (уходит в утреннюю сводку)" \
+    || bad "первый сбой: без флага решения" "$(head -1 "$DECISION_LOG")"
 
 # --- Сценарий 9: сразу после urgent-отправки — подавлено (не каждые 2ч спам) ---
 : > "$TG_LOG"
@@ -177,23 +177,23 @@ alert_ok "✅ test: автосинк прошёл после долгого пр
 grep -q "sync-script:" "$TG_LOG" && ok "urgent: восстановление после urgent-инцидента называет класс и длительность" \
     || bad "urgent: восстановление называет sync-script" "$(cat "$TG_LOG")"
 
-# --- Сценарий 7: нет токена/чата — send_telegram предупреждает, не молчит ---
-# WP-7 Ф174, 24.09.2026: до этой правки send_telegram() без токена просто
-# ничего не делала — 5-дневный простой автосинка на Маке (сломанный
-# ~/.config/aist/env оставлял TELEGRAM_* неопределёнными) был неотличим в
-# логе от штатного подавления повтора.
+# --- Сценарий 7: нет библиотеки отправки — предупреждение, не молчание ----
+# WP-7 Ф174 (24.09.2026): пропавшая отправка не должна быть неотличима в
+# логе от штатного подавления. После WP-568 Ф10 токен проверяет сама
+# библиотека; здесь — случай, когда её файла нет на хосте.
 (
-  unset TELEGRAM_BOT_TOKEN TELEGRAM_CHAT_ID
   : > "$TG_LOG"
-  send_telegram "test: нет токена"
+  SYNC_EXTENSIONS_TG_LIB="$WORKDIR/missing-telegram.sh"
+  TG_LIB="$SYNC_EXTENSIONS_TG_LIB"
+  send_telegram "test: нет библиотеки"
 ) >"$WORKDIR/scenario7.log" 2>&1
-if grep -qi "not set" "$WORKDIR/scenario7.log"; then
-  ok "нет токена: предупреждение в логе"
+if grep -q "library not found" "$WORKDIR/scenario7.log"; then
+  ok "нет библиотеки: предупреждение в логе"
 else
-  bad "нет токена: предупреждение в логе" "$(cat "$WORKDIR/scenario7.log")"
+  bad "нет библиотеки: предупреждение в логе" "$(cat "$WORKDIR/scenario7.log")"
 fi
 LINES=$(wc -l < "$TG_LOG" | tr -d ' ')
-[ "$LINES" = "0" ] && ok "нет токена: curl не вызван" || bad "нет токена: curl не вызван" "$LINES строк"
+[ "$LINES" = "0" ] && ok "нет библиотеки: ничего не отправлено мимо неё" || bad "нет библиотеки: ничего не отправлено" "$LINES строк"
 
 echo "---"
 echo "PASS=$PASS FAIL=$FAIL"

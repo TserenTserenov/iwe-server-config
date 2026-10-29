@@ -93,27 +93,27 @@ if [ -f "$NOTIFY_LIB" ]; then
   NOTIFY_LIB_AVAILABLE=true
 fi
 
+# send_telegram <text> [needs_decision 0|1]: through the shared library
+# (WP-568 Ф10) — its allowlist row (source-id sync-extensions-auto, channel
+# "decision") decides live chat vs morning digest; only a send marked as
+# needing the pilot's decision now may reach the live chat. No raw curl
+# fallback: a direct Bot API call would bypass that decision, which
+# scripts/telegram-direct-api-scan.sh (DS-my-strategy) rejects.
+TG_LIB="${SYNC_EXTENSIONS_TG_LIB:-$HOME/IWE/DS-my-strategy/scripts/lib/telegram.sh}"
 send_telegram() {
-  local text="$1"
-  if [ -z "${TELEGRAM_BOT_TOKEN:-}" ] || [ -z "${TELEGRAM_CHAT_ID:-}" ]; then
-    # Previously silent (WP-7 Ф174, 24.09.2026): a broken $AIST_ENV upstream
-    # (see the bash -n check above) left these unset for 5 days, and every
-    # alert()/alert_ok() call after that did nothing with no trace in the
-    # log -- indistinguishable from "the dedup throttle suppressed it".
-    echo "$LOG_PREFIX WARN: TELEGRAM_BOT_TOKEN/TELEGRAM_CHAT_ID not set -- message not sent: $text"
+  local text="$1" needs_decision="${2:-0}"
+  if [ ! -f "$TG_LIB" ]; then
+    echo "$LOG_PREFIX WARN: Telegram library not found ($TG_LIB) -- message not sent: $text"
     return 0
   fi
-  local response
-  response=$(curl -s --max-time 10 -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
-    -d "chat_id=${TELEGRAM_CHAT_ID}" \
-    --data-urlencode "text=$text") || {
-    echo "$LOG_PREFIX WARN: Telegram send failed (curl error) -- message not delivered"
-    return 0
-  }
-  case "$response" in
-    *'"ok":true'*) : ;;
-    *) echo "$LOG_PREFIX WARN: Telegram send rejected: ${response:0:200}" ;;
-  esac
+  # shellcheck source=/dev/null
+  . "$TG_LIB"
+  # Credentials keep coming from ~/.config/aist/env (sourced above), as before
+  # the library switch: an empty TG_SECRETS_FILE stops the library from
+  # loading another bot/chat over them.
+  TG_SECRETS_FILE=/dev/null TELEGRAM_SOURCE_ID=sync-extensions-auto TELEGRAM_NEEDS_DECISION="$needs_decision" \
+    telegram_send "$text" \
+    || echo "$LOG_PREFIX WARN: Telegram send failed (outcome: ${TELEGRAM_SEND_OUTCOME:-none}) -- message not delivered"
 }
 
 # alert <class> <text>: сбой класса <class>. Первый раз — сразу; повтор того
@@ -131,17 +131,34 @@ send_telegram() {
 # сутки навсегда», а «раз в сутки, пока инцидент открыт».
 NOTIFY_ESCALATION_URGENT_AFTER_SEC="${NOTIFY_ESCALATION_URGENT_AFTER_SEC:-21600}"
 NOTIFY_ESCALATION_URGENT_REPEAT_MIN="${NOTIFY_ESCALATION_URGENT_REPEAT_MIN:-1440}"
+# alert_class_subject <class>: the urgent message names the stuck step in
+# plain words instead of reusing the base text (which may say "no action
+# needed" — the contradiction of the 29.10 dump).
+alert_class_subject() {
+  case "$1" in
+    cd|source-behind|source-snapshot|pull) printf 'Доставка расширений на сервер стоит: не удаётся получить свежие файлы' ;;
+    sync-script) printf 'Доставка расширений на сервер стоит: не проходит сборка файлов для сервера' ;;
+    test-env|test-gate) printf 'Доставка расширений на сервер стоит: не проходят тесты' ;;
+    add|commit|push) printf 'Доставка расширений на сервер стоит: не удаётся записать и отправить изменения' ;;
+    *) printf 'Доставка расширений на сервер стоит (шаг %s)' "$1" ;;
+  esac
+}
+
 alert() {
-  local class="$1" text="$2"
+  local class="$1" text="$2" subject="${3:-}"
   echo "$LOG_PREFIX $text"
-  local full_text="$text"
+  local full_text="$text" needs_decision=0
   if $NOTIFY_LIB_AVAILABLE; then
     if notify_escalation_update "sync-extensions-auto/$class" fail \
          --repeat-after-min 360 \
          --urgent-after-sec "$NOTIFY_ESCALATION_URGENT_AFTER_SEC" \
          --urgent-repeat-after-min "$NOTIFY_ESCALATION_URGENT_REPEAT_MIN"; then
       if [ "$NOTIFY_ESCALATION_PHASE" = "urgent" ]; then
-        full_text="🆘 $text — конвейер доставки стоит уже $(notify_format_duration "$NOTIFY_ESCALATION_DURATION_SEC") ($NOTIFY_ESCALATION_COUNT попыток подряд), нужно ручное вмешательство"
+        # The urgent text REPLACES the base text: the base text of a routine
+        # class may say "no action needed", and gluing both into one message
+        # told the pilot two opposite things at once (dump 29.10).
+        full_text="🆘 ${subject:-$(alert_class_subject "$class")}: так уже $(notify_format_duration "$NOTIFY_ESCALATION_DURATION_SEC") ($NOTIFY_ESCALATION_COUNT попыток подряд), само не проходит. Нужен разбор: скажите агенту «разбери доставку расширений»."
+        needs_decision=1
       elif [ "$NOTIFY_ESCALATION_PHASE" = "ongoing" ]; then
         full_text="$text (повторяется $NOTIFY_ESCALATION_COUNT раз подряд, не решается уже $(notify_format_duration "$NOTIFY_ESCALATION_DURATION_SEC"))"
       fi
@@ -150,7 +167,7 @@ alert() {
       return 0
     fi
   fi
-  send_telegram "$full_text"
+  send_telegram "$full_text" "$needs_decision"
 }
 
 # alert_ok <text>: успешный прогон — снимает активную эскалацию у КАЖДОГО
@@ -619,7 +636,8 @@ if [ "$GATE_FAILED" = true ]; then
   EXCLUDED_BRIEF=$(file_list_brief "${#EXCLUDED_UNIQ[@]}" "${EXCLUDED_TOP3[@]}")
   DELIVERED_TOP3=("${DELIVERED_PATHS[@]:0:3}")
   DELIVERED_BRIEF=$(file_list_brief "$FILE_COUNT" "${DELIVERED_TOP3[@]}")
-  alert test-gate-partial "⚠️ sync-extensions-auto: тестовый гейт исключил ${#EXCLUDED_UNIQ[@]} файлов (${EXCLUDED_BRIEF}) — они пересоберутся на следующем тике; остальные ${FILE_COUNT} файлов (${DELIVERED_BRIEF}) доставляются как обычно. Сторож продолжит попытки по расписанию; вмешательство нужно, только если придёт отдельный сигнал 🆘 о затяжном простое"
+  alert test-gate-partial "⚠️ Доставка расширений на сервер: не прошли тесты и пока не доставлены ${#EXCLUDED_UNIQ[@]} файл(ов) (${EXCLUDED_BRIEF}); остальные ${FILE_COUNT} (${DELIVERED_BRIEF}) доставлены. Следующая попытка по расписанию, действие не нужно." \
+    "Доставка расширений на сервер: ${EXCLUDED_BRIEF} не проходит тесты и не доезжает до сервера, остальные файлы доставляются"
 fi
 
 # Pathspec на commit (не только на add) — если параллельная сессия уже держит
