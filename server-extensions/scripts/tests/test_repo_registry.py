@@ -71,6 +71,23 @@ class ValidateTest(unittest.TestCase):
         errors = broken(lambda d: d["repos"][0]["thresholds"].update(unknown_limit=1))
         self.assertIn("неизвестный порог 'unknown_limit'", errors[0])
 
+    def test_wrong_types_are_reported_not_raised(self):
+        """Regression (cold review): an unhashable host/path used to raise TypeError out of validate()."""
+        for bad in ({"host": "mac", "path": ["x"]}, {"host": ["mac"], "path": "x"}, {"host": {"a": 1}, "path": "x"}):
+            errors = broken(lambda d, b=bad: d["repos"][0]["checkouts"].append(b))
+            self.assertTrue(errors, bad)
+
+    def test_version_must_be_the_integer_one(self):
+        for bad in (True, 1.0, "1"):
+            errors = repo_registry.validate({**VALID, "version": bad})
+            self.assertEqual(len(errors), 1, bad)
+
+    def test_paths_must_be_in_normal_form(self):
+        for path in ("a/", "./a", "a//b"):
+            errors = broken(lambda d, p=path: d["repos"][0]["checkouts"].append({"host": "mac", "path": p}))
+            self.assertTrue(any("нормальной форме" in e for e in errors), path)
+        self.assertEqual(broken(lambda d: d["repos"][0]["checkouts"].append({"host": "mac", "path": "a/b"})), [])
+
     def test_empty_and_non_mapping_roots_are_rejected(self):
         self.assertTrue(repo_registry.validate(None))
         self.assertTrue(repo_registry.validate({"version": 1, "repos": []}))

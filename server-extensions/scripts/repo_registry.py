@@ -9,6 +9,7 @@ error, not an ignored field.
 Read-only: nothing here touches a working tree, an index or a remote.
 """
 
+import posixpath
 import re
 from pathlib import Path
 
@@ -49,7 +50,9 @@ def _validate_checkout(where, checkout, seen):
         errors.append(f"{where}: path обязателен и должен быть строкой")
     elif path.startswith("/") or ".." in path.split("/"):
         errors.append(f"{where}: path относителен корню IWE, без '..': {path!r}")
-    elif (host, path) in seen:
+    elif posixpath.normpath(path) != path:
+        errors.append(f"{where}: path в нормальной форме (без './' и завершающего '/'): {path!r}")
+    elif host in HOSTS and (host, path) in seen:  # `host in HOSTS` first: an unhashable host must not reach the dict
         errors.append(f"{where}: пара ({host}, {path}) уже занята записью '{seen[(host, path)]}'")
     if checkout.get("purpose", "normal") not in PURPOSES:
         errors.append(f"{where}: purpose должен быть одним из {PURPOSES}")
@@ -84,8 +87,9 @@ def _validate_entry(index, entry, seen_ids, seen_paths):
     else:
         for n, checkout in enumerate(checkouts):
             errors += _validate_checkout(f"{label}.checkouts[{n}]", checkout, seen_paths)
-            if isinstance(checkout, dict):
-                seen_paths.setdefault((checkout.get("host"), checkout.get("path")), repo_id)
+            # Only well-typed pairs are hashable; a wrong type is already reported by the checkout check.
+            if isinstance(checkout, dict) and checkout.get("host") in HOSTS and isinstance(checkout.get("path"), str):
+                seen_paths.setdefault((checkout["host"], checkout["path"]), repo_id)
     owner = entry.get("decision_owner")
     if owner is not None:
         if not isinstance(owner, dict) or not owner.get("ref") or owner.get("scope") not in SCOPES:
@@ -109,7 +113,8 @@ def validate(data):
     if not isinstance(data, dict):
         return ["корень реестра должен быть словарём"]
     errors = []
-    if data.get("version") != REGISTRY_VERSION:
+    version = data.get("version")
+    if isinstance(version, bool) or version != REGISTRY_VERSION or not isinstance(version, int):
         errors.append(f"version должен быть {REGISTRY_VERSION}, получено {data.get('version')!r}")
     repos = data.get("repos")
     if not isinstance(repos, list) or not repos:
