@@ -28,6 +28,7 @@ SKIP_DIRS = {".iwe-runtime", ".worktrees", ".claude", "node_modules"}
 BROKER_OK_RE = re.compile(r"^(\S+) OK (\S+) <- \S+ \+?[^:\s]+:(\S+)$")
 CANON_REPO = "DS-my-strategy"
 SYNC_RUN_STALE_MIN = 60   # the canon sync runs every 20 min (Mac backstop: hourly)
+FETCH_FRESH_MIN = int(os.environ.get("CONVERGENCE_FETCH_FRESH_MIN", "120"))
 
 
 def git(repo, *args):
@@ -116,8 +117,10 @@ def relation(repo):
     rc, upstream = git(repo, "rev-parse", "--symbolic-full-name", "@{upstream}")
     if rc != 0:
         configured, _ = git(repo, "config", "--get", f"branch.{branch}.merge")
-        if configured != 0:
+        if configured == 1:  # key absent: no upstream is set up
             return f"no-upstream ({branch})", None, False
+        if configured != 0:
+            return f"error: git config exit {configured}", None, True
         return "error: upstream configured but unresolved", None, True
     rc, counts = git(repo, "rev-list", "--left-right", "--count", "HEAD...@{upstream}")
     if rc != 0:
@@ -149,13 +152,15 @@ def scan(root, state_file):
             "upstream": upstream,
             "error": is_error,
             "fetch": age(fetched, now) if fetched else "unknown",
+            "fetch_stale": bool(fetched) and (now - fetched).total_seconds() > FETCH_FRESH_MIN * 60,
             "block": block_text if repo.name == CANON_REPO else "",
         })
     return rows, [broker_note, state_note]
 
 
 def classify(row):
-    if row["error"] or row["block"] or row["relation"] != "equal":
+    # An old confirmation is not a current one: equal on stale data is a problem.
+    if row["error"] or row["block"] or row["relation"] != "equal" or row["fetch_stale"]:
         return "problem"
     return "confirmed" if row["fetch"] != "unknown" else "unconfirmed"
 
@@ -174,7 +179,8 @@ def render(rows, sources, host, problems_only):
         "источники: " + "; ".join(sources),
     ]
     for r in sorted(groups["problem"], key=lambda r: (not r["error"], not r["block"], r["repo"])):
-        line = f"- {r['repo']}: {r['relation']}; данные с сервера получены: {r['fetch']}"
+        fetched = r["fetch"] + (" (устарело)" if r["fetch_stale"] else "")
+        line = f"- {r['repo']}: {r['relation']}; данные с сервера получены: {fetched}"
         if r["block"]:
             line += f"; блокировка: {r['block']}"
         out.append(line)

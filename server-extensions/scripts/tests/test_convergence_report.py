@@ -47,11 +47,11 @@ class ConvergenceReportTest(unittest.TestCase):
         clone(origin, seed)
         commit(seed, "a")
         git(seed, "push", "-q", "origin", "main")
-        for name in ("equal", "unconfirmed", "behind", "stale-ahead", "diverged", "DS-my-strategy"):
+        for name in ("equal", "unconfirmed", "behind", "stale-ahead", "diverged", "DS-my-strategy", "stale-ok"):
             clone(origin, self.root / name)
         commit(seed, "b")
         git(seed, "push", "-q", "origin", "main")
-        for name in ("equal", "unconfirmed", "DS-my-strategy"):
+        for name in ("equal", "unconfirmed", "DS-my-strategy", "stale-ok"):
             git(self.root / name, "pull", "-q", "--ff-only")
         git(self.root / "behind", "fetch", "-q")
         commit(self.root / "stale-ahead", "c")      # never fetched b
@@ -71,6 +71,7 @@ class ConvergenceReportTest(unittest.TestCase):
         (broker / "broker.log").write_text(
             ok.format("equal", "main", "main")
             + ok.format("DS-my-strategy", "main", "main")
+            + f"{stamp(60 * 24 * 30)} OK stale-ok <- origin +refs/heads/main:refs/remotes/origin/main\n"
             # Confirms a different ref than "unconfirmed" tracks: must not count.
             + ok.format("unconfirmed", "release", "release")
             + f"{stamp(5)} FAIL behind <- origin timeout\n")
@@ -112,12 +113,14 @@ class ConvergenceReportTest(unittest.TestCase):
     def test_text_groups_unconfirmed_separately(self):
         self.state.write_text(json.dumps({"consecutive_fails": 0, "last_run_ts": stamp(3)}))
         out = self.run_report("--problems-only").stdout
-        self.assertIn("найдено 8, проверено 7, ошибок 1", out)
+        self.assertIn("найдено 9, проверено 8, ошибок 1", out)
+        # A 30-day-old confirmation is shown as a problem with its age, not as confirmed.
+        self.assertIn("- stale-ok: equal; данные с сервера получены: 30d (устарело)", out)
         self.assertIn("- behind: behind -1; данные с сервера получены: unknown", out)
         self.assertIn("совпадение не подтверждено: unconfirmed", out)
         self.assertNotIn("- equal:", out)
         self.assertNotIn("совпадение подтверждено:", out)
-        self.assertIn("broker.log: 3 подтверждений", out)
+        self.assertIn("broker.log: 4 подтверждений", out)
 
     def test_canon_block_from_state(self):
         self.state.write_text(json.dumps({
