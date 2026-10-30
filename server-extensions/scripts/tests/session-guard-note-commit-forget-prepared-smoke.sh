@@ -90,9 +90,14 @@ SESSION_ID=$(sed -n 's/^session_id: //p' "$SEM" | head -1)
 [ -n "$SESSION_ID" ] || { echo "FAIL: semaphore has no session_id: field"; exit 1; }
 
 commit_file() {  # <name> -> prints HEAD sha, one commit on work-repo's current branch
-  printf 'content for %s\n' "$1" > "$WORK/$1"
+  # Unique content per call: build_three_claims is retried when the first triple
+  # happens to be sorted, and re-committing identical content is "nothing to
+  # commit" -- git's message then leaked into the claim list (1-in-6 flake).
+  # The commit count is the sequence (callers run this in $(...) subshells, so
+  # a shell counter would not survive between calls).
+  printf 'content for %s #%s\n' "$1" "$(git -C "$WORK" rev-list --count HEAD)" > "$WORK/$1"
   git -C "$WORK" add "$1"
-  git -C "$WORK" commit -q -m "$1"
+  git -C "$WORK" commit -q -m "$1" >/dev/null
   git -C "$WORK" rev-parse HEAD
 }
 

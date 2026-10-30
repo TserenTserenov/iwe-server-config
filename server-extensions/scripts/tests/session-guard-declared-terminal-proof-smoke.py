@@ -507,7 +507,9 @@ class DeclaredTerminalProofTests(unittest.TestCase):
                    "_prepared_source_worktree_unchanged", "_prepared_source_identity_matches",
                    "_prepared_source_snapshot_matches"]
         script = "\n".join(function_source(name) for name in helpers)
-        script += "\nIWE_ROOT=" + shlex.quote(str(self.root))
+        # _prepared_worktree_status_sha reads $IWE_ROOT/$GOV_REPO/inbox/agent/tasks
+        # (8f379567d); under `set -u` a fixture without GOV_REPO dies "unbound".
+        script += "\nIWE_ROOT=" + shlex.quote(str(self.root)) + "\nGOV_REPO=governance"
         script += "\n_prepared_source_snapshot_matches " + shlex.join([str(semaphore), str(repo)])
         self.assertEqual(self.shell(script).returncode, 0)
         doc["history"].append({"step": "session-guard-release", "type": "reflex"})

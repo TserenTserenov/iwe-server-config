@@ -31,6 +31,10 @@
 #                                      # read-only admission-locked snapshot;
 #                                      # JSON carries `blockers` (every file that
 #                                      # kept the verdict from `absent`)
+#   release-duplicate --guard-id <id> --reason "<why>"
+#                                      # WP-484 Ф261: drop ONE live semaphore of the caller's
+#                                      # own conversation when another live copy of the same
+#                                      # work (harness + wp + slug) stays; never the last one.
 #   retire-semaphore-artifact <path> --reason "<why>" [--i-confirm-no-live-owner]
 #                                      # WP-530 Ф90: record (append-only, bound to
 #                                      # exact path + sha256) that an INACTIVE
@@ -83,7 +87,9 @@
 #                                      # независимого publish proof (иначе это ослабление
 #                                      # доказательства доставки, не уборка мусора). Работает до
 #                                      # PREPARE и во время него (в отличие от обычного note-commit).
-#   note-publication <sha> --repo <name> [--target-ref refs/heads/main|pilot|new-architecture]
+#   note-publication <sha> --repo <name> [--target-ref refs/heads/main|pilot|new-architecture] [--claim-source <sha>]
+#     --claim-source (WP-539 F21 B5): claim the caller-stated SOURCE commit and record its receipt in
+#     one transition-lock section; rolled back when the receipt fails. Only in state none on main.
 #     PREPARED: append-only peer product evidence (including main); never a push grant.
 #                                                      # проверять доставку по СВОИМ коммитам,
 #                                                      # а не по состоянию всей ветки (WP-537).
@@ -441,6 +447,16 @@ peer_session_evidence() { # <close_path> <semaphore> <slug> <orz-dir>
 # would wipe another product's Quick Close still in flight. Never fails the close,
 # and time-boxed -- this work product has already had two incidents where a new
 # gate hung a session close, and a missed clear is the cheaper of the two.
+# WP-484 Ф267 п.2: a `no-code-changes` close has no runner card either, so the same
+# armed obligation would outlive it. Unlike peer-session it earns no standing Stop
+# exemption in close_obligation.py -- only this one-off clear after a proven close.
+_close_path_clears_obligation() {  # <close_path value>
+  case "$1" in
+    peer-session | no-code-changes) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
 clear_peer_session_obligation() {
   local semaphore="$1" slug="$2"
   local obligation_cli="$IWE_ROOT/$GOV_REPO/scripts/close_obligation.py"
@@ -989,7 +1005,18 @@ print("%d:%d" % (info.st_dev, info.st_ino))
 PY
 }
 
+# Set between appending a --claim-source line and finishing the receipt. A signal in that window
+# (the gateway bounds this command with `timeout 45`) would leave a claim without a receipt,
+# which close must then prove: undo it before the lock is released.
+_PENDING_CLAIM_SEM=""
+_PENDING_CLAIM_LINE=""
+
 _release_transition_locks_on_exit() {
+  if [ -n "$_PENDING_CLAIM_LINE" ]; then
+    _unclaim_source_for_receipt "$_PENDING_CLAIM_SEM" "$_PENDING_CLAIM_LINE" || true
+    _PENDING_CLAIM_SEM=""
+    _PENDING_CLAIM_LINE=""
+  fi
   [ -z "$_SESSION_TRANSITION_LOCK_PATH" ] || release_session_transition_lock || true
   [ -z "$_SCHEDULED_ADMISSION_LOCK_PATH" ] || release_scheduled_admission_lock || true
 }
@@ -1955,9 +1982,14 @@ def normalize_wp(value):
     return "WP-" + match[1] if match else value
 
 
+# WP-484 Ф261: `claude` and `claude-code` are one agent; records written under
+# the alias before the fix must still count as "this work is already open".
+family = ("claude", "claude-code") if agent in ("claude", "claude-code") else (agent,)
+prefixes = tuple(name + "-" for name in family)
+
 try:
     for path in sorted(Path(root).iterdir()):
-        if not (path.name.startswith(agent + "-")
+        if not (path.name.startswith(prefixes)
                 and (path.name.endswith(".open") or path.name.endswith(".open.closed"))):
             continue
         lines = snapshot(path)
@@ -2012,11 +2044,12 @@ try:
                 continue
         else:
             refuse(path, "запись совпадает по wp/slug, но не содержит host — принадлежность неопределена")
-        if unique("agent") != agent:
+        recorded_agent = unique("agent")
+        if recorded_agent not in family:
             refuse(path, "agent не совпадает с именем записи")
         session = unique("session_id")
         suffix = ".open.closed" if path.name.endswith(".closed") else ".open"
-        if path.name != agent + "-" + session + suffix:
+        if path.name != recorded_agent + "-" + session + suffix:
             refuse(path, "session_id не совпадает с именем записи")
         if suffix == ".open.closed":
             refuse(path, "эта работа native-сессии уже закрыта; session_id=" + session)
@@ -4192,15 +4225,54 @@ orz_agent_name() {
 #   1 — no open semaphore at all for this agent
 #   2 — ambiguous or requested --wp/--slug matched nothing; candidate list
 #       already printed to stderr, caller should just propagate a failure
+_agent_family() { # _agent_family <agent> — names that denote one agent (WP-484 Ф261)
+  case "$1" in
+    claude|claude-code) echo "claude claude-code" ;;
+    *) echo "$1" ;;
+  esac
+}
+
 list_candidates() { # list_candidates <agent> — one path per line, newest first
-  ls -t "$SESSION_DIR/${1}"-*.open 2>/dev/null || true
+  # WP-484 Ф266: the file-name glob alone is a prefix match (`claude-*` also
+  # catches `claude-code-*`), so the record's own `agent:` field decides, exactly,
+  # within the agent's family. Records without the field (legacy) are kept by
+  # their file-name prefix, as before.
+  local family name cand cand_agent
+  local keep=()
+  family=$(_agent_family "$1")
+  for name in $family; do
+    for cand in "$SESSION_DIR/${name}"-*.open; do
+      [ -f "$cand" ] || continue
+      cand_agent=$(grep -m1 "^agent: " "$cand" 2>/dev/null | cut -d' ' -f2- || true)
+      if [ -n "$cand_agent" ]; then
+        case " $family " in *" $cand_agent "*) ;; *) continue ;; esac
+      fi
+      keep+=("$cand")
+    done
+  done
+  [ "${#keep[@]}" -gt 0 ] || return 0
+  # Both family globs can list the same file; keep the first (newest) copy.
+  # A candidate renamed by a parallel close between the glob and ls is dropped.
+  ls -t "${keep[@]}" 2>/dev/null | awk '!seen[$0]++' || true
+}
+
+_family_record_agent() { # _family_record_agent <semaphore> <agent> — the name the record was written under
+  # WP-484 Ф266: a record found through the family (or via --session-id) may
+  # carry the other name of the same agent; identity checks compare the record's
+  # own field, so callers adopt it. Outside the family the caller's name stays.
+  local rec_agent
+  rec_agent=$(grep -m1 "^agent: " "$1" 2>/dev/null | cut -d' ' -f2- || true)
+  case " $(_agent_family "$2") " in
+    *" $rec_agent "*) [ -n "$rec_agent" ] && { printf '%s\n' "$rec_agent"; return 0; } ;;
+  esac
+  printf '%s\n' "$2"
 }
 
 print_candidates() { # print_candidates <candidates> — human-readable list to stderr
   local cand
   while IFS= read -r cand; do
     [ -z "$cand" ] && continue
-    echo "  $(basename "$cand")  wp=$(grep "^wp: " "$cand" | cut -d' ' -f2-)  slug=$(grep "^slug: " "$cand" | cut -d' ' -f2-)" >&2
+    echo "  $(basename "$cand")  wp=$(grep "^wp: " "$cand" | cut -d' ' -f2-)  slug=$(grep "^slug: " "$cand" | cut -d' ' -f2-)  session_id=$(grep -m1 "^session_id: " "$cand" | cut -d' ' -f2-)" >&2
   done <<< "$1"
 }
 
@@ -4241,6 +4313,7 @@ select_semaphore() {
     if [ "${#matches[@]}" -gt 1 ]; then
       echo "session-guard: под wp='$want_wp' slug='$want_slug' подходит несколько сессий агента '$agent' — уточни:" >&2
       print_candidates "$(printf '%s\n' "${matches[@]}")"
+      echo "  Укажи одну сессию её служебным номером: --session-id <session_id из списка выше>" >&2
       return 2
     fi
 
@@ -4282,7 +4355,13 @@ select_semaphore() {
 # чтобы вызов через "$(...)" не терял код возврата в подshell'е.
 resolve_semaphore_by_session_id() {  # <agent> <session-id> [wp] [slug]
   local agent="$1" sid="$2" want_wp="${3:-}" want_slug="${4:-}"
-  local sem="$SESSION_DIR/${agent}-${sid}.open"
+  local sem="$SESSION_DIR/${agent}-${sid}.open" alias_agent=""
+  # WP-484 Ф261: `claude` and `claude-code` are one agent; `open` writes the
+  # canonical name, callers (and records from before the fix) may use either.
+  case "$agent" in claude) alias_agent="claude-code" ;; claude-code) alias_agent="claude" ;; esac
+  if [ ! -f "$sem" ] && [ -n "$alias_agent" ] && [ -f "$SESSION_DIR/${alias_agent}-${sid}.open" ]; then
+    sem="$SESSION_DIR/${alias_agent}-${sid}.open"
+  fi
   if [ ! -f "$sem" ]; then
     echo "нет открытой сессии ${agent}-${sid}" >&2
     return 1
@@ -4315,6 +4394,8 @@ SLUG=""
 AGENT="${IWE_AGENT:-}"
 HOUSEKEEPING=""
 PERSONALITY=""
+# WP-484 Ф261: explicit target of `release-duplicate` (the guard ID of the copy to drop).
+GUARD_ID_ARG=""
 # WP-484 Ф118 (19.08, пир-сессия с Codex): declared close protocol for this
 # session — quick-close|day-close|peer-session|pipeline|none. Written into the
 # semaphore so close-runner-gate.sh/close-gate-reminder.sh can stop guessing
@@ -4353,6 +4434,7 @@ ABANDON_PREPARED=0
 ABANDON_ACK=0
 ABANDON_SOURCE_COMMITS=()
 PUBLICATION_TARGET_REF="refs/heads/main"
+CLAIM_SOURCE_ARG=""
 EXPECTED_HASH=""
 EXPECTED_ABSENT=0
 HOT_LOCK_TOKEN=""
@@ -4410,6 +4492,11 @@ while [[ $# -gt 0 ]]; do
       fi
       UNFREEZE_REASON="$2"; shift 2 ;;
     --personality) PERSONALITY="$2"; shift 2 ;;
+    --guard-id)
+      if [[ $# -lt 2 || -z "$2" ]]; then
+        fail "--guard-id требует непустое значение (guard ID копии)" 1
+      fi
+      GUARD_ID_ARG="$2"; shift 2 ;;
     --owner-pid) OWNER_PID="$2"; shift 2 ;;
     --scheduled-owner)
       if [[ $# -lt 2 || -z "$2" ]]; then
@@ -4436,6 +4523,9 @@ while [[ $# -gt 0 ]]; do
     --target-ref)
       [[ $# -ge 2 && -n "$2" ]] || fail "--target-ref требует значение" 1
       PUBLICATION_TARGET_REF="$2"; shift 2 ;;
+    --claim-source)
+      [[ $# -ge 2 && "$2" =~ ^[0-9a-f]{40,64}$ ]] || fail "--claim-source требует полный SHA коммита" 1
+      CLAIM_SOURCE_ARG="$2"; shift 2 ;;
     --expected-hash)
       if [[ $# -lt 2 || -z "$2" ]]; then
         fail "--expected-hash требует непустое значение (sha256 файла, который читал вызывающий)" 1
@@ -4517,6 +4607,22 @@ while [[ $# -gt 0 ]]; do
     *)        POSITIONAL+=("$1"); shift ;;
   esac
 done
+
+# WP-484 Ф261: `claude` and `claude-code` name ONE agent. A semaphore opened as
+# `claude-<id>.open` is invisible to session-open-gate.sh (mask `claude-code-*`)
+# and to the native-identity re-open check below, which is how one conversation
+# ended up with two live semaphores. `open` only: close/renew/etc. must keep
+# addressing records written before this fix under their original name.
+# Other spellings (Claude, CLAUDE, Claude-Code) are refused, not lower-cased:
+# silently rewriting an arbitrary agent name would hide the typo.
+if [ "$CMD" = "open" ]; then
+  case "$AGENT" in
+    claude) AGENT="claude-code" ;;
+    claude-code) : ;;
+    [Cc][Ll][Aa][Uu][Dd][Ee]|[Cc][Ll][Aa][Uu][Dd][Ee]-[Cc][Oo][Dd][Ee])
+      fail "open: имя агента '$AGENT' не распознано; для Claude Code используй claude-code (допустим также алиас claude)" 1 ;;
+  esac
+fi
 
 if [ -z "$AGENT" ] && { [ "$CMD" = "open" ] || [ "$CMD" = "close" ] || [ "$CMD" = "note-scheduled-drain" ] || [ "$CMD" = "heartbeat" ] || [ "$CMD" = "machine-close" ]; }; then
   fail "--agent обязателен для open/close/machine-close/note-scheduled-drain/heartbeat (или переменная IWE_AGENT)" 1
@@ -4674,6 +4780,13 @@ PY
     || fail "machine-close не принимает positional arguments" 1
 elif [ -n "$SCHEDULED_OWNER" ] || [ -n "$SCHEDULED_RUN_ID" ]; then
   fail "--scheduled-owner/--scheduled-run-id применимы только к scheduled open/note-scheduled-drain" 1
+fi
+
+# WP-484 Ф267 п.2: `no-code-changes` is a promise about the session's repository,
+# so the repository must be a private isolated worktree that close can inspect.
+if [ "$CMD" = "open" ] && [ "$CLOSE_PATH" = "no-code-changes" ]; then
+  [ "$ISOLATE_FLAG" = "1" ] \
+    || fail "close_path no-code-changes требует --isolate: без изолированной копии нечем доказать отсутствие правок" 1
 fi
 
 if [ "$CMD" = "open" ] && [ "$CLOSE_PATH" = "machine-publish-only" ]; then
@@ -6079,6 +6192,8 @@ artifacts: []
 |----------|----------|
 
 ## Ключевые решения
+
+## Следующий шаг
 
 EOF
     echo "ORZ scaffold создан: $ORZ_FILE"
@@ -8648,7 +8763,7 @@ elif kind == "sentinel":
     # Sentinels are a closed set produced by the already-completed close
     # policy gate.  A missing RUN card path must never silently become one.
     if not re.fullmatch(
-        r"(?:declared-peer-session|declared-publish-only|declared-machine-publish-only|cancel-obligation):[A-Za-z0-9._-]{1,256}",
+        r"(?:declared-peer-session|declared-publish-only|declared-no-code-changes|declared-machine-publish-only|cancel-obligation):[A-Za-z0-9._-]{1,256}",
         value,
     ):
         raise SystemExit(1)
@@ -8787,8 +8902,8 @@ _session_commit_claims_json() {  # <semaphore>
     'import json,sys; print(json.dumps([line for line in sys.stdin.read().splitlines() if line], separators=(",", ":")))'
 }
 
-_worktree_clean_status_sha() {  # <worktree> [exact active RUN card] [verified governance cards dir]
-  python3 - "$1" "${2:-}" "${3:-}" <<'PY' 2>/dev/null
+_worktree_clean_status_sha() {  # <worktree> [exact active RUN card] [verified governance cards dir] [canonical governance cards dir]
+  python3 - "$1" "${2:-}" "${3:-}" "${4:-}" <<'PY' 2>/dev/null
 import hashlib
 import os
 from pathlib import Path
@@ -8797,7 +8912,7 @@ import stat
 import subprocess
 import sys
 
-worktree, allowed_card, governance_cards = sys.argv[1:]
+worktree, allowed_card, governance_cards, canonical_governance_cards = sys.argv[1:]
 allowed_relative = None
 if allowed_card:
     root = Path(worktree).resolve(strict=True)
@@ -8815,10 +8930,25 @@ if allowed_card:
         # with _declared_governance_card_dir before passing it here.
         if Path(governance_cards).is_symlink():
             raise SystemExit(1)
+    elif canonical_governance_cards and card.parent == Path(canonical_governance_cards):
+        # The canonical governance repo's own inbox/agent/tasks (not a
+        # registered worktree): the caller already matched this exact card
+        # against it by owner_session_id/slug before selecting it as
+        # TERMINAL_PROOF_REFERENCE (RUNNER_CARD_DIRS[0] in close()) -- this
+        # branch trusts that prior match, not a new, unverified source. Fixes
+        # a false "not clean" refusal for any isolate of a repo other than
+        # the governance repo whose terminal card sits in the canonical
+        # governance checkout without IWE_GOVERNANCE_REPO_PATH being set
+        # (found 2026-10-29, WP-484, session claude-code-6808465a82f48140).
+        if Path(canonical_governance_cards).is_symlink():
+            raise SystemExit(1)
     else:
-        # relocate-card moves a waiting RUN card to the canonical checkout
-        # before close removes this isolated worktree. It is outside this
-        # worktree's ignored scope, so that scope must be completely empty.
+        # Neither the closing worktree's own tasks dir, nor an explicitly
+        # verified governance worktree, nor the canonical governance repo's
+        # tasks dir above: relocate-card moves a waiting RUN card to the
+        # canonical checkout before close removes this isolated worktree. It
+        # is outside this worktree's ignored scope, so that scope must be
+        # completely empty.
         common = subprocess.run(
             ["git", "-C", worktree, "rev-parse", "--git-common-dir"],
             stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, check=False,
@@ -9023,7 +9153,7 @@ if (
 if fields["close_delivery_terminal_kind"] == "file" and not os.path.isabs(terminal_reference):
     raise SystemExit(1)
 if fields["close_delivery_terminal_kind"] == "sentinel" and not re.fullmatch(
-    r"(?:declared-peer-session|declared-publish-only|declared-machine-publish-only|cancel-obligation):[A-Za-z0-9._-]{1,256}",
+    r"(?:declared-peer-session|declared-publish-only|declared-no-code-changes|declared-machine-publish-only|cancel-obligation):[A-Za-z0-9._-]{1,256}",
     terminal_reference,
 ):
     raise SystemExit(1)
@@ -9932,7 +10062,7 @@ _prepared_worktree_status_sha() {  # <semaphore> <worktree>: clean-status digest
       || return 1
   fi
   if [ "$terminal_kind" = "file" ]; then
-    _worktree_clean_status_sha "$worktree" "$terminal_ref" "$governance_cards"
+    _worktree_clean_status_sha "$worktree" "$terminal_ref" "$governance_cards" "$IWE_ROOT/$GOV_REPO/inbox/agent/tasks"
   else
     _worktree_clean_status_sha "$worktree"
   fi
@@ -11311,7 +11441,7 @@ _close_delivery_and_transition() {
     # Proved clean BEFORE the rebuild below (WP-561 Ч3): a dirty copy is refused
     # here, so the rebase never runs over uncommitted work and never stashes it.
     if [ "$TERMINAL_PROOF_KIND" = "file" ]; then
-      source_status=$(_worktree_clean_status_sha "$CLOSING_WORKTREE" "$TERMINAL_PROOF_REFERENCE" "${DECLARED_CARD_DIR:-}" || true)
+      source_status=$(_worktree_clean_status_sha "$CLOSING_WORKTREE" "$TERMINAL_PROOF_REFERENCE" "${DECLARED_CARD_DIR:-}" "$IWE_ROOT/$GOV_REPO/inbox/agent/tasks" || true)
     else
       source_status=$(_worktree_clean_status_sha "$CLOSING_WORKTREE" || true)
     fi
@@ -11342,7 +11472,7 @@ _close_delivery_and_transition() {
     # The rebuild above may have moved the copy; PREPARED binds the status of
     # the tree it snapshots (a completed rebase leaves it clean).
     if [ "$TERMINAL_PROOF_KIND" = "file" ]; then
-      source_status=$(_worktree_clean_status_sha "$CLOSING_WORKTREE" "$TERMINAL_PROOF_REFERENCE" "${DECLARED_CARD_DIR:-}" || true)
+      source_status=$(_worktree_clean_status_sha "$CLOSING_WORKTREE" "$TERMINAL_PROOF_REFERENCE" "${DECLARED_CARD_DIR:-}" "$IWE_ROOT/$GOV_REPO/inbox/agent/tasks" || true)
     else
       source_status=$(_worktree_clean_status_sha "$CLOSING_WORKTREE" || true)
     fi
@@ -11392,6 +11522,7 @@ if [ "$CMD" = "note-scheduled-drain" ]; then
     || fail "note-scheduled-drain: lock wait должен быть целым 0..30 секунд" 1
   IWE_SESSION_TRANSITION_WAIT_SEC="$NOTE_DRAIN_WAIT"
   acquire_session_transition_lock "$SEM_FILE"
+  AGENT=$(_family_record_agent "$SEM_FILE" "$AGENT")
   LOCKED_DRAIN_SESSION_ID=$(_locked_open_identity "$SEM_FILE" "$AGENT" "$SESSION_ID_ARG" || true)
   [ "$LOCKED_DRAIN_SESSION_ID" = "$SESSION_ID_ARG" ] \
     || fail "note-scheduled-drain: semaphore изменился после resolve" 1
@@ -11419,6 +11550,7 @@ if [ "$CMD" = "heartbeat" ]; then
     || fail "heartbeat: lock wait должен быть целым 0..30 секунд" 1
   IWE_SESSION_TRANSITION_WAIT_SEC="$HEARTBEAT_WAIT"
   acquire_session_transition_lock "$SEM_FILE"
+  AGENT=$(_family_record_agent "$SEM_FILE" "$AGENT")
   LOCKED_HEARTBEAT_SESSION_ID=$(_locked_open_identity "$SEM_FILE" "$AGENT" "$SESSION_ID_ARG" || true)
   [ "$LOCKED_HEARTBEAT_SESSION_ID" = "$SESSION_ID_ARG" ] \
     || fail "heartbeat: semaphore изменился после resolve" 1
@@ -11438,6 +11570,7 @@ if [ "$CMD" = "machine-close" ]; then
     || fail "machine-close: exact session_id не резолвится" 3
   acquire_scheduled_admission_lock
   acquire_session_transition_lock "$SEM_FILE"
+  AGENT=$(_family_record_agent "$SEM_FILE" "$AGENT")
   LOCKED_MACHINE_SESSION=$(_locked_open_identity "$SEM_FILE" "$AGENT" "$SESSION_ID_ARG" 1 || true)
   [ "$LOCKED_MACHINE_SESSION" = "$SESSION_ID_ARG" ] \
     || fail "machine-close: semaphore identity изменилась после lock" 7
@@ -11497,6 +11630,117 @@ if [ "$CMD" = "machine-close" ]; then
 fi
 
 # --- CLOSE ---
+# --- NO-CODE-CHANGES proof (WP-484 Ф267 п.2) ---
+# `open --isolate --close-path no-code-changes` promises that the session
+# changes no repository state (healing, reading, diagnosis). Close skips the
+# quick-close runner only while that promise is PROVEN: the semaphore claims
+# nothing but the session's own ORZ file and inbox/open-sessions.log, the
+# isolated worktree is clean (tracked changes, staged changes and untracked
+# files alike; ignored files are outside the contract) and its HEAD never
+# moved since the worktree was created. Side effects outside the repository (MCP calls,
+# messages) are not covered by this contract. Any doubt returns 1 with the
+# reason on stderr; close then falls back to the ordinary terminal-card path.
+_no_code_changes_proof() {  # <semaphore>
+  python3 - "$1" <<'PY_NCC'
+import json
+import os
+import subprocess
+import sys
+from pathlib import Path
+
+sem = Path(sys.argv[1])
+fields = {}
+claims = []
+fences = 0
+CLAIM_PREFIXES = ("file: ", "file_v2: ", "commit: ")
+for line in sem.read_text(encoding="utf-8").splitlines():
+    if line == "---":
+        fences += 1
+        continue
+    if fences >= 2:
+        # close_delivery_*, recovery_* and other bookkeeping lines are not claims
+        if line.startswith(CLAIM_PREFIXES):
+            claims.append(line.strip())
+    elif fences == 1:
+        key, sep, value = line.partition(":")
+        if sep:
+            fields.setdefault(key, []).append(value.strip())
+
+
+def single(key):
+    values = fields.get(key, [])
+    return values[0] if len(values) == 1 and values[0] else ""
+
+
+def refuse(reason):
+    print(f"no-code-changes: {reason}", file=sys.stderr)
+    raise SystemExit(1)
+
+
+def run_git(repo, *args):
+    try:
+        result = subprocess.run(["git", "-C", repo, *args], capture_output=True, text=True, timeout=60)
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        refuse(f"git {' '.join(args)} не выполнился: {exc}")
+    if result.returncode != 0:
+        refuse(f"git {' '.join(args)} не выполнился: {result.stderr.strip()[:200]}")
+    return result.stdout
+
+
+def common_dir(repo):
+    if not Path(repo).is_dir():
+        refuse(f"каталог репозитория недоступен: {repo}")
+    return os.path.realpath(os.path.join(repo, run_git(repo, "rev-parse", "--git-common-dir").strip()))
+
+
+if single("close_path") != "no-code-changes":
+    refuse("в семафоре нет close_path: no-code-changes")
+worktree, orz_file = single("isolated_worktree"), single("orz_file")
+governance, orz_dir = single("governance_worktree"), single("orz_sessions_dir")
+if not (worktree and orz_file and governance and orz_dir):
+    refuse("в семафоре нет isolated_worktree, governance_worktree, orz_file или orz_sessions_dir; без них нечем доказать отсутствие правок")
+if not Path(worktree).is_dir() or Path(worktree).is_symlink():
+    refuse(f"изолированная копия {worktree} недоступна")
+
+# What the session may have claimed: its own ORZ file (in the sessions repo) and the
+# open-sessions log (in the governance repo), each bound to its repository.
+own = {(orz_file, common_dir(orz_dir)), ("inbox/open-sessions.log", common_dir(governance))}
+extra = []
+for claim in claims:
+    if claim.startswith("file: "):
+        # a v1 line carries no repository; it is accepted only as the twin of a v2 line below
+        if claim[6:] in {path for path, _ in own}:
+            continue
+    elif claim.startswith("file_v2: "):
+        try:
+            record = json.loads(claim[9:])
+            if (record["path"], os.path.realpath(record["repo"])) in own:
+                continue
+        except (ValueError, KeyError, TypeError):
+            pass
+    elif claim.startswith("commit: "):
+        parts = claim.split()
+        # a commit claim is fine only when that commit touched nothing but the own ORZ file
+        if len(parts) == 3 and parts[1] == os.path.basename(orz_dir):
+            touched = set(run_git(orz_dir, "show", "--name-only", "--format=", parts[2]).split())
+            if touched == {orz_file}:
+                continue
+    extra.append(claim)
+if extra:
+    refuse(f"сессия заявила {len(extra)} запис(ь/и) кроме своего ORZ и open-sessions.log, например: {'; '.join(extra[:3])}")
+
+dirty = run_git(worktree, "status", "--porcelain", "--ignore-submodules=none").splitlines()
+if dirty:
+    refuse(f"в изолированной копии есть несохранённые изменения ({len(dirty)} шт., например: {dirty[0]})")
+# The worktree's HEAD reflog starts at its creation: the session must not have moved HEAD at
+# all (own commit, checkout, pull), so pushed-then-forgotten and detached work cannot hide.
+reflog = run_git(worktree, "reflog", "show", "--format=%H", "HEAD").split()
+head = run_git(worktree, "rev-parse", "HEAD").strip()
+if not reflog or reflog[-1] != head:
+    refuse("HEAD изолированной копии сдвинут относительно момента её создания (коммит, переключение или обновление)")
+PY_NCC
+}
+
 if [ "$CMD" = "close" ]; then
   if [ -n "$HOUSEKEEPING" ]; then
     [[ "$HOUSEKEEPING" =~ ^[a-zA-Z0-9][a-zA-Z0-9._-]{0,127}$ ]] \
@@ -11536,6 +11780,14 @@ if [ "$CMD" = "close" ]; then
   # Ф49): совпало неоднозначно -- откажи, не угадывай.
   if [ -n "$SESSION_ID_ARG" ]; then
     EXACT_OPEN="$SESSION_DIR/${AGENT}-${SESSION_ID_ARG}.open"
+    # WP-484 Ф261: `claude` and `claude-code` are one agent; address the record
+    # under the name it was actually written with.
+    case "$AGENT" in claude) CLOSE_ALIAS_AGENT="claude-code" ;; claude-code) CLOSE_ALIAS_AGENT="claude" ;; *) CLOSE_ALIAS_AGENT="" ;; esac
+    if [ ! -e "$EXACT_OPEN" ] && [ -n "$CLOSE_ALIAS_AGENT" ] \
+        && [ -e "$SESSION_DIR/${CLOSE_ALIAS_AGENT}-${SESSION_ID_ARG}.open" ]; then
+      AGENT="$CLOSE_ALIAS_AGENT"
+      EXACT_OPEN="$SESSION_DIR/${AGENT}-${SESSION_ID_ARG}.open"
+    fi
     acquire_session_transition_lock "$EXACT_OPEN"
     if [ ! -e "$EXACT_OPEN" ] && [ ! -L "$EXACT_OPEN" ]; then
       # Re-enter in admission -> session order: recovery may clear an old peer
@@ -11547,7 +11799,7 @@ if [ "$CMD" = "close" ]; then
         || fail "close: exact closed receipt отсутствует, повреждён или не совпал с запросом; повтор не подтверждён" 3
       _cleanup_closed_session_projections "$EXACT_OPEN" "$AGENT" "$SESSION_ID_ARG" \
         || fail "close: receipt подтверждён, но локальные projections не восстановлены" 7
-      if [ "$(_unique_record_field "$EXACT_OPEN.closed" close_path || true)" = peer-session ] \
+      if _close_path_clears_obligation "$(_unique_record_field "$EXACT_OPEN.closed" close_path || true)" \
           && _closed_peer_has_no_live_owner "$EXACT_OPEN.closed"; then
         # Do not lend authority descriptors to the ledger's detached publisher.
         clear_peer_session_obligation "$EXACT_OPEN.closed" \
@@ -11569,6 +11821,7 @@ if [ "$CMD" = "close" ]; then
     fi
     acquire_session_transition_lock "$SEM_FILE"
   fi
+  AGENT=$(_family_record_agent "$SEM_FILE" "$AGENT")
   LOCKED_SESSION_ID=$(_locked_open_identity "$SEM_FILE" "$AGENT" "${SESSION_ID_ARG:-}" 1 || true)
   [ -n "$LOCKED_SESSION_ID" ] \
     || fail "close: semaphore изменился после resolve или identity неоднозначна; mutation запрещена" 7
@@ -11799,6 +12052,22 @@ if [ "$CMD" = "close" ]; then
     TERMINAL_PROOF_MODE="sentinel"
     FORCED_CARD="declared-publish-only:$SLUG"
     echo "Session CLOSE: close_path=publish-only объявлен при open — раннер не требуется (WP-537 Ф30)." >&2
+  fi
+
+  # WP-484 Ф267 п.2: a session that declared `no-code-changes` at open skips the
+  # runner ONLY while the proof holds (nothing claimed, worktree clean, nothing
+  # ahead of origin/main). A failed proof does not fail the close: it falls
+  # through to the ordinary terminal-card requirement below, which is the
+  # ready exit for the same session (finish through quick-close).
+  if grep -q '^close_path: no-code-changes$' "${SEM_FILE:-}" 2>/dev/null; then
+    if NCC_REASON=$(_no_code_changes_proof "$SEM_FILE" 2>&1); then
+      RUNNER_OK="declared-no-code-changes:$SLUG"
+      TERMINAL_PROOF_MODE="sentinel"
+      FORCED_CARD="declared-no-code-changes:$SLUG"
+      echo "Session CLOSE: close_path=no-code-changes объявлен и доказан — раннер не требуется (WP-484 Ф267)." >&2
+    else
+      echo "Session CLOSE: close_path=no-code-changes не доказан (${NCC_REASON}); обычное требование карточки закрытия остаётся — закрой эту же сессию через quick-close." >&2
+    fi
   fi
 
   # "${RUNNER_CARDS[@]+"${RUNNER_CARDS[@]}"}", not "${RUNNER_CARDS[@]}": a
@@ -12214,6 +12483,15 @@ print(json.dumps({"wp": sys.argv[1], "slug": sys.argv[2], "agent": sys.argv[3], 
       FORCED_CARD="declared-peer-session:$SLUG"
     elif grep -q '^close_path: publish-only$' "${SEM_FILE:-}" 2>/dev/null; then
       FORCED_CARD="declared-publish-only:$SLUG"
+    elif [ "$(_unique_record_field "${SEM_FILE:-}" close_delivery_terminal_reference || true)" = "declared-no-code-changes:$SLUG" ]; then
+      # Only a first attempt that really closed through this channel resumes
+      # through it; one that fell back to a card keeps its card. The promise is
+      # proven again: the state may have changed after PREPARED.
+      if [ "$CLOSE_RESUME_STATE" = "prepared" ]; then
+        NCC_REASON=$(_no_code_changes_proof "$SEM_FILE" 2>&1) \
+          || fail "close: после PREPARED объявление no-code-changes больше не доказано (${NCC_REASON}); продолжение запрещено" 7
+      fi
+      FORCED_CARD="declared-no-code-changes:$SLUG"
     fi
     # WP-561 Ч4 (peer-session 2026-10-06-07-wp561-f33-contract-tests,
     # Claude+Kimi+Codex, consensus; cold review found a 3rd missed channel
@@ -12450,6 +12728,7 @@ print(json.dumps({"wp": sys.argv[1], "slug": sys.argv[2], "agent": sys.argv[3], 
     _close_channel="unclassified"
     case "$FORCED_CARD" in
       declared-peer-session:*) _close_channel="peer-session" ;;
+      declared-no-code-changes:*) _close_channel="no-code-changes" ;;
       cancel-obligation:*)     _close_channel="cancel-obligation" ;;
       *)
         if [ -f "$FORCED_CARD" ]; then
@@ -12484,7 +12763,7 @@ print(json.dumps({"wp": sys.argv[1], "slug": sys.argv[2], "agent": sys.argv[3], 
   # channel classification, which is derived inside that block for a different
   # purpose. Why the clear belongs to the close and not to the calling skill: see
   # the clear_peer_session_obligation() docstring.
-  if grep -q '^close_path: peer-session$' "$_sem_read" 2>/dev/null; then
+  if _close_path_clears_obligation "$(_unique_record_field "$_sem_read" close_path || true)"; then
     clear_peer_session_obligation "$_sem_read" "$SLUG"
   fi
 
@@ -12516,6 +12795,7 @@ if [ "$CMD" = "note-file" ]; then
     fi
   fi
   acquire_session_transition_lock "$SEM_FILE"
+  NOTE_AGENT=$(_family_record_agent "$SEM_FILE" "$NOTE_AGENT")
   LOCKED_NOTE_SESSION_ID=$(_locked_open_identity "$SEM_FILE" "$NOTE_AGENT" "${SESSION_ID_ARG:-}" || true)
   [ -n "$LOCKED_NOTE_SESSION_ID" ] \
     || fail "note-file: semaphore изменился после resolve или уже закрывается" 1
@@ -12933,6 +13213,7 @@ if [ "$CMD" = "note-commit" ]; then
     fi
   fi
   acquire_session_transition_lock "$SEM_FILE"
+  NOTE_AGENT=$(_family_record_agent "$SEM_FILE" "$NOTE_AGENT")
   LOCKED_NOTE_SESSION_ID=$(_locked_open_identity "$SEM_FILE" "$NOTE_AGENT" "${SESSION_ID_ARG:-}" || true)
   [ -n "$LOCKED_NOTE_SESSION_ID" ] \
     || fail "note-commit: semaphore изменился после resolve или уже закрывается" 1
@@ -13485,6 +13766,84 @@ PY
   exit 0
 fi
 
+# WP-539 F21 B5 (peer session 2026-10-29-16): publishers historically passed the
+# dated slug as --session-id, while semaphores are keyed by the guard id, so every
+# such receipt was refused with "нет открытой сессии <agent>-<slug>". Compatibility
+# lives here only (close/note-file keep the strict resolver): a direct id always
+# wins, a slug must match exactly one open semaphore of this agent, and the
+# fallback is logged so callers get fixed rather than relying on it.
+_note_publication_canonical_session_id() {  # <agent> <session id or slug>
+  local agent="$1" given="$2" cand base slug
+  local matches=()
+  if [ -f "$SESSION_DIR/${agent}-${given}.open" ]; then
+    printf '%s\n' "$given"
+    return 0
+  fi
+  while IFS= read -r cand; do
+    [ -n "$cand" ] || continue
+    slug=$(grep "^slug: " "$cand" | cut -d' ' -f2- || true)
+    [ "$slug" = "$given" ] && matches+=("$cand")
+  done <<< "$(list_candidates "$agent")"
+  case "${#matches[@]}" in
+    0)
+      # No slug match either: hand the original value to the strict resolver,
+      # which prints its own refusal.
+      printf '%s\n' "$given"
+      ;;
+    1)
+      # The match may carry the other name of the agent (family, Ф266): strip
+      # the name the record was written under, not the caller's.
+      base=$(basename "${matches[0]}")
+      base="${base#"$(_family_record_agent "${matches[0]}" "$agent")-"}"
+      base="${base%.open}"
+      echo "WARN: note-publication: --session-id '$given' is a slug, not the guard id; resolved to '$base'. Callers must pass the guard id." >&2
+      printf '%s\n' "$base"
+      ;;
+    *)
+      echo "note-publication: slug '$given' matches ${#matches[@]} open sessions of agent '$agent'; pass the guard id (--session-id)" >&2
+      return 1
+      ;;
+  esac
+}
+
+# Claims the caller-stated source commit of a publication (note-publication --claim-source).
+# Sets CLAIM_ADDED=1 only when this call appended the line (an existing claim is never undone).
+# The caller holds the session transition lock.
+_claim_source_for_receipt() {  # <semaphore> <repo dir> <repo name> <full sha>
+  local sem="$1" repo="$2" name="$3" sha="$4" other entry
+  CLAIM_ADDED=0
+  # Not a commit of this checkout (a separate clone, a leaked variable): the receipt may still be
+  # recordable from claims the session already has, so go on without claiming.
+  git -C "$repo" rev-parse --verify --quiet "$sha^{commit}" >/dev/null \
+    || { echo "WARN: note-publication: --claim-source $sha не коммит репозитория $name; заявка пропущена" >&2; return 0; }
+  entry="commit: $name $sha"
+  grep -qxF "$entry" "$sem" 2>/dev/null && return 0
+  for other in "$SESSION_DIR"/*.open; do
+    [ -f "$other" ] && [ "$other" != "$sem" ] || continue
+    if grep -qxF "$entry" "$other" 2>/dev/null; then
+      echo "note-publication: --claim-source $sha уже заявлен другой сессией ($(basename "$other")); заявка отклонена" >&2
+      return 1
+    fi
+  done
+  echo "$entry" >> "$sem" || return 1
+  CLAIM_ADDED=1
+  _PENDING_CLAIM_SEM="$sem"
+  _PENDING_CLAIM_LINE="$entry"
+  echo "Noted commit: $name $sha (claim-source)" >&2
+}
+
+# Removes exactly the line this call added, leaving every other line (including receipts and
+# claims written meanwhile) untouched. The rewrite goes through a copy that keeps the mode.
+_unclaim_source_for_receipt() {  # <semaphore> <exact line>
+  local sem="$1" line="$2" tmp
+  tmp=$(mktemp "$sem.rollback.XXXXXX") || return 1
+  if cp -p "$sem" "$tmp" && { grep -vxF -- "$line" "$sem" > "$tmp" || [ $? -eq 1 ]; } && mv -f "$tmp" "$sem"; then
+    return 0
+  fi
+  rm -f "$tmp"
+  return 1
+}
+
 # Receipts derive content only from this session's existing commit claims.
 if [ "$CMD" = "note-publication" ]; then
   PUBLISHED_SHA="${POSITIONAL[0]:-}"
@@ -13492,6 +13851,7 @@ if [ "$CMD" = "note-publication" ]; then
   [ -n "$REPO_ARG" ] || fail "note-publication: --repo required" 1
   NOTE_AGENT="${AGENT:-${IWE_AGENT:-claude-code}}"
   if [ -n "$SESSION_ID_ARG" ]; then
+    SESSION_ID_ARG=$(_note_publication_canonical_session_id "$NOTE_AGENT" "$SESSION_ID_ARG") || exit 1
     SEM_FILE=$(resolve_semaphore_by_session_id "$NOTE_AGENT" "$SESSION_ID_ARG" "${WP:-}" "${SLUG:-}") || exit 1
   else
     SEM_FILE=$(select_semaphore "$NOTE_AGENT" "${WP:-}" "${SLUG:-}") || exit 1
@@ -13500,6 +13860,7 @@ if [ "$CMD" = "note-publication" ]; then
   # worktree. Never wait on this inverse edge. The publisher records a durable
   # receipt gap on refusal, preserving its existing recovery/proof behavior.
   IWE_SESSION_TRANSITION_WAIT_SEC=0 acquire_session_transition_lock "$SEM_FILE"
+  NOTE_AGENT=$(_family_record_agent "$SEM_FILE" "$NOTE_AGENT")
   LOCKED_NOTE_SESSION_ID=$(_locked_open_identity "$SEM_FILE" "$NOTE_AGENT" "${SESSION_ID_ARG:-}") || exit 1
   PUBLICATION_CLOSE_STATE=$(_close_delivery_state "$SEM_FILE" "$LOCKED_NOTE_SESSION_ID" || true)
   case "$PUBLICATION_CLOSE_STATE:$PUBLICATION_TARGET_REF" in
@@ -13510,29 +13871,66 @@ if [ "$CMD" = "note-publication" ]; then
   PUBLICATION_PREPARE_DIGEST=$(_unique_record_field "$SEM_FILE" close_delivery_prepare_digest || true)
   [ "$REPO_ARG" != IWE ] || REPO_ARG=iwe-root
   RECEIPT_REPO=$(_resolve_repo_checkout "$REPO_ARG" "$PUBLISHED_SHA") || exit 1
-  # A PREPARED product may have a newer DS-MCP clone than the root checkout.
-  # Select it only when new source receipts are bound to its qualified files.
-  if [ "$PUBLICATION_CLOSE_STATE" = prepared ]; then
-    RECEIPT_REPO=$(_publication_receipt_tool \
-      select-checkout "$SEM_FILE" "$RECEIPT_REPO" "$REPO_ARG" "$PUBLISHED_SHA" \
-      --workspace "$IWE_ROOT") || exit 1
-  fi
-  if [ "$PUBLICATION_TARGET_REF" = refs/heads/main ] && [ "$PUBLICATION_CLOSE_STATE" = none ]; then
+  NOTE_RC=0
+  if [ "$PUBLICATION_CLOSE_STATE" = prepared ] && [ "$REPO_ARG" = MC-sessions ]; then
+    # Recovery branch (WP-484 F269): a session may append the receipt of its own
+    # MC-sessions commit after close was prepared. It runs BEFORE select-checkout,
+    # only appends evidence (claims and the prepare digest stay frozen; checked
+    # below) and repeats nothing the product policy decides. The PUBLISHED state
+    # is not handled here: that is a known limit, not an oversight.
+    [ "$PUBLICATION_TARGET_REF" = refs/heads/main ] \
+      || fail "note-publication: квитанцию MC-sessions в состоянии prepared можно дописать только для refs/heads/main" 1
     timeout 10 git -C "$RECEIPT_REPO" fetch --quiet origin '+refs/heads/main:refs/remotes/origin/main' \
       || fail "note-publication: fresh origin/main required" 1
-    _record_publication_receipts "$SEM_FILE" "$RECEIPT_REPO" "$REPO_ARG" "$PUBLISHED_SHA" || exit 1
+    python3 "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/session_receipt_scope.py" \
+      --record-prepared-recovery "$SEM_FILE" "$RECEIPT_REPO" "$PUBLISHED_SHA" "$IWE_ROOT" || NOTE_RC=$?
+    if [ "$NOTE_RC" -ne 0 ]; then
+      echo "note-publication: квитанция MC-sessions не дописана полностью. Публикуйте через ds-publish.sh с IWE_PUBLICATION_SESSION_ID ДО подготовки закрытия, либо повторите note-publication после исправления условий." >&2
+    fi
   else
-    # All PREPARED receipts, including main, require the product policy. Root,
-    # governance and session repositories cannot use this recovery route.
-    # Product policy and frozen inventory are checked before the exact fetch.
-    # This only appends evidence, never replaces claims or authorizes a push.
-    _record_publication_receipts "$SEM_FILE" "$RECEIPT_REPO" "$REPO_ARG" "$PUBLISHED_SHA" \
-      --target-ref "$PUBLICATION_TARGET_REF" --workspace "$IWE_ROOT" || exit 1
+    # A PREPARED product may have a newer DS-MCP clone than the root checkout.
+    # Select it only when new source receipts are bound to its qualified files.
+    if [ "$PUBLICATION_CLOSE_STATE" = prepared ]; then
+      RECEIPT_REPO=$(_publication_receipt_tool \
+        select-checkout "$SEM_FILE" "$RECEIPT_REPO" "$REPO_ARG" "$PUBLISHED_SHA" \
+        --workspace "$IWE_ROOT") || exit 1
+    fi
+    if [ "$PUBLICATION_TARGET_REF" = refs/heads/main ] && [ "$PUBLICATION_CLOSE_STATE" = none ]; then
+      timeout 10 git -C "$RECEIPT_REPO" fetch --quiet origin '+refs/heads/main:refs/remotes/origin/main' \
+        || fail "note-publication: fresh origin/main required" 1
+      CLAIM_ADDED=0
+      if [ -n "$CLAIM_SOURCE_ARG" ]; then
+        # The claim and the receipt share this transition lock; a failed receipt must not leave
+        # a claim behind, because close has to prove every claim (WP-484 F257).
+        _claim_source_for_receipt "$SEM_FILE" "$RECEIPT_REPO" "$REPO_ARG" "$CLAIM_SOURCE_ARG" || exit 1
+      fi
+      if ! _record_publication_receipts "$SEM_FILE" "$RECEIPT_REPO" "$REPO_ARG" "$PUBLISHED_SHA"; then
+        if [ "$CLAIM_ADDED" = 1 ]; then
+          _PENDING_CLAIM_LINE=""
+          _unclaim_source_for_receipt "$SEM_FILE" "commit: $REPO_ARG $CLAIM_SOURCE_ARG" \
+            && echo "note-publication: claim_rolled_back (заявка $CLAIM_SOURCE_ARG снята: квитанция не записана)" >&2
+        fi
+        exit 1
+      fi
+      _PENDING_CLAIM_LINE=""
+    else
+      # All other PREPARED receipts, including main, require the product policy.
+      # Root and governance receipts are written by close itself.
+      # Product policy and frozen inventory are checked before the exact fetch.
+      # This only appends evidence, never replaces claims or authorizes a push.
+      _record_publication_receipts "$SEM_FILE" "$RECEIPT_REPO" "$REPO_ARG" "$PUBLISHED_SHA" \
+        --target-ref "$PUBLICATION_TARGET_REF" --workspace "$IWE_ROOT" || {
+        if [ "$REPO_ARG" = iwe-root ] || [ "$REPO_ARG" = "$GOV_REPO" ]; then
+          echo "note-publication: в состоянии prepared квитанции для корня и governance пишет само закрытие, повторите close." >&2
+        fi
+        exit 1
+      }
+    fi
   fi
   [ "$(_close_delivery_state "$SEM_FILE" "$LOCKED_NOTE_SESSION_ID" || true)" = "$PUBLICATION_CLOSE_STATE" ] \
     && [ "$(_unique_record_field "$SEM_FILE" close_delivery_prepare_digest || true)" = "$PUBLICATION_PREPARE_DIGEST" ] \
     || fail "note-publication: frozen close identity changed" 1
-  exit 0
+  exit "$NOTE_RC"
 fi
 
 # --- HOT-FILE LOCK (WP-7 SessionGitRaceIsolation, 09.08) ---
@@ -13977,6 +14375,7 @@ if [ "$CMD" = "renew" ]; then
     fi
   fi
   acquire_session_transition_lock "$SEM_FILE"
+  RENEW_AGENT=$(_family_record_agent "$SEM_FILE" "$RENEW_AGENT")
   RENEW_SESSION_ID=$(_locked_open_identity "$SEM_FILE" "$RENEW_AGENT" "${SESSION_ID_ARG:-}" || true)
   [ -n "$RENEW_SESSION_ID" ] \
     || fail "renew: semaphore изменился после resolve или уже закрывается" 3
@@ -14746,6 +15145,179 @@ if [ "$CMD" = "retire-semaphore-artifact" ]; then
   exit 0
 fi
 
+# --- RELEASE-DUPLICATE (WP-484 Ф261, Ф267 п.1) ---
+# Drops ONE live semaphore when other live semaphores carry the same work, from
+# ANY conversation and without the pilot's word: the permission comes from the
+# records, not from who calls. Target and every kept copy must agree on
+# harness_session_id, wp, slug and a non-empty task; everything the target has
+# claimed (file, file_v2, commit lines) must be claimed by the kept copies too,
+# so nothing is lost; kept copies are plain readable single-link files. Any doubt
+# refuses. The target is named by guard ID; the last live copy is never
+# released; the target's worktree and ORZ file are not touched.
+# Lock order (invariant): admission -> exact session lock of the target ->
+# LOCK_SH on each kept copy (fd 197..200, sorted by name). A plain `close` takes
+# no admission lock, but its rename takes LOCK_EX on its own semaphore, so a
+# kept copy cannot be closed between our check and our rename.
+_release_duplicate_check() {  # <semaphore dir> <target semaphore> <guard id> [<expected kept names, comma-separated>] -> prints the kept names
+  python3 - "$1" "$2" "$3" "${4:-}" <<'PY_DUP'
+import os
+import sys
+from pathlib import Path
+
+root, target_path, guard_id, expected = sys.argv[1:]
+target_path = Path(target_path)
+keys = ("harness_session_id", "wp", "slug", "session_id", "task")
+same_work = ("harness_session_id", "wp", "slug", "task")
+FIRST_FD = 197
+
+
+def read(path):
+    found = {}
+    claims = set()
+    fences = 0  # a semaphore is a frontmatter block between two `---` lines, claims follow the second
+    in_claims = False
+    for line in path.read_text(encoding="utf-8").splitlines():
+        if line == "---":
+            fences += 1
+            in_claims = fences >= 2
+            continue
+        if in_claims:
+            if line.strip():
+                claims.add(line.strip())
+            continue
+        key, sep, value = line.partition(":")
+        if sep and key in keys:
+            found.setdefault(key, []).append(value.strip())
+    if any(len(found.get(key, [])) != 1 or not found[key][0] for key in keys):
+        raise SystemExit(f"release-duplicate: неоднозначные или пустые поля в {path.name}")
+    if fences < 2:
+        raise SystemExit(f"release-duplicate: у {path.name} нет закрытой рамки frontmatter; заявки не прочитать")
+    return {key: found[key][0] for key in keys}, claims
+
+
+try:
+    target, target_claims = read(target_path)
+except FileNotFoundError:
+    raise SystemExit("release-duplicate: цель исчезла между поиском и чтением (параллельное снятие или закрытие)")
+if target["session_id"] != guard_id:
+    raise SystemExit("release-duplicate: guard ID не совпадает с записью семафора")
+kept = []
+kept_claims = set()
+for path in sorted(Path(root).glob("*.open")):
+    if path.name == target_path.name:
+        continue
+    try:
+        if path.is_symlink() or path.stat().st_nlink != 1:
+            continue
+        record, claims = read(path)
+    except (OSError, UnicodeError, SystemExit):
+        continue  # a record that is not readable cannot prove it carries the work
+    if all(record[key] == target[key] for key in same_work):
+        kept.append(path)
+        kept_claims |= claims
+if not kept:
+    raise SystemExit("release-duplicate: это единственная живая копия работы; её закрывает close, не release-duplicate. Команда (подставь реальные значения вместо плейсхолдеров): session-guard.sh close --agent \"<agent>\" --slug \"<slug этой копии>\"")
+lost = sorted(target_claims - kept_claims)
+if lost:
+    shown = "; ".join(lost[:3])
+    raise SystemExit(f"release-duplicate: цель заявляла то, чего нет у оставляемых копий ({len(lost)} шт.: {shown}); снимать нельзя, работа потеряется")
+names = [path.name for path in kept]
+if len(names) > 4:
+    raise SystemExit("release-duplicate: больше четырёх оставляемых копий; сначала разберите дубли вручную")
+if expected:
+    if ",".join(names) != expected:
+        raise SystemExit("release-duplicate: набор оставляемых копий изменился после захвата замков")
+    for offset, path in enumerate(kept):
+        try:
+            held, current = os.fstat(FIRST_FD + offset), os.lstat(path)
+        except OSError:
+            raise SystemExit("release-duplicate: замок на оставляемой копии потерян")
+        if (held.st_dev, held.st_ino) != (current.st_dev, current.st_ino):
+            raise SystemExit(f"release-duplicate: {path.name} заменён после захвата замка")
+print(",".join(names))
+PY_DUP
+}
+
+_release_duplicate_hold_kept() {  # <semaphore dir> <kept names, comma-separated> -> LOCK_SH on fd 197.. until the fds are closed
+  local fd=197 name
+  [ -n "$FLOCK_BIN" ] || return 1
+  while IFS= read -r name; do
+    [ -n "$name" ] || continue
+    eval "exec $fd<\"\$1/\$name\"" || return 1
+    "$FLOCK_BIN" -sn "$fd" || return 1
+    fd=$((fd + 1))
+  done <<EOF_KEPT
+$(printf '%s\n' "$2" | tr ',' '\n')
+EOF_KEPT
+}
+
+_release_duplicate_close_kept() {
+  exec 197>&- 198>&- 199>&- 200>&-
+}
+
+_release_duplicate_journal() {  # <stage> <target name> <caller> <kept> <sha256> <reason>
+  printf '%s\t%s\t%s\t%s\tkept=%s\tsha256=%s\treason=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$1" "$2" "$3" "$4" "$5" \
+    "$(printf '%s' "$6" | tr '\t\n' '  ')" >> "$IWE_ROOT/.iwe-runtime/duplicate-release.log"
+}
+
+if [ "$CMD" = "release-duplicate" ]; then
+  [ -n "$GUARD_ID_ARG" ] || fail "release-duplicate: --guard-id обязателен (guard ID копии, которую снять)" 1
+  [ -n "$UNFREEZE_REASON" ] || fail "release-duplicate: --reason обязателен (почему копия лишняя)" 1
+  case "$GUARD_ID_ARG" in
+    *[!A-Za-z0-9._-]*) fail "release-duplicate: недопустимый guard ID '$GUARD_ID_ARG'" 1 ;;
+  esac
+  DUP_TARGET=""
+  for DUP_CANDIDATE in "$SESSION_DIR"/*-"$GUARD_ID_ARG".open; do
+    [ -e "$DUP_CANDIDATE" ] || [ -L "$DUP_CANDIDATE" ] || continue
+    [ -z "$DUP_TARGET" ] || fail "release-duplicate: guard ID '$GUARD_ID_ARG' указывает на несколько семафоров" 1
+    DUP_TARGET="$DUP_CANDIDATE"
+  done
+  [ -n "$DUP_TARGET" ] || fail "release-duplicate: живой семафор с guard ID '$GUARD_ID_ARG' не найден" 1
+  [ ! -L "$DUP_TARGET" ] || fail "release-duplicate: '$DUP_TARGET' — символическая ссылка" 1
+  # The caller is only a label for the audit line, never a permission: its own
+  # environment decides, not the agent name in the target's file name.
+  DUP_CALLER=$(_runtime_harness_session_id codex) || fail "release-duplicate: native harness session id повреждён" 1
+  DUP_CALLER="${DUP_CALLER:-unknown-caller}"
+
+  # Admission first, then the exact session lock of the target, then LOCK_SH on
+  # the kept copies. Check, re-check under the locks and rename are one critical
+  # section, so two parallel releases cannot drop both copies and a plain close
+  # cannot finish a kept copy in between.
+  acquire_scheduled_admission_lock
+  acquire_session_transition_lock "$DUP_TARGET"
+  _local_release_mutation_allowed "$DUP_TARGET" || fail "release-duplicate: local result is intentionally retained" 7
+  DUP_KEPT=$(_release_duplicate_check "$SESSION_DIR" "$DUP_TARGET" "$GUARD_ID_ARG") || exit 1
+  _release_duplicate_hold_kept "$SESSION_DIR" "$DUP_KEPT" \
+    || { _release_duplicate_close_kept; fail "release-duplicate: замок на оставляемой копии не взят (идёт её закрытие?); ничего не изменено" 1; }
+  DUP_KEPT=$(_release_duplicate_check "$SESSION_DIR" "$DUP_TARGET" "$GUARD_ID_ARG" "$DUP_KEPT") \
+    || { _release_duplicate_close_kept; exit 1; }
+  while IFS= read -r DUP_KEPT_NAME; do
+    [ -z "$DUP_KEPT_NAME" ] || _local_release_mutation_allowed "$SESSION_DIR/$DUP_KEPT_NAME" \
+      || { _release_duplicate_close_kept; fail "release-duplicate: оставляемая копия $DUP_KEPT_NAME — удержанный локальный результат" 7; }
+  done <<EOF_KEPT_CHECK
+$(printf '%s\n' "$DUP_KEPT" | tr ',' '\n')
+EOF_KEPT_CHECK
+  DUP_SNAPSHOT=$(_owned_semaphore_snapshot_sha "$DUP_TARGET" 0) \
+    || { _release_duplicate_close_kept; fail "release-duplicate: нет эксклюзивного снимка семафора (идёт close или файл чужой)" 1; }
+  DUP_WORKTREE=$(_semaphore_last_field "$DUP_TARGET" isolated_worktree)
+  DUP_DEST="${DUP_TARGET}.closed"
+  # The intent line goes first: a surplus line is better than a lost one. A
+  # journal that cannot be written stops the release before anything changes.
+  _release_duplicate_journal intent "$(basename -- "$DUP_TARGET")" "$DUP_CALLER" "$DUP_KEPT" "$DUP_SNAPSHOT" "$UNFREEZE_REASON" \
+    || { _release_duplicate_close_kept; fail "release-duplicate: запись намерения в duplicate-release.log не выполнена; ничего не изменено" 1; }
+  _rename_owned_semaphore_cas "$DUP_TARGET" "$DUP_DEST" "$DUP_SNAPSHOT" \
+    || { _release_duplicate_close_kept; fail "release-duplicate: переименование отклонено, файл изменился во время проверки (в журнале осталась строка intent без done)" 1; }
+  _release_duplicate_close_kept
+  _release_duplicate_journal done "$(basename -- "$DUP_TARGET")" "$DUP_CALLER" "$DUP_KEPT" "$DUP_SNAPSHOT" "$UNFREEZE_REASON" \
+    || echo "WARN: $(basename -- "$DUP_TARGET") снят, но строка done в duplicate-release.log не записана (есть строка intent)" >&2
+  release_session_transition_lock \
+    || fail "release-duplicate: копия снята, но exact session lock не освободился" 1
+  release_scheduled_admission_lock \
+    || fail "release-duplicate: копия снята, но admission lock не освободился" 1
+  echo "Released duplicate: $(basename -- "$DUP_TARGET") -> $(basename -- "$DUP_DEST"); остаётся живой: $DUP_KEPT; рабочая копия сохранена: ${DUP_WORKTREE:-нет}"
+  exit 0
+fi
+
 # --- HEAL (WP-484 Ф250, мера 3) ---
 # One command for a session stuck on THIS host. The manual cure used to be a
 # chain of service-file edits and four separate CLIs (retire-semaphore-artifact
@@ -14763,8 +15335,12 @@ fi
 #     _heal_pilot_word_proven;
 #   - _local_release_mutation_allowed fences every mutation, and the Ф220
 #     auto-recovery flags are neither read nor changed.
-# Default is a DRY RUN with no side effects (no lock files, no registry, no
-# ledger).
+# Default is a DRY RUN: no lock files, no registry, no ledger, no change to the
+# session. One exception (WP-484 Ф267 п.6): when the pilot's word is required,
+# the exact line to type is sent to the pilot's Telegram once per code (source
+# `session-guard-heal`, channel `decision`), so the pilot does not have to wait
+# for the agent to relay it. The send is
+# best-effort and never changes the dry run's result or exit code.
 HEAL_WORD_WINDOW_SEC=7200
 
 _heal_code() {  # <slug> <semaphore> <hour bucket>
@@ -14775,6 +15351,61 @@ import sys
 
 print(hashlib.sha256("heal|".encode("utf-8") + "|".join(sys.argv[1:]).encode("utf-8")).hexdigest()[:6])
 PY
+}
+
+# WP-484 Ф267 п.6: send the pilot-word line to Telegram right after a dry run
+# that requires it. The code is derived from the target, not secret (the agent
+# computes it too), so this adds no way around the word check -- it only gets
+# the line to the pilot. Cold review 30.10 (Fable, Kimi, Codex) fixed:
+#  - routing: the source `session-guard` is a digest source (WP-568), so the line
+#    would reach the pilot with the morning digest, after the code expired. The
+#    send uses its own allowlist source `session-guard-heal` (channel `decision`)
+#    with TELEGRAM_NEEDS_DECISION=1 and a "Что делать:" line, which is what makes
+#    the router deliver it to the live chat;
+#  - once per slug+code, claimed BEFORE the send with an atomic mkdir (two parallel
+#    dry runs cannot both send); a failed send gives the claim back, so the next
+#    dry run retries; claims older than a day are swept;
+#  - the line to type stands alone on its own line, with no punctuation after the
+#    code (the witness check needs the whole message to match);
+#  - facts for the decision (owner process, unsaved work) go into the text, and
+#    the agent-controlled task is cut to 80 characters on one line;
+#  - the status line says the line was handed to sending, not that it arrived:
+#    iwe-tg cannot tell delivered from queued.
+# Prints one status line; never fails the caller.
+_heal_send_word_to_pilot() {  # <slug> <semaphore> <code> <owner process state> <unsaved work>
+  local slug="$1" sem="$2" code="$3" alive="$4" work="$5" wp task msg tg_rc=0
+  local marker_dir="$IWE_ROOT/.iwe-runtime/heal-word-notified"
+  local marker="$marker_dir/$slug.$code"
+  if ! command -v iwe-tg >/dev/null 2>&1; then
+    echo "Строка слова в Телеграм не отправлена: iwe-tg недоступен"
+    return 0
+  fi
+  mkdir -p "$marker_dir" 2>/dev/null || {
+    echo "Строка слова в Телеграм не отправлена: не удалось создать каталог меток"
+    return 0
+  }
+  find "$marker_dir" -mindepth 1 -maxdepth 1 -type d -mtime +0 -exec rmdir {} + 2>/dev/null || true
+  if ! mkdir "$marker" 2>/dev/null; then
+    echo "Строка слова уже передана пилоту в Телеграм (повторно не шлю)"
+    return 0
+  fi
+  wp=$(_semaphore_last_field "$sem" wp); task=$(_semaphore_last_field "$sem" task)
+  # Cut by characters in python: bash ${var:0:80} cuts bytes outside a UTF-8 locale (launchd, cron, ssh).
+  task=$(printf '%s' "$task" | tr '\n\r\t' '   ' | python3 -c 'import sys; sys.stdout.write(sys.stdin.read()[:80])')
+  # No absolute path in the pilot's text: the router would scrub it and note it in the digest.
+  work="${work%% (копия:*}"
+  msg="Агент просит снять зависшую сессию по ${wp:-неизвестному РП}${task:+ «${task}»}. Владелец: процесс ${alive}; несохранённая работа: ${work}. Агенту нужно ваше слово: напишите ему в чате ровно эту строку, она действует 1-2 часа:
+heal $slug $code
+Что делать: если сессия вам знакома и её нужно снять, отправьте строку выше; если не знакома, ничего не пишите."
+  TELEGRAM_NEEDS_DECISION=1 iwe-tg --source session-guard-heal "$msg" || tg_rc=$?
+  case "$tg_rc" in
+    0) echo "Строка слова передана в отправку пилоту в Телеграм" ;;
+    3) rmdir "$marker" 2>/dev/null || true
+       echo "Строка слова в Телеграм не доставлена: сообщение задержано фильтром отправителей" ;;
+    *) rmdir "$marker" 2>/dev/null || true
+       echo "Строка слова в Телеграм не отправлена (iwe-tg, код $tg_rc)" ;;
+  esac
+  return 0
 }
 
 # Every conversation identity the caller carries, one per line: the single
@@ -15006,8 +15637,17 @@ if [ "$CMD" = "heal" ]; then
   done
   if [ -n "$HEAL_MATCHES" ]; then
     [ "$(printf '%s' "$HEAL_MATCHES" | grep -c .)" -eq 1 ] \
-      || fail "heal: slug '$HEAL_SLUG' совпал с несколькими активными семафорами, не лечу вслепую:
-$HEAL_MATCHES" 1
+      || fail "heal: slug '$HEAL_SLUG' совпал с несколькими активными семафорами, не лечу вслепую.
+Укажи одну сессию её служебным номером (поле session_id:) вместо slug:
+$(while IFS= read -r HEAL_CAND; do
+  [ -n "$HEAL_CAND" ] || continue
+  HEAL_CAND_SID=$(_semaphore_last_field "$HEAL_CAND" session_id)
+  if [ -n "$HEAL_CAND_SID" ]; then
+    echo "  session-guard.sh heal $HEAL_CAND_SID   # $(basename -- "$HEAL_CAND")"
+  else
+    echo "  $(basename -- "$HEAL_CAND"): нет поля session_id, точный адрес недоступен — разбор вручную"
+  fi
+done <<< "$HEAL_MATCHES")" 1
     HEAL_SEM=$(printf '%s' "$HEAL_MATCHES" | head -1); HEAL_ACTIVE=1
   else
     # Recovery receipts (.recovery-pending, .recovered) and leases are not
@@ -15043,7 +15683,7 @@ $HEAL_QUARANTINES" 1
   while IFS= read -r HEAL_OWN; do
     [ -n "$HEAL_OWN" ] || continue
     if [ "$HEAL_OWN" = "$HEAL_SID" ] || [ "$HEAL_OWN" = "$HEAL_HID" ]; then
-      fail "heal: $HEAL_BASE принадлежит ЭТОМУ разговору ($HEAL_OWN) — свою сессию снимает close, а не heal" 1
+      fail "heal: $HEAL_BASE принадлежит ЭТОМУ разговору ($HEAL_OWN) — свою сессию снимает close, а не heal. Команда: session-guard.sh close --agent $(_semaphore_last_field "$HEAL_SEM" agent) --slug $HEAL_SLUG" 1
     fi
   done <<< "$(_heal_caller_ids)"
 
@@ -15106,7 +15746,7 @@ $HEAL_QUARANTINES" 1
   [ "$HEAL_UNSAVED" -eq 0 ] || HEAL_APPLY_CMD="$HEAL_APPLY_CMD --discard-unpublished"
 
   if [ "$HEAL_APPLY" -eq 0 ]; then
-    echo "heal $HEAL_SLUG — СУХОЙ ПРОГОН, ничего не изменено"
+    echo "heal $HEAL_SLUG — СУХОЙ ПРОГОН, сессия не изменена"
     echo "Запись: $HEAL_BASE ($([ "$HEAL_ACTIVE" -eq 1 ] && echo "активный семафор" || echo "уже в карантине"))"
     echo "Владелец: pid ${HEAL_PID:-—} на ${HEAL_HOST:-хост не записан}, процесс: $HEAL_ALIVE"
     if [ "$HEAL_ACTIVE" -eq 1 ]; then
@@ -15135,6 +15775,7 @@ $HEAL_QUARANTINES" 1
       echo "Слово пилота: ТРЕБУЕТСЯ. Пилот пишет в чат ровно эту строку (код действует 1-2 часа): heal $HEAL_SLUG $HEAL_CODE_NOW"
       echo "  Условия: у разговора, из которого идёт --apply, есть свой живой семафор; в журнале его реплик перед этой строкой есть хотя бы одна другая реплика пилота. Слово пилота доказуемо только для Claude (запись ведёт его хук); для Codex/Kimi — недоказуемо, лечи из окна Claude."
       echo "  Ограничение: это рефлекс против самоодобрения, а не граница привилегий — агент того же пользователя может обойти его через дочерний headless-разговор (claude -p) или подбор чужого журнала; фильтры выше лишь удорожают обход."
+      _heal_send_word_to_pilot "$HEAL_SLUG" "$HEAL_SEM" "$HEAL_CODE_NOW" "$HEAL_ALIVE" "$HEAL_WORK"
     else
       echo "Слово пилота: не требуется"
     fi
@@ -15145,7 +15786,7 @@ $HEAL_QUARANTINES" 1
 
   # 3. Apply. Refusals first, before any lock or mutation.
   if [ "$HEAL_UNSAVED" -gt 0 ] && [ "$HEAL_DISCARD_UNPUBLISHED" -ne 1 ]; then
-    fail "heal --apply: в копии сессии есть несохранённая работа ($HEAL_WORK). Без явного --discard-unpublished и слова пилота не лечу. Сначала собери работу (isolate-push) либо повтори сухой прогон" 1
+    fail "heal --apply: в копии сессии есть несохранённая работа ($HEAL_WORK). Без явного --discard-unpublished и слова пилота не лечу. Выход: (а) сохранить работу — собрать её публикацией isolate-push из копии сессии и повторить сухой прогон: session-guard.sh heal $HEAL_SLUG; (б) снять с потерей работы, только если пилот подтвердил: session-guard.sh heal $HEAL_SLUG --apply --reason \"<что случилось>\" --discard-unpublished" 1
   fi
   HEAL_WORD_TS=""
   if [ "$HEAL_NEEDS_WORD" -eq 1 ]; then
@@ -15153,10 +15794,10 @@ $HEAL_QUARANTINES" 1
     _heal_pilot_word_proven "$HEAL_SLUG" "$HEAL_CODE_NOW" "$HEAL_CODE_PREV" "$HEAL_SEM" || HEAL_WORD_RC=$?
     case "$HEAL_WORD_RC" in
       0) : ;;
-      2) fail "heal --apply: нужно слово пилота, но у вызывающего разговора нет собственной идентичности (CLAUDE_CODE_SESSION_ID), журнал реплик пилота не найти. Лечить из этого окружения нельзя" 1 ;;
-      3) fail "heal --apply: нужно слово пилота, но для Codex/Kimi оно недоказуемо — журнал реплик пилота ведёт только хук Claude. Выполни heal из окна Claude" 1 ;;
-      4) fail "heal --apply: слово не принято — в журнале разговора нет ни одной другой реплики пилота перед командой heal (так выглядит дочерний headless-разговор). Пилот должен написать слово в обычном окне, где уже шёл разговор" 1 ;;
-      5) fail "heal --apply: слово не принято — у вызывающего разговора нет собственного живого семафора на этом хосте. Открой сессию (protocol-open) в этом окне и повтори" 1 ;;
+      2) fail "heal --apply: нужно слово пилота, но у вызывающего разговора нет собственной идентичности (CLAUDE_CODE_SESSION_ID), журнал реплик пилота не найти. Лечить из этого окружения нельзя. Выход: открой обычное окно Claude на этом хосте и выполни там: session-guard.sh heal $HEAL_SLUG" 1 ;;
+      3) fail "heal --apply: нужно слово пилота, но для Codex/Kimi оно недоказуемо — журнал реплик пилота ведёт только хук Claude. Выход: открой окно Claude на этом хосте и выполни там: session-guard.sh heal $HEAL_SLUG" 1 ;;
+      4) fail "heal --apply: слово не принято — в журнале разговора нет ни одной другой реплики пилота перед командой heal (так выглядит дочерний headless-разговор). Пилот должен написать слово в обычном окне, где уже шёл разговор; затем повтори: session-guard.sh heal $HEAL_SLUG --apply --reason \"<что случилось>\"" 1 ;;
+      5) fail "heal --apply: слово не принято — у вызывающего разговора нет собственного живого семафора на этом хосте. Открой лёгкую сессию лечения в этом окне и повтори: session-guard.sh open --wp \"<WP-N>\" --agent claude-code --task \"лечение $HEAL_SLUG\" --slug lechenie-$HEAL_SLUG --isolate --close-path no-code-changes; затем: session-guard.sh heal $HEAL_SLUG --apply --reason \"<что случилось>\"" 1 ;;
       *) fail "heal --apply: слова пилота нет. Нужна реплика пилота в ЭТОМ разговоре, целиком: heal $HEAL_SLUG $HEAL_CODE_NOW (причина: ${HEAL_DEAD_WHY:-есть несохранённая работа}). Слово не принимается ни аргументом, ни от самого агента; проверка — рефлекс против самоодобрения, не граница привилегий" 1 ;;
     esac
   fi
@@ -16379,4 +17020,4 @@ if [ "$CMD" = "post-merge-check" ]; then
   exit 0
 fi
 
-fail "Unknown command: $CMD (use: open, close, audit, renew, note-file, note-commit, recover-orphaned, retire-semaphore-artifact, heal, owner-status, pre-commit-check, post-merge-check)"
+fail "Unknown command: $CMD (use: open, close, audit, renew, note-file, note-commit, recover-orphaned, retire-semaphore-artifact, release-duplicate, heal, owner-status, pre-commit-check, post-merge-check)"

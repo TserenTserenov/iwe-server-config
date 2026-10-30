@@ -22,7 +22,10 @@
 set -euo pipefail
 
 IWE_ROOT_REAL="${IWE_ROOT:-$HOME/IWE}"
-GUARD="$IWE_ROOT_REAL/scripts/session-guard.sh"
+# The guard under test is the file shipped next to this test (the snapshot the
+# sync gate delivers), not whatever copy the host's $IWE_ROOT happens to hold;
+# SESSION_GUARD_UNDER_TEST overrides it, same as the Python smoke test.
+GUARD="${SESSION_GUARD_UNDER_TEST:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/session-guard.sh}"
 GOV_REPO_REAL="${IWE_GOVERNANCE_REPO:-DS-my-strategy}"
 OBLIGATION_CLI_REAL="$IWE_ROOT_REAL/$GOV_REPO_REAL/scripts/close_obligation.py"
 
@@ -187,11 +190,24 @@ if len(calls) != 2:
     raise SystemExit(0)
 for call in calls:
     guard = "\n".join(text[:call.start()].rsplit("\n", 5)[-5:])
-    if "close_path" not in guard or "peer-session" not in guard:
+    # The condition may be spelled inline (`close_path` + `peer-session`) or
+    # through the _close_path_clears_obligation predicate. In the helper form the
+    # call must be an `if` over the semaphore's own close_path field, and the
+    # predicate must have a case arm that names peer-session and returns 0
+    # (a bare mention of the word, e.g. in a log line, does not count).
+    inline = "close_path" in guard and "peer-session" in guard
+    via_helper = re.search(r'if\s+_close_path_clears_obligation\s+"\$\([^)]*close_path', guard)
+    if not (inline or via_helper):
         print(f"вызов не под нужным условием: {guard!r}")
         break
 else:
-    print("ok")
+    helper = re.search(r"^_close_path_clears_obligation\(\) \{.*?^\}", text, re.M | re.S)
+    inline_all = all("peer-session" in "\n".join(text[:c.start()].rsplit("\n", 5)[-5:]) for c in calls)
+    arm = helper and re.search(r"peer-session\b[^)\n]*\)\s*return 0", helper.group(0))
+    if not inline_all and not arm:
+        print("_close_path_clears_obligation не возвращает 0 для peer-session")
+    else:
+        print("ok")
 PY
 )
 check "обычное закрытие и повтор стоят под проверкой close_path" "$WIRING" "ok"
