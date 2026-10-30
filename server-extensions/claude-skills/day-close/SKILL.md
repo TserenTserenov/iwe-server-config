@@ -506,7 +506,28 @@ DC_STATUS=$(git status --porcelain) || exit 1
 # Проверить владение непосредственно перед публикацией. Публикуется вся копия:
 # process-runner мог создать отдельный коммит RUN, один DC_SHA его не покрывает.
 bash "$DAY_CLOSE_WRAPPER" --context "$DAY_CLOSE_LOCK_TOKEN" >/dev/null || exit 1
-bash scripts/ds-publish.sh "$PWD" high --reason "day-close: $IWE_CLOSE_DATE" || exit 1
+# BEGIN-RECEIPT-ENV (WP-539 Ф21 Б5; извлекается scripts/tests/day-close-receipt-env-smoke.sh)
+# Квитанция публикации (v2) пишется только при заданных агенте и номере сессии. Интерактивный
+# Claude Code переменную IWE_AGENT не несёт, поэтому без этого блока квитанция терялась
+# («нет привязанного агента»). Номер сессии = суффикс файла housekeeping-семафора, открытого
+# выше (claude-code-housekeeping-day-close.open → housekeeping-day-close). Квитанция отказывает,
+# если у сессии нет заявленных коммитов для репозитория, поэтому сначала заявляем DC_SHA (по слагу).
+DC_GUARD="${IWE_SCRIPTS:-$HOME/IWE/scripts}/session-guard.sh"
+DC_SEM="${IWE_ROOT:-$HOME/IWE}/.iwe-runtime/sessions/claude-code-housekeeping-day-close.open"
+DC_RECEIPT_ENV=()
+DC_COMMON=$(git rev-parse --path-format=absolute --git-common-dir 2>/dev/null) || DC_COMMON=""
+DC_REPO_NAME=$(basename "$(dirname "$DC_COMMON")")
+# Имя корневого репозитория считается так же, как в isolate-push.sh (record_publication_receipts).
+[ "$(dirname "$DC_COMMON")" != "$(cd "${IWE_ROOT:-$HOME/IWE}" 2>/dev/null && pwd -P)" ] || DC_REPO_NAME=iwe-root
+if [ -f "$DC_GUARD" ] && [ -f "$DC_SEM" ] && [ -n "$DC_COMMON" ] \
+    && IWE_AGENT=claude-code bash "$DC_GUARD" note-commit "$DC_SHA" --repo "$DC_REPO_NAME" \
+         --agent claude-code --slug day-close; then
+  DC_RECEIPT_ENV=(IWE_AGENT=claude-code IWE_PUBLICATION_SESSION_ID=housekeeping-day-close)
+else
+  echo "WARN: коммит дня не заявлен (нет охранника сессий, housekeeping-семафора или заявка отклонена) — публикация пойдёт без квитанции v2" >&2
+fi
+# END-RECEIPT-ENV
+env ${DC_RECEIPT_ENV[@]+"${DC_RECEIPT_ENV[@]}"} bash scripts/ds-publish.sh "$PWD" high --reason "day-close: $IWE_CLOSE_DATE" || exit 1
 git fetch -q origin main || exit 1
 DC_PUBLISHED_REVISION=$(git rev-parse origin/main) || exit 1
 # Доказательство всей ветки: достижимость или проверяемая patch-эквивалентность

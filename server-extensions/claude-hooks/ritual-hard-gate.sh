@@ -70,6 +70,33 @@ if [ "$ALREADY_SHOWN" = "yes" ]; then
   : > "$CONFIRMED_MARKER"
   exit 0
 fi
+# WP-484 Ф267 п.4: after the conversation is compacted the summary names the
+# WP while the Ritual text may be out of view (or was agreed in another form).
+# The agreed Ritual stored by `declare-intent.sh WP-N --ritual "..."` in this
+# conversation's record counts as shown, with these limits (cold review 29.10):
+#  - the record must carry THIS conversation's id and the SAME WP the latest
+#    message names (another WP needs its own agreement);
+#  - non-blank text and a calendar-valid agreed_at, not in the future and not
+#    older than 72 h (protocol-open: a pause over 3 days needs a fresh Ritual);
+#  - no CONFIRMED_MARKER is written here: the marker is not bound to a WP, so
+#    it would carry this agreement over to the next WP named in the session.
+# The record is written by the agent itself, so this is a reflex against
+# re-asking after compaction, not proof that the pilot agreed.
+if [ "$ALREADY_SHOWN" = "no" ]; then
+  NAMED_WP=$(ritual_prompt_wp_number "$TRANSCRIPT_PATH")
+  DECL_FILE="${IWE_RUNTIME_DIR:-${HOME:-/nonexistent}/IWE/.iwe-runtime}/intent-declarations/$SESSION_ID.json"
+  if [ -n "$NAMED_WP" ]; then
+    STORED_OK=$(jq -rs --arg wp "$NAMED_WP" --arg sid "$SESSION_ID" '
+      select(length == 1) | first | select(.session_id == $sid and .intent == $wp)
+      | .ritual
+      | select(type == "object" and ((.text // "") | type == "string" and test("\\S")))
+      | .agreed_at as $at
+      | (try ($at | fromdateiso8601) catch null) as $t
+      | select($t != null and ($t | todate) == $at and $t <= now and now - $t <= 259200)
+      | "yes"' "$DECL_FILE" 2>/dev/null || true)
+    [ "$STORED_OK" = "yes" ] && exit 0
+  fi
+fi
 # Fail OPEN on "error" (transcript unreadable / unexpected exception) --
 # only an explicit "no" denies. Folding "error" into "no" here would make
 # a transient parse failure synchronously deny a legitimate tool call
@@ -77,6 +104,6 @@ fi
 [ "$ALREADY_SHOWN" = "no" ] || exit 0
 
 cat <<EOF
-{"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "deny", "permissionDecisionReason": "WP Gate: ты назвал номер РП в этой сессии, но Ритуал согласования (роль/РП/класс/ставка — memory/protocol-open.md §Сессия) ещё не объявлен. Покажи Ритуал СЕЙЧАС, текстом, до вызова инструмента $TOOL_NAME, затем дождись согласования пилота."}}
+{"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "deny", "permissionDecisionReason": "WP Gate: ты назвал номер РП в этой сессии, но Ритуал согласования (роль/РП/класс/ставка — memory/protocol-open.md §Сессия) ещё не объявлен. Покажи Ритуал СЕЙЧАС, текстом (строки «> **Роль Claude:**», «> **РП:**», «> **Целевой переход состояния:**» подряд), до вызова инструмента $TOOL_NAME, затем дождись согласования пилота. Когда пилот согласует Ритуал, следующей командой запиши согласование: scripts/declare-intent.sh <WP-N> --ritual \"<что согласовано>\" — запись переживёт сжатие беседы (действует 72 часа)."}}
 EOF
 exit 0

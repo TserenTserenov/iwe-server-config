@@ -357,7 +357,8 @@ def product_target(repo: Path, raw: bytes, name: str, root: Path, target_ref: st
     for path in protected:
         other_common, other_origin = repository_identity(path)
         if common == other_common or origin == other_origin:
-            raise ProofError("protected repository requires main")
+            raise ProofError("репозиторий защищён: в состоянии prepared квитанцию принимает только "
+                             "закрытие (или ветка восстановления для MC-sessions)")
     if not claims(raw, name, repo):
         raise ProofError("no session-owned product claims")
     if common.parent.parent == root and not legacy_wp167:
@@ -727,6 +728,37 @@ def verified_anchors(repo: Path, semaphore: Path, name: str, remote: str) -> lis
     return sorted(anchors)
 
 
+def append_receipts(repo: Path, semaphore: Path, raw: bytes, added: list[str],
+                    remote: str, target_ref: str, recheck=None) -> None:
+    """Append receipt lines atomically; the caller holds the session transition lock.
+
+    Re-snapshots the session and re-reads the fetched target ref right before
+    the replace; recheck() returning True means the caller's extra binding broke.
+    """
+    updated = raw + ("\n".join(added) + "\n").encode()
+    if len(updated) > MAX_BYTES:
+        raise ProofError("receipt would exceed session size limit")
+    fd, temporary = tempfile.mkstemp(prefix=semaphore.name + ".receipt-", dir=semaphore.parent)
+    try:
+        with os.fdopen(fd, "wb") as stream:
+            stream.write(updated)
+            stream.flush()
+            os.fsync(stream.fileno())
+        if snapshot(semaphore) != raw or oid(repo, tracking_ref(repo, target_ref) + "^{commit}") != remote:
+            raise ProofError("session or remote changed while recording")
+        if recheck is not None and recheck():
+            raise ProofError("alternative checkout changed while recording")
+        os.replace(temporary, semaphore)
+        directory_fd = os.open(semaphore.parent, os.O_RDONLY)
+        try:
+            os.fsync(directory_fd)
+        finally:
+            os.close(directory_fd)
+    finally:
+        if os.path.exists(temporary):
+            os.unlink(temporary)
+
+
 def record(repo: Path, semaphore: Path, name: str, published: str,
            target_ref: str = MAIN_REF, workspace: Path | None = None) -> int:
     raw = snapshot(semaphore)
@@ -762,29 +794,10 @@ def record(repo: Path, semaphore: Path, name: str, published: str,
         raise ProofError("no claimed change has a publication proof")
     if not added:
         return 0
-    updated = raw + ("\n".join(added) + "\n").encode()
-    if len(updated) > MAX_BYTES:
-        raise ProofError("receipt would exceed session size limit")
-    fd, temporary = tempfile.mkstemp(prefix=semaphore.name + ".receipt-", dir=semaphore.parent)
-    try:
-        with os.fdopen(fd, "wb") as stream:
-            stream.write(updated)
-            stream.flush()
-            os.fsync(stream.fileno())
-        if snapshot(semaphore) != raw or oid(repo, tracking_ref(repo, target_ref) + "^{commit}") != remote:
-            raise ProofError("session or remote changed while recording")
-        if (alternate
-                and select_checkout(workspace / name, semaphore, name, published, workspace) != repo):
-            raise ProofError("alternative checkout changed while recording")
-        os.replace(temporary, semaphore)
-        directory_fd = os.open(semaphore.parent, os.O_RDONLY)
-        try:
-            os.fsync(directory_fd)
-        finally:
-            os.close(directory_fd)
-    finally:
-        if os.path.exists(temporary):
-            os.unlink(temporary)
+    append_receipts(repo, semaphore, raw, added, remote, target_ref,
+                    recheck=(lambda: select_checkout(workspace / name, semaphore, name,
+                                                     published, workspace) != repo)
+                    if alternate else None)
     return len(added)
 
 

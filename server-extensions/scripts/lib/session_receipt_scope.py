@@ -257,8 +257,118 @@ def verify_empty_governance_scope(semaphore: Path, repo: Path) -> None:
             "repository identity changed during scope proof")
 
 
+SESSIONS_NAME = "MC-sessions"
+SHA_PATTERN = r"[0-9a-f]{40}|[0-9a-f]{64}"
+
+
+def common_dir(path: Path) -> Path:
+    return Path(proof.git(path, "rev-parse", "--path-format=absolute", "--git-common-dir")
+                .decode().strip()).resolve(strict=True)
+
+
+def receipt_rows(raw: bytes, name: str, source: str) -> int:
+    """Count saved receipt lines for one (repository, source); malformed lines refuse."""
+    count = 0
+    for line in raw.decode("utf-8").splitlines():
+        if not line.startswith(proof.PREFIX):
+            continue
+        value = json.loads(line[len(proof.PREFIX):])
+        require(isinstance(value, dict), "повреждённая запись квитанции в семафоре")
+        if value.get("repo") == name and value.get("source_commit") == source:
+            count += 1
+    return count
+
+
+def require_recovery_session(raw: bytes, repo: Path, workspace: Path) -> tuple[Path, str]:
+    """Check the PREPARED peer session and its sessions checkout; return (common, orz)."""
+    require(proof.field(raw, "close_path") == "peer-session",
+            "восстановление квитанции возможно только для peer-session")
+    require(proof.field(raw, "close_delivery_version") == "isolate-push/v2"
+            and proof.field(raw, "close_delivery_session_id") == proof.field(raw, "session_id")
+            and proof.field(raw, "close_delivery_target_ref") == proof.MAIN_REF,
+            "семафор не в состоянии prepared для refs/heads/main")
+    require(repo.name == SESSIONS_NAME and Path(proof.field(raw, "orz_sessions_dir")).resolve(strict=True) == repo,
+            "репозиторий не совпадает с каталогом сессий семафора (MC-sessions)")
+    common = common_dir(repo)
+    require(common == repo / ".git", "это не основной checkout MC-sessions")
+    others = {"close_delivery_common_dir": Path(proof.field(raw, "close_delivery_common_dir")).resolve(),
+              "governance_worktree": common_dir(Path(proof.field(raw, "governance_worktree")).resolve(strict=True))}
+    if (workspace / ".git").exists():
+        others["workspace root"] = common_dir(workspace.resolve(strict=True))
+    for label, other in others.items():
+        require(other != common, "MC-sessions совпадает с защищённым репозиторием: " + label)
+    frozen = json.loads(proof.field(raw, "close_delivery_claimed_commits"))
+    actual = sorted(set(line[8:] for line in raw.decode().splitlines() if line.startswith("commit: ")))
+    require(isinstance(frozen, list) and frozen == actual,
+            "заявки на коммиты расходятся с замороженным списком подготовки закрытия")
+    orz = proof.field(raw, "orz_file")
+    require(exact_path(orz), "invalid session document path")
+    return common, orz
+
+
+def require_publishable_entries(repo: Path, commit: str, paths: list[str]) -> None:
+    """Reject deletions, symlinks, submodules and modes verify_scope cannot accept."""
+    for row in proof.entries(repo, commit, paths):
+        entry = row["entry"]
+        require(entry is not None and entry["kind"] == "blob" and entry["mode"] in {"100644", "100755"},
+                "коммит содержит удаление, симлинк, сабмодуль или недопустимый режим: " + row["path"])
+
+
+def record_prepared_recovery(semaphore: Path, repo: Path, published: str,
+                             workspace: Path) -> tuple[list[str], list[str]]:
+    """Append publication receipts for this session's own MC-sessions commits in PREPARED.
+
+    Only evidence is appended: claims and the prepare digest are never touched.
+    The caller holds the session transition lock and fetched origin/main just now.
+    The PUBLISHED close state is deliberately not handled here (known limit).
+    Returns (sources recorded, sources still unproven); a duplicate receipt refuses.
+    """
+    raw = proof.snapshot(semaphore)
+    require(re.fullmatch(SHA_PATTERN, published) is not None, "invalid published commit")
+    repo = repo.resolve(strict=True)
+    common, orz = require_recovery_session(raw, repo, workspace)
+    own = parse_scope(raw, common, orz)
+    remote = proof.oid(repo, "refs/remotes/origin/main^{commit}")
+    require(proof.oid(repo, published + "^{commit}") == published and proof.ancestor(repo, published, remote),
+            "опубликованный коммит не является предком свежего origin/main")
+    sources = proof.claims(raw, SESSIONS_NAME, repo)
+    require(0 < len(sources) <= 128, "нет заявленных коммитов MC-sessions")
+    lines: list[str] = []
+    recorded: list[str] = []
+    unproven: list[str] = []
+    for source in sources:
+        if receipt_rows(raw, SESSIONS_NAME, source):
+            require(proof.verify(repo, semaphore, SESSIONS_NAME, source, remote),
+                    "для коммита уже есть квитанция, но она не проходит проверку; "
+                    "дописывать вторую нельзя: " + source)
+            continue
+        if proof.ancestor(repo, source, remote):
+            anchor = source
+        elif proof.replay_matches(repo, source, published):
+            anchor = published
+        else:
+            unproven.append(source)
+            continue
+        paths = proof.changed_paths(repo, source)
+        require(set(paths) <= own, "коммит меняет путь вне собственных файлов сессии: " + source)
+        require_publishable_entries(repo, source, paths)
+        require_publishable_entries(repo, anchor, paths)
+        evidence = proof.receipt(repo, raw, SESSIONS_NAME, source, anchor, proof.MAIN_REF)
+        lines.append(proof.PREFIX + json.dumps(evidence, sort_keys=True, separators=(",", ":")))
+        recorded.append(source)
+    if lines:
+        proof.append_receipts(repo, semaphore, raw, lines, remote, proof.MAIN_REF)
+    return recorded, unproven
+
+
 if __name__ == "__main__":
     try:
+        if len(sys.argv) == 6 and sys.argv[1] == "--record-prepared-recovery":
+            done, left = record_prepared_recovery(Path(sys.argv[2]), Path(sys.argv[3]),
+                                                  sys.argv[4], Path(sys.argv[5]))
+            print("добавлено: " + (", ".join(done) or "ничего") + "; осталось недоказанным: "
+                  + (", ".join(left) or "ничего"))
+            raise SystemExit(1 if left else 0)
         if len(sys.argv) != 4:
             raise proof.ProofError("usage: session_receipt_scope.py <semaphore> <MC-sessions> <remote>")
         if sys.argv[1] == "--empty-governance":

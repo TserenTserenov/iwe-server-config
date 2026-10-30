@@ -29,9 +29,11 @@ export IWE_SESSIONS_ROOT="$GOV/sessions"
 mkdir -p "$GOV/scripts" "$GOV/sessions" "$CARDS" "$SESSION_DIR" "$TICKET_DIR" "$OBLIGATION_DIR" "$TEST_ROOT/bin" "$TEST_ROOT/scripts"
 git -C "$GOV" init -q
 
+TG_LOG="$TEST_ROOT/tg.log"
 cat > "$TEST_ROOT/bin/iwe-tg" <<EOF
 #!/usr/bin/env bash
-exit 0
+printf '%s|%s\n' "\${TELEGRAM_NEEDS_DECISION:-}" "\$*" >> "$TG_LOG"
+exit \${STUB_TG_RC:-0}
 EOF
 chmod +x "$TEST_ROOT/bin/iwe-tg"
 
@@ -233,6 +235,38 @@ grep -q 'процесс: жив' <<<"$OUT" || fail "live owner not reported: $OU
 grep -q 'Смерть владельца доказана: нет' <<<"$OUT" || fail "live owner reported as proven dead: $OUT"
 CODE=$(code_from "$OUT" live-1)
 [ -n "$CODE" ] || fail "no confirmation code in the dry run: $OUT"
+# Ф267 п.6: the line to type goes to the pilot's Telegram right after the dry run, once per code.
+grep -q 'Строка слова передана в отправку пилоту в Телеграм' <<<"$OUT" || fail "dry run did not report the Telegram send: $OUT"
+# routing: own decision source, flagged as needing a decision, with the action line the router requires
+[ "$(grep -c '^1|--source session-guard-heal ' "$TG_LOG")" = 1 ] || fail "send must use source session-guard-heal with TELEGRAM_NEEDS_DECISION=1 once: $(cat "$TG_LOG" 2>/dev/null)"
+grep -q 'Что делать: .\{10,\}' "$TG_LOG" || fail "the text must carry a 'Что делать:' line of 10+ characters"
+# the line to type stands alone, no punctuation after the code
+[ "$(grep -c "^heal live-1 $CODE\$" "$TG_LOG")" = 1 ] || fail "the exact line 'heal live-1 $CODE' must stand alone once: $(cat "$TG_LOG" 2>/dev/null)"
+grep -q 'процесс жив' "$TG_LOG" || fail "the text must carry the owner process state"
+! grep -q 'копия: /' "$TG_LOG" || fail "the text must not carry an absolute worktree path (the router would scrub it)"
+OUT2=$(sg -- heal live-1)
+grep -q 'уже передана пилоту' <<<"$OUT2" || fail "repeated dry run must not resend: $OUT2"
+[ "$(grep -c '^1|--source session-guard-heal ' "$TG_LOG")" = 1 ] || fail "repeated dry run resent the Telegram message"
+# A failing notifier never fails the dry run and leaves no marker, so the next dry run retries.
+write_semaphore live-tgfail "$$" "$HOST"
+OUT3=$(sg STUB_TG_RC=1 -- heal live-tgfail) || fail "a failing notifier must not fail the dry run: $OUT3"
+grep -q 'Строка слова в Телеграм не отправлена (iwe-tg, код 1)' <<<"$OUT3" || fail "send failure not reported: $OUT3"
+! compgen -G "$TEST_ROOT/.iwe-runtime/heal-word-notified/live-tgfail.*" >/dev/null || fail "a failed send must not leave the once-per-code marker"
+OUT3=$(sg -- heal live-tgfail)
+grep -q 'Строка слова передана в отправку пилоту в Телеграм' <<<"$OUT3" || fail "the retry after a failed send did not send: $OUT3"
+
+# Quarantined by the sender filter (exit 3): reported distinctly, no claim kept, dry run still succeeds.
+write_semaphore live-tg3 "$$" "$HOST"
+OUT4=$(sg STUB_TG_RC=3 -- heal live-tg3) || fail "a quarantined send must not fail the dry run: $OUT4"
+grep -q 'задержано фильтром отправителей' <<<"$OUT4" || fail "quarantine not reported: $OUT4"
+! compgen -G "$TEST_ROOT/.iwe-runtime/heal-word-notified/live-tg3.*" >/dev/null || fail "a quarantined send must not keep the once-per-code claim"
+
+# Two parallel dry runs send once (the claim is taken before the send).
+write_semaphore live-par "$$" "$HOST"
+sg -- heal live-par >/dev/null &
+sg -- heal live-par >/dev/null &
+wait
+[ "$(grep -c 'heal live-par ' "$TG_LOG")" = 1 ] || fail "parallel dry runs sent more than once: $(grep -c 'heal live-par ' "$TG_LOG")"
 if OUT=$(sg CLAUDE_CODE_SESSION_ID=caller-1 -- heal live-1 --apply --reason "no word"); then fail "live owner healed without the word"; fi
 grep -q 'слова пилота нет' <<<"$OUT" || fail "refusal does not explain the missing word: $OUT"
 [ -f "$SESSION_DIR/claude-code-live-1.open" ] || fail "refused heal moved the semaphore"

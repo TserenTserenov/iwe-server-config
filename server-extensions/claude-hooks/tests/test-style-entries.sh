@@ -20,7 +20,8 @@ check() {  # check <name> <command...>: passes when the command succeeds
   if "$@"; then PASS=$((PASS+1)); echo "ok   $name"; else FAIL=$((FAIL+1)); echo "FAIL $name"; fi
 }
 
-BAD='Запусти `sync-agent-instructions.sh --force` и всё обновится.'
+# A10 (bare English status marker) is a blockable rule; A13.1 became warn-only on 30.10.
+BAD=$'Итог проверки.\n\nPASS\n\nДальше: жду ответа.'
 GOOD='Готово, всё работает.'
 
 kimi_journal() {  # kimi_journal <assistant text>

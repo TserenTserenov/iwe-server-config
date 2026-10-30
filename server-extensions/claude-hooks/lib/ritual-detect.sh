@@ -94,7 +94,7 @@ try:
     pattern = re.compile(r"\b(?:WP|РП)-\d+\b", re.IGNORECASE)
     last_user_text = ""
     for r in rs.read_transcript(os.environ["TRANSCRIPT_PATH"]):
-        if rs.role_of(r) != "user" or r.get("isMeta"):
+        if rs.role_of(r) != "user" or r.get("isMeta") or r.get("isCompactSummary"):
             continue
         last_user_text = rs.message_text(r)
     print("yes" if (last_user_text and pattern.search(last_user_text)) else "no")
@@ -161,7 +161,7 @@ try:
     pattern = re.compile(r"\b(?:WP|РП)-(\d+)\b", re.IGNORECASE)
     last_user_text = ""
     for r in rs.read_transcript(os.environ["TRANSCRIPT_PATH"]):
-        if rs.role_of(r) != "user" or r.get("isMeta"):
+        if rs.role_of(r) != "user" or r.get("isMeta") or r.get("isCompactSummary"):
             continue
         last_user_text = rs.message_text(r)
     m = pattern.search(last_user_text) if last_user_text else None
