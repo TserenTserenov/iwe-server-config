@@ -121,7 +121,11 @@ in
         # ни один процесс на сервере не читает (WP-484 delivery-version-handshake,
         # peer-session 2026-08-21-01, root cause: protocol-open.md/protocol-close.md
         # отставали на server 26-32 дня без единого сигнала ошибки).
-        ${pkgs.rsync}/bin/rsync -a --checksum \
+        # --chmod: из nix store приходят каталоги 555 и файлы 444 (дата 1970).
+        # `-a` переносит права, в том числе на сам каталог memory/ - после этого
+        # в него нельзя создать новый файл (EACCES), рецидив 11.09, 21.09, 25.09,
+        # 10.10, 30.10. Явные права вместо унаследованных.
+        ${pkgs.rsync}/bin/rsync -a --checksum --chmod=D755,F644 \
           ${src}/memory/ \
           /home/${cfg.user}/.claude/projects/-home-${cfg.user}-IWE/memory/
 
