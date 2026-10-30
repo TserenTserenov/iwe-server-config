@@ -29,7 +29,7 @@ in
     ../../modules/iwe-calendar-secrets.nix  # DOC3 — Google Calendar read-only creds
     ../../modules/claude-subscription-secret.nix  # WP-7 21.07 — OAuth-токен подписки для iwe-scheduler
     ../../modules/bitcoind-ots-verify.nix  # WP-455 Ф11 hardening 27.07 — независимая верификация OTS-якорей
-    ../../modules/plan-bridge.nix  # WP-561 Ф55 — приёмник запросов плана; выключен, включение отдельным коммитом
+    ../../modules/plan-bridge.nix  # WP-561 Ф55 — приёмник запросов плана (включён в блоке tsekh.planBridge)
     ./hardware-configuration.nix # генерируется при первой установке
   ];
 
@@ -76,12 +76,16 @@ in
     enable = true;
     receiver.enable = true;
     hostId = values.hostName;
-    agentUid = 1000;  # tseren; проверено id на сервере 30.10, в users.nix uid не закреплён
     codeSrc = ../../vendor/plan-bridge/code;
     inherit codePaths producersPath limitsPath;
     rulesPaths = codePaths ++ [ producersPath limitsPath ];
     admit = [ "tsekh-agent-channel" ];
   };
+
+  # uid агентов закреплён явно: на сервере он уже 1000 (проверено 30.10, uid-map
+  # NixOS держит то же значение), поэтому закрепление ничего не меняет, но даёт
+  # модулю plan-bridge вычислимое значение agentUid.
+  users.users.tseren.uid = 1000;
 
   tsekh.users = {
     rootSshKeys   = values.sshKeys.root;

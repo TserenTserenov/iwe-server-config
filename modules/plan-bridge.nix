@@ -209,7 +209,16 @@ in
       requires = [ "iwe-plan-bridge-key.service" ];
       after = [ "iwe-plan-bridge-key.service" ];
       environment.PYTHONDONTWRITEBYTECODE = "1";
+      # Отказ адаптера (код 2: хост не готов) не лечится перезапуском; прочие
+      # сбои повторяются не более пяти раз за пять минут, затем юнит становится
+      # failed и виден в мониторинге. Автоматический откат deploy-rs падение
+      # приёмника не ловит (юнит Type=simple), поэтому видимый failed обязателен.
+      unitConfig = {
+        StartLimitIntervalSec = 300;
+        StartLimitBurst = 5;
+      };
       serviceConfig = {
+        RestartPreventExitStatus = 2;
         User = "iwe-plan-bridge";
         Group = "iwe-plan-writers";
         RuntimeDirectory = "iwe-plan-bridge";
