@@ -53,12 +53,34 @@ in
     ipv6 = values.ipv6;
   };
 
-  # WP-561 Ф55: приёмник запросов плана. Выключен: слияние ничего не меняет на
-  # сервере. Включение требует codeSrc (копия кода моста с SHA в SOURCE),
-  # утверждённой пилотом версии правил и решения о границе доверия (DR-06 п.5а).
-  tsekh.planBridge = {
-    enable = false;
+  # WP-561 Ф55: приёмник запросов плана (К12, решение пилота 30.10: защита от
+  # ошибок и подмены имени между своими агентами, умысел агента вне модели).
+  # Включены пользователь, каталоги, конфиг хоста, ключ и служба приёмника.
+  # Доставка в Git НЕ включена: нет таймера и учётных данных публикации.
+  # Копия кода — vendor/plan-bridge/code, происхождение — vendor/plan-bridge/SOURCE.
+  tsekh.planBridge = let
+    codePaths = [
+      "scripts/lib/plan_allocation.py"
+      "scripts/lib/plan_bridge_allocation.py"
+      "scripts/lib/plan_bridge_decisions.py"
+      "scripts/lib/plan_bridge_host.py"
+      "scripts/lib/plan_bridge_receiver.py"
+      "scripts/lib/plan_event_bridge.py"
+      "scripts/lib/plan_event_intake.py"
+      "scripts/lib/plan_event_wal.py"
+      "scripts/plan-event-receiver.py"
+    ];
+    producersPath = "machine/plan-bridge/producers.json";
+    limitsPath = "machine/plan-bridge/limits.json";
+  in {
+    enable = true;
+    receiver.enable = true;
     hostId = values.hostName;
+    agentUid = 1000;  # tseren; проверено id на сервере 30.10, в users.nix uid не закреплён
+    codeSrc = ../../vendor/plan-bridge/code;
+    inherit codePaths producersPath limitsPath;
+    rulesPaths = codePaths ++ [ producersPath limitsPath ];
+    admit = [ "tsekh-agent-channel" ];
   };
 
   tsekh.users = {

@@ -1,0 +1,21 @@
+# Происхождение vendor/plan-bridge/code (WP-561 Ф55)
+#
+# Источник: репозиторий DS-my-strategy, изолированная копия пир-сессии
+#   2026-10-30-20-wp561-f55-host-adapter (MC-sessions), на момент копирования
+#   НЕ опубликован. После публикации записать сюда SHA коммита и сверить:
+#   `git ls-tree <SHA> scripts/lib scripts/plan-event-receiver.py` должен дать те
+#   же объекты. Файл лежит вне code/, чтобы его правка не пересобирала службу.
+#
+# Хеши объектов Git (git hash-object) скопированных файлов:
+#   70284c63241e1032d4e3502cd81f2663933541d9 scripts/lib/plan_allocation.py
+#   83474ade1b5b9845ef0766779fd0cda3a74809e3 scripts/lib/plan_bridge_allocation.py
+#   f4431d14b40a2acc7002e18c0423f816f58a4e86 scripts/lib/plan_bridge_decisions.py
+#   b0cc1d2273b194405702af1849d41329391aaa95 scripts/lib/plan_bridge_host.py
+#   017c6a8abaaede2dccc475dcddf76eddef56ee71 scripts/lib/plan_bridge_receiver.py
+#   9057e5818cbc319cad7a45536139286ffeba60a3 scripts/lib/plan_event_bridge.py
+#   aaa218adb2b6792777f4aacfc11eb28efed818ed scripts/lib/plan_event_intake.py
+#   fbb3395861e9dd13a64863bed07c0fe2a8c8172e scripts/lib/plan_event_wal.py
+#   4ee4700b089bc885f12e52c333f3a21f52d6a582 scripts/plan-event-receiver.py
+#
+# Обновление копии: скопировать файлы из DS-my-strategy на нужном SHA, обновить
+# этот список и SHA, затем отдельный коммит и переключение.
