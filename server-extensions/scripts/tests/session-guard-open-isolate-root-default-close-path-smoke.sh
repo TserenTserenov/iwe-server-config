@@ -27,11 +27,12 @@ make_repo() {  # <dir> -- a repo with an origin, one commit pushed to main
 
 make_repo "$TEST_ROOT"                 # the workspace ROOT repo itself
 make_repo "$TEST_ROOT/DS-strategy"     # the governance repo, a separate checkout
-printf 'DS-strategy/\n.iwe-runtime/\n*.origin.git/\n' > "$TEST_ROOT/.gitignore"
+printf 'DS-strategy/\nMC-sessions/\n.iwe-runtime/\n*.origin.git/\n' > "$TEST_ROOT/.gitignore"
 git -C "$TEST_ROOT" add .gitignore
 git -C "$TEST_ROOT" commit -qm "ignore nested repos"
 git -C "$TEST_ROOT" push -q origin HEAD:main
 
+git init -q "$TEST_ROOT/MC-sessions"  # the guard reports into the sandbox, not the inherited live root
 export IWE_ROOT="$TEST_ROOT"
 export IWE_GOVERNANCE_REPO="DS-strategy"
 export IWE_AGENT="fixture"

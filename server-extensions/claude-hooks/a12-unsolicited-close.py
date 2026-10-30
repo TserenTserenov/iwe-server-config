@@ -29,8 +29,14 @@ CLOSE_PROPOSAL_RE = re.compile(
 # Pilot lexicon: a positive intent must be an imperative, not a mention.
 # Includes push phrases (CLAUDE.md §2 rule 2 treats them as close triggers) and
 # the slash commands whose command block is otherwise a synthetic record.
+# "закрой шаг / фазу / пункт ..." names a non-session object, so it is not a
+# close command (РП-605, 30.10.2026: a pasted "закрой шаг «...»" armed the
+# close obligation and blocked a commit). The object list is explicit (P13):
+# "закрой задачу / РП / сессию" stay close triggers, extend only from misses.
 CLOSE_INTENT_RE = re.compile(
-    r"закрывай|закрываю|закрой(?:те)?|закрываем|закроем|можно\s+закрывать|пора\s+закрыва"
+    r"(?:закрывай|закрываю|закрой(?:те)?|закрываем|закроем)\b"
+    r"(?!\s+(?:этот\s+|данный\s+|тот\s+|ещё\s+)?(?:шаг|фаз|пункт|вопрос|issue|тикет|баг|файл|окн|ветк))"
+    r"|можно\s+закрывать|пора\s+закрыва"
     r"|заливай|запуши|запушь"
     r"|/(?:day|week|month|quick)-close\b|/run-protocol\s+(?:day-|week-|month-)?close\b",
     re.IGNORECASE,

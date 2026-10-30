@@ -131,5 +131,24 @@ else
   FAIL=$((FAIL + 1)); echo "FAIL row 14: log missing, hook blocked or counter bumped. out='$HOOK_OUT'"
 fi
 
+# 25-31: "закрой <non-session object>" is a mention of a step, not a close command
+# (РП-605, 30.10.2026). Session/РП objects and the bare word stay commands.
+intent_check() {
+  local row="$1" expected="$2" prompt="$3" got
+  got=$(printf '%s' "$prompt" | python3 "$DETECTOR" --prompt-intends-close 2>/dev/null)
+  if [ "$got" = "$expected" ]; then
+    PASS=$((PASS + 1)); echo "ok   row $row (intends-close=$expected)"
+  else
+    FAIL=$((FAIL + 1)); echo "FAIL row $row: expected $expected, got '$got' for: $prompt"
+  fi
+}
+intent_check 25 no 'Запиши это в карточку и закрой шаг «выяснить, почему» в обоих местах'
+intent_check 26 no 'закройте этот пункт и идём дальше'
+intent_check 27 no 'закрой фазу Ф6 в карточке'
+intent_check 28 yes 'закрой сессию'
+intent_check 29 yes 'закрой РП-605'
+intent_check 30 yes 'заливай и закрывай'
+intent_check 31 yes 'закрывай'
+
 echo "---"; echo "passed=$PASS failed=$FAIL"
 [ "$FAIL" -eq 0 ]
