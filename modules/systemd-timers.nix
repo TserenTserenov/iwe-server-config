@@ -495,14 +495,95 @@ let
       ${pkgs.curl}/bin/curl -s --max-time 10 -X POST \
         "https://api.telegram.org/bot''${TELEGRAM_BOT_TOKEN}/sendMessage" \
         -d "chat_id=$1" \
-        --data-urlencode "text=$msg" \
+        --data-urlencode "text=$2" \
         > /dev/null
     }
-    send_tg "''${TELEGRAM_CHAT_ID}"
-    # Командный канал — дублируем если задан
-    if [ -n "''${TELEGRAM_TEAM_CHAT_ID:-}" ]; then
-      send_tg "''${TELEGRAM_TEAM_CHAT_ID}"
+    # Прямая отправка: личный чат и, если задан, командный канал.
+    send_direct() {
+      send_tg "''${TELEGRAM_CHAT_ID}" "$1"
+      if [ -n "''${TELEGRAM_TEAM_CHAT_ID:-}" ]; then
+        send_tg "''${TELEGRAM_TEAM_CHAT_ID}" "$1"
+      fi
+    }
+    # Платёжный реестр - исключение (WP-568, решение 30.10): всегда сразу и прямо.
+    if [ -n "$pr_what" ]; then
+      send_direct "$msg"
+      exit 0
     fi
+    # Остальные сбои (WP-568, пир-сессия 2026-10-30-02): один сбой - строка в
+    # сводку; срочное сообщение только если задача не выполняется 15 минут и
+    # дольше (минимум 3 сбоя подряд), не чаще раза в 6 часов на задачу.
+    # Одиночный сбой связи (брокер ссылок, 30.10: 3 сообщения за 3 минуты из-за
+    # временного отказа ключа GitHub) в чат не идёт.
+    state_dir="''${HOME:-/home/tseren}/IWE/.claude/state/failure-alert"
+    log="$state_dir/$unit.log"
+    now=$(${pkgs.coreutils}/bin/date +%s)
+    count=1
+    first=$now
+    # Цепочка сбоев: пауза больше 20 минут между сбоями начинает счёт заново
+    # (успех между сбоями в журнал не пишется, поэтому редкие одиночные сбои
+    # частой задачи в одну цепочку не склеиваются). Любая ошибка с состоянием
+    # не должна помешать отправке: все чтения проверяются на число.
+    if ${pkgs.coreutils}/bin/mkdir -p "$state_dir" 2>/dev/null; then
+      prev=$(${pkgs.coreutils}/bin/tail -n 1 "$log" 2>/dev/null) || true
+      case "$prev" in ""|*[!0-9]*) prev=0 ;; esac
+      keep=""
+      if [ $((now - prev)) -le 1200 ]; then
+        keep=$(awk -v c="$((now - 14400))" '$1 ~ /^[0-9]+$/ && $1 >= c' "$log" 2>/dev/null) || true
+      fi
+      { if [ -n "$keep" ]; then ${pkgs.coreutils}/bin/printf '%s\n' "$keep"; fi; echo "$now"; } > "$log.tmp" 2>/dev/null \
+        && ${pkgs.coreutils}/bin/mv "$log.tmp" "$log" 2>/dev/null || true
+      count=$(${pkgs.coreutils}/bin/wc -l < "$log" 2>/dev/null | ${pkgs.coreutils}/bin/tr -d ' ') || true
+      first=$(${pkgs.coreutils}/bin/head -n 1 "$log" 2>/dev/null) || true
+    fi
+    case "$count" in ""|*[!0-9]*) count=1 ;; esac
+    case "$first" in ""|*[!0-9]*) first=$now ;; esac
+    last_urgent=$(${pkgs.coreutils}/bin/cat "$state_dir/$unit.urgent" 2>/dev/null) || true
+    case "$last_urgent" in ""|*[!0-9]*) last_urgent=0 ;; esac
+    urgent=0
+    if [ "$count" -ge 3 ] && [ $((now - first)) -ge 900 ] && [ $((now - last_urgent)) -ge 21600 ]; then
+      urgent=1
+    fi
+    tg="${iweTgShim}/bin/iwe-tg"
+    # Шлюз вернул 0, но не доставил и не записал (запись в сводку не удалась,
+    # тестовый режим): такой ответ считается отказом, сообщение уходит напрямую.
+    gate_ok() {
+      local out rc=0
+      out=$("$tg" --source iwe-failure-alert "$@" 2>&1) || rc=$?
+      echo "$out"
+      [ "$rc" = 0 ] || return 1
+      case "$out" in
+        *"запись в утреннюю сводку не удалась"*|*"реальная отправка заблокирована"*) return 1 ;;
+      esac
+      return 0
+    }
+    if [ "$urgent" = 1 ]; then
+      minutes=$(( (now - first) / 60 ))
+      umsg=$(${pkgs.coreutils}/bin/printf \
+        "🚨 Задача IWE не выполняется уже %s мин (сбоев подряд: %s): %s\nСервер: %s" \
+        "$minutes" "$count" "$human_name" "$host")
+      action="Что делать: открыть новую беседу с Claude и сказать «разбери сбой задачи $human_name на $host»; журнал и причину он найдёт сам."
+      if TELEGRAM_NEEDS_DECISION=1 TELEGRAM_ACTION="$action" gate_ok "$umsg"; then
+        echo "$now" > "$state_dir/$unit.urgent" || true
+        if [ -n "''${TELEGRAM_TEAM_CHAT_ID:-}" ]; then send_tg "''${TELEGRAM_TEAM_CHAT_ID}" "$umsg"; fi
+        exit 0
+      fi
+    else
+      if [ "$last_urgent" -gt 0 ] && [ $((now - last_urgent)) -lt 21600 ]; then
+        tail_note="Срочное сообщение по этой задаче уже отправлено, повторное придёт не раньше чем через 6 часов."
+      else
+        tail_note="Срочного действия нет: если сбои продолжатся 15 минут, придёт отдельное срочное сообщение."
+      fi
+      dmsg=$(${pkgs.coreutils}/bin/printf \
+        "⚠️ Не выполнилась запланированная задача IWE: %s (сбоев подряд: %s, сервер %s). %s" \
+        "$human_name" "$count" "$host" "$tail_note")
+      if gate_ok "$dmsg"; then
+        exit 0
+      fi
+    fi
+    # Шлюз не принял (нет строки реестра, карантин, нет доставки): сообщение не
+    # теряем, уходит прямой отправкой как раньше.
+    send_direct "$msg"
   '';
 
   # Contract-sync wrapper: запускает sync-contracts.sh, затем (только при success)
@@ -1508,7 +1589,7 @@ in
         StandardOutput = "journal";
         StandardError  = "journal";
       };
-      path = [ pkgs.curl pkgs.coreutils ];
+      path = [ pkgs.curl pkgs.coreutils pkgs.gawk ] ++ commonPath;
     };
 
     # =========================================================
