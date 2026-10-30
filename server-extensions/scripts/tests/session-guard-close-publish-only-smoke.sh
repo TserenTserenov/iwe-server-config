@@ -32,10 +32,26 @@ git -C "$REPO" add scripts/process-runner.py
 git -C "$REPO" commit -qm init
 git -C "$REPO" push -q origin HEAD:main
 
+# Sessions repository of the fixture (WP-526 Ф2): the ORZ file lives there, not in the
+# governance repo, and the guard looks for it at the semaphore's orz_sessions_dir.
+MC="$TEST_ROOT/MC-sessions"
+MC_ORIGIN="$TEST_ROOT/mc-origin.git"
+mkdir -p "$MC"
+git init --bare -q "$MC_ORIGIN"
+git -C "$MC" init -q
+git -C "$MC" config user.email test@example.com
+git -C "$MC" config user.name "Test"
+git -C "$MC" remote add origin "$MC_ORIGIN"
+echo fixture > "$MC/README.md"
+git -C "$MC" add README.md
+git -C "$MC" commit -qm init
+git -C "$MC" push -q origin HEAD:main
+
 export IWE_ROOT="$TEST_ROOT"
 export IWE_GOVERNANCE_REPO="DS-strategy"
 export IWE_AGENT="fixture"
 export IWE_FROZEN_CANONICAL_PATH=""
+export IWE_SESSIONS_ROOT="$MC"
 
 write_orz() {
   local orz_path="$1"
@@ -71,10 +87,12 @@ bash "$GUARD" open --wp WP-484 --task fixture --slug publish-only-a --agent fixt
 SEM_A=$(grep -l '^slug: publish-only-a$' "$TEST_ROOT"/.iwe-runtime/sessions/fixture-*.open)
 grep -q '^close_path: publish-only$' "$SEM_A" || { echo "FAIL: fixture setup — close_path not recorded in semaphore" >&2; exit 1; }
 ORZ_A=$(grep '^orz_file: ' "$SEM_A" | cut -d' ' -f2-)
-write_orz "$REPO/sessions/$ORZ_A"
-git -C "$REPO" add "sessions/$ORZ_A"
-git -C "$REPO" commit -qm "orz publish-only a"
-git -C "$REPO" push -q origin HEAD:main
+ORZ_DIR_A=$(sed -n 's/^orz_sessions_dir: //p' "$SEM_A")
+[ "$ORZ_DIR_A" = "$MC" ] || { echo "FAIL: fixture setup — ORZ must go to the fixture sessions repo, got: $ORZ_DIR_A" >&2; exit 1; }
+write_orz "$ORZ_DIR_A/$ORZ_A"
+git -C "$MC" add "$ORZ_A"
+git -C "$MC" commit -qm "orz publish-only a"
+git -C "$MC" push -q origin HEAD:main
 
 CLOSE_A_ERR="$TEST_ROOT/close-a.err"
 if bash "$GUARD" close --wp WP-484 --slug publish-only-a --agent fixture 2>"$CLOSE_A_ERR" \
@@ -93,9 +111,10 @@ bash "$GUARD" open --wp WP-484 --task fixture --slug ordinary-b --agent fixture 
 SEM_B=$(grep -l '^slug: ordinary-b$' "$TEST_ROOT"/.iwe-runtime/sessions/fixture-*.open)
 grep -qE '^close_path: (publish-only|peer-session)$' "$SEM_B" && { echo "FAIL: fixture setup — ordinary open unexpectedly declared a bypass close_path" >&2; exit 1; }
 ORZ_B=$(grep '^orz_file: ' "$SEM_B" | cut -d' ' -f2-)
-write_orz "$REPO/sessions/$ORZ_B"
-git -C "$REPO" add "sessions/$ORZ_B"
-git -C "$REPO" commit -qm "orz ordinary b"
+ORZ_DIR_B=$(sed -n 's/^orz_sessions_dir: //p' "$SEM_B")
+write_orz "$ORZ_DIR_B/$ORZ_B"
+git -C "$MC" add "$ORZ_B"
+git -C "$MC" commit -qm "orz ordinary b"
 
 if bash "$GUARD" close --wp WP-484 --slug ordinary-b --agent fixture 2>/dev/null; then
   echo "FAIL: close accepted a session with no close_path and no terminal card at all" >&2
