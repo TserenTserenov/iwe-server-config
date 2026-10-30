@@ -566,9 +566,10 @@ if printf '%s' "$CMD_EXEC" | grep -qE '(^|[^[:alnum:]_.-])git([^[:alnum:]_-]|$)'
         FROZEN_CHECKOUT="${STAGE_VERDICT#*$'\t'}"
         # The hint depends on WHICH canon is frozen (РП-518, bug-2026-10-30): the workspace
         # root has no DS-my-strategy in its isolated copy, so the governance hint does not fit
-        # it, and the runner route from a root copy needs close_path quick-close.
+        # it, and the runner route from a root copy needs close_path quick-close. A root copy
+        # opened without --close-path cannot be closed at all, so the hint declares the path.
         if [ "$FROZEN_CHECKOUT" = "$WORKSPACE_ROOT" ]; then
-          FROZEN_HINT="Открой изолированную копию КОРНЯ: (cd $WORKSPACE_ROOT && bash scripts/session-guard.sh open --isolate --wp WP-N --agent <агент> --close-path quick-close …) и стейдж там. Закрытие из копии корня: канонический process-runner.py запускается из копии с IWE_ROOT, IWE_GOVERNANCE_REPO, IWE_GOVERNANCE_REPO_PATH (отдельная изолированная копия DS-my-strategy), IWE_AGENT, IWE_SESSION_ID; без --close-path quick-close раннер отказывает."
+          FROZEN_HINT="Открой изолированную копию КОРНЯ и объяви путь закрытия сразу: (cd '$WORKSPACE_ROOT' && bash scripts/session-guard.sh open --isolate --wp WP-N --agent <агент> --close-path <publish-only|quick-close> …) и стейдж там. Для публикации одного файла бери --close-path publish-only: коммить и пушь до слов о закрытии, затем session-guard.sh close; прямой коммит после слов о закрытии охранник раннера всё равно блокирует. Для работы с закрытием через раннер бери --close-path quick-close. Без --close-path копию корня закрыть почти нечем. Раннер из копии корня запускается с IWE_ROOT, IWE_GOVERNANCE_REPO, IWE_GOVERNANCE_REPO_PATH (отдельная изолированная копия DS-my-strategy), IWE_AGENT, IWE_SESSION_ID (служебный id охранника, не slug); сессия должна быть живой."
         else
           FROZEN_HINT="Открой изолированную копию ((cd DS-my-strategy && bash ../scripts/session-guard.sh open --isolate --wp WP-N …)) и стейдж там; для чужого репозитория — git -C <путь> add."
         fi

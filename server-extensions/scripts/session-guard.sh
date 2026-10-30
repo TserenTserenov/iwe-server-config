@@ -5827,6 +5827,12 @@ $isolate_status_code $isolate_status_path"
 
     echo "{\"worktree_path\": \"$ISOLATED_WORKTREE_PATH\", \"branch\": \"$ISOLATED_WORKTREE_BRANCH\", \"session_id\": \"$ISOLATE_SESSION_ID\"}"
     echo "⚠️  cd \"$ISOLATED_WORKTREE_PATH\" перед следующим действием -- рабочий каталог не переключается автоматически, это отдельный процесс bash." >&2
+    # РП-518 (bug-2026-10-30): a root copy opened without --close-path can be closed
+    # neither by the runner (its root route accepts only quick-close) nor by a declared
+    # no-runner path, and the pilot's cancel has nothing to cancel. Say so at open time.
+    if [ -z "$CLOSE_PATH" ] && [ "$(realpath "$ISOLATE_BASE_DIR" 2>/dev/null)" = "$(realpath "$IWE_ROOT" 2>/dev/null)" ]; then
+      echo "ℹ️  Копия корня IWE открыта без --close-path: ни раннер (из копии корня он принимает лишь close_path quick-close), ни объявленные пути publish-only и no-code-changes её не закроют. Переоткрой копию с --close-path publish-only (публикация файла) или --close-path quick-close (закрытие через раннер)." >&2
+    fi
   fi
 
   # Report stale semaphores of the same agent — WITHOUT quarantining them.

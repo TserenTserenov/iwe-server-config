@@ -113,6 +113,8 @@ expect_msg() {
 }
 expect_msg "frozen workspace root: hint names the root route"  "$ROOT"  "git add scripts/x.sh" "NOOP=1" \
   "--close-path quick-close" "cd DS-my-strategy &&"
+expect_msg "frozen workspace root: hint names the publish-only path" "$ROOT" "git add scripts/x.sh" "NOOP=1" \
+  "--close-path publish-only" "cd DS-my-strategy &&"
 expect_msg "frozen governance repo: hint keeps the DS-my-strategy route" "$OTHER" "git add a.md" "IWE_FROZEN_CANONICAL_PATH=$OTHER" \
   "cd DS-my-strategy &&" "--close-path quick-close"
 
