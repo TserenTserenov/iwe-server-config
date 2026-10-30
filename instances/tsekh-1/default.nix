@@ -29,6 +29,7 @@ in
     ../../modules/iwe-calendar-secrets.nix  # DOC3 — Google Calendar read-only creds
     ../../modules/claude-subscription-secret.nix  # WP-7 21.07 — OAuth-токен подписки для iwe-scheduler
     ../../modules/bitcoind-ots-verify.nix  # WP-455 Ф11 hardening 27.07 — независимая верификация OTS-якорей
+    ../../modules/plan-bridge.nix  # WP-561 Ф55 — приёмник запросов плана; выключен, включение отдельным коммитом
     ./hardware-configuration.nix # генерируется при первой установке
   ];
 
@@ -50,6 +51,14 @@ in
     interface = values.interface;
     ipv4 = values.ipv4;
     ipv6 = values.ipv6;
+  };
+
+  # WP-561 Ф55: приёмник запросов плана. Выключен: слияние ничего не меняет на
+  # сервере. Включение требует codeSrc (копия кода моста с SHA в SOURCE),
+  # утверждённой пилотом версии правил и решения о границе доверия (DR-06 п.5а).
+  tsekh.planBridge = {
+    enable = false;
+    hostId = values.hostName;
   };
 
   tsekh.users = {
