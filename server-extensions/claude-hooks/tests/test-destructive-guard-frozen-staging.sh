@@ -98,6 +98,24 @@ expect "cd -P -- <canon> from elsewhere"                 block "$OTHER" "(cd -P 
 expect "inherited GIT_INDEX_FILE aims at the canon"      block "$OTHER" "git add a.md" "GIT_INDEX_FILE=$ROOTGIT/index"
 expect "benign assignment before -C"                     pass  "$ROOT" "D=$OTHER; git -C \"\$D\" add a.md"
 
+# expect_msg $1=desc $2=cwd $3=command $4=env assignment $5=substring the block message must have
+# $6=substring it must NOT have (РП-518: the hint depends on which canon is frozen)
+expect_msg() {
+  local desc="$1" cwd="$2" cmd="$3" envset="$4" must="$5" mustnot="$6" msg
+  msg=$(jq -n --arg c "$cmd" --arg d "$cwd" '{tool_name:"Bash",cwd:$d,tool_input:{command:$c}}' \
+    | env "$envset" bash "$HOOK" 2>&1 >/dev/null)
+  if printf '%s' "$msg" | grep -qF -- "$must" && ! printf '%s' "$msg" | grep -qF -- "$mustnot"; then
+    PASS=$((PASS + 1))
+  else
+    FAIL=$((FAIL + 1))
+    echo "FAIL: $desc (message: $msg)"
+  fi
+}
+expect_msg "frozen workspace root: hint names the root route"  "$ROOT"  "git add scripts/x.sh" "NOOP=1" \
+  "--close-path quick-close" "cd DS-my-strategy &&"
+expect_msg "frozen governance repo: hint keeps the DS-my-strategy route" "$OTHER" "git add a.md" "IWE_FROZEN_CANONICAL_PATH=$OTHER" \
+  "cd DS-my-strategy &&" "--close-path quick-close"
+
 git -C "$ROOT" worktree remove --force "$WT" 2>/dev/null
 
 echo "frozen-staging: PASS=$PASS FAIL=$FAIL"
