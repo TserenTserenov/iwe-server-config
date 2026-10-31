@@ -381,6 +381,9 @@ A14_MATCH=$(printf '%s\n' "$RESPONSE" | perl -0777 -CSD -Mutf8 -ne '
       my $it = $lines[$j];
       next if $it =~ /^\s*$/;
       last unless $it =~ /^\s*([-*]|\d+[.)]|\*\*\d+[.)])\s*/;
+      # an item that corrects the claim ("протоколы, правила — не «входят», а применяются": the quoted word is
+      # stripped above, so it reads "не , а") is the right form by rule 8, not a listed part
+      next if $it =~ /(?:^|\s)не\s(?:[^.]*?,\s*)?а\s/;
       my $head = $it =~ /\*\*([^*]+)\*\*/ ? $1 : ($it =~ /^\s*(?:[-*]|\d+[.)])\s*([^—:,(]+)/ ? $1 : "");
       # head noun is the first word: "Модуль памяти" is a system or an ambiguous head (decided
       # by the sentence, not by the word), "Правила пилота" is a plain non-system
@@ -389,7 +392,11 @@ A14_MATCH=$(printf '%s\n' "$RESPONSE" | perl -0777 -CSD -Mutf8 -ne '
       # "Контекст и память" keeps "память" and still counts
       (my $rest = $head) =~ s/^\s*$ambw\s+\S+// if $ambw;
       $rest = $head unless defined $rest;
-      if ($rest =~ $nonsys) { $h =~ s/\s+$//; hit("$h $it") }
+      # word-end bounded: the bare stem "ответ" matched "ответственности" (Kimi 12, 31.10)
+      # only the first three words of the item head count: the head noun leads, "переход ... к самостоятельной работе"
+      # names a step, the trailing "работе" is not the thing listed (Kimi 12, pilot verdict: clean)
+      (my $lead = $rest) =~ s/^\s*(\S+(?:\s+\S+){0,2}).*/$1/s;
+      if ($lead =~ $nonsys_l) { $h =~ s/\s+$//; hit("$h $it") }
     }
   }
   s/\*\*//g;
@@ -413,7 +420,9 @@ A14_MATCH=$(printf '%s\n' "$RESPONSE" | perl -0777 -CSD -Mutf8 -ne '
   for my $s (split /(?<=[.!?;:])\s+|\n+/) {
     (my $t = $s) =~ s/(^|\s)не\s+(входи\S*|входя\S*|состо\S*\s+из|явля\S*\s+частью|част\S*)(\s+в\s+состав\S*)?/$1/gi;
     my $t0 = $t;  # before heads are cut: the ambiguity warning must still see them
-    $t =~ s/$syshead\s+\S+//g;
+    # a part verb right after a system head stays visible: "в IWE входят протоколы" is a violation,
+    # "в IWE входят только агенты" is not (IWE is a system by the pilot decision of 31.10)
+    $t =~ s/$syshead\s+(?!$part)\S+//g;
     # "модуль памяти": an ambiguous head with its complement is not a verdict, but the link verb
     # after it ("отчёт входит") must stay visible
     $t =~ s/$ambw\s+(?!$part)\S+//g if $ambw;

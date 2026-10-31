@@ -11,6 +11,9 @@ system	молоток
 system	молотк
 system	компьютер
 system	мак(?![а-яё])
+system	программ
+system	скрипт
+system	хук
 description	промпт
 description	инструкци
 description	ответ
@@ -68,7 +71,7 @@ ambiguous	закрыти
 ambiguous	открыти
 ambiguous	модел[ьиею]
 ambiguous	платформ
-ambiguous	модул
+system	модул
 ambiguous	баз[аеыу] данных
 ambiguous	хранилищ
 ambiguous	сервис
@@ -77,6 +80,6 @@ ambiguous	клиент
 ambiguous	исполнител
 ambiguous	команд
 ambiguous	групп
-ambiguous	iwe
+system	iwe
 ambiguous	экзокортекс
 ambiguous	цифров[а-яё]+ двойник
