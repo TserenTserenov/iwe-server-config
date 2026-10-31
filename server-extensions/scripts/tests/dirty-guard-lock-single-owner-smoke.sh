@@ -32,7 +32,16 @@ for g in $GUARDS; do
   assert "$(code_of "$f" | grep -c '^unset DGLOCK_LIB_READY')" "1" "$g.sh: the marker is unset BEFORE the source (an inherited one must not vouch for a cut library)"
   assert "$(code_of "$f" | grep -c 'the lock library is missing or unusable')" "1" "$g.sh: a missing or cut-short library is a loud failure"
   assert "$(code_of "$f" | grep -c 'dglock_acquire "\$GIT_DIR"')" "1" "$g.sh: one acquire, in the shell of the script"
-  assert "$(code_of "$f" | grep -c 'dglock_release')" "1" "$g.sh: one release, from the exit handler of the script"
+  # canon-reconcile sets its one EXIT trap twice: first for the guard lock alone, then
+  # (indented, before the ledger writer's locks are taken) widened to
+  # `ledger_lockdir_release; dglock_release`. Same release in a wider handler, so two
+  # trap lines name it there. Scenario 3a keeps its `^trap` (unindented) count: it
+  # sees only the first one.
+  want_release_traps=1; [ "$g" = "canon-reconcile" ] && want_release_traps=2
+  # git-dirty-guard keeps the release inside cleanup_guard(), which its trap names:
+  # that function body counts as part of the exit handler.
+  assert "$(code_of "$f" | awk '/^cleanup_guard\(\) \{/ { on = 1; next } on && /^\}/ { on = 0; next } !on' | grep 'dglock_release' | grep -c -v -E '^[[:space:]]*trap ')" "0" "$g.sh: dglock_release is named only in exit-handler lines (a trap line or the cleanup_guard body)"
+  assert "$(code_of "$f" | grep -c -E '^[[:space:]]*trap .*(dglock_release|cleanup_guard)')" "$want_release_traps" "$g.sh: $want_release_traps exit-handler line(s) lead to the release"
   assert "$(code_of "$f" | grep -n -E '^(SCRIPT_DIR=|cd )' | sed -n '1p' | grep -c 'SCRIPT_DIR=')" "1" "$g.sh: SCRIPT_DIR is taken BEFORE the first cd (a relative \$0 would not find the library after it)"
   assert "$(code_of "$f" | grep -c -F 'SCRIPT_DIR="./$SCRIPT_DIR"')/$(code_of "$f" | grep -c -F 'cd "$SCRIPT_DIR" >/dev/null 2>&1 && pwd && printf x')/$(code_of "$f" | grep '^SCRIPT_DIR=' | sed 's/   # .*//' | grep -c 'dirname')" "1/1/0" "$g.sh: SCRIPT_DIR is made with no dirname and no CDPATH (./ prefix, cd silenced) and with the newline marker"
   assert "$(code_of "$f" | grep -c 'GIT_DIR=\$(git rev-parse --[a-z-]*git-dir && printf x)')" "1" "$g.sh: the git directory is captured with the newline marker (the lock is made where the guard says)"

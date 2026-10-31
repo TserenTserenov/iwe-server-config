@@ -228,7 +228,7 @@ CONFLICTS_EOF
 # total), because every second spent waiting here, while earlier locks are
 # already held, counts against a waiting writer's own 60 s budget.
 LEDGER_LOCKDIRS=""
-HOSTNAME_NOW="${HOSTNAME:-$(python3 -c 'import socket; print(socket.gethostname())' 2>/dev/null || echo unknown)}"   # same derivation as ledger-append.sh, including macOS without /proc
+LEDGER_HOST_NOW="${HOSTNAME:-$(python3 -c 'import socket; print(socket.gethostname())' 2>/dev/null || echo unknown)}"   # same derivation as ledger-append.sh, including macOS without /proc
 
 # Removes only lock directories this run created: the owner record is ours, or
 # not written yet (interrupted right after our mkdir; nobody else steals an
@@ -334,7 +334,7 @@ ledger_lockdir_acquire() {
   while :; do
     if mkdir "$dir" 2>/dev/null; then
       LEDGER_LOCKDIRS="${LEDGER_LOCKDIRS}${dir}"$'\n'
-      printf 'host=%s\npid=%s\n' "$HOSTNAME_NOW" "$$" > "$dir/owner" || return 1
+      printf 'host=%s\npid=%s\n' "$LEDGER_HOST_NOW" "$$" > "$dir/owner" || return 1
       return 0
     fi
     owner_host=$(awk -F= '$1=="host"{print $2}' "$dir/owner" 2>/dev/null)
@@ -346,7 +346,7 @@ ledger_lockdir_acquire() {
           return 2
         fi ;;
       *)
-        if [ "$owner_host" = "$HOSTNAME_NOW" ] && [ "$reclaims" -lt 3 ] && pid_gone "$owner_pid"; then
+        if [ "$owner_host" = "$LEDGER_HOST_NOW" ] && [ "$reclaims" -lt 3 ] && pid_gone "$owner_pid"; then
           ledger_lockdir_reclaim "$dir" "$owner_pid"
           reclaims=$((reclaims + 1))
           continue
