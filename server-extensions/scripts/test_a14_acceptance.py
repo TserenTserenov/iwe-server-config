@@ -100,6 +100,46 @@ class AcceptanceTest(unittest.TestCase):
         self.assertFalse((out / "out" / "claude-01.md").exists(), "timed-out question leaves no half answer")
         self.assertTrue((out / "out" / "claude-02.md").exists())
 
+    def test_agent_commands_match_the_installed_clis(self):
+        kimi = acc.agent_command("kimi", "q", Path("x"))
+        self.assertEqual(kimi[1:], ["-p", "q"], "kimi CLI has no --quiet/-w; the 30.10 run lost 12 answers to it")
+        self.assertIn("--skip-git-repo-check", acc.agent_command("codex", "q", Path("x")))
+
+    def test_run_prints_redacted_stderr_tail_when_the_agent_fails(self):
+        import contextlib
+        import io
+        out = Path(tempfile.mkdtemp())
+
+        def fake_run(cmd, **kw):
+            return subprocess.CompletedProcess(cmd, 1, stdout="", stderr="warn\nNot logged in · token ghp_abcdef0123456789XYZ\n")
+
+        buf = io.StringIO()
+        with mock.patch.object(acc.subprocess, "run", fake_run), contextlib.redirect_stdout(buf):
+            acc.run(["claude"], out, 5)
+        text = buf.getvalue()
+        self.assertIn("rc=1", text)
+        self.assertIn("Not logged in", text)
+        self.assertIn("<REDACTED>", text)
+        self.assertNotIn("ghp_abcdef", text)
+
+    def test_replay_survives_a_journal_line_cut_mid_character(self):
+        """Hooks before 30.10 wrote `cut -c` byte-truncated lines; the rule id must still be read."""
+        import contextlib
+        import io
+        out = fake_answers(["kimi"])
+        broken = "2026-10-30 12:00:00 | kimi | A14 | non-system-as-part | состоя".encode()[:-1] + b"\n"
+
+        def fake_run(cmd, env=None, **kw):
+            log = Path(env["HOME"]) / ".claude/logs/style-violations.log"
+            log.parent.mkdir(parents=True)
+            log.write_bytes(broken)
+            return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+
+        buf = io.StringIO()
+        with mock.patch.object(acc.subprocess, "run", fake_run), contextlib.redirect_stdout(buf):
+            acc.replay(out)
+        self.assertIn("flagged answers: 12 of 12", buf.getvalue())
+
     def test_replay_flags_a_violating_answer_and_not_a_clean_one(self):
         bad = "ИИ-агент — это система. В ней есть:\n\n- **Память** — хранит сведения.\n- **Правила** — задают границы.\n"
         out = fake_answers(["kimi"], bad={("kimi", 1): bad})

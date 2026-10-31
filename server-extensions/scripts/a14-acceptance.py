@@ -16,9 +16,13 @@ the workspace root, so each agent loads its real instructions. Answers are grade
 
 Acceptance criterion (card Ф21): >= 10 clean answers of 12 per agent and no failure of
 checklist item 1 on questions 1-3. `score` counts failures on questions 1-3 as the proxy.
-Env: IWE_ROOT (default ~/IWE), KIMI_BIN (default: the VS Code Kimi extension binary),
-A14_HOOK (the style hook `replay` runs; default <root>/.claude/hooks/response-clarity-hook.sh -- set it
-to test an unpublished hook).
+Env: IWE_ROOT (default ~/IWE), KIMI_BIN (default: `kimi` on PATH, else the VS Code Kimi
+extension binary on macOS), A14_HOOK (the style hook `replay` runs; default
+<root>/.claude/hooks/response-clarity-hook.sh -- set it to test an unpublished hook).
+
+A failed agent call (non-zero exit) prints the tail of its stderr: the 30.10 run on tsekh-1 lost
+all 36 answers to "Not logged in" (claude), an unknown `--quiet` flag (kimi) and "Not inside a
+trusted directory" (codex) while the log only said `rc=1 0 bytes`.
 """
 
 from __future__ import annotations
@@ -28,6 +32,8 @@ import datetime as dt
 import json
 import os
 import random
+import re
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -35,13 +41,15 @@ from pathlib import Path
 
 ROOT = Path(os.environ.get("IWE_ROOT", Path.home() / "IWE"))
 QUESTIONS = Path(__file__).resolve().parent.parent / ".claude/hooks/tests/a14-acceptance-questions.txt"
-KIMI_BIN = os.environ.get(
-    "KIMI_BIN",
-    str(Path.home() / "Library/Application Support/Code/User/globalStorage/moonshot-ai.kimi-code/bin/kimi/kimi"),
+KIMI_BIN = os.environ.get("KIMI_BIN") or shutil.which("kimi") or str(
+    Path.home() / "Library/Application Support/Code/User/globalStorage/moonshot-ai.kimi-code/bin/kimi/kimi"
 )
 HOOK = Path(os.environ.get("A14_HOOK", ROOT / ".claude/hooks/response-clarity-hook.sh"))
 PASS_CLEAN = 10
 BLIND_SEED = 388
+STDERR_TAIL_LINES = 3
+# same token shapes the style hook's redact() masks before writing its journal
+SECRET_RE = re.compile(r"(gh[pousr]_|sk-|xox[baprs]-|AKIA)[A-Za-z0-9_-]+|[A-Za-z0-9_-]{32,}|[a-f0-9]{16,}")
 
 
 def questions() -> list[str]:
@@ -49,14 +57,21 @@ def questions() -> list[str]:
 
 
 def agent_command(agent: str, question: str, answer_file: Path) -> list[str]:
-    """One fresh, non-interactive session per question."""
+    """One fresh, non-interactive session per question; cwd=ROOT is what loads the real instructions."""
     if agent == "claude":
         return ["claude", "-p", "--permission-mode", "plan", question]
     if agent == "kimi":
-        return [KIMI_BIN, "--quiet", "-w", str(ROOT), "-p", question]
+        # kimi CLI 2026-10: `-p` is the only prompt flag; `--quiet`/`-w` were never accepted on Linux
+        return [KIMI_BIN, "-p", question]
     if agent == "codex":
-        return ["codex", "exec", "-s", "read-only", "-C", str(ROOT), "--ephemeral", "-o", str(answer_file), question]
+        return ["codex", "exec", "-s", "read-only", "-C", str(ROOT), "--skip-git-repo-check", "--ephemeral",
+                "-o", str(answer_file), question]
     raise SystemExit(f"unknown agent {agent!r} (claude, kimi, codex)")
+
+
+def stderr_tail(text: str) -> str:
+    lines = [ln for ln in text.splitlines() if ln.strip()][-STDERR_TAIL_LINES:]
+    return " / ".join(SECRET_RE.sub("<REDACTED>", ln.strip()) for ln in lines)
 
 
 def run(agents: list[str], out: Path, timeout: int) -> int:
@@ -76,7 +91,10 @@ def run(agents: list[str], out: Path, timeout: int) -> int:
                 continue
             if agent != "codex":  # codex writes the answer file itself (-o)
                 answer.write_text(done.stdout, encoding="utf-8")
-            print(f"{agent} {n:02d} rc={done.returncode} {answer.stat().st_size if answer.exists() else 0} bytes")
+            line = f"{agent} {n:02d} rc={done.returncode} {answer.stat().st_size if answer.exists() else 0} bytes"
+            if done.returncode != 0 and done.stderr:
+                line += f"  stderr: {stderr_tail(done.stderr)}"
+            print(line)
     print(f"answers in {out / 'out'}; next: blind {out}, grade, score")
     return 0
 
@@ -110,9 +128,11 @@ def replay(out: Path) -> int:
                 capture_output=True, text=True, check=False,
             )
             log = Path(tmp) / "home/.claude/logs/style-violations.log"
-            hits = [ln.split(" | ") for ln in log.read_text(encoding="utf-8").splitlines()] if log.exists() else []
+            # errors="replace": journals written by the hook before 30.10 hold lines cut mid-character
+            # (byte-wise `cut -c`); the rule id in column 3 is ASCII and survives either way
+            hits = [ln.split(" | ") for ln in log.read_text(encoding="utf-8", errors="replace").splitlines()] if log.exists() else []
         for parts in hits:
-            if len(parts) > 4 and parts[2] in ("A14", "A14_AMBIGUOUS"):
+            if len(parts) > 4 and parts[2] in ("A14", "A14_AMBIGUOUS", "A14_STATE_STORED"):
                 flagged += 1
                 print(f"{agent}-{num:02d}  {parts[2]}: {parts[4][:80]}")
                 break

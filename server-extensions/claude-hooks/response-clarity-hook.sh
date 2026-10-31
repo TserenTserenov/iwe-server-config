@@ -143,9 +143,12 @@ mkdir -p "$(dirname "$CHECKS_LOG")" 2>/dev/null || true
 echo "$TIMESTAMP | $AGENT" >> "$CHECKS_LOG" 2>/dev/null || true
 
 # redact: обрезать до 100 символов, замаскировать токены (в т.ч. короткие
-# провайдерские), заменить разделитель | чтобы не ломать парсер агрегатора
+# провайдерские), заменить разделитель | чтобы не ломать парсер агрегатора.
+# Обрезка — perl по символам, не `cut -c`: GNU cut считает байты и режет
+# кириллическую букву пополам, строка журнала перестаёт быть UTF-8 и любой
+# строгий читатель (`a14-acceptance.py replay`) падает (РП-388 Ф21, 30.10).
 redact() {
-  printf '%s' "$1" | tr '\n' ' ' | cut -c1-100 \
+  printf '%s' "$1" | tr '\n' ' ' | perl -CSD -pe 's/^(.{100}).*/$1/' \
     | sed -E 's/(gh[pousr]_|sk-|xox[baprs]-|AKIA)[A-Za-z0-9_-]+/<REDACTED>/g; s/[A-Za-z0-9_-]{32,}/<REDACTED>/g; s/[a-f0-9]{16,}/<REDACTED>/g; s/\|/¦/g'
 }
 
@@ -359,8 +362,14 @@ A14_MATCH=$(printf '%s\n' "$RESPONSE" | perl -0777 -CSD -Mutf8 -ne '
   my @lines = split /\n/;
   for my $i (0 .. $#lines) {
     my $h = $lines[$i];
-    next unless $h =~ /:\s*\**\s*$/
-      && $h =~ /$b(состо[ия]т\s+из|входят|компонент|элемент|сло[яёе]в?(?![а-яё])|состав(?![а-яё])|составн\S*\s+част|в\s+(ней|нём|него|неё)\s+(есть|работают|собран\S*)|соединены|к\s+(нему|ней)\s+добавлен)/i;
+    # a composition header is either a line ending in ":" that names parts (компоненты,
+    # элементы, слои, состав) or a line with an explicit part verb anywhere, whatever its end:
+    # answer 2 of the 30.10 run opened with "состоит из следующего." and a full stop, then a
+    # blank line and bold numbered headings — the old "ends with :" test let it through.
+    my $hdr_verb = $h =~ /$b(состо[ия]т\s+из|входят|в\s+(ней|нём|него|неё)\s+(есть|работают|собран\S*)|соединены|к\s+(нему|ней)\s+добавлен)/i;
+    my $hdr_noun = $h =~ /:\s*\**\s*$/
+      && $h =~ /$b(компонент|элемент|сло[яёе]в?(?![а-яё])|состав(?![а-яё])|составн\S*\s+част)/i;
+    next unless $hdr_verb || $hdr_noun;
     next if $h =~ /(^|\s)не\s+(входи|входя|явля|состо)/i;
     # a header whose SUBJECT (first word) is a description/method ("Промпт ... несколько слоёв:")
     # introduces the content parts of that description (ConstituentOf), not system parts;
@@ -382,6 +391,23 @@ A14_MATCH=$(printf '%s\n' "$RESPONSE" | perl -0777 -CSD -Mutf8 -ne '
     }
   }
   s/\*\*//g;
+  # parts named after "из": "состоит из N частей", "делится на части" and the bare
+  # "протокол из двух частей" (answer 9 of the 30.10 run) — rule 8: «не "протокол состоит из
+  # шагов", а "протокол описывает шаги"»; the same for method, document and work.
+  my $parts = qr/(част|раздел|этап|шаг|компонент|элемент)/i;
+  # A14_STATE_STORED (warn-only, never BLOCKABLE; РП-388 Ф21, 30.10): a state said to lie, be
+  # stored or recorded "in" a place. By rule 8 the state is the system itself at a moment; what
+  # lies in memory or a journal is the description of the state. "в обработке / в статусе /
+  # в норме" after the verb name a stage, not a place (counterexamples from Kimi) — excluded.
+  # Measured by journal until 06.11; more than 20 % false hits -> drop the rule, not the log.
+  our $ST = "";
+  # a dash between head and predicate: em/en dash with any spacing, or a hyphen only after a
+  # space — "бизнес-профиль", "мини-набора" are single words, not "X — набор" (cold review, 30.10)
+  my $dash = qr/(?:\s*[—–]|\s+-)/;
+  # "описание/запись/снимок состояния хранится в …" is the very form rule 8 prescribes: the
+  # subject is the description, not the state — it must not feed the warn journal
+  my $state_desc = qr/$b(описани|запис|снимк|снимок|слепок|значени|данн|сведени|информаци|отч[её]т)\S*\s+(об?\s+)?состояни/i;
+  my $stored = qr/$b(состояни)\S*(\s+[а-яё-]+){0,2}\s+(лежит|лежат|хранится|хранятся|хранят|находится|находятся|записан[оаы]?|сохран[её]н[оаы]?|сохраняется)\s+в\s+(?!(обработк|ожидани|процесс|работ|разработк|стади|фаз|режим|норм|поряд|статус))/i;
   for my $s (split /(?<=[.!?;:])\s+|\n+/) {
     (my $t = $s) =~ s/(^|\s)не\s+(входи\S*|входя\S*|состо\S*\s+из|явля\S*\s+частью|част\S*)(\s+в\s+состав\S*)?/$1/gi;
     my $t0 = $t;  # before heads are cut: the ambiguity warning must still see them
@@ -392,40 +418,65 @@ A14_MATCH=$(printf '%s\n' "$RESPONSE" | perl -0777 -CSD -Mutf8 -ne '
     if ($t =~ /$nonsys_s$win\s+$part/ || $t =~ /$part$win\s+$nonsys_s/) {
       hit($s)
     }
-    if ($t =~ /$nonsys_s$win\s+(состо[ия]т\s+из|дел[ия]тся\s+на)\s+(\S+\s+)?(част|раздел|этап|шаг)/i) {
+    if ($t =~ /$nonsys_s$win\s+(состо[ия]т\s+из|дел[ия]тся\s+на)\s+(\S+\s+)?$parts/i
+        || $t =~ /$nonsys_s\s+из\s+(\S+\s+){0,2}$parts/i) {
       hit($s)
     }
     if (!$AMB && $ambw
         && ($t0 =~ /$ambw$win\s+$part/ || $t0 =~ /$part$win\s+$ambw/
-            || $t0 =~ /$ambw$win\s+(состо[ия]т\s+из|дел[ия]тся\s+на)\s+(\S+\s+)?(част|раздел|этап|шаг)/i)) {
+            || $t0 =~ /$ambw$win\s+(состо[ия]т\s+из|дел[ия]тся\s+на)\s+(\S+\s+)?$parts/i
+            || $t0 =~ /$ambw\s+из\s+(\S+\s+){0,2}$parts/i)) {
       $AMB = $s
     }
     # (4) a non-system called a system ("проект как систему", "процесс — это система",
-    # "назвал проект системой"): only the system kind is a system (pilot decision 24.10,
-    # registry rule 6).
+    # "назвал проект системой", "состояние заказа — это система"): only the system kind is a
+    # system (pilot decision 24.10, registry rule 6). Up to two dependent words may stand
+    # between the head and the dash.
     # A negation anywhere in the sentence ("нельзя назвать", "не стоит называть",
     # "как система не рассматривается") says the opposite, so the check is skipped.
+    # The bare "состояние — это (сама) система" is the correct form by rule 8 (the state IS the
+    # system at a moment) — false positive of the 30.10 run, answer 6; with a dependent word
+    # before the dash ("состояние здоровья — это система") it still fires.
     my $n = $t;
     $n = "" if $n =~ /$b(нельзя|не\s+(стоит|надо|нужно|следует|можно|как|явля\S*|назыв\S*|назва\S*|счита\S*|рассматрива\S*))/i;
+    # cut the phrase, not the sentence: "состояние — это система, а процесс — это система" must
+    # still fire on its second half (cold review, 30.10)
+    $n =~ s/$b(состояни[еяюи]?)\s*[-—–]\s*это\s+(сама\s+)?систем\S*//gi;
     if ($n =~ /$nonsys_s$win\s+(как\s+систем\S*|явля\S+\s+систем\S*|назва\S+\s+систем\S*|назыв\S+\s+систем\S*)/
-        || $n =~ /$nonsys_s\s*[-—–]\s+это\s+систем/i
+        || $n =~ /$nonsys_s(\s+[а-яё-]+){0,2}$dash\s*это\s+систем/i
         || $n =~ /$b(назва\S*|назыв\S*|счита\S*|рассматрива\S*)\s+$nonsys_s$win\s+систем/i) {
       hit($s)
     }
-    # "X - это Y" assigns a type; "state is a set of values" names a description, not a type
-    if ($t =~ /$b(состояни|систем|агент|метод|работ)\S*\s+[-—–]\s+это\s+(набор|совокупност|множеств|комплекс|сочетани|список|профиль)/i
+    # "X - это Y" assigns a type; "state is a set of values" names a description, not a type.
+    # "это" is optional and up to two dependent words may follow the head: answer 5 of the
+    # 30.10 run wrote "Полное состояние человека — набор значений по всем типам". Checked on
+    # $t0: the system-head cut above would take "человека —" (человек is a system) and the dash
+    # with it.
+    if ($t0 =~ /$b(состояни|систем|агент|метод|работ)\S*(\s+[а-яё-]+){0,2}$dash\s*(это\s+)?(набор|совокупност|множеств|комплекс|сочетани|список|профиль)/i
         || $t =~ /$b(метод)\S*\s+[-—–]\s+это\s+(описани|документ|текст|файл|инструкци)/i
         || $t =~ /$b(протокол|инструкци|описани|документ|файл)\S*\s+[-—–]\s+это\s+метод/i) {
       hit($s)
     }
+    # checked on $t0: "состояние агента лежит в" would lose "агента лежит" to the system-head cut
+    $ST = $s if !$ST && $t0 =~ $stored && $t0 !~ $state_desc;
   }
-  END { print "AMBIG\t$AMB" if $AMB && !$REAL }
+  END {
+    print "AMBIG\t$AMB\n" if $AMB && !$REAL;
+    print "STATE\t$ST\n" if $ST && !$REAL;
+  }
 ' 2>/dev/null || true)
+# One line per signal; a real hit is alone (perl exits on it), the warn-only signals may come
+# together. `done < <(...)` keeps the loop in this shell: log_violation appends to VIOLATIONS,
+# which the BLOCKABLE check below reads, so a pipe-subshell would lose it.
 if [ -n "$A14_MATCH" ]; then
-  case "$A14_MATCH" in
-    AMBIG$'\t'*) log_violation "A14_AMBIGUOUS" "ambiguous-head-in-part-whole" "${A14_MATCH#AMBIG$'\t'}" ;;
-    *) log_violation "A14" "non-system-as-part" "$A14_MATCH" ;;
-  esac
+  while IFS= read -r A14_LINE; do
+    [ -n "$A14_LINE" ] || continue
+    case "$A14_LINE" in
+      AMBIG$'\t'*) log_violation "A14_AMBIGUOUS" "ambiguous-head-in-part-whole" "${A14_LINE#AMBIG$'\t'}" ;;
+      STATE$'\t'*) log_violation "A14_STATE_STORED" "state-said-to-lie-in-a-place" "${A14_LINE#STATE$'\t'}" ;;
+      *) log_violation "A14" "non-system-as-part" "$A14_LINE" ;;
+    esac
+  done < <(printf '%s\n' "$A14_MATCH")
 fi
 
 # --- B1 (поведение): просит пилота «сделать вручную / дать доступ» до проверки ---
