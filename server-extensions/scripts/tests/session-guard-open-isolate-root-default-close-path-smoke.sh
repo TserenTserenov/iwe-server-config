@@ -9,7 +9,7 @@ set -euo pipefail
 ROOT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
 GUARD="$ROOT_DIR/scripts/session-guard.sh"
 TEST_ROOT=$(mktemp -d ${TMPDIR:-/tmp}/session-guard-root-default.XXXXXX)
-trap 'rm -rf "$TEST_ROOT"' EXIT
+trap 'rm -rf "$TEST_ROOT" "$TEST_ROOT.origin.git"' EXIT
 
 make_repo() {  # <dir> -- a repo with an origin, one commit pushed to main
   local dir="$1" origin="$1.origin.git"
@@ -37,6 +37,10 @@ export IWE_ROOT="$TEST_ROOT"
 export IWE_GOVERNANCE_REPO="DS-strategy"
 export IWE_AGENT="fixture"
 export IWE_FROZEN_CANONICAL_PATH=""
+# `open --isolate` derives its id from the conversation identity (WP-484 F204). The
+# sync gate strips the ambient CLAUDE_CODE_SESSION_ID, so supply our own instead of
+# inheriting one; the three opens differ by slug, so one conversation id is enough.
+export CLAUDE_CODE_SESSION_ID="fixture-root-default-conversation"
 
 semaphore_close_path() {  # <slug> -> close_path recorded in that slug's semaphore
   local sem

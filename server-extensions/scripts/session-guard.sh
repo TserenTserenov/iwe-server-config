@@ -199,6 +199,47 @@ OPEN_LOG_RUNTIME="$IWE_ROOT/.iwe-runtime/open-sessions.log"
 # governance-repo-path.sh (DS-my-strategy) -- not sourced from there to avoid
 # a cross-repo dependency in this file (P2 exemption already accepted for
 # this exact split, cold-review WP-526 Ф1).
+# WP-484 Ф274: an interactive shell exports the live IWE_SESSIONS_ROOT, and a test that
+# swaps only IWE_ROOT inherits it: the semaphore lands in the sandbox, the report in the
+# live repository. A temporary IWE_ROOT never belongs with a non-temporary sessions root,
+# so the inherited value is dropped and the normal resolution from IWE_ROOT applies.
+# Same code in scripts/session-guard.sh and scripts/lib/governance-repo-path.sh (the two
+# repositories do not source each other): change both together.
+_iwe_physical_path() {
+  local path="$1" rest=""
+  case "$path" in /*) ;; *) path="$PWD/$path" ;; esac
+  path="${path%/}"
+  while [ -n "$path" ] && [ ! -d "$path" ]; do
+    rest="/${path##*/}$rest"
+    path="${path%/*}"
+  done
+  printf '%s%s\n' "$(cd -P -- "${path:-/}" 2>/dev/null && pwd -P)" "$rest"
+}
+
+_iwe_is_temp_path() {
+  local physical temp_root
+  physical=$(_iwe_physical_path "$1")
+  for temp_root in "${TMPDIR:-}" /tmp /var/folders; do
+    [ -n "$temp_root" ] || continue
+    temp_root=$(_iwe_physical_path "$temp_root")
+    # An unreachable TMPDIR resolves to nothing; an empty prefix would match every path.
+    [ -n "$temp_root" ] || continue
+    case "$physical/" in "$temp_root"/*) return 0 ;; esac
+  done
+  return 1
+}
+
+iwe_drop_inherited_live_sessions_root() {
+  [ -n "${IWE_SESSIONS_ROOT:-}" ] || return 0
+  _iwe_is_temp_path "${IWE_ROOT:-$HOME/IWE}" || return 0
+  _iwe_is_temp_path "$IWE_SESSIONS_ROOT" && return 0
+  printf 'SESSIONS_SPLIT_BLOCKED: IWE_ROOT=%s is temporary, ignoring inherited IWE_SESSIONS_ROOT=%s\n' \
+    "${IWE_ROOT:-}" "$IWE_SESSIONS_ROOT" >&2
+  [ -z "${IWE_SESSIONS_SPLIT_LOG:-}" ] || printf '%s\n' "$IWE_SESSIONS_ROOT" >>"$IWE_SESSIONS_SPLIT_LOG" || true
+  unset IWE_SESSIONS_ROOT
+}
+
+iwe_drop_inherited_live_sessions_root
 ORZ_DIR="${IWE_SESSIONS_ROOT:-$IWE_ROOT/MC-sessions}"
 AGENT_STATUS_SCRIPT="$IWE_ROOT/scripts/agent-status-report.sh"
 # WP-520 находка 28+enforcement (14.08): freeze on the canonical DS-my-strategy
@@ -5827,11 +5868,13 @@ $isolate_status_code $isolate_status_path"
 
     echo "{\"worktree_path\": \"$ISOLATED_WORKTREE_PATH\", \"branch\": \"$ISOLATED_WORKTREE_BRANCH\", \"session_id\": \"$ISOLATE_SESSION_ID\"}"
     echo "⚠️  cd \"$ISOLATED_WORKTREE_PATH\" перед следующим действием -- рабочий каталог не переключается автоматически, это отдельный процесс bash." >&2
-    # РП-518 (bug-2026-10-30): a root copy opened without --close-path can be closed
-    # neither by the runner (its root route accepts only quick-close) nor by a declared
-    # no-runner path, and the pilot's cancel has nothing to cancel. Say so at open time.
+    # РП-518 (bug-2026-10-30): a root copy opened without --close-path used to get
+    # close_path "unknown", which neither the runner's root route (accepts only quick-close)
+    # nor a declared no-runner path can close. The semaphore is written below from CLOSE_PATH,
+    # so a root copy without an explicit path defaults to quick-close and says so.
     if [ -z "$CLOSE_PATH" ] && [ "$(realpath "$ISOLATE_BASE_DIR" 2>/dev/null)" = "$(realpath "$IWE_ROOT" 2>/dev/null)" ]; then
-      echo "ℹ️  Копия корня IWE открыта без --close-path: ни раннер (из копии корня он принимает лишь close_path quick-close), ни объявленные пути publish-only и no-code-changes её не закроют. Переоткрой копию с --close-path publish-only (публикация файла) или --close-path quick-close (закрытие через раннер)." >&2
+      CLOSE_PATH="quick-close"
+      echo "ℹ️  Копия корня IWE открыта без --close-path: выставлен close_path quick-close (раннер из копии корня принимает только его). Для публикации одного файла без раннера переоткрой копию с --close-path publish-only." >&2
     fi
   fi
 
@@ -15377,9 +15420,25 @@ PY
 #    the agent-controlled task is cut to 80 characters on one line;
 #  - the status line says the line was handed to sending, not that it arrived:
 #    iwe-tg cannot tell delivered from queued.
+# Owner process load for the pilot's text: a live pid alone reads as "the session
+# is running", but an editor tab keeps an idle process for days (30.10: 0% CPU,
+# up to 1.5 days). Prints " — простаивает (...)" / " — нагружен (...)", or nothing
+# when the pid is not a local process.
+_heal_owner_load_note() {  # <pid>
+  [[ "${1:-}" =~ ^[1-9][0-9]*$ ]] || return 0
+  ps -o %cpu=,etime= -p "$1" 2>/dev/null | awk '
+    NF >= 2 {
+      n = split($2, a, /[-:]/); d = h = m = 0
+      if (n == 4) { d = a[1]; h = a[2]; m = a[3] } else if (n == 3) { h = a[1]; m = a[2] } else { m = a[1] }
+      if ($1 + 0 >= 5.0) { printf " — нагружен (%s%% процессора)", $1; exit }
+      if (d > 0) t = d + 0 " сут " h + 0 " ч"; else if (h > 0) t = h + 0 " ч " m + 0 " мин"; else t = m + 0 " мин"
+      printf " — простаивает (нагрузка %s%%, работает %s)", $1, t
+    }'
+}
+
 # Prints one status line; never fails the caller.
 _heal_send_word_to_pilot() {  # <slug> <semaphore> <code> <owner process state> <unsaved work>
-  local slug="$1" sem="$2" code="$3" alive="$4" work="$5" wp task msg tg_rc=0
+  local slug="$1" sem="$2" code="$3" alive="$4" work="$5" wp task msg tg_rc=0 load_note
   local marker_dir="$IWE_ROOT/.iwe-runtime/heal-word-notified"
   local marker="$marker_dir/$slug.$code"
   if ! command -v iwe-tg >/dev/null 2>&1; then
@@ -15397,12 +15456,16 @@ _heal_send_word_to_pilot() {  # <slug> <semaphore> <code> <owner process state> 
   fi
   wp=$(_semaphore_last_field "$sem" wp); task=$(_semaphore_last_field "$sem" task)
   # Cut by characters in python: bash ${var:0:80} cuts bytes outside a UTF-8 locale (launchd, cron, ssh).
-  task=$(printf '%s' "$task" | tr '\n\r\t' '   ' | python3 -c 'import sys; sys.stdout.write(sys.stdin.read()[:80])')
+  # strip(" '\"") drops the empty-title artifact `''` so the pilot never reads «''».
+  task=$(printf '%s' "$task" | tr '\n\r\t' '   ' | python3 -c 'import sys; sys.stdout.write(sys.stdin.read()[:80].strip(" '"'"'\""))')
   # No absolute path in the pilot's text: the router would scrub it and note it in the digest.
   work="${work%% (копия:*}"
-  msg="Агент просит снять зависшую сессию по ${wp:-неизвестному РП}${task:+ «${task}»}. Владелец: процесс ${alive}; несохранённая работа: ${work}. Агенту нужно ваше слово: напишите ему в чате ровно эту строку, она действует 1-2 часа:
+  load_note=""
+  [ "$alive" != "жив" ] || load_note="$(_heal_owner_load_note "$(_semaphore_last_field "$sem" pid)")"
+  msg="Открыта сессия по ${wp:-неизвестному РП}${task:+ «${task}»}, признаков работы не видно: её процесс ${alive}${load_note}, несохранённая работа: ${work}.
+Агент, который просит снять её, ждёт вашего слова. Скопируйте строку ниже и отправьте её в обычное окно Claude, где идёт ваша рабочая сессия и уже была хотя бы одна ваша реплика (первой репликой в чате она не примется); строка действует 1-2 часа:
 heal $slug $code
-Что делать: если сессия вам знакома и её нужно снять, отправьте строку выше; если не знакома, ничего не пишите."
+Что делать: если сессия вам знакома и её нужно снять, отправьте строку выше в такое окно; если не знакома, ничего не пишите."
   TELEGRAM_NEEDS_DECISION=1 iwe-tg --source session-guard-heal "$msg" || tg_rc=$?
   case "$tg_rc" in
     0) echo "Строка слова передана в отправку пилоту в Телеграм" ;;
