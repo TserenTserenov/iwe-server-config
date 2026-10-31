@@ -34,6 +34,7 @@ document	страниц
 document	журнал
 document	реестр
 document	карточк
+document	документ
 method	метод
 method	ритуал
 method	управлени[ея] выполнени
@@ -70,7 +71,7 @@ ambiguous	сесси
 ambiguous	закрыти
 ambiguous	открыти
 ambiguous	модел[ьиею]
-ambiguous	платформ
+system	платформ
 system	модул
 ambiguous	баз[аеыу] данных
 ambiguous	хранилищ

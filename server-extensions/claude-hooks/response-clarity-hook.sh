@@ -471,7 +471,9 @@ A14_MATCH=$(printf '%s\n' "$RESPONSE" | perl -0777 -CSD -Mutf8 -ne '
     # before the type check (false positive of the 31.10 acceptance run, answer 6; both graders: clean)
     (my $t1 = $t0) =~ s/$state_desc\S*//g;
     if ($t1 =~ /$b(состояни|систем|агент|метод|работ)\S*(\s+[а-яё-]+){0,4}$dash\s*(это\s+)?(набор|совокупност|множеств|комплекс|сочетани|список|профиль)/i
-        || $t1 =~ /$b(агент)\S*(\s+[а-яё-]+){0,2}$dash\s*(это\s+)?(модел|промпт|инструкци)/i
+        # "агент" must be the head: "промпт агента — это инструкция" is the right form (Kimi 10, 31.10), so
+        # a letter and a space before it (a possessor noun) rules the rule out
+        || $t1 =~ /(?<![а-яё]\s)$b(агент)\S*(\s+[а-яё-]+){0,2}$dash\s*(это\s+)?(модел|промпт|инструкци)/i
         || $t =~ /$b(метод)\S*\s+[-—–]\s+это\s+(описани|документ|текст|файл|инструкци)/i
         || $t =~ /$b(протокол|инструкци|описани|документ|файл)\S*\s+[-—–]\s+это\s+метод/i) {
       hit($s)
