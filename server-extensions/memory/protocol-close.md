@@ -99,6 +99,8 @@ python3 scripts/process-runner.py relocate-card <run_id> \
 
 **Обязательно вместе с заявкой (WP-484, пир-сессия 2026-09-11-08 с Kimi+Codex, `bug-2026-09-11-quick-close-confirmed-clean-repos-blind-to-cherry-pick-delivery.md`):** (1) поле `session` во входе — `{"commits":[],"confirmed_clean_repos":[...],"session":{"agent":"claude-code","wp":"WP-NNN","slug":"<slug сессии>"}}`, иначе хендлер не найдёт семафор и проверит ВСЮ ветку (в общем чекауте с чужими неопубликованными коммитами это отказ всегда); (2) после КАЖДОГО коммита по ходу сессии — `bash "${IWE_SCRIPTS:-$HOME/IWE/scripts}/session-guard.sh" note-commit <sha> --repo <repo> --wp WP-NNN --slug <slug>` — единственное доказательство принадлежности коммита сессии; доставка через cherry-pick (другой SHA на origin) распознаётся по patch-id только для объявленных коммитов. Без `note-commit`, но с найденным семафором хендлер работает в режиме `session_scope_inferred`: пропускает, только если ни один неопубликованный коммит ветки не трогает файлы сессии, иначе отказывает как «неоднозначный» — не как «ваш коммит».
 
+**1c. Строка о доставке в шаблон (РП-529 Ф248, 31.10, решение пилота) · [[narrative]].** Если сессия правила файл с `delivery: managed` (frontmatter), в итоге закрытия назвать его одной строкой: «изменён managed-файл X — в шаблон попадёт на закрытии недели через список расхождений». Ничего не записывать и не вызывать `template-sync.sh`; строка — напоминание пилоту, не вход решения о доставке.
+
 ### 2. Короткий свод + рефлексия (шаги `reflection-gate` → `session-reflection-render` → `session-reflection-append` при `reflection_due: true`, WP-484 Ф56 05.08 — три reflex-шага вместо одного ai-шага) [[gate]]
 
 **Механизация (WP-484 Ф56, пир-сессии с Codex+Kimi 05.08).** Раньше `session-reflection` был ai-шагом: раннер принимал `answer` из `--input` закрывающего агента без проверки, кто его реально написал — судья и нарушитель совпадали (3 рецидива за один день, MAJOR fault). Теперь три reflex-шага закрывают это структурно, не текстом инструкции:
@@ -321,6 +323,7 @@ Quick Close, WP context «Осталось», `git diff --name-only`, кратк
    - Флаги — информативно. Пользователь решает действие.
 4. **iwe-drift.sh** — полный drift-отчёт в Week Report (S) [[narrative]]
 5. **STAGING.md** — есть `validated`? → предложить промоцию (S+T) [[narrative]]
+5b. **Список расхождений с шаблоном** (РП-529 Ф248, 31.10, решение пилота) — `bash <setup>/scripts/template-sync.sh --dry-run`, лог читать вручную: `CONFLICT[repair]` (шаблон ушёл вперёд), `CONFLICT[diverge]` (менялись обе стороны), `WOULD UPDATE`, `(new file)`. Показать пилоту счётчик по классам и первые пути, не весь лог; повторяющееся расхождение остаётся напоминанием (без отметки «отклонено»). Код выхода 2 = блокировку держит боевой запуск → повторить позже, пустым списком не считать. Недельный шаг вызывает только `--dry-run`, `--reconcile`, `--accept-base`; полный запуск `template-sync.sh`, `FORCE_SYNC=1`, `--force`, `--force-wp-elsewhere` — запрещены. Запись в шаблон — по каждому файлу отдельным решением пилота. [[narrative]]
 6. **iwe-rules-review** — какие правила обходились? (S) [[narrative]]
 7. **R-вопросник** (3 вопроса, `memory/r-questionnaire.md`, шаг 3 Части А `week-close/SKILL.md`, WP-484 30.07 — переставлен к началу) → ответы в Week Report [[gate]]
 8. **Архивация done-WP** → `archive/wp-contexts/` (T) [[gate]]
