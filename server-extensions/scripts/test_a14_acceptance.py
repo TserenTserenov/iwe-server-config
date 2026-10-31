@@ -14,6 +14,22 @@ acc = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(acc)
 
 
+def claude_stream(*texts):
+    """Claude `--output-format stream-json` output: one assistant event per message plus a tool-only one."""
+    events = [{"type": "system", "subtype": "init"}]
+    for text in texts:
+        events.append({"type": "assistant", "message": {"content": [{"type": "text", "text": text}]}})
+        events.append({"type": "assistant", "message": {"content": [{"type": "tool_use", "name": "Read"}]}})
+    events.append({"type": "result", "result": texts[-1]})
+    return "\n".join(json.dumps(e, ensure_ascii=False) for e in events) + "\n"
+
+
+def codex_stream(*texts):
+    events = [{"type": "thread.started"}, {"type": "item.completed", "item": {"type": "error", "message": "meta"}}]
+    events += [{"type": "item.completed", "item": {"type": "agent_message", "text": t}} for t in texts]
+    return "\n".join(json.dumps(e, ensure_ascii=False) for e in events) + "\n"
+
+
 def fake_answers(agents, bad=None):
     out = Path(tempfile.mkdtemp())
     (out / "out").mkdir()
@@ -79,7 +95,7 @@ class AcceptanceTest(unittest.TestCase):
 
         def fake_run(cmd, **kw):
             calls.append(cmd)
-            return subprocess.CompletedProcess(cmd, 0, stdout="ответ", stderr="")
+            return subprocess.CompletedProcess(cmd, 0, stdout=claude_stream("ответ"), stderr="")
 
         with mock.patch.object(acc.subprocess, "run", fake_run):
             acc.run(["claude"], out, 5)
@@ -93,17 +109,50 @@ class AcceptanceTest(unittest.TestCase):
         def fake_run(cmd, **kw):
             if "Из чего состоит ИИ-агент?" in cmd:
                 raise subprocess.TimeoutExpired(cmd, 1)
-            return subprocess.CompletedProcess(cmd, 0, stdout="ответ", stderr="")
+            return subprocess.CompletedProcess(cmd, 0, stdout=claude_stream("ответ"), stderr="")
 
         with mock.patch.object(acc.subprocess, "run", fake_run):
             acc.run(["claude"], out, 1)
         self.assertFalse((out / "out" / "claude-01.md").exists(), "timed-out question leaves no half answer")
         self.assertTrue((out / "out" / "claude-02.md").exists())
 
+    def test_parse_messages_reads_every_assistant_message(self):
+        self.assertEqual(acc.parse_messages("claude", claude_stream("первый", "второй")), ["первый", "второй"])
+        self.assertEqual(acc.parse_messages("codex", codex_stream("первый", "второй")), ["первый", "второй"])
+        self.assertEqual(acc.parse_messages("kimi", "один ответ"), ["один ответ"])
+        self.assertEqual(acc.parse_messages("claude", "Not logged in\n"), [], "plain text is not an answer")
+
+    def test_choose_answer_keeps_the_real_answer_when_a_hook_comment_follows_it(self):
+        real = "Длинный содержательный ответ про состав. " * 10
+        self.assertEqual(acc.choose_answer([real, "Хук сработал ложно."]), (real, True))
+        self.assertEqual(acc.choose_answer([real, "Переписанный ответ " * 12]), ("Переписанный ответ " * 12, False))
+        self.assertEqual(acc.choose_answer(["единственный"]), ("единственный", False))
+        self.assertEqual(acc.choose_answer([]), ("", False))
+
+    def test_run_saves_the_earlier_answer_and_the_whole_exchange_after_a_hook_comment(self):
+        import contextlib
+        import io
+        out = Path(tempfile.mkdtemp())
+        real = "Полный ответ на вопрос о составе. " * 10
+
+        def fake_run(cmd, **kw):
+            return subprocess.CompletedProcess(cmd, 0, stdout=codex_stream(real, "Дальше: вы: уточнить.") if cmd[0] == "codex"
+                                               else claude_stream(real, "Хук сработал ложно."), stderr="")
+
+        buf = io.StringIO()
+        with mock.patch.object(acc.subprocess, "run", fake_run), contextlib.redirect_stdout(buf):
+            acc.run(["claude", "codex"], out, 5)
+        for agent in ("claude", "codex"):
+            self.assertEqual((out / "out" / f"{agent}-01.md").read_text(encoding="utf-8"), real)
+            saved = json.loads((out / "out" / f"{agent}-01.messages.json").read_text(encoding="utf-8"))
+            self.assertEqual(len(saved), 2)
+        self.assertIn("kept the earlier answer", buf.getvalue())
+        self.assertEqual(len(acc.answer_files(out)), 24, "the .messages.json sidecar is not counted as an answer")
+
     def test_agent_commands_match_the_installed_clis(self):
-        kimi = acc.agent_command("kimi", "q", Path("x"))
+        kimi = acc.agent_command("kimi", "q")
         self.assertEqual(kimi[1:], ["-p", "q"], "kimi CLI has no --quiet/-w; the 30.10 run lost 12 answers to it")
-        self.assertIn("--skip-git-repo-check", acc.agent_command("codex", "q", Path("x")))
+        self.assertIn("--skip-git-repo-check", acc.agent_command("codex", "q"))
 
     def test_run_prints_redacted_stderr_tail_when_the_agent_fails(self):
         import contextlib

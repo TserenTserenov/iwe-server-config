@@ -349,9 +349,11 @@ A14_MATCH=$(printf '%s\n' "$RESPONSE" | perl -0777 -CSD -Mutf8 -ne '
   my $amb_src = $ENV{A14_AMBIG} || ""; utf8::decode($amb_src);
   my $nonsys = qr/$b($nonsys_src)/i;
   my $syshead = qr/$b($sys_src)\S*/i;
-  my $part = qr/$b(входи[тл]|входят|входить|состо[ия]т\s+из|в\s+состав(?![а-яё])|(является|являются|будет|быть)\s+частью|част(ью|ь|и)\s+(агента|системы|программы))/i;
+  my $part = qr/$b(входи[тл]|входят|входить|состо[ия]т\s+из|в\s+состав(?![а-яё])|включа(ет|ют)(?![а-яё])|(является|являются|будет|быть)\s+частью|част(ью|ь|и)\s+(агента|системы|программы))/i;
   my $end = qr/[а-яё]{0,3}(?![а-яё])/i;
   my $nonsys_s = qr/$b($nonsys_src)$notagent$end/i;
+  # longer endings ("документации", "инструкциями"): used only inside the list after "состоит из / включает"
+  my $nonsys_l = qr/$b($nonsys_src)$notagent[а-яё]{0,6}(?![а-яё])/i;
   my $ambw = $amb_src ? qr/$b($amb_src)$notagent$end/i : undef;
   # a window of up to three words never crosses a comma or semicolon (clause boundary)
   my $win = qr/(?:\s+[^\s,;]+){0,3}?/;
@@ -366,7 +368,7 @@ A14_MATCH=$(printf '%s\n' "$RESPONSE" | perl -0777 -CSD -Mutf8 -ne '
     # элементы, слои, состав) or a line with an explicit part verb anywhere, whatever its end:
     # answer 2 of the 30.10 run opened with "состоит из следующего." and a full stop, then a
     # blank line and bold numbered headings — the old "ends with :" test let it through.
-    my $hdr_verb = $h =~ /$b(состо[ия]т\s+из|входят|в\s+(ней|нём|него|неё)\s+(есть|работают|собран\S*)|соединены|к\s+(нему|ней)\s+добавлен)/i;
+    my $hdr_verb = $h =~ /$b(состо[ия]т\s+из|входят|включа(ет|ют)(?![а-яё])|в\s+(ней|нём|него|неё)\s+(есть|работают|собран\S*)|соединены|к\s+(нему|ней)\s+добавлен)/i;
     my $hdr_noun = $h =~ /:\s*\**\s*$/
       && $h =~ /$b(компонент|элемент|сло[яёе]в?(?![а-яё])|состав(?![а-яё])|составн\S*\s+част)/i;
     next unless $hdr_verb || $hdr_noun;
@@ -418,6 +420,10 @@ A14_MATCH=$(printf '%s\n' "$RESPONSE" | perl -0777 -CSD -Mutf8 -ne '
     if ($t =~ /$nonsys_s$win\s+$part/ || $t =~ /$part$win\s+$nonsys_s/) {
       hit($s)
     }
+    # a list after "состоит из / включает": any non-system item in the same clause chain (a stop word, ";" or "." ends it)
+    if ($t =~ /$b(состо[ия]т\s+из|включа(ет|ют)(\s+в\s+себя)?)(?:\s+(?!(?:а|но|что|который|которая|которые|чтобы|если)(?![а-яё]))[^\s;.]+){0,9}?\s+$nonsys_l/i) {
+      hit($s)
+    }
     if ($t =~ /$nonsys_s$win\s+(состо[ия]т\s+из|дел[ия]тся\s+на)\s+(\S+\s+)?$parts/i
         || $t =~ /$nonsys_s\s+из\s+(\S+\s+){0,2}$parts/i) {
       hit($s)
@@ -452,7 +458,8 @@ A14_MATCH=$(printf '%s\n' "$RESPONSE" | perl -0777 -CSD -Mutf8 -ne '
     # 30.10 run wrote "Полное состояние человека — набор значений по всем типам". Checked on
     # $t0: the system-head cut above would take "человека —" (человек is a system) and the dash
     # with it.
-    if ($t0 =~ /$b(состояни|систем|агент|метод|работ)\S*(\s+[а-яё-]+){0,2}$dash\s*(это\s+)?(набор|совокупност|множеств|комплекс|сочетани|список|профиль)/i
+    if ($t0 =~ /$b(состояни|систем|агент|метод|работ)\S*(\s+[а-яё-]+){0,4}$dash\s*(это\s+)?(набор|совокупност|множеств|комплекс|сочетани|список|профиль)/i
+        || $t0 =~ /$b(агент)\S*(\s+[а-яё-]+){0,2}$dash\s*(это\s+)?(модел|промпт|инструкци)/i
         || $t =~ /$b(метод)\S*\s+[-—–]\s+это\s+(описани|документ|текст|файл|инструкци)/i
         || $t =~ /$b(протокол|инструкци|описани|документ|файл)\S*\s+[-—–]\s+это\s+метод/i) {
       hit($s)

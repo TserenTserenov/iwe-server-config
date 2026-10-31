@@ -48,6 +48,7 @@ HOOK = Path(os.environ.get("A14_HOOK", ROOT / ".claude/hooks/response-clarity-ho
 PASS_CLEAN = 10
 BLIND_SEED = 388
 STDERR_TAIL_LINES = 3
+REWRITE_RATIO = 0.4  # a final message shorter than this share of an earlier one is a comment, not an answer
 # same token shapes the style hook's redact() masks before writing its journal
 SECRET_RE = re.compile(r"(gh[pousr]_|sk-|xox[baprs]-|AKIA)[A-Za-z0-9_-]+|[A-Za-z0-9_-]{32,}|[a-f0-9]{16,}")
 
@@ -56,17 +57,53 @@ def questions() -> list[str]:
     return [q for q in QUESTIONS.read_text(encoding="utf-8").splitlines() if q.strip()]
 
 
-def agent_command(agent: str, question: str, answer_file: Path) -> list[str]:
+def agent_command(agent: str, question: str) -> list[str]:
     """One fresh, non-interactive session per question; cwd=ROOT is what loads the real instructions."""
     if agent == "claude":
-        return ["claude", "-p", "--permission-mode", "plan", question]
+        # stream-json keeps every assistant message: after a stop hook asks for a rewrite, plain `-p`
+        # output is only the last message, which can be a comment on the hook instead of the answer
+        return ["claude", "-p", "--permission-mode", "plan", "--output-format", "stream-json", "--verbose", question]
     if agent == "kimi":
         # kimi CLI 2026-10: `-p` is the only prompt flag; `--quiet`/`-w` were never accepted on Linux
         return [KIMI_BIN, "-p", question]
     if agent == "codex":
-        return ["codex", "exec", "-s", "read-only", "-C", str(ROOT), "--skip-git-repo-check", "--ephemeral",
-                "-o", str(answer_file), question]
+        return ["codex", "exec", "--json", "-s", "read-only", "-C", str(ROOT), "--skip-git-repo-check", "--ephemeral",
+                question]
     raise SystemExit(f"unknown agent {agent!r} (claude, kimi, codex)")
+
+
+def parse_messages(agent: str, stdout: str) -> list[str]:
+    """All assistant messages of one session, in order (claude stream-json, codex --json); kimi prints one."""
+    if agent == "kimi":
+        return [stdout] if stdout.strip() else []
+    messages: list[str] = []
+    for line in stdout.splitlines():
+        try:
+            event = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if agent == "codex":
+            item = event.get("item") or {}
+            if event.get("type") == "item.completed" and item.get("type") == "agent_message" and item.get("text"):
+                messages.append(item["text"])
+        elif event.get("type") == "assistant":
+            blocks = (event.get("message") or {}).get("content") or []
+            text = "".join(b.get("text", "") for b in blocks if isinstance(b, dict) and b.get("type") == "text")
+            if text.strip():
+                messages.append(text)
+    return messages
+
+
+def choose_answer(messages: list[str]) -> tuple[str, bool]:
+    """The last message is the answer the user sees, unless a stop hook turned it into a short comment
+    on the hook: then the longest earlier message is the real answer. Returns (text, replaced)."""
+    if not messages:
+        return "", False
+    final = messages[-1]
+    earlier = max(messages[:-1], key=len, default="")
+    if earlier and len(final) < REWRITE_RATIO * len(earlier):
+        return earlier, True
+    return final, False
 
 
 def stderr_tail(text: str) -> str:
@@ -83,15 +120,20 @@ def run(agents: list[str], out: Path, timeout: int) -> int:
                 continue
             try:
                 done = subprocess.run(
-                    agent_command(agent, question, answer),
+                    agent_command(agent, question),
                     cwd=ROOT, stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=timeout, check=False,
                 )
             except subprocess.TimeoutExpired:
                 print(f"{agent} {n:02d} timeout after {timeout}s: no answer saved; rerun to resume")
                 continue
-            if agent != "codex":  # codex writes the answer file itself (-o)
-                answer.write_text(done.stdout, encoding="utf-8")
+            messages = parse_messages(agent, done.stdout)
+            text, replaced = choose_answer(messages)
+            answer.write_text(text, encoding="utf-8")
+            if len(messages) > 1:  # keep the whole exchange next to the answer; the glob in answer_files ignores it
+                answer.with_suffix(".messages.json").write_text(json.dumps(messages, ensure_ascii=False, indent=1), encoding="utf-8")
             line = f"{agent} {n:02d} rc={done.returncode} {answer.stat().st_size if answer.exists() else 0} bytes"
+            if replaced:
+                line += f"  (final message was a comment after a hook rewrite; kept the earlier answer, {len(messages)} messages)"
             if done.returncode != 0 and done.stderr:
                 line += f"  stderr: {stderr_tail(done.stderr)}"
             print(line)
