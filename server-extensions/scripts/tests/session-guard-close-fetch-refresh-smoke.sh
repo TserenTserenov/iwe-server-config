@@ -194,7 +194,8 @@ def verify(name, expected, mutate=None):
         result = subprocess.run(
             ['bash', '-c', 'source "$1"; _code_branch_claim_has_publish_proof "$2" "$3" "$4" product',
              'test', str(helper), str(sem), str(f['code']), claim],
-            env={**os.environ, 'IWE_ROOT': str(f['root'])}, capture_output=True, text=True,
+            env={**os.environ, 'IWE_ROOT': str(f['root']), 'GUARD_LIB_DIR': str(script.parent / 'lib')},
+            capture_output=True, text=True,
         )
         assert (result.returncode == 0) == expected, (name, claim, result.stderr)
     print('OK: branch-proof ' + name)

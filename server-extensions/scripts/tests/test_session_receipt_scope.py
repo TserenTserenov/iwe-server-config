@@ -234,6 +234,12 @@ class EmptyGovernanceScopeTest(unittest.TestCase):
         self.assertEqual(before, git(self.governance, "status", "--porcelain=v1", "--untracked-files=all"))
         self.assertEqual(self.sem.read_text(), self.original)
 
+    def test_four_field_claim_of_the_external_commit_is_accepted(self) -> None:
+        # WP-484 Ф275 precondition 3: the claim may carry checkout and branch; the pair (repo, sha) decides.
+        four = f"commit: MC-sessions {self.source} {self.sessions} main\n"
+        self.sem.write_text(self.original.replace(f"commit: MC-sessions {self.source}\n", four))
+        self.verify()
+
     def test_own_missing_same_name_and_directory_claims_refuse(self) -> None:
         for path in ("deleted.txt", "report.md", "inbox/", "inbox/open-sessions.log"):
             with self.subTest(path=path):
@@ -254,6 +260,7 @@ class EmptyGovernanceScopeTest(unittest.TestCase):
             self.original + f"commit: strategy {self.source}\n",
             self.original + f"commit: unknown {self.source}\n",
             self.original + "commit: MC-sessions not-a-sha\n",
+            self.original + f"commit: MC-sessions {self.source} only-checkout\n",
         ]
         for text in cases:
             with self.subTest(text=text):

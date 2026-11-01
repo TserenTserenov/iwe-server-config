@@ -15,6 +15,8 @@ import tempfile
 import unittest
 
 SOURCE = Path(sys.argv.pop()).resolve()
+# Functions cut out of the guard (the claim readers) import the shared claim parser from this directory.
+os.environ.setdefault("GUARD_LIB_DIR", str(SOURCE / "scripts/lib"))
 GUARD = (SOURCE / "scripts/session-guard.sh").read_text()
 
 
@@ -73,7 +75,7 @@ class GovernanceDeliveryTest(unittest.TestCase):
                         PYTHONDONTWRITEBYTECODE="1")
         scripts = self.root / "scripts"
         (scripts / "lib").mkdir(parents=True)
-        for name in ("session_receipt_scope.py", "publication_receipt.py"):
+        for name in ("session_receipt_scope.py", "publication_receipt.py", "claim_line.py"):
             shutil.copyfile(SOURCE / "scripts/lib" / name, scripts / "lib" / name)
         (scripts / "proof-functions.sh").write_text(FUNCTIONS)
         self.runner = scripts / "decision.sh"

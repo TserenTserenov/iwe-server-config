@@ -16,6 +16,7 @@ import stat
 import sys
 
 import publication_receipt as proof
+import claim_line
 
 
 def require(condition: bool, message: str) -> None:
@@ -241,10 +242,13 @@ def verify_empty_governance_scope(semaphore: Path, repo: Path) -> None:
                     "file claim belongs outside the verified sessions checkout")
             pending = None
         elif line.startswith("commit: "):
-            parts = line[8:].split()
-            require(len(parts) == 2 and re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", parts[1]) is not None,
-                    "invalid commit claim")
-            commits.append(parts)
+            # A claim is the pair (repo, sha); the 4-field form only adds checkout and branch.
+            try:
+                claim = claim_line.parse(line)
+            except claim_line.ClaimError:
+                raise proof.ProofError("invalid commit claim") from None
+            require(claim_line.is_canonical_sha(claim.sha), "invalid commit claim")
+            commits.append([claim.repo, claim.sha])
         elif line.startswith(("file:", "file_v2:", "commit:")):
             raise proof.ProofError("malformed scope record")
     require(len(unpaired) == 2 and set(unpaired) == {orz, "inbox/open-sessions.log"},

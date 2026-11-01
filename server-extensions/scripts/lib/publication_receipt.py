@@ -20,6 +20,12 @@ import sys
 import tempfile
 import time
 
+try:
+    import claim_line
+except ImportError:  # loaded by file path (guard, tests): this directory is not on sys.path
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    import claim_line
+
 PREFIX = "publication_receipt_v2: "
 MAX_BYTES = 1024 * 1024
 MAX_CANDIDATES = 256
@@ -111,11 +117,16 @@ def claims(raw: bytes, repo_name: str, repo: Path) -> list[str]:
     for line in raw.decode().splitlines():
         if not line.startswith("commit: " + repo_name + " "):
             continue
-        sha = line[len("commit: " + repo_name + " "):]
-        if not re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", sha):
+        # The claim is the pair (repo, sha); a 4-field line (WP-484 Ф275 precondition 3)
+        # adds checkout and branch as context. The proof keeps the strict canonical sha.
+        try:
+            claim = claim_line.parse(line)
+        except claim_line.ClaimError:
+            raise ProofError("malformed source claim") from None
+        if claim is None or not claim_line.is_canonical_sha(claim.sha):
             raise ProofError("malformed source claim")
-        if sha not in result:
-            result.append(sha)
+        if claim.sha not in result:
+            result.append(claim.sha)
     # PREPARED close already freezes its source inventory in this semaphore,
     # including commits which predate note-commit. Bind that inventory to the
     # same repository and session, never to caller-supplied source lists.

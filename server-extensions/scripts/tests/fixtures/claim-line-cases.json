@@ -1,0 +1,76 @@
+{
+  "repo": "DS-my-strategy",
+  "sha": "acb47b96f515b4efb61b05b7171ae2fb9d0f2ce2",
+  "cases": [
+    {
+      "name": "two-field claim",
+      "line": "commit: DS-my-strategy acb47b96f515b4efb61b05b7171ae2fb9d0f2ce2",
+      "matches": true
+    },
+    {
+      "name": "four-field claim in the incident layout of promote-intent",
+      "line": "commit: DS-my-strategy acb47b96f515b4efb61b05b7171ae2fb9d0f2ce2 /home/tseren/IWE/.iwe-runtime/isolated-worktrees/grok-b48ce4db7c1ad92b session-isolate/grok-b48ce4db7c1ad92b",
+      "matches": true
+    },
+    {
+      "name": "four-field claim with unset checkout and branch",
+      "line": "commit: DS-my-strategy acb47b96f515b4efb61b05b7171ae2fb9d0f2ce2 - -",
+      "matches": true
+    },
+    {
+      "name": "neighbour sha of the same repo",
+      "line": "commit: DS-my-strategy bcb47b96f515b4efb61b05b7171ae2fb9d0f2ce2",
+      "matches": false
+    },
+    {
+      "name": "same sha in another repo",
+      "line": "commit: iwe-root acb47b96f515b4efb61b05b7171ae2fb9d0f2ce2",
+      "matches": false
+    },
+    {
+      "name": "repo name that only starts like ours",
+      "line": "commit: DS-my-strategy-copy acb47b96f515b4efb61b05b7171ae2fb9d0f2ce2",
+      "matches": false
+    },
+    {
+      "name": "three fields",
+      "line": "commit: DS-my-strategy acb47b96f515b4efb61b05b7171ae2fb9d0f2ce2 /some/checkout",
+      "matches": false
+    },
+    {
+      "name": "five fields",
+      "line": "commit: DS-my-strategy acb47b96f515b4efb61b05b7171ae2fb9d0f2ce2 /a b c",
+      "matches": false
+    },
+    {
+      "name": "short sha",
+      "line": "commit: DS-my-strategy acb47b9",
+      "matches": false
+    },
+    {
+      "name": "not a claim line",
+      "line": "file: DS-my-strategy/inbox/WP-484/WP-484.md",
+      "matches": false
+    },
+    {
+      "name": "empty line",
+      "line": "",
+      "matches": false
+    },
+    {
+      "name": "double space between fields",
+      "line": "commit: DS-my-strategy  acb47b96f515b4efb61b05b7171ae2fb9d0f2ce2",
+      "matches": false
+    },
+    {
+      "name": "tab between fields",
+      "line": "commit: DS-my-strategy acb47b96f515b4efb61b05b7171ae2fb9d0f2ce2\t/co\tbr",
+      "matches": false
+    },
+    {
+      "name": "trailing space",
+      "line": "commit: DS-my-strategy acb47b96f515b4efb61b05b7171ae2fb9d0f2ce2 ",
+      "matches": false
+    }
+  ]
+}

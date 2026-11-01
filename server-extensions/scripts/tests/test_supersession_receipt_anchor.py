@@ -53,8 +53,8 @@ class ReceiptSupersessionTests(unittest.TestCase):
         # Keep the helper's ordinary source-relative library location intact.
         fixture_scripts = self.root / "scripts"
         (fixture_scripts / "lib").mkdir(parents=True)
-        (fixture_scripts / "lib/publication_receipt.py").write_bytes(
-            (SCRIPTS / "lib/publication_receipt.py").read_bytes())
+        for name in ("publication_receipt.py", "claim_line.py"):
+            (fixture_scripts / "lib" / name).write_bytes((SCRIPTS / "lib" / name).read_bytes())
         self.helper = fixture_scripts / "helper.sh"
         self.helper.write_text(extract_function((SCRIPTS / "session-guard.sh").read_text(),
                                                "_commit_claim_supersession_has_publish_proof"))

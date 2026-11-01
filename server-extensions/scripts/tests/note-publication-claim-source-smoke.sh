@@ -88,5 +88,23 @@ case "$OUT" in *"заявка пропущена"*) ;; *) fail "skipped claim no
 run "$PUBLISHED" --claim-source 'not-a-sha'
 [ "$RC" -ne 0 ] || fail "malformed --claim-source must be refused"
 
+# 6. The session already holds the claim in the 4-field form (WP-484 Ф275, incident of 01.11): it is found
+#    by the pair (repo, sha), the receipt lands, and no 2-field duplicate is appended.
+mk "$SEM" aaaa1111 slug-one
+echo "commit: myrepo $PUBLISHED /some/checkout some-branch" >> "$SEM"
+run "$PUBLISHED" --claim-source "$PUBLISHED"
+[ "$RC" -eq 0 ] || fail "4-field claim + receipt must succeed (rc=$RC): $OUT"
+[ "$(grep -c "^commit: myrepo $PUBLISHED" "$SEM")" = 1 ] || fail "4-field claim got a duplicate line: $(grep '^commit:' "$SEM")"
+grep -q 'receipt' "$SEM" || fail "no receipt line recorded for the 4-field claim: $(cat "$SEM")"
+
+# 7. Another session holds the claim in the 4-field form: refused, nothing written.
+mk "$SEM" aaaa1111 slug-one
+echo "commit: myrepo $PUBLISHED /some/checkout some-branch" >> "$OTHER"
+cp "$SEM" "$T/before"
+run "$PUBLISHED" --claim-source "$PUBLISHED"
+[ "$RC" -ne 0 ] || fail "4-field claim of another session must be refused: $OUT"
+cmp -s "$SEM" "$T/before" || fail "semaphore changed after a foreign 4-field refusal"
+case "$OUT" in *"другой сессией"*) ;; *) fail "foreign 4-field reason missing: $OUT" ;; esac
+
 [ "$FAIL" = 0 ] && echo "PASS: note-publication-claim-source-smoke"
 exit "$FAIL"

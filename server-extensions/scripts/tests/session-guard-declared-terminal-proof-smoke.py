@@ -20,6 +20,8 @@ GUARD = Path(os.environ.get(
     str(Path(__file__).resolve().parents[1] / "session-guard.sh"),
 ))
 SOURCE = GUARD.read_text()
+# Functions cut out of the guard (the claim readers) import the shared claim parser from this directory.
+os.environ.setdefault("GUARD_LIB_DIR", str(GUARD.parent / "lib"))
 
 
 def function_source(name):
