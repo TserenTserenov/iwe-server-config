@@ -329,13 +329,16 @@ BASE5_MATCH=$(printf '%s\n' "$RESPONSE" | perl -CSD -Mutf8 -ne '
 # a part-whole sentence with one is logged as A14_AMBIGUOUS, a warn-only signal that feeds
 # registry calibration. No copy -> the built-in lists in the perl block below (fail-open).
 A14_TSV="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/concept-kinds.tsv"
-A14_NONSYS=""; A14_SYS=""; A14_AMBIG=""
+A14_NONSYS=""; A14_SYS=""; A14_AMBIG=""; A14_PARTOK=""
 if [ -r "$A14_TSV" ]; then
   A14_NONSYS=$(awk -F'\t' '!/^#/ && NF==2 && $1!="system" && $1!="ambiguous" && $1!="collection" {print $2}' "$A14_TSV" | paste -sd'|' -)
   A14_SYS=$(awk -F'\t' '!/^#/ && NF==2 && $1=="system" {print $2}' "$A14_TSV" | paste -sd'|' -)
   A14_AMBIG=$(awk -F'\t' '!/^#/ && NF==2 && $1=="ambiguous" {print $2}' "$A14_TSV" | paste -sd'|' -)
+  # a method, a work and an activity have parts of their own (pilot decision 01.11, РП-388 Ф38; FPF A.14:
+  # sub-methods, parts of work): "метод состоит из шагов", "работа делится на два этапа" are not A14
+  A14_PARTOK=$(awk -F'\t' '!/^#/ && NF==2 && ($1=="method" || $1=="work" || $1=="activity") {print $2}' "$A14_TSV" | paste -sd'|' -)
 fi
-export A14_NONSYS A14_SYS A14_AMBIG
+export A14_NONSYS A14_SYS A14_AMBIG A14_PARTOK
 A14_MATCH=$(printf '%s\n' "$RESPONSE" | perl -0777 -CSD -Mutf8 -ne '
   s/«[^»]*»//g; s/`[^`]*`//g;
   my $b = qr/(?<![а-яёА-ЯЁ])/;
@@ -361,6 +364,10 @@ A14_MATCH=$(printf '%s\n' "$RESPONSE" | perl -0777 -CSD -Mutf8 -ne '
   # printed (prefixed AMBIG) by END when no real hit exists
   our ($REAL, $AMB) = (0, "");
   sub hit { $REAL = 1; print $_[0]; exit }
+  # subject is a method / work / activity word and the part word is a step, a stage or a bare "часть":
+  # its own parts, not a system part (a description or a document keeps the ban)
+  our $PARTOK = $ENV{A14_PARTOK} ? do { my $p = $ENV{A14_PARTOK}; utf8::decode($p); qr/$b($p)/i } : undef;
+  sub part_ok { my ($subj, $pw) = @_; return ($PARTOK && $subj =~ $PARTOK && $pw =~ /^(част|этап|шаг)/i) ? 1 : 0 }
   my @lines = split /\n/;
   for my $i (0 .. $#lines) {
     my $h = $lines[$i];
@@ -426,6 +433,12 @@ A14_MATCH=$(printf '%s\n' "$RESPONSE" | perl -0777 -CSD -Mutf8 -ne '
     # "модуль памяти": an ambiguous head with its complement is not a verdict, but the link verb
     # after it ("отчёт входит") must stay visible
     $t =~ s/$ambw\s+(?!$part)\S+//g if $ambw;
+    # own parts of a method / work / activity ("метод состоит из шагов", "работа делится на два этапа"):
+    # cut that phrase before the generic checks, so the rest of the sentence is still judged
+    for my $own_re (qr/(?<subj>$nonsys_s)$win\s+(?:состо[ия]т\s+из|дел[ия]тся\s+на)\s+(?:\S+\s+)?(?<pw>$parts)/i,
+                    qr/(?<subj>$nonsys_s)\s+из\s+(?:\S+\s+){0,2}(?<pw>$parts)/i) {
+      if ($t =~ $own_re) { my ($m, $subj, $pw) = ($&, $+{subj}, $+{pw}); $t =~ s/\Q$m\E// if part_ok($subj, $pw) }
+    }
     if ($t =~ /$nonsys_s$win\s+$part/ || $t =~ /$part$win\s+$nonsys_s/) {
       hit($s)
     }

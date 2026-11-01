@@ -84,3 +84,8 @@ ambiguous	групп
 system	iwe
 ambiguous	экзокортекс
 ambiguous	цифров[а-яё]+ двойник
+method	рабоч[а-яё]+ процесс
+method	процесс(а|у|ом|е)? разработки
+method	инженерн[а-яё]+ процесс
+ambiguous	жизненн[а-яё]+ цикл
+ambiguous	цикл(а|у|ом|е)? жизни
