@@ -523,15 +523,18 @@ A12_CLOSE_MATCH=$(python3 "$(dirname "${BASH_SOURCE[0]}")/a12-unsolicited-close.
 # Наличие и непустота строки «Дальше:» (A12, пак правило 6) — не её ясность
 # (двусмысленность проверяется выборочным чтением, не лексиконом; сигнал
 # «нет обращения к пилоту» снят в Ф6, 23.10.2026) и не истинность (РП-603).
-# Warn-only, в BLOCKABLE не входят: a12-next-block.py печатает ровно три
+# Warn-only, в BLOCKABLE не входят: a12-next-block.py печатает ровно четыре
 # строки (пусто = нет сигнала), не ломает ход при сбое. Третья строка —
 # A12_NEXT_UNNAMED_LAUNCHER: «следующая сессия ...» без названного запускающего
-# (РП-605 Ф6, 30.10.2026, разрешение пилота).
-A12_NEXT_RESULT=$(python3 "$(dirname "${BASH_SOURCE[0]}")/a12-next-block.py" "$TRANSCRIPT_PATH" 2>/dev/null || printf '\n\n\n')
+# (РП-605 Ф6, 30.10.2026, разрешение пилота). Четвёртая — A12_NEXT_PLACE_THIS_CHAT:
+# «где» названо для этого же чата (РП-605 Ф6, 01.11.2026, разрешение пилота).
+A12_NEXT_RESULT=$(python3 "$(dirname "${BASH_SOURCE[0]}")/a12-next-block.py" "$TRANSCRIPT_PATH" 2>/dev/null || printf '\n\n\n\n')
 A12_NEXT_MISSING_LINE=$(printf '%s\n' "$A12_NEXT_RESULT" | sed -n '1p')
 A12_NEXT_EMPTY_LINE=$(printf '%s\n' "$A12_NEXT_RESULT" | sed -n '2p')
 A12_NEXT_UNNAMED_LINE=$(printf '%s\n' "$A12_NEXT_RESULT" | sed -n '3p')
+A12_NEXT_THIS_CHAT_LINE=$(printf '%s\n' "$A12_NEXT_RESULT" | sed -n '4p')
 [ -n "$A12_NEXT_UNNAMED_LINE" ] && echo "$TIMESTAMP | $AGENT | A12_NEXT_UNNAMED_LAUNCHER | next-session-without-named-launcher | $(redact "$A12_NEXT_UNNAMED_LINE")" >> "$LOG_FILE" 2>/dev/null || true
+[ -n "$A12_NEXT_THIS_CHAT_LINE" ] && echo "$TIMESTAMP | $AGENT | A12_NEXT_PLACE_THIS_CHAT | place-named-for-this-chat | $(redact "$A12_NEXT_THIS_CHAT_LINE")" >> "$LOG_FILE" 2>/dev/null || true
 [ -n "$A12_NEXT_MISSING_LINE" ] && echo "$TIMESTAMP | $AGENT | A12_NEXT_MISSING | no-next-line-in-last-3-lines | -" >> "$LOG_FILE" 2>/dev/null || true
 [ -n "$A12_NEXT_EMPTY_LINE" ] && echo "$TIMESTAMP | $AGENT | A12_NEXT_EMPTY_CONTENT | next-line-emoji-or-punctuation-only | $(redact "$A12_NEXT_EMPTY_LINE")" >> "$LOG_FILE" 2>/dev/null || true
 
