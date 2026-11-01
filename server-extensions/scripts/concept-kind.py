@@ -195,6 +195,8 @@ def lookup(data: dict, word: str, claim: str | None) -> tuple[str, list[str]]:
         lines.append(f"  основание: {term['basis']} (статус {term['status']})")
         for also in term.get("also") or []:
             lines.append(f"  также как {kinds[also['kind']]['name']}: {also['when']}")
+        if term.get("prefer"):
+            lines.append(f"  слово под уходом, говорить вместо него: {term['prefer']}")
     if claim:
         claimed = resolve_claim(data, claim)
         if claimed is None:
@@ -254,9 +256,39 @@ def claim_subject(m: re.Match) -> list[str]:
     return words
 
 
+def phrase_terms(data: dict, subject: str) -> list[dict]:
+    """Terms whose stem spans several words ("рабочий процесс"), matched on the whole subject."""
+    subject = subject.lower()
+    return [
+        t
+        for t in data["terms"]
+        if any(
+            " " in stem and re.search(rf"(?<![а-яё]){stem}", subject)
+            for stem in t.get("stems") or []
+        )
+    ]
+
+
+def discouraged_words(data: dict, text: str) -> list[str]:
+    """Warnings for terms the pilot retired (registry field `prefer`); quoted and code text is skipped."""
+    text = QUOTE_RE.sub(" ", CODE_RE.sub(" ", text)).lower()
+    warnings: list[str] = []
+    for term in data["terms"]:
+        if not term.get("prefer"):
+            continue
+        for stem in term.get("stems") or []:
+            for m in re.finditer(rf"(?<![а-яё]){stem}[а-яё]*", text):
+                warnings.append(
+                    f"«{m.group(0)}»: слово под уходом (решение пилота). "
+                    f"Уточни: {term.get('resolve', 'что именно имеется в виду?')} "
+                    f"Говори: {term['prefer']}"
+                )
+    return warnings
+
+
 def check_text(data: dict, text: str) -> list[str]:
     kinds = kind_index(data)
-    warnings: list[str] = []
+    warnings: list[str] = discouraged_words(data, text)
     for m in CLAIM_RE.finditer(strip_noise(text)):
         words = claim_subject(m)
         y = m.group("y")
@@ -264,7 +296,9 @@ def check_text(data: dict, text: str) -> list[str]:
         if y_kind is None:
             continue
         subject = " ".join(words[:6])
-        x_terms = next((term_kind(data, w) for w in words if term_kind(data, w)), [])
+        x_terms = phrase_terms(data, subject) or next(
+            (term_kind(data, w) for w in words if term_kind(data, w)), []
+        )
         x_kinds = {t["kind"] for t in x_terms}
         if x_kinds == {y_kind["id"]}:
             continue

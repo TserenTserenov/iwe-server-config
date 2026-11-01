@@ -113,3 +113,31 @@ def test_cli_log_line_keeps_seven_columns_with_tabs_in_fields(tmp_path):
     assert len(lines) == 1
     fields = lines[0].split("\t")
     assert len(fields) == 7 and fields[1] == "ag x y" and fields[6] == "р а"
+
+
+def test_check_text_flags_retired_word_in_any_form():
+    for text in (
+        "Жизненный цикл РП описан в протоколе.",
+        "Для жизненного цикла нужен метод.",
+        "Это цикл жизни системы.",
+    ):
+        warnings = ck.check_text(DATA, text)
+        assert any("слово под уходом" in w for w in warnings), text
+        assert any("работы создателей" in w for w in warnings), text
+
+
+def test_check_text_skips_retired_word_in_quote_and_code():
+    text = "Руководство называет раздел «жизненный цикл 2.0» и `lifecycle_stage`."
+    assert ck.check_text(DATA, text) == []
+
+
+def test_working_process_is_method_not_activity():
+    # "процесс" alone is an activity (24.10); the phrase "рабочий процесс" is a method by the guide
+    assert ck.check_text(DATA, "Рабочий процесс — это метод.") == []
+    assert ck.check_text(DATA, "Процесс — это деятельность.") == []
+    assert len(ck.check_text(DATA, "Рабочий процесс — это работа.")) == 1
+
+
+def test_phrase_term_found_by_whole_subject():
+    terms = ck.phrase_terms(DATA, "рабочий процесс")
+    assert [t["term"] for t in terms] == ["рабочий процесс"]
