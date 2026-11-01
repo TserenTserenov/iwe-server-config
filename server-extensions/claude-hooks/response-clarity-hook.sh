@@ -9,7 +9,7 @@
 # Детерминированные правила (консенсус peer-session 2026-06-04-56):
 #   A1   путь к файлу как подлежащее предложения
 #   A8   журнал процесса в начале ответа (Reading…, Проверяю…)
-#   A10  голые английские маркеры статуса (exit 0, PASS, SHA, status: done)
+#   A10  голые английские маркеры статуса (exit 0, PASS, status: done)
 #   BASE5 длинное тире вне конструкции «— это» (базовое правило стиля #5)
 #
 # A11 (пассивный залог) — НЕ ловится: высокий риск ложных срабатываний,
@@ -172,10 +172,14 @@ A1_MATCH=$(printf '%s\n' "$RESPONSE" | grep -E '^\s*`?[A-Za-z0-9_/.-]+\.(py|md|t
 [ -n "$A1_MATCH" ] && log_violation "A1" "path-as-subject" "$A1_MATCH"
 
 # --- A10: голые английские маркеры статуса ---
-# exit 0 / SHA: / status: done — детерминированы. PASS/FAIL ловим только в
+# exit 0 / status: done — детерминированы. PASS/FAIL ловим только в
 # тест-контексте (рядом тест/smoke/проверка/G-гейт) — иначе ложный позитив
 # на обычное слово («полный FAIL»).
-A10_MATCH=$(printf '%s\n' "$RESPONSE" | grep -E '(\bexit\s+0\b|SHA:\s*[a-f0-9]{7,}|status:\s*(done|success)|\bG[0-9]\s+(PASS|FAIL)\b|(smoke|тест[а-я]*|проверк[а-я]*)\s*:\s*(PASS|FAIL)\b|`(PASS|FAIL)`)' | head -1 || true)
+# «SHA: <hex>» снят (РП-388 Ф36 шаг 3, 01.11, пир-сессия Claude+Grok
+# 2026-11-01-12): номер коммита — адрес, пилоту он нужен; A10 в BLOCKABLE,
+# поэтому исключение «кириллица в той же строке» не годилось — ответ
+# «Залил правкой.» и строкой ниже «SHA: a1b2c3d» всё равно блокировался бы.
+A10_MATCH=$(printf '%s\n' "$RESPONSE" | grep -E '(\bexit\s+0\b|status:\s*(done|success)|\bG[0-9]\s+(PASS|FAIL)\b|(smoke|тест[а-я]*|проверк[а-я]*)\s*:\s*(PASS|FAIL)\b|`(PASS|FAIL)`)' | head -1 || true)
 # Вариант без пробела вида `close_exit=0` (РП-388 калибровка, 19.10, найден
 # в реальном golden-set) — требует perl: `grep -E` не поддерживает lookahead,
 # а он обязателен, чтобы не ловить `close_exit=0.5`/`exit:0.7` (Codex,
@@ -242,7 +246,11 @@ fi
 # внутри него ложно засчитывался как A2-нарушение (найдено Codex, round-loop
 # 20.10). `perl -0777` читает весь `$RESPONSE` одной строкой (slurp), поэтому
 # `[^`]*` в паттерне видит и вырезает спан независимо от переводов строк внутри.
-A2_BODY=$(printf '%s' "$RESPONSE" | perl -0777 -pe 's/`[^`]*`//g')
+# Скобки сразу после русского слова вырезаются ДО обратных кавычек (РП-388 Ф36
+# шаг 3, 01.11, пир-сессия Claude+Grok 2026-11-01-12): «ошибка разбора
+# (code_paths)» — разрешённая форма A2 «русское объяснение, имя в скобках», а
+# прежний поиск давал на ней предупреждение.
+A2_BODY=$(printf '%s' "$RESPONSE" | perl -CSD -0777 -pe 's/(\p{Cyrillic}[\p{Cyrillic}-]*\s*)\([^()\n]*\)/$1/g; s/`[^`]*`//g')
 A2_MATCH=$(printf '%s\n' "$A2_BODY" | grep -oE '\b[a-z][a-z0-9]*_[a-z0-9_]+\b' | head -1 || true)
 [ -n "$A2_MATCH" ] && echo "$TIMESTAMP | $AGENT | A2 | untranslated-term | $(redact "$A2_MATCH")" >> "$LOG_FILE" 2>/dev/null || true
 
@@ -555,7 +563,8 @@ A12_NEXT_THIS_CHAT_LINE=$(printf '%s\n' "$A12_NEXT_RESULT" | sed -n '4p')
 # A7.1 запрещает журнал (SHA, коммиты, итоги peer, пути отчёта) в чате — он идёт
 # в report.md/sessions. Распознаём по ДВУМ независимым признакам внутри спойлера:
 #   (1) ярлык журнала: «журнал сессии / для протокола / для фиксации»;
-#   (2) начинка журнала: хэши коммитов, маркеры SHA/commit/push/деплой.
+#   (2) начинка журнала: push в main / автодеплой / задеплоен (хэш коммита и
+#       «SHA» сняты Ф36 шаг 3 — номер коммита теперь якорь, см. ниже).
 # Признак (2) добавлен 2026-06-13: спойлер «Технические детали» с хэшами коммитов
 # без слова «журнал» проходил мимо (label-based детектор смотрел на заголовок, а
 # не на содержимое). Признак машинного журнала — начинка, а не как назван блок.
@@ -584,7 +593,8 @@ A12_NEXT_THIS_CHAT_LINE=$(printf '%s\n' "$A12_NEXT_RESULT" | sed -n '4p')
 # случаях, под которые правило изначально писалось — хуже некуда. Решение
 # (консенсус Claude+Kimi+Codex, 2 раунда): known_gap остаётся, дальше не
 # трогать в этой фазе. Метрика ТЕКУЩЕГО (не кандидата) детектора на полном
-# наборе фикстур: precision=0.18, recall=1.00 (tests/fixtures/response-
+# наборе фикстур до Ф36: precision=0.18, recall=1.00; после снятия хэша (Ф36 шаг 3, 01.11)
+# precision=0.29, recall=1.00 (tests/fixtures/response-
 # clarity-fixtures.jsonl, актуально на момент коммита — пересчитывать при
 # правке фикстур, не доверять этому числу бессрочно).
 if printf '%s' "$RESPONSE" | grep -qiE '<details'; then
@@ -597,11 +607,15 @@ if printf '%s' "$RESPONSE" | grep -qiE '<details'; then
   # даёт ложную блокировку. Реальный хэш коммита почти всегда с буквой.
   # Без \b/\w вокруг кириллицы: здешний grep (ugrep) ломается на границе слова
   # перед кириллицей — границы токена только ASCII-классами [^0-9a-z].
+  # Хэш коммита и слово «SHA» из признака 2 сняты (РП-388 Ф36 шаг 3, 01.11,
+  # пир-сессия Claude+Grok 2026-11-01-12): номер коммита — якорь, он в чат идёт
+  # (A7.1 в ядре сужен шагом 1), а A7.1 в BLOCKABLE — «<details>Залил правкой,
+  # коммит a1b2c3d</details>» блокировался бы. «задеплоен» держит реконструкцию
+  # инцидента 4 июня (A71-POS-02-RECONSTRUCTED), ярлык признака 1 — цитату
+  # 13 июня (A71-POS-01-HISTORICAL). Пути служебных отчётов и «дефект» как
+  # признаки отложены: без своих фикстур они блокируют обычный итог проверки.
   if [ -z "$A71_MATCH" ]; then
-    A71_MATCH=$(printf '%s\n' "$RESPONSE" | grep -iE '(push в main|автодеплой|SHA[[:space:]:])' | head -1 || true)
-  fi
-  if [ -z "$A71_MATCH" ]; then
-    A71_MATCH=$(printf '%s\n' "$RESPONSE" | grep -ioE '(^|[^0-9a-z])[0-9a-f]{7,40}([^0-9a-z]|$)' | grep -iE '[a-f]' | head -1 || true)
+    A71_MATCH=$(printf '%s\n' "$RESPONSE" | grep -iE '(push в main|автодеплой|задеплоен)' | head -1 || true)
   fi
   [ -n "$A71_MATCH" ] && log_violation "A7.1" "journal-in-chat" "$A71_MATCH"
 fi
@@ -654,7 +668,7 @@ cmd_re = re.compile(r'(^|\s)(' + CMD_WORDS + r')\s+\S')
 # вариант без пробела close_exit=0 через negative lookahead, чтобы не ловить
 # close_exit=0.5/exit:0.7 (cold-review этой же сессии, Medium: до этой правки
 # A13 и A10 определяли один и тот же класс маркера с разной полнотой).
-exit_re = re.compile(r'(\bexit\s+0\b|exit[=:]0(?!\.?[0-9])|SHA:\s*[a-f0-9]{7,}|status:\s*(done|success)|`(PASS|FAIL)`)')
+exit_re = re.compile(r'(\bexit\s+0\b|exit[=:]0(?!\.?[0-9])|status:\s*(done|success)|`(PASS|FAIL)`)')
 snake_re = re.compile(r'\b[a-z][a-z0-9]*_[a-z0-9_]+\b')
 func_re = re.compile(r'\b[a-zA-Z_][a-zA-Z0-9_]*\(')
 
@@ -688,42 +702,123 @@ if triggered:
 # признак (одиночный токен, не порог по всему тексту), другая фикстура-ось.
 cmd_inline_re = re.compile(r'^(' + CMD_WORDS + r')\s+\S')
 bt_descriptor_re = re.compile(r'(скрипт|команд|файл|пут[ьи]|ветк|директори|папк|каталог|репозитори|хук|сценари)[а-яё]*', re.IGNORECASE)
+# Описатели имени из кода (РП-388 Ф36 шаг 3, 01.11, пир-сессия Claude+Grok
+# 2026-11-01-12): полные словоформы с правой границей — голый стебель гасил бы
+# символ словами «Ключевой», «Классический», «Пользователь», «Функционал».
+# «статус» и «тест» сознательно не описатели: «Тест `x` упал» имя не объясняет.
+bt_code_descriptor_re = re.compile(
+    r'\b(?:функци(?:я|и|ю|ей|ям|ями|ях|й)'
+    r'|переменн(?:ая|ой|ую|ые|ых|ыми|ое|ого|ым)'
+    r'|параметр(?:а|у|ом|е|ы|ов|ам|ами)?'
+    r'|ошибк(?:а|и|у|е|ой|ами)?'
+    r'|модул(?:ь|я|ю|ем|е|и|ей|ями)?'
+    r'|класс(?:а|у|ом|е|ы|ов|ам|ами)?'
+    r'|пол(?:е|я|ю|ем|ей|ях|ями)'
+    r'|ключ(?:а|у|ом|и|ей|ам|ами)?'
+    r'|флаг(?:а|у|ом|е|и|ов|ам|ами)?'
+    r'|таблиц(?:а|ы|е|у|ей|ами|ах)?'
+    r'|колонк(?:а|и|е|у|ой|ами|ах)?'
+    r'|состояни(?:е|я|ю|ем|и|ях|ями))\b',
+    re.IGNORECASE)
+# Пояснение ПОСЛЕ токена: связка (—, :, «это», «как») сразу за токеном и
+# описатель сразу за связкой — «`TypeError` — это класс исключения». Свободное
+# окно не годится: «вызвали `x()` и ошибка ушла» гасило бы символ чужим словом.
+bt_after_link_re = re.compile(r'^\s*(?:(?:—|:)\s*(?:(?:это|как)\s+)?|(?:это|как)\s+)', re.IGNORECASE)
 # Форма "русское описание (`термин`)" — та же, что уже разрешена A2 выше.
 bt_paren_form_re = re.compile(r'[а-яё][а-яё-]*\s*\($', re.IGNORECASE)
 # Ф18 (22.10, живой отчёт пилота про `note-commit --forget-unprovable`,
-# `close_delivery_source_commits`, `iwe-local-config@eadd57139`, `PREPARED`):
-# список CMD_WORDS не угнаться за именами команд, поэтому добавлен признак
-# ФОРМЫ — латинский идентификатор без кириллицы с дефисом/подчёркиванием/@/
-# точкой между буквами, флагом `--x` или ВЕРХНИМ регистром ≥4 букв. Только `/`
-# не считается формой (`origin/main` — граница класса, фикстура NEG-04).
-# Исключения для ALLCAPS (TODO/INFO) и дефисных слов в backtick НЕ заводим
-# заранее (P13): сначала живое ложное срабатывание в журнале, потом список.
+# `close_delivery_source_commits`, `PREPARED`): список CMD_WORDS не угнаться
+# за именами команд, поэтому признак ФОРМЫ — латинский идентификатор без
+# кириллицы с дефисом/подчёркиванием/@/точкой между буквами, флагом `--x`,
+# ВЕРХНИМ регистром ≥4 букв. Ф36 шаг 3 добавил горб `[A-Z][a-z]+[A-Z]`
+# (`TypeError`; `macOS`/`iOS` его не проходят) и вызов `x(`. Зеркальный горб
+# (`getUser`) не добавлен: его не отличить от `iPhone`/`eBay`. Голая строчная
+# латиница (`main`, `true`, `inbox`) формы не имеет и символом не считается.
 bt_cyr_re = re.compile(r'[А-Яа-яЁё]')
-bt_shape_re = re.compile(r'[A-Za-z][-_@][A-Za-z0-9]|[A-Za-z]\.[A-Za-z]|(^|\s)--?[A-Za-z]|\b[A-Z]{4,}\b')
+bt_shape_re = re.compile(r'[A-Za-z][-_@][A-Za-z0-9]|[A-Za-z]\.[A-Za-z]|(^|\s)--?[A-Za-z]|\b[A-Z]{4,}\b|[A-Z][a-z]+[A-Z]|[A-Za-z0-9_]\(')
+# Адрес (Ф36 шаг 3): то, по чему пилот сам что-то откроет или найдёт, —
+# допустим рядом с русской фразой и символом не считается. Голое имя файла
+# (`ds-publish.sh`) и команда с флагом без пути (`git apply --3way`) — не
+# адреса: на обе пилот жаловался 22.10. Имена репозиториев — закрытый список
+# полных имён, не префикс: `iwe-safe-pull.sh` и `DS-MODE` остаются символами.
+BT_REPO_NAMES = ("iwe-local-config", "iwe-server-config", "DS-my-strategy", "DS-ai-systems",
+                 "MC-sessions", "PACK-digital-platform", "PACK-agent-rules", "FMT-exocortex-template")
+bt_sha_re = re.compile(r'[0-9a-f]{7,40}')
+bt_ref_re = re.compile(r'\S+@[0-9a-f]{7,40}|\S+#\d+')
+bt_doc_id_re = re.compile(r'(?:WP|РП|PR)-?\d+|[A-Z]{2,}(?:\.[A-Z0-9]+){1,3}')
+
+
+def is_address(content):
+    if "/" in content or content == "HEAD" or content in BT_REPO_NAMES:
+        return True
+    if bt_sha_re.fullmatch(content):
+        return bool(re.search(r'[a-f]', content))
+    if bt_ref_re.fullmatch(content):
+        return True
+    return bool(bt_doc_id_re.fullmatch(content)) and bool(re.search(r'\d', content))
 
 
 def is_bare_tech_token(content):
+    if is_address(content):
+        return False
     if path_re.fullmatch(content) or cmd_inline_re.match(content):
         return True
     return not bt_cyr_re.search(content) and bool(bt_shape_re.search(content))
 
 
-bt_token = None
+def is_explained(content, before, after):
+    if bt_paren_form_re.search(before):
+        return True
+    # A flag names the very class of the 22.10 complaints («флаг `x --y`»),
+    # so descriptors never excuse a token that carries one.
+    if "--" in content:
+        return False
+    if bt_descriptor_re.search(before) or bt_code_descriptor_re.search(before):
+        return True
+    link = bt_after_link_re.match(after)
+    if not link:
+        return False
+    rest = after[link.end():]
+    return bool(bt_descriptor_re.match(rest) or bt_code_descriptor_re.match(rest))
+
+
+def log_example(tokens, limit=100):
+    # Cut on the " ;; " boundary so the log never shows half a name.
+    sep, tail = " ;; ", " ;; …"
+    out = []
+    for index, token in enumerate(tokens):
+        candidate = sep.join(out + [token])
+        reserve = len(tail) if index < len(tokens) - 1 else 0
+        if len(candidate) + reserve > limit and out:
+            return sep.join(out) + tail
+        out.append(token)
+    return sep.join(out)
+
+
+bt_tokens = []
 for bt_match in re.finditer(r'`([^`\n]{1,200})`', body_no_fence):
     content = bt_match.group(1)
     if not is_bare_tech_token(content):
         continue
     window_start = max(0, bt_match.start() - 60)
-    window = body_no_fence[window_start:bt_match.start()]
-    newline_pos = window.rfind("\n")
+    before = body_no_fence[window_start:bt_match.start()]
+    newline_pos = before.rfind("\n")
     if newline_pos != -1:
-        window = window[newline_pos + 1:]
-    if bt_descriptor_re.search(window) or bt_paren_form_re.search(window):
+        before = before[newline_pos + 1:]
+    # 40 chars, then drop a word cut by the window edge: a truncated «клю…»
+    # must not pass for the descriptor «ключ» (cold review, 01.11).
+    after_end = bt_match.end() + 40
+    after = body_no_fence[bt_match.end():after_end]
+    if "\n" in after:
+        after = after.split("\n", 1)[0]
+    elif after_end < len(body_no_fence) and not body_no_fence[after_end].isspace():
+        after = after.rsplit(None, 1)[0] if after.strip().count(" ") else ""
+    if is_explained(content, before, after):
         continue
-    bt_token = content
-    break
-if bt_token:
-    print("BT|" + bt_token)
+    if content not in bt_tokens:
+        bt_tokens.append(content)
+if bt_tokens:
+    print("BT|" + log_example(bt_tokens))
 PY
 )
 A13_TRIGGERED_LINE=$(printf '%s\n' "$A13_RESULT" | grep '^TRIGGERED|' || true)
@@ -779,7 +874,7 @@ ESC_NOTE=""
 [ "$COUNT" -ge 3 ] && ESC_NOTE=" | 3+ нарушений стиля за сессию (сигнал пилоту)"
 
 if [ "${STYLE_ENFORCE_BLOCK:-0}" = "1" ] && [ -n "$BLOCKABLE" ] && [ "$STYLE_CONTEXT" != "peer" ]; then
-  REASON="Стиль нарушен (правила:${BLOCKABLE} ). НЕ повторяй и не пересказывай предыдущий ответ целиком — пилот его уже видел (найдено 22.10, РП-388 Ф19: буквальное прочтение прежней формулировки давало полный повтор ответа дважды подряд). Нарушение уже записано в журнал стража, поэтому никаких пометок о нём не пиши: ни строки коррекции, ни слов «исправляю», «было → стало», ни разбора ошибки (WP-388 Ф24: пилоту эта строка не нужна). Если в прежнем ответе была финальная часть с выводом или следующим шагом, напиши ТОЛЬКО её, переписанную по правилам ниже; остальной текст не повторяй. Строку «Дальше:» пилот уже видел: если следующий шаг не изменился, дай её заново одной короткой фразой того же смысла (до 12 слов), без прежних формулировок и деталей; если изменился, назови только изменение. Если финальной части не было, напиши одно-два предложения: то, что пилоту нужно знать из прежнего ответа, уже без нарушения. Правила: A1 голое имя файла не подлежащее; A10 без голых маркеров (exit/PASS, «SHA: …»), номер коммита рядом с русской фразой — адрес, он допустим; A7.1 журнал процесса (дефекты, пути к служебным отчётам, цепочки команд) в чат не идёт — даже под <details>, он в report.md; якоря (коммит, путь в репозитории, ссылка) идут; A13.1 имя из кода (функция, переменная, параметр, тип ошибки) без русского пояснения — опиши по-русски, что оно делает (например: «команда снятия заявок (note-commit --forget-unprovable)» без обратных кавычек) или убери; A14 «входит в / состоит из / делится на части» только о системах — об описании, документе, методе, состоянии говори глаголами («описывает», «хранит», «работает по»), в одном перечислении один род.${ESC_NOTE}"
+  REASON="Стиль нарушен (правила:${BLOCKABLE} ). НЕ повторяй и не пересказывай предыдущий ответ целиком — пилот его уже видел (найдено 22.10, РП-388 Ф19: буквальное прочтение прежней формулировки давало полный повтор ответа дважды подряд). Нарушение уже записано в журнал стража, поэтому никаких пометок о нём не пиши: ни строки коррекции, ни слов «исправляю», «было → стало», ни разбора ошибки (WP-388 Ф24: пилоту эта строка не нужна). Если в прежнем ответе была финальная часть с выводом или следующим шагом, напиши ТОЛЬКО её, переписанную по правилам ниже; остальной текст не повторяй. Строку «Дальше:» пилот уже видел: если следующий шаг не изменился, дай её заново одной короткой фразой того же смысла (до 12 слов), без прежних формулировок и деталей; если изменился, назови только изменение. Если финальной части не было, напиши одно-два предложения: то, что пилоту нужно знать из прежнего ответа, уже без нарушения. Правила: A1 голое имя файла не подлежащее; A10 без голых маркеров (exit/PASS), номер коммита рядом с русской фразой — адрес, он допустим; A7.1 журнал процесса (дефекты, пути к служебным отчётам, цепочки команд) в чат не идёт — даже под <details>, он в report.md; якоря (коммит, путь в репозитории, ссылка) идут; A13.1 имя из кода (функция, переменная, параметр, тип ошибки) без русского пояснения — опиши по-русски, что оно делает (например: «команда снятия заявок (note-commit --forget-unprovable)» без обратных кавычек) или убери; A14 «входит в / состоит из / делится на части» только о системах — об описании, документе, методе, состоянии говори глаголами («описывает», «хранит», «работает по»), в одном перечислении один род.${ESC_NOTE}"
   jq -n --arg r "$REASON" '{"decision":"block","reason":$r}'
   exit 0
 fi
