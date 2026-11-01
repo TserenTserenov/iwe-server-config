@@ -33,7 +33,7 @@ if [ -n "$CWD" ] && [ "${REL#"$CWD"/}" != "$REL" ]; then
 fi
 
 case "$REL" in
-  .claude/hooks/*.sh|.claude/hooks/secret_patterns.py) ;;
+  .claude/hooks/*.sh|.claude/hooks/secret_patterns.py|.claude/hooks/a13_1_symbols.py) ;;
   *) exit 0 ;;
 esac
 
@@ -71,7 +71,9 @@ _safe_timeout() {
 
 SELF_TEST_TARGET="$TARGET"
 SYNTAX_RC=0
-if [ "$REL" = ".claude/hooks/secret_patterns.py" ]; then
+# a13_1_symbols.py is imported by response-clarity-hook.sh (rules A13 and
+# A13.1): a syntax error there silences both, so it gets the same compile check.
+if [ "$REL" = ".claude/hooks/secret_patterns.py" ] || [ "$REL" = ".claude/hooks/a13_1_symbols.py" ]; then
   # Compile bytes without executing the module or writing __pycache__.
   # Do not echo a failing source line: the checker handles a secret guard.
   SYNTAX_ERR=$(_safe_timeout 15 python3 -I -B - "$TARGET" 2>&1 <<'PY'
@@ -88,7 +90,7 @@ except (SyntaxError, ValueError, OSError) as exc:
     sys.exit(1)
 PY
   ) || SYNTAX_RC=$?
-  SELF_TEST_TARGET="$(dirname "$TARGET")/secret-bypass-lib.sh"
+  [ "$REL" = ".claude/hooks/secret_patterns.py" ] && SELF_TEST_TARGET="$(dirname "$TARGET")/secret-bypass-lib.sh"
 else
   SYNTAX_ERR=$(bash -n -- "$TARGET" 2>&1) || SYNTAX_RC=$?
 fi

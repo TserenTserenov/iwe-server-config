@@ -645,8 +645,16 @@ fi
 # финальном сообщении о закрытии сессии — не вычищать, даже если правило сработало.
 # Детектор это не знает (warn-only, не блокирует) — исключение применяет сам агент
 # при самопроверке, см. feedback_response_clarity_for_pilot.md, A13.
-A13_RESULT=$(RESPONSE="$RESPONSE" python3 <<'PY' 2>/dev/null || echo ""
-import os, re
+A13_RESULT=$(RESPONSE="$RESPONSE" HOOKS_DIR="$(dirname "${BASH_SOURCE[0]}")" python3 -B <<'PY' 2>/dev/null || echo ""
+import os, re, sys
+sys.path.insert(0, os.environ["HOOKS_DIR"])
+# A13.1 rule lives in a13_1_symbols.py (shared with scripts/style-symbol-metric.py).
+# A failed import silences A13 and A13.1 at once, so it is logged, not swallowed.
+try:
+    from a13_1_symbols import CMD_WORDS, find_symbols, log_example, path_re, strip_fences
+except Exception as exc:  # any import-time failure of the shared module
+    print(f"ERR|a13_1_symbols import failed: {type(exc).__name__}")
+    sys.exit(0)
 text = os.environ.get("RESPONSE", "")
 words = len(text.split())
 has_code_block = "```" in text
@@ -654,15 +662,12 @@ has_code_block = "```" in text
 # Medium): обратный порядок на блоке с внутренним инлайн-кодом (````date`\n...```)
 # давал нечётное число "одиночных" бэктиков и инлайн-regex откусывал кусок
 # текста ПОСЛЕ открывающей тройки непредсказуемо — редкий, но реальный случай.
-body_no_fence = re.sub(r'```.*?```', '', text, flags=re.S)
+body_no_fence = strip_fences(text)
 body_no_code = re.sub(r'`[^`]*`', '', body_no_fence)
-path_re = re.compile(r'[A-Za-z0-9_/.-]+\.(py|md|ts|sh|js|yaml|json)(:[0-9]+)?')
 # ls/cd/rm сознательно исключены (cold-review этой же сессии): двух-трёхбуквенные
 # "команды" совпадают с обычными словами в русской прозе ("использовал ls для
 # просмотра") — ложный позитив без единого технического намерения в тексте.
-# Единая константа (РП-388 Ф17): A13.1 ниже строит свой cmd_inline_re из той же
-# строки, второй список команд не завести.
-CMD_WORDS = "bash|python3|git|grep|sed|curl|npm|mkdir"
+# Единая константа (РП-388 Ф17) — теперь в a13_1_symbols.py, общая с A13.1.
 cmd_re = re.compile(r'(^|\s)(' + CMD_WORDS + r')\s+\S')
 # Та же пара вариантов "exit 0", что в A10 (bash-уровень, строки выше) — включая
 # вариант без пробела close_exit=0 через negative lookahead, чтобы не ловить
@@ -700,129 +705,15 @@ if triggered:
 # пример: tech_hits=2, не 3 — cmd_re не засчитывает команду сразу после
 # backtick). Отдельный под-идентификатор A13.1, не расширение A2/A13: другой
 # признак (одиночный токен, не порог по всему тексту), другая фикстура-ось.
-cmd_inline_re = re.compile(r'^(' + CMD_WORDS + r')\s+\S')
-bt_descriptor_re = re.compile(r'(скрипт|команд|файл|пут[ьи]|ветк|директори|папк|каталог|репозитори|хук|сценари)[а-яё]*', re.IGNORECASE)
-# Описатели имени из кода (РП-388 Ф36 шаг 3, 01.11, пир-сессия Claude+Grok
-# 2026-11-01-12): полные словоформы с правой границей — голый стебель гасил бы
-# символ словами «Ключевой», «Классический», «Пользователь», «Функционал».
-# «статус» и «тест» сознательно не описатели: «Тест `x` упал» имя не объясняет.
-bt_code_descriptor_re = re.compile(
-    r'\b(?:функци(?:я|и|ю|ей|ям|ями|ях|й)'
-    r'|переменн(?:ая|ой|ую|ые|ых|ыми|ое|ого|ым)'
-    r'|параметр(?:а|у|ом|е|ы|ов|ам|ами)?'
-    r'|ошибк(?:а|и|у|е|ой|ами)?'
-    r'|модул(?:ь|я|ю|ем|е|и|ей|ями)?'
-    r'|класс(?:а|у|ом|е|ы|ов|ам|ами)?'
-    r'|пол(?:е|я|ю|ем|ей|ях|ями)'
-    r'|ключ(?:а|у|ом|и|ей|ам|ами)?'
-    r'|флаг(?:а|у|ом|е|и|ов|ам|ами)?'
-    r'|таблиц(?:а|ы|е|у|ей|ами|ах)?'
-    r'|колонк(?:а|и|е|у|ой|ами|ах)?'
-    r'|состояни(?:е|я|ю|ем|и|ях|ями))\b',
-    re.IGNORECASE)
-# Пояснение ПОСЛЕ токена: связка (—, :, «это», «как») сразу за токеном и
-# описатель сразу за связкой — «`TypeError` — это класс исключения». Свободное
-# окно не годится: «вызвали `x()` и ошибка ушла» гасило бы символ чужим словом.
-bt_after_link_re = re.compile(r'^\s*(?:(?:—|:)\s*(?:(?:это|как)\s+)?|(?:это|как)\s+)', re.IGNORECASE)
-# Форма "русское описание (`термин`)" — та же, что уже разрешена A2 выше.
-bt_paren_form_re = re.compile(r'[а-яё][а-яё-]*\s*\($', re.IGNORECASE)
-# Ф18 (22.10, живой отчёт пилота про `note-commit --forget-unprovable`,
-# `close_delivery_source_commits`, `PREPARED`): список CMD_WORDS не угнаться
-# за именами команд, поэтому признак ФОРМЫ — латинский идентификатор без
-# кириллицы с дефисом/подчёркиванием/@/точкой между буквами, флагом `--x`,
-# ВЕРХНИМ регистром ≥4 букв. Ф36 шаг 3 добавил горб `[A-Z][a-z]+[A-Z]`
-# (`TypeError`; `macOS`/`iOS` его не проходят) и вызов `x(`. Зеркальный горб
-# (`getUser`) не добавлен: его не отличить от `iPhone`/`eBay`. Голая строчная
-# латиница (`main`, `true`, `inbox`) формы не имеет и символом не считается.
-bt_cyr_re = re.compile(r'[А-Яа-яЁё]')
-bt_shape_re = re.compile(r'[A-Za-z][-_@][A-Za-z0-9]|[A-Za-z]\.[A-Za-z]|(^|\s)--?[A-Za-z]|\b[A-Z]{4,}\b|[A-Z][a-z]+[A-Z]|[A-Za-z0-9_]\(')
-# Адрес (Ф36 шаг 3): то, по чему пилот сам что-то откроет или найдёт, —
-# допустим рядом с русской фразой и символом не считается. Голое имя файла
-# (`ds-publish.sh`) и команда с флагом без пути (`git apply --3way`) — не
-# адреса: на обе пилот жаловался 22.10. Имена репозиториев — закрытый список
-# полных имён, не префикс: `iwe-safe-pull.sh` и `DS-MODE` остаются символами.
-BT_REPO_NAMES = ("iwe-local-config", "iwe-server-config", "DS-my-strategy", "DS-ai-systems",
-                 "MC-sessions", "PACK-digital-platform", "PACK-agent-rules", "FMT-exocortex-template")
-bt_sha_re = re.compile(r'[0-9a-f]{7,40}')
-bt_ref_re = re.compile(r'\S+@[0-9a-f]{7,40}|\S+#\d+')
-bt_doc_id_re = re.compile(r'(?:WP|РП|PR)-?\d+|[A-Z]{2,}(?:\.[A-Z0-9]+){1,3}')
-
-
-def is_address(content):
-    if "/" in content or content == "HEAD" or content in BT_REPO_NAMES:
-        return True
-    if bt_sha_re.fullmatch(content):
-        return bool(re.search(r'[a-f]', content))
-    if bt_ref_re.fullmatch(content):
-        return True
-    return bool(bt_doc_id_re.fullmatch(content)) and bool(re.search(r'\d', content))
-
-
-def is_bare_tech_token(content):
-    if is_address(content):
-        return False
-    if path_re.fullmatch(content) or cmd_inline_re.match(content):
-        return True
-    return not bt_cyr_re.search(content) and bool(bt_shape_re.search(content))
-
-
-def is_explained(content, before, after):
-    if bt_paren_form_re.search(before):
-        return True
-    # A flag names the very class of the 22.10 complaints («флаг `x --y`»),
-    # so descriptors never excuse a token that carries one.
-    if "--" in content:
-        return False
-    if bt_descriptor_re.search(before) or bt_code_descriptor_re.search(before):
-        return True
-    link = bt_after_link_re.match(after)
-    if not link:
-        return False
-    rest = after[link.end():]
-    return bool(bt_descriptor_re.match(rest) or bt_code_descriptor_re.match(rest))
-
-
-def log_example(tokens, limit=100):
-    # Cut on the " ;; " boundary so the log never shows half a name.
-    sep, tail = " ;; ", " ;; …"
-    out = []
-    for index, token in enumerate(tokens):
-        candidate = sep.join(out + [token])
-        reserve = len(tail) if index < len(tokens) - 1 else 0
-        if len(candidate) + reserve > limit and out:
-            return sep.join(out) + tail
-        out.append(token)
-    return sep.join(out)
-
-
-bt_tokens = []
-for bt_match in re.finditer(r'`([^`\n]{1,200})`', body_no_fence):
-    content = bt_match.group(1)
-    if not is_bare_tech_token(content):
-        continue
-    window_start = max(0, bt_match.start() - 60)
-    before = body_no_fence[window_start:bt_match.start()]
-    newline_pos = before.rfind("\n")
-    if newline_pos != -1:
-        before = before[newline_pos + 1:]
-    # 40 chars, then drop a word cut by the window edge: a truncated «клю…»
-    # must not pass for the descriptor «ключ» (cold review, 01.11).
-    after_end = bt_match.end() + 40
-    after = body_no_fence[bt_match.end():after_end]
-    if "\n" in after:
-        after = after.split("\n", 1)[0]
-    elif after_end < len(body_no_fence) and not body_no_fence[after_end].isspace():
-        after = after.rsplit(None, 1)[0] if after.strip().count(" ") else ""
-    if is_explained(content, before, after):
-        continue
-    if content not in bt_tokens:
-        bt_tokens.append(content)
+bt_tokens = find_symbols(body_no_fence)
 if bt_tokens:
     print("BT|" + log_example(bt_tokens))
 PY
 )
 A13_TRIGGERED_LINE=$(printf '%s\n' "$A13_RESULT" | grep '^TRIGGERED|' || true)
 A13_1_LINE=$(printf '%s\n' "$A13_RESULT" | grep '^BT|' || true)
+A13_ERR_LINE=$(printf '%s\n' "$A13_RESULT" | grep '^ERR|' || true)
+[ -n "$A13_ERR_LINE" ] && log_violation "A13" "classifier-unavailable" "${A13_ERR_LINE#ERR|}"
 if [ -n "$A13_TRIGGERED_LINE" ]; then
   A13_DESC="${A13_TRIGGERED_LINE#TRIGGERED|}"
   log_violation "A13" "long-or-technical-dump" "$A13_DESC"

@@ -55,6 +55,19 @@ check "A10 still blocks" \
 check "block reason names A10 and not A13.1" \
   "$([[ "$reason" == *"правила: A10"* && "$reason" != *"правила: A10 A13.1"* && "$reason" != *"правила: A13.1"* ]] && echo yes || echo no)" "$reason"
 
+# Shared classifier missing (not delivered, broken import): A13 and A13.1 go
+# silent together, so the hook must log the failure instead of swallowing it.
+mkdir -p "$TMP/nomod/hooks"
+cp "$HOOK" "$TMP/nomod/hooks/"
+HOOK_SAVED="$HOOK"
+HOOK="$TMP/nomod/hooks/response-clarity-hook.sh"
+run_reply nomod "$A13_ONLY" >/dev/null
+HOOK="$HOOK_SAVED"
+log="$TMP/nomod/home/.claude/logs/style-violations.log"
+check "missing classifier module is logged" \
+  "$([ -f "$log" ] && grep -qE '\| A13 \| classifier-unavailable \| a13_1_symbols import failed: ModuleNotFoundError' "$log" && echo yes || echo no)" \
+  "$(cat "$log" 2>/dev/null)"
+
 echo "---"
 echo "passed=$PASS failed=$FAIL"
 [ "$FAIL" -eq 0 ]
