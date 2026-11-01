@@ -81,6 +81,15 @@
 #                                                      # коммита); отказ, если путь есть на диске,
 #                                                      # в HEAD/индексе или в заявленном коммите
 #   note-commit <sha> [--repo <name>] [--agent ...]   # заявить коммит сессии: даёт commit-push.sh
+#   note-commit <sha> --source-checkout <path> --branch <name> [--repo <name>]
+#                                      # WP-484 Ф275 предусловие 3: 4-полевая заявка
+#                                      # "commit: <repo> <sha> <checkout> <branch>" — checkout
+#                                      # обязан быть worktree или клоном с тем же origin
+#   note-commit --promote-intent <uuid> --repo <name> [--agent ...] [--session-id ...]
+#                                      # WP-484 Ф275 предусловие 3: ЕДИНСТВЕННЫЙ путь, который
+#                                      # превращает commit-intent (.iwe-runtime/commit-intents/)
+#                                      # в заявку семафора; guard сам проверяет parent/message/paths
+#                                      # по trailer "Iwe-Intent: <uuid>" и печатает "PROMOTED <sha>"
 #   note-commit --forget <sha> [--repo <name>] [--agent ...]
 #                                      # WP-7 Ф209: снять заявку на коммит, если она не входит в
 #                                      # source/expected набор текущего PREPARE и ещё не имеет
@@ -176,6 +185,9 @@ export GIT_GRAFT_FILE=/dev/null/iwe-no-grafts
 readonly GUARD_SCHEMA_VERSION=1
 
 IWE_ROOT="${IWE_ROOT:-$HOME/IWE}"
+# WP-484 Ф275: the claim line `commit: <repo> <sha>[ <checkout> <branch>]` is read through one shared
+# parser (claim_line.py / claim-line.sh); the identity of a claim is the pair (repo, sha).
+GUARD_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib"
 # issue #266: hardcoded "DS-my-strategy" broke every template user whose
 # governance repo is named "DS-strategy" (the shipped default — see create-wp.sh).
 # Fail-closed: no silent default for the governance repo. Any default here is
@@ -4469,6 +4481,11 @@ FORCE_FLAG=0
 FORCE_WP_ELSEWHERE_FLAG=0
 FORGET_FLAG=0
 FORGET_UNPROVABLE_FLAG=0
+# WP-484 Ф275 предусловие 3: optional 4-field claim enrichment (plain
+# note-commit add) and intent promotion; see the note-commit block.
+SOURCE_CHECKOUT_ARG=""
+BRANCH_ARG=""
+PROMOTE_INTENT_ARG=""
 UNFREEZE_REASON=""
 ISOLATE_FLAG=0
 ABANDON_PREPARED=0
@@ -4607,6 +4624,21 @@ while [[ $# -gt 0 ]]; do
     --force-wp-elsewhere) FORCE_WP_ELSEWHERE_FLAG=1; shift ;;
     --forget) FORGET_FLAG=1; shift ;;
     --forget-unprovable) FORGET_UNPROVABLE_FLAG=1; shift ;;
+    --source-checkout)
+      if [[ $# -lt 2 || -z "$2" ]]; then
+        fail "--source-checkout требует непустое значение (путь к checkout-источнику коммита)" 1
+      fi
+      SOURCE_CHECKOUT_ARG="$2"; shift 2 ;;
+    --branch)
+      if [[ $# -lt 2 || -z "$2" ]]; then
+        fail "--branch требует непустое значение (имя ветки в checkout-источнике)" 1
+      fi
+      BRANCH_ARG="$2"; shift 2 ;;
+    --promote-intent)
+      if [[ $# -lt 2 || -z "$2" ]]; then
+        fail "--promote-intent требует непустое значение (uuid intent-записи)" 1
+      fi
+      PROMOTE_INTENT_ARG="$2"; shift 2 ;;
     --isolate) ISOLATE_FLAG=1; shift ;;
     # WP-484 (peer-session with Codex): manual recovery for a PREPARED close
     # snapshot whose tree-proof can never pass (a later legitimate REPLACE on
@@ -6790,7 +6822,9 @@ for line in lines:
     if not line.startswith("commit: "):
         continue
     fields = line[8:].split()
-    if len(fields) != 2 or not re.fullmatch(r"[0-9a-fA-F]{40,64}", fields[1]):
+    # 2-field or 4-field claim (WP-484 Ф275 предусловие 3); only repo+sha
+    # participate in the proof, fields 3/4 are a fetch hint for readers.
+    if len(fields) not in (2, 4) or not re.fullmatch(r"[0-9a-fA-F]{40,64}", fields[1]):
         refuse("неоднозначный commit claim")
     if fields[0] != Path(repo).name:
         other_claims.append(tuple(fields))
@@ -7753,11 +7787,11 @@ try:
         raise ValueError("claim snapshot exceeds proof budget")
     claims = [line[8:].decode("ascii").split() for line in snapshot.splitlines()
               if line.startswith(b"commit: ")]
-    if len(claims) > 32 or any(len(claim) != 2 for claim in claims):
+    if len(claims) > 32 or any(len(claim) not in (2, 4) for claim in claims):
         raise ValueError("invalid or excessive claims")
-    candidates = sorted({oid for name, oid in claims if name == repo_name and oid != source})
+    candidates = sorted({claim[1] for claim in claims if claim[0] == repo_name and claim[1] != source})
     receipt_candidates = set()
-    if [repo_name, source] not in claims:
+    if not any(claim[:2] == [repo_name, source] for claim in claims):
         raise ValueError("source is not a frozen claim")
 
     def successor_candidates():
@@ -8116,7 +8150,8 @@ try:
     for line in lines:
         if line.startswith("commit: "):
             parts = line[8:].split()
-            if len(parts) != 2 or not re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", parts[1]):
+            # 2-field or 4-field claim; the sha is field 2 either way.
+            if len(parts) not in (2, 4) or not re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", parts[1]):
                 raise ValueError("invalid claim")
             if parts[0] == repo_name:
                 claims.add(parts[1])
@@ -8186,13 +8221,16 @@ _code_branch_claim_has_publish_proof() {  # <semaphore> <resolved repo> <claimed
   # Product delivery can stop at its session branch; governance/ORZ/root cannot.
   # The frozen claim and slug choose the identity and ref. The existing runner
   # receipt only locates the owned registered worktree; it never proves delivery.
-  python3 - "$IWE_ROOT" "$@" <<'PY'
+  GUARD_LIB_DIR="$GUARD_LIB_DIR" python3 - "$IWE_ROOT" "$@" <<'PY'
 import os
 from pathlib import Path
 import re
 import subprocess
 import sys
 import yaml
+
+sys.path.insert(0, os.environ["GUARD_LIB_DIR"])
+import claim_line
 
 root, semaphore, repo, claimed, repo_name = sys.argv[1:]
 root, semaphore, repo = (Path(value).resolve(strict=True) for value in (root, semaphore, repo))
@@ -8256,7 +8294,8 @@ try:
     slug, owner = metadata.get("slug"), metadata.get("session_id")
     require(isinstance(slug, str) and re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,255}", slug), "invalid session slug")
     require(isinstance(owner, str) and owner, "session owner missing")
-    require(f"commit: {repo_name} {claimed}" in sem_snapshot.decode().splitlines(), "claim is not session-owned")
+    require(any(claim_line.matches(line, repo_name, claimed) for line in sem_snapshot.decode().splitlines()),
+            "claim is not session-owned")
     repo_common, repo_origin = common(repo), origin(repo)
     require(repo_common.name == ".git" and repo_common.parent.parent in {
         root / "DS-MCP", root / "DS-IT-systems"
@@ -8442,7 +8481,8 @@ try:
     claims = set()
     for row in rows:
         parts = row.split()
-        if len(parts) != 2 or not re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", parts[1]):
+        # 2-field or 4-field frozen claim; the sha is field 2 either way.
+        if len(parts) not in (2, 4) or not re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", parts[1]):
             raise ValueError("invalid frozen claim")
         if parts[0] == repo_name:
             claims.add(parts[1])
@@ -8550,8 +8590,8 @@ try:
         raise ValueError("claim snapshot exceeds proof budget")
     claims = [line[8:].decode("ascii").split() for line in snapshot.splitlines()
               if line.startswith(b"commit: ")]
-    if (len(claims) > 32 or any(len(claim) != 2 for claim in claims)
-            or [repo_name, source] not in claims):
+    if (len(claims) > 32 or any(len(claim) not in (2, 4) for claim in claims)
+            or not any(claim[:2] == [repo_name, source] for claim in claims)):
         raise ValueError("source is not an exact frozen claim")
     head = git(repo, "rev-parse", "--verify", "HEAD^{commit}").stdout.strip()
     if git(repo, "rev-parse", "--verify", "refs/remotes/origin/main^{commit}").stdout.strip().decode() != remote:
@@ -8663,8 +8703,10 @@ _claimed_commits_have_publish_proof() {  # <semaphore> [exact claim strings JSON
       continue
     fi
     repo_name=${entry%% *}
-    commit_sha=${entry#* }
-    [ "$repo_name" != "$entry" ] \
+    # The stored line may be 2-field or 4-field (WP-484 Ф275 предусловие 3):
+    # the sha is always field 2; fields 3/4 are a fetch hint, not identity.
+    commit_sha=$(printf '%s' "$entry" | cut -d' ' -f2)
+    [ -n "$commit_sha" ] && [ "$commit_sha" != "$entry" ] \
       && [[ "$repo_name" =~ ^[A-Za-z0-9._-]+$ ]] \
       && [[ "$commit_sha" =~ ^[0-9a-fA-F]{40,64}$ ]] \
       || { echo "Session CLOSE: malformed commit claim: $entry" >&2; return 1; }
@@ -9178,7 +9220,7 @@ if (
     or expected != source_commits
     or not isinstance(claimed, list)
     or any(not isinstance(item, str) for item in claimed)
-    or any(not re.fullmatch(r"[A-Za-z0-9._-]+ [0-9a-fA-F]{40,64}", item) for item in claimed)
+    or any(not re.fullmatch(r"[A-Za-z0-9._-]+ [0-9a-fA-F]{40,64}( [^ \t]+ [^ \t]+)?", item) for item in claimed)
     or claimed != sorted(set(claimed))
 ):
     raise SystemExit(1)
@@ -9901,6 +9943,450 @@ for path in Path(directory).glob("*.open"):
     finally:
         os.close(fd)
 PY
+}
+
+# --- COMMIT-INTENT PROMOTION (WP-484 Ф275 предусловие 3) ---
+#
+# _promote_commit_intent <semaphore> <repo-dir> <repo-name> <uuid> <session-id> <intents-root>
+#
+# The ONLY path that turns a durable commit intent (.iwe-runtime/commit-intents/,
+# written by commit-push.sh before `git commit`) into a semaphore claim, and it
+# lives in the guard by design: publication scripts must never self-declare
+# ownership. Promotion requires the caller's session transition lock, the
+# exact-bound session identity, and a full re-check of the commit against the
+# intent record (parent / tree fingerprint / message bytes). Fail-closed: any
+# mismatch refuses with no writes.
+#
+# Idempotency matrix (single code path -- every successful run ends with the
+# claim verifiably present in the semaphore, never exit 0 without it):
+#   claim present  ∧ intent completed           -> PROMOTED, exit 0 (no-op)
+#   intent completed ∧ claim missing            -> re-append the claim
+#     (fields 3/4 from the intent, same validation as plain note-commit)
+#   claim present  ∧ intent prepared/committed  -> append completed record
+#
+# Commit resolution: (1) the latest intent record carrying "sha" is trusted
+# and verified (survives dangling commits no ref/log search finds, e.g. after
+# `git reset --hard`); (2) otherwise fallback search by the Iwe-Intent trailer,
+# with a real trailer-block parse -- a body MENTION of the trailer text is not
+# a trailer and must not match. Direct `git commit` in the shared checkout
+# bypassing commit-push.sh is out of contract (it never takes ds-commit.lock);
+# such orphans are caught by the evidence checks as before, not by promote.
+_promote_commit_intent() {
+  python3 - "$1" "$2" "$3" "$4" "$5" "$6" <<'PY'
+import fcntl
+import hashlib
+import json
+import os
+import re
+import stat
+import subprocess
+import sys
+import tempfile
+from pathlib import Path
+
+sem, repo_dir, repo_name, intent_uuid, session_id, intents_root = sys.argv[1:7]
+
+
+def refuse(message):
+    sys.stderr.write("note-commit --promote-intent: " + message + "\n")
+    sys.exit(1)
+
+
+def git_bytes(*args):
+    result = subprocess.run(["git", "-C", repo_dir, *args],
+                            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+    if result.returncode != 0:
+        refuse("git " + args[0] + " не выполнен для " + repo_dir)
+    return result.stdout
+
+
+def git_rc(*args):
+    return subprocess.run(["git", "-C", repo_dir, *args],
+                          stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+
+
+def trailer_block(message_bytes):
+    # Lines of the trailing trailer block: consecutive "Key: value" lines at
+    # the very end of the message (git interpret-trailers semantics). A line
+    # mentioning "Iwe-Intent: <uuid>" inside the body is NOT in this block.
+    text = message_bytes.decode("utf-8", "surrogateescape")
+    lines = text.split("\n")
+    while lines and lines[-1].strip() == "":
+        lines.pop()
+    block = []
+    for line in reversed(lines):
+        if re.match(r"^[A-Za-z][A-Za-z0-9-]*: ", line):
+            block.append(line)
+        else:
+            break
+    return list(reversed(block))
+
+
+# --- intent record: union-merged per uuid; corrupt/truncated lines ignored ---
+# Session id and repo name are sanitized with the same alphabet the handler's
+# _commit_intent_path uses. The file name additionally carries the repo-id key
+# (first 12 of sha256 of the realpath'd git-common-dir): two checkouts can
+# share a basename inside one session and must not share an intent file.
+# Union-merge every record of the uuid in write order: the completion record
+# carries only {uuid,status}, while prepared/committed records carry the
+# verification fields -- neither alone is sufficient for the matrix.
+sanitized_session = re.sub(r"[^A-Za-z0-9._-]", "_", session_id)
+sanitized = re.sub(r"[^A-Za-z0-9._-]", "_", repo_name)
+common = git_bytes("rev-parse", "--path-format=absolute",
+                   "--git-common-dir").decode().strip()
+repo_key = hashlib.sha256(os.path.realpath(common).encode()).hexdigest()[:12]
+intent_dir = os.path.join(intents_root, sanitized_session)
+intent_path = os.path.join(intent_dir, sanitized + "-" + repo_key + ".jsonl")
+intent_lock_path = os.path.join(intent_dir, ".lock")
+
+latest = {}
+if os.path.exists(intent_path):
+    with open(intent_lock_path, "a+") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        with open(intent_path, encoding="utf-8") as src:
+            for line in src:
+                try:
+                    rec = json.loads(line)
+                except ValueError:
+                    continue  # truncated/corrupt line (crash mid-append)
+                if rec.get("uuid"):
+                    latest[rec["uuid"]] = dict(latest.get(rec["uuid"]) or {}, **rec)
+record = latest.get(intent_uuid)
+if record is None:
+    refuse("intent-not-found")
+if not record.get("message_sha256"):
+    if record.get("status") == "completed":
+        # P2: a completion stub whose committed record (the sole sha carrier)
+        # is missing is a DISTINCT debt class -- the claim existed once but
+        # cannot be reconstructed from this file. No PROMOTED, nonzero, and
+        # the record stays in jsonl until the debt is fixed separately; every
+        # sweep keeps completed-without-sha records for exactly this reason.
+        refuse("intent-completed-without-sha")
+    refuse("intent-not-found")
+
+# --- resolve the commit ---
+recorded_sha = record.get("sha")
+if recorded_sha:
+    if git_rc("cat-file", "-e", recorded_sha + "^{commit}").returncode != 0:
+        refuse("intent-commit-missing")
+    sha = recorded_sha
+else:
+    out = git_bytes("log", "--all", "--format=%H",
+                    "--grep=Iwe-Intent: " + intent_uuid).decode("ascii")
+    candidates = []
+    for cand in [ln for ln in out.splitlines() if ln.strip()]:
+        raw = git_bytes("cat-file", "commit", cand)
+        block = trailer_block(raw.split(b"\n\n", 1)[1])
+        if sum(1 for ln in block if ln == "Iwe-Intent: " + intent_uuid) == 1:
+            candidates.append(cand)
+    if not candidates:
+        refuse("intent-commit-missing")
+    if len(candidates) > 1:
+        refuse("intent-ambiguous")
+    sha = candidates[0]
+
+# --- verify: parents (root-aware), tree fingerprint, message bytes ---
+# E2 (claim-and-flag): once the commit is RESOLVED, a verification failure is
+# NOT a refusal-without-claim -- that would orphan a commit the session did
+# create. The claim is written for the actual sha and the mismatch is
+# recorded as visible debt (INTENT-DEBT + completion flag), exit nonzero.
+# Only unresolvable intents (not-found/missing/ambiguous) fail closed without
+# a claim: they have no commit to orphan (ambiguity is itself the signal).
+raw_commit = git_bytes("cat-file", "commit", sha)
+header, _, message = raw_commit.partition(b"\n\n")
+header_text = header.decode("ascii")
+parents = re.findall(r"(?m)^parent ([0-9a-f]{40,64})$", header_text)
+tree = re.search(r"(?m)^tree ([0-9a-f]{40,64})$", header_text).group(1)
+
+debt = None
+expected_parent = record.get("expected_parent")
+root_marker = not expected_parent or set(str(expected_parent)) == {"0"}
+if root_marker:
+    if parents:
+        debt = "intent-parent-moved"
+elif parents != [expected_parent]:
+    debt = "intent-parent-moved"
+
+if debt is None and record.get("tree") and record["tree"] != tree:
+    debt = "intent-content-mismatch"
+
+if debt is None:
+    digest = hashlib.sha256(message).hexdigest()
+    accepted = {record.get("message_sha256"), record.get("message_sha256_actual")}
+    if digest not in accepted and message.endswith(b"\n"):
+        digest = hashlib.sha256(message[:-1]).hexdigest()
+    if digest not in accepted:
+        debt = "intent-content-mismatch"
+
+# Path set: only for intents without a tree fingerprint (older records).
+if debt is None and not record.get("tree"):
+    if root_marker:
+        changed = git_bytes("diff-tree", "--root", "--no-commit-id",
+                            "--name-only", "-z", "-r", sha)
+    else:
+        changed = git_bytes("diff-tree", "--no-commit-id", "--name-only",
+                            "-z", "-r", parents[0], sha)
+    if sorted(os.fsdecode(p) for p in changed.split(b"\0") if p) \
+            != sorted(record.get("paths") or []):
+        debt = "intent-content-mismatch"
+
+# --- validate fields 3/4 before they land in a space-split claim line ---
+# The intent file is a recovery hint written before `git commit`; its
+# source_checkout/branch may name anything, and an unvalidated value would
+# either corrupt the space-split claim line (whitespace) or make readers
+# fetch from an untrusted checkout. Fail closed, no writes.
+src_checkout_raw = record.get("source_checkout") or ""
+src_checkout = src_checkout_raw
+src_branch = record.get("branch") or ""
+# Absent fields 3/4 are legitimate (a 2-field claim, stored as "- -");
+# only a PRESENT but invalid/untrusted value degrades to "- -" and joins the
+# visible debt.
+fields_valid = not src_checkout_raw
+if not src_checkout_raw:
+    src_checkout = "-"
+    src_branch = "-"
+if src_checkout_raw:
+    if not re.search(r"\s", src_checkout) and src_branch \
+            and not re.search(r"\s", src_branch) \
+            and os.path.isdir(src_checkout):
+        try:
+            checkout_common = subprocess.run(
+                ["git", "-C", src_checkout, "rev-parse",
+                 "--path-format=absolute", "--git-common-dir"],
+                stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, check=True,
+            ).stdout.decode().strip()
+        except subprocess.CalledProcessError:
+            checkout_common = ""
+        repo_common = subprocess.run(
+            ["git", "-C", repo_dir, "rev-parse", "--path-format=absolute",
+             "--git-common-dir"],
+            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL).stdout.decode().strip()
+        same_store = (checkout_common and repo_common
+                      and os.path.realpath(checkout_common)
+                      == os.path.realpath(repo_common))
+        if same_store:
+            fields_valid = True
+        else:
+            checkout_origin = subprocess.run(
+                ["git", "-C", src_checkout, "remote", "get-url", "origin"],
+                stdout=subprocess.PIPE, stderr=subprocess.DEVNULL).stdout.decode().strip()
+            repo_origin = subprocess.run(
+                ["git", "-C", repo_dir, "remote", "get-url", "origin"],
+                stdout=subprocess.PIPE, stderr=subprocess.DEVNULL).stdout.decode().strip()
+            fields_valid = bool(checkout_origin and repo_origin
+                                and checkout_origin == repo_origin)
+if fields_valid:
+    pass
+else:
+    # Invalid/untrusted fields 3/4 must not enter a space-split claim line;
+    # the claim degrades to "- -" and the mismatch joins the visible debt.
+    if debt is None:
+        debt = "intent-content-mismatch"
+    src_checkout = "-"
+    src_branch = "-"
+new_claim = "commit: " + repo_name + " " + sha + " " + src_checkout + " " + src_branch
+
+# --- semaphore: dedup by (repo,sha), flock-guarded atomic same-dir rewrite ---
+# The whole check-and-rewrite runs under an exclusive flock on the semaphore
+# itself: concurrent promotes of the same uuid (recovery racing close's
+# promote-pass) must not both pass the existence check and append two claim
+# lines. Callers normally hold the session transition lock; this makes the
+# function safe standalone too.
+try:
+    lfd = os.open(sem, os.O_RDWR | getattr(os, "O_NOFOLLOW", 0))
+except OSError:
+    lfd = os.open(sem, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+fcntl.flock(lfd, fcntl.LOCK_EX)
+try:
+    # The lock fd may reference an inode a concurrent promote already replaced
+    # (os.replace unlinks the old one) -- open the PATH after acquiring the
+    # lock: while the lock is held, the path names a stable inode.
+    fd = os.open(sem, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+    try:
+        info = os.fstat(fd)
+        current = os.lstat(sem)
+        if (not stat.S_ISREG(info.st_mode) or info.st_uid != os.geteuid()
+                or info.st_nlink != 1 or info.st_size <= 0
+                or info.st_size > 1024 * 1024
+                or stat.S_ISLNK(current.st_mode)
+                or (current.st_dev, current.st_ino) != (info.st_dev, info.st_ino)):
+            refuse("небезопасная запись семафора")
+        raw = b""
+        while True:
+            chunk = os.read(fd, 65536)
+            if not chunk:
+                break
+            raw += chunk
+        if len(raw) != info.st_size or b"\0" in raw or not raw.endswith(b"\n"):
+            refuse("повреждённая запись семафора")
+    finally:
+        os.close(fd)
+
+    lines = raw.decode("utf-8").split("\n")
+
+    def claim_pair(line):
+        fields = line[len("commit: "):].split()
+        return (fields[0], fields[1]) if len(fields) in (2, 4) else None
+
+    pair = (repo_name, sha)
+    if not any(line == new_claim for line in lines):
+        already = any(line.startswith("commit: ") and claim_pair(line) == pair
+                      for line in lines)
+        if not already:
+            kept = [line for line in lines
+                    if not (line.startswith("commit: ")
+                            and claim_pair(line) == pair)]
+            if kept and kept[-1] == "":
+                kept.pop()
+            kept.append(new_claim)
+            candidate = "\n".join(kept).encode("utf-8") + b"\n"
+            sem_dir = os.path.dirname(os.path.abspath(sem))
+            mode = os.stat(sem).st_mode & 0o7777
+            fd2, tmp = tempfile.mkstemp(dir=sem_dir, prefix=".promote-intent-")
+            try:
+                with os.fdopen(fd2, "wb") as handle:
+                    handle.write(candidate)
+                    handle.flush()
+                    os.fchmod(handle.fileno(), mode)
+                    os.fsync(handle.fileno())
+                os.replace(tmp, sem)
+            finally:
+                if os.path.exists(tmp):
+                    os.unlink(tmp)
+            dir_fd = os.open(sem_dir, os.O_RDONLY)
+            try:
+                os.fsync(dir_fd)
+            finally:
+                os.close(dir_fd)
+finally:
+    fcntl.flock(lfd, fcntl.LOCK_UN)
+    os.close(lfd)
+
+if record.get("status") != "completed" or debt:
+    done = {"uuid": intent_uuid, "status": "completed"}
+    if debt:
+        done["debt"] = debt
+        # P1 (tuple consistency): the debt record carries the ACTUAL commit
+        # fingerprint -- the object was read for verification anyway, so tree
+        # and message hash are the real values; they are only ever absent when
+        # the object itself cannot be read (unresolvable cases, which never
+        # reach this line).
+        done["tree"] = tree
+        done["message_sha256"] = hashlib.sha256(message).hexdigest()
+    with open(intent_lock_path, "a+") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        with open(intent_path, "a", encoding="utf-8") as stream:
+            stream.write(json.dumps(done) + "\n")
+
+print("PROMOTED " + sha)
+if debt:
+    # Отказ промоута при существующем коммите без записи заявки запрещён: the
+    # claim IS written (stdout contract unchanged, recovery picks the sha up);
+    # the mismatch surfaces as debt on stderr and a nonzero exit.
+    sys.stderr.write("INTENT-DEBT " + debt + "\n")
+    sys.exit(2)
+PY
+}
+
+# WP-484 Ф275 (round 2, blocker C): a closing session must not orphan its
+# unfinished intents (a crash between `git commit` and note-commit leaves a
+# prepared/committed record and no claim). BEFORE the intents directory is
+# dropped, promote every unfinished intent of this session through the same
+# locked validation; a failure is explicit debt ("prepared-intent-left: ...")
+# and KEEPS the directory -- close still succeeds.
+# Returns 0 when every unfinished intent was processed (promoted cleanly or
+# with debt -- E2 claim-and-flag counts as processed: the claim exists). Returns
+# 1 when intents remain unresolved (no commit / ambiguous / stub without sha):
+# the caller (close) must NOT close, must keep the directory, and the retry
+# contract is "повторный close догоняет promote-pass".
+_finish_session_commit_intents() {  # <semaphore> <session-id>
+  local sem="$1" sid="$2"
+  local sanitized dir failures=0 line repo rest uuid repo_dir reason promoted debt
+  sanitized=$(printf '%s' "$sid" | LC_ALL=C tr -cs 'A-Za-z0-9._-' '_')
+  dir="$IWE_ROOT/.iwe-runtime/commit-intents/$sanitized"
+  [ -d "$dir" ] || return 0
+  while IFS= read -r line; do
+    repo=${line%% *}
+    rest=${line#* }
+    uuid=${rest%% *}
+    [ -n "$repo" ] && [ "$rest" != "$line" ] && [ -n "$uuid" ] || continue
+    repo_dir=$(_resolve_repo_checkout "$repo" 2>/dev/null) || {
+      echo "WARN: prepared-intent-left: $repo $uuid repo-not-resolved" >&2
+      failures=1
+      continue
+    }
+    reason=$(_promote_commit_intent "$sem" "$repo_dir" "$repo" "$uuid" \
+      "$sid" "$IWE_ROOT/.iwe-runtime/commit-intents" 2>&1) || true
+    promoted=$(printf '%s\n' "$reason" | grep -aoE 'PROMOTED [0-9a-f]{40,64}' \
+      | head -1 | cut -d' ' -f2)
+    debt=$(printf '%s\n' "$reason" | grep -a '^INTENT-DEBT ' | head -1)
+    if [ -n "$promoted" ]; then
+      # E2: the claim IS written; the mismatch is visible debt -- processed.
+      [ -n "$debt" ] && printf '%s %s %s\n' "$debt" "$repo" "$uuid" >&2
+    else
+      reason=$(printf '%s\n' "$reason" | tail -1 \
+        | sed 's/^note-commit --promote-intent: //')
+      echo "WARN: prepared-intent-left: $repo $uuid $reason" >&2
+      failures=1
+    fi
+  done < <(python3 - "$dir" <<'PY'
+import fcntl
+import json
+import os
+import sys
+
+dirp = sys.argv[1]
+try:
+    names = sorted(n for n in os.listdir(dirp) if n.endswith(".jsonl"))
+except OSError:
+    sys.exit(0)
+latest = {}
+with open(os.path.join(dirp, ".lock"), "a+") as lock:
+    fcntl.flock(lock, fcntl.LOCK_EX)
+    for name in names:
+        try:
+            with open(os.path.join(dirp, name), encoding="utf-8") as src:
+                for line in src:
+                    try:
+                        rec = json.loads(line)
+                    except ValueError:
+                        continue  # truncated/corrupt line: ignore
+                    if rec.get("uuid"):
+                        latest[rec["uuid"]] = dict(latest.get(rec["uuid"]) or {}, **rec)
+        except OSError:
+            continue
+for uuid in sorted(latest):
+    rec = latest[uuid]
+    if rec.get("status") != "completed" and rec.get("repo"):
+        print(rec["repo"] + " " + uuid)
+PY
+)
+  if [ "$failures" -eq 0 ]; then
+    _cleanup_session_commit_intents "$sid"
+    return 0
+  fi
+  echo "WARN: close: каталог commit-intents '$dir' сохранён: есть непродвинутые intents (долг -- в WARN prepared-intent-left выше)" >&2
+  return 1
+}
+
+# WP-484 Ф275 предусловие 3: the session's commit-intent records
+# (.iwe-runtime/commit-intents/<session-id>/) are a crash-recovery hint needed
+# only while the session is open. Once the semaphore is renamed .open →
+# .closed the session cannot claim anything anymore, so the intents are dead
+# weight -- drop them. Best-effort by contract: cleanup must never fail a
+# close that already succeeded, so a removal problem is a WARN, not an error.
+# Called by _finish_session_commit_intents AFTER the promote-pass.
+_cleanup_session_commit_intents() {  # <session-id>
+  # Same tr alphabet as the handler's _commit_intent_path (Ф275 phase 2,
+  # cold review: low) -- cleanup must resolve to the exact directory name
+  # commit-push.sh writes intents under, for any session-id spelling.
+  local sanitized intents_dir
+  sanitized=$(printf '%s' "$1" | LC_ALL=C tr -cs 'A-Za-z0-9._-' '_')
+  intents_dir="$IWE_ROOT/.iwe-runtime/commit-intents/$sanitized"
+  [ -d "$intents_dir" ] || return 0
+  rm -rf "$intents_dir" 2>/dev/null \
+    || echo "WARN: close: не удалось удалить каталог commit-intents '$intents_dir' (сессия закрыта, очистка отложена)" >&2
+  return 0
 }
 
 _rename_open_to_closed() {  # <prepared open> <closed destination>
@@ -10982,19 +11468,35 @@ _rewrite_commit_claims_atomic() {  # <semaphore> <repo> <old shas> <new shas>; c
   # become claims on the rebuilt commits, every other byte is kept. Same
   # replace-through-fsynced-temporary discipline as _append_close_fields_atomic.
   # Prints the number of rewritten lines.
-  python3 - "$1" "$2" "$3" "$4" <<'PY'
+  GUARD_LIB_DIR="$GUARD_LIB_DIR" python3 - "$1" "$2" "$3" "$4" <<'PY'
 import os
 import stat
 import sys
+
+sys.path.insert(0, os.environ["GUARD_LIB_DIR"])
+import claim_line
 
 path, repo, old_text, new_text = sys.argv[1:]
 old, new = old_text.split(), new_text.split()
 if len(old) != len(new) or len(set(old)) != len(old):
     raise SystemExit(1)
-replacement = {}
-for before, after in zip(old, new):
-    replacement[("commit: %s %s" % (repo, before)).encode("utf-8")] = (
-        "commit: %s %s" % (repo, after)).encode("utf-8")
+new_sha = dict(zip(old, new))
+
+
+def rewrite_line(raw_line):
+    # A claim is the pair (repo, sha): a 4-field line keeps its checkout and branch.
+    try:
+        claim = claim_line.parse(raw_line.decode("utf-8"))
+    except (UnicodeDecodeError, claim_line.ClaimError):
+        return raw_line
+    if claim is None or claim.repo != repo or claim.sha not in new_sha:
+        return raw_line
+    line = "%s%s %s" % (claim_line.PREFIX, repo, new_sha[claim.sha])
+    if claim.checkout is not None:
+        line += " %s %s" % (claim.checkout, claim.branch)
+    return line.encode("utf-8")
+
+
 fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
 temporary = path + ".stage.%d" % os.getpid()
 temp_fd = -1
@@ -11021,7 +11523,7 @@ try:
     if len(raw) != info.st_size or b"\0" in raw or not raw.endswith(b"\n"):
         raise SystemExit(1)
     lines = raw.split(b"\n")
-    rewritten = [replacement.get(line, line) for line in lines]
+    rewritten = [rewrite_line(line) for line in lines]
     payload = b"\n".join(rewritten)
     temp_fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, stat.S_IMODE(info.st_mode))
     view = memoryview(payload)
@@ -11146,6 +11648,13 @@ _close_delivery_and_transition() {
     || fail "close: имя semaphore не связано точно с agent/session_id" 7
   close_receipt="$SEM_FILE.closed"
   isolated_worktree=$(_unique_record_field "$SEM_FILE" isolated_worktree || true)
+
+  # WP-484 Ф275 (C2): promote-pass BEFORE the first terminal rename. Unresolved
+  # prepared intents make close refuse (nonzero, semaphore stays .open, intents
+  # directory kept); повторный close догоняет promote-pass. Promote-with-debt
+  # (E2) counts as processed. Idempotent: a retry re-runs the same pass.
+  _finish_session_commit_intents "$SEM_FILE" "$SESSION_ID" \
+    || fail "close: остались непродвинутые commit intents (см. WARN prepared-intent-left выше); .open сохранён, повторный close догоняет promote-pass" 7
 
   # A crash after link(2) but before unlink(2) leaves two names for the exact
   # prepared receipt.  Finish only that inode-bound transition before trying
@@ -11550,6 +12059,8 @@ _close_delivery_and_transition() {
 
   [ -n "${TERMINAL_PROOF_SHA256:-}" ] \
     || fail "close: immutable terminal proof отсутствует у non-isolated close" 7
+  _finish_session_commit_intents "$SEM_FILE" "$SESSION_ID" \
+    || fail "close: остались непродвинутые commit intents (см. WARN prepared-intent-left выше); .open сохранён, повторный close догоняет promote-pass" 7
   _prepare_close_receipt "$SEM_FILE" "${RESULT_ARG:-не указано}" "${DEFER_ARG:-нет}" "" "$TERMINAL_PROOF_SHA256" \
     || fail "close: не удалось атомарно подготовить identity-bound receipt; .open сохранён" 7
   [ "${IWE_SESSION_GUARD_FAULT_POINT:-}" != "after-checklist-prepare" ] \
@@ -11769,8 +12280,9 @@ for claim in claims:
             pass
     elif claim.startswith("commit: "):
         parts = claim.split()
-        # a commit claim is fine only when that commit touched nothing but the own ORZ file
-        if len(parts) == 3 and parts[1] == os.path.basename(orz_dir):
+        # a commit claim is fine only when that commit touched nothing but the own ORZ file;
+        # 2-field ("commit: repo sha") or 4-field with fetch-hint extras (WP-484 Ф275)
+        if len(parts) in (3, 5) and parts[1] == os.path.basename(orz_dir):
             touched = set(run_git(orz_dir, "show", "--name-only", "--format=", parts[2]).split())
             if touched == {orz_file}:
                 continue
@@ -12658,7 +13170,8 @@ print(json.dumps({"wp": sys.argv[1], "slug": sys.argv[2], "agent": sys.argv[3], 
   # Repo-agnostic on purpose: a claim is matched to a checkout by the full OID
   # existing there, so no repo-name resolution is needed.
   _session_claimed_commits() {
-    sed -n 's/^commit: [^ ]* //p' "$_sem_read" 2>/dev/null || true
+    # Claim lines may be 2-field or 4-field; only the sha (field 2) is used.
+    sed -n 's/^commit: //p' "$_sem_read" 2>/dev/null | awk '{print $2}' || true
     _unique_record_field "$_sem_read" close_delivery_source_commits 2>/dev/null \
       | jq -r '.[]' 2>/dev/null || true
   }
@@ -12965,12 +13478,13 @@ for parent in (iwe_root, os.path.join(iwe_root, "DS-IT-systems")):
         pass
 
 # A commit claim of an unknown format is not something to reason around: fail closed.
+# 2-field or 4-field (WP-484 Ф275 предусловие 3); only repo+sha are used here.
 claimed_commits = []
 for line in lines:
     if not line.startswith("commit: "):
         continue
     fields = line[8:].split()
-    if len(fields) != 2 or not re.fullmatch(r"[0-9a-fA-F]{40,64}", fields[1]):
+    if len(fields) not in (2, 4) or not re.fullmatch(r"[0-9a-fA-F]{40,64}", fields[1]):
         refuse("неоднозначная заявка коммита в семафоре ('" + line + "'): заявка остаётся")
     claimed_commits.append(fields[1])
 
@@ -13221,6 +13735,8 @@ fi
 # --- NOTE-COMMIT (WP-537, peer session 2026-09-05-24 with Kimi) ---
 #
 #   session-guard.sh note-commit <sha> [--repo <name>] [--agent|--wp|--slug|--session-id ...]
+#   session-guard.sh note-commit <sha> --source-checkout <path> --branch <name> ...   # 4-field claim
+#   session-guard.sh note-commit --promote-intent <uuid> --repo <name> ...            # intent -> claim
 #
 # Records "this session produced this commit in this repo" in the semaphore, so
 # commit-push.sh can verify the claim "my work is already published" against the
@@ -13238,6 +13754,14 @@ fi
 # Repo-qualified on purpose: one semaphore mixes repo-relative `file:` entries
 # from several repositories with no separator, so a bare `commit: <sha>` would
 # inherit exactly that ambiguity.
+#
+# WP-484 Ф275 предусловие 3: a claim line may be 2-field
+# (`commit: <repo> <sha>`) or 4-field (`commit: <repo> <sha> <checkout> <branch>`)
+# -- fields 3/4 name the session's source checkout and branch so a reader whose
+# clone lacks the commit can fetch it from a trusted same-origin checkout.
+# --promote-intent turns a durable commit intent into a claim through
+# _promote_commit_intent (defined above) -- the ONLY such path, in the guard by
+# design: publication scripts must never self-declare ownership.
 if [ "$CMD" = "note-commit" ]; then
   # Cold review (22.10, Ф198-А): the two flags are not alternatives of the
   # same intent (one named SHA vs. a self-discovered batch) -- silently
@@ -13246,8 +13770,21 @@ if [ "$CMD" = "note-commit" ]; then
   if [ "$FORGET_FLAG" = "1" ] && [ "$FORGET_UNPROVABLE_FLAG" = "1" ]; then
     fail "note-commit: --forget и --forget-unprovable взаимно исключающие" 1
   fi
+  # --promote-intent is its own mode: it finds the sha from the intent record,
+  # so a positional sha or the mutation/enrichment flags next to it are
+  # ambiguous by construction, not combinable options.
+  if [ -n "$PROMOTE_INTENT_ARG" ]; then
+    [ "${#POSITIONAL[@]}" -eq 0 ] \
+      || fail "note-commit --promote-intent: позиционный <sha> не принимается — sha берётся из intent-записи" 1
+    [ "$FORGET_FLAG" != "1" ] && [ "$FORGET_UNPROVABLE_FLAG" != "1" ] \
+      || fail "note-commit --promote-intent взаимно исключается с --forget/--forget-unprovable" 1
+    [ -z "$SOURCE_CHECKOUT_ARG" ] \
+      || fail "note-commit --promote-intent взаимно исключается с --source-checkout (checkout берётся из intent-записи)" 1
+    [ -z "$BRANCH_ARG" ] \
+      || fail "note-commit --promote-intent взаимно исключается с --branch (ветка берётся из intent-записи)" 1
+  fi
   COMMIT_SHA="${POSITIONAL[0]:-}"
-  if [ -z "$COMMIT_SHA" ] && [ "$FORGET_UNPROVABLE_FLAG" != "1" ]; then
+  if [ -z "$COMMIT_SHA" ] && [ "$FORGET_UNPROVABLE_FLAG" != "1" ] && [ -z "$PROMOTE_INTENT_ARG" ]; then
     fail "note-commit: не передан <sha> коммита" 1
   fi
   NOTE_AGENT="${AGENT:-${IWE_AGENT:-claude-code}}"
@@ -13360,7 +13897,7 @@ def field(name):
 
 raw_claims = [line[len("commit: "):] for line in lines if line.startswith("commit: ")]
 for claim in raw_claims:
-    if not re.fullmatch(r"[A-Za-z0-9._-]+ [0-9a-fA-F]{40,64}", claim):
+    if not re.fullmatch(r"[A-Za-z0-9._-]+ [0-9a-fA-F]{40,64}( [^ \t]+ [^ \t]+)?", claim):
         refuse("неоднозначная заявка коммита в семафоре ('commit: " + claim + "'): заявка остаётся, снятие остановлено")
 
 missing = [t for t in targets if t not in raw_claims]
@@ -13583,6 +14120,20 @@ PY
   case "$NC_REPO_NAME" in
     *' '*) fail "note-commit: имя репозитория '$NC_REPO_NAME' содержит пробел — формат семафора 'commit: <repo> <sha>' это не переживёт" 1 ;;
   esac
+
+  # --- --promote-intent (WP-484 Ф275 предусловие 3) ---
+  #
+  # Recovery mode: commit-push.sh wrote a durable intent before `git commit`
+  # and may have died before note-commit; _promote_commit_intent (defined
+  # above) finds the commit, re-checks it against the intent record and
+  # appends the (repo,sha)-deduplicated claim -- the only intent->claim path.
+  if [ -n "$PROMOTE_INTENT_ARG" ]; then
+    _promote_commit_intent "$SEM_FILE" "$NC_REPO_DIR" "$NC_REPO_NAME" \
+      "$PROMOTE_INTENT_ARG" "$LOCKED_NOTE_SESSION_ID" \
+      "$IWE_ROOT/.iwe-runtime/commit-intents" || exit $?
+    exit 0
+  fi
+
   # Full 40-char form only: a short SHA recorded today can become ambiguous as
   # the repo grows, and the reader resolves it long after this session is gone.
   NC_FULL_SHA=$(git -C "$NC_REPO_DIR" rev-parse --verify --quiet "${COMMIT_SHA}^{commit}" 2>/dev/null) \
@@ -13599,7 +14150,12 @@ PY
     # grep -v exits 1 (not an error here) when the target is the only claim --
     # nothing left to exclude is a valid, expected case under set -e, not a
     # failure to mask with it (live, found running this script's own test).
-    NC_FORGET_OTHER_CLAIMS=$(sed -n 's/^commit: //p' "$SEM_FILE" | { grep -vxF "$NC_REPO_NAME $NC_FULL_SHA" || true; } | jq -R . | jq -s -c .)
+    # Exclude every claim of the same (repo,sha) pair -- the stored line may be
+    # 2-field or 4-field (WP-484 Ф275 предусловие 3); the proof checker below
+    # re-validates raw lines, so the exclusion must be pair-based, not literal.
+    NC_FORGET_OTHER_CLAIMS=$(sed -n 's/^commit: //p' "$SEM_FILE" \
+      | awk -v r="$NC_REPO_NAME" -v s="$NC_FULL_SHA" '{ if (!($1==r && $2==s)) print }' \
+      | jq -R . | jq -s -c .)
     # A published claim stays unremovable unless the commit is provably not this
     # session's work (WP-484 F257): note-commit after a refused commit once
     # claimed a foreign HEAD, and that claim blocked the close for good.
@@ -13657,18 +14213,24 @@ def field(name):
 
 raw_claims = [line[len("commit: "):] for line in lines if line.startswith("commit: ")]
 for claim in raw_claims:
-    if not re.fullmatch(r"[A-Za-z0-9._-]+ [0-9a-fA-F]{40,64}", claim):
+    if not re.fullmatch(r"[A-Za-z0-9._-]+ [0-9a-fA-F]{40,64}( [^ \t]+ [^ \t]+)?", claim):
         refuse("неоднозначная заявка коммита в семафоре ('commit: " + claim + "'): заявка остаётся, снятие остановлено")
 
 target = repo_name + " " + full_sha
-if target not in raw_claims:
+# The stored line may be 2-field or 4-field (WP-484 Ф275 предусловие 3) --
+# match and remove by the (repo,sha) pair, not the exact spelling.
+target_pair = (repo_name, full_sha)
+def claim_pair(claim):
+    fields = claim.split()
+    return (fields[0], fields[1]) if len(fields) in (2, 4) else None
+if not any(claim_pair(claim) == target_pair for claim in raw_claims):
     refuse("заявки на '" + target + "' в семафоре нет")
 # _close_delivery_state requires claimed_commits stored already sorted
 # (claimed != sorted(set(claimed)) -> invalid); the raw file order is
 # whatever order note-commit happened to append in, not sorted (Codex
 # cold review, 07.10 peer-session -- caught a real PREPARED-breaking bug
 # here, reproduced: unsorted leftover list fails the very next validation).
-claims_after = sorted(claim for claim in raw_claims if claim != target)
+claims_after = sorted(claim for claim in raw_claims if claim_pair(claim) != target_pair)
 
 # PREPARE already froze claimed_commits/prepare_digest as single-occurrence
 # fields (_close_delivery_state requires exactly one of each) -- forgetting a
@@ -13737,7 +14299,7 @@ if state == "prepared":
 kept = []
 replaced_keys = set()
 for line in lines:
-    if line == "commit: " + target:
+    if line.startswith("commit: ") and claim_pair(line[len("commit: "):]) == target_pair:
         continue
     matched_key = next((key for key in replacements if line.startswith(key + ": ")), None)
     if matched_key:
@@ -13806,12 +14368,138 @@ print("Forgot commit: " + target)
 PY
     exit 0
   fi
-  # Idempotent: the same commit may legitimately be reported twice (a retried
-  # close step), and a duplicated entry would be verified twice for nothing.
-  if ! grep -qxF "$NC_ENTRY" "$SEM_FILE" 2>/dev/null; then
-    echo "$NC_ENTRY" >> "$SEM_FILE"
+  # Optional 4-field enrichment (WP-484 Ф275 предусловие 3): name the source
+  # checkout and branch so commit-push.sh can fetch a missing claimed commit
+  # from a trusted checkout instead of skipping the claim.
+  NC_SOURCE_CHECKOUT="-"
+  NC_BRANCH="-"
+  if [ -n "$SOURCE_CHECKOUT_ARG" ] || [ -n "$BRANCH_ARG" ]; then
+    [ -n "$SOURCE_CHECKOUT_ARG" ] && [ -n "$BRANCH_ARG" ] \
+      || fail "note-commit: --source-checkout и --branch задаются только вместе (4-полевая заявка)" 1
+    [ -d "$SOURCE_CHECKOUT_ARG" ] \
+      || fail "note-commit: --source-checkout '$SOURCE_CHECKOUT_ARG' не является каталогом" 1
+    NC_SRC_COMMON=$(git -C "$SOURCE_CHECKOUT_ARG" rev-parse --path-format=absolute \
+      --git-common-dir 2>/dev/null) \
+      || fail "note-commit: --source-checkout '$SOURCE_CHECKOUT_ARG' не является git-репозиторием" 1
+    # Same repository is proven by the shared git-common-dir; when either side
+    # has no resolvable origin URL that is the ONLY accepted proof (a clone of
+    # the same origin is accepted on top -- this is what lets a clean clone
+    # with its own object store serve as the fetch source).
+    NC_SRC_ACCEPTED=0
+    NC_REPO_COMMON=$(git -C "$NC_REPO_DIR" rev-parse --path-format=absolute \
+      --git-common-dir 2>/dev/null || true)
+    if [ -n "$NC_REPO_COMMON" ] \
+       && [ "$(realpath "$NC_SRC_COMMON" 2>/dev/null || echo "$NC_SRC_COMMON")" \
+          = "$(realpath "$NC_REPO_COMMON" 2>/dev/null || echo "$NC_REPO_COMMON")" ]; then
+      NC_SRC_ACCEPTED=1
+    fi
+    if [ "$NC_SRC_ACCEPTED" != "1" ]; then
+      NC_SRC_ORIGIN=$(git -C "$SOURCE_CHECKOUT_ARG" remote get-url origin 2>/dev/null || true)
+      NC_REPO_ORIGIN=$(git -C "$NC_REPO_DIR" remote get-url origin 2>/dev/null || true)
+      if [ -n "$NC_SRC_ORIGIN" ] && [ -n "$NC_REPO_ORIGIN" ] \
+         && [ "$NC_SRC_ORIGIN" = "$NC_REPO_ORIGIN" ]; then
+        NC_SRC_ACCEPTED=1
+      fi
+    fi
+    [ "$NC_SRC_ACCEPTED" = "1" ] \
+      || fail "note-commit: --source-checkout '$SOURCE_CHECKOUT_ARG' не является ни worktree, ни клоном с тем же origin репозитория '$NC_REPO_NAME'" 1
+    NC_SOURCE_CHECKOUT=$(realpath "$SOURCE_CHECKOUT_ARG" 2>/dev/null || echo "$SOURCE_CHECKOUT_ARG")
+    # The claim line is space-split by readers: whitespace in fields 3/4 would
+    # silently corrupt the split the same way a space in the repo name would.
+    case "$NC_SOURCE_CHECKOUT" in
+      *[[:space:]]*) fail "note-commit: --source-checkout не должен содержать пробелов — строка заявки семафора разбивается по пробелам" 1 ;;
+    esac
+    case "$BRANCH_ARG" in
+      *[[:space:]]*) fail "note-commit: --branch не должен содержать пробелов — строка заявки семафора разбивается по пробелам" 1 ;;
+    esac
+    NC_BRANCH="$BRANCH_ARG"
   fi
-  echo "Noted commit: $NC_REPO_NAME $NC_FULL_SHA"
+  NC_ENTRY="commit: $NC_REPO_NAME $NC_FULL_SHA"
+  if [ "$NC_SOURCE_CHECKOUT" != "-" ]; then
+    NC_ENTRY="$NC_ENTRY $NC_SOURCE_CHECKOUT $NC_BRANCH"
+  fi
+  # Idempotent on the exact line AND on the (repo,sha) pair: a retried close
+  # step re-reports the same commit, and a 2-field claim must never coexist
+  # with its 4-field upgrade -- readers split the line by spaces and would
+  # verify the commit twice, once in each spelling. The caller already holds
+  # the session transition lock, so read-modify-write via a same-dir temp
+  # file + os.replace is as atomic as the forget writers above.
+  python3 - "$SEM_FILE" "$NC_ENTRY" <<'PY' || exit $?
+import os
+import stat
+import sys
+import tempfile
+from pathlib import Path
+
+sem, entry = sys.argv[1:3]
+
+
+def refuse(message):
+    sys.stderr.write("note-commit: " + message + "\n")
+    sys.exit(1)
+
+
+fd = os.open(sem, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+try:
+    info = os.fstat(fd)
+    current = os.lstat(sem)
+    if (not stat.S_ISREG(info.st_mode) or info.st_uid != os.geteuid()
+            or info.st_nlink != 1 or info.st_size <= 0 or info.st_size > 1024 * 1024
+            or stat.S_ISLNK(current.st_mode)
+            or (current.st_dev, current.st_ino) != (info.st_dev, info.st_ino)):
+        refuse("небезопасная запись семафора")
+    raw = b""
+    while True:
+        chunk = os.read(fd, 65536)
+        if not chunk:
+            break
+        raw += chunk
+    if len(raw) != info.st_size or b"\0" in raw or not raw.endswith(b"\n"):
+        refuse("повреждённая запись семафора")
+finally:
+    os.close(fd)
+
+lines = raw.decode("utf-8").split("\n")
+if entry in lines:
+    print("Noted commit: " + entry[len("commit: "):])
+    sys.exit(0)
+
+new_fields = entry[len("commit: "):].split()
+pair = (new_fields[0], new_fields[1])
+kept = []
+for line in lines:
+    if line.startswith("commit: "):
+        fields = line[len("commit: "):].split()
+        if len(fields) in (2, 4) and (fields[0], fields[1]) == pair:
+            continue  # same (repo,sha): the new spelling replaces the old one
+    kept.append(line)
+if kept and kept[-1] == "":
+    kept.pop()  # trailing element of the split: keep exactly one final "\n"
+kept.append(entry)
+
+candidate = "\n".join(kept).encode("utf-8") + b"\n"
+sem_dir = os.path.dirname(os.path.abspath(sem))
+mode = os.stat(sem).st_mode & 0o7777
+fd2, tmp = tempfile.mkstemp(dir=sem_dir, prefix=".note-commit-")
+try:
+    with os.fdopen(fd2, "wb") as handle:
+        handle.write(candidate)
+        handle.flush()
+        os.fchmod(handle.fileno(), mode)
+        os.fsync(handle.fileno())
+    if Path(sem).read_bytes() != raw:
+        refuse("семафор изменился во время проверки, повтори")
+    os.replace(tmp, sem)
+finally:
+    if os.path.exists(tmp):
+        os.unlink(tmp)
+dir_fd = os.open(sem_dir, os.O_RDONLY)
+try:
+    os.fsync(dir_fd)
+finally:
+    os.close(dir_fd)
+print("Noted commit: " + entry[len("commit: "):])
+PY
   exit 0
 fi
 
@@ -13860,16 +14548,21 @@ _note_publication_canonical_session_id() {  # <agent> <session id or slug>
 # The caller holds the session transition lock.
 _claim_source_for_receipt() {  # <semaphore> <repo dir> <repo name> <full sha>
   local sem="$1" repo="$2" name="$3" sha="$4" other entry
+  # shellcheck source=lib/claim-line.sh
+  . "$GUARD_LIB_DIR/claim-line.sh" \
+    || { echo "note-publication: не найден $GUARD_LIB_DIR/claim-line.sh (lib выкладывается раньше или вместе со сторожем)" >&2; return 1; }
   CLAIM_ADDED=0
   # Not a commit of this checkout (a separate clone, a leaked variable): the receipt may still be
   # recordable from claims the session already has, so go on without claiming.
   git -C "$repo" rev-parse --verify --quiet "$sha^{commit}" >/dev/null \
     || { echo "WARN: note-publication: --claim-source $sha не коммит репозитория $name; заявка пропущена" >&2; return 0; }
   entry="commit: $name $sha"
-  grep -qxF "$entry" "$sem" 2>/dev/null && return 0
+  # The session may already hold this claim in the 4-field form: match by the pair (repo, sha),
+  # or a 2-field duplicate is appended and later rolled back (the 01.11 incident).
+  _claim_present "$sem" "$name" "$sha" && return 0
   for other in "$SESSION_DIR"/*.open; do
     [ -f "$other" ] && [ "$other" != "$sem" ] || continue
-    if grep -qxF "$entry" "$other" 2>/dev/null; then
+    if _claim_present "$other" "$name" "$sha"; then
       echo "note-publication: --claim-source $sha уже заявлен другой сессией ($(basename "$other")); заявка отклонена" >&2
       return 1
     fi
