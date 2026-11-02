@@ -6319,6 +6319,15 @@ EOF
     FINDINGS_COUNT=$(wc -l < "$FINDINGS_REGISTRY" | tr -d ' ')
     echo "ℹ️  $FINDINGS_COUNT запись(ей) в findings registry чужих RUN-карточек ($FINDINGS_REGISTRY) — разбор на Day/Week Close, не блокирует эту сессию" >&2
   fi
+  # WP-484 Ф275: undelivered close remainder (depth, age of the oldest entry,
+  # count by class). One line, non-fatal; silent when nothing is held or when
+  # the runner predates the `remainder-summary` command.
+  REMAINDER_RUNNER="$IWE_ROOT/$GOV_REPO/scripts/process-runner.py"
+  if [ -f "$REMAINDER_RUNNER" ]; then
+    REMAINDER_LINE=$(python3 "$REMAINDER_RUNNER" remainder-summary 2>/dev/null \
+      | python3 -c 'import json,sys; print(json.load(sys.stdin).get("line",""))' 2>/dev/null || true)
+    [ -n "$REMAINDER_LINE" ] && echo "⚠️  $REMAINDER_LINE" >&2
+  fi
   # Session-handoff gap scan (WP-484, peer-session
   # 2026-10-15-33-wp484-session-handoff-gap): did the previous session(s) of
   # this WP finalize their journal (report.md)? Runs AFTER both kernel locks

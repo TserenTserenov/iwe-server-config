@@ -1007,6 +1007,16 @@ render_attention() {
     done < <(grep -E '^(⚠️|🗓️)' "$weekstate")
   fi
 
+  # WP-484 Ф275: undelivered close remainder. The runner prints one line, empty
+  # when nothing is held; a runner without the command stays silent.
+  local remainder_runner="$IWE/${IWE_GOVERNANCE_REPO:-DS-strategy}/scripts/process-runner.py"
+  if [ -f "$remainder_runner" ]; then
+    local remainder_line
+    remainder_line=$(python3 "$remainder_runner" remainder-summary 2>/dev/null \
+      | python3 -c 'import json,sys; print(json.load(sys.stdin).get("line",""))' 2>/dev/null || true)
+    [ -n "$remainder_line" ] && items+=("🔴 ${remainder_line} — разобрать: process-runner.py remainder-resolve")
+  fi
+
   if [ "${#items[@]}" -eq 0 ]; then
     echo "— нет сигналов, требующих внимания."
     return
