@@ -81,9 +81,9 @@ out=$(note "$SHA2" --repo myrepo --source-checkout "$REPO" --branch main); rc=$?
 
 out=$(note "$SHA2" --repo myrepo); rc=$?
 n=$(grep -c "^commit: myrepo $SHA2" "$SEM")
-{ [ $rc -eq 0 ] && [ "$n" -eq 1 ] && grep -qx "commit: myrepo $SHA2" "$SEM"; } \
-  && ok "2-field re-note replaces 4-field, single line" \
-  || bad "2-field re-note (rc=$rc count=$n lines=$(grep 'commit:' "$SEM"))"
+{ [ $rc -eq 0 ] && [ "$n" -eq 1 ] && grep -qx "commit: myrepo $SHA2 - -" "$SEM"; } \
+  && ok "unknown-checkout re-note replaces real 4-field with canonical \"- -\" form, single line" \
+  || bad "unknown-checkout re-note (rc=$rc count=$n lines=$(grep 'commit:' "$SEM"))"
 
 out=$(note "$SHA2" --repo myrepo --source-checkout "$REPO" --branch main); rc=$?
 n=$(grep -c "^commit: myrepo $SHA2" "$SEM")

@@ -55,7 +55,7 @@ guard open --wp WP-999 --agent fixture --slug forget --task forget >/dev/null 2>
 SEM=$(find "$TEST_ROOT/.iwe-runtime/sessions" -name 'fixture-*.open' | head -1)
 [ -n "$SEM" ] || { echo "FAIL: fixture session did not open"; exit 1; }
 
-claims() { grep -cxF "commit: work-repo $1" "$SEM" || true; }
+claims() { grep -cxF "commit: work-repo $1 - -" "$SEM" || true; }
 
 # --- state=none: plain forget withdraws a stray claim -------------------------
 echo one > "$WORK/one.txt"
@@ -112,7 +112,7 @@ check "own published claim survives the foreign forget" "1" "$(claims "$SHA_PUBL
 # Remove the proven claim via the one withdrawal path that does not itself
 # depend on the gate under test (git): confirms the refusal above wasn't a
 # side effect of some other check.
-sed -i.bak "/^commit: work-repo $SHA_PUBLISHED\$/d" "$SEM" && rm -f "$SEM.bak"
+sed -i.bak "/^commit: work-repo $SHA_PUBLISHED - -\$/d" "$SEM" && rm -f "$SEM.bak"
 
 echo
 if [ "$FAILURES" -eq 0 ]; then

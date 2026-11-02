@@ -159,7 +159,7 @@ note_commit() {  # note_commit <sha> [--repo <name>]
 }
 
 note_commit "$NESTED_SHA" --repo mentorship-service
-if [ "$NC_RC" -eq 0 ] && grep -qxF "commit: mentorship-service $NESTED_SHA" "$SEM_FILE"; then
+if [ "$NC_RC" -eq 0 ] && grep -qxF "commit: mentorship-service $NESTED_SHA - -" "$SEM_FILE"; then
   pass "--repo <вложенный репозиторий> принят и записан под своим basename"
 else
   fail "--repo mentorship-service отклонён (exit $NC_RC): $NC_OUT"
@@ -167,7 +167,7 @@ fi
 
 cd "$NESTED_DIR" || exit 1
 note_commit "$NESTED_SHA"
-if [ "$NC_RC" -eq 0 ] && [ "$(grep -cxF "commit: mentorship-service $NESTED_SHA" "$SEM_FILE")" -eq 1 ]; then
+if [ "$NC_RC" -eq 0 ] && [ "$(grep -cxF "commit: mentorship-service $NESTED_SHA - -" "$SEM_FILE")" -eq 1 ]; then
   pass "вызов из каталога вложенного репозитория даёт то же имя, без дубля строки"
 else
   fail "вызов без --repo из вложенного репозитория записал другое имя: $(grep '^commit: ' "$SEM_FILE" | tr '\n' ' ')"
@@ -175,7 +175,7 @@ fi
 cd "$GOV_DIR" || exit 1
 
 note_commit "$GOV_SHA" --repo DS-strategy
-if [ "$NC_RC" -eq 0 ] && grep -qxF "commit: DS-strategy $GOV_SHA" "$SEM_FILE"; then
+if [ "$NC_RC" -eq 0 ] && grep -qxF "commit: DS-strategy $GOV_SHA - -" "$SEM_FILE"; then
   pass "прямой потомок корня заявляется как прежде (регрессии нет)"
 else
   fail "заявка обычного репозитория сломана (exit $NC_RC): $NC_OUT"
@@ -189,14 +189,14 @@ else
 fi
 
 note_commit "$DUP_ONLY_NESTED_SHA" --repo neon-migrations
-if [ "$NC_RC" -eq 0 ] && grep -qxF "commit: neon-migrations $DUP_ONLY_NESTED_SHA" "$SEM_FILE"; then
+if [ "$NC_RC" -eq 0 ] && grep -qxF "commit: neon-migrations $DUP_ONLY_NESTED_SHA - -" "$SEM_FILE"; then
   pass "две копии одного origin — не коллизия: заявка принята по копии, где коммит есть"
 else
   fail "дубль чекаута с одним origin не разрешён (exit $NC_RC): $NC_OUT"
 fi
 
 note_commit "$EXTERNAL_SHA" --repo service
-if [ "$NC_RC" -eq 0 ] && grep -qxF "commit: service $EXTERNAL_SHA" "$SEM_FILE"; then
+if [ "$NC_RC" -eq 0 ] && grep -qxF "commit: service $EXTERNAL_SHA - -" "$SEM_FILE"; then
   pass "симлинк записан под запрошенным именем, а не под basename цели"
 else
   fail "имя заявки для симлинка искажено (exit $NC_RC): $(grep '^commit: ' "$SEM_FILE" | tr '\n' ' ')"
@@ -213,7 +213,7 @@ WT_SHA=$(add_commit "$LINKED_WT" "worktree-work")
 cd "$LINKED_WT" || exit 1
 note_commit "$WT_SHA"
 cd "$GOV_DIR" || exit 1
-if [ "$NC_RC" -eq 0 ] && grep -qxF "commit: DS-strategy $WT_SHA" "$SEM_FILE"; then
+if [ "$NC_RC" -eq 0 ] && grep -qxF "commit: DS-strategy $WT_SHA - -" "$SEM_FILE"; then
   pass "заявка из изолированной копии записана под именем канонического репозитория"
 else
   fail "заявка из изолированной копии записана под именем каталога worktree (exit $NC_RC): $(grep "$WT_SHA" "$SEM_FILE" || echo 'строки нет')"

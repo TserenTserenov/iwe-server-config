@@ -44,7 +44,8 @@ run() {  # <published sha> [extra args]; fills OUT and RC
     --repo myrepo --session-id aaaa1111 "$@" 2>&1)
   RC=$?
 }
-claims_of() { grep -c "^commit: myrepo $1\$" "$SEM"; }
+# The guard writes the canonical 4-field form, "-" for an unknown checkout/branch.
+claims_of() { grep -c "^commit: myrepo $1 - -\$" "$SEM"; }
 
 # 5. no --claim-source: unclaimed commit is refused.
 run "$PUBLISHED"
@@ -66,6 +67,13 @@ run "$PUBLISHED" --claim-source "$PUBLISHED"
 cmp -s "$SEM" "$T/before" || fail "semaphore changed after a foreign-claim refusal"
 case "$OUT" in *"другой сессией"*) ;; *) fail "foreign-claim reason missing: $OUT" ;; esac
 mk "$OTHER" bbbb2222 slug-two
+# 3b. the same refusal when the other session holds the canonical "- -" form.
+echo "commit: myrepo $PUBLISHED - -" >> "$OTHER"
+cp "$SEM" "$T/before"
+run "$PUBLISHED" --claim-source "$PUBLISHED"
+[ "$RC" -ne 0 ] || fail "canonical claim of another session must be refused: $OUT"
+cmp -s "$SEM" "$T/before" || fail "semaphore changed after a foreign canonical-claim refusal"
+mk "$OTHER" bbbb2222 slug-two
 
 # 1. claim + receipt together.
 run "$PUBLISHED" --claim-source "$PUBLISHED"
@@ -82,7 +90,7 @@ cp "$SEM" "$T/before"
 run "$PUBLISHED" --claim-source "$(printf 'c%.0s' $(seq 1 40))"
 [ "$RC" -eq 0 ] || fail "unknown source must not block a recordable receipt (rc=$RC): $OUT"
 case "$OUT" in *"заявка пропущена"*) ;; *) fail "skipped claim not reported: $OUT" ;; esac
-[ "$(grep -c '^commit: myrepo c' "$SEM")" = 0 ] || fail "unknown source was claimed"
+[ "$(grep -c "^commit: myrepo $(printf 'c%.0s' $(seq 1 40))" "$SEM")" = 0 ] || fail "unknown source was claimed"
 
 # Odd values never reach the claim.
 run "$PUBLISHED" --claim-source 'not-a-sha'

@@ -51,7 +51,7 @@ guard open --wp WP-999 --agent fixture --slug forget-unprovable --task forget-un
 SEM=$(find "$TEST_ROOT/.iwe-runtime/sessions" -name 'fixture-*.open' | head -1)
 [ -n "$SEM" ] || { echo "FAIL: fixture session did not open"; exit 1; }
 
-claims() { grep -cxF "commit: work-repo $1" "$SEM" || true; }
+claims() { grep -cxF "commit: work-repo $1 - -" "$SEM" || true; }
 
 ORIGIN=$(mktemp -d "${TMPDIR:-/tmp}/session-guard-commit-forget-unprovable-origin.XXXXXX")
 git -C "$ORIGIN" init -q --bare

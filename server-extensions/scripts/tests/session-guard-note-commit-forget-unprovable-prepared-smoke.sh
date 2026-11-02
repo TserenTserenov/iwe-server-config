@@ -117,10 +117,9 @@ build_fixture() {  # <slug> [publish_head=0] -- opens a fresh session, builds a
   printf 'terminal-anchor-%s\n' "$slug" > "$terminal_file"
   placeholder_status_sha=$(git -C "$WORK" hash-object -t blob /dev/null)
   commits_json=$(python3 -c "import json,sys; print(json.dumps([sys.argv[1]]))" "$head")
-  claims_json=$(python3 -c "
-import json, sys
-print(json.dumps(sorted('work-repo ' + s for s in sys.argv[1:])))
-" "$head" "$extra1" "$extra2" "$extra3")
+  # Raw claim tails exactly as the guard wrote them ("work-repo <sha> - -"),
+  # the way the real prepare path freezes the list.
+  claims_json=$(sed -n 's/^commit: //p' "$sem" | python3 -c "import json,sys; print(json.dumps(sorted(l.strip() for l in sys.stdin if l.strip())))")
   _record_close_prepared "$sem" "$session_id" "$WORK" "$WORK/.git" \
     "$head" "$head" "$placeholder_status_sha" \
     "$commits_json" "$claims_json" file "$terminal_file" "$(_terminal_proof_snapshot_sha file "$terminal_file")" \
@@ -136,10 +135,10 @@ check "scenario A: state is prepared before batch forget" "prepared" "$(_close_d
 
 guard note-commit --forget-unprovable --repo work-repo --agent fixture --slug forget-unprov-a >/dev/null 2>&1; RC=$?
 check "scenario A: batch forget succeeds" "0" "$RC"
-check "scenario A: extra1 removed" "0" "$(grep -cxF "commit: work-repo $EXTRA_A1" "$SEM_A")"
-check "scenario A: extra2 removed" "0" "$(grep -cxF "commit: work-repo $EXTRA_A2" "$SEM_A")"
-check "scenario A: extra3 removed" "0" "$(grep -cxF "commit: work-repo $EXTRA_A3" "$SEM_A")"
-check "scenario A: source (head) claim untouched" "1" "$(grep -cxF "commit: work-repo $HEAD_A" "$SEM_A")"
+check "scenario A: extra1 removed" "0" "$(grep -cxF "commit: work-repo $EXTRA_A1 - -" "$SEM_A")"
+check "scenario A: extra2 removed" "0" "$(grep -cxF "commit: work-repo $EXTRA_A2 - -" "$SEM_A")"
+check "scenario A: extra3 removed" "0" "$(grep -cxF "commit: work-repo $EXTRA_A3 - -" "$SEM_A")"
+check "scenario A: source (head) claim untouched" "1" "$(grep -cxF "commit: work-repo $HEAD_A - -" "$SEM_A")"
 NEW_STATE_A=$(_close_delivery_state "$SEM_A" "$SESSION_A" || echo "INVALID")
 check "scenario A: semaphore still validates as prepared" "prepared" "$NEW_STATE_A"
 check "scenario A: close_delivery_claimed_commits single occurrence" "1" \
@@ -158,7 +157,7 @@ check "scenario A: claimed_commits lists only the source claim now" "1" \
 import json, sys
 claimed = json.loads(sys.argv[1])
 print(1 if claimed == [sys.argv[2]] else 0)
-" "$NEW_CLAIMED_A" "work-repo $HEAD_A")"
+" "$NEW_CLAIMED_A" "work-repo $HEAD_A - -")"
 
 # --- scenario B: one of the unprovable targets is the PREPARE source commit;
 # whole batch must refuse, nothing removed (fail-closed, not partial) -------
@@ -169,10 +168,10 @@ read -r SEM_B SESSION_B HEAD_B EXTRA_B1 EXTRA_B2 EXTRA_B3 <<<"$(build_fixture fo
 # close_delivery_source_commits forbids.
 guard note-commit --forget-unprovable --repo work-repo --agent fixture --slug forget-unprov-b >/dev/null 2>&1; RC=$?
 check "scenario B: batch refuses when a source commit is among the unprovable targets" "1" "$RC"
-check "scenario B: head (source) claim kept" "1" "$(grep -cxF "commit: work-repo $HEAD_B" "$SEM_B")"
-check "scenario B: extra1 kept (fail-closed, no partial removal)" "1" "$(grep -cxF "commit: work-repo $EXTRA_B1" "$SEM_B")"
-check "scenario B: extra2 kept (fail-closed, no partial removal)" "1" "$(grep -cxF "commit: work-repo $EXTRA_B2" "$SEM_B")"
-check "scenario B: extra3 kept (fail-closed, no partial removal)" "1" "$(grep -cxF "commit: work-repo $EXTRA_B3" "$SEM_B")"
+check "scenario B: head (source) claim kept" "1" "$(grep -cxF "commit: work-repo $HEAD_B - -" "$SEM_B")"
+check "scenario B: extra1 kept (fail-closed, no partial removal)" "1" "$(grep -cxF "commit: work-repo $EXTRA_B1 - -" "$SEM_B")"
+check "scenario B: extra2 kept (fail-closed, no partial removal)" "1" "$(grep -cxF "commit: work-repo $EXTRA_B2 - -" "$SEM_B")"
+check "scenario B: extra3 kept (fail-closed, no partial removal)" "1" "$(grep -cxF "commit: work-repo $EXTRA_B3 - -" "$SEM_B")"
 check "scenario B: state still prepared after refusal" "prepared" "$(_close_delivery_state "$SEM_B" "$SESSION_B")"
 
 echo

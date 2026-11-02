@@ -134,7 +134,7 @@ COMMITS_JSON=$(python3 -c "import json,sys; print(json.dumps([sys.argv[1]]))" "$
 # alike (_close_delivery_state: sorted(claimed) must equal the raw commit:
 # lines) -- not just the source set _record_close_prepared itself tracks
 # separately in source_commits/expected_commits.
-CLAIMS_JSON=$(printf '%s\n' "$CLAIM_LINES" | python3 -c "import json,sys; print(json.dumps(sorted(l.strip() for l in sys.stdin if l.strip())))")
+CLAIMS_JSON=$(sed -n 's/^commit: //p' "$SEM" | python3 -c "import json,sys; print(json.dumps(sorted(l.strip() for l in sys.stdin if l.strip())))")
 # Only HEAD_SHA is source/expected; the two extras are "additional" claims --
 # exactly the class note-commit --forget exists for.
 _record_close_prepared "$SEM" "$SESSION_ID" "$WORK" "$WORK/.git" \
@@ -150,14 +150,14 @@ check "fixture: claims built in non-sorted raw order (or exhausted retries)" "0"
 # --- the regression case: forget one additional claim, state must stay valid --
 OUT=$(guard note-commit --forget "$EXTRA_SHA_1" --repo work-repo --agent fixture --slug prepfgt 2>&1); RC=$?
 check "prepared, additional claim: forget succeeds" "0" "$RC"
-check "prepared, additional claim: raw line removed" "0" "$(grep -cxF "commit: work-repo $EXTRA_SHA_1" "$SEM")"
-check "prepared, additional claim: other extra claim kept" "1" "$(grep -cxF "commit: work-repo $EXTRA_SHA_2" "$SEM")"
-check "prepared, additional claim: source claim untouched" "1" "$(grep -cxF "commit: work-repo $HEAD_SHA" "$SEM")"
+check "prepared, additional claim: raw line removed" "0" "$(grep -cxF "commit: work-repo $EXTRA_SHA_1 - -" "$SEM")"
+check "prepared, additional claim: other extra claim kept" "1" "$(grep -cxF "commit: work-repo $EXTRA_SHA_2 - -" "$SEM")"
+check "prepared, additional claim: source claim untouched" "1" "$(grep -cxF "commit: work-repo $HEAD_SHA - -" "$SEM")"
 NEW_STATE=$(_close_delivery_state "$SEM" "$SESSION_ID" || echo "INVALID")
 check "prepared, additional claim: semaphore still validates as prepared (the bug Codex caught)" "prepared" "$NEW_STATE"
 NEW_CLAIMED=$(sed -n 's/^close_delivery_claimed_commits: //p' "$SEM" | tail -1)
 check "close_delivery_claimed_commits no longer lists the forgotten claim" "0" \
-  "$(python3 -c "import json,sys; print(1 if sys.argv[1] in json.loads(sys.argv[2]) else 0)" "work-repo $EXTRA_SHA_1" "$NEW_CLAIMED")"
+  "$(python3 -c "import json,sys; print(1 if sys.argv[1] in json.loads(sys.argv[2]) else 0)" "work-repo $EXTRA_SHA_1 - -" "$NEW_CLAIMED")"
 check "close_delivery_claimed_commits is stored sorted" "0" \
   "$(python3 -c "
 import json, sys
@@ -174,7 +174,7 @@ check "audit log recorded the prepared-state forget" "1" \
 # --- refusal: a source/expected commit may not be forgotten --------------------
 guard note-commit --forget "$HEAD_SHA" --repo work-repo --agent fixture --slug prepfgt >/dev/null 2>&1; RC=$?
 check "prepared, source commit: refused" "1" "$RC"
-check "prepared, source commit: claim kept" "1" "$(grep -cxF "commit: work-repo $HEAD_SHA" "$SEM")"
+check "prepared, source commit: claim kept" "1" "$(grep -cxF "commit: work-repo $HEAD_SHA - -" "$SEM")"
 check "prepared, source commit: state still prepared after refusal" "prepared" "$(_close_delivery_state "$SEM" "$SESSION_ID")"
 
 echo
