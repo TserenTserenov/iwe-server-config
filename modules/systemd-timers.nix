@@ -445,6 +445,13 @@ let
     exit 0
   '';
 
+  paymentRegistryAlert = pkgs.writeShellScript "payment-registry-alert"
+    (builtins.readFile ../scripts/payment-registry-alert.sh);
+  # OnSuccess закрывает инцидент реестра: OnFailure сам о восстановлении не узнаёт.
+  paymentRegistryUnitConfig = commonUnitConfig // {
+    OnSuccess = "payment-registry-recovered@%n.service";
+  };
+
   # Скрипт TG-алерта.
   # TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID — из EnvironmentFile /etc/iwe/env (личный чат).
   # TELEGRAM_TEAM_CHAT_ID — опционально; если задан, алерт дублируется в командный канал.
@@ -472,25 +479,9 @@ let
     # разговорный стиль (DP.SC.050). Агент ищет деталь через
     # `journalctl -u iwe-failure-alert@<unit>.service`.
     echo "unit=$unit journal_hint=journalctl -u $unit --since -1h"
-    # Платёжный реестр (WP-538 Ф10, 02.10, пир-сессия 2026-10-02-04): за голым
-    # "payment registry sync payment" пилот не видел, что это за обмен, потеряны ли
-    # данные и когда следующая попытка. Обмен идёт по границе уже обработанного
-    # (sync_state), поэтому сбой задерживает данные, а не теряет их.
-    case "$unit" in
-      payment-registry-sync-payment.service)      pr_what="платежи" ;;
-      payment-registry-sync-subscription.service) pr_what="подписки" ;;
-      payment-registry-sync-contract.service)     pr_what="договоры" ;;
-      *) pr_what="" ;;
-    esac
-    if [ -n "$pr_what" ]; then
-      msg=$(${pkgs.coreutils}/bin/printf \
-        "🚨 Платёжный реестр: не прошёл обмен данными или проверка после него (%s).\nДанные, как правило, не теряются, а задерживаются: следующая плановая попытка их догонит. Если такие сообщения идут больше часа подряд, нужна проверка агентом.\nСервер: %s\nВремя: %s" \
-        "$pr_what" "$host" "$ts")
-    else
-      msg=$(${pkgs.coreutils}/bin/printf \
-        "🚨 Не выполнилась запланированная задача IWE: %s\nСервер: %s\nВремя: %s" \
-        "$human_name" "$host" "$ts")
-    fi
+    msg=$(${pkgs.coreutils}/bin/printf \
+      "🚨 Не выполнилась запланированная задача IWE: %s\nСервер: %s\nВремя: %s" \
+      "$human_name" "$host" "$ts")
     send_tg() {
       ${pkgs.curl}/bin/curl -s --max-time 10 -X POST \
         "https://api.telegram.org/bot''${TELEGRAM_BOT_TOKEN}/sendMessage" \
@@ -505,11 +496,15 @@ let
         send_tg "''${TELEGRAM_TEAM_CHAT_ID}" "$1"
       fi
     }
-    # Платёжный реестр - исключение (WP-568, решение 30.10): всегда сразу и прямо.
-    if [ -n "$pr_what" ]; then
-      send_direct "$msg"
-      exit 0
-    fi
+    # Платёжный реестр: сразу и прямо, но один инцидент на простой (WP-568, 02.11).
+    case "$unit" in
+      payment-registry-sync-*)
+        if ! ${paymentRegistryAlert} failure "$unit"; then
+          send_direct "$msg"
+        fi
+        exit 0
+        ;;
+    esac
     # Остальные сбои (WP-568, пир-сессия 2026-10-30-02): один сбой - строка в
     # сводку; срочное сообщение только если задача не выполняется 15 минут и
     # дольше (минимум 3 сбоя подряд), не чаще раза в 6 часов на задачу.
@@ -1589,7 +1584,20 @@ in
         StandardOutput = "journal";
         StandardError  = "journal";
       };
-      path = [ pkgs.curl pkgs.coreutils pkgs.gawk ] ++ commonPath;
+      path = [ pkgs.curl pkgs.coreutils pkgs.gawk pkgs.util-linux ] ++ commonPath;
+    };
+
+    systemd.services."payment-registry-recovered@" = {
+      description = "Payment Registry — снять инцидент после успеха %i";
+      serviceConfig = {
+        User            = "tseren";
+        Type            = "oneshot";
+        EnvironmentFile = "/etc/iwe/env";
+        ExecStart       = "${paymentRegistryAlert} success %i";
+        StandardOutput  = "journal";
+        StandardError   = "journal";
+      };
+      path = [ pkgs.curl pkgs.coreutils pkgs.util-linux ];
     };
 
     # =========================================================
@@ -1743,7 +1751,7 @@ in
 
     systemd.services."payment-registry-sync-payment" = {
       description = "Payment Registry — incremental payment sync (10 мин)";
-      unitConfig  = commonUnitConfig;
+      unitConfig  = paymentRegistryUnitConfig;
       serviceConfig = commonServiceConfig // {
         ExecStartPre = verifiedSyncPre "payment-registry" "main" "payment-registry";
         ExecStart  = "${pkgs.bash}/bin/bash ${iwe}/payment-registry/scripts/incremental-sync.sh";
@@ -1765,7 +1773,7 @@ in
 
     systemd.services."payment-registry-sync-subscription" = {
       description = "Payment Registry — subscription sync (30 мин)";
-      unitConfig  = commonUnitConfig;
+      unitConfig  = paymentRegistryUnitConfig;
       serviceConfig = commonServiceConfig // {
         ExecStartPre = verifiedSyncPre "payment-registry" "main" "payment-registry";
         ExecStart  = "${pkgs.bash}/bin/bash ${iwe}/payment-registry/scripts/sync-subscriptions.sh";
@@ -1787,7 +1795,7 @@ in
 
     systemd.services."payment-registry-sync-contract" = {
       description = "Payment Registry — contract sync + health-check + heartbeat (15 мин)";
-      unitConfig  = commonUnitConfig;
+      unitConfig  = paymentRegistryUnitConfig;
       serviceConfig = commonServiceConfig // {
         ExecStartPre = verifiedSyncPre "payment-registry" "main" "payment-registry";
         ExecStart  = "${contractSyncWrapper}";
