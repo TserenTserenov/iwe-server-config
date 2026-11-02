@@ -141,3 +141,42 @@ def test_working_process_is_method_not_activity():
 def test_phrase_term_found_by_whole_subject():
     terms = ck.phrase_terms(DATA, "рабочий процесс")
     assert [t["term"] for t in terms] == ["рабочий процесс"]
+
+
+def test_check_text_catches_work_named_as_module_in_table():
+    # Pilot remark 02.11 (РП-611): works were listed in the «Модули» column.
+    text = (
+        "| Подсистема | Модули |\n|---|---|\n"
+        "| Держатель портрета | digital-twin-mcp, профилировщик, оценка ступени |\n"
+        "| Кассир | payment-receiver, синхронизация реестра платежей |\n"
+        "| Каталог методов | нет (модуль запланирован в РП-608) |\n"
+        "| Сторож | caddy (HTTP-вход и страница состояния) |\n"
+    )
+    warnings = ck.check_text(DATA, text)
+    assert len(warnings) == 2
+    assert "«оценка» — названо действие" in warnings[0]
+    assert "«синхронизация» — названо действие" in warnings[1]
+
+
+def test_check_text_catches_non_system_parts_in_prose():
+    text = (
+        "Сборка руководств входит в платформу. Протокол — часть IWE. "
+        "Платформа состоит из шлюза, бота и синхронизации. Модули: профилировщик, сборка руководств."
+    )
+    warnings = ck.check_text(DATA, text)
+    assert [w.split("»")[0] for w in warnings] == [
+        "«Сборка руководств",
+        "«Протокол",
+        "«синхронизации",
+        "«сборка руководств",
+    ]
+    assert "род «описание»" in warnings[1]
+
+
+def test_check_text_allows_steps_of_methods_and_system_parts():
+    text = (
+        "Агент входит в команду. Проверка входит в закрытие дня. "
+        "Метод состоит из шагов: проверка и публикация. Платформа состоит из шлюза, бота и приложения.\n"
+        "| Состав | Что делает |\n|---|---|\n| сборка руководств | собирает |\n"
+    )
+    assert ck.check_text(DATA, text) == []

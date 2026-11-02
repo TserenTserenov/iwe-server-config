@@ -94,6 +94,23 @@ class HostMemoryImportTest(unittest.TestCase):
         self.assertIn("отказ сканера 1", result.stdout)
         self.assertFalse((self.memory / "reference_db.md").exists())
 
+    def test_password_forms_gitleaks_misses_are_refused(self):
+        self.put("reference_lms.md", "- **Password:** Zq7%kd^Lm2x\n")
+        self.put("lessons_fdw.md", "ALTER USER MAPPING ... OPTIONS (SET password 'Rt5vWq9zLp')\n")
+        self.put("lessons_ok.md", "- **Password:** `<пароль в ~/.secrets>`\n")
+        result = self.run_tool()
+        self.assertIn("отказ сканера 2", result.stdout)
+        self.assertFalse((self.memory / "reference_lms.md").exists())
+        self.assertFalse((self.memory / "lessons_fdw.md").exists())
+        self.assertTrue((self.memory / "lessons_ok.md").exists())
+
+    def test_reviewed_divergence_is_silent_until_source_changes(self):
+        self.put("shared.md", "other host text\n")
+        self.run_tool("--mark-reviewed")
+        self.assertIn("расходятся 0", self.run_tool().stdout)
+        self.put("shared.md", "other host text\nnew line\n")
+        self.assertIn("расходятся 1", self.run_tool().stdout)
+
     def test_note_changed_at_source_after_import_is_reported_not_overwritten(self):
         self.put("lessons_new.md", "v1\n")
         self.run_tool()

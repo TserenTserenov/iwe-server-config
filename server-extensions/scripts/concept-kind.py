@@ -9,7 +9,10 @@ Usage:
                                                    with --claim also prints the test of the
                                                    claimed kind (the word may be missing)
   concept-kind.py check-text <file|->              warnings on "X — это Y" sentences where Y
-                                                   names a kind or a registry term
+                                                   names a kind or a registry term, and on
+                                                   part-of claims ("входит в", "часть",
+                                                   "состоит из", table columns «Модуль»)
+                                                   whose part is not a system
 
 A miss means "kind not established". It is not a draft entry and not a reason to add the word
 to the registry: new entries are decided by the pilot.
@@ -113,6 +116,54 @@ QUOTE_RE = re.compile(r"«[^»\n]*»")
 # Headings and table rows use the dash as a separator, not as "is a".
 LAYOUT_LINE_RE = re.compile(r"^\s*(?:#|\|).*$", re.MULTILINE)
 LIST_MARK_RE = re.compile(r"^\s*(?:[-*+]|\d+\.)\s+", re.MULTILINE)
+
+# Part-of claims: only a system is a part of a system (A14). Surface forms: "X входит в Y",
+# "X — часть Y", "Y состоит из X, Z", "модули: X, Z" and table columns «Модуль», «Подсистема».
+PART_SEGMENT = r"[^.!?;:\n—–«»()|]{2,120}?"
+WHOLE = r"(?P<whole>[а-яёa-z][а-яёa-z0-9-]*)"
+MEMBER_RE = re.compile(
+    rf"(?P<part>{PART_SEGMENT})\s+(?:входит|входят|входил[аио]?)\s+в\s+(?:состав\s+)?{WHOLE}",
+    re.IGNORECASE,
+)
+PART_RE = re.compile(
+    rf"(?P<part>{PART_SEGMENT})\s*(?:[—–]\s*(?:это\s+)?|\s+явля[ею]тся\s+)част(?:ь|ью|и)\s+{WHOLE}",
+    re.IGNORECASE,
+)
+CONSISTS_RE = re.compile(
+    rf"{WHOLE}\s+состо(?:ит|ят)\s+из\s+(?P<parts>[^.!?;\n]{{2,200}})", re.IGNORECASE
+)
+SYSTEM_LIST_RE = re.compile(
+    r"(?<![а-яё])(?:модули|подсистемы)\s*:\s*(?P<parts>[^.!?;\n]{2,200})", re.IGNORECASE
+)
+# Wholes that are systems by the pilot's decisions (02.11): a module is a program, database or
+# server; the platform and IWE are systems. A step of a method or a work may be an action noun,
+# a part of one of these may not.
+SYSTEM_WHOLE_RE = re.compile(
+    r"^(?:модул|подсистем|платформ|iwe|систем|программ|сервер|бот|шлюз|агент)",
+    re.IGNORECASE,
+)
+PART_COLUMN_RE = re.compile(r"^(?:модул|подсистем|состав|част)", re.IGNORECASE)
+SYSTEM_COLUMN_RE = re.compile(r"^(?:модул|подсистем)", re.IGNORECASE)
+# Kinds that may be steps of a method or a work ("закрытие дня делится на два этапа").
+STEP_KINDS = frozenset(["method", "work", "work_plan", "activity"])
+ITEM_SPLIT_RE = re.compile(r",|;|\s+и\s+|<br>")
+# A parenthesis in a table cell explains the part, it does not list more parts.
+PAREN_RE = re.compile(r"\([^()]*\)")
+# Nouns that name an action ("сборка руководств", "синхронизация", "якорение"): a work or
+# a method, never a module. Generic -ние/-тие plus explicit stems for -ка and -ция nouns,
+# because those endings also form system names ("площадка", "организация").
+ACTION_NOUN_RE = re.compile(
+    r"(?:[аеяо]ни[еяюй]|ти[еяю])$|^(?:сборк|проверк|доставк|сверк|выгрузк|загрузк|очистк|"
+    r"рассылк|установк|настройк|отправк|обработк|разметк|подготовк|оценк|правк|"
+    r"синхронизац|публикац|индексац|миграц|архивац|авторизац|верификац|валидац|"
+    r"репликац|интеграц|классификац|агрегац|ротац|эскалац)",
+    re.IGNORECASE,
+)
+# -ние words that still name a running system.
+ACTION_NOUN_EXCEPTIONS = re.compile(
+    r"^(?:приложени|окружени|здани|отделени|подразделени|учреждени|объединени)",
+    re.IGNORECASE,
+)
 
 
 def load() -> tuple[dict, str]:
@@ -286,6 +337,107 @@ def discouraged_words(data: dict, text: str) -> list[str]:
     return warnings
 
 
+def head_noun(phrase: str) -> str | None:
+    """First Cyrillic noun-like word of a phrase; None for code names and empty phrases."""
+    for word in subject_words(phrase):
+        if not re.match(r"[а-яё]", word, re.IGNORECASE):
+            return None
+        if ADJ_END_RE.search(word.lower()) or word.lower() in NOT_A_SUBJECT:
+            continue
+        return word
+    return None
+
+
+def non_system_reason(data: dict, word: str, whole_is_system: bool) -> str | None:
+    """Why the word cannot name a part here, or None when it may."""
+    kinds = kind_index(data)
+    term_kinds = {t["kind"] for t in term_kind(data, word)}
+    if term_kinds and "ambiguous" not in term_kinds and "system" not in term_kinds:
+        kind = min(term_kinds)
+        if kind in STEP_KINDS and not whole_is_system:
+            return None
+        return describe_kind(kinds[kind])
+    if (
+        whole_is_system
+        and not term_kinds
+        and ACTION_NOUN_RE.search(word)
+        and not ACTION_NOUN_EXCEPTIONS.match(word)
+    ):
+        return "названо действие — это работа или метод, не система"
+    return None
+
+
+def part_warning(data: dict, item: str, form: str, whole_is_system: bool) -> str | None:
+    word = head_noun(item)
+    reason = non_system_reason(data, word, whole_is_system) if word else None
+    if reason is None:
+        return None
+    return (
+        f"«{' '.join(item.split())[:80]}» {form}: «{word}» — {reason}. "
+        "Частью бывает только система; иначе связь глаголом (работает по, выполняет, хранит)."
+    )
+
+
+def table_part_cells(text: str) -> list[tuple[str, bool]]:
+    """Cells of part columns with a flag: True when the column header names system parts."""
+    cells: list[tuple[str, bool]] = []
+    # None: the next table row is a header.
+    columns: list[tuple[int, bool]] | None = None
+    for line in text.splitlines():
+        if not line.lstrip().startswith("|"):
+            columns = None
+            continue
+        row = [c.strip().strip("*").strip() for c in line.strip().strip("|").split("|")]
+        if all(re.fullmatch(r":?-{3,}:?", c) for c in row if c):
+            continue
+        if columns is None:
+            columns = [
+                (i, bool(SYSTEM_COLUMN_RE.match(c)))
+                for i, c in enumerate(row)
+                if PART_COLUMN_RE.match(c)
+            ]
+            continue
+        cells += [(row[i], is_system) for i, is_system in columns if i < len(row)]
+    return cells
+
+
+def part_claims(data: dict, text: str) -> list[str]:
+    """Warnings where a non-system is named as a part: prose claims and part columns of tables."""
+    text = QUOTE_RE.sub(" ", CODE_RE.sub(" ", text))
+    prose = LIST_MARK_RE.sub("", LAYOUT_LINE_RE.sub(" ", text))
+    found: list[tuple[str, str, bool]] = []
+    for regex, form in (
+        (MEMBER_RE, "названо как входящее в"),
+        (PART_RE, "названо частью"),
+    ):
+        for m in regex.finditer(prose):
+            is_system = bool(SYSTEM_WHOLE_RE.match(m.group("whole")))
+            found.append(
+                (
+                    m.group("part").split(",")[-1],
+                    f"{form} «{m.group('whole')}»",
+                    is_system,
+                )
+            )
+    for m in CONSISTS_RE.finditer(prose):
+        is_system = bool(SYSTEM_WHOLE_RE.match(m.group("whole")))
+        found += [
+            (i, "в перечне частей", is_system)
+            for i in ITEM_SPLIT_RE.split(m.group("parts"))
+        ]
+    for m in SYSTEM_LIST_RE.finditer(prose):
+        found += [
+            (i, "в перечне частей", True) for i in ITEM_SPLIT_RE.split(m.group("parts"))
+        ]
+    for cell, is_system in table_part_cells(text):
+        items = ITEM_SPLIT_RE.split(PAREN_RE.sub(" ", cell))
+        found += [(i, "в столбце частей", is_system) for i in items]
+    warnings = [
+        part_warning(data, item, form, is_system) for item, form, is_system in found
+    ]
+    return [w for w in warnings if w]
+
+
 def check_text(data: dict, text: str) -> list[str]:
     kinds = kind_index(data)
     warnings: list[str] = discouraged_words(data, text)
@@ -319,7 +471,7 @@ def check_text(data: dict, text: str) -> list[str]:
                 f"{claim}: по реестру подлежащее — {describe_kind(x_kind)} "
                 f"Утверждается — {describe_kind(y_kind)}"
             )
-    return warnings
+    return warnings + part_claims(data, text)
 
 
 def main() -> int:

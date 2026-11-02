@@ -20,6 +20,7 @@ import datetime
 import hashlib
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -80,7 +81,24 @@ def flagged_by_scanner(staging, scanner):
         raise OSError(f"gitleaks завершился с кодом {result.returncode}")
     findings = json.loads(report.read_text(encoding="utf-8") or "[]")
     report.unlink()
-    return {Path(f["File"]).name for f in findings}
+    flagged = {Path(f["File"]).name for f in findings}
+    return flagged | {p.name for p in staging.glob("*.md")
+                      if has_plain_password(p.read_text(encoding="utf-8", errors="replace"))}
+
+
+# gitleaks misses passwords written as a labelled value or inside SQL; both
+# forms carried live DB passwords between hosts before 02.11 (WP-529 F248).
+PLACEHOLDER = re.compile(r"^(<|\*|\$|\{|\[|\.\.\.|x+$)", re.I)
+CREDENTIAL_FORMS = (
+    re.compile(r"(?:пароль|password)[^:\n]{0,40}:(?:\*\*)?\s*`?([^\s`]{6,})", re.I),
+    re.compile(r"PASSWORD\s+'([^']{6,})'", re.I),
+    re.compile(r"postgres(?:ql)?://[^:/@\s]+:([^@\s]+)@"),
+)
+
+
+def has_plain_password(text):
+    return any(not PLACEHOLDER.match(m.group(1))
+               for form in CREDENTIAL_FORMS for m in form.finditer(text))
 
 
 def note_lines(text):
@@ -111,7 +129,8 @@ def has_lines_missing_here(src, target, memory):
     return True
 
 
-def plan(staging, memory, root, state):
+def plan(staging, memory, root, state, reviewed):
+    """`reviewed` maps a name to the source digest already judged in a weekly review."""
     skip = HOST_INDEXES | {p.name for p in (root / CANON_DIR).glob("*.md")}
     history = names_in_history(memory)
     new, changed_at_source, both_differ = [], [], []
@@ -127,6 +146,8 @@ def plan(staging, memory, root, state):
             continue
         target = memory / name
         if target.exists() or name in history:
+            if reviewed.get(name) == digest:
+                continue
             if target.exists() and has_lines_missing_here(src, target, memory):
                 both_differ.append(name)
             continue
@@ -160,7 +181,14 @@ def run(args):
     fetch(args.source, staging)
     state_path = runtime / "state.tsv"
     state = read_state(state_path)
-    new, changed_at_source, both_differ = plan(staging, memory, root, state)
+    reviewed_path = runtime / "reviewed.tsv"
+    reviewed = {n: d for n, (d, _) in read_state(reviewed_path).items()}
+    new, changed_at_source, both_differ = plan(staging, memory, root, state, reviewed)
+    if args.mark_reviewed and not args.dry_run:
+        for name in both_differ:
+            reviewed[name] = sha256((staging / name).read_bytes())
+        write_atomic(reviewed_path, "".join(f"{n}\t{d}\t{today}\n" for n, d in sorted(reviewed.items())).encode())
+        both_differ = []
     flagged = flagged_by_scanner(staging, scanner) if new else set()
     imported, refused = [], []
     for name, digest in new:
@@ -192,6 +220,9 @@ def main():
     parser.add_argument("--source", default=DEFAULT_SOURCE, help="rsync source of the other host's memory/")
     parser.add_argument("--force", action="store_true", help="run even if already ran today")
     parser.add_argument("--dry-run", action="store_true", help="report only, write nothing to memory/")
+    parser.add_argument("--mark-reviewed", action="store_true",
+                        help="after the weekly review: stop reporting the listed divergent notes "
+                             "until their source changes")
     args = parser.parse_args()
     args.memory = args.memory or str(Path(args.root) / "memory")
     args.runtime = args.runtime or str(Path(args.root) / ".iwe-runtime/host-memory-import")
