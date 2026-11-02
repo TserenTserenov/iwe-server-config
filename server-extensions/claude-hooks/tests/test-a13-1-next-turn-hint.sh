@@ -27,9 +27,9 @@ CLEAN=$'Поправил разбор переписки: страж больш�
 # $1 case id, $2 previous answer -> transcript at $TMP/$1/t.jsonl (prompt already appended,
 # as Claude Code does before UserPromptSubmit).
 make_transcript() {
-  local id="$1" answer="$2"
+  local id="$1" answer="$2" prompt="${3:-$LONG_PROMPT}"
   mkdir -p "$TMP/$id/home" "$TMP/$id/proj"
-  ANSWER="$answer" PROMPT="$LONG_PROMPT" python3 - "$TMP/$id/t.jsonl" <<'PY'
+  ANSWER="$answer" PROMPT="$prompt" python3 - "$TMP/$id/t.jsonl" <<'PY'
 import json, os, sys
 rows = [
     {"type": "user", "message": {"content": [{"type": "text", "text": "Почини страж."}]}},
@@ -75,7 +75,7 @@ check "no hint after an answer without code names" "$([ -z "$out" ] && echo yes 
 make_transcript ack "$WITH_SYMBOLS"
 for prompt in "да" "Заливай!" "А что с Маком, доехало ли туда обновление стража сегодня?" "Хорошо, проверь"; do
   out=$(run_hook ack "$prompt")
-  check "no hint for prompt «$prompt»" "$([ -z "$out" ] && echo yes || echo no)" "$out"
+  check "no hint for prompt «${prompt}»" "$([ -z "$out" ] && echo yes || echo no)" "$out"
 done
 
 # Current prompt not yet in the transcript: the last answer is still the one checked.
@@ -111,6 +111,48 @@ make_transcript both "$WITH_SYMBOLS"
 out=$(run_hook both "$LONG_PROMPT" "" no)
 check "hint rides along with a reinjected style fragment" \
   "$(printf '%s' "$out" | grep -q 'Разговорный стиль IWE' && printf '%s' "$out" | grep -q 'create_host_adapter()' && echo yes || echo no)" "$out"
+
+
+# --- Place hint (РП-605 Ф6, 02.11): "Дальше:" names this very chat as the place ---
+PLACE_BAD=$'Готово, запрос слит.\n\nДальше: вы, в этом чате: сказать «закрывай».'
+PLACE_OTHER=$'Готово.\n\nДальше: вы, в новой беседе на РП-605: сказать «сверка».'
+make_transcript place "$PLACE_BAD"
+out=$(run_hook place "$LONG_PROMPT")
+check "place hint after a line naming this chat" \
+  "$(printf '%s' "$out" | grep -q 'для этого же чата' && echo yes || echo no)" "$out"
+make_transcript placeshort "$PLACE_BAD" "да"
+out=$(run_hook placeshort "да")
+check "place hint is not skipped for a short prompt" \
+  "$(printf '%s' "$out" | grep -q 'для этого же чата' && echo yes || echo no)" "$out"
+check "place hint does not mention A13.1 names when there are none" \
+  "$(printf '%s' "$out" | grep -q 'правило A13.1' && echo no || echo yes)" "$out"
+make_transcript placeok "$PLACE_OTHER" "да"
+out=$(run_hook placeok "да")
+check "no place hint when another place is named" "$([ -z "$out" ] && echo yes || echo no)" "$out"
+make_transcript placeoff "$PLACE_BAD" "да"
+out=$(run_hook placeoff "да" "IWE_STYLE_NEXT_TURN_HINT=0")
+check "off switch silences the place hint" "$([ -z "$out" ] && echo yes || echo no)" "$out"
+PLACE_AND_SYM=$'Поправил `create_host_adapter()`.\n\nДальше: вы, здесь: проверить.'
+make_transcript placesym "$PLACE_AND_SYM"
+out=$(run_hook placesym "$LONG_PROMPT")
+check "both hints go out together" \
+  "$(printf '%s' "$out" | grep -q 'create_host_adapter()' && printf '%s' "$out" | grep -q 'для этого же чата' && echo yes || echo no)" "$out"
+
+# --- A missing or broken a12 detector must not take the A13.1 hint down ---
+# Run a copy of the hooks directory with a12-next-block.py removed / syntactically broken.
+HOOK_ORIG="$HOOK"
+for mode in missing broken; do
+  cp -R "$HOOKS" "$TMP/hooks-$mode"
+  if [ "$mode" = "missing" ]; then rm -f "$TMP/hooks-$mode/a12-next-block.py"; else echo 'def (' > "$TMP/hooks-$mode/a12-next-block.py"; fi
+  HOOK="$TMP/hooks-$mode/inject-communication-style.sh"
+  make_transcript "d$mode" "$PLACE_AND_SYM"
+  out=$(run_hook "d$mode" "$LONG_PROMPT")
+  check "A13.1 hint survives a $mode a12 detector" \
+    "$(printf '%s' "$out" | grep -q 'create_host_adapter()' && echo yes || echo no)" "$out"
+  check "no place hint when the a12 detector is $mode" \
+    "$(printf '%s' "$out" | grep -q 'для этого же чата' && echo no || echo yes)" "$out"
+done
+HOOK="$HOOK_ORIG"
 
 echo "---"
 echo "passed: $PASS, failed: $FAIL"

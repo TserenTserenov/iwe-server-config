@@ -56,9 +56,12 @@ fi
 
 checkout_status="unknown"
 if [ -n "$EXPECTED_ORIGIN_SHA" ] && [ "$root_commit" != "unknown" ]; then
-    if [ "$root_commit" = "$EXPECTED_ORIGIN_SHA" ]; then
+    # The clone's origin/main is only as fresh as its last fetch: a root ahead of
+    # it is current, and a root the clone does not know cannot be judged.
+    if [ "$root_commit" = "$EXPECTED_ORIGIN_SHA" ] \
+       || git -C "$LOCAL_CONFIG" merge-base --is-ancestor "$EXPECTED_ORIGIN_SHA" "$root_commit" 2>/dev/null; then
         checkout_status="ok"
-    else
+    elif git -C "$LOCAL_CONFIG" merge-base --is-ancestor "$root_commit" "$EXPECTED_ORIGIN_SHA" 2>/dev/null; then
         checkout_status="stale"
     fi
 fi

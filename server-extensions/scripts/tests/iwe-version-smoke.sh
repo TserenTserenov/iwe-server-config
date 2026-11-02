@@ -53,6 +53,18 @@ mv "$T/h4/iwe-local-config" "$T/h4-root/"; rm -rf "$T/h4/.iwe-runtime"
 out=$(run "$T/h4-root")
 grep -q "checkout=stale" <<<"$out" && ok "git-checkout root behind origin/main: stale" || bad "git root: $out"
 
+# The host clone fetched before the root moved on: root ahead of its origin/main.
+host "$T/h6"; git -C "$T/h6/iwe-local-config" update-ref refs/remotes/origin/main "$OLD"; receipt "$T/h6" "$NEW"
+out=$(run "$T/h6")
+{ grep -q "checkout=ok" <<<"$out" && ! grep -q "⚠️" <<<"$out"; } \
+  && ok "root ahead of a stale clone ref: ok, no warning" || bad "root ahead: $out"
+
+# A root commit the clone has never seen cannot be judged: unknown, no warning.
+host "$T/h7"; receipt "$T/h7" "$(printf '%040d' 7)"
+out=$(run "$T/h7")
+{ grep -q "checkout=unknown" <<<"$out" && ! grep -q "⚠️" <<<"$out"; } \
+  && ok "root unknown to the clone: unknown, no warning" || bad "unknown root: $out"
+
 mkdir -p "$T/h5"
 out=$(run "$T/h5")
 grep -q "release=unknown" <<<"$out" && ok "no receipt, no git: unknown" || bad "bare root: $out"
