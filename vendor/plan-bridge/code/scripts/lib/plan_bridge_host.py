@@ -6,23 +6,29 @@ read from, or a rules hash the pilot has not approved stops the stream.
 
 Trust boundary (К12, DR-06 "Контракт host-adapter"): the key, the host config
 and the approved-rules file must belong to a host-service uid that is NOT an
-agent uid. The config path is fixed in this module, so neither an environment
-variable nor a CLI argument redirects it. That holds only while this module, its
-sibling modules and the interpreter are not writable by agents either:
-create_host_adapter() checks that (check_code_ownership) and refuses to start
-otherwise.
+agent uid. The config path is fixed in this module: create_host_adapter() takes
+no arguments, so neither an environment variable, a CLI argument nor a caller
+redirects it (only the private _build_host_adapter(), used by tests, does). That
+holds only while this module, its sibling modules and the interpreter are not
+writable by agents either: the adapter checks that (check_code_ownership), that
+every project module in memory is a deployed file (check_loaded_code_is_deployed)
+and refuses to start otherwise.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
+import errno
 import hashlib
 import hmac
+import importlib
 import json
 import os
 from pathlib import Path
+import site
 import stat
 import sys
+import sysconfig
 
 import yaml
 
@@ -39,7 +45,7 @@ MIN_KEY_BYTES = 32
 MAX_HISTORY_COMMITS = 5000
 MAX_JOURNAL_FILE_BYTES = bridge.MAX_PUBLICATION_FILE_BYTES
 MAX_FILES_PER_COMMIT = 4 * bridge.MAX_BATCH_RECORDS
-_CODE_MODULES = (
+_PROJECT_MODULES = (
     "plan_bridge_host",
     "plan_event_bridge",
     "plan_event_intake",
@@ -47,10 +53,10 @@ _CODE_MODULES = (
     "plan_bridge_decisions",
     "plan_bridge_allocation",
     "plan_allocation",
-    "__main__",
-    "yaml",
-    "rfc8785",
+    "plan_bridge_receiver",
 )
+_CODE_MODULES = (*_PROJECT_MODULES, "__main__", "yaml", "rfc8785")
+_ACL_ATTRIBUTES = ("system.posix_acl_access", "system.posix_acl_default")
 _CONFIG_FIELDS = frozenset(
     {
         "schema",
@@ -239,13 +245,74 @@ def deployed_code_matches_base(reader, commit, code_root, code_paths):
             )
 
 
+def _load_module(name):
+    """Import the module if it is not loaded yet, so it cannot be skipped by a check."""
+    module = sys.modules.get(name)
+    if module is None:
+        try:
+            module = importlib.import_module(name)
+        except (ImportError, SyntaxError) as exc:
+            raise HostAdapterError(f"code module cannot be loaded: {name}") from exc
+    return module
+
+
+def loaded_code_files():
+    """Map each project module name to the file the interpreter really loaded."""
+    return {name: _load_module(name).__file__ for name in _PROJECT_MODULES}
+
+
+def _interpreter_paths():
+    """Everything the interpreter reads before this module runs: the executable as
+    written (a venv path is a symlink the agent may own), its prefixes, the
+    standard library and site-packages (where .pth files execute at startup)."""
+    paths = [sys.executable, sys.prefix, sys.base_prefix]
+    paths += [sysconfig.get_path(name) for name in ("stdlib", "purelib", "platlib")]
+    if site.ENABLE_USER_SITE and os.path.lexists(site.getusersitepackages()):
+        paths.append(site.getusersitepackages())
+    return list(dict.fromkeys(item for item in paths if item))
+
+
 def _runtime_code_paths():
-    paths = [os.path.realpath(sys.executable)]
+    paths = _interpreter_paths()
     for name in _CODE_MODULES:
-        location = getattr(sys.modules.get(name), "__file__", None)
+        module = sys.modules.get(name) if name == "__main__" else _load_module(name)
+        location = getattr(module, "__file__", None)
         if location:
             paths.append(location)
+        # A bytecode cache the interpreter reads is code too: its directory is
+        # checked like the source, so an agent-writable __pycache__ stops the start.
+        cached = getattr(module, "__cached__", None)
+        if cached and os.path.lexists(cached):
+            paths.append(cached)
     return paths
+
+
+def check_loaded_code_is_deployed(code_root, code_paths, loaded=None):
+    """The files that run must be the files that were compared with the base.
+
+    deployed_code_matches_base() hashes code_root/code_paths; a module imported
+    from another place (PYTHONPATH, user site, an older bytecode source) would
+    pass that check and still be the code that signs and orders. Every project
+    module in memory therefore has to resolve to one of the deployed files.
+    """
+    deployed = {os.path.realpath(Path(code_root) / item) for item in code_paths}
+    for name, location in (loaded_code_files() if loaded is None else loaded).items():
+        if not location or os.path.realpath(location) not in deployed:
+            raise HostAdapterError(
+                f"loaded module {name} is not a deployed file checked against the base"
+            )
+
+
+def _has_acl(target):
+    if not hasattr(os, "listxattr"):
+        return False
+    try:
+        names = os.listxattr(target, follow_symlinks=False)
+    except OSError as exc:
+        if exc.errno == errno.ENOTSUP:
+            return False
+        raise HostAdapterError(f"ACL of a code path cannot be read: {target}") from exc
+    return any(name in names for name in _ACL_ATTRIBUTES)
 
 
 def check_code_ownership(paths, agent_uids):
@@ -253,15 +320,31 @@ def check_code_ownership(paths, agent_uids):
 
     Without this the uid split of key and config proves nothing: an agent could
     edit the module the service runs. Each file and every directory above it
-    must be owned by a non-agent uid and closed to group and world writes.
+    must be owned by a non-agent uid, closed to group and world writes and free
+    of ACLs. The path is walked twice: as written (a symlink or a directory an
+    agent controls can be swapped later) and after resolution (where it leads).
     """
     for path in paths:
+        written = Path(os.path.abspath(path))
         resolved = Path(os.path.realpath(path))
-        for target in (resolved, *resolved.parents):
-            info = os.lstat(target)
-            sticky = info.st_mode & stat.S_ISVTX
-            if info.st_uid in agent_uids or (info.st_mode & 0o022 and not sticky):
-                raise HostAdapterError(f"code is writable by an agent: {target}")
+        for target in dict.fromkeys(
+            (written, *written.parents, resolved, *resolved.parents)
+        ):
+            try:
+                info = os.lstat(target)
+            except OSError as exc:
+                raise HostAdapterError(
+                    f"code path cannot be inspected: {target}"
+                ) from exc
+            # The sticky bit limits deletion inside a directory; on a file it does nothing.
+            sticky = stat.S_ISDIR(info.st_mode) and info.st_mode & stat.S_ISVTX
+            writable = (
+                info.st_mode & 0o022 and not sticky and not stat.S_ISLNK(info.st_mode)
+            )
+            if info.st_uid in agent_uids or writable or _has_acl(target):
+                raise HostAdapterError(
+                    f"code is writable by an agent or has an ACL: {target}"
+                )
 
 
 @dataclass(frozen=True)
@@ -616,17 +699,20 @@ class HostAdapter:
     validator_factory: object
 
 
-def create_host_adapter(
-    config_path=DEFAULT_CONFIG_PATH,
-    trusted_uids=DEFAULT_TRUSTED_UIDS,
-    ownership_paths=None,
-):
+def create_host_adapter():
+    """The only entry point of the service: fixed config, fixed trusted uids."""
+    return _build_host_adapter(DEFAULT_CONFIG_PATH, DEFAULT_TRUSTED_UIDS)
+
+
+def _build_host_adapter(config_path, trusted_uids, ownership_paths=None):
+    """Test seam: the service never calls this with anything but the defaults."""
     config = load_host_config(config_path, trusted_uids)
     key = _load_key(config, trusted_uids)
     if ownership_paths is None:
         deployed = [config.code_root / item for item in config.code_paths]
         ownership_paths = [*_runtime_code_paths(), *deployed]
     check_code_ownership(ownership_paths, config.agent_uids)
+    check_loaded_code_is_deployed(config.code_root, config.code_paths)
 
     def validator_factory(base_commit, reader):
         deployed_code_matches_base(
@@ -667,7 +753,8 @@ def _step(results, name, action):
     except (HostAdapterError, BridgeError, OSError) as exc:
         results.append({"check": name, "ok": False, "detail": str(exc)})
         return None
-    results.append({"check": name, "ok": True, "detail": detail or ""})
+    printable = isinstance(detail, (str, bool, int, list, dict))
+    results.append({"check": name, "ok": True, "detail": detail if printable else ""})
     return detail
 
 
@@ -700,6 +787,11 @@ def readiness_report(
             ],
             config.agent_uids,
         ),
+    )
+    _step(
+        results,
+        "loaded code is deployed code",
+        lambda: check_loaded_code_is_deployed(config.code_root, config.code_paths),
     )
     approved = _step(
         results,
