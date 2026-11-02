@@ -1,19 +1,19 @@
 #!/usr/bin/env bash
-# wp-inbox.sh — почтовый ящик входящего контекста РП (WP-5 Ф69, DRR-f69-wp-inbound-mailbox).
+# wp-inbox.sh — inbound context mailbox of a WP (WP-5 Phase 69, DRR-f69-wp-inbound-mailbox).
 #
-# Владелец РП пишет карточку inbox/WP-N/WP-N.md; чужие сессии пишут сюда:
-# inbox/WP-N/INBOX.md (только дописывание). Владелец разбирает записи в свои
-# фазы при открытии сессии (сигнал wp-sync-bundle.sh) или по фразе «актуализируй РП-N».
+# The WP owner writes the card inbox/WP-N/WP-N.md; other sessions write here:
+# inbox/WP-N/INBOX.md (append-only). The owner folds entries into its phases
+# on session open (wp-sync-bundle.sh signal) or on the phrase «актуализируй РП-N».
 #
 # Usage:
-#   wp-inbox.sh add    --to WP-N --from "<РП или сессия>" --pointer "<путь/ссылка на полный текст>" --summary "<выжимка>"
-#   wp-inbox.sh list   --wp WP-N [--all]       записи «новое» (с --all и «учтено»)
-#   wp-inbox.sh count  --wp WP-N               число записей «новое»
-#   wp-inbox.sh digest --wp WP-N               отпечаток записей «новое» (пусто, если их нет)
-#   wp-inbox.sh mark   --wp WP-N --id K --by "<кто и чем учтено>"   «новое» → «учтено», идемпотентно
-# Общий флаг: --repo DIR (по умолчанию $IWE_WORKSPACE/$IWE_GOVERNANCE_REPO).
+#   wp-inbox.sh add    --to WP-N --from "<WP or session>" --pointer "<path/link to full text>" --summary "<summary>"
+#   wp-inbox.sh list   --wp WP-N [--all]       «новое» entries (with --all also «учтено»)
+#   wp-inbox.sh count  --wp WP-N               number of «новое» entries
+#   wp-inbox.sh digest --wp WP-N               fingerprint of «новое» entries (empty if none)
+#   wp-inbox.sh mark   --wp WP-N --id K --by "<who/what processed it>"   «новое» → «учтено», idempotent
+# Common flag: --repo DIR (default $IWE_WORKSPACE/$IWE_GOVERNANCE_REPO).
 #
-# Коды выхода: 0 успех · 1 отказ по условию (нет карточки, нет записи) · 2 ошибка вызова.
+# Exit codes: 0 success · 1 refused by condition (no card, no entry) · 2 usage error.
 # Compatible: bash 3.2+
 
 set -euo pipefail
@@ -33,8 +33,8 @@ sha256_stdin() {
   fi
 }
 
-# Одна строка без переводов строк и без заголовков записи: иначе текст
-# выжимки подделает границу записи (строка «## И-…» внутри тела).
+# Single line, no newlines and no entry headers: otherwise summary text
+# could forge an entry boundary (a «## И-…» line inside the body).
 one_line() {
   printf '%s' "$1" | tr '\r\n\t' '   ' | sed -E 's/  +/ /g; s/^ +//; s/ +$//; s/^## /# /'
 }
@@ -67,7 +67,7 @@ dir="$repo/inbox/WP-$n"
 card="$dir/WP-$n.md"
 box="$dir/INBOX.md"
 
-# Записи «новое» одним потоком: заголовок и тело до следующего заголовка.
+# «новое» entries as one stream: header plus body up to the next header.
 entries_with_status() {
   [[ -f "$box" ]] || return 0
   awk -v want="$1" '/^## И-[0-9]+ · / { p = ($0 ~ (" · " want "$")) } p' "$box"
@@ -77,7 +77,7 @@ case "$cmd" in
   add)
     [[ -n "$from" && -n "$pointer" && -n "$summary" ]] || die "add требует --from, --pointer и --summary"
     if [[ ! -f "$card" ]]; then
-      echo "wp-inbox: у РП-$n нет карточки $card (закрыт или не заведён) — запись не создана; для закрытого РП используйте DS-my-strategy/inbox/backlog-with-triggers.md" >&2
+      echo "wp-inbox: у РП-$n нет карточки $card (закрыт или не заведён) — запись не создана; для закрытого РП используйте $repo/inbox/backlog-with-triggers.md" >&2
       exit 1
     fi
     lock="${TMPDIR:-/tmp}/wp-inbox-$n.lock"
