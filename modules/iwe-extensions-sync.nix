@@ -125,9 +125,64 @@ in
         # `-a` переносит права, в том числе на сам каталог memory/ - после этого
         # в него нельзя создать новый файл (EACCES), рецидив 11.09, 21.09, 25.09,
         # 10.10, 30.10. Явные права вместо унаследованных.
-        ${pkgs.rsync}/bin/rsync -a --checksum --chmod=D755,F644 \
-          ${src}/memory/ \
-          /home/${cfg.user}/.claude/projects/-home-${cfg.user}-IWE/memory/
+        #
+        # Охрана перезаписи (WP-529 Ф248, DRR-f248-sposob-kopirovaniya-kanona-v-memory,
+        # условие 2): managed .md перезаписывается, только если живой файл не
+        # менялся с прошлой доставки (его хэш = записи в memory-delivered.sha256).
+        # Иначе это правка мимо канона: файл не трогаем, новая версия кладётся в
+        # memory-canon-pending/, проверка ниже даёт статус diverged. Запись — через
+        # временный файл и повторную сверку хэша перед mv (агент мог писать в файл
+        # во время активации). Подшелл: голый exit оборвал бы остальные снипеты.
+        (
+          LIVE_MEMORY=/home/${cfg.user}/.claude/projects/-home-${cfg.user}-IWE/memory
+          RUNTIME=/home/${cfg.user}/IWE/.iwe-runtime
+          STATE=$RUNTIME/memory-delivered.sha256
+          PENDING=$RUNTIME/memory-canon-pending
+          ${pkgs.coreutils}/bin/mkdir -p "$LIVE_MEMORY" "$PENDING"
+          ${pkgs.coreutils}/bin/chmod 755 "$LIVE_MEMORY"
+          NEW_STATE=$(${pkgs.coreutils}/bin/mktemp)
+          sha() { ${pkgs.coreutils}/bin/sha256sum "$1" | ${pkgs.coreutils}/bin/cut -d' ' -f1; }
+          for src_file in ${src}/memory/*; do
+            name=$(${pkgs.coreutils}/bin/basename "$src_file")
+            live_file="$LIVE_MEMORY/$name"
+            src_sha=$(sha "$src_file")
+            live_sha=""
+            [ -f "$live_file" ] && live_sha=$(sha "$live_file")
+            if [ "$live_sha" = "$src_sha" ]; then
+              echo "$src_sha  $name" >> "$NEW_STATE"
+              ${pkgs.coreutils}/bin/rm -f "$PENDING/$name"
+              continue
+            fi
+            delivered_sha=$(${pkgs.gawk}/bin/awk -v n="$name" '$2 == n {print $1}' "$STATE" 2>/dev/null)
+            case "$name" in
+              *.md)
+                if [ -n "$live_sha" ] && [ "$live_sha" != "$delivered_sha" ]; then
+                  echo "[iwe-ext-sync] WARN: правка мимо канона в $name — не перезаписываю, новая версия в $PENDING/$name" >&2
+                  ${pkgs.coreutils}/bin/install -m 0644 "$src_file" "$PENDING/$name"
+                  [ -n "$delivered_sha" ] && echo "$delivered_sha  $name" >> "$NEW_STATE"
+                  continue
+                fi
+                ;;
+            esac
+            tmp_file="$LIVE_MEMORY/.$name.iwe-sync.$$"
+            ${pkgs.coreutils}/bin/install -m 0644 -o ${cfg.user} -g users "$src_file" "$tmp_file"
+            now_sha=""
+            [ -f "$live_file" ] && now_sha=$(sha "$live_file")
+            if [ "$now_sha" != "$live_sha" ]; then
+              echo "[iwe-ext-sync] WARN: $name изменился во время доставки — не перезаписываю" >&2
+              ${pkgs.coreutils}/bin/rm -f "$tmp_file"
+              ${pkgs.coreutils}/bin/install -m 0644 "$src_file" "$PENDING/$name"
+              [ -n "$delivered_sha" ] && echo "$delivered_sha  $name" >> "$NEW_STATE"
+              continue
+            fi
+            ${pkgs.coreutils}/bin/mv -f "$tmp_file" "$live_file"
+            ${pkgs.coreutils}/bin/rm -f "$PENDING/$name"
+            echo "$src_sha  $name" >> "$NEW_STATE"
+          done
+          ${pkgs.coreutils}/bin/mv -f "$NEW_STATE" "$STATE"
+          ${pkgs.coreutils}/bin/chmod 644 "$STATE"
+          ${pkgs.coreutils}/bin/chown -R ${cfg.user}:users "$RUNTIME/memory-delivered.sha256" "$PENDING"
+        )
 
         # Восстановить права (rsync из nix store даёт root, нужно tseren)
         chown -R ${cfg.user}:users \
@@ -185,10 +240,16 @@ in
             exit 0
           fi
           FAILED=0
+          DIVERGED=0
           while IFS= read -r rel_path; do
             [ -z "$rel_path" ] && continue
             SRC_FILE="${src}/memory/$rel_path"
             LIVE_FILE="$LIVE_MEMORY/$rel_path"
+            if [ -f "/home/${cfg.user}/IWE/.iwe-runtime/memory-canon-pending/$rel_path" ]; then
+              echo "[iwe-ext-verify] DIVERGED: $rel_path правлен мимо канона, доставка остановлена (новая версия в .iwe-runtime/memory-canon-pending/)" >&2
+              DIVERGED=1
+              continue
+            fi
             if [ ! -f "$LIVE_FILE" ]; then
               echo "[iwe-ext-verify] FATAL: managed-файл отсутствует в живом пути: $LIVE_FILE" >&2
               FAILED=1
@@ -218,6 +279,10 @@ in
           if [ "$FAILED" -ne 0 ]; then
             echo "[iwe-ext-verify] доставка managed-memory провалена — см. FATAL выше" >&2
             echo "fatal"
+            exit 0
+          fi
+          if [ "$DIVERGED" -ne 0 ]; then
+            echo "diverged"
             exit 0
           fi
           echo "[iwe-ext-verify] managed-memory manifest verified: $(${pkgs.coreutils}/bin/wc -l < "$MANIFEST" | tr -d ' ') файлов OK"

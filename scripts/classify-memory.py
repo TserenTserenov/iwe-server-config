@@ -18,10 +18,18 @@ be host-specific harness bugs (e.g. "Bash tool cwd resets between calls"),
 not canonical documents — semantic ownership and delivery authority are
 orthogonal axes. This script trusts only the explicit `delivery`/
 `delivery_authority` fields; everything else fails closed (excluded).
+
+Canon files (WP-529 Ф248, DRR-f248-sposob-kopirovaniya-kanona-v-memory,
+condition 2): every file in `.claude/memory-canon/` of the source root is
+delivered from that snapshot, never from the Mac's live memory — a direct
+edit of memory/X on the Mac must not reach the server bypassing the canon.
+sync-extensions-auto.sh points IWE_EXTENSIONS_SOURCE_ROOT at a fresh clone
+of the published main, so the snapshot is the published canon.
 """
 
 import getpass
 import hashlib
+import os
 import sys
 from pathlib import Path
 from typing import Optional
@@ -34,9 +42,13 @@ import yaml
 # cwd, not just the username, so this breaks silently loud (dir not found,
 # exit 1 below) if ever run from a worktree or subdirectory instead. Found in
 # cold-context review, peer-session 2026-08-21-01-delivery-version-handshake.
-MAC_MEMORY = Path.home() / ".claude" / "projects" / f"-Users-{getpass.getuser()}-IWE" / "memory"
+MAC_MEMORY = Path(os.environ.get(
+    "CLASSIFY_MEMORY_MAC_DIR",
+    Path.home() / ".claude" / "projects" / f"-Users-{getpass.getuser()}-IWE" / "memory"))
+SOURCE_ROOT = Path(os.environ.get("IWE_EXTENSIONS_SOURCE_ROOT", Path.home() / "IWE"))
+CANON_DIR = SOURCE_ROOT / ".claude" / "memory-canon"
 REPO_ROOT = Path(__file__).resolve().parent.parent
-STAGING_MEMORY = REPO_ROOT / "server-extensions" / "memory"
+STAGING_MEMORY = Path(os.environ.get("CLASSIFY_MEMORY_STAGING", REPO_ROOT / "server-extensions" / "memory"))
 MANIFEST_PATH = STAGING_MEMORY / "managed-memory-manifest.txt"
 MANIFEST_HASH_PATH = STAGING_MEMORY / "manifest.sha256"
 
@@ -74,13 +86,19 @@ def main() -> int:
         print(f"ERROR: {MAC_MEMORY} not found — run this on the Mac, not the server", file=sys.stderr)
         return 1
 
-    managed_files = []
+    if not CANON_DIR.is_dir():
+        print(f"ERROR: {CANON_DIR} not found — source root has no memory canon, refusing to stage", file=sys.stderr)
+        return 1
+    canon = {p.name: p for p in sorted(CANON_DIR.glob("*.md"))}
+
+    sources = dict(canon)
     for md_file in sorted(MAC_MEMORY.glob("*.md")):
-        frontmatter = read_frontmatter(md_file)
-        if frontmatter is None:
+        if md_file.name in canon:
             continue
-        if is_managed(frontmatter):
-            managed_files.append(md_file.name)
+        frontmatter = read_frontmatter(md_file)
+        if frontmatter is not None and is_managed(frontmatter):
+            sources[md_file.name] = md_file
+    managed_files = sorted(sources)
 
     if not managed_files:
         print("ERROR: zero managed files found — refusing to write an empty manifest "
@@ -96,7 +114,7 @@ def main() -> int:
         print(f"removed from staging (no longer managed): {stale}")
 
     for name in managed_files:
-        (STAGING_MEMORY / name).write_bytes((MAC_MEMORY / name).read_bytes())
+        (STAGING_MEMORY / name).write_bytes(sources[name].read_bytes())
 
     manifest_text = "\n".join(managed_files) + "\n"
     MANIFEST_PATH.write_text(manifest_text, encoding="utf-8")
@@ -106,7 +124,7 @@ def main() -> int:
 
     print(f"manifest written: {len(managed_files)} files, sha256={manifest_sha[:12]}")
     for name in managed_files:
-        print(f"  managed: {name}")
+        print(f"  managed: {name}" + (" (canon)" if name in canon else ""))
     return 0
 
 
