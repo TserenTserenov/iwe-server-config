@@ -1051,6 +1051,26 @@ main() {
   esac
   echo ""
 
+  # WP-5 Ф69: почтовый ящик входящего контекста рядом с карточкой
+  # (inbox/WP-N/INBOX.md, пишет scripts/wp-inbox.sh). Записи «новое» —
+  # drift-сигнал: включает нетривиальную ветку и при нуле связанных РП.
+  # Читается тем же путём, что и карточка, поэтому работает и в режиме снимка origin.
+  local inbox_box inbox_new
+  inbox_box="$(dirname "$wp_file")/INBOX.md"
+  inbox_new=0
+  if [[ -f "$inbox_box" ]]; then
+    inbox_new=$(grep -c -E '^## И-[0-9]+ · .* · новое$' "$inbox_box" || true)
+  fi
+  echo "## Входящие (ящик РП, Ф69)"
+  if [[ "$inbox_new" -gt 0 ]]; then
+    echo "- Неразобранных записей: ${inbox_new}"
+    awk '/^## И-[0-9]+ · /{p = ($0 ~ / · новое$/)} p' "$inbox_box" | sed 's/^/  /'
+    echo "DRIFT: inbox_unprocessed — ${inbox_new} записей в ${inbox_box}" >> "$drift_file"
+  else
+    echo "- Нет неразобранных записей."
+  fi
+  echo ""
+
   # WP-484 Ф219: цитата §4/§5 последнего отчёта, не только его пересказ в
   # карточке -- см. комментарий у latest_session_report_excerpt() выше.
   echo "## Последний отчёт сессии этого РП (цитата §4/§5)"
