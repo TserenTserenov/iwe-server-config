@@ -1541,6 +1541,34 @@ in
       };
     };
 
+    # WP-545 Ф25 — ночная запись личного табло (PD-dashboard) переезжает с Мака
+    # (launchd com.iwe.dashboard-nightly-writer, 07:30) на Цех. Пока пишет Мак,
+    # Цех считает тот же снимок в пробном режиме (DASHBOARD_DRY_RUN=1) и пишет в
+    # журнал расхождение с уже записанным Маком. Переключение: убрать эту
+    # переменную и выгрузить задание на Маке, иначе писателей станет два.
+    # Ключи чтения баз лежат в ~/.config/aist/env, не в /etc/iwe/env, поэтому
+    # запуск через scripts/with-aist-env.sh. Запись в GitHub — ключ с правом
+    # записи через ssh-псевдоним github-pd-dashboard-rw у пользователя tseren.
+    systemd.services."iwe-dashboard-nightly-writer" = {
+      description = "IWE — ночная запись личного табло (пробный режим до переключения с Мака)";
+      unitConfig   = commonUnitConfig;
+      serviceConfig = commonServiceConfig // {
+        ExecStart  = "${pkgs.bash}/bin/bash ${iwe}/scripts/with-aist-env.sh ${pkgs.bash}/bin/bash ${iwe}/DS-my-strategy/scripts/dashboard-nightly-writer.sh";
+        TimeoutSec = 900;
+      };
+      path = commonPath;
+      environment = commonEnv // { DASHBOARD_DRY_RUN = "1"; };
+    };
+
+    systemd.timers."iwe-dashboard-nightly-writer" = {
+      wantedBy    = [ "timers.target" ];
+      description = "IWE Ночная запись табло — ежедн 07:45 (через 15 мин после Мака)";
+      timerConfig = {
+        OnCalendar = "*-*-* 07:45:00 Europe/Nicosia";
+        Persistent = true;
+      };
+    };
+
     # =========================================================
     # WP-494 — WP PANEL SNAPSHOT (многоплощадочная панель VS Code, Ф12)
     # =========================================================
