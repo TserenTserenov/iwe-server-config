@@ -5,7 +5,10 @@
 # Мигрирует 7 из 8 Mac launchd-задач на сервер.
 # НЕ мигрируется: com.exocortex.pomodoro-alert (требует macOS GUI/notifications).
 #
-# Таймзона: Europe/Helsinki (UTC+3 летом = MSK) — все времена в МСК.
+# Таймзона сервера: Europe/Helsinki (EEST=MSK летом, EET=MSK-1h зимой).
+# Времена с пометкой «МСК» обязаны иметь явный Europe/Moscow в OnCalendar —
+# без него таймер зимой срабатывает на час позже (профилировщик 26.10–02.11.2026
+# шёл после stage-evaluator вместо до него, WP-545 Ф26).
 #
 # Секреты (создать вручную на сервере, не в git):
 #   /etc/iwe/env — ANTHROPIC_API_KEY=...
@@ -1326,7 +1329,7 @@ in
       wantedBy    = [ "timers.target" ];
       description = "IWE Профилировщик — ежедн 04:30 МСК";
       timerConfig = {
-        OnCalendar = "*-*-* 04:30:00";
+        OnCalendar = "*-*-* 04:30:00 Europe/Moscow";
         Persistent = true;  # catch-up если сервер был недоступен
       };
     };
@@ -1881,7 +1884,7 @@ in
       wantedBy    = [ "timers.target" ];
       description = "IWE backup stress-test — Сб 05:00 МСК";
       timerConfig = {
-        OnCalendar = "Sat *-*-* 05:00:00";
+        OnCalendar = "Sat *-*-* 05:00:00 Europe/Moscow";
         Persistent = true;
       };
     };
