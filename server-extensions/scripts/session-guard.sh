@@ -90,6 +90,10 @@
 #                                      # превращает commit-intent (.iwe-runtime/commit-intents/)
 #                                      # в заявку семафора; guard сам проверяет parent/message/paths
 #                                      # по trailer "Iwe-Intent: <uuid>" и печатает "PROMOTED <sha>"
+#   capabilities                       # WP-484 Ф282: read-only list of optional contracts this
+#                                      # guard accepts, one token per line; a caller passes a newer
+#                                      # flag only when its token is listed (an older guard exits
+#                                      # non-zero here, which means "none")
 #   note-commit --forget <sha> [--repo <name>] [--agent ...]
 #                                      # WP-7 Ф209: снять заявку на коммит, если она не входит в
 #                                      # source/expected набор текущего PREPARE и ещё не имеет
@@ -159,6 +163,16 @@
 #   7 — close отказан, состояние сохранено (.open и копия как были, PREPARED не записан либо сохранён)
 
 set -euo pipefail
+
+# WP-484 Ф282 measure 1: answered before any environment check or directory
+# creation, so the probe has no side effects and needs no configuration. 01.11 a
+# fresh DS-my-strategy handler passed --source-checkout to an older root guard on
+# Tsekh and the close stopped twice; callers now ask first. Add a token here in
+# the same commit that adds the flag.
+if [ "${1:-}" = "capabilities" ]; then
+  printf '%s\n' note-commit-source-checkout note-commit-promote-intent
+  exit 0
+fi
 
 # Peer session 2026-09-21-04-wp537-wp7-fmt-decisions-followup (Claude+Codex),
 # WP-7 Ф161: every ancestry check this script's publish-proof path runs --
@@ -13936,7 +13950,9 @@ if state == "prepared":
     source_shas = {s.lower() for s in source_commits}
     expected_shas = {s.lower() for s in expected_commits}
     for target in targets:
-        target_sha = target.rsplit(" ", 1)[-1].lower()
+        # The SHA is field 2 of "<repo> <sha> [<checkout> <branch>]"; the last
+        # field of a 4-field claim is the branch or "-" (WP-484 Ф275 step 3).
+        target_sha = target.split(" ")[1].lower()
         if target_sha in source_shas:
             refuse("'" + target + "' входит в close_delivery_source_commits -- снятие ослабило бы доказательство финальной доставки; батч остановлен целиком")
         if target_sha in expected_shas:
@@ -14414,10 +14430,9 @@ PY
     esac
     NC_BRANCH="$BRANCH_ARG"
   fi
-  NC_ENTRY="commit: $NC_REPO_NAME $NC_FULL_SHA"
-  if [ "$NC_SOURCE_CHECKOUT" != "-" ]; then
-    NC_ENTRY="$NC_ENTRY $NC_SOURCE_CHECKOUT $NC_BRANCH"
-  fi
+  # WP-484 Ф275 step 3: every producer writes the 4-field form, "-" for an
+  # unknown checkout/branch (the canon the promote path already used).
+  NC_ENTRY="commit: $NC_REPO_NAME $NC_FULL_SHA $NC_SOURCE_CHECKOUT $NC_BRANCH"
   # Idempotent on the exact line AND on the (repo,sha) pair: a retried close
   # step re-reports the same commit, and a 2-field claim must never coexist
   # with its 4-field upgrade -- readers split the line by spaces and would
@@ -14556,8 +14571,8 @@ _claim_source_for_receipt() {  # <semaphore> <repo dir> <repo name> <full sha>
   # recordable from claims the session already has, so go on without claiming.
   git -C "$repo" rev-parse --verify --quiet "$sha^{commit}" >/dev/null \
     || { echo "WARN: note-publication: --claim-source $sha не коммит репозитория $name; заявка пропущена" >&2; return 0; }
-  entry="commit: $name $sha"
-  # The session may already hold this claim in the 4-field form: match by the pair (repo, sha),
+  entry="commit: $name $sha - -"
+  # The session may already hold this claim in the other form: match by the pair (repo, sha),
   # or a 2-field duplicate is appended and later rolled back (the 01.11 incident).
   _claim_present "$sem" "$name" "$sha" && return 0
   for other in "$SESSION_DIR"/*.open; do
@@ -14649,7 +14664,7 @@ if [ "$CMD" = "note-publication" ]; then
       if ! _record_publication_receipts "$SEM_FILE" "$RECEIPT_REPO" "$REPO_ARG" "$PUBLISHED_SHA"; then
         if [ "$CLAIM_ADDED" = 1 ]; then
           _PENDING_CLAIM_LINE=""
-          _unclaim_source_for_receipt "$SEM_FILE" "commit: $REPO_ARG $CLAIM_SOURCE_ARG" \
+          _unclaim_source_for_receipt "$SEM_FILE" "commit: $REPO_ARG $CLAIM_SOURCE_ARG - -" \
             && echo "note-publication: claim_rolled_back (заявка $CLAIM_SOURCE_ARG снята: квитанция не записана)" >&2
         fi
         exit 1
