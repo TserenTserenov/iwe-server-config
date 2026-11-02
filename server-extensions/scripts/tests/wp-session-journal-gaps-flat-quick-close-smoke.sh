@@ -103,4 +103,20 @@ P
 )"
 contains "закрытие из журнала находит плоский файл" "$FOUND" "2026-10/2026-10-27-ledger-only.md"
 
+# WP-484 Ф279: an unset duration with a written insight is a filled ORZ, not a scaffold.
+printf -- "---\nduration_h: ~\n---\n\n## Главный инсайт\n\nФакт сессии.\n\n## Контекст\n" >"$SESSIONS/2026-10/2026-10-30-filled.md"
+printf -- "---\nduration_h: ~\n---\n\n## Главный инсайт\n\n## Контекст\n\nтолько контекст\n" >"$SESSIONS/2026-10/2026-10-30-empty-insight.md"
+STATUS="$(SCRIPT_PATH="$SCRIPT" SESS="$SESSIONS" "$PY" - <<'P'
+import importlib.util, os
+spec = importlib.util.spec_from_file_location("gaps", os.environ["SCRIPT_PATH"])
+mod = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(mod)
+base = os.path.join(os.environ["SESS"], "2026-10")
+print(mod.report_status(os.path.join(base, "2026-10-30-filled.md")), "|",
+      mod.report_status(os.path.join(base, "2026-10-30-empty-insight.md")))
+P
+)"
+contains "заполненный инсайт без длительности — не заготовка" "${STATUS%%|*}" "ОРЗ-файл есть"
+contains "пустой инсайт без длительности — заготовка" "${STATUS##*|}" "ОРЗ-заготовка не заполнена"
+
 echo "PASS: wp-session-journal-gaps.py lists flat Quick Close sessions ($NOW_SHIFT)"

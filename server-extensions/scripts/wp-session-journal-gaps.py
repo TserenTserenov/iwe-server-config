@@ -110,6 +110,12 @@ def flat_orz_candidates(slug: str, ts: str) -> list[str]:
     return [f"{month}/{slug}.md", f"{month}/{day}-{slug}.md"]
 
 
+def insight_written(text: str) -> bool:
+    """The `## Главный инсайт` section has a non-blank line before the next heading."""
+    match = re.search(r"^## Главный инсайт[ \t]*\n(.*?)(?=^#|\Z)", text, flags=re.MULTILINE | re.DOTALL)
+    return bool(match and match.group(1).strip())
+
+
 def report_status(folder_path: str) -> str:
     if os.path.isfile(folder_path):
         # `open` writes a scaffold with `duration_h: ~`; a closed session replaces it.
@@ -118,7 +124,9 @@ def report_status(folder_path: str) -> str:
                 head = handle.read(4000)
         except OSError:
             return FLAT_MISSING
-        if re.search(r"^duration_h:\s*~\s*$", head, flags=re.MULTILINE):
+        # An unset duration alone is not a scaffold: sessions closed outside the
+        # runner keep `duration_h: ~` with a written insight (WP-484 Ф279, 30.10).
+        if re.search(r"^duration_h:\s*~\s*$", head, flags=re.MULTILINE) and not insight_written(head):
             return FLAT_SCAFFOLD
         return FLAT_FINAL
     if os.path.isfile(os.path.join(folder_path, "report.md")):

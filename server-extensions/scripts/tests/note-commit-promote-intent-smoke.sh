@@ -46,6 +46,12 @@ PASS=0
 FAIL=0
 ok()  { PASS=$((PASS+1)); echo "  ok: $1"; }
 bad() { FAIL=$((FAIL+1)); echo "  FAIL: $1"; }
+# Portable in-place line delete: BSD `sed -i ''` is a usage error on GNU sed,
+# so on Linux the fixture silently kept the line (WP-484 Ф282, Tsekh run 02.11).
+drop_lines() {  # <ERE> <file>
+  grep -vE -- "$1" "$2" > "$2.tmp" || true
+  mv "$2.tmp" "$2"
+}
 
 # Repo inside IWE_ROOT so _resolve_repo_checkout finds it.
 REPO="$IWE_ROOT/myrepo"
@@ -263,7 +269,7 @@ after=$(grep -c '^commit:' "$SEM")
 echo "== promote: crash matrix (blocker B) =="
 # completed ∧ claim missing -> re-append the claim, PROMOTED, exit 0.
 # Simulate by deleting the claim line of the round-tripped intent (UUID).
-sed -i '' "/^commit: myrepo $CSHA /d" "$SEM"
+drop_lines "^commit: myrepo $CSHA " "$SEM"
 grep -q "^commit: myrepo $CSHA" "$SEM" && bad "crash-matrix fixture (claim still present)" || {
   out=$(note --promote-intent "$UUID" --repo myrepo); rc=$?
   { [ $rc -eq 0 ] && printf '%s' "$out" | grep -q "PROMOTED $CSHA" \
@@ -575,7 +581,7 @@ PY
 # here the file was written directly with all three records. Delete the claim
 # (none was written yet) and re-add one to simulate a crash after claim-write:
 echo "commit: myrepo $B1SHA - -" >> "$SEM"
-sed -i '' "/^commit: myrepo $B1SHA - \-$/d" "$SEM"
+drop_lines "^commit: myrepo $B1SHA - -$" "$SEM"
 echo "DEBUG IFILE=$IFILE"; tail -4 "$IFILE"; ls -la "$(dirname "$IFILE")"
 out=$(note --promote-intent "$UUIDB1" --repo myrepo); rc=$?
 out2=$(note --promote-intent "$UUIDB1" --repo myrepo); rc2=$?
