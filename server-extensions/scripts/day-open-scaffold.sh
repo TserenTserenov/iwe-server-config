@@ -45,6 +45,8 @@ SERVER_MODE="${IWE_SERVER_MODE:-0}"  # WP-283: 1 = Linux server, Mac-only MCP н
 
 # --- Pre-flight healthcheck (WP-7 ФDay-Open-Hardening) ---
 PREFLIGHT_JSON=$(bash "$IWE/scripts/day-open-preflight.sh" "$DATE" "$CONFIG" 2>/dev/null || echo '{"calendar":"unknown","scout":"unknown","triage":"unknown"}')
+# WP-484 Ф275: finish close cards of dead owners before the plan is drawn.
+SETTLE_SWEEP_LINE=$(IWE_ROOT="$IWE" bash "$IWE/scripts/settle-sweep.sh" 2>/dev/null || true)
 CALENDAR_PF=$(echo "$PREFLIGHT_JSON" | jq -r '.calendar // "unknown"')
 SCOUT_PF=$(echo "$PREFLIGHT_JSON" | jq -r '.scout // "unknown"')
 TRIAGE_PF=$(echo "$PREFLIGHT_JSON" | jq -r '.triage // "unknown"')
@@ -1012,10 +1014,14 @@ render_attention() {
   local remainder_runner="$IWE/${IWE_GOVERNANCE_REPO:-DS-strategy}/scripts/process-runner.py"
   if [ -f "$remainder_runner" ]; then
     local remainder_line
-    remainder_line=$(python3 "$remainder_runner" remainder-summary 2>/dev/null \
+    remainder_line=$(cd "$IWE/${IWE_GOVERNANCE_REPO:-DS-strategy}" && python3 "$remainder_runner" remainder-summary 2>/dev/null \
       | python3 -c 'import json,sys; print(json.load(sys.stdin).get("line",""))' 2>/dev/null || true)
     [ -n "$remainder_line" ] && items+=("🔴 ${remainder_line} — разобрать: process-runner.py remainder-resolve")
   fi
+
+  # WP-484 Ф275: the settle sweep ran at the start of the script; its line says
+  # what it finished or handed back to the pilot.
+  [ -n "${SETTLE_SWEEP_LINE:-}" ] && items+=("$SETTLE_SWEEP_LINE")
 
   if [ "${#items[@]}" -eq 0 ]; then
     echo "— нет сигналов, требующих внимания."

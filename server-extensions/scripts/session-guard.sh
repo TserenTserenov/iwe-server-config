@@ -6324,9 +6324,15 @@ EOF
   # the runner predates the `remainder-summary` command.
   REMAINDER_RUNNER="$IWE_ROOT/$GOV_REPO/scripts/process-runner.py"
   if [ -f "$REMAINDER_RUNNER" ]; then
-    REMAINDER_LINE=$(python3 "$REMAINDER_RUNNER" remainder-summary 2>/dev/null \
+    REMAINDER_LINE=$(cd "$IWE_ROOT/$GOV_REPO" && python3 "$REMAINDER_RUNNER" remainder-summary 2>/dev/null \
       | python3 -c 'import json,sys; print(json.load(sys.stdin).get("line",""))' 2>/dev/null || true)
     [ -n "$REMAINDER_LINE" ] && echo "⚠️  $REMAINDER_LINE" >&2
+  fi
+  # WP-484 Ф275: finish close cards of dead owners (settle service). Detached,
+  # so `open` never waits on the shared lease; the result goes to a log.
+  if [ -x "$IWE_ROOT/scripts/settle-sweep.sh" ]; then
+    mkdir -p "$IWE_ROOT/.iwe-runtime" 2>/dev/null || true
+    ( "$IWE_ROOT/scripts/settle-sweep.sh" >> "$IWE_ROOT/.iwe-runtime/settle-sweep.log" 2>&1 & ) || true
   fi
   # Session-handoff gap scan (WP-484, peer-session
   # 2026-10-15-33-wp484-session-handoff-gap): did the previous session(s) of
