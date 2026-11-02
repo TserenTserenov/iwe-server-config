@@ -4,6 +4,7 @@ One owner for the rule «address ≠ code name»: response-clarity-hook.sh calls
 find_symbols() for its A13.1 log line, scripts/style-symbol-metric.py imports
 the same functions to measure replies. Changing the rule here changes both.
 """
+import json
 import re
 
 # Shared with rule A13 in the hook (РП-388 Ф17): one list of command words.
@@ -224,3 +225,67 @@ def split_items(text):
         pending_blank = False
     flush()
     return items
+
+
+# --- Transcript turns (shared by the metric and the next-turn hint) ---
+# Headless runs (claude -p / SDK) answer scripts, not the pilot.
+HEADLESS_ENTRYPOINTS = {"sdk-cli", "sdk-ts", "sdk-py"}
+NON_HUMAN_PREFIXES = ("<task-notification", "<system-reminder", "<command-", "<local-command")
+
+
+def is_human_turn(rec):
+    """A real pilot message: not a tool result, not meta, not a harness notice."""
+    if rec.get("type") != "user" or rec.get("isMeta") or rec.get("isSidechain") or rec.get("isCompactSummary"):
+        return False
+    content = (rec.get("message") or {}).get("content")
+    if isinstance(content, str):
+        texts = [content]
+    elif isinstance(content, list):
+        if any(isinstance(b, dict) and b.get("type") == "tool_result" for b in content):
+            return False
+        texts = [b.get("text", "") for b in content if isinstance(b, dict) and b.get("type") == "text"]
+    else:
+        return False
+    text = "\n".join(texts).strip()
+    return bool(text) and not text.startswith(NON_HUMAN_PREFIXES)
+
+
+def is_visible_reply(rec):
+    """An assistant record the model wrote, not a harness-made error or stub."""
+    msg = rec.get("message") or {}
+    return not rec.get("isApiErrorMessage") and msg.get("model") != "<synthetic>"
+
+
+def turns(path, entrypoints=None):
+    """Yield (date, [text blocks]) for each assistant answer to one human turn.
+
+    Day is the UTC date of the turn's last text block. Records from headless
+    runs are skipped; their entrypoints are added to `entrypoints` if given.
+    """
+    blocks, day = [], None
+    with open(path, encoding="utf-8", errors="replace") as fh:
+        for line in fh:
+            try:
+                rec = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if rec.get("isSidechain"):
+                continue
+            entrypoint = rec.get("entrypoint")
+            if entrypoint and entrypoints is not None:
+                entrypoints.add(entrypoint)
+            if entrypoint in HEADLESS_ENTRYPOINTS:
+                continue
+            if is_human_turn(rec):
+                if blocks:
+                    yield day, blocks
+                blocks, day = [], None
+                continue
+            if rec.get("type") != "assistant" or not is_visible_reply(rec):
+                continue
+            for block in (rec.get("message") or {}).get("content") or []:
+                if isinstance(block, dict) and block.get("type") == "text" and block.get("text", "").strip():
+                    blocks.append(block["text"])
+                    day = rec.get("timestamp", "")[:10]
+    if blocks:
+        yield day, blocks

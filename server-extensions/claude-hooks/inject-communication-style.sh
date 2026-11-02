@@ -21,6 +21,8 @@
 # - L0-файл отсутствует → silent skip (echo '{}')
 # - L1-файл отсутствует → инжектим только L0
 # - Пороги: STYLE_REINJECT_TURNS (12), STYLE_REINJECT_BYTES (60000)
+# - Каждый ход: подсказка A13.1 о прошлом ответе (a13-1-next-turn-hint.py, РП-388 Ф36),
+#   выключатель IWE_STYLE_NEXT_TURN_HINT=0
 
 set -uo pipefail
 export PATH="/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin:${PATH:-}"
@@ -71,11 +73,35 @@ elif [ "$CUR_BYTES" -gt 0 ] && [ $((CUR_BYTES - LAST_INJECT_BYTES)) -ge "$REINJE
   DO_INJECT=1                                                   # по объёму переписки
 fi
 
-# Не пора впрыскивать — обновить счётчик хода и выйти
+# $1 = additionalContext text; empty → '{}' (Claude Code needs valid JSON on stdout).
+emit_context() {
+  if [ -z "$1" ]; then echo '{}'; return; fi
+  jq -n --arg ctx "$1" '{
+    "hookSpecificOutput": {
+      "hookEventName": "UserPromptSubmit",
+      "additionalContext": $ctx
+    }
+  }'
+}
+
+# Next-turn hint for A13.1 (РП-388 Ф36 step 5): replaces the old A13.1 block, which
+# produced a second visible message. Runs on every turn, independent of reinjection.
+# Off switch: IWE_STYLE_NEXT_TURN_HINT=0.
+NEXT_TURN_HINT=""
+HOOK_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+if [ "${IWE_STYLE_NEXT_TURN_HINT:-1}" != "0" ] && [ -n "$TRANSCRIPT_PATH" ]; then
+  PROMPT_TEXT=$(echo "$INPUT" | jq -r '.prompt // empty' 2>/dev/null || echo "")
+  mkdir -p "$HOME/.claude/logs" 2>/dev/null || true
+  NEXT_TURN_HINT=$(PROMPT="$PROMPT_TEXT" SESSION_ID="$SESSION_ID" \
+    python3 -B "$HOOK_DIR/a13-1-next-turn-hint.py" "$TRANSCRIPT_PATH" \
+    2>>"$HOME/.claude/logs/style-next-turn-hints.err" || echo "")
+fi
+
+# Не пора впрыскивать — обновить счётчик хода и выйти (подсказка, если есть, всё равно уходит)
 if [ "$DO_INJECT" -eq 0 ]; then
   mkdir -p "$STATE_DIR"
   echo "$TURN $LAST_INJECT_TURN $LAST_INJECT_BYTES" > "$STATE_FILE"
-  echo '{}'
+  emit_context "$NEXT_TURN_HINT"
   exit 0
 fi
 
@@ -83,7 +109,6 @@ fi
 # Диспетчер: WP-412 Ф6 (тонкий хук с каскадом L0+L1+author). Путь к нему через PROJECT_DIR.
 # Файл-снимок: WP-412 Ф11 (FMT-fallback, самодостаточен). Путь через BASH_SOURCE — работает в env -i.
 # Рантайм-механика (переинъекция, state) остаётся в хуке. Откат: git revert.
-HOOK_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 S0_CORE="$HOOK_DIR/../styles/s0-core.md"
 
 DISPATCHER="$PROJECT_DIR/PACK-rhetoric/pack/language-style/registry/dispatcher.py"
@@ -96,7 +121,7 @@ if [ -z "${FRAGMENT:-}" ] && [ -f "$S0_CORE" ]; then
   FRAGMENT=$(awk '/^---/{n++; if(n==2){found=1; next}} found' "$S0_CORE" 2>/dev/null)
 fi
 
-[ -n "${FRAGMENT:-}" ] || { echo '{}'; exit 0; }   # оба источника пусты/упали → пропуск (safe)
+[ -n "${FRAGMENT:-}" ] || { emit_context "$NEXT_TURN_HINT"; exit 0; }   # оба источника пусты/упали → только подсказка (safe)
 
 # S2: личный оверрайд пользователя шаблона (WP-412 Ф13). Отдельный файл от
 # шаблона-образца (communication-style-personal-template.md) — его хук
@@ -126,10 +151,10 @@ echo "$TURN $TURN $CUR_BYTES" > "$STATE_FILE"
 # Cleanup старых state-файлов (>24h)
 find "$STATE_DIR" -name "comm-style-injected-*" -mmin +1440 -delete 2>/dev/null || true
 
-# JSON для Claude Code UserPromptSubmit hook
-jq -n --arg ctx "$CONTEXT" '{
-  "hookSpecificOutput": {
-    "hookEventName": "UserPromptSubmit",
-    "additionalContext": $ctx
-  }
-}'
+if [ -n "$NEXT_TURN_HINT" ]; then
+  CONTEXT="$CONTEXT
+
+$NEXT_TURN_HINT"
+fi
+
+emit_context "$CONTEXT"
