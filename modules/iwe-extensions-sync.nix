@@ -141,6 +141,13 @@ in
           ${pkgs.coreutils}/bin/mkdir -p "$LIVE_MEMORY" "$PENDING"
           ${pkgs.coreutils}/bin/chmod 755 "$LIVE_MEMORY"
           NEW_STATE=$(${pkgs.coreutils}/bin/mktemp)
+          # Records of files absent from this delivery are kept: a generation that
+          # ships fewer files must not erase what an earlier one recorded.
+          if [ -f "$STATE" ]; then
+            while read -r rec_sha rec_name; do
+              [ -e "${src}/memory/$rec_name" ] || echo "$rec_sha  $rec_name" >> "$NEW_STATE"
+            done < "$STATE"
+          fi
           sha() { ${pkgs.coreutils}/bin/sha256sum "$1" | ${pkgs.coreutils}/bin/cut -d' ' -f1; }
           for src_file in ${src}/memory/*; do
             name=$(${pkgs.coreutils}/bin/basename "$src_file")

@@ -134,6 +134,17 @@ class GuardTest(unittest.TestCase):
         self.assertEqual((self.home / "memory" / "roles.md").read_text(), "server-only history\n")
         self.assertNotIn("roles.md", self.state())
 
+    def test_record_of_file_missing_from_delivery_survives(self):
+        (self.src / "memory" / "roles.md").write_text("canon v1\n")
+        self.deliver()
+        (self.src / "memory" / "roles.md").unlink()
+        (self.src / "memory" / "protocol-open.md").write_text("v1\n")
+        self.deliver()
+        (self.src / "memory" / "roles.md").write_text("canon v2\n")
+        self.deliver()
+        self.assertEqual((self.home / "memory" / "roles.md").read_text(), "canon v2\n")
+        self.assertFalse((self.home / "runtime" / "memory-canon-pending" / "roles.md").exists())
+
     def test_non_markdown_files_are_copied_unguarded(self):
         (self.home / "memory" / "managed-memory-manifest.txt").write_text("old\n")
         (self.src / "memory" / "managed-memory-manifest.txt").write_text("new\n")
