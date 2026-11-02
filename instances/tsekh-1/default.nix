@@ -80,6 +80,9 @@ in
     inherit codePaths producersPath limitsPath;
     rulesPaths = codePaths ++ [ producersPath limitsPath ];
     admit = [ "tsekh-agent-channel" ];
+    # Утверждено пилотом 02.11.2026 (поручение «сделай сам»): версия правил на ревизии
+    # DS-my-strategy d948402c76 (код моста + producers.json + limits.json).
+    approvedRulesVersion = "plan-rules/1:47cafcc58a463d977f723295485a62c9dfe2df25f11faa89d2340ff54a7951df";
   };
 
   # uid агентов закреплён явно: на сервере он уже 1000 (проверено 30.10, uid-map
