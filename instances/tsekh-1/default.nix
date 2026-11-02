@@ -81,8 +81,8 @@ in
     rulesPaths = codePaths ++ [ producersPath limitsPath ];
     admit = [ "tsekh-agent-channel" ];
     # Утверждено пилотом 02.11.2026 (поручение «сделай сам»): версия правил на ревизии
-    # DS-my-strategy d948402c76 (код моста + producers.json + limits.json).
-    approvedRulesVersion = "plan-rules/1:47cafcc58a463d977f723295485a62c9dfe2df25f11faa89d2340ff54a7951df";
+    # DS-my-strategy f28e33931b (код моста + producers.json + limits.json, лимит 9).
+    approvedRulesVersion = "plan-rules/1:10ae907bcee6a40c5997bc19a4653b264c80afa17db8fc90fc2b5e2d61df7817";
   };
 
   # uid агентов закреплён явно: на сервере он уже 1000 (проверено 30.10, uid-map
