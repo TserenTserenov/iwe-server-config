@@ -247,6 +247,29 @@ grep -q 'процесс жив' "$TG_LOG" || fail "the text must carry the owner
 OUT2=$(sg -- heal live-1)
 grep -q 'уже передана пилоту' <<<"$OUT2" || fail "repeated dry run must not resend: $OUT2"
 [ "$(grep -c '^1|--source session-guard-heal ' "$TG_LOG")" = 1 ] || fail "repeated dry run resent the Telegram message"
+# Ф279 п.2: the owner-load note in the pilot's text, with `ps` replaced by a stub.
+mkdir -p "$TEST_ROOT/psbin"
+cat > "$TEST_ROOT/psbin/ps" <<'EOF'
+#!/usr/bin/env bash
+[ -z "${STUB_PS_OUT:-}" ] || printf '%s\n' "$STUB_PS_OUT"
+EOF
+chmod +x "$TEST_ROOT/psbin/ps"
+load_note_text() {  # <slug> <stubbed ps output>: text sent to the pilot for a live owner
+  write_semaphore "$1" "$$" "$HOST"
+  sg PATH="$TEST_ROOT/psbin:$TEST_ROOT/bin:$PATH" STUB_PS_OUT="$2" -- heal "$1" >/dev/null
+  grep -F "Открыта сессия по WP-484 «fixture $1»" "$TG_LOG" || fail "no text sent for $1: $(cat "$TG_LOG" 2>/dev/null)"
+}
+TEXT=$(load_note_text load-idle-days " 0.1 1-22:05:30")
+grep -qF 'её процесс жив — простаивает (нагрузка 0.1%, работает 1 сут 22 ч), несохранённая' <<<"$TEXT" || fail "idle days note wrong: $TEXT"
+TEXT=$(load_note_text load-idle-hours " 0.3 03:07:00")
+grep -qF 'простаивает (нагрузка 0.3%, работает 3 ч 7 мин)' <<<"$TEXT" || fail "idle hours note wrong: $TEXT"
+TEXT=$(load_note_text load-idle-minutes " 0.0 05:09")
+grep -qF 'простаивает (нагрузка 0.0%, работает 5 мин)' <<<"$TEXT" || fail "idle minutes note wrong: $TEXT"
+TEXT=$(load_note_text load-busy "42.0 00:10")
+grep -qF 'её процесс жив — нагружен (42.0% процессора), несохранённая' <<<"$TEXT" || fail "busy note wrong: $TEXT"
+! grep -qF 'простаивает' <<<"$TEXT" || fail "a busy process must not read as idle: $TEXT"
+TEXT=$(load_note_text load-no-ps "")
+grep -qF 'её процесс жив, несохранённая' <<<"$TEXT" || fail "no ps data must add no note: $TEXT"
 # A failing notifier never fails the dry run and leaves no marker, so the next dry run retries.
 write_semaphore live-tgfail "$$" "$HOST"
 OUT3=$(sg STUB_TG_RC=1 -- heal live-tgfail) || fail "a failing notifier must not fail the dry run: $OUT3"
