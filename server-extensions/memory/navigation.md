@@ -1,0 +1,100 @@
+---
+valid_from: 2026-04-13
+originSessionId: 9a0e726a-951e-4408-9e02-94d7eeffbf74
+
+type: reference
+horizon: warm
+domains: [reference]
+status: active
+owner: user
+schema_version: 1
+
+name: "navigation"
+description: "Операционный файл памяти IWE"
+---
+# Навигация по репозиториям (Слой 3)
+
+> Claude читает этот файл при поиске конкретного файла/репо. Для поиска знаний → `mcp__claude_ai_knowledge-mcp__search`.
+
+## Ключевые файлы
+
+| Тема | Файл |
+|------|------|
+| Различения (жёсткие пары) | `memory/hard-distinctions.md` |
+| FPF (навигация, принципы) | `memory/fpf-reference.md` |
+| Правила по типам репо | `memory/repo-type-rules.md` |
+| Чеклисты | `memory/checklists.md` |
+| SOTA-практики (18 шт.) | `memory/sota-reference.md` |
+| Протокол Open (WP Gate, Ритуал) | `memory/protocol-open.md` |
+| Протокол Close (маршрутизация, Quick Close) | `memory/protocol-close.md` |
+| Day Close (полный алгоритм) | `.claude/skills/day-close/SKILL.md` |
+| Week Close (полный алгоритм) | `.claude/skills/week-close/SKILL.md` |
+| Шаблоны DayPlan/WeekPlan | `memory/templates-dayplan.md` |
+| Нулевые принципы + иерархия | `ZP/README.md` |
+| Кодирование сущностей | `SPF/spec/SPF.SPEC.001-entity-coding.md` |
+| Масштабируемость Pack | `SPF/spec/SPF.SPEC.003-pack-scalability.md` |
+
+## Репозитории
+
+| Репо | Путь |
+|------|------|
+<!-- Добавьте свои DS-репо. Пример: -->
+<!-- | Мой бот (READ-ONLY) | `your-org/your-bot/` | -->
+<!-- | Монорепо ИИ-систем | `your-org/ai-systems/` | -->
+| Шаблонизатор | `FMT-exocortex-template/setup.sh` |
+| Личная онтология | `DS-my-strategy/ontology.md` |
+| Программа обучения | `DS-principles-curriculum/` |
+| Сессии агентов (с 29.08.2026, бывш. `DS-my-strategy/sessions/`) | `MC-sessions/` |
+| Личные данные: personal/, Lifework/, мастерства (с 29.08.2026) | `PD-persona/` |
+| Личные данные: питание/измерения/здоровье (бывш. DS-metrics) | `PD-metrics/` |
+
+## Pack-репо
+
+| Pack | Путь |
+|------|------|
+| PACK-personal | Личностное развитие |
+| PACK-verification | Верификация и приёмка (трансдоменный) |
+| PACK-autonomous-agents | Автономные агенты (BC, различения, методы) |
+
+## Ключевые документы (Pack DP)
+
+| Документ | Код |
+|----------|-----|
+| Тиры обслуживания | DP.ARCH.002 |
+| Каталог ролей (Role-Centric) | DP.ROLE.001 § 3.2 |
+| Role-Centric Architecture | DP.D.033 |
+| Реестр исполнителей | DP.ROLE.001 § 3.1 |
+| Runbook ошибок бота | DP.RUNBOOK.001 |
+
+## MCP
+
+| MCP | Путь |
+|-----|------|
+| knowledge-mcp (исходники) | `DS-MCP/knowledge-mcp/src/index.ts` |
+| knowledge-mcp (ingest) | `DS-MCP/knowledge-mcp/scripts/ingest.ts` |
+| guides-mcp (исходники) | `DS-MCP/guides-mcp/src/index.ts` |
+| fsm-mcp (исходники) | `DS-MCP/fsm-mcp/src/index.ts` |
+<!-- | Activity Hub | `your-org/activity-hub/` | -->
+| Автономные агенты (код) | `DS-autonomous-agents/` |
+| Данные агентов (workspace) | `DS-agent-workspace/` |
+
+## Стратегия
+
+| Файл | Путь |
+|------|------|
+| Стратегия | `DS-my-strategy/docs/Strategy.md` |
+| Реестр всех РП (WP-1…WP-85+) | `DS-my-strategy/docs/WP-REGISTRY.md` |
+| WeekPlan | `DS-my-strategy/current/` |
+
+## GitHub-организации (НЕ путать!)
+
+| Org | Какие репо | Примеры |
+|-----|-----------|---------|
+| `ailev` | FPF | `ailev/FPF` |
+
+> **Правило:** При генерации GitHub-ссылки → проверь org по этой таблице. НЕ подставляй `aisystant` по умолчанию.
+
+## WP Context Files
+
+> Все context files: `DS-my-strategy/inbox/WP-{N}/WP-{N}.md` (всегда папка — WP-434)
+> Архив: `DS-my-strategy/archive/wp-contexts/`
