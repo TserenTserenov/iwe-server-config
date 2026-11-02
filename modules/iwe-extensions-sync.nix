@@ -239,6 +239,7 @@ in
         ${pkgs.coreutils}/bin/cat > "$TMP_RELEASE" <<EOF
         {
           "root_commit": "$(${pkgs.coreutils}/bin/cat ${src}/ROOT_COMMIT_SHA 2>/dev/null || echo unknown)",
+          "root_commit_excluded": $([ -f ${src}/ROOT_COMMIT_EXCLUDED ] && ${pkgs.jq}/bin/jq -Rsc 'split("\n") | map(select(length > 0))' < ${src}/ROOT_COMMIT_EXCLUDED || echo '[]'),
           "config_revision": "${configRevision}",
           "deployed_at": "$(${pkgs.coreutils}/bin/date -u +%Y-%m-%dT%H:%M:%SZ)",
           "runtime_scripts_sha": "$(${pkgs.findutils}/bin/find /home/${cfg.user}/IWE/scripts -type f -exec ${pkgs.coreutils}/bin/sha256sum {} \; 2>/dev/null | ${pkgs.coreutils}/bin/sort | ${pkgs.coreutils}/bin/sha256sum | cut -d' ' -f1)",

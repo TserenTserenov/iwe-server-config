@@ -574,11 +574,17 @@ if [ "$GATE_FAILED" = true ]; then
       rm -f "$failed_path"
     fi
   done < <(printf '%s\n' "${FAILED_PATHS[@]}" | sort -u)
+  # WP-484 Ф282 measure 2: ROOT_COMMIT_SHA already names this tick's source
+  # commit, but the files held back above stay older than it. 01.11 Tsekh read
+  # "8ab2455" while its session-guard.sh was the 31.10 one. The list next to the
+  # SHA keeps the receipt honest; a clean tick removes it below.
+  printf '%s\n' "${FAILED_PATHS[@]}" | sort -u > server-extensions/ROOT_COMMIT_EXCLUDED
 elif $NOTIFY_LIB_AVAILABLE; then
   # The gate ran clean this tick -- test-gate-partial's own cross-tick
   # recovery point (see why it's excluded from ALERT_CLASSES above).
   notify_escalation_update "sync-extensions-auto/test-gate-partial" ok >/dev/null
 fi
+[ "$GATE_FAILED" = true ] || rm -f server-extensions/ROOT_COMMIT_EXCLUDED
 # Не удалять, если постоянное сохранение выше явно отказало (GATE_FAILED=true
 # и GATE_LOG_PERSISTED_PATH=="") -- это единственный оставшийся экземпляр
 # полного вывода в таком случае.
@@ -604,7 +610,11 @@ if ! changed_paths > "$DELIVERED_TMP"; then
   alert test-env "🚨 sync-extensions-auto: git status провалился после отката — состояние репозитория не проверено, тик прерван"
   exit 1
 fi
-while IFS= read -r -d '' p; do DELIVERED_PATHS+=("$p"); done < "$DELIVERED_TMP"
+while IFS= read -r -d '' p; do
+  # The held-back list describes a delivery; on its own it is not one.
+  [ "$p" = server-extensions/ROOT_COMMIT_EXCLUDED ] && continue
+  DELIVERED_PATHS+=("$p")
+done < "$DELIVERED_TMP"
 rm -f "$DELIVERED_TMP"
 if [ "${#DELIVERED_PATHS[@]}" -eq 0 ]; then
   # Первые три УНИКАЛЬНЫХ пути — массивом, не строковым конвейером:

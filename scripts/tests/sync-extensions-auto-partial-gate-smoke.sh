@@ -118,6 +118,10 @@ git -C "$S1_REPO" diff --quiet HEAD -- server-extensions/scripts/bar.sh \
 git -C "$S1_REPO" show --stat HEAD | grep -q "foo.sh" \
   && ok "смешанный тик: коммит реально содержит прошедший файл" \
   || bad "смешанный тик: коммит содержит foo.sh" "$(git -C "$S1_REPO" show --stat HEAD)"
+# WP-484 Ф282 мера 2: рядом с ROOT_COMMIT_SHA едет список задержанных файлов.
+[ "$(git -C "$S1_REPO" show HEAD:server-extensions/ROOT_COMMIT_EXCLUDED 2>&1)" = "server-extensions/scripts/bar.sh" ] \
+  && ok "смешанный тик: коммит несёт список задержанных файлов (только bar.sh)" \
+  || bad "смешанный тик: список задержанных файлов" "$(git -C "$S1_REPO" show HEAD:server-extensions/ROOT_COMMIT_EXCLUDED 2>&1)"
 
 # WP-538 (06.10): полный вывод провалившегося теста сохраняется постоянно.
 # 26.10 (WP-568): алерт пилоту путь к нему больше не содержит — только
@@ -134,6 +138,14 @@ grep -F "ALERT[test-gate-partial]" "$WORKDIR/tick.out" | grep -qF "server-extens
 [ -n "$S1_PERSISTED" ] && ! grep -F "ALERT[test-gate-partial]" "$WORKDIR/tick.out" | grep -qF "$S1_PERSISTED" \
   && ok "смешанный тик: алерт test-gate-partial не тащит путь к логу в Telegram" \
   || bad "смешанный тик: алерт без пути к логу" "$(grep -F 'ALERT[test-gate-partial]' "$WORKDIR/tick.out")"
+# Следующий тик, где тест bar прошёл: список удаляется вместе с доставкой bar.
+make_source_file "$S1_SRC" bar 0
+echo "bar fixed" > "$S1_REPO/server-extensions/scripts/bar.sh"
+run_tick "$S1_REPO" "$S1_SRC"
+! git -C "$S1_REPO" cat-file -e HEAD:server-extensions/ROOT_COMMIT_EXCLUDED 2>/dev/null \
+  && [ "$(git -C "$S1_REPO" show HEAD:server-extensions/scripts/bar.sh)" = "bar fixed" ] \
+  && ok "чистый тик после частичного: bar доставлен, список задержанных удалён" \
+  || bad "чистый тик: список задержанных удалён" "$(git -C "$S1_REPO" show --stat HEAD)"
 
 # --- Сценарий 2: провалились ВСЕ изменённые файлы — тик завершается чисто --
 #     (exit 0, не ошибка), коммита нет вообще.
