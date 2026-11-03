@@ -56,7 +56,7 @@ in
   # WP-561 Ф55: приёмник запросов плана (К12, решение пилота 30.10: защита от
   # ошибок и подмены имени между своими агентами, умысел агента вне модели).
   # Включены пользователь, каталоги, конфиг хоста, ключ и служба приёмника.
-  # Доставка в Git НЕ включена: нет таймера и учётных данных публикации.
+  # Доставка в Git НЕ включена: таймер ещё не настроен и не проверен.
   # Копия кода — vendor/plan-bridge/code, происхождение — vendor/plan-bridge/SOURCE.
   tsekh.planBridge = let
     codePaths = [
@@ -75,6 +75,14 @@ in
   in {
     enable = true;
     receiver.enable = true;
+    github = {
+      enable = true;
+      # Пилот разрешил 03.11.2026 отдельный ключ с чтением/записью только
+      # TserenTserenov/DS-my-strategy. В Git хранится только SOPS-шифротекст.
+      secretsFile = ../../secrets/plan-bridge-github.yaml;
+      # https://docs.github.com/en/authentication/keeping-your-account-and-data-secure/githubs-ssh-key-fingerprints
+      hostKey = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl";
+    };
     hostId = values.hostName;
     codeSrc = ../../vendor/plan-bridge/code;
     inherit codePaths producersPath limitsPath;

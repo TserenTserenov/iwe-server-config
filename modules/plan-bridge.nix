@@ -6,7 +6,8 @@
 # права, конфиг хоста для адаптера моста, ключ службы (создаётся один раз при
 # первом старте), код моста из хранилища Nix (владелец root, не пишется агентами)
 # и службу приёмника на локальном сокете. Доставка в Git (мост, таймер) здесь
-# НЕ определена: учётные данные публикации ещё не решены (DR-06, п.5).
+# НЕ определена. Отдельный GitHub-ключ можно включить для проверки доступа
+# до запуска доставки (DR-06, п.5).
 #
 # Модель угроз (решение пилота 30.10, DR-06 п.5а): защита от ошибок и подмены
 # имени между своими агентами. Умысел агента вне модели: у агентов на Цехе есть
@@ -26,6 +27,17 @@ let
   configDir = "/etc/iwe-plan-bridge";
   stateDir = "/var/lib/iwe-plan-bridge";
   keyPath = "${stateDir}/producer.key";
+  githubKeyPath = "${stateDir}/github_ed25519";
+  githubKnownHosts = pkgs.writeText "iwe-plan-bridge-github-known-hosts" ''
+    github.com ${cfg.github.hostKey}
+  '';
+  githubSsh = pkgs.writeShellScript "iwe-plan-bridge-git-ssh" ''
+    exec ${pkgs.openssh}/bin/ssh -F /dev/null \
+      -o BatchMode=yes -o IdentitiesOnly=yes -o IdentityAgent=none \
+      -o StrictHostKeyChecking=yes -o HostKeyAlgorithms=ssh-ed25519 \
+      -o UserKnownHostsFile=${githubKnownHosts} -o GlobalKnownHostsFile=/dev/null \
+      -i ${githubKeyPath} "$@"
+  '';
 
   python = pkgs.python3.withPackages (ps: [ ps.pyyaml ps.rfc8785 ]);
 
@@ -72,6 +84,19 @@ in
       type = lib.types.bool;
       default = false;
       description = "Запустить службу приёмника на сокете (нужен enable = true).";
+    };
+    github = {
+      enable = lib.mkEnableOption "отдельный GitHub-ключ службы, без запуска доставки";
+      secretsFile = lib.mkOption {
+        type = lib.types.nullOr lib.types.path;
+        default = null;
+        description = "SOPS-файл с github_private_key; закрытый ключ не попадает в Nix store.";
+      };
+      hostKey = lib.mkOption {
+        type = lib.types.str;
+        default = "";
+        description = "Проверенный публичный Ed25519-ключ SSH-сервера github.com.";
+      };
     };
     hostId = lib.mkOption {
       type = lib.types.str;
@@ -133,6 +158,10 @@ in
   config = lib.mkIf cfg.enable {
     assertions = [
       {
+        assertion = !cfg.github.enable || (cfg.github.secretsFile != null && lib.hasPrefix "ssh-ed25519 " cfg.github.hostKey);
+        message = "tsekh.planBridge.github: нужны зашифрованный secretsFile и проверенный hostKey.";
+      }
+      {
         assertion = cfg.codeSrc != null && cfg.codePaths != [ ];
         message = "tsekh.planBridge: нужны codeSrc и codePaths.";
       }
@@ -163,6 +192,19 @@ in
       description = "Служба приёмника запросов плана (WP-561)";
     };
     users.users.${cfg.agentUser}.extraGroups = [ "iwe-plan-writers" ];
+
+    sops.secrets."plan-bridge/github_private_key" = lib.mkIf cfg.github.enable {
+      sopsFile = cfg.github.secretsFile;
+      key = "github_private_key";
+      path = githubKeyPath;
+      owner = "iwe-plan-bridge";
+      group = "iwe-plan-bridge";
+      mode = "0600";
+    };
+    environment.etc."iwe-plan-bridge/git-ssh" = lib.mkIf cfg.github.enable {
+      source = githubSsh;
+      mode = "0555";
+    };
 
     systemd.tmpfiles.rules = [
       "d ${stateDir} 0700 iwe-plan-bridge iwe-plan-bridge -"
