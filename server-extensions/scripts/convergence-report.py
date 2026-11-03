@@ -309,16 +309,6 @@ def render_copies(rows):
     return out
 
 
-def host_id():
-    """Registry host id of THIS machine, from its network name (--host is only a display label).
-
-    CONVERGENCE_HOST_ID overrides the guess."""
-    explicit = os.environ.get("CONVERGENCE_HOST_ID")
-    if explicit:
-        return explicit
-    return "tsekh-1" if socket.gethostname().lower().startswith("tsekh") else "mac"
-
-
 def registry_section(rows, registry_path):
     """Registry view of the same repos; a broken/missing registry is reported, never silent."""
     if repo_registry is None:
@@ -327,7 +317,7 @@ def registry_section(rows, registry_path):
     registry, errors = repo_registry.load(registry_path)
     if registry is None:
         return {"state": "unavailable", "errors": errors}
-    result = repo_registry.compare(registry, [r["repo"] for r in rows], host_id())
+    result = repo_registry.compare(registry, [r["repo"] for r in rows], repo_registry.host_id())
     result.update(state="ok", entries=len(registry["repos"]))
     return result
 

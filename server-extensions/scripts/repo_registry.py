@@ -6,11 +6,13 @@ does NOT hold fetch permissions: those stay in refs-sync-broker.repos.yaml until
 broker is switched (one fact, one place); a `fetch_allowed` key here is a validation
 error, not an ignored field.
 
-Read-only: nothing here touches a working tree, an index or a remote.
+Read-only: nothing here touches a working tree, an index or a remote (reader-copies-sync.py acts on the answers).
 """
 
+import os
 import posixpath
 import re
+import socket
 from pathlib import Path
 
 try:
@@ -19,7 +21,8 @@ except ImportError:  # the caller reports it as "source unavailable", never as "
     yaml = None
 
 REGISTRY_VERSION = 1
-CLASSES = ("canon", "reader", "working", "undecided")
+CLASSES = ("canon", "reader", "service", "working", "undecided")
+DECIDED = ("canon", "reader", "service", "working")
 PURPOSES = ("normal", "copy")
 HOSTS = ("mac", "tsekh-1")
 SCOPES = ("repo", "checkout")
@@ -33,7 +36,7 @@ ENTRY_KEYS = {
     "repo_id", "class", "checkouts", "expected_branch", "upstream",
     "decision_owner", "executor", "mutation_mechanism", "thresholds", "note",
 }
-CHECKOUT_KEYS = {"host", "path", "purpose", "optional", "integrity_evidence"}
+CHECKOUT_KEYS = {"host", "path", "purpose", "optional", "integrity_evidence", "class"}
 REPO_ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")
 
 
@@ -58,6 +61,8 @@ def _validate_checkout(where, checkout, seen):
         errors.append(f"{where}: purpose должен быть одним из {PURPOSES}")
     if not isinstance(checkout.get("optional", False), bool):
         errors.append(f"{where}: optional должен быть булевым")
+    if "class" in checkout and checkout["class"] not in CLASSES:
+        errors.append(f"{where}: class должен быть одним из {CLASSES}")
     return errors
 
 
@@ -94,8 +99,12 @@ def _validate_entry(index, entry, seen_ids, seen_paths):
     if owner is not None:
         if not isinstance(owner, dict) or not owner.get("ref") or owner.get("scope") not in SCOPES:
             errors.append(f"{label}: decision_owner = null или {{ref, scope: {SCOPES}}}")
-    elif entry.get("class") in ("canon", "reader", "working"):
-        errors.append(f"{label}: класс {entry.get('class')} без записанного решения (decision_owner); неопределённое — class: undecided")
+    else:
+        # A per-checkout class is a decision too: it needs the same recorded owner as the entry class.
+        listed = checkouts if isinstance(checkouts, list) else []
+        classes = [entry.get("class")] + [c.get("class") for c in listed if isinstance(c, dict)]
+        for cls in sorted({c for c in classes if isinstance(c, str) and c in DECIDED}):
+            errors.append(f"{label}: класс {cls} без записанного решения (decision_owner); неопределённое — class: undecided")
     thresholds = entry.get("thresholds") or {}
     if not isinstance(thresholds, dict):
         errors.append(f"{label}: thresholds должен быть словарём")
@@ -106,6 +115,29 @@ def _validate_entry(index, entry, seen_ids, seen_paths):
             elif value is not None and (isinstance(value, bool) or not isinstance(value, int) or value < 0):
                 errors.append(f"{label}: порог {key} = null или целое >= 0 (null = не задан, не ноль)")
     return errors
+
+
+def host_id():
+    """Registry host id of THIS machine, from its network name. CONVERGENCE_HOST_ID overrides the guess."""
+    explicit = os.environ.get("CONVERGENCE_HOST_ID")
+    if explicit:
+        return explicit
+    return "tsekh-1" if socket.gethostname().lower().startswith("tsekh") else "mac"
+
+
+def checkout_class(entry, checkout):
+    """Effective class of one checkout: its own `class` overrides the entry's (roles differ per host)."""
+    return checkout.get("class", entry["class"])
+
+
+def checkouts_of_class(registry, cls, host_id):
+    """(entry, checkout) pairs on `host_id` whose effective class is `cls`."""
+    return [
+        (entry, checkout)
+        for entry in registry["repos"]
+        for checkout in entry["checkouts"]
+        if checkout["host"] == host_id and checkout_class(entry, checkout) == cls
+    ]
 
 
 def validate(data):

@@ -127,6 +127,57 @@ class LoadTest(unittest.TestCase):
         self.assertEqual(errors, [])
         self.assertEqual([e["repo_id"] for e in registry["repos"]][0], "DS-my-strategy")
 
+    def test_readers_are_fetched(self):
+        """A reader copy without broker fetch rights would be 'current' against a stale ref forever."""
+        import yaml
+
+        registry, _ = repo_registry.load(SCRIPTS / "repo-convergence.registry.yaml")
+        broker = yaml.safe_load((SCRIPTS / "refs-sync-broker.repos.yaml").read_text(encoding="utf-8"))
+        fetched = {r["path"]: r for r in broker["repos"]}
+        for host in repo_registry.HOSTS:
+            for entry, checkout in repo_registry.checkouts_of_class(registry, "reader", host):
+                rule = fetched.get(checkout["path"])
+                self.assertIsNotNone(rule, checkout["path"])
+                remote, _, _ = entry["upstream"].partition("/")
+                self.assertEqual(rule["remote"], remote, checkout["path"])
+                # the broker must fill exactly the ref the reader moves to (main vs master etc.)
+                self.assertTrue(rule["refspec"].endswith(":refs/remotes/" + entry["upstream"]), checkout["path"])
+
+    def test_bad_types_report(self):
+        """Wrong types in a decided entry are reported, never raised (load() must not crash its callers)."""
+        errors = broken(lambda d: d["repos"][1].update(checkouts=5))
+        self.assertTrue(any("checkouts — непустой список" in e for e in errors))
+        errors = broken(lambda d: d["repos"][1]["checkouts"][0].update({"class": ["reader"]}))
+        self.assertTrue(any("class должен быть одним из" in e for e in errors))
+
+
+class CheckoutClassTest(unittest.TestCase):
+    def with_tsekh_role(self, cls):
+        data = copy.deepcopy(VALID)
+        data["repos"][0]["class"] = "reader"
+        data["repos"][0]["checkouts"][1]["class"] = cls
+        return data
+
+    def test_checkout_class_overrides_entry_class_per_host(self):
+        data = self.with_tsekh_role("service")
+        self.assertEqual(repo_registry.validate(data), [])
+        self.assertEqual([c["path"] for _, c in repo_registry.checkouts_of_class(data, "reader", "mac")], ["canon"])
+        self.assertEqual(repo_registry.checkouts_of_class(data, "reader", "tsekh-1"), [])
+        self.assertEqual([c["host"] for _, c in repo_registry.checkouts_of_class(data, "service", "tsekh-1")],
+                         ["tsekh-1"])
+
+    def test_unknown_checkout_class_is_rejected(self):
+        errors = repo_registry.validate(self.with_tsekh_role("mirror"))
+        self.assertEqual(len(errors), 1)
+        self.assertIn("class должен быть одним из", errors[0])
+
+    def test_decided_checkout_class_needs_a_recorded_decision(self):
+        data = copy.deepcopy(VALID)
+        data["repos"][1]["checkouts"][0]["class"] = "service"  # entry 'root' is undecided, no owner
+        errors = repo_registry.validate(data)
+        self.assertEqual(len(errors), 1)
+        self.assertIn("класс service без записанного решения", errors[0])
+
 
 class CompareTest(unittest.TestCase):
     def test_four_separate_answers_on_mac(self):

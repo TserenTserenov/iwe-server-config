@@ -18,3 +18,53 @@ repos:
     optional: true  # On tsekh-1 the root is a Nix-managed mirror, not a Git repo.
     remote: origin
     refspec: "+refs/heads/main:refs/remotes/origin/main"
+  # WP-539, решение пилота 03.11: читательские копии (класс reader в repo-convergence.registry.yaml).
+  # Брокер только получает ссылки; рабочее дерево перематывает scripts/reader-copies-sync.py.
+  - path: PACK-MIM
+    remote: origin
+    refspec: "+refs/heads/main:refs/remotes/origin/main"
+  - path: PACK-agent-rules
+    remote: origin
+    refspec: "+refs/heads/main:refs/remotes/origin/main"
+  - path: PACK-autonomous-agents
+    remote: origin
+    refspec: "+refs/heads/main:refs/remotes/origin/main"
+  - path: PACK-digital-platform
+    remote: origin
+    refspec: "+refs/heads/main:refs/remotes/origin/main"
+  - path: PACK-ecosystem
+    remote: origin
+    refspec: "+refs/heads/main:refs/remotes/origin/main"
+  - path: PACK-engineering-management
+    remote: origin
+    refspec: "+refs/heads/main:refs/remotes/origin/main"
+  - path: PACK-personal
+    remote: origin
+    refspec: "+refs/heads/main:refs/remotes/origin/main"
+  - path: PACK-rhetoric
+    remote: origin
+    refspec: "+refs/heads/main:refs/remotes/origin/main"
+  - path: PACK-systems-art
+    remote: origin
+    refspec: "+refs/heads/main:refs/remotes/origin/main"
+  - path: PACK-verification
+    remote: origin
+    refspec: "+refs/heads/main:refs/remotes/origin/main"
+  - path: FPF
+    remote: origin
+    refspec: "+refs/heads/main:refs/remotes/origin/main"
+  - path: SPF
+    remote: origin
+    refspec: "+refs/heads/main:refs/remotes/origin/main"
+  - path: ZP
+    optional: true  # Mac only
+    remote: origin
+    refspec: "+refs/heads/main:refs/remotes/origin/main"
+  - path: DS-IT-systems/SystemsSchool_bot
+    optional: true  # Mac only
+    remote: origin
+    refspec: "+refs/heads/main:refs/remotes/origin/main"
+  - path: DS-IT-systems/aisystant
+    optional: true  # Mac only
+    remote: origin
+    refspec: "+refs/heads/master:refs/remotes/origin/master"

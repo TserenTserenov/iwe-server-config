@@ -8,13 +8,19 @@
 #   * repo-registry/repos.md          — в какой организации GitHub живёт репозиторий и куда он должен переехать.
 #
 # Правила:
-#   * class: undecided — решение пилота не принято (это явное значение, не пропуск). canon / reader / working
-#     допустимы только с decision_owner = {ref, scope}; смена класса — решение пилота.
+#   * class: undecided — решение пилота не принято (это явное значение, не пропуск). canon / reader / service /
+#     working допустимы только с decision_owner = {ref, scope}; смена класса — решение пилота.
+#     reader — копия только читается, её перематывает scripts/reader-copies-sync.py (чистую, ff-only, по уже
+#     полученной брокером ссылке); service — копию двигает служба перед запуском (проверенная синхронизация);
+#     working — только видимость в сводке, никакой автоматической перемотки.
+#   * Роль копии может отличаться по хостам: поле class у checkout перекрывает class записи.
 #   * Копия на хосте — path относительно корня IWE; purpose: copy — каталог-копия, не сходится с upstream, но
 #     присутствие и ошибки чтения остаются видимыми.
 #   * Пороги (thresholds): null = не задан (не ноль). Начало отсчёта у каждого своё; «неизвестно» показывается как неизвестно.
 #   * Присутствие в этом файле НЕ даёт права на fetch и не включает копию в брокер.
-#   * Обход сводки видит корень и каталоги первого уровня: вложенные репозитории не видны, полнота не заявляется.
+#   * Обход сводки видит корень и вложенные каталоги до глубины 2 (DS-MCP/*, DS-IT-systems/*).
+#   * Читательская копия должна быть и в refs-sync-broker.repos.yaml (иначе перематывать не на что) —
+#     это проверяет тест test_readers_are_fetched (tests/test_repo_registry.py).
 version: 1
 repos:
   - repo_id: DS-my-strategy
@@ -50,3 +56,150 @@ repos:
     executor: null
     mutation_mechanism: "ожидает Б4 (общий замок); на Цехе корень — зеркало Nix, не git-копия"
     note: "постоянного исполнителя синхронизации корня Мака нет; владелец решения — РП-539, механизм после Б4"
+  - repo_id: PACK-MIM
+    class: reader
+    checkouts:
+      - {host: mac, path: PACK-MIM}
+      - {host: tsekh-1, path: PACK-MIM, class: service}
+    expected_branch: main
+    upstream: origin/main
+    decision_owner: {ref: "решение пилота 03.11.2026, пир-сессия 2026-11-03-12-wp539-sync-processes-audit (proposals.md)", scope: checkout}
+    executor: "Мак — reader-copies-sync (launchd); Цех — ночной диспетчер перематывает источники индекса знаний (iwe-verified-sync)"
+    mutation_mechanism: "Мак: ff-only чистой копии; Цех: конвейер знаний коммитит, push-ahead отправляет"
+  - repo_id: PACK-agent-rules
+    class: reader
+    checkouts:
+      - {host: mac, path: PACK-agent-rules}
+      - {host: tsekh-1, path: PACK-agent-rules, class: service}
+    expected_branch: main
+    upstream: origin/main
+    decision_owner: {ref: "решение пилота 03.11.2026, пир-сессия 2026-11-03-12-wp539-sync-processes-audit (proposals.md)", scope: checkout}
+    executor: "Мак — reader-copies-sync (launchd); Цех — ночной диспетчер перематывает источники индекса знаний (iwe-verified-sync)"
+    mutation_mechanism: "Мак: ff-only чистой копии; Цех: конвейер знаний коммитит, push-ahead отправляет"
+  - repo_id: PACK-autonomous-agents
+    class: reader
+    checkouts:
+      - {host: mac, path: PACK-autonomous-agents}
+      - {host: tsekh-1, path: PACK-autonomous-agents, class: service}
+    expected_branch: main
+    upstream: origin/main
+    decision_owner: {ref: "решение пилота 03.11.2026, пир-сессия 2026-11-03-12-wp539-sync-processes-audit (proposals.md)", scope: checkout}
+    executor: "Мак — reader-copies-sync (launchd); Цех — ночной диспетчер перематывает источники индекса знаний (iwe-verified-sync)"
+    mutation_mechanism: "Мак: ff-only чистой копии; Цех: конвейер знаний коммитит, push-ahead отправляет"
+  - repo_id: PACK-digital-platform
+    class: reader
+    checkouts:
+      - {host: mac, path: PACK-digital-platform}
+      - {host: tsekh-1, path: PACK-digital-platform, class: service}
+    expected_branch: main
+    upstream: origin/main
+    decision_owner: {ref: "решение пилота 03.11.2026, пир-сессия 2026-11-03-12-wp539-sync-processes-audit (proposals.md)", scope: checkout}
+    executor: "Мак — reader-copies-sync (launchd); Цех — ночной диспетчер перематывает источники индекса знаний (iwe-verified-sync)"
+    mutation_mechanism: "Мак: ff-only чистой копии; Цех: конвейер знаний коммитит, push-ahead отправляет"
+  - repo_id: PACK-ecosystem
+    class: reader
+    checkouts:
+      - {host: mac, path: PACK-ecosystem}
+      - {host: tsekh-1, path: PACK-ecosystem, class: service}
+    expected_branch: main
+    upstream: origin/main
+    decision_owner: {ref: "решение пилота 03.11.2026, пир-сессия 2026-11-03-12-wp539-sync-processes-audit (proposals.md)", scope: checkout}
+    executor: "Мак — reader-copies-sync (launchd); Цех — ночной диспетчер перематывает источники индекса знаний (iwe-verified-sync)"
+    mutation_mechanism: "Мак: ff-only чистой копии; Цех: конвейер знаний коммитит, push-ahead отправляет"
+  - repo_id: PACK-engineering-management
+    class: reader
+    checkouts:
+      - {host: mac, path: PACK-engineering-management}
+      - {host: tsekh-1, path: PACK-engineering-management, class: service}
+    expected_branch: main
+    upstream: origin/main
+    decision_owner: {ref: "решение пилота 03.11.2026, пир-сессия 2026-11-03-12-wp539-sync-processes-audit (proposals.md)", scope: checkout}
+    executor: "Мак — reader-copies-sync (launchd); Цех — ночной диспетчер перематывает источники индекса знаний (iwe-verified-sync)"
+    mutation_mechanism: "Мак: ff-only чистой копии; Цех: конвейер знаний коммитит, push-ahead отправляет"
+  - repo_id: PACK-rhetoric
+    class: reader
+    checkouts:
+      - {host: mac, path: PACK-rhetoric}
+      - {host: tsekh-1, path: PACK-rhetoric, class: service}
+    expected_branch: main
+    upstream: origin/main
+    decision_owner: {ref: "решение пилота 03.11.2026, пир-сессия 2026-11-03-12-wp539-sync-processes-audit (proposals.md)", scope: checkout}
+    executor: "Мак — reader-copies-sync (launchd); Цех — ночной диспетчер перематывает источники индекса знаний (iwe-verified-sync)"
+    mutation_mechanism: "Мак: ff-only чистой копии; Цех: конвейер знаний коммитит, push-ahead отправляет"
+  - repo_id: PACK-systems-art
+    class: reader
+    checkouts:
+      - {host: mac, path: PACK-systems-art}
+      - {host: tsekh-1, path: PACK-systems-art, class: service}
+    expected_branch: main
+    upstream: origin/main
+    decision_owner: {ref: "решение пилота 03.11.2026, пир-сессия 2026-11-03-12-wp539-sync-processes-audit (proposals.md)", scope: checkout}
+    executor: "Мак — reader-copies-sync (launchd); Цех — ночной диспетчер перематывает источники индекса знаний (iwe-verified-sync)"
+    mutation_mechanism: "Мак: ff-only чистой копии; Цех: конвейер знаний коммитит, push-ahead отправляет"
+  - repo_id: PACK-verification
+    class: reader
+    checkouts:
+      - {host: mac, path: PACK-verification}
+      - {host: tsekh-1, path: PACK-verification, class: service}
+    expected_branch: main
+    upstream: origin/main
+    decision_owner: {ref: "решение пилота 03.11.2026, пир-сессия 2026-11-03-12-wp539-sync-processes-audit (proposals.md)", scope: checkout}
+    executor: "Мак — reader-copies-sync (launchd); Цех — ночной диспетчер перематывает источники индекса знаний (iwe-verified-sync)"
+    mutation_mechanism: "Мак: ff-only чистой копии; Цех: конвейер знаний коммитит, push-ahead отправляет"
+  - repo_id: PACK-personal
+    class: reader
+    checkouts:
+      - {host: mac, path: PACK-personal}
+      - {host: tsekh-1, path: PACK-personal, class: working}
+    expected_branch: main
+    upstream: origin/main
+    decision_owner: {ref: "решение пилота 03.11.2026, пир-сессия 2026-11-03-12-wp539-sync-processes-audit (proposals.md)", scope: checkout}
+    executor: "Мак — reader-copies-sync (launchd); Цех — нет (в индекс идёт PACK-personal-index)"
+    mutation_mechanism: "Мак: ff-only чистой копии"
+  - repo_id: FPF
+    class: reader
+    checkouts:
+      - {host: mac, path: FPF}
+      - {host: tsekh-1, path: FPF, class: service}
+    expected_branch: main
+    upstream: origin/main
+    decision_owner: {ref: "решение пилота 03.11.2026, пир-сессия 2026-11-03-12-wp539-sync-processes-audit (proposals.md)", scope: checkout}
+    executor: "Мак — reader-copies-sync (launchd); Цех — ночной диспетчер перематывает источники индекса знаний (iwe-verified-sync)"
+    mutation_mechanism: "ff-only чистой копии"
+  - repo_id: SPF
+    class: reader
+    checkouts:
+      - {host: mac, path: SPF}
+      - {host: tsekh-1, path: SPF, class: service}
+    expected_branch: main
+    upstream: origin/main
+    decision_owner: {ref: "решение пилота 03.11.2026, пир-сессия 2026-11-03-12-wp539-sync-processes-audit (proposals.md)", scope: checkout}
+    executor: "Мак — reader-copies-sync (launchd); Цех — ночной диспетчер перематывает источники индекса знаний (iwe-verified-sync)"
+    mutation_mechanism: "ff-only чистой копии"
+  - repo_id: ZP
+    class: reader
+    checkouts:
+      - {host: mac, path: ZP}
+    expected_branch: main
+    upstream: origin/main
+    decision_owner: {ref: "решение пилота 03.11.2026, пир-сессия 2026-11-03-12-wp539-sync-processes-audit (proposals.md)", scope: checkout}
+    executor: "Мак — reader-copies-sync (launchd)"
+    mutation_mechanism: "ff-only чистой копии"
+  - repo_id: SystemsSchool_bot
+    class: reader
+    checkouts:
+      - {host: mac, path: DS-IT-systems/SystemsSchool_bot}
+    expected_branch: main
+    upstream: origin/main
+    decision_owner: {ref: "решение пилота 03.11.2026, пир-сессия 2026-11-03-12-wp539-sync-processes-audit (proposals.md)", scope: checkout}
+    executor: "Мак — reader-copies-sync (launchd)"
+    mutation_mechanism: "ff-only чистой копии"
+  - repo_id: aisystant
+    class: reader
+    checkouts:
+      - {host: mac, path: DS-IT-systems/aisystant}
+    expected_branch: master
+    upstream: origin/master
+    decision_owner: {ref: "решение пилота 03.11.2026, пир-сессия 2026-11-03-12-wp539-sync-processes-audit (proposals.md)", scope: checkout}
+    executor: "Мак — reader-copies-sync (launchd)"
+    mutation_mechanism: "ff-only чистой копии"
