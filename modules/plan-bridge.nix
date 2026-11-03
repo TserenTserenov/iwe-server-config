@@ -262,6 +262,20 @@ in
     };
     users.users.${cfg.agentUser}.extraGroups = [ "iwe-plan-writers" ];
 
+    # Приёмник может только запустить один проход доставки. Другие юниты,
+    # остановка/перезапуск и изменение конфигурации этим правилом не разрешены.
+    security.polkit.enable = lib.mkIf cfg.delivery.enable true;
+    security.polkit.extraConfig = lib.mkIf cfg.delivery.enable ''
+      polkit.addRule(function(action, subject) {
+        if (subject.user === "iwe-plan-bridge" &&
+            action.id === "org.freedesktop.systemd1.manage-units" &&
+            action.lookup("unit") === "plan-event-bridge.service" &&
+            action.lookup("verb") === "start") {
+          return polkit.Result.YES;
+        }
+      });
+    '';
+
     sops.secrets."plan-bridge/github_private_key" = lib.mkIf cfg.github.enable {
       sopsFile = cfg.github.secretsFile;
       key = "github_private_key";
@@ -319,6 +333,7 @@ in
       wantedBy = [ "multi-user.target" ];
       requires = [ "iwe-plan-bridge-key.service" ];
       after = [ "iwe-plan-bridge-key.service" ];
+      path = lib.optionals cfg.delivery.enable [ pkgs.systemd ];
       environment.PYTHONDONTWRITEBYTECODE = "1";
       # Отказ адаптера (код 2: хост не готов) не лечится перезапуском; прочие
       # сбои повторяются не более пяти раз за пять минут, затем юнит становится
@@ -334,7 +349,7 @@ in
         Group = "iwe-plan-writers";
         RuntimeDirectory = "iwe-plan-bridge";
         RuntimeDirectoryMode = "0750";
-        ExecStart = "${python}/bin/python ${code}/scripts/plan-event-receiver.py --stream-dir ${stateDir}/stream --socket /run/iwe-plan-bridge/receiver.sock --group iwe-plan-writers ${admitArgs}";
+        ExecStart = "${python}/bin/python ${code}/scripts/plan-event-receiver.py --stream-dir ${stateDir}/stream --socket /run/iwe-plan-bridge/receiver.sock --group iwe-plan-writers ${admitArgs}${lib.optionalString cfg.delivery.enable " --kick-unit plan-event-bridge.service"}";
         Restart = "on-failure";
         RestartSec = 5;
         ReadWritePaths = [ stateDir ];

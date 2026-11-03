@@ -56,8 +56,8 @@ in
   # WP-561 Ф55: приёмник запросов плана (К12, решение пилота 30.10: защита от
   # ошибок и подмены имени между своими агентами, умысел агента вне модели).
   # Включены пользователь, каталоги, конфиг хоста, ключ и служба приёмника.
-  # Доставка в Git НЕ включена: подготовка клонов разрешена, таймер отключён
-  # до проверки готовности и утверждения обновлённой версии правил.
+  # Включение доставки утверждено пилотом 03.11: «Да, утвердить и включить».
+  # Подготовка, готовность и соответствие свежей базе проверены.
   # Копия кода — vendor/plan-bridge/code, происхождение — vendor/plan-bridge/SOURCE.
   tsekh.planBridge = let
     codePaths = [
@@ -107,7 +107,7 @@ in
     };
     delivery = {
       prepare = true;
-      enable = false;
+      enable = true;
       repositoryUrl = "git@github.com:TserenTserenov/DS-my-strategy.git";
     };
     hostId = values.hostName;
@@ -115,9 +115,11 @@ in
     inherit codePaths producersPath limitsPath;
     rulesPaths = codePaths ++ [ producersPath limitsPath ];
     admit = [ "tsekh-agent-channel" ];
-    # Утверждено пилотом 02.11.2026 (поручение «сделай сам»): версия правил на ревизии
-    # DS-my-strategy f28e33931b (код моста + producers.json + limits.json, лимит 9).
-    approvedRulesVersion = "plan-rules/1:10ae907bcee6a40c5997bc19a4653b264c80afa17db8fc90fc2b5e2d61df7817";
+    # Утверждено пилотом 03.11: «Да, утвердить и включить».
+    # Готовность проверена на DS 65d857ea1138: 600 минут 03.11, другие даты не заданы.
+    approvedRulesVersion = "plan-rules/1:7c618e504c6cf430fd9f49ed03c4911af35bb1a890112039f4f1afb69d1a03d8";
+    # П6: писатель пробы снят в Git и в действующих копиях Мака/Цеха; перенос принят.
+    intraCommitOrderTrusted = true;
   };
 
   # uid агентов закреплён явно: на сервере он уже 1000 (проверено 30.10, uid-map
