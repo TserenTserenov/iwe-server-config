@@ -31,7 +31,7 @@ done <<< "$sourced"
 # detection is the subject of the template's own regression test (#1431).
 help_out=$(IWE_DIR="$TMP_DIR" bash "$SCRIPT" --help 2>&1) || fail "--help exited non-zero: $help_out"
 case "$help_out" in
-  *"Маршрутизатор задач IWE"*) ;;
+  *"Usage:"*) ;;
   *) fail "--help did not print the usage header: $help_out" ;;
 esac
 
