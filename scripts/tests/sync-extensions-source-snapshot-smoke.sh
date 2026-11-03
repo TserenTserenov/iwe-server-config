@@ -22,12 +22,14 @@ mkdir -p \
   "$SOURCE/.claude/scripts" \
   "$SOURCE/.claude/lib" \
   "$SOURCE/.claude/rules" \
-  "$SOURCE/.claude/rules-lazy"
+  "$SOURCE/.claude/rules-lazy" \
+  "$SOURCE/.claude/agents"
 printf 'snapshot-script\n' > "$SOURCE/scripts/from-snapshot.sh"
 printf 'snapshot-extension\n' > "$SOURCE/extensions/from-snapshot.txt"
 printf 'snapshot-skill\n' > "$SOURCE/.claude/skills/demo/SKILL.md"
 printf 'snapshot-hook\n' > "$SOURCE/.claude/hooks/hook.sh"
 printf 'snapshot-claude-script\n' > "$SOURCE/.claude/scripts/tool.sh"
+printf 'snapshot-subagent\n' > "$SOURCE/.claude/agents/demo-agent.md"
 printf 'snapshot-instructions\n' > "$SOURCE/CLAUDE.md"
 printf 'snapshot-agent-instructions\n' > "$SOURCE/AGENTS.md"
 printf 'snapshot-agent-blocks\n' > "$SOURCE/AGENTS-agent-blocks.md"
@@ -37,6 +39,7 @@ git -C "$SOURCE" config user.email test@example.invalid
 git -C "$SOURCE" config user.name test
 git -C "$SOURCE" add -- scripts/from-snapshot.sh extensions/from-snapshot.txt \
   .claude/skills/demo/SKILL.md .claude/hooks/hook.sh .claude/scripts/tool.sh \
+  .claude/agents/demo-agent.md \
   CLAUDE.md AGENTS.md AGENTS-agent-blocks.md
 git -C "$SOURCE" commit -qm fixture
 EXPECTED_SHA=$(git -C "$SOURCE" rev-parse HEAD)
@@ -61,6 +64,7 @@ test "$(cat "$FIXTURE_REPO/server-extensions/extensions/from-snapshot.txt")" = s
 test "$(cat "$FIXTURE_REPO/server-extensions/claude-skills/demo/SKILL.md")" = snapshot-skill
 test "$(cat "$FIXTURE_REPO/server-extensions/claude-hooks/hook.sh")" = snapshot-hook
 test "$(cat "$FIXTURE_REPO/server-extensions/claude-scripts/tool.sh")" = snapshot-claude-script
+test "$(cat "$FIXTURE_REPO/server-extensions/claude-agents/demo-agent.md")" = snapshot-subagent
 test "$(cat "$FIXTURE_REPO/server-extensions/CLAUDE.md")" = snapshot-instructions
 test "$(cat "$FIXTURE_REPO/server-extensions/AGENTS.md")" = snapshot-agent-instructions
 test "$(cat "$FIXTURE_REPO/server-extensions/AGENTS-agent-blocks.md")" = snapshot-agent-blocks

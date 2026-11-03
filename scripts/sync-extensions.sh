@@ -16,6 +16,7 @@
 #   ~/IWE/.claude/lib/                                        → server-extensions/claude-lib/
 #   ~/IWE/.claude/rules/                                      → server-extensions/claude-rules/
 #   ~/IWE/.claude/rules-lazy/                                 → server-extensions/claude-rules-lazy/
+#   ~/IWE/.claude/agents/                                     → server-extensions/claude-agents/
 #   memory/*.md с explicit delivery: managed + delivery_authority: root-repository
 #                                                              → server-extensions/memory/ (см. classify-memory.py)
 #
@@ -34,7 +35,7 @@ fi
 
 echo "Синхронизация в $DST/..."
 
-mkdir -p "$DST"/{scripts,extensions,claude-skills,claude-scripts,claude-hooks,claude-lib,claude-rules,claude-rules-lazy,memory}
+mkdir -p "$DST"/{scripts,extensions,claude-skills,claude-scripts,claude-hooks,claude-lib,claude-rules,claude-rules-lazy,claude-agents,memory}
 
 # ROOT_COMMIT_SHA — читается iwe-extensions-sync.nix activation script для
 # iwe-release.json (version-handshake, WP-484). Пишется здесь, не в Nix,
@@ -82,6 +83,10 @@ rsync -a --delete "$SOURCE_ROOT/.claude/lib/"              "$DST/claude-lib/"
 # .claude/rules/{formatting,distinctions}.md и .claude/rules-lazy/*.md.
 rsync -a --delete "$SOURCE_ROOT/.claude/rules/"            "$DST/claude-rules/"
 rsync -a --delete "$SOURCE_ROOT/.claude/rules-lazy/"       "$DST/claude-rules-lazy/"
+# WP-5 Ф69 (03.11.2026): subagent definitions were never delivered -- tsekh-1
+# kept wp-sync-actualizer.md from 17.09, so the inbox step added to it on
+# 02.11 (commit 26343a0 in iwe-local-config) never reached the server.
+rsync -a --delete "$SOURCE_ROOT/.claude/agents/"           "$DST/claude-agents/"
 
 # Memory: classify-memory.py решает, что managed (см. модуль для критерия
 # и обоснования — hardcoded-список из 9 имён был тем же классом дыры, что

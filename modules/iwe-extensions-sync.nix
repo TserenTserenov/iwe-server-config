@@ -52,6 +52,7 @@ in
       "d /home/${cfg.user}/IWE/.claude/lib 0755 ${cfg.user} users -"
       "d /home/${cfg.user}/IWE/.claude/rules 0755 ${cfg.user} users -"
       "d /home/${cfg.user}/IWE/.claude/rules-lazy 0755 ${cfg.user} users -"
+      "d /home/${cfg.user}/IWE/.claude/agents 0755 ${cfg.user} users -"
       "d /home/${cfg.user}/IWE/extensions 0755 ${cfg.user} users -"
       "d /home/${cfg.user}/IWE/scripts 0755 ${cfg.user} users -"
       "d /home/${cfg.user}/.claude/projects/-home-${cfg.user}-IWE/memory 0755 ${cfg.user} users -"
@@ -113,6 +114,15 @@ in
         ${pkgs.rsync}/bin/rsync -a --checksum --delete \
           ${src}/claude-rules-lazy/ \
           /home/${cfg.user}/IWE/.claude/rules-lazy/
+
+        # WP-5 Ф69 (03.11.2026): subagent definitions (.claude/agents) were never
+        # delivered; the server kept a 17.09 copy of wp-sync-actualizer.md.
+        # Guarded: older server-extensions snapshots have no claude-agents/ yet.
+        if [ -d ${src}/claude-agents ]; then
+          ${pkgs.rsync}/bin/rsync -a --checksum --delete \
+            ${src}/claude-agents/ \
+            /home/${cfg.user}/IWE/.claude/agents/
+        fi
 
         # Claude project-key на сервере кодирует Linux-путь (-home-...), не
         # macOS-путь источника (-Users-...) — эти два префикса разные строки,
