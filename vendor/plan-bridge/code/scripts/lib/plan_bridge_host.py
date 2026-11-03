@@ -33,7 +33,7 @@ import sysconfig
 import yaml
 
 import plan_event_bridge as bridge
-from plan_bridge_allocation import AllocationPlanValidator, _project_checked_history
+from plan_bridge_allocation import AllocationPlanValidator, PersonalTimeBudget
 from plan_bridge_decisions import BridgeError
 
 DEFAULT_CONFIG_PATH = Path("/etc/iwe-plan-bridge/host.json")
@@ -72,7 +72,6 @@ _CONFIG_FIELDS = frozenset(
         "code_paths",
     }
 )
-_ACTIVE_STATES = frozenset({"confirmed", "started"})
 
 
 class HostAdapterError(Exception):
@@ -251,8 +250,12 @@ def _load_module(name):
     if module is None:
         try:
             module = importlib.import_module(name)
-        except (ImportError, SyntaxError) as exc:
-            raise HostAdapterError(f"code module cannot be loaded: {name}") from exc
+        except Exception as exc:
+            # Import executes module code, so failures are not limited to import
+            # or syntax errors. Keep process-control exceptions interruptible.
+            raise HostAdapterError(
+                f"code module cannot be loaded: {name} ({type(exc).__name__})"
+            ) from exc
     return module
 
 
@@ -457,12 +460,11 @@ def _read_blob_json(reader, commit, path, schema):
 
 def load_limits(reader, commit, path):
     """П7. Missing or invalid limits stop the stream; no model capacity is used."""
-    value = _read_blob_json(reader, commit, path, "plan-limits/1")
-    limits = {"max_active_allocations": value.get("max_active_allocations")}
-    if set(value) != {"schema", *limits} or not all(
-        type(item) is int and item >= 1 for item in limits.values()
-    ):
+    value = _read_blob_json(reader, commit, path, "plan-limits/2")
+    if set(value) != {"schema", "timezone", "daily_personal_minutes"}:
         raise BridgeError("BUDGET_VALIDATOR_UNAVAILABLE", "plan limits are invalid")
+    limits = {key: value[key] for key in ("timezone", "daily_personal_minutes")}
+    PersonalTimeBudget(limits["timezone"], limits["daily_personal_minutes"])
     return limits
 
 
@@ -667,21 +669,15 @@ class HostPlanValidator:
         self.rules_version = rules_version
         self._producers = producers
 
-        def budget(candidate, view):
-            # Plan integrity (DR-03 transitions) is checked by the inner validator;
-            # capacity is the number of resources currently held. Requests that do
-            # not claim a resource are not capacity-limited (DR-06, pilot's choice).
-            if candidate["event_type"] != "allocation_confirmed":
-                return True
-            active = sum(
-                state.state in _ACTIVE_STATES
-                for state in _project_checked_history(view).values()
-            )
-            return active < limits["max_active_allocations"]
-
         self._inner = AllocationPlanValidator(
-            rules_version=rules_version, whole_plan_budget=budget
+            rules_version=rules_version,
+            whole_plan_budget=PersonalTimeBudget(
+                limits["timezone"], limits["daily_personal_minutes"]
+            ),
         )
+
+    def check_history(self, view):
+        self._inner.check_history(view)
 
     def validate(self, request, view):
         allowed = self._producers.get(request["producer_id"])

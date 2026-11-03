@@ -5,9 +5,9 @@
 # Что даёт при включении: служебный пользователь и группа записи, каталоги и
 # права, конфиг хоста для адаптера моста, ключ службы (создаётся один раз при
 # первом старте), код моста из хранилища Nix (владелец root, не пишется агентами)
-# и службу приёмника на локальном сокете. Доставка в Git (мост, таймер) здесь
-# НЕ определена. Отдельный GitHub-ключ можно включить для проверки доступа
-# до запуска доставки (DR-06, п.5).
+# и службу приёмника на локальном сокете. Подготовка клонов и включение
+# доставки в Git заданы раздельно: таймер включают после проверки готовности
+# и утверждения версии правил (DR-06, п.5).
 #
 # Модель угроз (решение пилота 30.10, DR-06 п.5а): защита от ошибок и подмены
 # имени между своими агентами. Умысел агента вне модели: у агентов на Цехе есть
@@ -28,6 +28,12 @@ let
   stateDir = "/var/lib/iwe-plan-bridge";
   keyPath = "${stateDir}/producer.key";
   githubKeyPath = "${stateDir}/github_ed25519";
+  workspaceDir = "${stateDir}/workspace";
+  readerRepo = "${workspaceDir}/DS-my-strategy";
+  publisherRepo = "${stateDir}/publisher/DS-my-strategy";
+  emptyGitTemplate = pkgs.runCommand "iwe-plan-bridge-git-template" { } ''
+    mkdir -p $out
+  '';
   githubKnownHosts = pkgs.writeText "iwe-plan-bridge-github-known-hosts" ''
     github.com ${cfg.github.hostKey}
   '';
@@ -72,6 +78,52 @@ let
       ${pkgs.coreutils}/bin/mv ${keyPath}.new ${keyPath}
     fi
   '';
+
+  provisionScript = pkgs.writeShellScript "iwe-plan-bridge-provision" ''
+    set -euo pipefail
+    umask 077
+    mkdir -p ${workspaceDir} ${stateDir}/publisher
+    exec 9>${stateDir}/.provision.lock
+    flock -x 9
+    prepare_clone() {
+      local target="$1" status
+      if [ ! -e "$target" ]; then
+        git clone --template=${emptyGitTemplate} --branch main \
+          ${lib.escapeShellArg cfg.delivery.repositoryUrl} "$target"
+      fi
+      test -d "$target/.git"
+      test ! -L "$target"
+      test ! -L "$target/.git"
+      test "$(git -C "$target" remote get-url origin)" = ${lib.escapeShellArg cfg.delivery.repositoryUrl}
+      test "$(git -C "$target" remote get-url --push --all origin)" = ${lib.escapeShellArg cfg.delivery.repositoryUrl}
+      test "$(git -C "$target" branch --show-current)" = main
+      test "$(git -C "$target" rev-parse --is-shallow-repository)" = false
+      status=$(git -C "$target" status --porcelain=v1 --untracked-files=all)
+      test -z "$status"
+      ${python}/bin/python ${code}/scripts/lib/ledger-source-snapshot.py check-checkout "$target"
+      # Повтор после прерванного clone/config должен завершать настройку.
+      git -C "$target" config user.name "IWE plan bridge"
+      git -C "$target" config user.email "plan-bridge@localhost"
+    }
+    prepare_clone ${readerRepo}
+    prepare_clone ${publisherRepo}
+  '';
+
+  deliveryEnvironment = {
+    HOME = stateDir;
+    IWE_ROOT = workspaceDir;
+    IWE_WORKSPACE = workspaceDir;
+    IWE_GOVERNANCE_REPO = "DS-my-strategy";
+    GIT_CONFIG_NOSYSTEM = "1";
+    GIT_CONFIG_GLOBAL = "/dev/null";
+    GIT_SSH = "${configDir}/git-ssh";
+    GIT_SSH_VARIANT = "ssh";
+    PYTHONPYCACHEPREFIX = "/var/cache/iwe-plan-bridge";
+  };
+  deliveryPath = [
+    pkgs.bash pkgs.coreutils pkgs.findutils pkgs.git pkgs.gnugrep
+    pkgs.gnused pkgs.gawk pkgs.jq pkgs.util-linux pkgs.inetutils pkgs.procps python
+  ];
 in
 {
   options.tsekh.planBridge = {
@@ -96,6 +148,15 @@ in
         type = lib.types.str;
         default = "";
         description = "Проверенный публичный Ed25519-ключ SSH-сервера github.com.";
+      };
+    };
+    delivery = {
+      prepare = lib.mkEnableOption "собственные клоны и службу доставки без запуска таймера";
+      enable = lib.mkEnableOption "доставку после проверки готовности и утверждения правил";
+      repositoryUrl = lib.mkOption {
+        type = lib.types.str;
+        default = "";
+        description = "SSH URL репозитория плана для отдельного ключа службы.";
       };
     };
     hostId = lib.mkOption {
@@ -157,6 +218,14 @@ in
 
   config = lib.mkIf cfg.enable {
     assertions = [
+      {
+        assertion = !cfg.delivery.prepare || (cfg.github.enable && cfg.delivery.repositoryUrl != "" && lib.elem "scripts/plan-event-bridge.py" cfg.codePaths && lib.elem "scripts/ledger-publish.sh" cfg.codePaths);
+        message = "tsekh.planBridge.delivery: подготовке нужны ключ, URL и проверяемый код доставки/издателя.";
+      }
+      {
+        assertion = !cfg.delivery.enable || (cfg.delivery.prepare && cfg.receiver.enable && cfg.approvedRulesVersion != "");
+        message = "tsekh.planBridge.delivery: включению нужны подготовка, приёмник и утверждённые правила.";
+      }
       {
         assertion = !cfg.github.enable || (cfg.github.secretsFile != null && lib.hasPrefix "ssh-ed25519 " cfg.github.hostKey);
         message = "tsekh.planBridge.github: нужны зашифрованный secretsFile и проверенный hostKey.";
@@ -274,6 +343,70 @@ in
         NoNewPrivileges = true;
         PrivateTmp = true;
         PrivateDevices = true;
+      };
+    };
+
+    systemd.services.iwe-plan-bridge-provision = lib.mkIf cfg.delivery.prepare {
+      description = "Собственные клоны репозитория для доставки плана";
+      wantedBy = [ "multi-user.target" ];
+      wants = [ "network-online.target" ];
+      after = [ "network-online.target" "iwe-plan-bridge-key.service" ];
+      requires = [ "iwe-plan-bridge-key.service" ];
+      path = deliveryPath;
+      environment = deliveryEnvironment;
+      serviceConfig = {
+        Type = "oneshot";
+        RemainAfterExit = true;
+        User = "iwe-plan-bridge";
+        Group = "iwe-plan-writers";
+        UMask = "0077";
+        CacheDirectory = "iwe-plan-bridge";
+        CacheDirectoryMode = "0700";
+        ExecStart = provisionScript;
+        TimeoutStartSec = 600;
+        ReadWritePaths = [ stateDir ];
+        ProtectSystem = "strict";
+        ProtectHome = true;
+        NoNewPrivileges = true;
+        PrivateTmp = true;
+        PrivateDevices = true;
+      };
+    };
+
+    systemd.services.plan-event-bridge = lib.mkIf cfg.delivery.prepare {
+      wants = [ "network-online.target" ];
+      description = "Один проход доставки принятых запросов плана";
+      after = [ "network-online.target" "iwe-plan-bridge-provision.service" ];
+      requires = [ "iwe-plan-bridge-provision.service" ];
+      path = deliveryPath;
+      environment = deliveryEnvironment;
+      serviceConfig = {
+        Type = "oneshot";
+        User = "iwe-plan-bridge";
+        Group = "iwe-plan-writers";
+        UMask = "0022";
+        CacheDirectory = "iwe-plan-bridge";
+        CacheDirectoryMode = "0700";
+        ExecStart = "${python}/bin/python -I -X pycache_prefix=/var/cache/iwe-plan-bridge ${code}/scripts/plan-event-bridge.py --deliver-once --stream-dir ${stateDir}/stream --repository ${readerRepo} --workspace ${workspaceDir} --checkout ${publisherRepo}";
+        TimeoutStartSec = 240;
+        ReadWritePaths = [ stateDir ];
+        ProtectSystem = "strict";
+        ProtectHome = true;
+        NoNewPrivileges = true;
+        PrivateTmp = true;
+        PrivateDevices = true;
+      };
+    };
+
+    systemd.timers.plan-event-bridge = lib.mkIf cfg.delivery.enable {
+      description = "Повтор доставки плана, пока сервер доступен";
+      wantedBy = [ "timers.target" ];
+      timerConfig = {
+        OnCalendar = "*-*-* *:*:00,25,50";
+        AccuracySec = "1s";
+        RandomizedDelaySec = 0;
+        Persistent = true;
+        Unit = "plan-event-bridge.service";
       };
     };
   };

@@ -56,10 +56,27 @@ in
   # WP-561 Ф55: приёмник запросов плана (К12, решение пилота 30.10: защита от
   # ошибок и подмены имени между своими агентами, умысел агента вне модели).
   # Включены пользователь, каталоги, конфиг хоста, ключ и служба приёмника.
-  # Доставка в Git НЕ включена: таймер ещё не настроен и не проверен.
+  # Доставка в Git НЕ включена: подготовка клонов разрешена, таймер отключён
+  # до проверки готовности и утверждения обновлённой версии правил.
   # Копия кода — vendor/plan-bridge/code, происхождение — vendor/plan-bridge/SOURCE.
   tsekh.planBridge = let
     codePaths = [
+      "scripts/check-wp-card-schema.py"
+      "scripts/close_expect.py"
+      "scripts/close_obligation.py"
+      "scripts/ds-publish.sh"
+      "scripts/hot_publish_cas.py"
+      "scripts/install-ledger-merge-driver.sh"
+      "scripts/isolate-push.sh"
+      "scripts/ledger-publish.sh"
+      "scripts/lib/captures-block-merge.py"
+      "scripts/lib/ledger-event-diff.py"
+      "scripts/lib/ledger-safe-reset-check.py"
+      "scripts/lib/ledger-source-snapshot.py"
+      "scripts/lib/ledger_path.py"
+      "scripts/lib/notification-center-bridge.sh"
+      "scripts/lib/notification-render.sh"
+      "scripts/lib/notify-retry-policy.sh"
       "scripts/lib/plan_allocation.py"
       "scripts/lib/plan_bridge_allocation.py"
       "scripts/lib/plan_bridge_decisions.py"
@@ -68,7 +85,12 @@ in
       "scripts/lib/plan_event_bridge.py"
       "scripts/lib/plan_event_intake.py"
       "scripts/lib/plan_event_wal.py"
+      "scripts/lib/publish-gate.sh"
+      "scripts/lib/publish-lease.sh"
+      "scripts/lib/publish-queue.sh"
+      "scripts/plan-event-bridge.py"
       "scripts/plan-event-receiver.py"
+      "scripts/session_local_release.py"
     ];
     producersPath = "machine/plan-bridge/producers.json";
     limitsPath = "machine/plan-bridge/limits.json";
@@ -82,6 +104,11 @@ in
       secretsFile = ../../secrets/plan-bridge-github.yaml;
       # https://docs.github.com/en/authentication/keeping-your-account-and-data-secure/githubs-ssh-key-fingerprints
       hostKey = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl";
+    };
+    delivery = {
+      prepare = true;
+      enable = false;
+      repositoryUrl = "git@github.com:TserenTserenov/DS-my-strategy.git";
     };
     hostId = values.hostName;
     codeSrc = ../../vendor/plan-bridge/code;

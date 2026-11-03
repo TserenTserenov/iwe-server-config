@@ -343,6 +343,11 @@ def evaluate_batch(
         return []
     _require_validator(validator, view)
     local = view.copy()
+    # A policy may require migration of accepted history. Check that before
+    # dependency/version shortcuts can emit final decisions over that history.
+    check_history = getattr(validator, "check_history", None)
+    if check_history is not None:
+        check_history(local.copy())
     decisions, seen = [], {}
     blocked_by = None
     for request in requests:

@@ -12,12 +12,20 @@ current one. The semantic request, including its parent, is never rewritten.
 
 from collections.abc import Callable
 from copy import deepcopy
+from dataclasses import dataclass, field
+from datetime import date, datetime
+import json
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import plan_allocation as allocation
 from plan_bridge_decisions import BridgeError, PlanView
 from plan_event_intake import validate_request
 
-ALLOCATION_VALIDATOR_VERSION = "plan-allocation/2"
+ALLOCATION_VALIDATOR_VERSION = "plan-allocation/3"
+PERSONAL_TIME_RESOURCE_TYPE = "personal_time"
+_RESOURCE_TYPES = frozenset(
+    {allocation.RESOURCE_TYPE_PLAN_HOUR, PERSONAL_TIME_RESOURCE_TYPE}
+)
 RESOURCE_EVENTS = frozenset(
     {
         "allocation_confirmed",
@@ -46,7 +54,10 @@ _REQUIRED_STATES = {
 _HOLDER_EVENTS = frozenset(
     {"action_started", "outcome_confirmed", "cancellation_compensated"}
 )
-_RESOURCE_FIELDS = frozenset({"resource_id", "resource_type", "generation_claimed"})
+_TIME_FIELDS = frozenset({"plan_date", "reserved_minutes", "actual_minutes"})
+_RESOURCE_FIELDS = (
+    frozenset({"resource_id", "resource_type", "generation_claimed"}) | _TIME_FIELDS
+)
 _EMPTY = allocation.AllocationState(0, None, None)
 
 
@@ -83,15 +94,14 @@ def _admissible(request, state):
     claimed = payload.get("generation_claimed")
     if type(claimed) is not int or claimed < 1:
         return False
-    if (
-        "resource_type" in payload
-        and payload["resource_type"] != allocation.RESOURCE_TYPE_PLAN_HOUR
+    if "resource_type" in payload and (
+        not isinstance(payload["resource_type"], str)
+        or payload["resource_type"] not in _RESOURCE_TYPES
     ):
         return False
     if event_type == "allocation_confirmed":
         return (
-            allocation.resolve_resource_type(request)
-            == allocation.RESOURCE_TYPE_PLAN_HOUR
+            allocation.resolve_resource_type(request) in _RESOURCE_TYPES
             and state.state not in {"confirmed", "started"}
             and claimed == state.generation + 1
         )
@@ -147,6 +157,161 @@ def _project_checked_history(view: PlanView):
     return projected
 
 
+def _plan_date(value):
+    if not isinstance(value, str):
+        return False
+    try:
+        return date.fromisoformat(value).isoformat() == value
+    except ValueError:
+        return False
+
+
+def _minutes(value, *, minimum=0):
+    return type(value) is int and minimum <= value <= 1440
+
+
+def personal_time_resource_id(plan_date, stream_id, element_id):
+    """One reservation identity per work and day; no caller-chosen aliases."""
+    return "personal_time:" + json.dumps(
+        [plan_date, stream_id, element_id], ensure_ascii=True, separators=(",", ":")
+    )
+
+
+@dataclass(frozen=True)
+class _TimeReservation:
+    day: str
+    stream: str
+    element: str
+    minutes: int
+
+
+@dataclass
+class _TimeLedger:
+    """Replay all generations: terminal transitions preserve actual expenditure."""
+
+    reservations: dict = field(default_factory=dict)
+    spent: dict = field(default_factory=dict)
+    reserved: dict = field(default_factory=dict)
+
+    def total(self, day):
+        return self.spent.get(day, 0) + self.reserved.get(day, 0)
+
+    def _confirm(self, request, resource, day):
+        payload = request["payload"]
+        if (
+            payload.get("resource_type") != PERSONAL_TIME_RESOURCE_TYPE
+            or _TIME_FIELDS.intersection(payload) != {"plan_date", "reserved_minutes"}
+            or not _minutes(payload["reserved_minutes"], minimum=1)
+            or resource in self.reservations
+        ):
+            return False
+        self.reservations[resource] = _TimeReservation(
+            day,
+            request["stream_id"],
+            request["element_id"],
+            payload["reserved_minutes"],
+        )
+        self.reserved[day] = self.reserved.get(day, 0) + payload["reserved_minutes"]
+        return True
+
+    def apply(self, request, time_zone):
+        event, payload = request["event_type"], request["payload"]
+        if event not in RESOURCE_EVENTS:
+            return not _touches_resource(request)
+        day, resource = payload.get("plan_date"), _resource_id(request)
+        if not _plan_date(day) or payload.get("resource_type") not in (
+            None,
+            PERSONAL_TIME_RESOURCE_TYPE,
+        ):
+            return False
+        if resource != personal_time_resource_id(
+            day, request["stream_id"], request["element_id"]
+        ):
+            return False
+        if event == "allocation_confirmed":
+            return self._confirm(request, resource, day)
+        reservation = self.reservations.get(resource)
+        if reservation is None or (
+            day,
+            request["stream_id"],
+            request["element_id"],
+        ) != (reservation.day, reservation.stream, reservation.element):
+            return False
+        terminal = event in {"outcome_confirmed", "cancellation_compensated"}
+        expected = {"plan_date", "actual_minutes"} if terminal else {"plan_date"}
+        if _TIME_FIELDS.intersection(payload) != expected or (
+            terminal and not _minutes(payload["actual_minutes"])
+        ):
+            return False
+        if event == "action_started":
+            try:
+                occurred = datetime.fromisoformat(
+                    request["occurred_at"].replace("Z", "+00:00")
+                )
+                return occurred.astimezone(time_zone).date().isoformat() == day
+            except (ValueError, OverflowError):
+                return False
+        self.reserved[day] -= reservation.minutes
+        del self.reservations[resource]
+        if terminal:
+            self.spent[day] = self.spent.get(day, 0) + payload["actual_minutes"]
+        return True
+
+
+class PersonalTimeBudget:
+    """Daily pilot minutes from pinned rules; no capacity is inferred from work.
+
+    Run through AllocationPlanValidator, which first verifies DR-03 state,
+    generation, holder and publication order. Reporting actual overrun and
+    releasing reservations remain possible; only reservations and starts need
+    available capacity. Historical legacy resource events require migration.
+    """
+
+    def __init__(self, time_zone, daily_personal_minutes):
+        try:
+            self.time_zone = ZoneInfo(time_zone)
+        except (TypeError, ValueError, ZoneInfoNotFoundError) as exc:
+            raise BridgeError(
+                "BUDGET_VALIDATOR_UNAVAILABLE", "invalid budget timezone"
+            ) from exc
+        if not isinstance(daily_personal_minutes, dict) or not all(
+            _plan_date(day) and _minutes(minutes)
+            for day, minutes in daily_personal_minutes.items()
+        ):
+            raise BridgeError(
+                "BUDGET_VALIDATOR_UNAVAILABLE", "invalid daily personal minutes"
+            )
+        self.daily_minutes = dict(daily_personal_minutes)
+
+    def check_history(self, view):
+        """Stop before any request decisions if accepted time cannot be replayed."""
+        if view.ordered_accepted is None:
+            raise BridgeError(
+                "RESOURCE_ORDER_UNAVAILABLE", "budget needs publication order"
+            )
+        ledger = _TimeLedger()
+        for event_id in view.ordered_accepted:
+            if not ledger.apply(view.accepted[event_id], self.time_zone):
+                raise BridgeError(
+                    "BUDGET_HISTORY_INCOMPATIBLE",
+                    f"personal time history needs migration or repair: {event_id}",
+                )
+        return ledger
+
+    def __call__(self, candidate, view):
+        ledger = self.check_history(view)
+        if not ledger.apply(candidate, self.time_zone):
+            return False
+        if candidate["event_type"] not in {"allocation_confirmed", "action_started"}:
+            return True
+        day = candidate["payload"]["plan_date"]
+        if day not in self.daily_minutes:
+            raise BridgeError(
+                "BUDGET_DAY_UNAVAILABLE", f"personal time budget not set: {day}"
+            )
+        return ledger.total(day) <= self.daily_minutes[day]
+
+
 class AllocationPlanValidator:
     """Compose actual DR-03 semantics with an explicitly installed plan budget.
 
@@ -177,22 +342,31 @@ class AllocationPlanValidator:
         self.rules_version = rules_version
         self._budget = whole_plan_budget
 
-    def validate(self, request: dict, view: PlanView) -> bool:
-        validate_request(request)
+    def check_history(self, view: PlanView):
         if view.rules_version != self.rules_version:
             raise BridgeError(
                 "VALIDATOR_VERSION_MISMATCH",
                 "budget and resource rules do not match this plan",
             )
+        states = _project_checked_history(view)
+        check = getattr(self._budget, "check_history", None)
+        if check is not None:
+            check(view.copy())
+        return states
+
+    def validate(self, request: dict, view: PlanView) -> bool:
+        validate_request(request)
+        states = self.check_history(view)
         if request["rules_version"] != self.rules_version:
             return False
-        states = _project_checked_history(view)
         if _touches_resource(request) and not _admissible(
             request, states.get(_resource_id(request), _EMPTY)
         ):
             return False
         try:
             allowed = self._budget(deepcopy(request), view.copy())
+        except BridgeError:
+            raise
         except Exception as exc:
             raise BridgeError(
                 "BUDGET_VALIDATOR_FAILED", "whole-plan budget callback failed"

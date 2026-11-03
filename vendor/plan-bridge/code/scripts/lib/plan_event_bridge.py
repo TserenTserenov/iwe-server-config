@@ -171,6 +171,11 @@ class PinnedPlanValidator:
     def rules_version(self):
         return self.validator.rules_version
 
+    def check_history(self, view):
+        check = getattr(self.validator, "check_history", None)
+        if check is not None:
+            check(view)
+
     def validate(self, request, view):
         return self.validator.validate(request, view)
 
