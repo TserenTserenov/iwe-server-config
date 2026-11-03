@@ -23,6 +23,10 @@
 # - Пороги: STYLE_REINJECT_TURNS (12), STYLE_REINJECT_BYTES (60000)
 # - Каждый ход: подсказка A13.1 о прошлом ответе (a13-1-next-turn-hint.py, РП-388 Ф36),
 #   выключатель IWE_STYLE_NEXT_TURN_HINT=0
+# - Каждый ход: строка главного правила A0 (РП-388 Ф39) — полный стиль приходит
+#   раз в 12 ходов, а в долгой технической сессии агент между впрысками пишет
+#   языком собственного рабочего журнала. Выключатель IWE_STYLE_A0_EVERY_TURN=0
+#   (не зависит от выключателя подсказок).
 
 set -uo pipefail
 export PATH="/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin:${PATH:-}"
@@ -84,6 +88,26 @@ emit_context() {
   }'
 }
 
+# Main rule A0 (РП-388 Ф39, pilot's decision 03.11): one line on every turn, on
+# every exit below, before the hints. Text mirrors CLAUDE.md A0 and pack rule
+# "Главное правило".
+A0_LINE=""
+if [ "${IWE_STYLE_A0_EVERY_TURN:-1}" != "0" ]; then
+  A0_LINE="Главное правило стиля (A0, пилот её не видит): сначала — результат и что он значит для пилота, словами, понятными человеку, который не видел твоей работы; нужные ссылки — рядом с пунктом; слова внутренней кухни IWE (корень, канон, боевой, изолированная копия, холодная проверка) — простыми понятными словами, если пилот сам их не употребляет."
+fi
+
+# $1, $2 … non-empty parts joined by a blank line.
+join_parts() {
+  local out="" part
+  for part in "$@"; do
+    [ -n "$part" ] || continue
+    if [ -n "$out" ]; then out="$out
+
+$part"; else out="$part"; fi
+  done
+  printf '%s' "$out"
+}
+
 # Next-turn hint for A13.1 (РП-388 Ф36 step 5): replaces the old A13.1 block, which
 # produced a second visible message. Runs on every turn, independent of reinjection.
 # Off switch: IWE_STYLE_NEXT_TURN_HINT=0.
@@ -101,7 +125,7 @@ fi
 if [ "$DO_INJECT" -eq 0 ]; then
   mkdir -p "$STATE_DIR"
   echo "$TURN $LAST_INJECT_TURN $LAST_INJECT_BYTES" > "$STATE_FILE"
-  emit_context "$NEXT_TURN_HINT"
+  emit_context "$(join_parts "$A0_LINE" "$NEXT_TURN_HINT")"
   exit 0
 fi
 
@@ -121,7 +145,7 @@ if [ -z "${FRAGMENT:-}" ] && [ -f "$S0_CORE" ]; then
   FRAGMENT=$(awk '/^---/{n++; if(n==2){found=1; next}} found' "$S0_CORE" 2>/dev/null)
 fi
 
-[ -n "${FRAGMENT:-}" ] || { emit_context "$NEXT_TURN_HINT"; exit 0; }   # оба источника пусты/упали → только подсказка (safe)
+[ -n "${FRAGMENT:-}" ] || { emit_context "$(join_parts "$A0_LINE" "$NEXT_TURN_HINT")"; exit 0; }   # оба источника пусты/упали → только подсказка (safe)
 
 # S2: личный оверрайд пользователя шаблона (WP-412 Ф13). Отдельный файл от
 # шаблона-образца (communication-style-personal-template.md) — его хук
@@ -151,10 +175,4 @@ echo "$TURN $TURN $CUR_BYTES" > "$STATE_FILE"
 # Cleanup старых state-файлов (>24h)
 find "$STATE_DIR" -name "comm-style-injected-*" -mmin +1440 -delete 2>/dev/null || true
 
-if [ -n "$NEXT_TURN_HINT" ]; then
-  CONTEXT="$CONTEXT
-
-$NEXT_TURN_HINT"
-fi
-
-emit_context "$CONTEXT"
+emit_context "$(join_parts "$A0_LINE" "$CONTEXT" "$NEXT_TURN_HINT")"
