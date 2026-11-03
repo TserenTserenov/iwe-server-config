@@ -459,7 +459,13 @@ VIOLATIONS=0
 
 # 1. Горлышко недели (bottleneck-pick output)
 WEEK_CTX=$(awk '/<summary><b>Контекст недели/,/<\/details>/' "$FILE")
-if echo "$WEEK_CTX" | grep -qE "Горлышко недели|bottleneck-pick"; then
+# Honest BOTTLENECK-PENDING marker (day-open-bottleneck-patch.sh) = warning, not a block:
+# headless night pipeline cannot run /bottleneck-pick itself, and the «Калибровка /bottleneck-pick»
+# check below already treats this marker as non-blocking. Without this branch the two checks
+# gave opposite verdicts on the same DayPlan and the plan was not published (03.11, WP-518).
+if grep -q "<!-- BOTTLENECK-PENDING:" "$FILE"; then
+  echo "  🟡 Горлышко недели: честный маркер BOTTLENECK-PENDING — нужен ручной /bottleneck-pick, не блокирует"
+elif echo "$WEEK_CTX" | grep -qE "Горлышко недели|bottleneck-pick"; then
   if echo "$WEEK_CTX" | grep "Горлышко недели" | grep -q "PENDING"; then
     echo "  ❌ Горлышко недели: PENDING не заполнен — COMMIT БЛОКИРОВАН"
     VIOLATIONS=$((VIOLATIONS+1))
