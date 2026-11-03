@@ -136,6 +136,11 @@ fi
 S0_CORE="$HOOK_DIR/../styles/s0-core.md"
 
 DISPATCHER="$PROJECT_DIR/PACK-rhetoric/pack/language-style/registry/dispatcher.py"
+# Session-pinned snapshot of the packs (lib/style-pin.sh, WP-539); any failure keeps the live one.
+# shellcheck source=lib/style-pin.sh
+if [ -f "$HOOK_DIR/lib/style-pin.sh" ] && . "$HOOK_DIR/lib/style-pin.sh"; then
+  PINNED=$(style_pin_dispatcher "$PROJECT_DIR" "$SESSION_ID" 2>/dev/null) && [ -n "$PINNED" ] && DISPATCHER="$PINNED"
+fi
 if [ -f "$DISPATCHER" ]; then
   FRAGMENT=$(python3 "$DISPATCHER" --event userpromptsubmit-ide --quiet --no-cache 2>/dev/null)
 fi

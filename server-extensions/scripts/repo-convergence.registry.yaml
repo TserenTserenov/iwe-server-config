@@ -14,6 +14,8 @@
 #     полученной брокером ссылке); service — копию двигает служба перед запуском (проверенная синхронизация);
 #     working — только видимость в сводке, никакой автоматической перемотки.
 #   * Роль копии может отличаться по хостам: поле class у checkout перекрывает class записи.
+#   * written_here: true — на этом хосте в копию коммитят; список Цеха для iwe-pull-repos и iwe-push-ahead
+#     строится из таких копий (iwe-server-config читает JSON-копию: repo_registry.py export-json).
 #   * Копия на хосте — path относительно корня IWE; purpose: copy — каталог-копия, не сходится с upstream, но
 #     присутствие и ошибки чтения остаются видимыми.
 #   * Пороги (thresholds): null = не задан (не ноль). Начало отсчёта у каждого своё; «неизвестно» показывается как неизвестно.
@@ -60,7 +62,7 @@ repos:
     class: reader
     checkouts:
       - {host: mac, path: PACK-MIM}
-      - {host: tsekh-1, path: PACK-MIM, class: service}
+      - {host: tsekh-1, path: PACK-MIM, class: service, written_here: true}
     expected_branch: main
     upstream: origin/main
     decision_owner: {ref: "решение пилота 03.11.2026, пир-сессия 2026-11-03-12-wp539-sync-processes-audit (proposals.md)", scope: checkout}
@@ -70,7 +72,7 @@ repos:
     class: reader
     checkouts:
       - {host: mac, path: PACK-agent-rules}
-      - {host: tsekh-1, path: PACK-agent-rules, class: service}
+      - {host: tsekh-1, path: PACK-agent-rules, class: service, written_here: true}
     expected_branch: main
     upstream: origin/main
     decision_owner: {ref: "решение пилота 03.11.2026, пир-сессия 2026-11-03-12-wp539-sync-processes-audit (proposals.md)", scope: checkout}
@@ -80,7 +82,7 @@ repos:
     class: reader
     checkouts:
       - {host: mac, path: PACK-autonomous-agents}
-      - {host: tsekh-1, path: PACK-autonomous-agents, class: service}
+      - {host: tsekh-1, path: PACK-autonomous-agents, class: service, written_here: true}
     expected_branch: main
     upstream: origin/main
     decision_owner: {ref: "решение пилота 03.11.2026, пир-сессия 2026-11-03-12-wp539-sync-processes-audit (proposals.md)", scope: checkout}
@@ -90,7 +92,7 @@ repos:
     class: reader
     checkouts:
       - {host: mac, path: PACK-digital-platform}
-      - {host: tsekh-1, path: PACK-digital-platform, class: service}
+      - {host: tsekh-1, path: PACK-digital-platform, class: service, written_here: true}
     expected_branch: main
     upstream: origin/main
     decision_owner: {ref: "решение пилота 03.11.2026, пир-сессия 2026-11-03-12-wp539-sync-processes-audit (proposals.md)", scope: checkout}
@@ -100,7 +102,7 @@ repos:
     class: reader
     checkouts:
       - {host: mac, path: PACK-ecosystem}
-      - {host: tsekh-1, path: PACK-ecosystem, class: service}
+      - {host: tsekh-1, path: PACK-ecosystem, class: service, written_here: true}
     expected_branch: main
     upstream: origin/main
     decision_owner: {ref: "решение пилота 03.11.2026, пир-сессия 2026-11-03-12-wp539-sync-processes-audit (proposals.md)", scope: checkout}
@@ -110,7 +112,7 @@ repos:
     class: reader
     checkouts:
       - {host: mac, path: PACK-engineering-management}
-      - {host: tsekh-1, path: PACK-engineering-management, class: service}
+      - {host: tsekh-1, path: PACK-engineering-management, class: service}  # no commits on tsekh-1; https push lacks auth there
     expected_branch: main
     upstream: origin/main
     decision_owner: {ref: "решение пилота 03.11.2026, пир-сессия 2026-11-03-12-wp539-sync-processes-audit (proposals.md)", scope: checkout}
@@ -120,7 +122,7 @@ repos:
     class: reader
     checkouts:
       - {host: mac, path: PACK-rhetoric}
-      - {host: tsekh-1, path: PACK-rhetoric, class: service}
+      - {host: tsekh-1, path: PACK-rhetoric, class: service, written_here: true}
     expected_branch: main
     upstream: origin/main
     decision_owner: {ref: "решение пилота 03.11.2026, пир-сессия 2026-11-03-12-wp539-sync-processes-audit (proposals.md)", scope: checkout}
@@ -130,7 +132,7 @@ repos:
     class: reader
     checkouts:
       - {host: mac, path: PACK-systems-art}
-      - {host: tsekh-1, path: PACK-systems-art, class: service}
+      - {host: tsekh-1, path: PACK-systems-art, class: service, written_here: true}
     expected_branch: main
     upstream: origin/main
     decision_owner: {ref: "решение пилота 03.11.2026, пир-сессия 2026-11-03-12-wp539-sync-processes-audit (proposals.md)", scope: checkout}
@@ -140,7 +142,7 @@ repos:
     class: reader
     checkouts:
       - {host: mac, path: PACK-verification}
-      - {host: tsekh-1, path: PACK-verification, class: service}
+      - {host: tsekh-1, path: PACK-verification, class: service, written_here: true}
     expected_branch: main
     upstream: origin/main
     decision_owner: {ref: "решение пилота 03.11.2026, пир-сессия 2026-11-03-12-wp539-sync-processes-audit (proposals.md)", scope: checkout}
@@ -150,7 +152,7 @@ repos:
     class: reader
     checkouts:
       - {host: mac, path: PACK-personal}
-      - {host: tsekh-1, path: PACK-personal, class: working}
+      - {host: tsekh-1, path: PACK-personal, class: working, written_here: true}
     expected_branch: main
     upstream: origin/main
     decision_owner: {ref: "решение пилота 03.11.2026, пир-сессия 2026-11-03-12-wp539-sync-processes-audit (proposals.md)", scope: checkout}
@@ -203,3 +205,93 @@ repos:
     decision_owner: {ref: "решение пилота 03.11.2026, пир-сессия 2026-11-03-12-wp539-sync-processes-audit (proposals.md)", scope: checkout}
     executor: "Мак — reader-copies-sync (launchd)"
     mutation_mechanism: "ff-only чистой копии"
+  - repo_id: DS-ai-systems
+    class: working
+    checkouts:
+      - {host: mac, path: DS-IT-systems/DS-ai-systems}
+      - {host: tsekh-1, path: DS-IT-systems/DS-ai-systems, class: service, written_here: true}
+    expected_branch: main
+    upstream: origin/main
+    decision_owner: {ref: "решение пилота 03.11.2026, пир-сессия 2026-11-03-12-wp539-sync-processes-audit (proposals.md)", scope: checkout}
+    executor: "Цех — iwe-verified-sync перед запуском службы; Мак — нет (рабочая копия)"
+    mutation_mechanism: "сессии и службы коммитят; Цех отправляет то, что впереди"
+  - repo_id: activity-hub
+    class: working
+    checkouts:
+      - {host: mac, path: DS-IT-systems/activity-hub}
+      - {host: tsekh-1, path: DS-IT-systems/activity-hub, class: service, written_here: true}
+    expected_branch: main
+    upstream: origin/main
+    decision_owner: {ref: "решение пилота 03.11.2026, пир-сессия 2026-11-03-12-wp539-sync-processes-audit (proposals.md)", scope: checkout}
+    executor: "Цех — iwe-verified-sync перед запуском службы; Мак — нет (рабочая копия)"
+    mutation_mechanism: "сессии и службы коммитят; Цех отправляет то, что впереди"
+  - repo_id: iwe-server
+    class: working
+    checkouts:
+      - {host: mac, path: DS-IT-systems/iwe-server}
+      - {host: tsekh-1, path: DS-IT-systems/iwe-server, class: service, written_here: true}
+    expected_branch: main
+    upstream: origin/main
+    decision_owner: {ref: "решение пилота 03.11.2026, пир-сессия 2026-11-03-12-wp539-sync-processes-audit (proposals.md)", scope: checkout}
+    executor: "Цех — iwe-verified-sync перед запуском службы; Мак — нет (рабочая копия)"
+    mutation_mechanism: "сессии и службы коммитят; Цех отправляет то, что впереди"
+  - repo_id: knowledge-mcp
+    class: working
+    checkouts:
+      - {host: mac, path: DS-MCP/knowledge-mcp}
+      - {host: tsekh-1, path: DS-MCP/knowledge-mcp, class: service, written_here: true}
+    expected_branch: main
+    upstream: origin/main
+    decision_owner: {ref: "решение пилота 03.11.2026, пир-сессия 2026-11-03-12-wp539-sync-processes-audit (proposals.md)", scope: checkout}
+    executor: "Цех — iwe-verified-sync перед запуском службы; Мак — нет (рабочая копия)"
+    mutation_mechanism: "сессии и службы коммитят; Цех отправляет то, что впереди"
+  - repo_id: DS-autonomous-agents
+    class: working
+    checkouts:
+      - {host: mac, path: DS-autonomous-agents}
+      - {host: tsekh-1, path: DS-autonomous-agents, class: service, written_here: true}
+    expected_branch: main
+    upstream: origin/main
+    decision_owner: {ref: "решение пилота 03.11.2026, пир-сессия 2026-11-03-12-wp539-sync-processes-audit (proposals.md)", scope: checkout}
+    executor: "Цех — iwe-verified-sync перед запуском службы; Мак — нет (рабочая копия)"
+    mutation_mechanism: "сессии и службы коммитят; Цех отправляет то, что впереди"
+  - repo_id: DS-agent-workspace
+    class: working
+    checkouts:
+      - {host: mac, path: DS-agent-workspace}
+      - {host: tsekh-1, path: DS-agent-workspace, class: working, written_here: true}
+    expected_branch: main
+    upstream: origin/main
+    decision_owner: {ref: "решение пилота 03.11.2026, пир-сессия 2026-11-03-12-wp539-sync-processes-audit (proposals.md)", scope: checkout}
+    executor: "нет автоматической перемотки; Цех — отправка того, что впереди (iwe-push-ahead)"
+    mutation_mechanism: "сессии и службы коммитят; Цех отправляет то, что впереди"
+  - repo_id: DS-ecosystem-development
+    class: working
+    checkouts:
+      - {host: mac, path: DS-ecosystem-development}
+      - {host: tsekh-1, path: DS-ecosystem-development, class: working, written_here: true}
+    expected_branch: main
+    upstream: origin/main
+    decision_owner: {ref: "решение пилота 03.11.2026, пир-сессия 2026-11-03-12-wp539-sync-processes-audit (proposals.md)", scope: checkout}
+    executor: "нет автоматической перемотки; Цех — отправка того, что впереди (iwe-push-ahead)"
+    mutation_mechanism: "сессии и службы коммитят; Цех отправляет то, что впереди"
+  - repo_id: DS-Knowledge-Index-Tseren
+    class: working
+    checkouts:
+      - {host: mac, path: DS-Knowledge-Index-Tseren}
+      - {host: tsekh-1, path: DS-Knowledge-Index-Tseren, class: working, written_here: true}
+    expected_branch: main
+    upstream: origin/main
+    decision_owner: {ref: "решение пилота 03.11.2026, пир-сессия 2026-11-03-12-wp539-sync-processes-audit (proposals.md)", scope: checkout}
+    executor: "нет автоматической перемотки; Цех — отправка того, что впереди (iwe-push-ahead)"
+    mutation_mechanism: "сессии и службы коммитят; Цех отправляет то, что впереди"
+  - repo_id: DS-principles-curriculum
+    class: working
+    checkouts:
+      - {host: mac, path: DS-principles-curriculum}
+      - {host: tsekh-1, path: DS-principles-curriculum, class: working, written_here: true}
+    expected_branch: main
+    upstream: origin/main
+    decision_owner: {ref: "решение пилота 03.11.2026, пир-сессия 2026-11-03-12-wp539-sync-processes-audit (proposals.md)", scope: checkout}
+    executor: "нет автоматической перемотки; Цех — отправка того, что впереди (iwe-push-ahead)"
+    mutation_mechanism: "сессии и службы коммитят; Цех отправляет то, что впереди"

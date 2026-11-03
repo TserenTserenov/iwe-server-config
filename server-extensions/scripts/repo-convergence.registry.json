@@ -1,0 +1,629 @@
+{
+  "repos": [
+    {
+      "checkouts": [
+        {
+          "host": "mac",
+          "path": "DS-my-strategy"
+        },
+        {
+          "host": "tsekh-1",
+          "path": "DS-my-strategy"
+        }
+      ],
+      "class": "canon",
+      "decision_owner": {
+        "ref": "WP-539 Ф21 (диагноз 29.10, заморозка канона WP-520/WP-484 Ф104)",
+        "scope": "repo"
+      },
+      "executor": "Цех — синхронизатор канона (tsekh1-git-sync.sh); Мак — страховочный проход (backstop)",
+      "expected_branch": "main",
+      "mutation_mechanism": "ff-only синхронизатором под замком; сессии пишут только в изолированной копии",
+      "repo_id": "DS-my-strategy",
+      "thresholds": {
+        "behind_max_commits": null,
+        "behind_observed_for_min": null,
+        "block_resolution_max_age_min": null,
+        "fetch_max_age_min": 120
+      },
+      "upstream": "origin/main"
+    },
+    {
+      "checkouts": [
+        {
+          "host": "mac",
+          "path": "MC-sessions"
+        },
+        {
+          "host": "tsekh-1",
+          "path": "MC-sessions"
+        }
+      ],
+      "class": "undecided",
+      "decision_owner": null,
+      "executor": null,
+      "expected_branch": "main",
+      "mutation_mechanism": "ожидает Б4 (общий замок)",
+      "note": "Мак: diverged +3/-8 на 29.10; Цех: копию никто не двигает (брокер обновляет только ссылки)",
+      "repo_id": "MC-sessions",
+      "upstream": "origin/main"
+    },
+    {
+      "checkouts": [
+        {
+          "host": "mac",
+          "path": "."
+        },
+        {
+          "host": "tsekh-1",
+          "optional": true,
+          "path": "."
+        }
+      ],
+      "class": "undecided",
+      "decision_owner": null,
+      "executor": null,
+      "expected_branch": "main",
+      "mutation_mechanism": "ожидает Б4 (общий замок); на Цехе корень — зеркало Nix, не git-копия",
+      "note": "постоянного исполнителя синхронизации корня Мака нет; владелец решения — РП-539, механизм после Б4",
+      "repo_id": "iwe-root",
+      "upstream": "origin/main"
+    },
+    {
+      "checkouts": [
+        {
+          "host": "mac",
+          "path": "PACK-MIM"
+        },
+        {
+          "class": "service",
+          "host": "tsekh-1",
+          "path": "PACK-MIM",
+          "written_here": true
+        }
+      ],
+      "class": "reader",
+      "decision_owner": {
+        "ref": "решение пилота 03.11.2026, пир-сессия 2026-11-03-12-wp539-sync-processes-audit (proposals.md)",
+        "scope": "checkout"
+      },
+      "executor": "Мак — reader-copies-sync (launchd); Цех — ночной диспетчер перематывает источники индекса знаний (iwe-verified-sync)",
+      "expected_branch": "main",
+      "mutation_mechanism": "Мак: ff-only чистой копии; Цех: конвейер знаний коммитит, push-ahead отправляет",
+      "repo_id": "PACK-MIM",
+      "upstream": "origin/main"
+    },
+    {
+      "checkouts": [
+        {
+          "host": "mac",
+          "path": "PACK-agent-rules"
+        },
+        {
+          "class": "service",
+          "host": "tsekh-1",
+          "path": "PACK-agent-rules",
+          "written_here": true
+        }
+      ],
+      "class": "reader",
+      "decision_owner": {
+        "ref": "решение пилота 03.11.2026, пир-сессия 2026-11-03-12-wp539-sync-processes-audit (proposals.md)",
+        "scope": "checkout"
+      },
+      "executor": "Мак — reader-copies-sync (launchd); Цех — ночной диспетчер перематывает источники индекса знаний (iwe-verified-sync)",
+      "expected_branch": "main",
+      "mutation_mechanism": "Мак: ff-only чистой копии; Цех: конвейер знаний коммитит, push-ahead отправляет",
+      "repo_id": "PACK-agent-rules",
+      "upstream": "origin/main"
+    },
+    {
+      "checkouts": [
+        {
+          "host": "mac",
+          "path": "PACK-autonomous-agents"
+        },
+        {
+          "class": "service",
+          "host": "tsekh-1",
+          "path": "PACK-autonomous-agents",
+          "written_here": true
+        }
+      ],
+      "class": "reader",
+      "decision_owner": {
+        "ref": "решение пилота 03.11.2026, пир-сессия 2026-11-03-12-wp539-sync-processes-audit (proposals.md)",
+        "scope": "checkout"
+      },
+      "executor": "Мак — reader-copies-sync (launchd); Цех — ночной диспетчер перематывает источники индекса знаний (iwe-verified-sync)",
+      "expected_branch": "main",
+      "mutation_mechanism": "Мак: ff-only чистой копии; Цех: конвейер знаний коммитит, push-ahead отправляет",
+      "repo_id": "PACK-autonomous-agents",
+      "upstream": "origin/main"
+    },
+    {
+      "checkouts": [
+        {
+          "host": "mac",
+          "path": "PACK-digital-platform"
+        },
+        {
+          "class": "service",
+          "host": "tsekh-1",
+          "path": "PACK-digital-platform",
+          "written_here": true
+        }
+      ],
+      "class": "reader",
+      "decision_owner": {
+        "ref": "решение пилота 03.11.2026, пир-сессия 2026-11-03-12-wp539-sync-processes-audit (proposals.md)",
+        "scope": "checkout"
+      },
+      "executor": "Мак — reader-copies-sync (launchd); Цех — ночной диспетчер перематывает источники индекса знаний (iwe-verified-sync)",
+      "expected_branch": "main",
+      "mutation_mechanism": "Мак: ff-only чистой копии; Цех: конвейер знаний коммитит, push-ahead отправляет",
+      "repo_id": "PACK-digital-platform",
+      "upstream": "origin/main"
+    },
+    {
+      "checkouts": [
+        {
+          "host": "mac",
+          "path": "PACK-ecosystem"
+        },
+        {
+          "class": "service",
+          "host": "tsekh-1",
+          "path": "PACK-ecosystem",
+          "written_here": true
+        }
+      ],
+      "class": "reader",
+      "decision_owner": {
+        "ref": "решение пилота 03.11.2026, пир-сессия 2026-11-03-12-wp539-sync-processes-audit (proposals.md)",
+        "scope": "checkout"
+      },
+      "executor": "Мак — reader-copies-sync (launchd); Цех — ночной диспетчер перематывает источники индекса знаний (iwe-verified-sync)",
+      "expected_branch": "main",
+      "mutation_mechanism": "Мак: ff-only чистой копии; Цех: конвейер знаний коммитит, push-ahead отправляет",
+      "repo_id": "PACK-ecosystem",
+      "upstream": "origin/main"
+    },
+    {
+      "checkouts": [
+        {
+          "host": "mac",
+          "path": "PACK-engineering-management"
+        },
+        {
+          "class": "service",
+          "host": "tsekh-1",
+          "path": "PACK-engineering-management"
+        }
+      ],
+      "class": "reader",
+      "decision_owner": {
+        "ref": "решение пилота 03.11.2026, пир-сессия 2026-11-03-12-wp539-sync-processes-audit (proposals.md)",
+        "scope": "checkout"
+      },
+      "executor": "Мак — reader-copies-sync (launchd); Цех — ночной диспетчер перематывает источники индекса знаний (iwe-verified-sync)",
+      "expected_branch": "main",
+      "mutation_mechanism": "Мак: ff-only чистой копии; Цех: конвейер знаний коммитит, push-ahead отправляет",
+      "repo_id": "PACK-engineering-management",
+      "upstream": "origin/main"
+    },
+    {
+      "checkouts": [
+        {
+          "host": "mac",
+          "path": "PACK-rhetoric"
+        },
+        {
+          "class": "service",
+          "host": "tsekh-1",
+          "path": "PACK-rhetoric",
+          "written_here": true
+        }
+      ],
+      "class": "reader",
+      "decision_owner": {
+        "ref": "решение пилота 03.11.2026, пир-сессия 2026-11-03-12-wp539-sync-processes-audit (proposals.md)",
+        "scope": "checkout"
+      },
+      "executor": "Мак — reader-copies-sync (launchd); Цех — ночной диспетчер перематывает источники индекса знаний (iwe-verified-sync)",
+      "expected_branch": "main",
+      "mutation_mechanism": "Мак: ff-only чистой копии; Цех: конвейер знаний коммитит, push-ahead отправляет",
+      "repo_id": "PACK-rhetoric",
+      "upstream": "origin/main"
+    },
+    {
+      "checkouts": [
+        {
+          "host": "mac",
+          "path": "PACK-systems-art"
+        },
+        {
+          "class": "service",
+          "host": "tsekh-1",
+          "path": "PACK-systems-art",
+          "written_here": true
+        }
+      ],
+      "class": "reader",
+      "decision_owner": {
+        "ref": "решение пилота 03.11.2026, пир-сессия 2026-11-03-12-wp539-sync-processes-audit (proposals.md)",
+        "scope": "checkout"
+      },
+      "executor": "Мак — reader-copies-sync (launchd); Цех — ночной диспетчер перематывает источники индекса знаний (iwe-verified-sync)",
+      "expected_branch": "main",
+      "mutation_mechanism": "Мак: ff-only чистой копии; Цех: конвейер знаний коммитит, push-ahead отправляет",
+      "repo_id": "PACK-systems-art",
+      "upstream": "origin/main"
+    },
+    {
+      "checkouts": [
+        {
+          "host": "mac",
+          "path": "PACK-verification"
+        },
+        {
+          "class": "service",
+          "host": "tsekh-1",
+          "path": "PACK-verification",
+          "written_here": true
+        }
+      ],
+      "class": "reader",
+      "decision_owner": {
+        "ref": "решение пилота 03.11.2026, пир-сессия 2026-11-03-12-wp539-sync-processes-audit (proposals.md)",
+        "scope": "checkout"
+      },
+      "executor": "Мак — reader-copies-sync (launchd); Цех — ночной диспетчер перематывает источники индекса знаний (iwe-verified-sync)",
+      "expected_branch": "main",
+      "mutation_mechanism": "Мак: ff-only чистой копии; Цех: конвейер знаний коммитит, push-ahead отправляет",
+      "repo_id": "PACK-verification",
+      "upstream": "origin/main"
+    },
+    {
+      "checkouts": [
+        {
+          "host": "mac",
+          "path": "PACK-personal"
+        },
+        {
+          "class": "working",
+          "host": "tsekh-1",
+          "path": "PACK-personal",
+          "written_here": true
+        }
+      ],
+      "class": "reader",
+      "decision_owner": {
+        "ref": "решение пилота 03.11.2026, пир-сессия 2026-11-03-12-wp539-sync-processes-audit (proposals.md)",
+        "scope": "checkout"
+      },
+      "executor": "Мак — reader-copies-sync (launchd); Цех — нет (в индекс идёт PACK-personal-index)",
+      "expected_branch": "main",
+      "mutation_mechanism": "Мак: ff-only чистой копии",
+      "repo_id": "PACK-personal",
+      "upstream": "origin/main"
+    },
+    {
+      "checkouts": [
+        {
+          "host": "mac",
+          "path": "FPF"
+        },
+        {
+          "class": "service",
+          "host": "tsekh-1",
+          "path": "FPF"
+        }
+      ],
+      "class": "reader",
+      "decision_owner": {
+        "ref": "решение пилота 03.11.2026, пир-сессия 2026-11-03-12-wp539-sync-processes-audit (proposals.md)",
+        "scope": "checkout"
+      },
+      "executor": "Мак — reader-copies-sync (launchd); Цех — ночной диспетчер перематывает источники индекса знаний (iwe-verified-sync)",
+      "expected_branch": "main",
+      "mutation_mechanism": "ff-only чистой копии",
+      "repo_id": "FPF",
+      "upstream": "origin/main"
+    },
+    {
+      "checkouts": [
+        {
+          "host": "mac",
+          "path": "SPF"
+        },
+        {
+          "class": "service",
+          "host": "tsekh-1",
+          "path": "SPF"
+        }
+      ],
+      "class": "reader",
+      "decision_owner": {
+        "ref": "решение пилота 03.11.2026, пир-сессия 2026-11-03-12-wp539-sync-processes-audit (proposals.md)",
+        "scope": "checkout"
+      },
+      "executor": "Мак — reader-copies-sync (launchd); Цех — ночной диспетчер перематывает источники индекса знаний (iwe-verified-sync)",
+      "expected_branch": "main",
+      "mutation_mechanism": "ff-only чистой копии",
+      "repo_id": "SPF",
+      "upstream": "origin/main"
+    },
+    {
+      "checkouts": [
+        {
+          "host": "mac",
+          "path": "ZP"
+        }
+      ],
+      "class": "reader",
+      "decision_owner": {
+        "ref": "решение пилота 03.11.2026, пир-сессия 2026-11-03-12-wp539-sync-processes-audit (proposals.md)",
+        "scope": "checkout"
+      },
+      "executor": "Мак — reader-copies-sync (launchd)",
+      "expected_branch": "main",
+      "mutation_mechanism": "ff-only чистой копии",
+      "repo_id": "ZP",
+      "upstream": "origin/main"
+    },
+    {
+      "checkouts": [
+        {
+          "host": "mac",
+          "path": "DS-IT-systems/SystemsSchool_bot"
+        }
+      ],
+      "class": "reader",
+      "decision_owner": {
+        "ref": "решение пилота 03.11.2026, пир-сессия 2026-11-03-12-wp539-sync-processes-audit (proposals.md)",
+        "scope": "checkout"
+      },
+      "executor": "Мак — reader-copies-sync (launchd)",
+      "expected_branch": "main",
+      "mutation_mechanism": "ff-only чистой копии",
+      "repo_id": "SystemsSchool_bot",
+      "upstream": "origin/main"
+    },
+    {
+      "checkouts": [
+        {
+          "host": "mac",
+          "path": "DS-IT-systems/aisystant"
+        }
+      ],
+      "class": "reader",
+      "decision_owner": {
+        "ref": "решение пилота 03.11.2026, пир-сессия 2026-11-03-12-wp539-sync-processes-audit (proposals.md)",
+        "scope": "checkout"
+      },
+      "executor": "Мак — reader-copies-sync (launchd)",
+      "expected_branch": "master",
+      "mutation_mechanism": "ff-only чистой копии",
+      "repo_id": "aisystant",
+      "upstream": "origin/master"
+    },
+    {
+      "checkouts": [
+        {
+          "host": "mac",
+          "path": "DS-IT-systems/DS-ai-systems"
+        },
+        {
+          "class": "service",
+          "host": "tsekh-1",
+          "path": "DS-IT-systems/DS-ai-systems",
+          "written_here": true
+        }
+      ],
+      "class": "working",
+      "decision_owner": {
+        "ref": "решение пилота 03.11.2026, пир-сессия 2026-11-03-12-wp539-sync-processes-audit (proposals.md)",
+        "scope": "checkout"
+      },
+      "executor": "Цех — iwe-verified-sync перед запуском службы; Мак — нет (рабочая копия)",
+      "expected_branch": "main",
+      "mutation_mechanism": "сессии и службы коммитят; Цех отправляет то, что впереди",
+      "repo_id": "DS-ai-systems",
+      "upstream": "origin/main"
+    },
+    {
+      "checkouts": [
+        {
+          "host": "mac",
+          "path": "DS-IT-systems/activity-hub"
+        },
+        {
+          "class": "service",
+          "host": "tsekh-1",
+          "path": "DS-IT-systems/activity-hub",
+          "written_here": true
+        }
+      ],
+      "class": "working",
+      "decision_owner": {
+        "ref": "решение пилота 03.11.2026, пир-сессия 2026-11-03-12-wp539-sync-processes-audit (proposals.md)",
+        "scope": "checkout"
+      },
+      "executor": "Цех — iwe-verified-sync перед запуском службы; Мак — нет (рабочая копия)",
+      "expected_branch": "main",
+      "mutation_mechanism": "сессии и службы коммитят; Цех отправляет то, что впереди",
+      "repo_id": "activity-hub",
+      "upstream": "origin/main"
+    },
+    {
+      "checkouts": [
+        {
+          "host": "mac",
+          "path": "DS-IT-systems/iwe-server"
+        },
+        {
+          "class": "service",
+          "host": "tsekh-1",
+          "path": "DS-IT-systems/iwe-server",
+          "written_here": true
+        }
+      ],
+      "class": "working",
+      "decision_owner": {
+        "ref": "решение пилота 03.11.2026, пир-сессия 2026-11-03-12-wp539-sync-processes-audit (proposals.md)",
+        "scope": "checkout"
+      },
+      "executor": "Цех — iwe-verified-sync перед запуском службы; Мак — нет (рабочая копия)",
+      "expected_branch": "main",
+      "mutation_mechanism": "сессии и службы коммитят; Цех отправляет то, что впереди",
+      "repo_id": "iwe-server",
+      "upstream": "origin/main"
+    },
+    {
+      "checkouts": [
+        {
+          "host": "mac",
+          "path": "DS-MCP/knowledge-mcp"
+        },
+        {
+          "class": "service",
+          "host": "tsekh-1",
+          "path": "DS-MCP/knowledge-mcp",
+          "written_here": true
+        }
+      ],
+      "class": "working",
+      "decision_owner": {
+        "ref": "решение пилота 03.11.2026, пир-сессия 2026-11-03-12-wp539-sync-processes-audit (proposals.md)",
+        "scope": "checkout"
+      },
+      "executor": "Цех — iwe-verified-sync перед запуском службы; Мак — нет (рабочая копия)",
+      "expected_branch": "main",
+      "mutation_mechanism": "сессии и службы коммитят; Цех отправляет то, что впереди",
+      "repo_id": "knowledge-mcp",
+      "upstream": "origin/main"
+    },
+    {
+      "checkouts": [
+        {
+          "host": "mac",
+          "path": "DS-autonomous-agents"
+        },
+        {
+          "class": "service",
+          "host": "tsekh-1",
+          "path": "DS-autonomous-agents",
+          "written_here": true
+        }
+      ],
+      "class": "working",
+      "decision_owner": {
+        "ref": "решение пилота 03.11.2026, пир-сессия 2026-11-03-12-wp539-sync-processes-audit (proposals.md)",
+        "scope": "checkout"
+      },
+      "executor": "Цех — iwe-verified-sync перед запуском службы; Мак — нет (рабочая копия)",
+      "expected_branch": "main",
+      "mutation_mechanism": "сессии и службы коммитят; Цех отправляет то, что впереди",
+      "repo_id": "DS-autonomous-agents",
+      "upstream": "origin/main"
+    },
+    {
+      "checkouts": [
+        {
+          "host": "mac",
+          "path": "DS-agent-workspace"
+        },
+        {
+          "class": "working",
+          "host": "tsekh-1",
+          "path": "DS-agent-workspace",
+          "written_here": true
+        }
+      ],
+      "class": "working",
+      "decision_owner": {
+        "ref": "решение пилота 03.11.2026, пир-сессия 2026-11-03-12-wp539-sync-processes-audit (proposals.md)",
+        "scope": "checkout"
+      },
+      "executor": "нет автоматической перемотки; Цех — отправка того, что впереди (iwe-push-ahead)",
+      "expected_branch": "main",
+      "mutation_mechanism": "сессии и службы коммитят; Цех отправляет то, что впереди",
+      "repo_id": "DS-agent-workspace",
+      "upstream": "origin/main"
+    },
+    {
+      "checkouts": [
+        {
+          "host": "mac",
+          "path": "DS-ecosystem-development"
+        },
+        {
+          "class": "working",
+          "host": "tsekh-1",
+          "path": "DS-ecosystem-development",
+          "written_here": true
+        }
+      ],
+      "class": "working",
+      "decision_owner": {
+        "ref": "решение пилота 03.11.2026, пир-сессия 2026-11-03-12-wp539-sync-processes-audit (proposals.md)",
+        "scope": "checkout"
+      },
+      "executor": "нет автоматической перемотки; Цех — отправка того, что впереди (iwe-push-ahead)",
+      "expected_branch": "main",
+      "mutation_mechanism": "сессии и службы коммитят; Цех отправляет то, что впереди",
+      "repo_id": "DS-ecosystem-development",
+      "upstream": "origin/main"
+    },
+    {
+      "checkouts": [
+        {
+          "host": "mac",
+          "path": "DS-Knowledge-Index-Tseren"
+        },
+        {
+          "class": "working",
+          "host": "tsekh-1",
+          "path": "DS-Knowledge-Index-Tseren",
+          "written_here": true
+        }
+      ],
+      "class": "working",
+      "decision_owner": {
+        "ref": "решение пилота 03.11.2026, пир-сессия 2026-11-03-12-wp539-sync-processes-audit (proposals.md)",
+        "scope": "checkout"
+      },
+      "executor": "нет автоматической перемотки; Цех — отправка того, что впереди (iwe-push-ahead)",
+      "expected_branch": "main",
+      "mutation_mechanism": "сессии и службы коммитят; Цех отправляет то, что впереди",
+      "repo_id": "DS-Knowledge-Index-Tseren",
+      "upstream": "origin/main"
+    },
+    {
+      "checkouts": [
+        {
+          "host": "mac",
+          "path": "DS-principles-curriculum"
+        },
+        {
+          "class": "working",
+          "host": "tsekh-1",
+          "path": "DS-principles-curriculum",
+          "written_here": true
+        }
+      ],
+      "class": "working",
+      "decision_owner": {
+        "ref": "решение пилота 03.11.2026, пир-сессия 2026-11-03-12-wp539-sync-processes-audit (proposals.md)",
+        "scope": "checkout"
+      },
+      "executor": "нет автоматической перемотки; Цех — отправка того, что впереди (iwe-push-ahead)",
+      "expected_branch": "main",
+      "mutation_mechanism": "сессии и службы коммитят; Цех отправляет то, что впереди",
+      "repo_id": "DS-principles-curriculum",
+      "upstream": "origin/main"
+    }
+  ],
+  "version": 1
+}

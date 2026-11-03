@@ -9,10 +9,12 @@ error, not an ignored field.
 Read-only: nothing here touches a working tree, an index or a remote (reader-copies-sync.py acts on the answers).
 """
 
+import json
 import os
 import posixpath
 import re
 import socket
+import sys
 from pathlib import Path
 
 try:
@@ -36,7 +38,8 @@ ENTRY_KEYS = {
     "repo_id", "class", "checkouts", "expected_branch", "upstream",
     "decision_owner", "executor", "mutation_mechanism", "thresholds", "note",
 }
-CHECKOUT_KEYS = {"host", "path", "purpose", "optional", "integrity_evidence", "class"}
+CHECKOUT_KEYS = {"host", "path", "purpose", "optional", "integrity_evidence", "class", "written_here"}
+JSON_EXPORT = "repo-convergence.registry.json"  # Nix reads JSON only (builtins.fromJSON)
 REPO_ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")
 
 
@@ -61,6 +64,8 @@ def _validate_checkout(where, checkout, seen):
         errors.append(f"{where}: purpose должен быть одним из {PURPOSES}")
     if not isinstance(checkout.get("optional", False), bool):
         errors.append(f"{where}: optional должен быть булевым")
+    if not isinstance(checkout.get("written_here", False), bool):
+        errors.append(f"{where}: written_here должен быть булевым")
     if "class" in checkout and checkout["class"] not in CLASSES:
         errors.append(f"{where}: class должен быть одним из {CLASSES}")
     return errors
@@ -95,6 +100,10 @@ def _validate_entry(index, entry, seen_ids, seen_paths):
             # Only well-typed pairs are hashable; a wrong type is already reported by the checkout check.
             if isinstance(checkout, dict) and checkout.get("host") in HOSTS and isinstance(checkout.get("path"), str):
                 seen_paths.setdefault((checkout["host"], checkout["path"]), repo_id)
+            # A written copy gets pushed from its host: never a reader copy, never a copy-folder.
+            if isinstance(checkout, dict) and checkout.get("written_here") is True:
+                if checkout.get("class", entry.get("class")) == "reader" or checkout.get("purpose") == "copy":
+                    errors.append(f"{label}.checkouts[{n}]: written_here несовместим с class reader и purpose copy")
     owner = entry.get("decision_owner")
     if owner is not None:
         if not isinstance(owner, dict) or not owner.get("ref") or owner.get("scope") not in SCOPES:
@@ -195,3 +204,41 @@ def compare(registry, discovered, host_id):
         "not_expected": sorted((found - set(mine)) & set(others)),
         "absent": sorted(set(mine) - found - optional),
     }
+
+
+def written_paths(registry, host_id):
+    """Checkouts on `host_id` that are committed to there, i.e. need fetch + push of what is ahead."""
+    return sorted(
+        checkout["path"]
+        for entry in registry["repos"]
+        for checkout in entry["checkouts"]
+        if checkout["host"] == host_id and checkout.get("written_here")
+    )
+
+
+def to_json(registry):
+    """Canonical JSON text of the registry, for consumers without a YAML parser (Nix)."""
+    return json.dumps(registry, ensure_ascii=False, indent=2, sort_keys=True) + "\n"
+
+
+def main(argv):
+    """`repo_registry.py export-json` -- regenerate the JSON copy next to the YAML registry."""
+    if argv != ["export-json"]:
+        print("usage: repo_registry.py export-json", file=sys.stderr)
+        return 2
+    here = Path(__file__).resolve().parent
+    registry, errors = load(here / "repo-convergence.registry.yaml")
+    if registry is None:
+        print("\n".join(errors), file=sys.stderr)
+        return 1
+    try:
+        text = to_json(registry)
+    except TypeError as exc:  # e.g. an unquoted YAML date: JSON has no such type
+        print(f"реестр не переводится в JSON: {exc}", file=sys.stderr)
+        return 1
+    (here / JSON_EXPORT).write_text(text, encoding="utf-8")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

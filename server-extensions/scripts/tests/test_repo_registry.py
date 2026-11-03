@@ -143,6 +143,33 @@ class LoadTest(unittest.TestCase):
                 # the broker must fill exactly the ref the reader moves to (main vs master etc.)
                 self.assertTrue(rule["refspec"].endswith(":refs/remotes/" + entry["upstream"]), checkout["path"])
 
+    def test_json_copy_in_sync(self):
+        """iwe-server-config builds the Tsekh git-ops lists from the JSON copy: it must equal the YAML."""
+        registry, _ = repo_registry.load(SCRIPTS / "repo-convergence.registry.yaml")
+        committed = (SCRIPTS / repo_registry.JSON_EXPORT).read_text(encoding="utf-8")
+        self.assertEqual(committed, repo_registry.to_json(registry),
+                         "regenerate: python3 scripts/repo_registry.py export-json")
+
+    def test_written_paths(self):
+        data = copy.deepcopy(VALID)
+        data["repos"][0]["checkouts"][1]["written_here"] = True
+        self.assertEqual(repo_registry.validate(data), [])
+        self.assertEqual(repo_registry.written_paths(data, "tsekh-1"), ["canon"])
+        self.assertEqual(repo_registry.written_paths(data, "mac"), [])
+        data["repos"][0]["checkouts"][1]["written_here"] = "yes"
+        self.assertTrue(any("written_here должен быть булевым" in e for e in repo_registry.validate(data)))
+
+    def test_written_reader_rejected(self):
+        """A reader copy marked written would be pushed from its host by the Tsekh git-ops list."""
+        data = copy.deepcopy(VALID)
+        data["repos"][0]["class"] = "reader"
+        data["repos"][0]["checkouts"][1]["written_here"] = True
+        errors = repo_registry.validate(data)
+        self.assertEqual(len(errors), 1)
+        self.assertIn("written_here несовместим", errors[0])
+        data["repos"][0]["checkouts"][1]["class"] = "service"
+        self.assertEqual(repo_registry.validate(data), [])
+
     def test_bad_types_report(self):
         """Wrong types in a decided entry are reported, never raised (load() must not crash its callers)."""
         errors = broken(lambda d: d["repos"][1].update(checkouts=5))
