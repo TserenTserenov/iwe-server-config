@@ -7,6 +7,11 @@ WP-539 F21 B0(a). Three independent fields per repo, never merged into one statu
               ref, from producers that log it (refs-sync-broker); no evidence means
               "unknown", not "never", and "equal" without it is not confirmed;
   block    -- an observed blocker of the canon sync contour with its age.
+Per-copy facts beside them (WP-539, 03.11): origin (copies of one GitHub repo in
+several folders are listed as duplicates), unpublished commits (in no known
+remote branch, not just "ahead of upstream"), uncommitted and untracked files.
+Discovery descends MAX_DEPTH levels, so nested repos (DS-MCP/*, DS-IT-systems/*)
+are seen too.
 Completeness (found / checked / errors / unconfirmed) and the state of every
 evidence source are printed, so neither a vanished repo nor a broken source can
 turn the report green by its absence.
@@ -20,6 +25,7 @@ import re
 import socket
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
@@ -32,13 +38,19 @@ except ImportError:  # `python3 -` (script piped on stdin): __file__ is "<stdin>
 GIT_ENV = dict(os.environ, GIT_OPTIONAL_LOCKS="0", LC_ALL="C")
 DEFAULT_REGISTRY = str(HERE / "repo-convergence.registry.yaml") if repo_registry else ""
 REGISTRY_NAMES_SHOWN = 15
-COVERAGE_NOTE = "полнота обхода: корень и каталоги первого уровня; вложенные репозитории не видны"
-SKIP_DIRS = {".iwe-runtime", ".worktrees", ".claude", "node_modules"}
+MAX_DEPTH = 2  # root = 0; DS-MCP/knowledge-mcp = 2
+COVERAGE_NOTE = (f"полнота обхода: корень и вложенные каталоги до глубины {MAX_DEPTH}, кроме служебных; "
+                 "по символическим ссылкам внутрь не заходит")
+SKIP_DIRS = {".git", ".iwe-runtime", ".worktrees", ".claude", "node_modules"}
 # "<ts> OK <path> <- <remote> +<src>:<dst>" -- refs-sync-broker.sh success line.
 BROKER_OK_RE = re.compile(r"^(\S+) OK (\S+) <- \S+ \+?[^:\s]+:(\S+)$")
 CANON_REPO = "DS-my-strategy"
 SYNC_RUN_STALE_MIN = 60   # the canon sync runs every 20 min (Mac backstop: hourly)
 FETCH_FRESH_MIN = int(os.environ.get("CONVERGENCE_FETCH_FRESH_MIN", "120"))
+# Whole-scan budget: copies left when it runs out are reported as not checked, not dropped.
+SCAN_BUDGET_S = int(os.environ.get("CONVERGENCE_SCAN_BUDGET_S", "120"))
+COPY_FACTS = ("origin", "unpublished", "changed", "untracked")
+DUP_FOLDERS_SHOWN = 3
 
 
 def git(repo, *args):
@@ -49,12 +61,98 @@ def git(repo, *args):
     return proc.returncode, proc.stdout.strip()
 
 
+def has_git(path):
+    """True if path holds a .git entry; raises OSError when path cannot be entered (Python <3.12)."""
+    return (path / ".git").exists()
+
+
 def discover(root):
-    repos = [root] if (root / ".git").exists() else []
-    for child in sorted(root.iterdir()):
-        if child.name not in SKIP_DIRS and child.is_dir() and (child / ".git").exists():
-            repos.append(child)
-    return repos
+    """(repos down to MAX_DEPTH, unreadable dirs). A symlinked repo is listed, never descended into;
+    a folder reachable by two paths (memory and iwe-local-config/memory) is listed once, under its
+    shallowest non-symlink path."""
+    found, unreadable = {}, []  # real path -> ((is_link, depth, posix path), path); smaller key wins
+
+    def add(path, depth, is_link):
+        key = (is_link, depth, path.as_posix())
+        real = path.resolve()
+        if real not in found or key < found[real][0]:
+            found[real] = (key, path)
+
+    def walk(path, depth):
+        try:
+            if has_git(path):
+                add(path, depth, False)
+            if depth == MAX_DEPTH:
+                return
+            children = sorted(c for c in path.iterdir() if c.name not in SKIP_DIRS and c.is_dir())
+        except OSError:
+            unreadable.append(path)
+            return
+        for child in children:
+            if not child.is_symlink():
+                walk(child, depth + 1)
+                continue
+            try:
+                if has_git(child):
+                    add(child, depth + 1, True)
+            except OSError:
+                unreadable.append(child)
+
+    walk(root, 0)
+    repos = sorted((path for _, path in found.values()), key=lambda p: p.as_posix())
+    return repos, unreadable
+
+
+def origin_id(repo):
+    """'owner/name' of the origin remote in lower case (GitHub ignores case), or None."""
+    rc, url = git(repo, "remote", "get-url", "origin")
+    if rc != 0 or not url:
+        return None
+    url = re.sub(r"\.git$", "", url.rstrip("/"))
+    match = re.search(r"[:/]([^/:]+/[^/:]+)$", url)
+    return (match.group(1) if match else url).lower()
+
+
+def unpublished(repo):
+    """Commits of the current branch that no remote-tracking ref contains.
+
+    Current branch only: publication here cherry-picks session commits onto origin, so old
+    local session branches never merge and --branches would count delivered work (198 on the
+    root, 03.11). None when there is nothing to compare with: no remote, or a remote never
+    fetched (every commit would read as unpublished). Stale remote-tracking refs overstate it."""
+    rc, refs = git(repo, "for-each-ref", "--count=1", "--format=%(refname)", "refs/remotes")
+    if rc != 0 or not refs:
+        return None
+    rc, count = git(repo, "rev-list", "--count", "HEAD", "--not", "--remotes")
+    if rc != 0:
+        return None
+    if int(count) == 0:
+        return 0
+    # Publication cherry-picks onto origin: a commit whose patch is already upstream is delivered.
+    rc, unique = git(repo, "rev-list", "--count", "--cherry-pick", "--right-only", "--no-merges",
+                     "@{upstream}...HEAD")
+    return min(int(count), int(unique)) if rc == 0 else int(count)
+
+
+def worktree_changes(repo):
+    """(changed tracked files, untracked entries); (None, None) on error."""
+    rc, out = git(repo, "status", "--porcelain", "--untracked-files=normal")
+    if rc != 0:
+        return None, None
+    lines = [line for line in out.splitlines() if line]
+    untracked = sum(line.startswith("??") for line in lines)
+    return len(lines) - untracked, untracked
+
+
+def copy_facts(repo):
+    """Per-copy facts beside the relation; a failure leaves them None and never touches the relation."""
+    try:
+        changed, untracked = worktree_changes(repo)
+        return {"origin": origin_id(repo), "unpublished": unpublished(repo),
+                "changed": changed, "untracked": untracked}
+    except (subprocess.SubprocessError, OSError, ValueError) as exc:
+        print(f"convergence-report: {repo}: {exc.__class__.__name__}", file=sys.stderr)
+        return dict.fromkeys(COPY_FACTS)
 
 
 def parse_ts(value):
@@ -149,23 +247,66 @@ def scan(root, state_file):
     now = dt.datetime.now(dt.timezone.utc)
     fetch_times, broker_note = broker_fetch_times(root)
     block_text, state_note = canon_block(state_file, now)
+    repos, unreadable = discover(root)
+    deadline = time.monotonic() + SCAN_BUDGET_S
     rows = []
-    for repo in discover(root):
-        try:
-            rel, upstream, is_error = relation(repo)
-        except (subprocess.SubprocessError, OSError, ValueError) as exc:
-            rel, upstream, is_error = f"error: {exc.__class__.__name__}", None, True
+    for repo in repos:
+        name = "." if repo == root else repo.relative_to(root).as_posix()
+        if time.monotonic() > deadline:
+            rel, upstream, is_error = f"не проверено: обход дольше {SCAN_BUDGET_S} с", None, True
+            facts = dict.fromkeys(COPY_FACTS)
+        else:
+            try:
+                rel, upstream, is_error = relation(repo)
+            except (subprocess.SubprocessError, OSError, ValueError) as exc:
+                rel, upstream, is_error = f"error: {exc.__class__.__name__}", None, True
+            facts = copy_facts(repo)
         fetched = fetch_times.get((repo, upstream)) if upstream else None
         rows.append({
-            "repo": "." if repo == root else repo.name,
+            "repo": name,
             "relation": rel,
             "upstream": upstream,
             "error": is_error,
             "fetch": age(fetched, now) if fetched else "unknown",
             "fetch_stale": bool(fetched) and (now - fetched).total_seconds() > FETCH_FRESH_MIN * 60,
-            "block": block_text if repo.name == CANON_REPO else "",
+            "block": block_text if name == CANON_REPO else "",
+            **facts,
         })
-    return rows, [broker_note, state_note]
+    sources = [broker_note, state_note]
+    if unreadable:
+        sources.append(f"не читаются каталоги: {_names([str(p.relative_to(root)) for p in unreadable])}")
+    return rows, sources
+
+
+def duplicates(rows):
+    """{origin: [repo, ...]} for origins checked out in more than one folder."""
+    by_origin = {}
+    for row in rows:
+        if row["origin"]:
+            by_origin.setdefault(row["origin"], []).append(row["repo"])
+    return {origin: repos for origin, repos in sorted(by_origin.items()) if len(repos) > 1}
+
+
+def _folders(repos):
+    rest = len(repos) - DUP_FOLDERS_SHOWN
+    return ", ".join(repos[:DUP_FOLDERS_SHOWN]) + (f" и ещё {rest}" if rest > 0 else "")
+
+
+def render_copies(rows):
+    """Summary lines for work at risk and duplicate copies; empty parts are omitted."""
+    out = []
+    pending = [f"{r['repo']} ({r['unpublished']})" for r in rows if r["unpublished"]]
+    if pending:
+        out.append(f"коммиты текущей ветки, которых нет ни в одной известной удалённой ветке, "
+                   f"в {len(pending)} копиях: {_names(pending)}")
+    dirty = [f"{r['repo']} ({r['changed']})" for r in rows if r["changed"]]
+    if dirty:
+        out.append(f"незакоммиченные правки в {len(dirty)} копиях: {_names(dirty)}")
+    dups = duplicates(rows)
+    if dups:
+        out.append(f"один удалённый репозиторий в нескольких папках ({len(dups)}): "
+                   + _names([f"{o}: {_folders(repos)}" for o, repos in dups.items()]))
+    return out
 
 
 def host_id():
@@ -234,6 +375,7 @@ def render(rows, sources, host, problems_only, registry=None):
     ]
     if registry is not None:
         out += render_registry(registry)
+    out += render_copies(rows)
     for r in sorted(groups["problem"], key=lambda r: (not r["error"], not r["block"], r["repo"])):
         fetched = r["fetch"] + (" (устарело)" if r["fetch_stale"] else "")
         line = f"- {r['repo']}: {r['relation']}; данные с сервера получены: {fetched}"

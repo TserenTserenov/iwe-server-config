@@ -122,6 +122,103 @@ class ConvergenceReportTest(unittest.TestCase):
         self.assertNotIn("совпадение подтверждено:", out)
         self.assertIn("broker.log: 4 подтверждений", out)
 
+    def test_nested_and_copy_facts(self):
+        self.state.write_text(json.dumps({"consecutive_fails": 0, "last_run_ts": stamp(3)}))
+        origin = Path(self.tmp.name) / "origin.git"
+        (self.root / "group").mkdir()
+        clone(origin, self.root / "group" / "inner")
+        (self.root / "deep" / "x").mkdir(parents=True)
+        clone(origin, self.root / "deep" / "x" / "too-deep")  # depth 3: beyond MAX_DEPTH
+        (self.root / "equal" / "a").write_text("changed")
+        (self.root / "equal" / "new.txt").write_text("n")
+        rows, _, _ = self.rows()
+        self.assertEqual(rows["group/inner"]["relation"], "equal")
+        self.assertNotIn("deep/x/too-deep", rows)
+        # Unpublished = in no remote branch, unlike "ahead" which only compares with upstream.
+        self.assertEqual(rows["stale-ahead"]["unpublished"], 1)
+        self.assertEqual(rows["behind"]["unpublished"], 0)
+        self.assertIsNone(rows["local"]["unpublished"])  # no remote to compare with
+        self.assertEqual((rows["equal"]["changed"], rows["equal"]["untracked"]), (1, 1))
+        out = self.run_report().stdout
+        self.assertIn("найдено 10", out)
+        self.assertIn("коммиты текущей ветки, которых нет ни в одной известной удалённой ветке, в 2 копиях: "
+                      "diverged (1), stale-ahead (1)", out)
+        self.assertIn("незакоммиченные правки в 1 копиях: equal (1)", out)
+        # Eight clones share one origin; the folder list is cut to three so the Telegram line stays short.
+        self.assertRegex(out, r"один удалённый репозиторий в нескольких папках \(1\): "
+                              r"\S+/origin: DS-my-strategy, behind, diverged и ещё 5\n")
+
+    def test_cherry_picked_commit_is_not_unpublished(self):
+        """Regression 03.11: DS-ecosystem-development read 1 unpublished though its patch was on origin."""
+        self.state.write_text(json.dumps({"consecutive_fails": 0, "last_run_ts": stamp(3)}))
+        base = Path(self.tmp.name)
+        picked = self.root / "picked"
+        clone(base / "origin.git", picked)
+        commit(picked, "p")
+        publisher = base / "publisher"
+        clone(base / "origin.git", publisher)
+        commit(publisher, "q")  # moves origin, so the cherry-pick below gets a new SHA
+        git(publisher, "fetch", "-q", str(picked), "main")
+        git(publisher, "cherry-pick", "FETCH_HEAD")
+        git(publisher, "push", "-q", "origin", "main")
+        git(picked, "fetch", "-q")
+        rows, _, _ = self.rows()
+        self.assertEqual(rows["picked"]["relation"], "diverged +1/-2")
+        self.assertEqual(rows["picked"]["unpublished"], 0)
+
+    def test_two_paths_one_copy(self):
+        """Regression 03.11: memory and iwe-local-config/memory point at one folder; it was counted twice."""
+        self.state.write_text(json.dumps({"consecutive_fails": 0, "last_run_ts": stamp(3)}))
+        # "a-link" sorts before "behind": the real, shallower path must still win.
+        (self.root / "a-link").symlink_to(self.root / "behind")
+        (self.root / "equal" / "link-to-behind").symlink_to(self.root / "behind")
+        rows, _, _ = self.rows()
+        self.assertIn("behind", rows)
+        self.assertNotIn("a-link", rows)
+        self.assertNotIn("equal/link-to-behind", rows)
+        self.assertEqual(len(rows), 9)
+
+    def test_unreadable_dir_is_reported_not_fatal(self):
+        """Python <3.12 raises PermissionError from Path.exists() inside a dir without execute bit."""
+        self.state.write_text(json.dumps({"consecutive_fails": 0, "last_run_ts": stamp(3)}))
+        locked = self.root / "locked"
+        (locked / "inner").mkdir(parents=True)
+        locked.chmod(0)
+        try:
+            rows, sources, _ = self.rows()
+        finally:
+            locked.chmod(0o755)
+        self.assertEqual(rows["equal"]["relation"], "equal")
+        self.assertIn("не читаются каталоги: locked", sources)
+
+    def test_unfetched_and_empty_repos(self):
+        self.state.write_text(json.dumps({"consecutive_fails": 0, "last_run_ts": stamp(3)}))
+        never = self.root / "never-fetched"
+        never.mkdir()
+        git(never, "init", "-q")
+        commit(never, "x")
+        git(never, "remote", "add", "origin", str(Path(self.tmp.name) / "origin.git"))
+        empty = self.root / "empty"
+        empty.mkdir()
+        git(empty, "init", "-q")
+        git(empty, "remote", "add", "origin", str(Path(self.tmp.name) / "origin.git"))
+        git(empty, "fetch", "-q")
+        rows, _, _ = self.rows()
+        self.assertIsNone(rows["never-fetched"]["unpublished"])  # nothing to compare with
+        self.assertIsNone(rows["empty"]["unpublished"])  # no HEAD yet: unknown, and not a crash
+        self.assertFalse(rows["never-fetched"]["error"])
+
+    def test_scan_budget_marks_rest_not_checked(self):
+        self.state.write_text(json.dumps({"consecutive_fails": 0, "last_run_ts": stamp(3)}))
+        proc = subprocess.run(
+            [sys.executable, str(SCRIPT), "--root", str(self.root), "--host", "t",
+             "--state-file", str(self.state), "--json"],
+            capture_output=True, text=True,
+            env=dict(os.environ, CONVERGENCE_HOST_ID="mac", CONVERGENCE_SCAN_BUDGET_S="0"))
+        rows = {r["repo"]: r for r in json.loads(proc.stdout)["repos"]}
+        self.assertEqual(len(rows), 9)  # nothing dropped
+        self.assertTrue(all(r["relation"].startswith("не проверено") and r["error"] for r in rows.values()))
+
     def test_canon_block_from_state(self):
         self.state.write_text(json.dumps({
             "consecutive_fails": 0, "last_run_ts": stamp(180), "behind_since_ts": stamp(240)}))
@@ -156,7 +253,7 @@ class ConvergenceReportTest(unittest.TestCase):
         self.assertIn("присутствие на этом хосте не ожидается: behind", out)
         self.assertRegex(out, r"вне реестра \d+: .*unconfirmed")
         self.assertNotRegex(out, r"вне реестра \d+: .*\bbehind\b")  # registered for the other host only
-        self.assertIn("полнота обхода: корень и каталоги первого уровня; вложенные репозитории не видны", out)
+        self.assertIn("полнота обхода: корень и вложенные каталоги до глубины 2", out)
 
     def test_registry_host_comes_from_the_machine_not_the_display_label(self):
         """Regression: the digest labels the server 'Цех'; matching on that label made it read as the Mac."""
