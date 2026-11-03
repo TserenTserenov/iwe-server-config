@@ -27,6 +27,21 @@ let
   cfg = config.tsekh.timers;
   iwe = cfg.iweHome;
 
+  # One list for iwe-pull-repos and iwe-push-ahead: the checkouts that are committed to on this
+  # host (`written_here: true` for tsekh-1 in the convergence registry, owned by iwe-local-config:
+  # scripts/repo-convergence.registry.yaml). WP-539, pilot decision 03.11.2026; the hand-written
+  # copies had already drifted apart (DS-principles-curriculum was in one list only). The JSON
+  # copy exists because Nix has no YAML parser; a test there keeps it equal to the YAML.
+  convergenceRegistry = builtins.fromJSON
+    (builtins.readFile ../server-extensions/scripts/repo-convergence.registry.json);
+  gitOpsRepos = lib.sort lib.lessThan (lib.concatMap
+    (entry: map (c: c.path)
+      (builtins.filter (c: c.host == "tsekh-1" && (c.written_here or false)) entry.checkouts))
+    convergenceRegistry.repos);
+  gitOpsReposBash = lib.throwIf (gitOpsRepos == [ ])
+    "convergence registry lists no written_here checkouts for tsekh-1"
+    (lib.concatMapStringsSep "\n      " (path: "\"${path}\"") gitOpsRepos);
+
   # caffeinate — macOS-специфичная команда (предотвращает сон).
   # На сервере не нужна: systemd сам не даёт процессам зависать.
   # Создаём no-op заглушку, чтобы scheduler.sh не падал с "command not found".
@@ -153,22 +168,7 @@ let
     # scheduler task on this host reads it — an unwatched clone is not a risk,
     # a watched-but-unused one is only alert noise.
     repos=(
-      "DS-IT-systems/DS-ai-systems"
-      "DS-IT-systems/activity-hub"
-      "DS-IT-systems/iwe-server"
-      "DS-MCP/knowledge-mcp"
-      "DS-agent-workspace"
-      "DS-autonomous-agents"
-      "DS-ecosystem-development"
-      "DS-Knowledge-Index-Tseren"
-      "DS-principles-curriculum"
-      "PACK-MIM"
-      "PACK-agent-rules"
-      "PACK-autonomous-agents"
-      "PACK-digital-platform"
-      "PACK-ecosystem"
-      "PACK-personal"
-      "PACK-verification"
+      ${gitOpsReposBash}
     )
 
     failed=()
@@ -395,21 +395,7 @@ let
     fi
 
     repos=(
-      "DS-IT-systems/DS-ai-systems"
-      "DS-IT-systems/activity-hub"
-      "DS-IT-systems/iwe-server"
-      "DS-MCP/knowledge-mcp"
-      "DS-agent-workspace"
-      "DS-autonomous-agents"
-      "DS-ecosystem-development"
-      "DS-Knowledge-Index-Tseren"
-      "PACK-MIM"
-      "PACK-agent-rules"
-      "PACK-autonomous-agents"
-      "PACK-digital-platform"
-      "PACK-ecosystem"
-      "PACK-personal"
-      "PACK-verification"
+      ${gitOpsReposBash}
     )
 
     failed=()
