@@ -27,7 +27,8 @@ make_repo() {  # <dir> -- a repo with an origin, one commit pushed to main
 
 make_repo "$TEST_ROOT"                 # the workspace ROOT repo itself
 make_repo "$TEST_ROOT/DS-strategy"     # the governance repo, a separate checkout
-printf 'DS-strategy/\nMC-sessions/\n.iwe-runtime/\n*.origin.git/\n' > "$TEST_ROOT/.gitignore"
+# .claude/state/ is ignored in the real root too (ds-commit.lock lives there, WP-539 Ф21 Б4).
+printf 'DS-strategy/\nMC-sessions/\n.iwe-runtime/\n.claude/state/\n*.origin.git/\n' > "$TEST_ROOT/.gitignore"
 git -C "$TEST_ROOT" add .gitignore
 git -C "$TEST_ROOT" commit -qm "ignore nested repos"
 git -C "$TEST_ROOT" push -q origin HEAD:main

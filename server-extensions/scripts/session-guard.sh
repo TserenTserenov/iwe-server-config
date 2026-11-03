@@ -1086,6 +1086,7 @@ _release_transition_locks_on_exit() {
   fi
   [ -z "$_SESSION_TRANSITION_LOCK_PATH" ] || release_session_transition_lock || true
   [ -z "$_SCHEDULED_ADMISSION_LOCK_PATH" ] || release_scheduled_admission_lock || true
+  release_ds_commit_lock || true
 }
 
 release_session_transition_lock() {
@@ -1218,6 +1219,52 @@ release_scheduled_admission_lock() {
   _SCHEDULED_ADMISSION_LOCK_PATH=""
   _SCHEDULED_ADMISSION_LOCK_TOKEN=""
   trap - EXIT
+}
+
+# WP-539 Ф21 Б4 (DRR-f21-b4-session-lock, 03.11): an open that publishes a
+# canonical-owner record or builds an isolated worktree from the shared .git
+# takes the shared repository mutation lock FIRST -- the same file
+# tsekh1-git-sync.sh (final proof + fast-forward) and commit-push.sh use. The
+# sync re-checks live sessions under that lock, so a record published here can
+# no longer slip between its re-check and its fast-forward. Lock order:
+# ds-commit -> scheduled-admission -> session-transition. A blocking wait is
+# allowed only for this first lock of the chain; anyone who already holds an
+# inner lock may take ds-commit only with `flock -n`.
+DS_COMMIT_LOCK_FILE="${DS_COMMIT_LOCK_FILE:-$IWE_ROOT/.claude/state/ds-commit.lock}"
+DS_COMMIT_LOCK_FD=194
+_DS_COMMIT_LOCK_HELD=0
+
+acquire_ds_commit_lock() {
+  local wait_seconds="${IWE_DS_COMMIT_LOCK_WAIT_SEC:-30}"
+  [ "$_DS_COMMIT_LOCK_HELD" = 0 ] \
+    || fail "ds-commit lock уже удерживается этим shell" 1
+  [ -z "$_SCHEDULED_ADMISSION_LOCK_PATH" ] && [ -z "$_SESSION_TRANSITION_LOCK_PATH" ] \
+    || fail "lock order violation: ds-commit должен браться до scheduled-admission и session-transition" 1
+  if { : >&194; } 2>/dev/null; then
+    fail "ds-commit reserved FD 194 уже занят" 1
+  fi
+  [ -n "$FLOCK_BIN" ] \
+    || fail "ds-commit lock требует доверенный flock (/opt/homebrew, /usr/local или /run/current-system/sw)" 1
+  mkdir -p "$(dirname "$DS_COMMIT_LOCK_FILE")" \
+    || fail "не удалось создать каталог замка $DS_COMMIT_LOCK_FILE" 1
+  exec 194>"$DS_COMMIT_LOCK_FILE" \
+    || fail "не удалось открыть замок $DS_COMMIT_LOCK_FILE" 1
+  if ! "$FLOCK_BIN" -w "$wait_seconds" "$DS_COMMIT_LOCK_FD"; then
+    exec 194>&-
+    fail "общая копия занята синхронизацией или публикацией дольше ${wait_seconds}s (ds-commit.lock); повтори позже" 1
+  fi
+  _DS_COMMIT_LOCK_HELD=1
+  trap _release_transition_locks_on_exit EXIT
+}
+
+# Releasing the outer lock while inner ones are still held is allowed: a
+# release never waits, so it cannot close a cycle. `open` uses that to drop
+# ds-commit right after publishing the record, before its slow follow-ups.
+release_ds_commit_lock() {
+  [ "$_DS_COMMIT_LOCK_HELD" = 1 ] || return 0
+  "$FLOCK_BIN" -u "$DS_COMMIT_LOCK_FD" 2>/dev/null || return 1
+  exec 194>&-
+  _DS_COMMIT_LOCK_HELD=0
 }
 
 acquire_scheduled_admission_lock() {
@@ -5221,6 +5268,7 @@ if [ "$CMD" = "open" ]; then
     [[ "$HOUSEKEEPING" =~ ^[a-zA-Z0-9][a-zA-Z0-9._-]{0,127}$ ]] \
       || fail "open --housekeeping: reason должен быть безопасным токеном длиной 1..128" 1
     HK_FILE="$SESSION_DIR/${AGENT}-housekeeping-${HOUSEKEEPING}.open"
+    [ -z "$CANONICAL_OWNER" ] || acquire_ds_commit_lock
     acquire_scheduled_admission_lock
     _refuse_second_canonical_owner
     acquire_session_transition_lock "$HK_FILE"
@@ -5275,6 +5323,8 @@ if [ "$CMD" = "open" ]; then
       || fail "open --housekeeping: semaphore опубликован, но session lock не освободился" 1
     release_scheduled_admission_lock \
       || fail "open --housekeeping: semaphore опубликован, но admission lock не освободился" 1
+    release_ds_commit_lock \
+      || fail "open --housekeeping: semaphore опубликован, но ds-commit lock не освободился" 1
     # Маркер standalone-доверия — по тому же id, что попал в семафор.
     if [ "${STANDALONE_LAUNCH:-0}" = "1" ] && [ "$AGENT" = "kimi" ]; then
       : > "$IWE_ROOT/.iwe-runtime/kimi-standalone-${HK_SID}.marker" 2>/dev/null || true
@@ -5305,6 +5355,34 @@ if [ "$CMD" = "open" ]; then
     esac
   fi
 
+  # WP-539 Ф21 Б4: the network fetch of origin/main runs BEFORE every lock, so
+  # the ds-commit critical section below never lasts a network round-trip
+  # (publishers wait for it at most 30 s). It replaces the --isolate base fetch
+  # and the WP-card baseline fetch further down whenever they would hit the same
+  # repository. `worktree add` later resolves origin/main once, under the locks;
+  # a concurrent fetch can only advance that ref. A --base-sha caller fixed its
+  # worktree base with its own fetch; it still gets this fetch when the WP-card
+  # baseline needs it, never one under the lock. A failed fetch is only
+  # recorded here and reported at the original fetch point below, so the
+  # earlier, more specific refusals keep their order.
+  OPEN_PREFETCH="none"
+  OPEN_PREFETCH_DIR=""
+  if { [ "$ISOLATE_FLAG" = "1" ] && [ -z "$BASE_SHA" ]; } \
+     || { { [ "$ISOLATE_FLAG" = "1" ] || [ -n "$CANONICAL_OWNER" ]; } && [[ "$WP" == WP-[0-9]* ]]; }; then
+    if [ "$ISOLATE_FLAG" = "1" ]; then
+      OPEN_PREFETCH_DIR="$(git rev-parse --show-toplevel 2>/dev/null || gov_repo_dir)"
+    else
+      OPEN_PREFETCH_DIR="$(gov_repo_dir)"
+    fi
+    if timeout 60 git -C "$OPEN_PREFETCH_DIR" fetch origin main --quiet 2>&1; then
+      OPEN_PREFETCH="ok"
+    else
+      OPEN_PREFETCH="failed"
+    fi
+  fi
+  if [ -n "$CANONICAL_OWNER" ] || [ "$ISOLATE_FLAG" = "1" ]; then
+    acquire_ds_commit_lock
+  fi
   acquire_scheduled_admission_lock
   _refuse_second_canonical_owner
   OPEN_HARNESS_SESSION_ID=$(_runtime_harness_session_id "$AGENT") \
@@ -5618,8 +5696,9 @@ if [ "$CMD" = "open" ]; then
     fi
     ISOLATE_EXISTING_SEM="$SESSION_DIR/${AGENT}-${ISOLATE_SESSION_ID}.open"
     # The stable kernel lock is the authority for the whole same-session
-    # transition, including dirty/re-entry reads, fetch, worktree creation and
-    # semaphore publication.  A crashed creator releases it automatically;
+    # transition, including dirty/re-entry reads, worktree creation and
+    # semaphore publication. The network fetch is no longer inside it (WP-539
+    # Ф21 Б4): it runs before ds-commit, see OPEN_PREFETCH above.  A crashed creator releases it automatically;
     # the next caller then sees either the exact semaphore/worktree pair or a
     # fail-closed worktree-without-semaphore state, never two concurrent owners.
     acquire_session_transition_lock "$ISOLATE_EXISTING_SEM"
@@ -5778,10 +5857,13 @@ $isolate_status_code $isolate_status_path"
     # здесь не укрепляет консистентность, а создаёт ровно то окно гонки
     # (fetch #1 -> [push может влезть] -> fetch #2), которое --base-sha
     # существует, чтобы закрыть.
-    if [ -z "$BASE_SHA" ]; then
-      if ! timeout 60 git -C "$ISOLATE_BASE_DIR" fetch origin main --quiet 2>&1; then
-        fail "--isolate: git fetch origin main не прошёл -- не создаю worktree от потенциально устаревшего origin/main. Проверь сеть и повтори." 1
-      fi
+    # No network fetch here: this runs under ds-commit (WP-539 Ф21 Б4). The
+    # pre-lock fetch used the same toplevel formula, so a different directory
+    # means the caller's cwd moved -- refuse instead of fetching under the lock.
+    if [ -z "$BASE_SHA" ] && [ "$OPEN_PREFETCH_DIR" != "$ISOLATE_BASE_DIR" ]; then
+      fail "--isolate: репозиторий изоляции ($ISOLATE_BASE_DIR) не совпал с заранее обновлённым ($OPEN_PREFETCH_DIR) -- не создаю worktree от потенциально устаревшего origin/main. Повтори open." 1
+    elif [ -z "$BASE_SHA" ] && [ "$OPEN_PREFETCH" != "ok" ]; then
+      fail "--isolate: git fetch origin main не прошёл -- не создаю worktree от потенциально устаревшего origin/main. Проверь сеть и повтори." 1
     fi
 
     ISOLATE_STORE_DIR="$IWE_ROOT/.iwe-runtime/isolated-worktrees"
@@ -6082,7 +6164,19 @@ $isolate_status_code $isolate_status_path"
         if [ -r "$BASELINE_LIMIT_LIB" ]; then
           # shellcheck source=lib/run-limited.sh
           . "$BASELINE_LIMIT_LIB"
-          if run_limited 20 git -C "${ISOLATED_WORKTREE_PATH:-$CURRENT_REPO_DIR}" fetch -q origin main </dev/null 2>/dev/null; then
+          # WP-539 Ф21 Б4: under ds-commit, reuse the pre-lock fetch of the same
+          # repository (a worktree shares its refs) instead of a second network call.
+          BASELINE_GIT_DIR=$(git -C "${ISOLATED_WORKTREE_PATH:-$CURRENT_REPO_DIR}" rev-parse --path-format=absolute --git-common-dir 2>/dev/null || true)
+          PREFETCH_GIT_DIR=""
+          [ -z "$OPEN_PREFETCH_DIR" ] \
+            || PREFETCH_GIT_DIR=$(git -C "$OPEN_PREFETCH_DIR" rev-parse --path-format=absolute --git-common-dir 2>/dev/null || true)
+          if [ -n "$BASELINE_GIT_DIR" ] && [ "$BASELINE_GIT_DIR" = "$PREFETCH_GIT_DIR" ]; then
+            [ "$OPEN_PREFETCH" != "ok" ] || BASELINE_SOURCE="fetched"
+          elif [ "$_DS_COMMIT_LOCK_HELD" = 1 ]; then
+            # Another repository than the pre-lock fetch: keep the local ref
+            # (baseline_source says so) rather than a network call under the lock.
+            :
+          elif run_limited 20 git -C "${ISOLATED_WORKTREE_PATH:-$CURRENT_REPO_DIR}" fetch -q origin main </dev/null 2>/dev/null; then
             BASELINE_SOURCE="fetched"
           fi
         fi
@@ -6219,6 +6313,11 @@ print(os.path.relpath(f, r))
     grep -qE '^orz_sessions_dir: .+' "$SEM_FILE" \
       || fail "open: опубликованный semaphore не содержит orz_sessions_dir (внутренняя ошибка записи, см. РП484 16.09) -- сессия не считается открытой" 1
   fi
+  # WP-539 Ф21 Б4: the record is published (or re-entered); the sync re-check
+  # can see it now. Drop ds-commit before the follow-ups below -- the card
+  # actualize does its own network fetch and must not run under this lock.
+  release_ds_commit_lock \
+    || fail "Session OPEN опубликован, но ds-commit lock не освободился; проверь $SEM_FILE" 1
 
   # WP-484 Ф210: снимок веток/тегов governance-репо до первых правок сессии
   # (no-clobber: повторный open той же сессии базовую линию не сдвигает).
