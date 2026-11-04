@@ -1,7 +1,7 @@
 # Происхождение vendor/plan-bridge/code (WP-561 Ф55)
 #
-# Источник: DS-my-strategy, коммит dbb8a4ff1ba04920d712a64dd321702543a6531e
-# (ветка запроса №221; файлы совпадают с пробным слиянием в main).
+# Источник: DS-my-strategy, коммит 5d79c45305f7a10adc74353aacf0a11084befe03
+# (ветка запроса о заявке из открытия сессии; файлы совпадают с пробным слиянием в main).
 # Только код моста: 8 модулей и 2 команды; общий конвейер публикации не нужен —
 # мост публикует сам, атомарной сверкой ветки (АрхГейт DR-06, вариант Д).
 # Все файлы взяты из Git-объектов указанной ревизии без изменений.
@@ -9,10 +9,10 @@
 #
 # Хеши объектов Git:
 #   70284c63241e1032d4e3502cd81f2663933541d9 scripts/lib/plan_allocation.py
-#   78c00f3895c2d2cfea4d9a3f171b4b010578fcb1 scripts/lib/plan_bridge_allocation.py
+#   348cf7ac8460996889d15d28f27c0873d276d9ea scripts/lib/plan_bridge_allocation.py
 #   bfccc83af88f2a73673e45711317d3467f2a9b01 scripts/lib/plan_bridge_decisions.py
-#   3b107e138f120ad4ff3fa058044f59b2362ebbc4 scripts/lib/plan_bridge_host.py
-#   017c6a8abaaede2dccc475dcddf76eddef56ee71 scripts/lib/plan_bridge_receiver.py
+#   7f19e742b2e471486272e13409d884af0cbb7ca1 scripts/lib/plan_bridge_host.py
+#   e924c258a1cd5d559e1b5d67b1f82ca116a3660b scripts/lib/plan_bridge_receiver.py
 #   2c73f08f8745de0049f4194720a63ef5f8f3ab08 scripts/lib/plan_event_bridge.py
 #   aaa218adb2b6792777f4aacfc11eb28efed818ed scripts/lib/plan_event_intake.py
 #   fbb3395861e9dd13a64863bed07c0fe2a8c8172e scripts/lib/plan_event_wal.py

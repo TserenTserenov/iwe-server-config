@@ -491,13 +491,18 @@ def _read_blob_json(reader, commit, path, schema):
     return value
 
 
+# The standing daily budget and per-date overrides (pilot, 04.11): a new day
+# needs no new rules version, and no day is ever without a budget.
+LIMIT_FIELDS = ("timezone", "default_daily_minutes", "daily_personal_minutes")
+
+
 def load_limits(reader, commit, path):
     """П7. Missing or invalid limits stop the stream; no model capacity is used."""
-    value = _read_blob_json(reader, commit, path, "plan-limits/2")
-    if set(value) != {"schema", "timezone", "daily_personal_minutes"}:
+    value = _read_blob_json(reader, commit, path, "plan-limits/3")
+    if set(value) != {"schema", *LIMIT_FIELDS}:
         raise BridgeError("BUDGET_VALIDATOR_UNAVAILABLE", "plan limits are invalid")
-    limits = {key: value[key] for key in ("timezone", "daily_personal_minutes")}
-    PersonalTimeBudget(limits["timezone"], limits["daily_personal_minutes"])
+    limits = {key: value[key] for key in LIMIT_FIELDS}
+    PersonalTimeBudget.from_limits(limits)
     return limits
 
 
@@ -704,9 +709,7 @@ class HostPlanValidator:
 
         self._inner = AllocationPlanValidator(
             rules_version=rules_version,
-            whole_plan_budget=PersonalTimeBudget(
-                limits["timezone"], limits["daily_personal_minutes"]
-            ),
+            whole_plan_budget=PersonalTimeBudget.from_limits(limits),
         )
 
     def check_history(self, view):
