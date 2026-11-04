@@ -1,9 +1,12 @@
 #!/bin/bash
 # routing: helper  skill=week-close,day-close  called-by=haiku
 # see DP.SC.159, DP.ROLE.059
-# check-dirty-repos.sh — Скан всех IWE репо на незакоммиченные изменения
-# Использование: ./scripts/check-dirty-repos.sh
-# Вызывается из Day Close для обнаружения "забытых" файлов.
+# check-dirty-repos.sh — scan all IWE repos for uncommitted changes
+# Usage: ./scripts/check-dirty-repos.sh
+# Called from Day Close to detect "forgotten" files.
+# IWE_DIRTY_SKIP_REPOS (e.g. in .exocortex.env): colon-separated repo paths
+# relative to the workspace that are not scanned, compared literally; unset or
+# empty means every repo is scanned.
 
 set -euo pipefail
 
@@ -26,11 +29,11 @@ UNPUSHED=0
 # 3.2 on macOS, which has no associative arrays.
 SEEN_TOPLEVELS="|"
 
-# Репозитории, исключённые из скана: известное постоянное состояние, не долг.
-# DS-MCP/personal-knowledge-mcp — архивный (read-only) на GitHub с 24.10.2026
-# (решение пилота: остаётся архивным), единственный локальный коммит физически
-# не пушится — флаг «незапушено» там постоянный шум, а не сигнал.
-SKIP_REPOS="|DS-MCP/personal-knowledge-mcp|"
+# Repos whose state is known and permanent (e.g. an archived read-only remote
+# that can never take a push), so flagging them every day is noise, not a
+# signal. "|a|b|" form for a literal match below (WP-529 F248).
+SKIP_REPOS="|${IWE_DIRTY_SKIP_REPOS:-}|"
+SKIP_REPOS="${SKIP_REPOS//:/|}"
 
 check_repo() {
     local dir="$1"

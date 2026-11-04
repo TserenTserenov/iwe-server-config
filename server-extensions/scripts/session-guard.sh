@@ -8,6 +8,7 @@
 # Команды:
 #   open --wp WP-N [--task "..."] [--files "a,b"] [--slug "..."] [--agent claude-code|kimi|hermes] [--personality <unassigned|UUID>] [--owner-pid PID]
 #   open --housekeeping <reason> [--agent ...] [--owner-pid PID]
+#   open-log-path                                      # напечатать путь журнала открытий (для читателей вроде dt-collect.sh)
 #   close [--wp WP-N] [--slug "..."] [--agent ...]
 #   close ... --force-no-reflection "<причина>"       # закрыть без ответа на рефлексию —
 #                                                      # только если раннер стоит именно на
@@ -363,6 +364,15 @@ now_iso() { date -u +"%Y-%m-%dT%H:%M:%SZ"; }
 now_date() { date +"%Y-%m-%d"; }
 now_month() { date +"%Y-%m"; }
 fail() { echo "session-guard: $1" >&2; exit "${2:-1}"; }
+
+# Read-only: where this guard appends the history of session opens. Readers
+# such as dt-collect.sh ask here instead of hardcoding a path, because the
+# template's guard keeps the log elsewhere (WP-529 F248).
+if [ "$CMD" = "open-log-path" ]; then
+  [ $# -eq 0 ] || fail "open-log-path: аргументы не принимаются" 1
+  printf '%s\n' "$OPEN_LOG_RUNTIME"
+  exit 0
+fi
 
 # WP-561 Ф25: the only values a session may record in `wp:` besides WP-<n>.
 # `open` validates against this list and the commit-barrier classifier
