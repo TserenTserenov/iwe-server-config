@@ -3,7 +3,9 @@
 
 Started by the host service under the service uid, never by an agent. Admitted
 producers are fixed in the unit's arguments; the socket's group decides who may
-connect. The host config (key, rules, code ownership) is checked by the same
+connect. --channel adds another socket with its own group and its own single
+admitted producer (the Mac's channel reaches this host through a dedicated SSH
+key); all channels write the one queue through one lock in this process. The host config (key, rules, code ownership) is checked by the same
 adapter the bridge uses, so a host that is not ready does not start receiving.
 """
 
@@ -16,6 +18,7 @@ import logging
 from pathlib import Path
 import subprocess
 import sys
+import threading
 
 sys.path.insert(0, str(Path(__file__).resolve().parent / "lib"))
 
@@ -41,6 +44,14 @@ def _parser():
     )
     parser.add_argument("--group", help="group that may connect to the socket")
     parser.add_argument("--kick-unit", help="systemd unit that delivers one pass")
+    parser.add_argument(
+        "--channel",
+        action="append",
+        default=[],
+        nargs=3,
+        metavar=("SOCKET", "GROUP", "PRODUCER_ID"),
+        help="another socket whose group may submit as exactly this producer",
+    )
     return parser
 
 
@@ -52,20 +63,31 @@ def main(argv):
     except host.HostAdapterError as exc:
         print(json.dumps({"state": "closed", "reason": str(exc)}), file=sys.stderr)
         return 2
-    context = host.ChannelContext(adapter.verifier.host_id, frozenset(arguments.admit))
-    group_id = grp.getgrnam(arguments.group).gr_gid if arguments.group else None
-    server = receiver.make_server(
-        Path(arguments.socket),
-        stream_dir=Path(arguments.stream_dir),
-        verifier=adapter.verifier,
-        context=context,
-        kick=_kick_unit(arguments.kick_unit) if arguments.kick_unit else None,
-        group_id=group_id,
-    )
+    channels = [(arguments.socket, arguments.group, arguments.admit)] + [
+        (socket_path, group, [producer])
+        for socket_path, group, producer in arguments.channel
+    ]
+    write_lock = threading.Lock()
+    kick = _kick_unit(arguments.kick_unit) if arguments.kick_unit else None
+    servers = [
+        receiver.make_server(
+            Path(socket_path),
+            stream_dir=Path(arguments.stream_dir),
+            verifier=adapter.verifier,
+            context=host.ChannelContext(adapter.verifier.host_id, frozenset(admit)),
+            kick=kick,
+            group_id=grp.getgrnam(group).gr_gid if group else None,
+            write_lock=write_lock,
+        )
+        for socket_path, group, admit in channels
+    ]
+    for server in servers[1:]:
+        threading.Thread(target=server.serve_forever, daemon=True).start()
     try:
-        server.serve_forever()
+        servers[0].serve_forever()
     finally:
-        server.server_close()
+        for server in servers:
+            server.server_close()
     return 0
 
 

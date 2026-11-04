@@ -97,10 +97,16 @@ in
     inherit codePaths producersPath limitsPath;
     rulesPaths = codePaths ++ [ producersPath limitsPath ];
     admit = [ "tsekh-agent-channel" ];
-    # Утверждено пилотом 04.11 слиянием №13 с этой точной версией (П3).
-    # Версия — 10 файлов кода моста, реестр и лимиты.
+    # ЖДЁТ УТВЕРЖДЕНИЯ ПИЛОТОМ этой точной версии (П3); до утверждения не
+    # сливать. Версия — 10 файлов кода моста, реестр и лимиты.
     # Бюджет: постоянный, 600 минут каждый день (решение пилота 04.11).
-    approvedRulesVersion = "plan-rules/1:e8f54374353ed19f7954e3ae3e3dad282dfc245dab21fea371f30ee9c1cbe83d";
+    approvedRulesVersion = "plan-rules/1:9a156bb7c4dd7b1829db413264982a755d8378b742849cd1671a0caeacbb98b2";
+    # Канал Мака через «Цех» (решение пилота 04.11). Закрытый ключ — только на
+    # Маке (~/.ssh/iwe-plan-mac); ключ умеет лишь подать заявку и ответ.
+    macChannel = {
+      enable = true;
+      publicKey = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIIwr5Pq5YN8nhJNT/+R5pVXey4x+cXslZl3jp+aSGwec";
+    };
     # П6: писатель пробы снят в Git и в действующих копиях Мака/Цеха; перенос принят.
     intraCommitOrderTrusted = true;
   };

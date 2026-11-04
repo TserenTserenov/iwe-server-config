@@ -69,6 +69,44 @@ let
 
   admitArgs = lib.concatMapStringsSep " " (id: "--admit ${lib.escapeShellArg id}") cfg.admit;
 
+  # Канал Мака (решение пилота 04.11): Мак не держит свой мост — его агенты
+  # работают от учётной записи пилота и могли бы менять код службы. Заявки
+  # приходят по SSH отдельным ключом, который умеет только два действия;
+  # здесь они превращаются в вызов отправителя с фиксированными сокетом и
+  # именем производителя — выбрать их со стороны Мака нельзя.
+  macSocketDir = "/run/iwe-plan-bridge-mac";
+  macChannelArgs = lib.optionalString cfg.macChannel.enable
+    " --channel ${macSocketDir}/receiver.sock iwe-plan-mac mac-agent-channel";
+  macGateway = pkgs.writeShellScript "iwe-plan-mac-gateway" ''
+    set -euo pipefail
+    read -r -a words <<< "''${SSH_ORIGINAL_COMMAND:-}"
+    fixed=(--socket ${macSocketDir}/receiver.sock --producer mac-agent-channel
+           --rules-file ${configDir}/approved_rules_version)
+    case "''${words[0]:-}" in
+      reserve)
+        if [ "''${#words[@]}" -ne 7 ] || [ "''${words[1]}" != --wp ] \
+           || [ "''${words[3]}" != --session ] || [ "''${words[5]}" != --minutes ]; then
+          echo '{"ok": false, "code": "GatewayUsage", "reason": "reserve --wp WP-N --session ID --minutes N"}'
+          exit 2
+        fi
+        exec ${python}/bin/python -I ${code}/scripts/plan-session-reserve.py \
+          "''${fixed[@]}" --timezone ${lib.escapeShellArg cfg.macChannel.timezone} \
+          --wp "''${words[2]}" --session "''${words[4]}" --minutes "''${words[6]}"
+        ;;
+      answer)
+        if [ "''${#words[@]}" -ne 1 ]; then
+          echo '{"ok": false, "code": "GatewayUsage", "reason": "answer (requests on stdin)"}'
+          exit 2
+        fi
+        exec ${python}/bin/python -I ${code}/scripts/plan-summary-answer.py send "''${fixed[@]}"
+        ;;
+      *)
+        echo '{"ok": false, "code": "GatewayUsage", "reason": "reserve or answer"}'
+        exit 2
+        ;;
+    esac
+  '';
+
   keyScript = pkgs.writeShellScript "iwe-plan-bridge-key" ''
     set -eu
     umask 077
@@ -205,6 +243,19 @@ in
       default = [ ];
       description = "Производители, которых допускает канал приёмника.";
     };
+    macChannel = {
+      enable = lib.mkEnableOption "канал заявок Мака через отдельный SSH-ключ";
+      publicKey = lib.mkOption {
+        type = lib.types.str;
+        default = "";
+        description = "Открытый ключ Мака; закрытая часть остаётся на Маке.";
+      };
+      timezone = lib.mkOption {
+        type = lib.types.str;
+        default = "Asia/Nicosia";
+        description = "Часовой пояс дня бюджета; тот же, что в limits.json.";
+      };
+    };
     intraCommitOrderTrusted = lib.mkOption {
       type = lib.types.bool;
       default = false;
@@ -235,6 +286,10 @@ in
         message = "tsekh.planBridge: codePaths, producersPath и limitsPath должны входить в rulesPaths.";
       }
       {
+        assertion = !cfg.macChannel.enable || (cfg.receiver.enable && lib.hasPrefix "ssh-ed25519 " cfg.macChannel.publicKey);
+        message = "tsekh.planBridge.macChannel: нужны приёмник и открытый ключ ssh-ed25519.";
+      }
+      {
         assertion = !cfg.receiver.enable || (cfg.admit != [ ] && lib.all (id: id != "") cfg.admit);
         message = "tsekh.planBridge: приёмнику нужен непустой admit без пустых имён.";
       }
@@ -257,6 +312,19 @@ in
       description = "Служба приёмника запросов плана (WP-561)";
     };
     users.users.${cfg.agentUser}.extraGroups = [ "iwe-plan-writers" ];
+
+    users.groups.iwe-plan-mac = lib.mkIf cfg.macChannel.enable { };
+    users.users.iwe-plan-mac = lib.mkIf cfg.macChannel.enable {
+      isSystemUser = true;
+      group = "iwe-plan-mac";
+      home = "/var/empty";
+      # Нужна оболочка: sshd запускает принудительную команду через неё.
+      shell = pkgs.bash;
+      openssh.authorizedKeys.keys = [
+        "restrict,command=\"${macGateway}\" ${cfg.macChannel.publicKey}"
+      ];
+      description = "Канал заявок плана с Мака (WP-561 Ф55)";
+    };
 
     # Приёмник может только запустить один проход доставки. Другие юниты,
     # остановка/перезапуск и изменение конфигурации этим правилом не разрешены.
@@ -288,6 +356,8 @@ in
     systemd.tmpfiles.rules = [
       "d ${stateDir} 0700 iwe-plan-bridge iwe-plan-bridge -"
       "d ${stateDir}/stream 0700 iwe-plan-bridge iwe-plan-bridge -"
+    ] ++ lib.optionals cfg.macChannel.enable [
+      "d ${macSocketDir} 0750 iwe-plan-bridge iwe-plan-mac -"
     ];
 
     # Обычные файлы, не ссылки: адаптер отказывает на ссылках и на файлах с
@@ -345,10 +415,12 @@ in
         Group = "iwe-plan-writers";
         RuntimeDirectory = "iwe-plan-bridge";
         RuntimeDirectoryMode = "0750";
-        ExecStart = "${python}/bin/python ${code}/scripts/plan-event-receiver.py --stream-dir ${stateDir}/stream --socket /run/iwe-plan-bridge/receiver.sock --group iwe-plan-writers ${admitArgs}${lib.optionalString cfg.delivery.enable " --kick-unit plan-event-bridge.service"}";
+        # Сокет Мака отдаётся группе iwe-plan-mac: для chown служба в ней состоит.
+        SupplementaryGroups = lib.optionals cfg.macChannel.enable [ "iwe-plan-mac" ];
+        ExecStart = "${python}/bin/python ${code}/scripts/plan-event-receiver.py --stream-dir ${stateDir}/stream --socket /run/iwe-plan-bridge/receiver.sock --group iwe-plan-writers ${admitArgs}${macChannelArgs}${lib.optionalString cfg.delivery.enable " --kick-unit plan-event-bridge.service"}";
         Restart = "on-failure";
         RestartSec = 5;
-        ReadWritePaths = [ stateDir ];
+        ReadWritePaths = [ stateDir ] ++ lib.optionals cfg.macChannel.enable [ macSocketDir ];
         ProtectSystem = "strict";
         ProtectHome = true;
         NoNewPrivileges = true;

@@ -17,6 +17,7 @@ Replies never carry proofs, keys or paths.
 from __future__ import annotations
 
 from collections.abc import Callable
+import contextlib
 import json
 import logging
 import os
@@ -145,8 +146,13 @@ def make_server(
     context: host.ChannelContext,
     kick: Callable | None = None,
     group_id: int | None = None,
+    write_lock=None,
 ) -> socketserver.UnixStreamServer:
-    """Bind first with a closed mode, open it to the group only when it is ready."""
+    """Bind first with a closed mode, open it to the group only when it is ready.
+
+    Several channels of one host share write_lock, so the process writes the
+    queue one request at a time (one writer per stream, DR-06).
+    """
     socket_path = Path(socket_path)
     _prepare_socket_path(socket_path)
 
@@ -157,13 +163,14 @@ def make_server(
             raw = self.rfile.readline(MAX_LINE_BYTES + 1)
             if not raw:
                 return  # connected and left without a word: a liveness probe
-            reply = handle_message(
-                raw.rstrip(b"\n"),
-                stream_dir=stream_dir,
-                verifier=verifier,
-                context=context,
-                kick=kick,
-            )
+            with write_lock or contextlib.nullcontext():
+                reply = handle_message(
+                    raw.rstrip(b"\n"),
+                    stream_dir=stream_dir,
+                    verifier=verifier,
+                    context=context,
+                    kick=kick,
+                )
             _LOG.info(
                 "[plan-receiver] uid=%s ok=%s code=%s",
                 peer_uid(self.request),
