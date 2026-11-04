@@ -16,8 +16,9 @@
 set -uo pipefail
 umask 077
 
-REGISTRY="${RULE_REGISTRY:-$HOME/IWE/.claude/rules-registry.yaml}"
 HOOK_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)
+# The registry sits next to the hooks directory on every host layout (Mac clone, Tsekh mirror).
+REGISTRY="${RULE_REGISTRY:-$HOOK_DIR/../rules-registry.yaml}"
 SECRET_PATTERN_LIB="$HOOK_DIR/secret-bypass-lib.sh"
 JOURNAL_DIR="${RULE_JOURNAL_DIR:-$HOME/logs/rule-engine}"
 mkdir -p "$JOURNAL_DIR"
@@ -199,11 +200,13 @@ except (TypeError, ValueError):
 # Парсим YAML через python (yaml stdlib не имеет в bash)
 load_rules_for_event() {
     local event="$1"
-    if [ ! -f "$REGISTRY" ]; then
-        echo "[]"
-        return
+    # A missing or unreadable registry is a failure, not "no rules": an empty list here silently
+    # disabled every registry-driven check (WP-544, 04.11: 69 of 109 engine tests on the Mac).
+    if [ ! -r "$REGISTRY" ]; then
+        printf 'rule-engine: rules registry not found: %s\n' "$REGISTRY" >&2
+        return 1
     fi
-    _LRE_EVENT="$event" _LRE_REG="$REGISTRY" python3 - << 'PYEOF' 2>/dev/null || echo "[]"
+    _LRE_EVENT="$event" _LRE_REG="$REGISTRY" python3 - << 'PYEOF' || { printf 'rule-engine: cannot parse rules registry %s (python3/yaml)\n' "$REGISTRY" >&2; return 1; }
 import yaml, json, os
 with open(os.environ['_LRE_REG']) as f:
     reg = yaml.safe_load(f)
@@ -1514,7 +1517,10 @@ dispatch_event() {
     local event="${RULE_EVENT:?error: RULE_EVENT required}"
 
     local matches
-    matches=$(load_rules_for_event "$event")
+    if ! matches=$(load_rules_for_event "$event"); then
+        emit_verdict "block" "none" "rules registry unavailable: $REGISTRY — registry-driven checks cannot run"
+        return 1
+    fi
 
     local count
     count=$(echo "$matches" | python3 -c 'import sys,json; print(len(json.loads(sys.stdin.read() or "[]")))')
@@ -2084,6 +2090,23 @@ for r in reg.get('rules', []):
             FAIL=$((FAIL+1))
         fi
         rm -rf -- "$T_C7_LOG"
+
+        T_NOREG_LOG=$(mktemp -d "${TMPDIR:-/tmp}/rule-engine-noreg.XXXXXX")
+        T_NOREG_RESULT=$(env RULE_REGISTRY="$T_NOREG_LOG/absent-registry.yaml" \
+            RULE_JOURNAL_DIR="$T_NOREG_LOG" \
+            RULE_EVENT="sql_file_write" \
+            RULE_CONTEXT='{"file_path":"x.sql","file_content":"SELECT 1;"}' \
+            bash "$0" dispatch 2>/dev/null)
+        T_NOREG_V=$(printf '%s' "$T_NOREG_RESULT" | python3 -c 'import json,sys; d=json.load(sys.stdin); print(d["verdict"] + "|" + d["reason"])' 2>/dev/null)
+        case "$T_NOREG_V" in
+            "block|rules registry unavailable: $T_NOREG_LOG/absent-registry.yaml"*)
+                echo "PASS Test REG.1: missing rules registry blocks instead of reporting no rules"
+                PASS=$((PASS+1)) ;;
+            *)
+                echo "FAIL Test REG.1: expected block naming the missing registry, got $T_NOREG_RESULT"
+                FAIL=$((FAIL+1)) ;;
+        esac
+        rm -rf -- "$T_NOREG_LOG"
 
         T_C7_NOHELP=$(mktemp -d "${TMPDIR:-/tmp}/rule-engine-c7-nohelper.XXXXXX")
         cp "$0" "$T_C7_NOHELP/rule-engine.sh"

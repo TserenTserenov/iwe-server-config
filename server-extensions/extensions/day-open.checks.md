@@ -13,6 +13,7 @@
 
 ### BLOCKING: Саморазвитие (шаг 3)
 
+<!-- CHECK: class=soft id=self-dev -->
 ```bash
 FILE="${FILE:-$(ls ~/IWE/DS-my-strategy/current/DayPlan\ *.md 2>/dev/null | sort | tail -1)}"
 # Проверка 1: секция Саморазвитие есть в файле
@@ -56,6 +57,7 @@ echo "  ✅ Саморазвитие: D-NNN/C-NNN присутствует, PEND
 > вернётся в другой форме). Эта проверка теперь только диагностическая сверка: если
 > patch-скрипт упал/не нашёл секцию — предупреждает, но НИКОГДА не блокирует commit.
 
+<!-- CHECK: class=soft id=priorities-table -->
 ```bash
 FILE="${FILE:-$(ls ~/IWE/DS-my-strategy/current/DayPlan\ *.md 2>/dev/null | sort | tail -1)}"
 PRIO="${GOV_REPO_DIR:-$HOME/IWE/DS-my-strategy}/current/priorities.yaml"
@@ -108,6 +110,7 @@ fi
 > лишний `<details>`. Инвариант: каждый `<details>` парен с одним `<summary>`.
 
 <!-- GATE-B: always-on -->
+<!-- CHECK: class=fatal id=details-balance -->
 ```bash
 FILE="${FILE:-$(ls ~/IWE/DS-my-strategy/current/DayPlan\ *.md 2>/dev/null | sort | tail -1)}"
 echo "=== Проверка: баланс <details>/<summary> ==="
@@ -130,6 +133,7 @@ fi
 
 ### Секции DayPlan (полнота по шаблону)
 
+<!-- CHECK: class=soft id=sections-complete -->
 ```bash
 FILE="${FILE:-$(ls ~/IWE/DS-my-strategy/current/DayPlan\ *.md 2>/dev/null | sort | tail -1)}"
 echo "=== Проверка секций ==="
@@ -160,6 +164,7 @@ if grep -qE "<summary><b>Наработки агентов" "$FILE"; then echo "
 > из 9 разных источников (carry-over, светофор, Scout, KE-SLA, орг-сигналы …), и её тихое
 > исчезновение прячет все 9 сразу, а не один локальный факт, как для остальных 8 секций.
 
+<!-- CHECK: class=fatal id=attention-section -->
 ```bash
 FILE="${FILE:-$(ls ~/IWE/DS-my-strategy/current/DayPlan\ *.md 2>/dev/null | sort | tail -1)}"
 echo "=== Проверка: «Требует внимания» присутствует ==="
@@ -194,6 +199,7 @@ fi
 
 ### 🔴 БЛОКИРУЮЩАЯ ПРОВЕРКА: Разбор заметок — markdown-ссылки на источники
 
+<!-- CHECK: class=soft id=notes-links -->
 ```bash
 FILE="${FILE:-$(ls ~/IWE/DS-my-strategy/current/DayPlan\ *.md 2>/dev/null | sort | tail -1)}"
 echo "=== Проверка: Разбор заметок — markdown-ссылки ==="
@@ -240,6 +246,7 @@ fi
 > уже работает для `BOTTLENECK-PENDING`. Эта проверка — только диагностическая сверка: если
 > patch-скрипт упал/не нашёл секцию — предупреждает, но НИКОГДА не блокирует commit.
 
+<!-- CHECK: class=soft id=content-plan -->
 ```bash
 FILE="${FILE:-$(ls ~/IWE/DS-my-strategy/current/DayPlan\ *.md 2>/dev/null | sort | tail -1)}"
 echo "=== Проверка: Контент-план — Стратегия и TTL заполнены ==="
@@ -274,6 +281,7 @@ fi
 
 **Шаг 6 SKILL.md:** «Ссылки на источники обязательны (URL)». Это касается ВСЕХ открытий (авто + ручной).
 
+<!-- CHECK: class=soft id=world-links -->
 ```bash
 FILE="${FILE:-$(ls ~/IWE/DS-my-strategy/current/DayPlan\ *.md 2>/dev/null | sort | tail -1)}"
 echo "=== Проверка: Мир должен содержать минимум одну ссылку ==="
@@ -298,6 +306,7 @@ fi
 > **Принцип:** Стратег НЕ имеет права самостоятельно пропустить шаг SKILL.md, объявленный в `day-rhythm-config.yaml` как `enabled: true`. Пропуск разрешён только если конфиг явно говорит `enabled: false` ИЛИ пользователь дал прямое указание в этой сессии.
 > **Триггер:** фразы «отложено», «отложена», «пропущено», «пропустим», «жёсткий ТОС», «не успел», «не запускался» в секциях Мир/Scout/Календарь/Видео БЕЗ соответствующего `enabled: false` в конфиге = НАРУШЕНИЕ.
 
+<!-- CHECK: class=soft id=no-silent-skip -->
 ```bash
 FILE="${FILE:-$(ls ~/IWE/DS-my-strategy/current/DayPlan\ *.md 2>/dev/null | sort | tail -1)}"
 CFG="$HOME/IWE/memory/day-rhythm-config.yaml"
@@ -336,6 +345,7 @@ check_section "Видео" "video"
 > находку в «Требует внимания», если секция должна быть, но её нет. Эта проверка — только
 > диагностическая сверка, никогда не блокирует.
 
+<!-- CHECK: class=soft id=ke-candidates -->
 ```bash
 FILE="${FILE:-$(ls ~/IWE/DS-my-strategy/current/DayPlan\ *.md 2>/dev/null | sort | tail -1)}"
 REPORTS_DIR="${GOV_REPO_DIR:-$HOME/IWE/DS-my-strategy}/inbox/extraction-reports"
@@ -369,6 +379,7 @@ fi
 > (шаг 4.595 pipeline, ДО этой проверки) пишет находку в «Требует внимания» при расхождении —
 > эта проверка больше не блокирует, только сверяет, что находка не потерялась.
 
+<!-- CHECK: class=soft id=ke-queue -->
 ```bash
 echo "=== Проверка: KE-очередь — согласованность day-open-smoke.sh vs ke-queue-stats.sh ==="
 # || true: оба источника могут вернуть ненулевой код при валидном stdout-JSON
@@ -409,6 +420,7 @@ fi
 
 ### Свежесть данных
 
+<!-- CHECK: class=soft id=freshness -->
 ```bash
 cd ~/IWE/DS-my-strategy && git log --oneline -5
 ```
@@ -418,6 +430,7 @@ cd ~/IWE/DS-my-strategy && git log --oneline -5
 
 ### 🔴 БЛОКИРУЮЩАЯ ПРОВЕРКА: AR.009 — новые файлы в exocortex/ (bug-2026-05-19)
 
+<!-- CHECK: class=fatal id=new-files-exocortex -->
 ```bash
 echo "=== Проверка: AR.009 Routing Gate ==="
 NEW_FILES=$(cd ~/IWE/DS-my-strategy && git status --porcelain | awk '/^\?\? / {print $2}' | grep "exocortex/" | grep -v -E "(feedback_|lessons_|reference_|project_|routing-vocab|CLAUDE|MEMORY|STAGING|checklists|dry-run|protocol-close|navigation)" || true)
@@ -435,6 +448,7 @@ fi
 
 ### 🟡 ПРОВЕРКА: Календарь — данные или явный PENDING (bug-2026-05-19)
 
+<!-- CHECK: class=soft id=calendar-pending -->
 ```bash
 FILE="${FILE:-$(ls ~/IWE/DS-my-strategy/current/DayPlan\ *.md 2>/dev/null | sort | tail -1)}"
 echo "=== Проверка: календарь — данные или явный PENDING ==="
@@ -451,6 +465,7 @@ fi
 
 > **Источник косяка:** 24 мая Day Open пропустил 4 LLM/external-шага (Горлышко недели, News Lens вывод, smoke-тесты бота, URL для «Мир»). Эти шаги невидимы bash-скаффолду — проверка только по grep содержимого, не по названию секции.
 
+<!-- CHECK: class=soft id=llm-steps -->
 ```bash
 FILE="${FILE:-$(ls ~/IWE/DS-my-strategy/current/DayPlan\ *.md 2>/dev/null | sort | tail -1)}"
 CFG="$HOME/IWE/memory/day-rhythm-config.yaml"
@@ -534,6 +549,7 @@ fi
 
 > **Источник:** 22-23-24 мая подряд вчерашний DayPlan оставался в `current/` после Day Close — Day Close протокол не имеет шага архивации DayPlan, Day Open checks этого не ловили.
 
+<!-- CHECK: class=fatal id=stale-dayplans -->
 ```bash
 # DAY_OPEN_EXPECTED_DATE (WP-484 Ф80): week-open-orchestrator.sh runs this checker for a
 # target date that isn't "today" by the system clock (Sun ~23:50 rendering Monday's plan)
@@ -565,6 +581,7 @@ fi
 > **Принцип:** «Горлышко недели» = производное от YAML. Любая ручная запись = bypass.
 > **Markеr:** генератор `bottleneck-section-from-yaml.sh` вставляет `<!-- BY-SCRIPT: bottleneck-section-from-yaml.sh -->` в начало выжимки. Ручная запись маркера не имеет.
 
+<!-- CHECK: class=soft id=bottleneck-calibration -->
 ```bash
 FILE="${FILE:-$(ls ~/IWE/DS-my-strategy/current/DayPlan\ *.md 2>/dev/null | sort | tail -1)}"
 TODAY="${DAY_OPEN_EXPECTED_DATE:-$(date +%Y-%m-%d)}"
@@ -649,6 +666,7 @@ fi
 > **Цель:** L2 periodic reconciliation — orphan detection в реестре. Не блокирует commit;
 > результат идёт в DayPlan «Требует внимания» через визуальный лог Day Open.
 
+<!-- CHECK: class=soft id=wp-registry-orphans -->
 ```bash
 DEEP_OUT=$(python3 ~/IWE/DS-my-strategy/scripts/build-active-wp.py --deep-check 2>&1 || true)
 ORPHAN_COUNT=$(echo "$DEEP_OUT" | grep -cE '^  - WP-' || true)
@@ -684,6 +702,7 @@ exit 0
 > Третья альтернатива regex ослаблена с точного `<!-- PENDING -->` до префикса `<!-- PENDING` —
 > иначе новый формат (с описанием после двоеточия) саму себя больше не ловил бы при утечке.
 
+<!-- CHECK: class=fatal id=plan-table -->
 ```bash
 FILE="${FILE:-$(ls ~/IWE/DS-my-strategy/current/DayPlan\ *.md 2>/dev/null | sort | tail -1)}"
 PLAN_TABLE=$(awk '/<summary><b>План на сегодня<\/b><\/summary>/{f=1} f&&/^\|/{print} f&&/<\/details>/{exit}' "$FILE")
@@ -711,6 +730,7 @@ fi
 > детектирует отсутствие/нереалистичный `phys_hours` и пишет находку в «Требует
 > внимания» ДО этой проверки. Эта проверка — диагностическая сверка, не блокирует.
 
+<!-- CHECK: class=soft id=phys-budget -->
 ```bash
 FILE="${FILE:-$(ls ~/IWE/DS-my-strategy/current/DayPlan\ *.md 2>/dev/null | sort | tail -1)}"
 PRIO="${GOV_REPO_DIR:-$HOME/IWE/DS-my-strategy}/current/priorities.yaml"
@@ -751,6 +771,7 @@ fi
 > месте или где угодно ещё в файле — что угодно, что должно встречаться ровно один раз,
 > а не «сколько источников решили его вписать»), не заменяет сам фикс.
 
+<!-- CHECK: class=soft id=guide-link-once -->
 ```bash
 FILE="${FILE:-$(ls ~/IWE/DS-my-strategy/current/DayPlan\ *.md 2>/dev/null | sort | tail -1)}"
 echo "=== Проверка: ссылка на персональное руководство — ровно один раз ==="
@@ -782,6 +803,7 @@ fi
 > Данные для чата теперь идут через `узел-владелец` (`scripts/lib/health/owner.py`,
 > см. `day-open.after.health-owner.md`), а не через старый прямой SQL-хук.
 
+<!-- CHECK: class=fatal id=health-residency -->
 ```bash
 FILE="${FILE:-$(ls ~/IWE/DS-my-strategy/current/DayPlan\ *.md 2>/dev/null | sort | tail -1)}"
 echo "=== Проверка: health-значения в DayPlan запрещены (WP-469) ==="
@@ -798,6 +820,7 @@ fi
 
 > **Источник:** 4/4 случая `blocked-witness-unavailable` (Ф56 доп./Ф73) и обход Quick Close 07.08 — один корень: хук на диске есть, но в settings.json не подключён. SessionStart-хук не может обнаружить отсутствие собственной регистрации, поэтому аудит живёт вне хук-контура. Граница: canary доказывает работоспособность файла, не факт загрузки живой сессией.
 
+<!-- CHECK: class=soft id=hooks-delivery -->
 ```bash
 echo "=== Проверка: доставка обязательных хуков (Ф74в) ==="
 if [ -x "$IWE/scripts/check-hooks-delivery.sh" ]; then
