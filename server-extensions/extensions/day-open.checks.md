@@ -433,7 +433,7 @@ cd ~/IWE/DS-my-strategy && git log --oneline -5
 <!-- CHECK: class=fatal id=new-files-exocortex -->
 ```bash
 echo "=== Проверка: AR.009 Routing Gate ==="
-NEW_FILES=$(cd ~/IWE/DS-my-strategy && git status --porcelain | awk '/^\?\? / {print $2}' | grep "exocortex/" | grep -v -E "(feedback_|lessons_|reference_|project_|routing-vocab|CLAUDE|MEMORY|STAGING|checklists|dry-run|protocol-close|navigation)" || true)
+NEW_FILES=$(cd "${GOV_REPO_DIR:-$HOME/IWE/DS-my-strategy}" && git status --porcelain | awk '/^\?\? / {print $2}' | grep "exocortex/" | grep -v -E "(feedback_|lessons_|reference_|project_|routing-vocab|CLAUDE|MEMORY|STAGING|checklists|dry-run|protocol-close|navigation)" || true)
 if [ -n "$NEW_FILES" ]; then
   echo "  ❌ AR.009: новые файлы в exocortex/ не соответствуют routing-vocab.md:"
   echo "$NEW_FILES"
@@ -702,17 +702,48 @@ exit 0
 > Третья альтернатива regex ослаблена с точного `<!-- PENDING -->` до префикса `<!-- PENDING` —
 > иначе новый формат (с описанием после двоеточия) саму себя больше не ловил бы при утечке.
 
-<!-- CHECK: class=fatal id=plan-table -->
+<!-- CHECK: class=fatal id=plan-table-placeholder-only -->
 ```bash
 FILE="${FILE:-$(ls ~/IWE/DS-my-strategy/current/DayPlan\ *.md 2>/dev/null | sort | tail -1)}"
-PLAN_TABLE=$(awk '/<summary><b>План на сегодня<\/b><\/summary>/{f=1} f&&/^\|/{print} f&&/<\/details>/{exit}' "$FILE")
-echo "=== Проверка: таблица плана без шаблонных заглушек (Block DOF) ==="
-if printf '%s\n' "$PLAN_TABLE" | grep -qE '\| *NNN *\||<!-- PENDING|\| *X *\|'; then
-  echo "  ❌ КРИТИЧЕСКИЙ: таблица «План на сегодня» содержит шаблонную заглушку (NNN/X/PENDING) вместо реальных данных — COMMIT БЛОКИРОВАН"
+# Data rows only: every separator line and the header row directly above it are dropped,
+# so the count stays right when the section holds more than one table.
+PLAN_ROWS=$(awk -v sep='^[|][[:blank:]]*:?-+:?[[:blank:]]*([|][[:blank:]]*:?-+:?[[:blank:]]*)*[|]?[[:blank:]]*$' '
+  /<summary><b>План на сегодня<\/b><\/summary>/ {f=1; next}
+  f && /<\/details>/ {exit}
+  f && /^[|]/ {n++; row[n]=$0; if ($0 ~ sep) {drop[n]=1; if (last == n-1) drop[n-1]=1}; last=n; next}
+  f {last=-1}
+  END {for (i=1; i<=n; i++) if (!drop[i]) print row[i]}' "$FILE")
+STUB_ROWS=$(printf '%s\n' "$PLAN_ROWS" | grep -cE '\| *NNN *\||<!-- PENDING|\| *X *\|' || true)
+DATA_ROWS=$(printf '%s\n' "$PLAN_ROWS" | grep -c '^|' || true)
+echo "=== Проверка: таблица плана не состоит из одних шаблонных заглушек (Block DOF) ==="
+if [ "$STUB_ROWS" -gt 0 ] && [ "$DATA_ROWS" -le "$STUB_ROWS" ]; then
+  echo "  ❌ КРИТИЧЕСКИЙ: таблица «План на сегодня» — только шаблонные заглушки (NNN/X/PENDING), реальных строк нет — COMMIT БЛОКИРОВАН"
   echo "       Тот же дефект, что Block DOF: fill_chunk() не заполнил секцию, ушёл пример-заглушка."
   exit 2
 else
-  echo "  ✅ Таблица плана: заглушек не найдено"
+  echo "  ✅ Таблица плана: не пустая заглушка"
+fi
+```
+
+<!-- CHECK: class=soft id=plan-table-stub-row -->
+```bash
+FILE="${FILE:-$(ls ~/IWE/DS-my-strategy/current/DayPlan\ *.md 2>/dev/null | sort | tail -1)}"
+# Data rows only: every separator line and the header row directly above it are dropped,
+# so the count stays right when the section holds more than one table.
+PLAN_ROWS=$(awk -v sep='^[|][[:blank:]]*:?-+:?[[:blank:]]*([|][[:blank:]]*:?-+:?[[:blank:]]*)*[|]?[[:blank:]]*$' '
+  /<summary><b>План на сегодня<\/b><\/summary>/ {f=1; next}
+  f && /<\/details>/ {exit}
+  f && /^[|]/ {n++; row[n]=$0; if ($0 ~ sep) {drop[n]=1; if (last == n-1) drop[n-1]=1}; last=n; next}
+  f {last=-1}
+  END {for (i=1; i<=n; i++) if (!drop[i]) print row[i]}' "$FILE")
+STUB_ROWS=$(printf '%s\n' "$PLAN_ROWS" | grep -cE '\| *NNN *\||<!-- PENDING|\| *X *\|' || true)
+DATA_ROWS=$(printf '%s\n' "$PLAN_ROWS" | grep -c '^|' || true)
+echo "=== Проверка: в таблице плана нет уцелевшей строки-заглушки рядом с реальными (Block DOF) ==="
+if [ "$STUB_ROWS" -gt 0 ] && [ "$DATA_ROWS" -gt "$STUB_ROWS" ]; then
+  echo "  ❌ таблица «План на сегодня» содержит шаблонную строку-заглушку (NNN/X/PENDING) рядом с реальными строками"
+  exit 1
+else
+  echo "  ✅ Таблица плана: заглушек рядом с реальными строками нет"
 fi
 ```
 
