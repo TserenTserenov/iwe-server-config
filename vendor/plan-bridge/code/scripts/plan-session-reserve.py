@@ -16,8 +16,14 @@ receiver's ParentMismatch reply and the same request (same event_id) is sent
 again. That is safe: the session is a new plan element, its meaning does not
 depend on the queue order, and a repeated event_id is accepted only once.
 
+If the reservation is in but its start is not (receiver restarted, queue
+busy), --resume-start <reservation event_id> sends only the start; sending
+the whole command again would be refused as a second reservation.
+
 Exit codes: 0 submitted, 1 refused by the receiver, 2 unusable input or the
-receiver was not reached, 3 no receiver on this host (nothing submitted).
+receiver was not reached, 3 no receiver on this host (nothing submitted),
+4 reservation submitted but its start not (resend with --resume-start),
+5 queue busy or moved on every attempt (nothing written; retry later).
 """
 
 from __future__ import annotations
@@ -45,6 +51,8 @@ LIMITS_PATH = "machine/plan-bridge/limits.json"
 WP_PATTERN = re.compile(r"WP-[0-9]+")
 SESSION_PATTERN = re.compile(r"[0-9A-Za-z][0-9A-Za-z._-]{0,159}")
 TIP_ATTEMPTS = 5
+START_ATTEMPTS = 3
+RETRYABLE = frozenset({"StreamBusy", "TipContention"})
 # The queue lock is held for milliseconds by a write or a delivery pass.
 BUSY_PAUSE_SECONDS = 0.2
 
@@ -131,11 +139,37 @@ def submit(socket_path, request, tip=None):
             tip = reply["wal_tip"]
         else:
             return reply
+    if reply.get("code") == "ParentMismatch":
+        # Nothing was written: other producers kept moving the tip.
+        return {"ok": False, "code": "TipContention", "reason": reply.get("reason")}
     return reply
 
 
+def submit_start(socket_path, request):
+    """The start is idempotent by event_id: a transient failure is simply resent."""
+    for _ in range(START_ATTEMPTS):
+        try:
+            reply = submit(socket_path, request, tip=request["expected_parent"])
+        except send.SendError as exc:
+            reply = {"ok": False, "code": "ClientError", "reason": str(exc)}
+        if reply.get("ok") is True or reply.get("code") not in RETRYABLE | {
+            "ClientError"
+        }:
+            return reply
+        time.sleep(BUSY_PAUSE_SECONDS)
+    return reply
+
+
+class _Parser(argparse.ArgumentParser):
+    """Usage errors are one JSON line too: the Mac reads them through SSH."""
+
+    def error(self, message):
+        print(json.dumps({"ok": False, "code": "UsageError", "reason": message}))
+        raise SystemExit(2)
+
+
 def main(argv):
-    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    parser = _Parser(description=__doc__.splitlines()[0])
     parser.add_argument("--wp", required=True)
     parser.add_argument("--session", required=True)
     parser.add_argument("--minutes", required=True, type=int)
@@ -146,6 +180,11 @@ def main(argv):
     parser.add_argument("--rules-file", default=send.DEFAULT_RULES_FILE)
     parser.add_argument("--producer", default=send.DEFAULT_PRODUCER)
     parser.add_argument("--timezone", help="budget time zone instead of --repository")
+    parser.add_argument(
+        "--resume-start",
+        metavar="RESERVATION_EVENT_ID",
+        help="send only the start of a reservation already submitted today",
+    )
     arguments = parser.parse_args(argv)
     if not os.path.exists(arguments.socket):
         print(json.dumps({"ok": False, "code": "NoReceiver", "submitted": False}))
@@ -156,35 +195,40 @@ def main(argv):
             producer_id=arguments.producer,
             rules_version=send.read_rules_version(arguments.rules_file),
         )
-        reserved = send.build_request(
-            reservation(arguments.wp, arguments.session, arguments.minutes, plan_date),
-            **fixed,
+        fields = reservation(
+            arguments.wp, arguments.session, arguments.minutes, plan_date
         )
-        reply = submit(arguments.socket, reserved)
+        if arguments.resume_start:
+            reserved = {**fields, "event_id": arguments.resume_start}
+            reply = {"ok": True, "resumed": arguments.resume_start}
+        else:
+            reserved = send.build_request(fields, **fixed)
+            reply = submit(arguments.socket, reserved)
         started = None
         if reply.get("ok") is True:
-            started = submit(
-                arguments.socket,
-                send.build_request(start(reserved), **fixed),
-                tip=reserved["event_id"],
+            started = submit_start(
+                arguments.socket, send.build_request(start(reserved), **fixed)
             )
     except send.SendError as exc:
         print(json.dumps({"ok": False, "code": "ClientError", "reason": str(exc)}))
         return 2
     ok = reply.get("ok") is True and (started or {}).get("ok") is True
-    print(
-        json.dumps(
-            {
-                "ok": ok,
-                "reservation": reply,
-                "start": started,
-                "plan_date": plan_date,
-                "minutes": arguments.minutes,
-            },
-            ensure_ascii=False,
-        )
-    )
-    return 0 if ok else 1
+    result = {
+        "ok": ok,
+        "reservation": reply,
+        "start": started,
+        "reservation_event_id": reserved["event_id"],
+        "plan_date": plan_date,
+        "minutes": arguments.minutes,
+    }
+    if reply.get("ok") is True and not ok:
+        result["code"] = "StartNotSubmitted"
+    print(json.dumps(result, ensure_ascii=False))
+    if ok:
+        return 0
+    if reply.get("ok") is True:
+        return 4
+    return 5 if reply.get("code") in RETRYABLE else 1
 
 
 if __name__ == "__main__":
