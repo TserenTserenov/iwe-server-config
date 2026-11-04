@@ -329,7 +329,7 @@ def legacy_product_scope(repo: Path, raw: bytes, common: Path, name: str) -> Non
 
 
 def product_target(repo: Path, raw: bytes, name: str, root: Path, target_ref: str) -> None:
-    """Bind non-main delivery and PREPARED recovery to peer product repositories."""
+    """Bind product delivery to a claimed repository and an approved branch."""
     if target_ref not in PEER_PRODUCT_REFS | {MAIN_REF} | registered_product_refs(repository_identity(repo)[1]):
         raise ProofError("publication recovery requires a peer product delivery target")
     root = root.resolve(strict=True)
@@ -338,6 +338,11 @@ def product_target(repo: Path, raw: bytes, name: str, root: Path, target_ref: st
                   and target_ref == BOT_REF and origin == "github.com/aisystant/aist_bot"
                   and field(raw, "close_delivery_version") == "isolate-push/v2"
                   and frozenset(claims(raw, name, repo)) == BOT_CLAIMS)
+    ordinary_bot = (field(raw, "close_path") == "unknown" and name == BOT_REPO
+                    and origin == "github.com/aisystant/aist_bot"
+                    and target_ref in PEER_PRODUCT_REFS
+                    and field(raw, "close_delivery_version") == "isolate-push/v2"
+                    and not legacy_bot)
     # WP-167 opened before repository-qualified file claims were recorded.
     # Admit only its immutable two-commit publisher scope; receipt construction
     # still has to prove each claimed commit by exact replay on the fetched ref.
@@ -349,7 +354,8 @@ def product_target(repo: Path, raw: bytes, name: str, root: Path, target_ref: st
                     and frozenset(claims(raw, name, repo)) == WP167_BOT_CLAIMS
                     and all(frozenset(changed_paths(repo, commit)) == WP167_BOT_PATHS
                             for commit in WP167_BOT_CLAIMS))
-    if (field(raw, "close_path") != "peer-session" and not (legacy_bot or legacy_wp167)
+    if (field(raw, "close_path") != "peer-session"
+            and not (legacy_bot or legacy_wp167 or ordinary_bot)
             and (target_ref != MAIN_REF
                  or field(raw, "close_delivery_version") != "isolate-push/v2")):
         raise ProofError("publication recovery requires a peer product delivery target")

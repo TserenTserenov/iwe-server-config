@@ -1148,5 +1148,49 @@ _close_delivery_state "$1" one
                     receipt.product_target(self.repo, raw, receipt.BOT_REPO,
                                            self.root, receipt.BOT_REF)
 
+    def test_ordinary_bot_close_accepts_only_scoped_published_claims(self):
+        bot = self.root / receipt.BOT_REPO
+        self.repo.rename(bot)
+        self.repo = bot
+        claimed = sorted(f"{receipt.BOT_REPO} {sha}" for sha in (self.source, self.anchor))
+        self.sem.write_text(
+            "agent: codex\nsession_id: one\nwp: WP-7\nclose_path: unknown\n"
+            "close_delivery_version: isolate-push/v2\nclose_delivery_session_id: one\n"
+            f"close_delivery_common_dir: {self.governance / '.git'}\n"
+            f"close_delivery_claimed_commits: {json.dumps(claimed)}\n"
+            f"governance_worktree: {self.governance}\norz_sessions_dir: {self.orz}\n"
+            "file: a.txt\nfile_v2: "
+            + json.dumps({"repo": str(bot / ".git"), "path": "a.txt"}) + "\n"
+            + "".join(f"commit: {item}\n" for item in claimed)
+        )
+        real_identity = receipt.repository_identity
+
+        def bot_identity(path):
+            common, origin = real_identity(path)
+            return common, ("github.com/aisystant/aist_bot" if path == bot else origin)
+
+        with patch.object(receipt, "repository_identity", side_effect=bot_identity):
+            raw = self.sem.read_bytes()
+            receipt.product_target(bot, raw, receipt.BOT_REPO, self.root,
+                                   "refs/heads/pilot")
+            self.assertEqual(receipt.record(bot, self.sem, receipt.BOT_REPO,
+                                            self.anchor, "refs/heads/pilot"), 2)
+            self.assertTrue(receipt.verify_product(bot, self.sem, receipt.BOT_REPO,
+                                                   self.source, self.root))
+            for damaged in (
+                raw.replace(b"file_v2: ", b"unbound: "),
+                raw.replace(self.source.encode(), b"0" * 40, 1),
+            ):
+                with self.subTest(damaged=damaged[:80]):
+                    with self.assertRaises(receipt.ProofError):
+                        receipt.product_target(bot, damaged, receipt.BOT_REPO,
+                                               self.root, "refs/heads/pilot")
+            with self.assertRaises(receipt.ProofError):
+                receipt.product_target(bot, raw, receipt.BOT_REPO,
+                                       self.root, "refs/heads/unapproved")
+        with self.assertRaises(receipt.ProofError):
+            receipt.product_target(bot, raw, receipt.BOT_REPO,
+                                   self.root, "refs/heads/pilot")
+
 if __name__ == "__main__":
     unittest.main()
