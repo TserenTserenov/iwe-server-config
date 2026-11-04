@@ -138,6 +138,10 @@ def render_md(data: dict) -> str:
         "generated_from: concept-kinds-registry.yaml",
         "---",
         "",
+        # The registry is a reference table whose basis cells are long by design;
+        # the marker must come from here, a hand edit would be lost on rebuild.
+        "<!-- index-health: skip-cells reference table, long basis cells are expected -->",
+        "",
         "# Реестр понятий и родов",
         "",
         (

@@ -6,7 +6,7 @@ type: reference
 horizon: warm
 domains: [reference]
 status: active
-owner: user
+owner: platform
 schema_version: 1
 
 name: "navigation"
@@ -15,6 +15,7 @@ description: "Операционный файл памяти IWE"
 # Навигация по репозиториям (Слой 3)
 
 > Claude читает этот файл при поиске конкретного файла/репо. Для поиска знаний → `mcp__claude_ai_knowledge-mcp__search`.
+> `DS-my-strategy` в путях ниже — имя репозитория управления из `.exocortex.env` (`GOVERNANCE_REPO`); подставьте значение своей установки.
 
 ## Ключевые файлы
 
@@ -44,10 +45,14 @@ description: "Операционный файл памяти IWE"
 | Шаблонизатор | `FMT-exocortex-template/setup.sh` |
 | Личная онтология | `DS-my-strategy/ontology.md` |
 | Программа обучения | `DS-principles-curriculum/` |
-| Сессии агентов (с 29.08.2026, бывш. `DS-my-strategy/sessions/`) | `MC-sessions/` |
-| Личные данные: personal/, Lifework/, мастерства (с 29.08.2026) | `PD-persona/` |
-| Личные данные: питание/измерения/здоровье (бывш. DS-metrics) | `PD-metrics/` |
+| Сессии агентов (если заведён) | `MC-sessions/` |
+| Личные данные: персона, дело жизни, мастерство (если заведён) | `PD-persona/` |
+| Личные данные: питание, измерения, здоровье (если заведён) | `PD-metrics/` |
 
+<!-- AUTHOR-ONLY:drop история переездов -->
+> История: `MC-sessions/` — с 29.08.2026, бывш. `DS-my-strategy/sessions/`; `PD-persona/` — с 29.08.2026 (personal/, Lifework/, мастерства); `PD-metrics/` — бывш. DS-metrics.
+
+<!-- /AUTHOR-ONLY -->
 ## Pack-репо
 
 | Pack | Путь |
