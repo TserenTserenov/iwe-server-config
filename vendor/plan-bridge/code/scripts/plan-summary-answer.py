@@ -28,6 +28,7 @@ refusal), 2 unusable input or receiver not reached, 3 no receiver on this host.
 from __future__ import annotations
 
 import argparse
+from dataclasses import asdict, dataclass, field
 import importlib.util
 import json
 import os
@@ -52,6 +53,29 @@ send = reserve.send
 
 class AnswerError(Exception):
     """The answer cannot be recorded as given (exit code 1)."""
+
+
+# What a pilot's answer may write through the Mac channel's key: the closing
+# terminal and nothing else (a reservation, a start or a dangling parent from
+# there could park the queue; review 04.11).
+_ANSWER_PAYLOAD = frozenset(
+    {
+        "resource_id",
+        "resource_type",
+        "generation_claimed",
+        "plan_date",
+        "confirmed_minutes",
+        "confirmation_ref",
+    }
+)
+
+
+@dataclass
+class Outcome:
+    requests: list = field(default_factory=list)
+    already_recorded: list = field(default_factory=list)
+    other_holder: list = field(default_factory=list)
+    not_answerable: list = field(default_factory=list)
 
 
 def answered_minutes(rows, *, confirm_all, corrections):
@@ -80,39 +104,56 @@ def _reservation(view, resource):
     raise AnswerError(f"no accepted reservation for {resource}")
 
 
-def outcome_requests(summary, current, view, answers, holder=None):
-    """outcome_confirmed fields per answered row; rows already recorded are skipped.
+def outcome_requests(summary, current, view, answers, holder=None, explicit=None):
+    """outcome_confirmed fields per answered row, as an Outcome.
 
     summary: the one the pilot answered (row numbers); current and view: the
     plan now, where each row's state and element tip are taken from. With a
     holder, rows of reservations held by another channel are listed apart.
+    explicit: rows the pilot named one by one; such a row that cannot be
+    answered refuses the whole answer. A row reached only by "подтверждаю"
+    (--all) that cannot be answered is listed in not_answerable instead, so
+    one unstarted or released row does not block the rest of the day.
     """
     import plan_bridge_allocation as allocation
 
+    named = set(answers) if explicit is None else set(explicit)
     now = {(row.stream_id, row.element_id): row for row in current.rows}
-    requests, recorded, other_holder = [], [], []
+    outcome = Outcome()
+
+    def unanswerable(number, reason):
+        if number in named:
+            raise AnswerError(f"row {number} {reason}")
+        outcome.not_answerable.append(number)
+
     for number, minutes in sorted(answers.items()):
-        row = now[
-            (summary.rows[number - 1].stream_id, summary.rows[number - 1].element_id)
-        ]
+        shown = summary.rows[number - 1]
+        row = now.get((shown.stream_id, shown.element_id))
+        if row is None:
+            raise AnswerError(
+                f"row {number} is not in the current plan: is --current older "
+                "than the summary?"
+            )
         if row.state == "completed":
-            if (row.spent_minutes, row.confirmation_ref) != (
+            if (row.spent_minutes, row.confirmation_ref) == (
                 minutes,
                 summary.summary_id,
             ):
-                raise AnswerError(f"row {number} is already closed with another answer")
-            recorded.append(number)
+                outcome.already_recorded.append(number)
+            else:
+                unanswerable(number, "is already closed with another answer")
             continue
         if row.state not in {"reserved", "awaiting"} or not row.started:
-            raise AnswerError(f"row {number} is not a started open reservation")
+            unanswerable(number, "is not a started open reservation")
+            continue
         resource = allocation.personal_time_resource_id(
             summary.plan_date, row.stream_id, row.element_id
         )
         reserved = _reservation(view, resource)
         if holder is not None and reserved["producer_id"] != holder:
-            other_holder.append(number)
+            outcome.other_holder.append(number)
             continue
-        requests.append(
+        outcome.requests.append(
             {
                 "event_type": "outcome_confirmed",
                 "stream_id": row.stream_id,
@@ -132,7 +173,20 @@ def outcome_requests(summary, current, view, answers, holder=None):
                 },
             }
         )
-    return requests, recorded, other_holder
+    return outcome
+
+
+def check_pilot_answers(requests):
+    """Refuse anything but the build step's closing terminals, before any send."""
+    for fields in requests:
+        if (
+            not isinstance(fields, dict)
+            or fields.get("event_type") != "outcome_confirmed"
+            or not isinstance(fields.get("payload"), dict)
+            or set(fields["payload"]) != _ANSWER_PAYLOAD
+            or not isinstance(fields.get("expected_parent"), str)
+        ):
+            raise AnswerError("only the pilot's answers built by this command")
 
 
 def build(arguments):
@@ -148,7 +202,16 @@ def build(arguments):
             raise AnswerError(f"commit {name} is not in {arguments.repository}")
         return resolved.stdout.decode().strip()
 
+    if arguments.current.startswith("origin/"):
+        # The other channel may have closed a row since the summary was shown.
+        fetched = reader._git("fetch", "-q", "origin", arguments.current[7:])
+        if fetched.returncode:
+            raise AnswerError("cannot fetch the current plan from origin")
     commit, latest = resolve(arguments.commit), resolve(arguments.current)
+    if reader._git("merge-base", "--is-ancestor", commit, latest).returncode:
+        raise AnswerError(
+            f"summary commit {commit[:10]} is not in the history of the current plan"
+        )
     trust = dict(trust_intra_commit_order=arguments.trust_intra_commit_order)
     summary = daily.summarize_repository(
         arguments.repository, commit, arguments.date, **trust
@@ -170,14 +233,15 @@ def build(arguments):
     answers = answered_minutes(
         summary.rows, confirm_all=arguments.all, corrections=corrections
     )
-    requests, recorded, other = outcome_requests(
-        summary, current, view, answers, holder=arguments.holder
+    outcome = outcome_requests(
+        summary,
+        current,
+        view,
+        answers,
+        holder=arguments.holder,
+        explicit=set(corrections),
     )
-    print(
-        json.dumps(
-            {"requests": requests, "already_recorded": recorded, "other_holder": other}
-        )
-    )
+    print(json.dumps(asdict(outcome)))
     return 0
 
 
@@ -189,6 +253,8 @@ def send_all(arguments):
         batch = json.load(sys.stdin)
         if not isinstance(batch, dict) or not isinstance(batch.get("requests"), list):
             raise send.SendError("stdin must hold the output of the build step")
+        if arguments.pilot_answers_only:
+            check_pilot_answers(batch["requests"])
         fixed = dict(
             producer_id=arguments.producer,
             rules_version=send.read_rules_version(arguments.rules_file),
@@ -197,6 +263,9 @@ def send_all(arguments):
             reserve.submit(arguments.socket, send.build_request(fields, **fixed))
             for fields in batch["requests"]
         ]
+    except AnswerError as exc:
+        print(json.dumps({"ok": False, "code": "NotPilotAnswer", "reason": str(exc)}))
+        return 1
     except (send.SendError, ValueError) as exc:
         print(json.dumps({"ok": False, "code": "ClientError", "reason": str(exc)}))
         return 2
@@ -233,6 +302,11 @@ def main(argv):
     sent.add_argument("--socket", default=send.DEFAULT_SOCKET)
     sent.add_argument("--rules-file", default=send.DEFAULT_RULES_FILE)
     sent.add_argument("--producer", default=send.DEFAULT_PRODUCER)
+    sent.add_argument(
+        "--pilot-answers-only",
+        action="store_true",
+        help="refuse any request but the pilot's closing answers (Mac gateway)",
+    )
     arguments = parser.parse_args(argv)
     if arguments.step == "send":
         return send_all(arguments)

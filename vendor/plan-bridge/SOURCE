@@ -1,7 +1,7 @@
 # Происхождение vendor/plan-bridge/code (WP-561 Ф55)
 #
-# Источник: DS-my-strategy, коммит f53f79de7c1a508517c715cbd3803d49f9fb8df0
-# (ветка запроса о канале Мака; файлы совпадают с пробным слиянием в main).
+# Источник: DS-my-strategy, коммит fa7abcb830a0dfabd1435d6c6fafc0bd222fd2db
+# (основная ветка после правок холодной проверки 04.11).
 # Код моста — 8 модулей и 2 команды (codePaths, входят в версию правил) — и три
 # клиентские команды для канала Мака (отправитель, заявка, ответ). Клиенты в
 # версию правил не входят: план не пишут, решение по заявке принимает мост.
@@ -20,5 +20,5 @@
 #   fedecf3077659ce3a7f8d6b65e6902d2c525c70c scripts/plan-event-bridge.py
 #   fa666f84e7aa982109661e8fb68b44b1af1e91a7 scripts/plan-event-receiver.py
 #   e40ee8469b56541fc2e1514f8df015d3789a23dc scripts/plan-event-send.py
-#   8dc6b5af7f62543ee1a6f768ff8be336b8399e82 scripts/plan-session-reserve.py
-#   55c0c0307cdfa31c3519544290be3395fe828674 scripts/plan-summary-answer.py
+#   3e47fe932a535239d0825cd69e102a137c9041ba scripts/plan-session-reserve.py
+#   476978912e9cbce9a3ab2a681a617345000d289f scripts/plan-summary-answer.py

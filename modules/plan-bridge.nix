@@ -71,7 +71,8 @@ let
 
   # Канал Мака (решение пилота 04.11): Мак не держит свой мост — его агенты
   # работают от учётной записи пилота и могли бы менять код службы. Заявки
-  # приходят по SSH отдельным ключом, который умеет только два действия;
+  # приходят по SSH отдельным ключом, который умеет только два действия
+  # (ответ — только закрытие заявки ответом пилота, холодная проверка 04.11);
   # здесь они превращаются в вызов отправителя с фиксированными сокетом и
   # именем производителя — выбрать их со стороны Мака нельзя.
   macSocketDir = "/run/iwe-plan-bridge-mac";
@@ -84,21 +85,28 @@ let
            --rules-file ${configDir}/approved_rules_version)
     case "''${words[0]:-}" in
       reserve)
-        if [ "''${#words[@]}" -ne 7 ] || [ "''${words[1]}" != --wp ] \
-           || [ "''${words[3]}" != --session ] || [ "''${words[5]}" != --minutes ]; then
-          echo '{"ok": false, "code": "GatewayUsage", "reason": "reserve --wp WP-N --session ID --minutes N"}'
+        # Optional tail: --resume-start <reservation event_id> sends only a lost start.
+        if { [ "''${#words[@]}" -ne 7 ] && [ "''${#words[@]}" -ne 9 ]; } \
+           || [ "''${words[1]}" != --wp ] || [ "''${words[3]}" != --session ] \
+           || [ "''${words[5]}" != --minutes ] \
+           || { [ "''${#words[@]}" -eq 9 ] && [ "''${words[7]}" != --resume-start ]; }; then
+          echo '{"ok": false, "code": "GatewayUsage", "reason": "reserve --wp WP-N --session ID --minutes N [--resume-start EVENT_ID]"}'
           exit 2
         fi
+        resume=()
+        if [ "''${#words[@]}" -eq 9 ]; then resume=(--resume-start "''${words[8]}"); fi
         exec ${python}/bin/python -I ${code}/scripts/plan-session-reserve.py \
           "''${fixed[@]}" --timezone ${lib.escapeShellArg cfg.macChannel.timezone} \
-          --wp "''${words[2]}" --session "''${words[4]}" --minutes "''${words[6]}"
+          --wp "''${words[2]}" --session "''${words[4]}" --minutes "''${words[6]}" \
+          "''${resume[@]}"
         ;;
       answer)
         if [ "''${#words[@]}" -ne 1 ]; then
           echo '{"ok": false, "code": "GatewayUsage", "reason": "answer (requests on stdin)"}'
           exit 2
         fi
-        exec ${python}/bin/python -I ${code}/scripts/plan-summary-answer.py send "''${fixed[@]}"
+        exec ${python}/bin/python -I ${code}/scripts/plan-summary-answer.py send \
+          "''${fixed[@]}" --pilot-answers-only
         ;;
       *)
         echo '{"ok": false, "code": "GatewayUsage", "reason": "reserve or answer"}'
