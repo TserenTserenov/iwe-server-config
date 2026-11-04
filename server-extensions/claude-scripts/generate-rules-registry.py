@@ -305,7 +305,12 @@ def main(argv=None):
     args = parse_args(sys.argv[1:] if argv is None else argv)
     # Checked before building and before mkdir/open: a refusal leaves the target tree untouched.
     symlink = find_symlink_on_path(args.output)
-    if symlink and not args.validate and not args.write_through_symlink:
+    if symlink and args.validate:
+        # Same predicate as the refusal, printed before the strict check: the real pack
+        # usually fails it (exit 2), and the warning must not depend on rule hygiene.
+        print(f"ВНИМАНИЕ: запись в {args.output} была бы отклонена с кодом {SYMLINK_REFUSAL_EXIT}: "
+              f"{describe_symlink(symlink)}", file=sys.stderr)
+    elif symlink and not args.write_through_symlink:
         refuse_symlink_write(symlink)
 
     # generate: skip-invalid (best-effort реестр из валидных); --validate: строгий gate
@@ -313,10 +318,6 @@ def main(argv=None):
 
     if args.validate:
         print(f"OK: {registry['rule_count']} rules validated")
-        if symlink:
-            # Same predicate as the refusal: a green --validate must not read as permission to write.
-            print(f"ВНИМАНИЕ: запись в {args.output} была бы отклонена с кодом {SYMLINK_REFUSAL_EXIT}: "
-                  f"{describe_symlink(symlink)}", file=sys.stderr)
         return
 
     output = args.output

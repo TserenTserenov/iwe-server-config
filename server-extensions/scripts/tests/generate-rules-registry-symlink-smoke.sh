@@ -58,6 +58,14 @@ gen --validate; rc=$?
 grep -q 'была бы отклонена с кодом 3' "$TMP/err" || fail "validate via link: no warning"
 [ "$(cat "$EXT/reg.yaml")" = ORIG ] || fail "validate via link: target was modified"
 
+# 3a. Same, with an invalid rule in the pack (the real pack fails strict validation):
+# exit 2 from validation, the symlink warning is still printed.
+printf -- '---\nid: AR.002\n---\nbody\n' > "$H/IWE/PACK-agent-rules/rules/AR.002.md"
+gen --validate; rc=$?
+[ "$rc" -eq 2 ] || fail "validate via link, invalid pack: expected 2, got $rc"
+grep -q 'была бы отклонена с кодом 3' "$TMP/err" || fail "validate via link, invalid pack: no warning"
+rm "$H/IWE/PACK-agent-rules/rules/AR.002.md"
+
 # 4. --write-through-symlink -> target updated, link still a link.
 gen --write-through-symlink; rc=$?
 [ "$rc" -eq 0 ] || fail "flag: rc=$rc $(cat "$TMP/err")"
@@ -116,4 +124,4 @@ gen --output "$H/cycle-a"; rc=$?
 [ "$rc" -eq 3 ] || fail "link cycle: expected 3, got $rc $(cat "$TMP/err")"
 grep -q Traceback "$TMP/err" && fail "link cycle: traceback instead of a refusal"
 
-echo "OK: generate-rules-registry symlink guard (12 cases)"
+echo "OK: generate-rules-registry symlink guard (13 cases)"
