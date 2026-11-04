@@ -12962,6 +12962,8 @@ print(json.dumps({"wp": sys.argv[1], "slug": sys.argv[2], "agent": sys.argv[3], 
     else
       CANCEL_HINT="явная отмена через close_obligation.py недоступна -- у этой сессии не определился ни harness_session_id, ни session_id семафора. Используй session-guard.sh heal <slug> (сухой прогон покажет шаги и нужное слово пилота)"
     fi
+    # bug-2026-11-03 (И-4): подсказка не называла --force-no-reflection; условия флага не менялись.
+    CANCEL_HINT="$CANCEL_HINT. Если пилот явно сказал закрыть без рефлексии, а работа уже опубликована (карточка на шаге blocked-witness-unavailable, commit_needed=false или all_pushed=true): session-guard.sh close --agent ${AGENT:-<агент>} --slug $SLUG --force-no-reflection \"<слово пилота>\""
   fi
 
   # WP-537 Ф29 (07.09, по решению пилота после ревью Fable): slug -> run_id
