@@ -411,7 +411,7 @@ class DeclaredTerminalProofTests(unittest.TestCase):
         script = "\n".join(function_source(name) for name in helpers)
         script += "\nIWE_ROOT=" + shlex.quote(str(self.root))
         script += "\n_runner_release_retry_snapshot_sha " + shlex.join([str(semaphore), str(card)])
-        for variant in ("valid", "owner", "wp", "slug", "waiting", "failed_verdict",
+        for variant in ("valid", "inline_delimiter", "owner", "wp", "slug", "waiting", "failed_verdict",
                         "unpublished", "no_previous_release", "body", "missing_audit",
                         "wrong_audit_hash", "wrong_audit_path", "symlink_audit"):
             with self.subTest(variant=variant):
@@ -421,6 +421,8 @@ class DeclaredTerminalProofTests(unittest.TestCase):
                            results={"gather-session-facts": {"wp": "WP-484"},
                                     "verify-r23": {"verdict": "pass"}, "commit-push": {"all_pushed": True}},
                            history=[{"step": "session-guard-release", "type": "reflex"}])
+                if variant == "inline_delimiter":
+                    doc["what_next"] = "first step\n---\nnext step\n"
                 if variant in ("owner", "slug", "waiting"):
                     key = {"owner": "owner_session_id", "slug": "requested_slug", "waiting": "status"}[variant]
                     doc[key] = "different"
@@ -434,6 +436,8 @@ class DeclaredTerminalProofTests(unittest.TestCase):
                     doc["history"] = []
                 card.write_text("---\n" + yaml.safe_dump(doc, allow_unicode=True) + "---\n"
                                 + ("changed\n" if variant == "body" else body))
+                if variant == "inline_delimiter":
+                    self.assertIn("  ---\n", card.read_text())
                 if audit.is_symlink() or audit.exists():
                     audit.unlink()
                 event = dict(actor="process-runner", event="written", process_id="quick-close",
@@ -451,9 +455,9 @@ class DeclaredTerminalProofTests(unittest.TestCase):
                     audit.symlink_to(moved)
                 before = semaphore.read_bytes()
                 result = self.shell(script)
-                self.assertEqual(result.returncode == 0, variant == "valid", result.stderr)
+                self.assertEqual(result.returncode == 0, variant in ("valid", "inline_delimiter"), result.stderr)
                 self.assertEqual(semaphore.read_bytes(), before)
-                if variant == "valid":
+                if variant in ("valid", "inline_delimiter"):
                     expected = hashlib.sha256(b"file\0" + str(card).encode() + b"\0" + card.read_bytes()).hexdigest()
                     self.assertEqual(result.stdout.strip(), expected)
 

@@ -10661,6 +10661,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import re
 import stat
 import sys
 import yaml
@@ -10686,7 +10687,12 @@ def owned_bytes(path, limit):
 
 try:
     raw = owned_bytes(card, 1024 * 1024)
-    _, metadata, body = raw.decode().split("---\n", 2)
+    text = raw.decode()
+    match = re.match(r"^---\n(.*?)\n---(?:\n|$)", text, re.S)
+    if match is None:
+        raise ValueError("frontmatter missing")
+    metadata = match.group(1)
+    body = text[match.end():]
     doc = yaml.safe_load(metadata)
     expected_body = ("\n# Карточка запуска: quick-close\n\n"
                      "Автоматически обновляется `process-runner.py`. Не редактировать руками -- "
