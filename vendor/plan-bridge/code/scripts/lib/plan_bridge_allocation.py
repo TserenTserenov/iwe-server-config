@@ -54,7 +54,20 @@ _REQUIRED_STATES = {
 _HOLDER_EVENTS = frozenset(
     {"action_started", "outcome_confirmed", "cancellation_compensated"}
 )
-_TIME_FIELDS = frozenset({"plan_date", "reserved_minutes", "actual_minutes"})
+_TIME_FIELDS = frozenset(
+    {
+        "plan_date",
+        "reserved_minutes",
+        "actual_minutes",
+        "confirmed_minutes",
+        "confirmation_ref",
+    }
+)
+# A terminal carries either a real measurement or the pilot's answer to one
+# daily summary (DR-06, 04.11): an estimate the pilot confirmed is not a
+# measurement, so it never lands in actual_minutes.
+_MEASURED = frozenset({"plan_date", "actual_minutes"})
+_PILOT_CONFIRMED = frozenset({"plan_date", "confirmed_minutes", "confirmation_ref"})
 _RESOURCE_FIELDS = (
     frozenset({"resource_id", "resource_type", "generation_claimed"}) | _TIME_FIELDS
 )
@@ -238,24 +251,46 @@ class _TimeLedger:
         ) != (reservation.day, reservation.stream, reservation.element):
             return False
         terminal = event in {"outcome_confirmed", "cancellation_compensated"}
-        expected = {"plan_date", "actual_minutes"} if terminal else {"plan_date"}
-        if _TIME_FIELDS.intersection(payload) != expected or (
-            terminal and not _minutes(payload["actual_minutes"])
+        spent = _terminal_minutes(payload) if terminal else 0
+        if spent is None or (
+            not terminal and _TIME_FIELDS.intersection(payload) != {"plan_date"}
         ):
             return False
         if event == "action_started":
-            try:
-                occurred = datetime.fromisoformat(
-                    request["occurred_at"].replace("Z", "+00:00")
-                )
-                return occurred.astimezone(time_zone).date().isoformat() == day
-            except (ValueError, OverflowError):
+            return _local_date(request, time_zone) == day
+        # A reservation whose day has passed awaits the pilot's daily summary:
+        # expiring it would erase participation instead of confirming it.
+        if event == "allocation_expired":
+            expired_on = _local_date(request, time_zone)
+            if expired_on is None or expired_on > day:
                 return False
         self.reserved[day] -= reservation.minutes
         del self.reservations[resource]
         if terminal:
-            self.spent[day] = self.spent.get(day, 0) + payload["actual_minutes"]
+            self.spent[day] = self.spent.get(day, 0) + spent
         return True
+
+
+def _local_date(request, time_zone):
+    try:
+        occurred = datetime.fromisoformat(request["occurred_at"].replace("Z", "+00:00"))
+        return occurred.astimezone(time_zone).date().isoformat()
+    except (ValueError, OverflowError):
+        return None
+
+
+def _terminal_minutes(payload):
+    """Minutes a terminal spends, or None when the payload is not one exact form."""
+    fields = _TIME_FIELDS.intersection(payload)
+    if fields == _MEASURED and _minutes(payload["actual_minutes"]):
+        return payload["actual_minutes"]
+    if (
+        fields == _PILOT_CONFIRMED
+        and _minutes(payload["confirmed_minutes"])
+        and _text(payload["confirmation_ref"])
+    ):
+        return payload["confirmed_minutes"]
+    return None
 
 
 class PersonalTimeBudget:

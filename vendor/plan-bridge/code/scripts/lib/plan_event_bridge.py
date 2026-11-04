@@ -17,7 +17,6 @@ import logging
 import os
 from pathlib import Path
 import re
-import signal
 import subprocess
 import tempfile
 from uuid import UUID, uuid4
@@ -476,116 +475,143 @@ class PublishResult:
     receipt: dict | None = None
 
 
-class LedgerPublisher:
-    """One invocation of the existing host-wide publisher and common Git gate."""
+class GitCasPublisher:
+    """Publish one candidate by compare-and-swap of main, inside the bridge itself.
 
-    def __init__(
-        self,
-        script: Path,
-        *,
-        workspace: Path,
-        governance_repo: str,
-        checkout: Path,
-        timeout=120,
-        environment=None,
-    ):
-        self.script = Path(script).resolve()
-        self.workspace = Path(workspace).resolve()
-        self.governance_repo = governance_repo
-        self.checkout = Path(checkout).resolve()
+    The candidate commit has the single parent B and differs from B only by the
+    added journal files (every bridge record has its own file); the push
+    succeeds only while origin main still equals B. A lost reply needs no recovery here: the next pass reads fresh origin and
+    finds the records already published. The whole write path lives in this
+    module, so it stays inside the rules version the pilot approves.
+    """
+
+    AUTHOR = ("plan-bridge", "plan-bridge@iwe.invalid")
+
+    def __init__(self, repository: Path, *, ref="refs/heads/main", timeout=60):
+        self.repository = Path(repository).resolve()
+        self.ref = ref
         self.timeout = timeout
-        self.environment = dict(environment or {})
+
+    def _git(self, *args, env=None, input=None):
+        try:
+            return subprocess.run(
+                ["git", "-C", str(self.repository), *args],
+                env={**_git_environment(), **(env or {})},
+                input=input,
+                capture_output=True,
+                timeout=self.timeout,
+                check=False,
+            )
+        except subprocess.TimeoutExpired as exc:
+            raise BridgeError(
+                "NO_NETWORK", "Git operation timed out", stop=False
+            ) from exc
+
+    def _checked(self, *args, env=None, input=None):
+        result = self._git(*args, env=env, input=input)
+        if result.returncode:
+            raise BridgeError("GIT_UNAVAILABLE", f"git {args[0]} failed", stop=False)
+        return result.stdout.decode().strip()
+
+    def _check_destination(self):
+        """The push must go exactly where the plan is read from."""
+        fetch = self._checked("remote", "get-url", "origin")
+        pushes = self._checked("remote", "get-url", "--push", "--all", "origin")
+        if set(pushes.splitlines()) != {fetch}:
+            raise BridgeError(
+                "PUBLICATION_DESTINATION", "push and fetch URLs of origin differ"
+            )
+
+    def _candidate(self, documents, base):
+        paths = {}
+        for relative, data in documents.items():
+            parts = Path(relative).parts
+            if not relative.startswith("plan/bridge-v2/") or {"..", "."} & set(parts):
+                raise BridgeError("PUBLICATION_SCOPE", "unexpected source path")
+            path = "machine/ledger/" + relative
+            if not self._git("cat-file", "-e", f"{base}:{path}").returncode:
+                raise BridgeError("PUBLICATION_SCOPE", f"path exists at base: {path}")
+            paths[path] = self._checked("hash-object", "-w", "--stdin", input=data)
+        with tempfile.TemporaryDirectory(prefix="plan-index-") as temporary:
+            index = {"GIT_INDEX_FILE": str(Path(temporary) / "index")}
+            self._checked("read-tree", base, env=index)
+            for path, blob in paths.items():
+                self._checked(
+                    "update-index",
+                    "--add",
+                    "--cacheinfo",
+                    f"100644,{blob},{path}",
+                    env=index,
+                )
+            tree = self._checked("write-tree", env=index)
+        name, email = self.AUTHOR
+        identity = {
+            "GIT_AUTHOR_NAME": name,
+            "GIT_AUTHOR_EMAIL": email,
+            "GIT_COMMITTER_NAME": name,
+            "GIT_COMMITTER_EMAIL": email,
+        }
+        candidate = self._checked(
+            "commit-tree",
+            tree,
+            "-p",
+            base,
+            "-m",
+            "plan-bridge: publish decided records",
+            env=identity,
+        )
+        changes = self._checked(
+            "diff-tree", "--no-renames", "--name-status", "-r", base, candidate
+        ).splitlines()
+        if sorted(changes) != sorted(f"A\t{path}" for path in paths):
+            raise BridgeError(
+                "PUBLICATION_SCOPE", "candidate changes more than records"
+            )
+        return candidate
 
     def publish(self, documents, expected_base, stream_dir):
         _oid(expected_base)
-        # Failed candidates remain on their own Git branches. These files are
-        # reproducible from WAL + the checked base; never drain the intake here.
-        with tempfile.TemporaryDirectory(
-            prefix=".plan-attempt-", dir=stream_dir
-        ) as temporary:
-            source = Path(temporary).resolve()
-            for relative, data in documents.items():
-                path = source / relative
-                if not relative.startswith("plan/bridge-v2/") or any(
-                    part in {"..", "."} for part in Path(relative).parts
-                ):
-                    raise BridgeError("PUBLICATION_SCOPE", "unexpected source path")
-                path.parent.mkdir(parents=True, exist_ok=True)
-                path.write_bytes(data)
+        self._check_destination()
+        candidate = _oid(self._candidate(documents, expected_base))
+        try:
+            pushed = self._git(
+                "push",
+                "--porcelain",
+                f"--force-with-lease={self.ref}:{expected_base}",
+                "origin",
+                f"{candidate}:{self.ref}",
+            )
+        except BridgeError:
+            return PublishResult("push_unknown")
+        report = pushed.stdout.decode()
+        if pushed.returncode == 0:
             manifest = {
                 key: hashlib.sha256(value).hexdigest()
                 for key, value in documents.items()
             }
-            snapshot_id = hashlib.sha256(
-                json.dumps(manifest, sort_keys=True).encode()
-            ).hexdigest()
-            env = {
-                **_git_environment(),
-                **self.environment,
-                "IWE_WORKSPACE": str(self.workspace),
-                "IWE_GOVERNANCE_REPO": self.governance_repo,
-                "LEDGER_PUBLISH_CHECKOUT": str(self.checkout),
-            }
-            process = subprocess.Popen(
-                [
-                    "bash",
-                    str(self.script),
-                    "--source-ledger-dir",
-                    str(source),
-                    "--expected-base",
-                    expected_base,
-                ],
-                env=env,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.DEVNULL,
-                start_new_session=True,
+            return PublishResult(
+                "published",
+                dict(
+                    schema="plan-publication-receipt/2",
+                    expected_base=expected_base,
+                    candidate_oid=candidate,
+                    snapshot_id=hashlib.sha256(
+                        json.dumps(manifest, sort_keys=True).encode()
+                    ).hexdigest(),
+                ),
             )
-            try:
-                stdout, _ = process.communicate(timeout=self.timeout)
-            except subprocess.TimeoutExpired:
-                os.killpg(process.pid, signal.SIGKILL)
-                process.communicate()
-                return PublishResult("push_unknown")
-            if process.returncode == 31:
-                return PublishResult("base_changed")
-            if process.returncode != 0:
-                return PublishResult("push_unknown")
-            if len(stdout) > 16384:
-                raise BridgeError(
-                    "MALFORMED_RECEIPT", "publisher receipt exceeds limit"
-                )
-            lines = stdout.splitlines()
-            try:
-                if len(lines) != 1 or not lines[0].startswith(
-                    b"PLAN_PUBLICATION_RECEIPT "
-                ):
-                    raise ValueError("expected exactly one plan receipt")
-                receipt = _json(lines[0].split(b" ", 1)[1])
-                if (
-                    set(receipt)
-                    != {
-                        "schema",
-                        "state",
-                        "reason",
-                        "expected_base",
-                        "candidate_oid",
-                        "origin_oid",
-                        "snapshot_id",
-                    }
-                    or receipt["schema"] != "plan-publication-receipt/1"
-                    or receipt["state"] != "published"
-                    or receipt["reason"] != "exact_commit_verified"
-                    or receipt["expected_base"] != expected_base
-                    or receipt["snapshot_id"] != snapshot_id
-                ):
-                    raise ValueError("receipt binding mismatch")
-                _oid(receipt["candidate_oid"])
-                _oid(receipt["origin_oid"])
-            except (ValueError, TypeError, KeyError, RecursionError) as exc:
-                raise BridgeError(
-                    "MALFORMED_RECEIPT", "publisher did not prove this attempt"
-                ) from exc
-            return PublishResult("published", receipt)
+        # Porcelain marks the ref line with "!": a lease or fast-forward refusal
+        # means origin moved; any other refusal (a hook, protection) is not ours
+        # to retry blindly and is reported apart from a moved base.
+        if re.search(
+            r"^!\t.*\[rejected\] \((stale info|fetch first|non-fast-forward)\)",
+            report,
+            re.M,
+        ):
+            return PublishResult("base_changed")
+        if re.search(r"^!\t.*\[remote rejected\]", report, re.M):
+            return PublishResult("push_refused")
+        return PublishResult("push_unknown")
 
 
 @contextmanager
@@ -721,7 +747,7 @@ def deliver_once(
     stream_dir: Path,
     *,
     reader: GitPlanReader,
-    publisher: LedgerPublisher,
+    publisher: GitCasPublisher,
     verifier=None,
     trusted_context=None,
     validator_factory: Callable | None = None,

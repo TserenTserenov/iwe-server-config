@@ -1,38 +1,20 @@
 # Происхождение vendor/plan-bridge/code (WP-561 Ф55)
 #
-# Источник: DS-my-strategy, коммит 4eb1d48a0635c72dc491eab78220787a8b911ebf
-# Копия моста, CLI и зависимостей штатного издателя.
+# Источник: DS-my-strategy, коммит dbb8a4ff1ba04920d712a64dd321702543a6531e
+# (ветка запроса №221; файлы совпадают с пробным слиянием в main).
+# Только код моста: 8 модулей и 2 команды; общий конвейер публикации не нужен —
+# мост публикует сам, атомарной сверкой ветки (АрхГейт DR-06, вариант Д).
 # Все файлы взяты из Git-объектов указанной ревизии без изменений.
 # SOURCE находится вне code/ и не влияет на код службы.
 #
 # Хеши объектов Git:
-#   1310ece8d422c5ed94df075384949dd1204265a3 scripts/check-wp-card-schema.py
-#   7a3f41847564317f49f567543fe0e1162707cff1 scripts/close_expect.py
-#   dea5e8429b48bf4820de6f3b06cd65783e60a9f6 scripts/close_obligation.py
-#   17c69d311bde026aa852f176a18866ba941186f5 scripts/ds-publish.sh
-#   78db593b4350b0032d6827656260e71f8b000bef scripts/hot_publish_cas.py
-#   431c83f72fce3ce0880c8691295c60b78588963c scripts/install-ledger-merge-driver.sh
-#   27e6205f2b306ae53bdf7eb87a40ed643d06515e scripts/isolate-push.sh
-#   a5652caf95241676c73755f1b78e5e9cfacd478a scripts/ledger-publish.sh
-#   c696dd75e9d4c3488d8035d8919798dc1343ac64 scripts/lib/captures-block-merge.py
-#   d783c35b9f6736856d2d0b81e526687a797bc5cb scripts/lib/ledger-event-diff.py
-#   13c4dab4acc46cc328fd76b14ccdf891b6a04213 scripts/lib/ledger-safe-reset-check.py
-#   7deef5fe097cdb62d303e09f57b2d297bb12f3a0 scripts/lib/ledger-source-snapshot.py
-#   c5ebdce0cb285f291a2787a74c59a1089a121098 scripts/lib/ledger_path.py
-#   f7888f60fab3a30d683a4d42473a559a65d09f3b scripts/lib/notification-center-bridge.sh
-#   10d3e2133110ac7da454ca70bd22d788a628ee25 scripts/lib/notification-render.sh
-#   41e3b39ac4807e408b7eb4bfe56a167f98266da7 scripts/lib/notify-retry-policy.sh
 #   70284c63241e1032d4e3502cd81f2663933541d9 scripts/lib/plan_allocation.py
-#   44e8ed6ab10f756ffe130c868b4f1fff107a83f3 scripts/lib/plan_bridge_allocation.py
+#   78c00f3895c2d2cfea4d9a3f171b4b010578fcb1 scripts/lib/plan_bridge_allocation.py
 #   bfccc83af88f2a73673e45711317d3467f2a9b01 scripts/lib/plan_bridge_decisions.py
-#   d4f21371e8958a8dd28e4d26d8be7562a29ce99e scripts/lib/plan_bridge_host.py
+#   3b107e138f120ad4ff3fa058044f59b2362ebbc4 scripts/lib/plan_bridge_host.py
 #   017c6a8abaaede2dccc475dcddf76eddef56ee71 scripts/lib/plan_bridge_receiver.py
-#   37eb6248d89a47434971f196437404a59b2086a9 scripts/lib/plan_event_bridge.py
+#   2c73f08f8745de0049f4194720a63ef5f8f3ab08 scripts/lib/plan_event_bridge.py
 #   aaa218adb2b6792777f4aacfc11eb28efed818ed scripts/lib/plan_event_intake.py
 #   fbb3395861e9dd13a64863bed07c0fe2a8c8172e scripts/lib/plan_event_wal.py
-#   e0ca368dbc30063aeec48f69784f447d1bed36ae scripts/lib/publish-gate.sh
-#   369ee9d7086f4238a4b69d92a7fcd3077fde96e5 scripts/lib/publish-lease.sh
-#   80219b3a7656db3fe9355d66873dece23f1311dd scripts/lib/publish-queue.sh
-#   578beb5c0bc94ddc4b01c1f99675fb3af5f099c8 scripts/plan-event-bridge.py
+#   fedecf3077659ce3a7f8d6b65e6902d2c525c70c scripts/plan-event-bridge.py
 #   4ee4700b089bc885f12e52c333f3a21f52d6a582 scripts/plan-event-receiver.py
-#   ae2ffe5fe77a8e336bf99fe58e3524c7afb19de5 scripts/session_local_release.py

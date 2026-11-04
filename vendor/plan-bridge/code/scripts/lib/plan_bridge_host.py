@@ -27,6 +27,7 @@ import os
 from pathlib import Path
 import site
 import stat
+import subprocess
 import sys
 import sysconfig
 
@@ -57,6 +58,7 @@ _PROJECT_MODULES = (
 )
 _CODE_MODULES = (*_PROJECT_MODULES, "__main__", "yaml", "rfc8785")
 _ACL_ATTRIBUTES = ("system.posix_acl_access", "system.posix_acl_default")
+_DARWIN = sys.platform == "darwin"
 _CONFIG_FIELDS = frozenset(
     {
         "schema",
@@ -91,6 +93,8 @@ def _secure_file(path: Path, trusted_uids, *, private: bool):
     forbidden = 0o077 if private else 0o022
     if info.st_mode & forbidden:
         raise HostAdapterError(f"host file mode is too open: {path}")
+    if _has_acl(path):
+        raise HostAdapterError(f"host file has an ACL: {path}")
     return info
 
 
@@ -101,6 +105,7 @@ def _trusted_directory(directory, owners):
         not stat.S_ISDIR(info.st_mode)
         or info.st_uid not in owners
         or (info.st_mode & 0o022 and not sticky)
+        or _has_acl(directory)
     ):
         raise HostAdapterError(f"host directory is not trusted: {directory}")
 
@@ -116,7 +121,7 @@ def _secure_parent(path: Path, trusted_uids):
     for directory in absolute.parents:
         info = os.lstat(directory)
         if stat.S_ISLNK(info.st_mode):
-            if info.st_uid not in owners:
+            if info.st_uid not in owners or _has_acl(directory):
                 raise HostAdapterError(f"host symlink is not trusted: {directory}")
         else:
             _trusted_directory(directory, owners)
@@ -307,6 +312,30 @@ def check_loaded_code_is_deployed(code_root, code_paths, loaded=None):
 
 
 def _has_acl(target):
+    if _DARWIN:
+        try:
+            result = subprocess.run(
+                ("/bin/ls", "-lde", os.fspath(target)),
+                capture_output=True,
+                check=True,
+                text=True,
+                timeout=5,
+                env={"LC_ALL": "C", "PATH": "/usr/bin:/bin"},
+            )
+        except (
+            OSError,
+            subprocess.CalledProcessError,
+            subprocess.TimeoutExpired,
+        ) as exc:
+            raise HostAdapterError(
+                f"ACL of a code path cannot be read: {target}"
+            ) from exc
+        lines = result.stdout.splitlines()
+        if not lines or len(lines[0].split(maxsplit=1)[0]) < 10:
+            raise HostAdapterError(f"ACL of a code path cannot be read: {target}")
+        # macOS may show '@' rather than '+' on the mode line even when an ACL
+        # exists; numbered entries from `ls -le` are the evidence to check.
+        return any(line.lstrip().split(":", 1)[0].isdigit() for line in lines[1:])
     if not hasattr(os, "listxattr"):
         return False
     try:
@@ -327,12 +356,15 @@ def check_code_ownership(paths, agent_uids):
     of ACLs. The path is walked twice: as written (a symlink or a directory an
     agent controls can be swapped later) and after resolution (where it leads).
     """
+    checked = set()
     for path in paths:
         written = Path(os.path.abspath(path))
         resolved = Path(os.path.realpath(path))
         for target in dict.fromkeys(
             (written, *written.parents, resolved, *resolved.parents)
         ):
+            if target in checked:
+                continue
             try:
                 info = os.lstat(target)
             except OSError as exc:
@@ -348,6 +380,7 @@ def check_code_ownership(paths, agent_uids):
                 raise HostAdapterError(
                     f"code is writable by an agent or has an ACL: {target}"
                 )
+            checked.add(target)
 
 
 @dataclass(frozen=True)
