@@ -8,10 +8,17 @@
 # checker, wp-handoff-check.py, in `peer` mode: there is no agent answer to
 # compare with, every other clause runs.
 #
+# WP-484 F285 M1: the closing writer saves its own next step (exactly the field text it
+# also gives the pilot and the report) to .iwe-runtime/peer-prompts/<slug>-next-step.txt
+# or names the file with --next-file; it is compared with the card field.  Without it
+# the checker reports HANDOFF_AGENT_NEXT_MISSING (a field rewritten early in a long
+# session passed every other clause, WP-611 04.11).
+#
 # Usage:
 #   wp-handoff-peer-check.sh --sem <semaphore-file>
 #   wp-handoff-peer-check.sh --agent <agent> --slug <slug>
 #   wp-handoff-peer-check.sh --agent <agent> --wp <WP-N>   # the one open peer-session semaphore of the WP
+#   any form above + --next-file <file>                    # the writer's next step, default by slug
 #
 # Mode (IWE_HANDOFF_CHECK_MODE): `shadow` (default) prints a warning and appends a
 # line to .iwe-runtime/handoff-check-shadow.log, never blocks; `off` does nothing.
@@ -28,13 +35,17 @@ SEM=""
 AGENT=""
 SLUG=""
 FIND_WP=""
+NEXT_FILE=""
+FROM_CLOSE=0
 while [ $# -gt 0 ]; do
+  if [ "$1" = "--from-close" ]; then FROM_CLOSE=1; shift; continue; fi   # called by session-guard.sh close
   [ $# -ge 2 ] || break   # a flag without a value ends parsing; `shift 2` would never drain $#
   case "$1" in
     --sem) SEM="${2:-}"; shift 2 ;;
     --agent) AGENT="${2:-}"; shift 2 ;;
     --slug) SLUG="${2:-}"; shift 2 ;;
     --wp) FIND_WP="${2:-}"; shift 2 ;;
+    --next-file) NEXT_FILE="${2:-}"; shift 2 ;;
     *) shift ;;
   esac
 done
@@ -153,17 +164,34 @@ case "$BASELINE_OID" in
     ;;
 esac
 
+# A slug equal to the WP (a session opened without --slug) is shared by every session of
+# the WP: a stale file of another session must not be taken, so no default then.
+if [ -z "$NEXT_FILE" ] && [ -n "$SLUG" ] && [ "$SLUG" != "$WP" ]; then
+  NEXT_FILE="$IWE_ROOT/.iwe-runtime/peer-prompts/$SLUG-next-step.txt"
+fi
+NEXT_ARGS=""
+[ -n "$NEXT_FILE" ] && [ -s "$NEXT_FILE" ] && NEXT_ARGS="yes"
+
 PY="$(command -v python3 || true)"
 if [ -z "$PY" ]; then
   log_line "$WP" "infra" "PYTHON_MISSING" "{}"
   exit 0
 fi
-if [ "$HAVE_BASELINE" = 1 ]; then
-  RESULT="$(limited "$PY" "$CHECKER" peer --card "$CARD" --origin-file "$BASELINE_FILE" 2>/dev/null)"
-else
-  RESULT="$(limited "$PY" "$CHECKER" peer --card "$CARD" 2>/dev/null)"
-fi
+set -- peer --card "$CARD"
+[ "$HAVE_BASELINE" = 1 ] && set -- "$@" --origin-file "$BASELINE_FILE"
+[ -n "$NEXT_ARGS" ] && set -- "$@" --what-next-file "$NEXT_FILE"
+RESULT="$(limited "$PY" "$CHECKER" "$@" 2>/dev/null)"
 RC=$?
+STALE_CHECKER=0
+if [ "$RC" -eq 2 ] && [ -n "$NEXT_ARGS" ]; then
+  # A governance worktree older than F285: its checker rejects --what-next-file.  Check
+  # the rest the old way and say the comparison did not run, instead of dropping the check.
+  set -- peer --card "$CARD"
+  [ "$HAVE_BASELINE" = 1 ] && set -- "$@" --origin-file "$BASELINE_FILE"
+  RESULT="$(limited "$PY" "$CHECKER" "$@" 2>/dev/null)"
+  RC=$?
+  STALE_CHECKER=1
+fi
 if [ "$RC" -ne 0 ] || [ -z "$RESULT" ]; then
   log_line "$WP" "infra" "CHECKER_FAILED_RC_$RC" "{}"
   exit 0
@@ -204,6 +232,11 @@ if [ "$BASELINE_SOURCE" = "local-unfetched" ]; then
     EVIDENCE="${EVIDENCE%\}}, \"baseline_source\": \"local-unfetched\"}"
   fi
 fi
+if [ "$STALE_CHECKER" = 1 ]; then
+  EVIDENCE="${EVIDENCE%\}}, \"stale_checker\": true}"
+  [ "${EVIDENCE#\{, }" = "$EVIDENCE" ] || EVIDENCE="{${EVIDENCE#\{, }"
+  echo "Session CLOSE: проверщик в рабочей копии $GOV устарел (до Ф285) — сравнение поля с твоим следующим шагом не выполнено; обнови копию от origin/main." >&2
+fi
 log_line "$WP" "$STATE" "$CODE" "$EVIDENCE"
 if [ "$BASELINE_SOURCE" = "local-unfetched" ]; then
   echo "Session CLOSE: baseline карточки записан без свежего fetch при открытии: правка поля другой сессией могла быть принята за правку этой (вердикт ниже ориентировочный)." >&2
@@ -215,10 +248,28 @@ fi
 case "$STATE" in
   fail)
     echo "Session CLOSE (режим наблюдения, закрытие не блокируется): поле «Следующий шаг» карточки $WP не прошло проверку — $CODE. Подробности: $EVIDENCE" >&2
-    echo "  Поправь поле «Следующий шаг» в «Осталось» карточки: одна строка с названием фазы (ФN) и первым действием. У зонтичной карточки (agent_scope: open-only) поле — ключ next_step в шапке, назвать можно фазу или под-РП." >&2
+    echo "  Поправь поле «Следующий шаг» в «Осталось» карточки: одна строка с названием фазы (ФN) и первым действием, метка без даты. У зонтичной карточки (agent_scope: open-only) поле — ключ next_step в шапке, назвать можно фазу или под-РП." >&2
+    if [ "$CODE" = "HANDOFF_AGENT_NEXT_MISSING" ] || [ "$CODE" = "HANDOFF_MISMATCH_WHAT_NEXT" ]; then
+      echo "  Свой следующий шаг для следующей сессии (ровно текст поля, как в отчёте; не строку «Дальше» пилоту) запиши в ${NEXT_FILE:-файл и передай его через --next-file (slug сессии совпадает с номером РП, файл по умолчанию не берётся)} и повтори проверку." >&2
+    fi
+    if [ "$FROM_CLOSE" = 1 ]; then
+      echo "  Это отказ, а сессия уже закрывается: исправь поле отдельной правкой карточки и скажи пилоту, что проверка не прошла." >&2
+    else
+      echo "  Это отказ: исправь поле до освобождения сессии и скажи пилоту, что проверка не прошла." >&2
+    fi
     ;;
   pass)
     echo "Session CLOSE: поле «Следующий шаг» карточки $WP проверено (отпечаток ревизии в журнале наблюдения)." >&2
     ;;
+esac
+# F285 warnings: the verdict holds, but the card needs a touch.
+case "$EVIDENCE" in *'"label_date_warning"'*)
+  echo "  Предупреждение: в метке поля стоит дата — пиши ровно **Следующий шаг:** без даты." >&2 ;;
+esac
+case "$EVIDENCE" in *'"duplicate_labels_warning"'*)
+  echo "  Предупреждение: в «Осталось» несколько меток «Следующий шаг» — считается первая без даты, старые блоки убери." >&2 ;;
+esac
+case "$EVIDENCE" in *'"valid_until_past_warning"'*)
+  echo "  Предупреждение: дата «Актуально до» уже прошла — обнови её." >&2 ;;
 esac
 exit 0

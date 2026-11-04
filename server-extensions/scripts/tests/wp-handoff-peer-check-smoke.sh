@@ -24,13 +24,15 @@ TMP="$(mktemp -d "${TMPDIR:-/tmp}/wp-handoff-peer-check.XXXXXX")"
 trap 'rm -rf "$TMP"' EXIT
 IWE="$TMP/iwe"
 GOV="$TMP/gov"
-mkdir -p "$IWE/.iwe-runtime/sessions" "$GOV/inbox/WP-9" "$GOV/scripts"
+mkdir -p "$IWE/.iwe-runtime/sessions" "$IWE/.iwe-runtime/peer-prompts" "$GOV/inbox/WP-9" "$GOV/scripts"
 git init -q "$GOV"
 git -C "$GOV" config user.email t@example.com
 git -C "$GOV" config user.name test
 cp "$CHECKER_SRC" "$GOV/scripts/wp-handoff-check.py"
 
-write_card() { # <next step text>
+NEXT_FILE="$IWE/.iwe-runtime/peer-prompts/s1-next-step.txt"
+write_card() { # <next step text>; the writer saves the same text as its own next step (F285 M1)
+  printf '%s\n' "$1" >"$NEXT_FILE"
   cat >"$GOV/inbox/WP-9/WP-9.md" <<CARD
 ---
 wp: 9
@@ -183,6 +185,62 @@ run --sem "$IWE/.iwe-runtime/sessions/claude-code-s1.open" >/dev/null
 LAST="$(tail -1 "$LOG")"
 [ "$(printf '%s' "$LAST" | awk -F' [|] ' '{print NF}')" = 6 ] && ok || bad "черта в evidence сдвинула поля: $LAST"
 has "$LAST" "| s1 |" "в журнале id сессии"
+
+# 12b. F285 M1: the writer's next step is compared with the field; no file is a failure
+write_card "Ф1 — новое действие: проверить хук"
+make_sem peer-session with-baseline
+printf 'Ф1 — другое действие\n' >"$NEXT_FILE"
+OUT="$(run --sem "$IWE/.iwe-runtime/sessions/claude-code-s1.open")"
+has "$OUT" "HANDOFF_MISMATCH_WHAT_NEXT" "следующий шаг писателя расходится с полем"
+has "$OUT" "$NEXT_FILE" "расхождение: названо, куда записать свой шаг"
+has "$OUT" "rc=0" "расхождение: режим наблюдения, код 0"
+rm -f "$NEXT_FILE"
+OUT="$(run --sem "$IWE/.iwe-runtime/sessions/claude-code-s1.open")"
+has "$OUT" "HANDOFF_AGENT_NEXT_MISSING" "нет файла следующего шага: отказ, не пропуск сравнения"
+printf 'Ф1 — новое действие: проверить хук\n' >"$TMP/elsewhere.txt"
+OUT="$(run --sem "$IWE/.iwe-runtime/sessions/claude-code-s1.open" --next-file "$TMP/elsewhere.txt")"
+has "$OUT" "проверено" "явный --next-file принимается"
+
+# 12d. F285 review: an old checker without --what-next-file still checks, comparison marked not run
+cp "$GOV/scripts/wp-handoff-check.py" "$TMP/new-checker.py"
+cat >"$GOV/scripts/wp-handoff-check.py" <<'PY'
+import sys
+if "--what-next-file" in sys.argv:
+    print("wp-handoff-check: bad peer arguments", file=sys.stderr)
+    sys.exit(2)
+print('state=pass code=HANDOFF_OK evidence={"what_next_compare": "not_applicable"}')
+PY
+write_card "Ф1 — новое действие: проверить хук"
+OUT="$(run --sem "$IWE/.iwe-runtime/sessions/claude-code-s1.open")"
+has "$OUT" "устарел" "старый проверщик: сказано агенту"
+has "$(tail -1 "$LOG")" '"stale_checker": true' "старый проверщик: пометка в журнале"
+has "$(tail -1 "$LOG")" "| pass | HANDOFF_OK |" "старый проверщик: проверка не пропала"
+cp "$TMP/new-checker.py" "$GOV/scripts/wp-handoff-check.py"
+
+# 12e. F285 review: slug equal to the WP is shared by sessions -> no default next-step file
+sed 's/^slug: s1$/slug: WP-9/' "$IWE/.iwe-runtime/sessions/claude-code-s1.open" >"$TMP/w.tmp" \
+  && mv "$TMP/w.tmp" "$IWE/.iwe-runtime/sessions/claude-code-s1.open"
+printf 'Ф1 — новое действие: проверить хук\n' >"$IWE/.iwe-runtime/peer-prompts/WP-9-next-step.txt"
+OUT="$(run --sem "$IWE/.iwe-runtime/sessions/claude-code-s1.open")"
+has "$OUT" "HANDOFF_AGENT_NEXT_MISSING" "slug = РП: общий файл по умолчанию не берётся"
+has "$OUT" "--next-file" "slug = РП: подсказка про --next-file"
+rm -f "$IWE/.iwe-runtime/peer-prompts/WP-9-next-step.txt"
+
+# 12f. F285 review: called from session-guard close, the advice fits a closing session
+make_sem peer-session with-baseline
+rm -f "$NEXT_FILE"
+OUT="$(run --sem "$IWE/.iwe-runtime/sessions/claude-code-s1.open" --from-close)"
+has "$OUT" "сессия уже закрывается" "из close: совет отдельной правкой"
+OUT="$(run --sem "$IWE/.iwe-runtime/sessions/claude-code-s1.open")"
+has "$OUT" "до освобождения сессии" "вручную: исправить до освобождения"
+
+# 12c. F285 M2: a label with a date is the field (with a warning in the log)
+write_card "Ф1 — новое действие: проверить хук"
+sed -i.bak 's/^\*\*Следующий шаг:\*\*/**Следующий шаг (04.11):**/' "$GOV/inbox/WP-9/WP-9.md" && rm -f "$GOV/inbox/WP-9/WP-9.md.bak"
+OUT="$(run --sem "$IWE/.iwe-runtime/sessions/claude-code-s1.open")"
+has "$OUT" "проверено" "метка с датой: поле найдено"
+has "$OUT" "в метке поля стоит дата" "метка с датой: предупреждение агенту"
+has "$(tail -1 "$LOG")" '"label_date_warning": "04.11"' "метка с датой: предупреждение в журнале"
 
 # 13. a card edit that is not on origin yet is called out (state itself unchanged)
 git init -q --bare "$TMP/origin.git"

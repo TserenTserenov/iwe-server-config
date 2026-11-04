@@ -392,7 +392,7 @@ validate_open_wp() {  # <wp> -- exit 2 unless it is WP-<n> or a sentinel, exact 
   for sentinel in $SG_WP_SENTINELS; do
     [ "$wp" = "$sentinel" ] && return 0
   done
-  fail "open: --wp '$wp' недопустим. Допустимо: WP-<число> (например WP-561) или ${SG_WP_SENTINELS// /, } (точное написание). Для недельной или нередакторской сессии возьми РП, к которому относится находка; закрытие и открытие сессий — WP-561, канон и публикация — WP-530." 2
+  fail "open: --wp '$wp' недопустим. Допустимо: WP-<число> (например WP-561) или ${SG_WP_SENTINELS// /, } (точное написание). Для недельной или нередакторской сессии возьми РП, к которому относится находка; открытие и закрытие сессий: починка действующего — WP-484, новый функционал — WP-561; канон и публикация — WP-530." 2
 }
 
 # A tiny read-only API: reject every extra argument before the shared parser.
@@ -12617,7 +12617,7 @@ if [ "$CMD" = "close" ]; then
   # Optional by design: a failure of the check must not stop a close.
   # Called only for a peer-session close: other sessions have no use for the check.
   if [ -n "${SEM_FILE:-}" ] && grep -qx 'close_path: peer-session' "$SEM_FILE" 2>/dev/null; then
-    bash "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/wp-handoff-peer-check.sh" --sem "$SEM_FILE" </dev/null || true
+    bash "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/wp-handoff-peer-check.sh" --sem "$SEM_FILE" --from-close </dev/null || true
   fi
 
   DEFERRED_NO_REFLECTION_EVENT=""
