@@ -97,10 +97,10 @@ in
     inherit codePaths producersPath limitsPath;
     rulesPaths = codePaths ++ [ producersPath limitsPath ];
     admit = [ "tsekh-agent-channel" ];
-    # Утверждено пилотом 04.11 слиянием №12 с этой точной версией (П3).
-    # Версия — 10 файлов кода моста, реестр и лимиты.
-    # Бюджет: 600 минут 03.11 и 04.11; другие даты не заданы.
-    approvedRulesVersion = "plan-rules/1:295c4fe1bdd64574502a6bf88766f33c72a73b561d10b488145f85e7b438b822";
+    # ЖДЁТ УТВЕРЖДЕНИЯ ПИЛОТОМ этой точной версии (П3); до утверждения не
+    # сливать. Версия — 10 файлов кода моста, реестр и лимиты.
+    # Бюджет: постоянный, 600 минут каждый день (решение пилота 04.11).
+    approvedRulesVersion = "plan-rules/1:e8f54374353ed19f7954e3ae3e3dad282dfc245dab21fea371f30ee9c1cbe83d";
     # П6: писатель пробы снят в Git и в действующих копиях Мака/Цеха; перенос принят.
     intraCommitOrderTrusted = true;
   };

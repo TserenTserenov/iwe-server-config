@@ -302,13 +302,17 @@ class PersonalTimeBudget:
     available capacity. Historical legacy resource events require migration.
     """
 
-    def __init__(self, time_zone, daily_personal_minutes):
+    def __init__(self, time_zone, default_daily_minutes, daily_personal_minutes):
         try:
             self.time_zone = ZoneInfo(time_zone)
         except (TypeError, ValueError, ZoneInfoNotFoundError) as exc:
             raise BridgeError(
                 "BUDGET_VALIDATOR_UNAVAILABLE", "invalid budget timezone"
             ) from exc
+        if not _minutes(default_daily_minutes):
+            raise BridgeError(
+                "BUDGET_VALIDATOR_UNAVAILABLE", "invalid default daily minutes"
+            )
         if not isinstance(daily_personal_minutes, dict) or not all(
             _plan_date(day) and _minutes(minutes)
             for day, minutes in daily_personal_minutes.items()
@@ -316,7 +320,20 @@ class PersonalTimeBudget:
             raise BridgeError(
                 "BUDGET_VALIDATOR_UNAVAILABLE", "invalid daily personal minutes"
             )
+        self.default_daily_minutes = default_daily_minutes
         self.daily_minutes = dict(daily_personal_minutes)
+
+    @classmethod
+    def from_limits(cls, limits):
+        return cls(
+            limits["timezone"],
+            limits["default_daily_minutes"],
+            limits["daily_personal_minutes"],
+        )
+
+    def capacity(self, day):
+        """Every day has a budget: the standing default unless a date overrides it."""
+        return self.daily_minutes.get(day, self.default_daily_minutes)
 
     def check_history(self, view):
         """Stop before any request decisions if accepted time cannot be replayed."""
@@ -340,11 +357,7 @@ class PersonalTimeBudget:
         if candidate["event_type"] not in {"allocation_confirmed", "action_started"}:
             return True
         day = candidate["payload"]["plan_date"]
-        if day not in self.daily_minutes:
-            raise BridgeError(
-                "BUDGET_DAY_UNAVAILABLE", f"personal time budget not set: {day}"
-            )
-        return ledger.total(day) <= self.daily_minutes[day]
+        return ledger.total(day) <= self.capacity(day)
 
 
 class AllocationPlanValidator:

@@ -9,6 +9,8 @@ by the channel, not by the agent; DR-06 "Граница доверия").
 Wire format, one exchange per connection, newline-terminated JSON:
     in : {"expected_wal_tip": <event_id | null>, "request": {<14 v2 fields>}}
     out: {"ok": true, "receipt": {...}} | {"ok": false, "code": ..., "reason": ...}
+A ParentMismatch reply also names the current queue tip ("wal_tip"): agents
+cannot read the queue, so this is how a producer learns what to expect.
 Replies never carry proofs, keys or paths.
 """
 
@@ -90,6 +92,13 @@ def handle_message(
         return {"ok": True, "receipt": receipt}
     except WireError as exc:
         return {"ok": False, "code": "WireError", "reason": str(exc)}
+    except wal.ParentMismatch as exc:
+        return {
+            "ok": False,
+            "code": "ParentMismatch",
+            "reason": str(exc)[:200],
+            "wal_tip": exc.actual,
+        }
     except wal.WalError as exc:
         return {"ok": False, "code": type(exc).__name__, "reason": str(exc)[:200]}
     except Exception:  # noqa: BLE001 - the socket must always answer, never leak
