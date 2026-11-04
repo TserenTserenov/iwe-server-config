@@ -5,8 +5,11 @@ generate-rules-registry.py — собрать rules-registry.yaml из PACK-agen
 Парсит frontmatter каждого файла правила, валидирует обязательные поля,
 строит dependency graph, выдаёт single yaml registry для rule-engine.sh.
 
-Запуск: python3 generate-rules-registry.py [--validate] [--output PATH]
+Запуск: python3 generate-rules-registry.py [--validate] [--output PATH] [--write-through-symlink]
 Output: ~/IWE/.claude/rules-registry.yaml (по умолчанию)
+
+Запись через ссылку отклоняется с кодом 3 (WP-7 Ф292): на Цехе реестр — ссылка
+в клон iwe-local-config, и запись сквозь неё пачкает клон.
 """
 
 import argparse
@@ -30,6 +33,8 @@ VALID_ON_FAIL = {"warn", "block"}
 # полнота набора при Close (rule-engine.sh check-trace-satisfaction), не линейность.
 # Имя НЕ "enforcement": ключ уже занят в AR.251 (enforcement: E3 — уровень замка, другая ось).
 VALID_EXECUTION_MODES = {"linear", "constraint-satisfaction"}
+# WP-7 F292: policy refusal, distinct from 1 (failure) and 2 (validation/argparse).
+SYMLINK_REFUSAL_EXIT = 3
 
 def parse_frontmatter(filepath):
     """Извлечь YAML frontmatter из markdown файла."""
@@ -234,25 +239,84 @@ def build_registry(skip_invalid=False):
         "rules": rules,
     }
 
+def find_symlink_on_path(output):
+    """Return the first symlink the OS would traverse when opening `output`, or None.
+    The output itself is always checked; a directory prefix only if it lies strictly
+    below the home directory, so system links such as macOS /tmp -> /private/tmp are
+    no reason to refuse (WP-7 F292). Prefixes are built from the raw components and
+    never normalised: "linked/../x" goes through "linked" at open time, and a lexical
+    normpath would hide that link. "Below home" is decided by where the prefix's parent
+    really is (realpath), not by its spelling: aliases of home and case differences on
+    macOS must not hide a link. Non-strict realpath does not raise on link cycles."""
+    real_home = os.path.realpath(Path.home())
+    parts = Path(os.path.join(os.getcwd(), output)).parts
+    prefixes = []
+    for part in parts:
+        prefixes.append(os.path.join(prefixes[-1], part) if prefixes else part)
+    full_path = prefixes[-1]
+    for prefix in prefixes:
+        parent = os.path.realpath(os.path.dirname(prefix))
+        below_home = parent == real_home or parent.startswith(real_home + os.sep)
+        if (prefix == full_path or below_home) and os.path.islink(prefix):
+            return Path(prefix)
+    return None
+
+
+def describe_symlink(link):
+    """"link -> target" without following the chain: dangling links and cycles must
+    still produce a message, not a traceback."""
+    try:
+        raw = os.readlink(link)
+    except OSError:
+        return f"{link} -> (цель не прочитана)"
+    lexical = os.path.normpath(os.path.join(os.path.dirname(link), raw))
+    if lexical == raw:
+        return f"{link} -> {raw}"
+    return f"{link} -> {raw} (то есть {lexical})"
+
+
+def refuse_symlink_write(link):
+    print(f"ОТКАЗ: путь записи реестра проходит через ссылку: {describe_symlink(link)}", file=sys.stderr)
+    print("  Запись сквозь ссылку изменила бы файл в другом месте (на Цехе — в клоне iwe-local-config).", file=sys.stderr)
+    print("  Штатный путь на Цехе: закоммитить реестр в iwe-local-config и перемотать клон из origin.", file=sys.stderr)
+    print("  Аварийно записать в цель ссылки: --write-through-symlink.", file=sys.stderr)
+    sys.exit(SYMLINK_REFUSAL_EXIT)
+
+
 def parse_args(argv):
     # Arguments are parsed before anything is built or written: --help and unknown flags
     # must leave the live registry untouched (WP-7 F290, 04.11: "--help" overwrote it).
-    parser = argparse.ArgumentParser(description="Build rules-registry.yaml from PACK-agent-rules/rules/AR.*.md.")
+    parser = argparse.ArgumentParser(
+        description="Build rules-registry.yaml from PACK-agent-rules/rules/AR.*.md.",
+        epilog="exit codes: 0 ok; 1 failure; 2 validation or argument error; "
+               "3 refused: the output path goes through a symlink (see --write-through-symlink)")
     parser.add_argument("--validate", action="store_true",
                         help="strict check of every rule file; nothing is written")
     parser.add_argument("--output", type=Path, default=OUTPUT,
                         help=f"registry file to write (default: {OUTPUT})")
+    parser.add_argument("--write-through-symlink", action="store_true",
+                        help="emergency only: write into the target of a symlink on the output path, "
+                             "keeping the link. On tsekh-1 the registry is updated by committing it "
+                             "to iwe-local-config and fast-forwarding the clone instead")
     return parser.parse_args(argv)
 
 
 def main(argv=None):
     args = parse_args(sys.argv[1:] if argv is None else argv)
+    # Checked before building and before mkdir/open: a refusal leaves the target tree untouched.
+    symlink = find_symlink_on_path(args.output)
+    if symlink and not args.validate and not args.write_through_symlink:
+        refuse_symlink_write(symlink)
 
     # generate: skip-invalid (best-effort реестр из валидных); --validate: строгий gate
     registry = build_registry(skip_invalid=not args.validate)
 
     if args.validate:
         print(f"OK: {registry['rule_count']} rules validated")
+        if symlink:
+            # Same predicate as the refusal: a green --validate must not read as permission to write.
+            print(f"ВНИМАНИЕ: запись в {args.output} была бы отклонена с кодом {SYMLINK_REFUSAL_EXIT}: "
+                  f"{describe_symlink(symlink)}", file=sys.stderr)
         return
 
     output = args.output
