@@ -207,13 +207,36 @@ load_rules_for_event() {
         return 1
     fi
     _LRE_EVENT="$event" _LRE_REG="$REGISTRY" python3 - << 'PYEOF' || { printf 'rule-engine: cannot parse rules registry %s (python3/yaml)\n' "$REGISTRY" >&2; return 1; }
-import yaml, json, os
+import yaml, json, os, re, sys
 with open(os.environ['_LRE_REG']) as f:
     reg = yaml.safe_load(f)
 event = os.environ['_LRE_EVENT']
 matches = [r for r in reg.get('rules', []) if event in r.get('triggers', []) and r.get('status') == 'active']
 matches.sort(key=lambda r: r['priority'])
-print(json.dumps(matches))
+
+# Lock contract v1 (WP-7 F294). Only a rule with a lock ("executable": hook is
+# "<file>::<function>") may be executed; "unsupported" and "unknown" rules sit in the
+# registry for audit and are skipped here. A registry written before schema 1.1 has no
+# `lock` key: a valid binding then means executable. The contract is checked on every
+# rule that matches the event BEFORE the filter, so a broken record fails loudly.
+BINDING = re.compile(r'[\w.\-/]+::[A-Za-z_]\w*')
+LOCKS = ('executable', 'unsupported', 'unknown')
+def has_binding(r):
+    h = r.get('hook')
+    # No strip(): the function name below is taken from the same string unchanged.
+    return isinstance(h, str) and bool(BINDING.fullmatch(h))
+runnable = []
+for r in matches:
+    lock = r.get('lock') if 'lock' in r else ('executable' if has_binding(r) else 'unknown')
+    if lock not in LOCKS:
+        print('rule-engine: rule %s has unknown lock value %r' % (r.get('id'), lock), file=sys.stderr)
+        sys.exit(3)
+    if lock == 'executable' and not has_binding(r):
+        print('rule-engine: rule %s is executable but has no valid hook binding' % r.get('id'), file=sys.stderr)
+        sys.exit(3)
+    if lock == 'executable':
+        runnable.append(r)
+print(json.dumps(runnable))
 PYEOF
 }
 
@@ -1540,7 +1563,13 @@ dispatch_event() {
         [ -z "$rule_json" ] && continue
         local rule_id check_fn
         rule_id=$(echo "$rule_json" | python3 -c 'import sys,json; print(json.loads(sys.stdin.read())["id"])')
-        check_fn=$(echo "$rule_json" | python3 -c 'import sys,json; print(json.loads(sys.stdin.read())["hook"].split("::")[-1])')
+        check_fn=$(echo "$rule_json" | python3 -c 'import sys,json; h=json.loads(sys.stdin.read()).get("hook"); print(h.split("::")[-1] if isinstance(h, str) else "")')
+
+        # Defence in depth: load_rules_for_event only returns rules with a hook binding.
+        if [ -z "$check_fn" ]; then
+            log_journal "$rule_id" "warn" "rule has no hook binding, skipped"
+            continue
+        fi
 
         if ! declare -f "$check_fn" > /dev/null; then
             log_journal "$rule_id" "warn" "check function $check_fn not implemented"

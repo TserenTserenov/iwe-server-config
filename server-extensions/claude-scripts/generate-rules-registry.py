@@ -22,7 +22,9 @@ from pathlib import Path
 PACK_DIR = Path.home() / "IWE" / "PACK-agent-rules" / "rules"
 OUTPUT = Path.home() / "IWE" / ".claude" / "rules-registry.yaml"
 
-REQUIRED_FIELDS = {"id", "name", "type", "priority", "status", "triggers", "tests", "hook"}
+# WP-7 F294: `hook` is no longer required. Whether a rule has a lock (a binding to the
+# rule engine) is derived by derive_lock(); a rule without one is still a valid rule.
+REQUIRED_FIELDS = {"id", "name", "type", "priority", "status", "triggers", "tests"}
 VALID_TYPES = {"structural", "behavioural", "procedural"}
 VALID_STATUSES = {"active", "draft", "deprecated", "superseded"}
 # WP-295 Ф5: deterministic step pre/post-conditions. Optional, backward-compatible.
@@ -33,6 +35,20 @@ VALID_ON_FAIL = {"warn", "block"}
 # полнота набора при Close (rule-engine.sh check-trace-satisfaction), не линейность.
 # Имя НЕ "enforcement": ключ уже занят в AR.251 (enforcement: E3 — уровень замка, другая ось).
 VALID_EXECUTION_MODES = {"linear", "constraint-satisfaction"}
+# WP-7 F294: lock contract v1. A "lock" is a binding of the rule to the rule engine:
+#   executable  - hook is "<file>::<identifier>"; the engine may call the function
+#   unsupported - no binding, and every enforcement entry says "unsupported" (no lock exists)
+#   unknown     - no binding, and the enforcement block does not prove the absence of a lock
+# The state is derived, never written in a rule file: a second source of truth next to
+# `hook` and `enforcement` would drift. Registry schema 1.1 carries it as `lock`.
+LOCK_EXECUTABLE, LOCK_UNSUPPORTED, LOCK_UNKNOWN = "executable", "unsupported", "unknown"
+VALID_LOCKS = (LOCK_EXECUTABLE, LOCK_UNSUPPORTED, LOCK_UNKNOWN)
+HOOK_BINDING_RE = re.compile(r"[\w.\-/]+::[A-Za-z_]\w*")
+VALID_ENFORCEMENT_CLASSES = {"enforced", "unsupported", "unknown"}
+# Reference to a rule of another pack (e.g. DP.M.020). Any other id that is not a rule of
+# this pack is an error, so that a typo in an AR.* id is still caught.
+EXTERNAL_REF_RE = re.compile(r"DP\.[A-Z]+\.[0-9]+")
+REGISTRY_SCHEMA_VERSION = "1.1"
 # WP-7 F292: policy refusal, distinct from 1 (failure) and 2 (validation/argparse).
 SYMLINK_REFUSAL_EXIT = 3
 
@@ -47,6 +63,57 @@ def parse_frontmatter(filepath):
     except yaml.YAMLError as e:
         print(f"ERROR: invalid YAML in {filepath.name}: {e}", file=sys.stderr)
         return None
+
+def has_hook(rule):
+    """A hook key with a null value means "no hook", the same as an absent key."""
+    return rule.get("hook") is not None
+
+
+def hook_binding(rule):
+    """The "<file>::<identifier>" binding, or None when the rule has no usable one."""
+    hook = rule.get("hook")
+    if isinstance(hook, str) and HOOK_BINDING_RE.fullmatch(hook.strip()):
+        return hook.strip()
+    return None
+
+
+def validate_lock_inputs(rule, filename):
+    """Errors in the fields lock derivation reads: hook and enforcement. A wrong shape is an
+    error, never silently turned into `unknown`: only a missing field means "not known"."""
+    errors = []
+    if "lock" in rule:
+        errors.append(f"{filename}: 'lock' is derived by the generator, remove it from the rule file")
+    if has_hook(rule):
+        hook = rule["hook"]
+        if not isinstance(hook, str):
+            errors.append(f"{filename}: hook must be a string, got {type(hook).__name__}")
+        elif not hook.strip():
+            errors.append(f"{filename}: hook is an empty string, omit it or give '<file>::<function>'")
+    enforcement = rule.get("enforcement")
+    if enforcement is None:
+        return errors
+    if not isinstance(enforcement, list):
+        errors.append(f"{filename}: enforcement must be a list, got {type(enforcement).__name__}")
+        return errors
+    for i, entry in enumerate(enforcement):
+        if not isinstance(entry, dict):
+            errors.append(f"{filename}: enforcement[{i}] must be a mapping with 'class'")
+        elif not isinstance(entry.get("class"), str) or entry["class"] not in VALID_ENFORCEMENT_CLASSES:
+            errors.append(f"{filename}: enforcement[{i}] class must be one of "
+                          f"{sorted(VALID_ENFORCEMENT_CLASSES)}, got {entry.get('class')!r}")
+    return errors
+
+
+def derive_lock(rule):
+    """Lock state of a rule that passed validate_lock_inputs. Absence of information is not
+    proof of absence of a lock, so an empty or missing enforcement block gives `unknown`."""
+    if hook_binding(rule):
+        return LOCK_EXECUTABLE
+    enforcement = rule.get("enforcement") or []
+    if enforcement and all(e["class"] == "unsupported" for e in enforcement):
+        return LOCK_UNSUPPORTED
+    return LOCK_UNKNOWN
+
 
 def validate_rule(rule, filename):
     """Проверить обязательные поля и валидность значений."""
@@ -86,6 +153,7 @@ def validate_rule(rule, filename):
     # with a non-empty 'check' (named deterministic check resolved by rule-engine.sh)
     # and 'on_fail' in {warn, block}. Absent field = no conditions (backward-compatible).
     errors.extend(validate_conditions(rule, filename))
+    errors.extend(validate_lock_inputs(rule, filename))
 
     return errors
 
@@ -113,19 +181,27 @@ def validate_conditions(rule, filename):
         errors.append(f"{filename}: execution_mode must be one of {sorted(VALID_EXECUTION_MODES)}, got {exm!r}")
     return errors
 
-def validate_cross_refs(rules):
+def validate_cross_refs(rules, external_refs=None):
     """WP-272 Ф2.5 (R23 audit F5): проверить что все conflicts_with / depends_on /
-    superseded_by ссылаются на существующие правила."""
+    superseded_by ссылаются на существующие правила. WP-7 F294: ссылка на правило другого
+    пака (формат EXTERNAL_REF_RE) не ошибка; такие ссылки собираются в external_refs."""
     errors = []
     rule_ids = {r["id"] for r in rules}
+
+    def check(owner, field, ref_id):
+        if not ref_id or ref_id in rule_ids:
+            return
+        if isinstance(ref_id, str) and EXTERNAL_REF_RE.fullmatch(ref_id):
+            if external_refs is not None:
+                external_refs.append((owner, field, ref_id))
+            return
+        errors.append(f"{owner}: {field} references non-existent rule '{ref_id}'")
+
     for r in rules:
         for ref_field in ("conflicts_with", "depends_on"):
             for ref_id in r.get(ref_field, []) or []:
-                if ref_id and ref_id not in rule_ids:
-                    errors.append(f"{r['id']}: {ref_field} references non-existent rule '{ref_id}'")
-        sup = r.get("superseded_by")
-        if sup and sup not in rule_ids:
-            errors.append(f"{r['id']}: superseded_by references non-existent rule '{sup}'")
+                check(r["id"], ref_field, ref_id)
+        check(r["id"], "superseded_by", r.get("superseded_by"))
     return errors
 
 
@@ -158,7 +234,7 @@ def validate_no_cycles(rules):
     return errors
 
 
-def build_registry(skip_invalid=False):
+def build_registry(skip_invalid=False, external_refs=None):
     """skip_invalid=False (--validate): любая ошибка → exit 2, реестр не пишется (строгий gate).
     skip_invalid=True (generate): невалидные правила пропускаются с предупреждением, реестр
     собирается из валидных. Без этого один дрейфующий файл (старый формат tests) блокировал
@@ -195,7 +271,8 @@ def build_registry(skip_invalid=False):
             "triggers": fm["triggers"],
             "applies_when": fm.get("applies_when", "true"),
             "exceptions": fm.get("exceptions", []),
-            "hook": fm["hook"],
+            "hook": hook_binding(fm),
+            "lock": derive_lock(fm),
             "pre_conditions": fm.get("pre_conditions", []),
             "post_conditions": fm.get("post_conditions", []),
             "conflicts_with": related.get("conflicts_with", []),
@@ -203,6 +280,10 @@ def build_registry(skip_invalid=False):
             "superseded_by": related.get("superseded_by"),
             "source_file": str(rule_file.relative_to(Path.home() / "IWE")),
         }
+        # Free text written in the hook field of older rules ("... не вшит, E3") is not a
+        # binding; it is kept for the reader, never executed.
+        if has_hook(fm) and rule_entry["hook"] is None:
+            rule_entry["hook_note"] = str(fm["hook"]).strip()
         # WP-481 Ф5: опциональное поле execution_mode (constraint-satisfaction для протокольных гейтов)
         if fm.get("execution_mode"):
             rule_entry["execution_mode"] = fm["execution_mode"]
@@ -210,7 +291,7 @@ def build_registry(skip_invalid=False):
 
     # Cross-ref + cycle: считаются только по собранным валидным правилам.
     # depends_on на пропущенное (невалидное) правило → предупреждение, не блок (в skip-режиме).
-    ref_errors = validate_cross_refs(rules) + validate_no_cycles(rules)
+    ref_errors = validate_cross_refs(rules, external_refs) + validate_no_cycles(rules)
 
     if not skip_invalid:
         all_errors = invalid_errors + ref_errors
@@ -232,7 +313,7 @@ def build_registry(skip_invalid=False):
     rules.sort(key=lambda r: r["priority"])
 
     return {
-        "schema_version": "1.0",
+        "schema_version": REGISTRY_SCHEMA_VERSION,
         "generated_at": "auto",
         "source": "PACK-agent-rules/rules/",
         "rule_count": len(rules),
@@ -283,6 +364,13 @@ def refuse_symlink_write(link):
     sys.exit(SYMLINK_REFUSAL_EXIT)
 
 
+def print_lock_counts(registry):
+    counts = {state: 0 for state in VALID_LOCKS}
+    for r in registry["rules"]:
+        counts[r["lock"]] += 1
+    print("     lock: " + ", ".join(f"{state} {n}" for state, n in counts.items()))
+
+
 def parse_args(argv):
     # Arguments are parsed before anything is built or written: --help and unknown flags
     # must leave the live registry untouched (WP-7 F290, 04.11: "--help" overwrote it).
@@ -314,10 +402,16 @@ def main(argv=None):
         refuse_symlink_write(symlink)
 
     # generate: skip-invalid (best-effort реестр из валидных); --validate: строгий gate
-    registry = build_registry(skip_invalid=not args.validate)
+    external_refs = []
+    registry = build_registry(skip_invalid=not args.validate, external_refs=external_refs)
+    if external_refs:
+        print(f"external references to other packs (not checked here): {len(external_refs)}", file=sys.stderr)
+        for owner, field, ref_id in external_refs:
+            print(f"  {owner}: {field} -> {ref_id}", file=sys.stderr)
 
     if args.validate:
         print(f"OK: {registry['rule_count']} rules validated")
+        print_lock_counts(registry)
         return
 
     output = args.output
@@ -327,6 +421,7 @@ def main(argv=None):
 
     print(f"OK: registry generated → {output}")
     print(f"     {registry['rule_count']} rules")
+    print_lock_counts(registry)
     types = {}
     for r in registry["rules"]:
         types[r["type"]] = types.get(r["type"], 0) + 1
