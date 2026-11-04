@@ -5,10 +5,11 @@ generate-rules-registry.py — собрать rules-registry.yaml из PACK-agen
 Парсит frontmatter каждого файла правила, валидирует обязательные поля,
 строит dependency graph, выдаёт single yaml registry для rule-engine.sh.
 
-Запуск: python3 generate-rules-registry.py [--validate]
-Output: ~/IWE/.claude/rules-registry.yaml
+Запуск: python3 generate-rules-registry.py [--validate] [--output PATH]
+Output: ~/IWE/.claude/rules-registry.yaml (по умолчанию)
 """
 
+import argparse
 import os
 import re
 import sys
@@ -233,21 +234,33 @@ def build_registry(skip_invalid=False):
         "rules": rules,
     }
 
-def main():
-    validate_only = "--validate" in sys.argv
+def parse_args(argv):
+    # Arguments are parsed before anything is built or written: --help and unknown flags
+    # must leave the live registry untouched (WP-7 F290, 04.11: "--help" overwrote it).
+    parser = argparse.ArgumentParser(description="Build rules-registry.yaml from PACK-agent-rules/rules/AR.*.md.")
+    parser.add_argument("--validate", action="store_true",
+                        help="strict check of every rule file; nothing is written")
+    parser.add_argument("--output", type=Path, default=OUTPUT,
+                        help=f"registry file to write (default: {OUTPUT})")
+    return parser.parse_args(argv)
+
+
+def main(argv=None):
+    args = parse_args(sys.argv[1:] if argv is None else argv)
 
     # generate: skip-invalid (best-effort реестр из валидных); --validate: строгий gate
-    registry = build_registry(skip_invalid=not validate_only)
+    registry = build_registry(skip_invalid=not args.validate)
 
-    if validate_only:
+    if args.validate:
         print(f"OK: {registry['rule_count']} rules validated")
         return
 
-    OUTPUT.parent.mkdir(parents=True, exist_ok=True)
-    with OUTPUT.open("w", encoding="utf-8") as f:
+    output = args.output
+    output.parent.mkdir(parents=True, exist_ok=True)
+    with output.open("w", encoding="utf-8") as f:
         yaml.safe_dump(registry, f, allow_unicode=True, sort_keys=False, default_flow_style=False)
 
-    print(f"OK: registry generated → {OUTPUT}")
+    print(f"OK: registry generated → {output}")
     print(f"     {registry['rule_count']} rules")
     types = {}
     for r in registry["rules"]:
