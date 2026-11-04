@@ -115,9 +115,9 @@ in
     inherit codePaths producersPath limitsPath;
     rulesPaths = codePaths ++ [ producersPath limitsPath ];
     admit = [ "tsekh-agent-channel" ];
-    # Утверждено пилотом 03.11: «Да, утвердить и включить».
-    # Готовность проверена на DS 65d857ea1138: 600 минут 03.11, другие даты не заданы.
-    approvedRulesVersion = "plan-rules/1:7c618e504c6cf430fd9f49ed03c4911af35bb1a890112039f4f1afb69d1a03d8";
+    # Утверждено пилотом 04.11: «Да, утвердить и применить».
+    # Бюджет: 600 минут 03.11 и 04.11; другие даты не заданы.
+    approvedRulesVersion = "plan-rules/1:eff3798ac887d3614c9e0e85a74b947e070f8e0a77e58203a2afce5a5274cd2a";
     # П6: писатель пробы снят в Git и в действующих копиях Мака/Цеха; перенос принят.
     intraCommitOrderTrusted = true;
   };
