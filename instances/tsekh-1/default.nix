@@ -60,23 +60,9 @@ in
   # Подготовка, готовность и соответствие свежей базе проверены.
   # Копия кода — vendor/plan-bridge/code, происхождение — vendor/plan-bridge/SOURCE.
   tsekh.planBridge = let
+    # Только код моста (8 модулей и 2 команды): публикует он сам, общий
+    # конвейер публикации в версию правил больше не входит (DR-06, вариант Д).
     codePaths = [
-      "scripts/check-wp-card-schema.py"
-      "scripts/close_expect.py"
-      "scripts/close_obligation.py"
-      "scripts/ds-publish.sh"
-      "scripts/hot_publish_cas.py"
-      "scripts/install-ledger-merge-driver.sh"
-      "scripts/isolate-push.sh"
-      "scripts/ledger-publish.sh"
-      "scripts/lib/captures-block-merge.py"
-      "scripts/lib/ledger-event-diff.py"
-      "scripts/lib/ledger-safe-reset-check.py"
-      "scripts/lib/ledger-source-snapshot.py"
-      "scripts/lib/ledger_path.py"
-      "scripts/lib/notification-center-bridge.sh"
-      "scripts/lib/notification-render.sh"
-      "scripts/lib/notify-retry-policy.sh"
       "scripts/lib/plan_allocation.py"
       "scripts/lib/plan_bridge_allocation.py"
       "scripts/lib/plan_bridge_decisions.py"
@@ -85,12 +71,8 @@ in
       "scripts/lib/plan_event_bridge.py"
       "scripts/lib/plan_event_intake.py"
       "scripts/lib/plan_event_wal.py"
-      "scripts/lib/publish-gate.sh"
-      "scripts/lib/publish-lease.sh"
-      "scripts/lib/publish-queue.sh"
       "scripts/plan-event-bridge.py"
       "scripts/plan-event-receiver.py"
-      "scripts/session_local_release.py"
     ];
     producersPath = "machine/plan-bridge/producers.json";
     limitsPath = "machine/plan-bridge/limits.json";
@@ -115,9 +97,10 @@ in
     inherit codePaths producersPath limitsPath;
     rulesPaths = codePaths ++ [ producersPath limitsPath ];
     admit = [ "tsekh-agent-channel" ];
-    # Утверждено пилотом 04.11: «Да, утвердить и применить».
+    # ЖДЁТ УТВЕРЖДЕНИЯ ПИЛОТОМ этой точной версии (П3); до утверждения не
+    # сливать и не применять. Версия — 10 файлов кода, реестр и лимиты.
     # Бюджет: 600 минут 03.11 и 04.11; другие даты не заданы.
-    approvedRulesVersion = "plan-rules/1:eff3798ac887d3614c9e0e85a74b947e070f8e0a77e58203a2afce5a5274cd2a";
+    approvedRulesVersion = "plan-rules/1:295c4fe1bdd64574502a6bf88766f33c72a73b561d10b488145f85e7b438b822";
     # П6: писатель пробы снят в Git и в действующих копиях Мака/Цеха; перенос принят.
     intraCommitOrderTrusted = true;
   };

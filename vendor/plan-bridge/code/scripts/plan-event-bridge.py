@@ -60,16 +60,10 @@ def _absolute(value):
 def _configuration(arguments):
     required = ["stream_dir"]
     if not arguments.status:
-        required.extend(["repository", "workspace", "checkout"])
+        required.append("repository")
     if any(getattr(arguments, field) is None for field in required):
         raise ClosedConfiguration("MISSING_PATH_ARGUMENT")
-    configuration = {field: _absolute(getattr(arguments, field)) for field in required}
-    if (
-        "repository" in configuration
-        and configuration["repository"].parent != configuration["workspace"]
-    ):
-        raise ClosedConfiguration("REPOSITORY_OUTSIDE_WORKSPACE")
-    return configuration
+    return {field: _absolute(getattr(arguments, field)) for field in required}
 
 
 def _check_host_adapter_file():
@@ -131,7 +125,7 @@ def delivery_command(configuration):
         str(SCRIPT),
         "--deliver-once",
     ]
-    for field in ("stream_dir", "repository", "workspace", "checkout"):
+    for field in ("stream_dir", "repository"):
         command.extend(["--" + field.replace("_", "-"), str(configuration[field])])
     return command
 
@@ -259,18 +253,12 @@ def local_status(configuration):
 
 def deliver(configuration, adapter):
     bridge, _, _, _ = _runtime()
-    repository, workspace = configuration["repository"], configuration["workspace"]
-    reader = bridge.GitPlanReader(repository)
-    publisher = bridge.LedgerPublisher(
-        SCRIPT.parent / "ledger-publish.sh",
-        workspace=workspace,
-        governance_repo=repository.name,
-        checkout=configuration["checkout"],
-    )
+    # One service-owned clone: the plan is read from and published to its origin.
+    repository = configuration["repository"]
     return bridge.deliver_once(
         configuration["stream_dir"],
-        reader=reader,
-        publisher=publisher,
+        reader=bridge.GitPlanReader(repository),
+        publisher=bridge.GitCasPublisher(repository),
         verifier=adapter.verifier,
         trusted_context=adapter.trusted_context,
         validator_factory=adapter.validator_factory,
@@ -284,7 +272,7 @@ def _parser():
     action.add_argument("--status", action="store_true")
     action.add_argument("--check", action="store_true")
     action.add_argument("--render-schedulers", metavar="OUTPUTDIR")
-    for name in ("stream-dir", "repository", "workspace", "checkout"):
+    for name in ("stream-dir", "repository"):
         parser.add_argument("--" + name)
     return parser
 
@@ -333,7 +321,8 @@ def main(argv=None):
         )
         return (
             75
-            if result["state"] in {"base_changed", "push_unknown", "lock_busy"}
+            if result["state"]
+            in {"base_changed", "push_unknown", "push_refused", "lock_busy"}
             else 0
         )
     except ClosedConfiguration as exc:

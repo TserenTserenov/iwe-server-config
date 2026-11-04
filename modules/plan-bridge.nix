@@ -30,7 +30,6 @@ let
   githubKeyPath = "${stateDir}/github_ed25519";
   workspaceDir = "${stateDir}/workspace";
   readerRepo = "${workspaceDir}/DS-my-strategy";
-  publisherRepo = "${stateDir}/publisher/DS-my-strategy";
   emptyGitTemplate = pkgs.runCommand "iwe-plan-bridge-git-template" { } ''
     mkdir -p $out
   '';
@@ -82,7 +81,7 @@ let
   provisionScript = pkgs.writeShellScript "iwe-plan-bridge-provision" ''
     set -euo pipefail
     umask 077
-    mkdir -p ${workspaceDir} ${stateDir}/publisher
+    mkdir -p ${workspaceDir}
     exec 9>${stateDir}/.provision.lock
     flock -x 9
     prepare_clone() {
@@ -100,20 +99,17 @@ let
       test "$(git -C "$target" rev-parse --is-shallow-repository)" = false
       status=$(git -C "$target" status --porcelain=v1 --untracked-files=all)
       test -z "$status"
-      ${python}/bin/python ${code}/scripts/lib/ledger-source-snapshot.py check-checkout "$target"
       # Повтор после прерванного clone/config должен завершать настройку.
       git -C "$target" config user.name "IWE plan bridge"
       git -C "$target" config user.email "plan-bridge@localhost"
     }
+    # Один клон: мост читает план из origin и публикует туда же
+    # атомарной сверкой ветки main (DR-06, вариант Д).
     prepare_clone ${readerRepo}
-    prepare_clone ${publisherRepo}
   '';
 
   deliveryEnvironment = {
     HOME = stateDir;
-    IWE_ROOT = workspaceDir;
-    IWE_WORKSPACE = workspaceDir;
-    IWE_GOVERNANCE_REPO = "DS-my-strategy";
     GIT_CONFIG_NOSYSTEM = "1";
     GIT_CONFIG_GLOBAL = "/dev/null";
     GIT_SSH = "${configDir}/git-ssh";
@@ -219,8 +215,8 @@ in
   config = lib.mkIf cfg.enable {
     assertions = [
       {
-        assertion = !cfg.delivery.prepare || (cfg.github.enable && cfg.delivery.repositoryUrl != "" && lib.elem "scripts/plan-event-bridge.py" cfg.codePaths && lib.elem "scripts/ledger-publish.sh" cfg.codePaths);
-        message = "tsekh.planBridge.delivery: подготовке нужны ключ, URL и проверяемый код доставки/издателя.";
+        assertion = !cfg.delivery.prepare || (cfg.github.enable && cfg.delivery.repositoryUrl != "" && lib.elem "scripts/plan-event-bridge.py" cfg.codePaths);
+        message = "tsekh.planBridge.delivery: подготовке нужны ключ, URL и проверяемый код доставки.";
       }
       {
         assertion = !cfg.delivery.enable || (cfg.delivery.prepare && cfg.receiver.enable && cfg.approvedRulesVersion != "");
@@ -402,7 +398,7 @@ in
         UMask = "0022";
         CacheDirectory = "iwe-plan-bridge";
         CacheDirectoryMode = "0700";
-        ExecStart = "${python}/bin/python -I -X pycache_prefix=/var/cache/iwe-plan-bridge ${code}/scripts/plan-event-bridge.py --deliver-once --stream-dir ${stateDir}/stream --repository ${readerRepo} --workspace ${workspaceDir} --checkout ${publisherRepo}";
+        ExecStart = "${python}/bin/python -I -X pycache_prefix=/var/cache/iwe-plan-bridge ${code}/scripts/plan-event-bridge.py --deliver-once --stream-dir ${stateDir}/stream --repository ${readerRepo}";
         TimeoutStartSec = 240;
         ReadWritePaths = [ stateDir ];
         ProtectSystem = "strict";
