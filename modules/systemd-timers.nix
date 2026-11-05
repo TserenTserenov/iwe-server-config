@@ -213,7 +213,16 @@ let
           dirty_paths=$(echo "$dirty_non_triage_after" | ${pkgs.coreutils}/bin/head -3 | ${pkgs.coreutils}/bin/tr '\n' '|')
           dirty_paths="''${dirty_paths%|}"
           echo "DIRTY: $repo (uncommitted changes — пропускаю pull): $dirty_paths"
-          failed+=("$repo (несохранённые правки, обновление пропущено: $dirty_paths)")
+          # A checkout on a work branch holds another session's unfinished
+          # edits (05.11: PACK-agent-rules on a WP-7 branch); the bare text read
+          # to the pilot as "your rules are not saved" (WP-568 Ф12).
+          dirty_branch=$(${pkgs.git}/bin/git rev-parse --abbrev-ref HEAD 2>/dev/null || echo "")
+          case "$dirty_branch" in
+            ""|HEAD|main|master)
+              failed+=("$repo (несохранённые правки, обновление пропущено: $dirty_paths)") ;;
+            *)
+              failed+=("$repo (незаконченная работа другой сессии на ветке $dirty_branch, обновление пропущено; вам делать ничего не нужно: $dirty_paths)") ;;
+          esac
           continue
         fi
         echo "RECOVERED: $repo (был транзиентный dirty, продолжаю pull)"
