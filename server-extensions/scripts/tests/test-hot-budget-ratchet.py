@@ -151,6 +151,43 @@ class RatchetTest(unittest.TestCase):
             "изменено 600 байт", out
         )  # 100 removed "---" + 100 added "+++", 3 bytes each
 
+    def test_staged_mode_checks_the_index(self):
+        self.base = "HEAD"
+        self.write("CLAUDE.md", "x" * 1001)
+        self.git("add", "CLAUDE.md")
+        code, out = self.check_staged()
+        self.assertEqual(code, 1, out)
+        self.write("CLAUDE.md", "x" * 900)
+        self.git("add", "CLAUDE.md")
+        self.write("CLAUDE.md", "x" * 5000)  # unstaged growth is not part of the commit
+        code, out = self.check_staged()
+        self.assertEqual(code, 0, out)
+        self.assertIn("(-100)", out)
+
+    def test_staged_deletion_counts_as_freed(self):
+        self.base = "HEAD"
+        self.git("rm", "-q", "--cached", ".claude/rules/a.md")
+        self.write("CLAUDE.md", "x" * 1400)
+        self.git("add", "CLAUDE.md")
+        code, out = self.check_staged()
+        self.assertEqual(code, 0, out)
+        self.assertIn("1500 → 1400", out)
+
+    def check_staged(self):
+        args = [
+            sys.executable,
+            SCRIPT,
+            "check",
+            "--repo",
+            self.repo,
+            "--base",
+            "HEAD",
+            "--head",
+            ":staged",
+        ]
+        res = subprocess.run(args, capture_output=True, text=True, check=False)
+        return res.returncode, res.stdout
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

@@ -47,8 +47,14 @@ def git(repo, *args):
     ).stdout
 
 
+STAGED = ":staged"  # pseudo-ref: the index, for a local commit hook
+
+
 def hot_paths(repo, ref):
-    names = git(repo, "ls-tree", "-r", "--name-only", ref).splitlines()
+    if ref == STAGED:
+        names = git(repo, "ls-files").splitlines()
+    else:
+        names = git(repo, "ls-tree", "-r", "--name-only", ref).splitlines()
     return sorted(n for n in names if any(fnmatch.fnmatchcase(n, g) for g in HOT_GLOBS))
 
 
@@ -57,7 +63,13 @@ def hot_bytes(repo, ref):
     for path in hot_paths(repo, ref):
         total += len(
             subprocess.run(
-                ["git", "-C", repo, "show", f"{ref}:{path}"],
+                [
+                    "git",
+                    "-C",
+                    repo,
+                    "show",
+                    f":{path}" if ref == STAGED else f"{ref}:{path}",
+                ],
                 capture_output=True,
                 check=True,
             ).stdout
@@ -77,7 +89,10 @@ def changed_bytes(repo, base, head):
     paths = sorted(set(hot_paths(repo, base)) | set(hot_paths(repo, head)))
     if not paths:
         return 0
-    diff = git(repo, "diff", "--unified=0", base, head, "--", *paths)
+    if head == STAGED:
+        diff = git(repo, "diff", "--cached", "--unified=0", base, "--", *paths)
+    else:
+        diff = git(repo, "diff", "--unified=0", base, head, "--", *paths)
     return sum(
         len(line.encode()) - 1
         for line in diff.splitlines()
@@ -197,7 +212,11 @@ def main(argv=None):
     c = sub.add_parser("check")
     c.add_argument("--repo", default=".")
     c.add_argument("--base", required=True)
-    c.add_argument("--head", default="HEAD")
+    c.add_argument(
+        "--head",
+        default="HEAD",
+        help=f"a ref, or {STAGED} for the index (local commit hook)",
+    )
     c.add_argument(
         "--waiver-label",
         action="store_true",
