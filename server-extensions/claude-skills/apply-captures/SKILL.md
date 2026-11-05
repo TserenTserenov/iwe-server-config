@@ -518,8 +518,10 @@ feedback-log (Шаг 5в, в том числе ранний выход из Ша
 
 ```bash
 M9_GOV_DIR="${IWE_WORKSPACE:-$HOME/IWE}/${IWE_GOVERNANCE_REPO:-DS-my-strategy}"
-# The wrapper loads the owner identifier (IWE_OWNER_ORY_UUID); without it the
-# script refuses to post and every fact is lost silently (109 log lines on the Mac).
+# The script needs the owner identifier (IWE_OWNER_ORY_UUID); without it it
+# refuses to post. The wrapper does not supply it: Claude inherits it from
+# .claude/settings.json, other agents (Codex, 04.11: 17 of 17 lost) only get it
+# if it is defined in the shared env file the wrapper exports.
 bash "${IWE_WORKSPACE:-$HOME/IWE}/scripts/with-aist-env.sh" python3 "$M9_GOV_DIR/scripts/post-culture-fact.py" \
   --element M9 --mode record --evidence "<id> из <filename>" \
   >/dev/null 2>>"${IWE_RUNTIME_DIR:-$HOME/IWE/.iwe-runtime}/culture-fact-errors.log" || true
