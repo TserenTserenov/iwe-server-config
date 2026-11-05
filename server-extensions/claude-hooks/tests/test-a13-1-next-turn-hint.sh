@@ -43,7 +43,8 @@ PY
 }
 
 # $1 case id, $2 prompt, $3 extra env (VAR=value or empty) -> hook additionalContext on stdout.
-# The style state file is pre-seeded so the fragment is not reinjected unless the case asks.
+# The legacy style state file is still pre-seeded; since WP-7 Ф299 it no longer gates the style
+# block (rotation sends one part every turn), run_hook strips that block instead.
 run_hook_raw() {
   local id="$1" prompt="$2" extra="${3:-}" seed="${4:-yes}"
   if [ "$seed" = "yes" ]; then
@@ -56,10 +57,12 @@ run_hook_raw() {
     | jq -r '.hookSpecificOutput.additionalContext // empty'
 }
 
-# Same, with the every-turn A0 line (РП-388 Ф39) removed: the hint cases check the hints only.
+# Same, with the every-turn A0 line (РП-388 Ф39) and the rotated style block (WP-7 Ф299:
+# one part of the style goes out every turn, between the manifest and its end mark)
+# removed: the hint cases check the hints only.
 A0_MARK='Главное правило стиля (A0'
 run_hook() {
-  run_hook_raw "$@" | grep -vF "$A0_MARK" | sed '/./,$!d'
+  run_hook_raw "$@" | grep -vF "$A0_MARK" | sed '/^<!-- стиль IWE/,/^<!-- \/стиль IWE -->$/d' | sed '/./,$!d'
 }
 
 make_transcript sym "$WITH_SYMBOLS"
@@ -114,7 +117,7 @@ check "off switch silences the hint" "$([ -z "$out" ] && echo yes || echo no)" "
 # First turn of a session: the style fragment (the hook's own s0-core.md snapshot) is
 # injected; the hint must be appended to it.
 make_transcript both "$WITH_SYMBOLS"
-out=$(run_hook both "$LONG_PROMPT" "" no)
+out=$(run_hook_raw both "$LONG_PROMPT" "" no)
 check "hint rides along with a reinjected style fragment" \
   "$(printf '%s' "$out" | grep -q 'Разговорный стиль IWE' && printf '%s' "$out" | grep -q 'create_host_adapter()' && echo yes || echo no)" "$out"
 
@@ -176,7 +179,7 @@ check "hint off switch keeps the A0 line" \
   "$(printf '%s' "$out" | grep -qF "$A0_MARK" && echo yes || echo no)" "$out"
 make_transcript a0off "$CLEAN"
 out=$(run_hook_raw a0off "да" "IWE_STYLE_A0_EVERY_TURN=0")
-check "A0 off switch silences the A0 line" "$([ -z "$out" ] && echo yes || echo no)" "$out"
+check "A0 off switch silences the A0 line" "$(printf '%s' "$out" | grep -qF "$A0_MARK" && echo no || echo yes)" "$out"
 # No style source at all (empty project, hook copy without its snapshot): A0 still goes out.
 cp -R "$HOOKS" "$TMP/hooks-nosrc"
 mkdir -p "$TMP/styles-moved" && HOOK_SAVE="$HOOK" && HOOK="$TMP/hooks-nosrc/inject-communication-style.sh"

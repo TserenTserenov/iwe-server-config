@@ -16,18 +16,17 @@
 #        тот же механизм, что у обычного пользователя шаблона без диспетчера).
 #   Доставка = этот хук (UserPromptSubmit). Генерируемые файлы не трогаются.
 #
-# Поведение (density-based reinjection, peer-session 2026-06-08-23):
-# - Освежается по ходу сессии: первый ход + при росте переписки (не один раз)
-# - L0-файл отсутствует → silent skip (echo '{}')
-# - L1-файл отсутствует → инжектим только L0
-# - Пороги: STYLE_REINJECT_TURNS (12), STYLE_REINJECT_BYTES (60000)
-# - Каждый ход: подсказка A13.1 о прошлом ответе (a13-1-next-turn-hint.py, РП-388 Ф36),
-#   выключатель IWE_STYLE_NEXT_TURN_HINT=0
-# - Каждый ход: строка главного правила A0 (РП-388 Ф39) — полный стиль приходит
-#   раз в 12 ходов, а в долгой технической сессии агент между впрысками пишет
-#   языком собственного рабочего журнала. Выключатель IWE_STYLE_A0_EVERY_TURN=0
-#   (не зависит от выключателя подсказок).
-
+# Поведение (WP-7 Ф299, пир-сессия 2026-11-05-05-wp7-system-prompt-budget, Claude+Kimi+Codex):
+# - Платформа держит в контексте не больше 10 000 символов вывода одного хука, остальное
+#   уводит в файл и показывает модели 2 КБ превью (замер 05.11, lib/platform_limits.py).
+#   Полный стиль ~26K символов поэтому НЕ впрыскивается целиком: lib/style_rotation.py режет его
+#   по границам правил на части ≤ 5 000 (7 000 − 2 000 запаса под A0, манифест и подсказку) и отдаёт по одной части за ход (разогрев — все части
+#   подряд в начале сессии, дальше «Дальше:» и онтология раз в 3 хода, прочее раз в 12).
+#   Ни одно правило не выбрасывается (запрет удаления, решение пилота 05.11.2026).
+# - Каждый ход: строка-манифест части, строка главного правила A0 (РП-388 Ф39, выключатель
+#   IWE_STYLE_A0_EVERY_TURN=0) и подсказка A13.1 (РП-388 Ф36, IWE_STYLE_NEXT_TURN_HINT=0).
+# - Весь вывод хука ≤ 7 000 символов (0,7 × лимит); журнал доставки ~/.claude/logs/style-delivery.log.
+# - Нет источника стиля → только A0 и подсказка (fail-open).
 set -uo pipefail
 export PATH="/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin:${PATH:-}"
 
@@ -43,39 +42,9 @@ SESSION_ID=$(printf '%s' "$SESSION_ID" | tr -cd 'A-Za-z0-9._-')
 
 PROJECT_DIR="${CLAUDE_PROJECT_DIR:-$HOME/IWE}"
 STATE_DIR="$PROJECT_DIR/.claude/state"
-STATE_FILE="$STATE_DIR/comm-style-injected-$SESSION_ID"
 
-# Density-based reinjection: впрыск НЕ один раз за сессию, а освежается по ходу.
-# Триггер: первый ход ИЛИ прошло >= N ходов ИЛИ выросло >= M байт стенограммы.
-REINJECT_EVERY_TURNS="${STYLE_REINJECT_TURNS:-12}"
-REINJECT_BYTES="${STYLE_REINJECT_BYTES:-60000}"
-
-# Текущий объём контекста — размер стенограммы (если харнесс её передал)
 TRANSCRIPT_PATH=$(echo "$INPUT" | jq -r '.transcript_path // empty' 2>/dev/null || echo "")
-CUR_BYTES=0
-if [ -n "$TRANSCRIPT_PATH" ] && [ -f "$TRANSCRIPT_PATH" ]; then
-  CUR_BYTES=$(wc -c < "$TRANSCRIPT_PATH" 2>/dev/null | tr -d ' ' || echo 0)
-  [ -n "$CUR_BYTES" ] || CUR_BYTES=0
-fi
-
-# Состояние: "turn last_inject_turn last_inject_bytes"
-TURN=0; LAST_INJECT_TURN=0; LAST_INJECT_BYTES=0
-if [ -f "$STATE_FILE" ]; then
-  read -r TURN LAST_INJECT_TURN LAST_INJECT_BYTES < "$STATE_FILE" 2>/dev/null || true
-  [ -n "${TURN:-}" ] || TURN=0
-  [ -n "${LAST_INJECT_TURN:-}" ] || LAST_INJECT_TURN=0
-  [ -n "${LAST_INJECT_BYTES:-}" ] || LAST_INJECT_BYTES=0
-fi
-TURN=$((TURN + 1))
-
-DO_INJECT=0
-if [ ! -f "$STATE_FILE" ]; then
-  DO_INJECT=1                                                   # первый ход
-elif [ $((TURN - LAST_INJECT_TURN)) -ge "$REINJECT_EVERY_TURNS" ]; then
-  DO_INJECT=1                                                   # по числу ходов
-elif [ "$CUR_BYTES" -gt 0 ] && [ $((CUR_BYTES - LAST_INJECT_BYTES)) -ge "$REINJECT_BYTES" ]; then
-  DO_INJECT=1                                                   # по объёму переписки
-fi
+mkdir -p "$STATE_DIR"
 
 # $1 = additionalContext text; empty → '{}' (Claude Code needs valid JSON on stdout).
 emit_context() {
@@ -119,14 +88,6 @@ if [ "${IWE_STYLE_NEXT_TURN_HINT:-1}" != "0" ] && [ -n "$TRANSCRIPT_PATH" ]; the
   NEXT_TURN_HINT=$(PROMPT="$PROMPT_TEXT" SESSION_ID="$SESSION_ID" \
     python3 -B "$HOOK_DIR/a13-1-next-turn-hint.py" "$TRANSCRIPT_PATH" \
     2>>"$HOME/.claude/logs/style-next-turn-hints.err" || echo "")
-fi
-
-# Не пора впрыскивать — обновить счётчик хода и выйти (подсказка, если есть, всё равно уходит)
-if [ "$DO_INJECT" -eq 0 ]; then
-  mkdir -p "$STATE_DIR"
-  echo "$TURN $LAST_INJECT_TURN $LAST_INJECT_BYTES" > "$STATE_FILE"
-  emit_context "$(join_parts "$A0_LINE" "$NEXT_TURN_HINT")"
-  exit 0
 fi
 
 # Контент: диспетчер реестра (если доступен) → файл-снимок s0-core.md → пропуск.
@@ -173,11 +134,25 @@ CONTEXT="## 🗣 Разговорный стиль IWE (S0 база + S1 авт�
 
 $FRAGMENT"
 
-# Записать state: текущий ход = последний впрыск, запомнить байты стенограммы
-mkdir -p "$STATE_DIR"
-echo "$TURN $TURN $CUR_BYTES" > "$STATE_FILE"
+# Rotation: one part of the full style per turn, whole output capped (lib/style_rotation.py).
+# The log dir must exist before the 2>> redirect below, or the shell fails the redirect,
+# python never runs and the style is silently not delivered (found by /verify, F299).
+mkdir -p "$HOME/.claude/logs" 2>/dev/null || true
+SOURCE_FILE="$STATE_DIR/comm-style-source-$SESSION_ID.md"
+ROTATION_STATE="$STATE_DIR/comm-style-rotation-$SESSION_ID.json"
+printf '%s' "$CONTEXT" > "$SOURCE_FILE"
+ROTATED=$(STYLE_PREFIX="$A0_LINE" STYLE_SUFFIX="$NEXT_TURN_HINT" python3 -B "$HOOK_DIR/lib/style_rotation.py" \
+  --source "$SOURCE_FILE" --state "$ROTATION_STATE" --session "$SESSION_ID" \
+  --log "$HOME/.claude/logs/style-delivery.log" 2>>"$HOME/.claude/logs/style-rotation.err") \
+  || ROTATED=$(join_parts "$A0_LINE" "$NEXT_TURN_HINT")
+# The fallback above bypasses the rotation's cap: never let it outgrow the harness limit,
+# drop the hint first (an oversized hook output is not delivered at all).
+if [ "$(printf '%s' "$ROTATED" | python3 -c 'import sys; print(len(sys.stdin.read()))')" -gt 7000 ]; then
+  ROTATED="$A0_LINE"
+fi
 
-# Cleanup старых state-файлов (>24h)
-find "$STATE_DIR" -name "comm-style-injected-*" -mmin +1440 -delete 2>/dev/null || true
+# Cleanup old per-session state (>24h)
+find "$STATE_DIR" \( -name "comm-style-injected-*" -o -name "comm-style-source-*" -o -name "comm-style-rotation-*" \) \
+  -mmin +1440 -delete 2>/dev/null || true
 
-emit_context "$(join_parts "$A0_LINE" "$CONTEXT" "$NEXT_TURN_HINT")"
+emit_context "$ROTATED"
