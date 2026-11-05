@@ -18,6 +18,19 @@
 # делает адаптер (Ф24), чтобы не задваивать строки; подключение орфо в
 # адаптер — отдельное решение пилота.
 #
+# Три класса находок (Ф26 → расширение 05.11, запрос пилота «исправить
+# системно»):
+#   misspelling — слова нет в словаре hunspell (склейки, опечатки);
+#   rare-word   — слово есть в словаре, но частота в языке ≈ 0 (обрезки
+#                 типа «опечат» — hunspell пропускает как основу);
+#   truncated   — слово есть и встречается, но является началом слова с
+#                 частотой выше на ≥2 порядка («пиш» → «пишет»).
+# Частоты — wordfreq (zipf) в том же venv ~/.iwe/venvs/ortho.
+#
+# Найденные слова печатаются в stdout (одно на строку) — их подхватывает
+# kimi-style-stop.py и возвращает агенту как напоминание до показа ответа
+# пилоту (механика Ф21; пилот видит только итоговый, исправленный ответ).
+#
 # Fail-open: любая ошибка → молчаливый exit 0. Никогда не блокирует ответ.
 
 from __future__ import annotations
@@ -40,14 +53,36 @@ WORD_RE = re.compile(r"[А-Яа-яЁё]+(?:-[А-Яа-яЁё]+)*")
 FENCE_RE = re.compile(r"```.*?```", re.DOTALL)
 BACKTICK_RE = re.compile(r"`[^`\n]*`")
 
-# Словарь грузим в дочернем процессе venv: системный python не содержит spylls,
-# а хук не может зависеть от пакетов глобального окружения.
+# Словарь и частоты грузим в дочернем процессе venv: системный python не
+# содержит spylls/wordfreq, а хук не может зависеть от пакетов глобального
+# окружения. Хелпер решает все три класса находок и печатает "причина слово".
 HELPER = r"""
 import sys
 from spylls.hunspell import Dictionary
+from wordfreq import zipf_frequency
+
+RARE_ZIPF = 1.5          # ниже — слово практически не встречается в языке
+TRUNC_MAX_ZIPF = 3.5     # у частых слов обрезок не детектируем
+TRUNC_GAP = 2.0          # обрезок: продолжение частотнее на ≥2 порядка
+
 d = Dictionary.from_files(sys.argv[1])
-for w in sys.stdin.read().splitlines():
-    print(("1" if d.lookup(w) else "0") + " " + w)
+letters = "абвгдежзийклмнопрстуфхцчшщъыьэюя"
+for raw in sys.stdin.read().splitlines():
+    w = raw.strip().lower().replace("ё", "е")
+    if not w:
+        continue
+    if not d.lookup(w):
+        print("misspelling " + raw)
+        continue
+    z = zipf_frequency(w, "ru")
+    if z < RARE_ZIPF:
+        print("rare-word " + raw)
+        continue
+    if len(w) >= 3 and z <= TRUNC_MAX_ZIPF:
+        for c in letters:
+            if zipf_frequency(w + c, "ru") >= z + TRUNC_GAP:
+                print("truncated " + raw)
+                break
 """
 
 
@@ -75,8 +110,8 @@ def extract_words(text: str, jargon: set[str]) -> tuple[str, list[str]]:
     return body, words
 
 
-def spellcheck(words: list[str]) -> list[str]:
-    """Возвращает слова, которых нет в словаре. Любой сбой → пусто (fail-open)."""
+def spellcheck(words: list[str]) -> list[tuple[str, str]]:
+    """Возвращает (причина, слово) для всех классов находок. Сбой → пусто (fail-open)."""
     with tempfile.NamedTemporaryFile(
         mode="w", encoding="utf-8", suffix=".py", delete=False
     ) as hf:
@@ -101,9 +136,9 @@ def spellcheck(words: list[str]) -> list[str]:
             pass
     bad = []
     for line in (done.stdout or "").splitlines():
-        ok, _, word = line.partition(" ")
-        if ok == "0":
-            bad.append(word)
+        reason, _, word = line.partition(" ")
+        if reason and word:
+            bad.append((reason.strip(), word))
     return bad
 
 
@@ -131,16 +166,19 @@ def main() -> int:
 
         timestamp = datetime.now(timezone.utc).astimezone().strftime("%Y-%m-%d %H:%M:%S")
         rows = []
-        for word in bad[:MAX_ROWS_PER_REPLY]:
+        for reason, word in bad[:MAX_ROWS_PER_REPLY]:
             match = re.search(re.escape(word), body)
             ctx = ""
             if match:
                 start = max(0, match.start() - 25)
                 end = min(len(body), match.end() + 25)
                 ctx = body[start:end].replace("\n", " ").replace("|", "¦").strip()
-            rows.append(f"{timestamp} | {agent} | ORTHO | misspelling | {word} :: {ctx}")
+            rows.append(f"{timestamp} | {agent} | ORTHO | {reason} | {word} :: {ctx}")
         with open(LOG_FILE, "a", encoding="utf-8") as lf:
             lf.write("\n".join(rows) + "\n")
+        # stdout — для kimi-style-stop.py: напоминание агенту до показа ответа.
+        for _, word in bad[:MAX_ROWS_PER_REPLY]:
+            print(word)
     except Exception:
         return 0
     return 0

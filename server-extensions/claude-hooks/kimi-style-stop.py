@@ -74,11 +74,15 @@ def main() -> int:
     if not text:
         return 0
 
-    # РП-388 Ф26: орфография — журнал + напоминание, без блока (решение пилота
-    # 25.10). До стилевой проверки: даже ответ, который стиль заблокирует,
-    # должен попасть в орфо-журнал. В пир-режиме ortho-check.py сам молчит
+    # РП-388 Ф26 (расширение 05.11, запрос пилота «исправить системно»):
+    # орфография — журнал + напоминание агенту ДО показа ответа пилоту.
+    # Пилот видит только итоговый ответ; напоминание — через механику Ф21
+    # (exit 2 + stderr), guard stop_hook_active не даст попросить дважды за ход.
+    # До стилевой проверки: даже ответ, который стиль заблокирует, должен
+    # попасть в орфо-журнал. В пир-режиме ortho-check.py сам молчит
     # (проверку там делает адаптер, Ф24). Fail-open внутри, timeout 8с, чтобы
     # вместе со стилем (10с) уложиться в лимит хука (20с).
+    ortho_flags: list[str] = []
     if os.path.isfile(ORTHO):
         ortho_tmp = None
         try:
@@ -87,13 +91,17 @@ def main() -> int:
             ) as of:
                 of.write(text)
                 ortho_tmp = of.name
-            subprocess.run(
+            ortho_done = subprocess.run(
                 ["python3", ORTHO, "kimi", ortho_tmp],
-                stdout=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
                 stderr=subprocess.DEVNULL,
+                text=True,
                 timeout=8,
                 check=False,
             )
+            ortho_flags = [
+                line.strip() for line in (ortho_done.stdout or "").splitlines() if line.strip()
+            ][:10]
         except Exception:
             pass
         finally:
@@ -131,6 +139,14 @@ def main() -> int:
 
     if isinstance(decision, dict) and decision.get("decision") == "block":
         print(decision.get("reason", ""), file=sys.stderr)
+        return 2
+    if ortho_flags:
+        words = ", ".join(ortho_flags)
+        print(
+            f"ОРФО: в предыдущем ответе подозрительные слова — {words}. "
+            "Проверь и исправь; если слово корректное, заверши ход повторно.",
+            file=sys.stderr,
+        )
         return 2
     return 0
 

@@ -662,6 +662,34 @@ prune_closed_session_worktrees() {
 #
 # Never fails the close: like `session_closed_direct`, the ledger is an auxiliary
 # channel here, not the purpose of `close`.
+# One ledger write of session-guard with a trace (WP-484 F290): the error text
+# and exit code of a failed write go to logs/session-ledger-append.<slug>.err.log,
+# the file the Quick Close handler already writes, instead of /dev/null.
+# ledger-append can fail after the event already landed (directory fsync,
+# publish kick), so only a caller whose write is deduplicated for this event
+# passes retry=yes. Never fails the caller, also under set -e.
+ledger_append_traced() {  # <slug> <kind> <retry: yes|no> <ledger-append args...>
+  local slug="$1" kind="$2" retry="$3" log_file err rc=0
+  shift 3
+  log_file="$IWE_ROOT/$GOV_REPO/logs/session-ledger-append.$(printf '%s' "$slug" | tr -c 'A-Za-z0-9._-' '_').err.log"
+  err=$(bash "$IWE_ROOT/$GOV_REPO/scripts/ledger-append.sh" "$@" 2>&1 >/dev/null) || rc=$?
+  if [ "$rc" -ne 0 ] && [ "$retry" = yes ]; then
+    _ledger_trace_line "$log_file" RETRY "$kind" "$rc" "$err"
+    rc=0
+    err=$(bash "$IWE_ROOT/$GOV_REPO/scripts/ledger-append.sh" "$@" 2>&1 >/dev/null) || rc=$?
+  fi
+  [ "$rc" -eq 0 ] && return 0
+  _ledger_trace_line "$log_file" LEDGER_MISS "$kind" "$rc" "$err"
+  echo "  ⚠️  ledger $kind не записан (best-effort, причина: $log_file)" >&2
+  return 0
+}
+
+_ledger_trace_line() {  # <log file> <mark> <kind> <rc> <error text>
+  { mkdir -p "$(dirname "$1")" \
+      && printf '%s %s kind=%s rc=%s err=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$2" "$3" "$4" \
+        "$(printf '%s' "$5" | tr '\n' ' ' | cut -c1-400)" >> "$1"; } 2>/dev/null || true
+}
+
 emit_session_closed() {
   local channel="$1" semaphore="$2" wp="$3" slug="$4" agent="$5"
   local ledger_script="$IWE_ROOT/$GOV_REPO/scripts/ledger-append.sh"
@@ -756,8 +784,11 @@ print(json.dumps(event, ensure_ascii=False))
   fi
   [ -n "$event_err" ] && rm -f "$event_err"
 
-  bash "$ledger_script" day "$event_day" session_closed "$event" session-guard --dedup-session-closed \
-    >/dev/null 2>&1 || echo "  ⚠️  ledger session_closed не записан (best-effort, не блокирует close)" >&2
+  # --dedup-session-closed dedups only with session_id and host; without them a
+  # retry could write a second event.
+  local closed_retry=no
+  [ -n "$session_id" ] && [ -n "$session_host" ] && closed_retry=yes
+  ledger_append_traced "$slug" session_closed "$closed_retry" day "$event_day" session_closed "$event" session-guard --dedup-session-closed
 }
 
 # resolve_orz_sessions_dir -- three-way resolver for the sessions-content
@@ -6476,11 +6507,12 @@ EOF
     _open_event=$(python3 -c '
 import json, sys
 print(json.dumps({"wp": sys.argv[1], "slug": sys.argv[2], "agent": sys.argv[3],
-                   "task": sys.argv[4], "sync_gate_marker_present": sys.argv[5] == "true"}))
-' "$WP" "${SLUG:-$WP}" "$AGENT" "${TASK:-}" "$_sync_marker_present" 2>/dev/null) || _open_event=""
+                   "task": sys.argv[4], "sync_gate_marker_present": sys.argv[5] == "true",
+                   "session_id": sys.argv[6]}))
+' "$WP" "${SLUG:-$WP}" "$AGENT" "${TASK:-}" "$_sync_marker_present" "$SESSION_ID" 2>/dev/null) || _open_event=""
     if [ -n "$_open_event" ]; then
-      bash "$IWE_ROOT/$GOV_REPO/scripts/ledger-append.sh" day "$(now_date)" session_opened "$_open_event" session-guard \
-        >/dev/null 2>&1 || echo "  ⚠️  ledger session_opened не записан (best-effort, не блокирует open)" >&2
+      # session_id makes the event keyable, so the traced retry cannot double it.
+      ledger_append_traced "${SLUG:-$WP}" session_opened yes day "$(now_date)" session_opened "$_open_event" session-guard --dedup-by-event-key
     fi
   fi
   # version-handshake (WP-484 Ф124/Ф125 план Этапа 0, линия 1, wiring 3а):
@@ -13422,8 +13454,7 @@ import json, sys
 print(json.dumps({"wp": sys.argv[1], "slug": sys.argv[2], "agent": sys.argv[3], "close_path": sys.argv[4], "peer_evidence": sys.argv[5]}))
 ' "$WP" "$SLUG" "$AGENT" "$_cp_from_sem" "$_peer_evidence" 2>/dev/null) || _direct_event=""
     if [ -n "$_direct_event" ]; then
-      bash "$IWE_ROOT/$GOV_REPO/scripts/ledger-append.sh" day "$(now_date)" session_closed_direct "$_direct_event" session-guard \
-        >/dev/null 2>&1 || echo "  ⚠️  ledger session_closed_direct не записан (best-effort, не блокирует close)" >&2
+      ledger_append_traced "$SLUG" session_closed_direct no day "$(now_date)" session_closed_direct "$_direct_event" session-guard
     fi
 
     # Which bypass path closed this session (WP-484, 05.09). Classified from the
