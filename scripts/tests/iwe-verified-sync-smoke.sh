@@ -38,6 +38,7 @@ export IWE_VERIFIED_SYNC_STATE_DIR="$WORK/state"
 export IWE_VERIFIED_SYNC_LOCK="$WORK/git-ops.lock"
 export IWE_VERIFIED_SYNC_ALERT_TTL_MIN=240
 export IWE_VERIFIED_SYNC_DIRTY_GRACE_SEC=0
+export IWE_VERIFIED_SYNC_FETCH_RETRY_SEC=0
 export GIT_AUTHOR_NAME=smoke GIT_AUTHOR_EMAIL=smoke@test GIT_COMMITTER_NAME=smoke GIT_COMMITTER_EMAIL=smoke@test
 
 # --- fixture: bare origin + author clone + server clone ----------------------
@@ -130,6 +131,89 @@ git -C "$SERVER" remote set-url origin "$WORK/does-not-exist.git"
 sync_it 2>/dev/null; RC=$?
 git -C "$SERVER" remote set-url origin "$WORK/origin.git"
 if [ "$RC" = 1 ] && grep -q '^last_error=fetch-failed' "$WORK/state/demo.state" && [ "$(state_get last_success_ts)" = "$PREV_OK" ] && [ "$(git -C "$SERVER" rev-parse HEAD)" = "$HEAD_BEFORE" ]; then ok "fetch-failed → refused, provenance kept"; else bad "fetch-failed → refused" "rc=$RC err=$(state_get last_error)"; fi
+sync_it 2>/dev/null || true
+
+# WP-545 Ф28: a fetch failure alerts only on the second consecutive failed run.
+# Fake ssh transport: logs each call, then behaves per $FAKE_SSH_MODE.
+cat > "$WORK/bin/fake-ssh" <<'EOF'
+#!/usr/bin/env bash
+# git probes the ssh variant with `-G` before connecting; that is not an attempt.
+[ "${1:-}" = "-G" ] && exit 0
+echo call >> "$FAKE_SSH_CALLS"
+case "$FAKE_SSH_MODE" in
+  publickey) echo "git@github.com: Permission denied (publickey)." >&2; exit 255 ;;
+  hang)      sleep 5; exit 255 ;;
+esac
+EOF
+chmod +x "$WORK/bin/fake-ssh"
+export FAKE_SSH_CALLS="$WORK/fake-ssh.calls"
+fetch_alerts() { alerts | grep -c 'два запуска подряд' || true; }
+
+echo "13c. first fetch failure → refused, no alert, pending marker; second → one alert; success → marker cleared silently"
+PENDING="$WORK/state/demo.fetch-pending"
+git -C "$SERVER" remote set-url origin "ssh://git@example.invalid/demo.git"
+BEFORE=$(fetch_alerts)
+FAKE_SSH_MODE=publickey GIT_SSH_COMMAND="$WORK/bin/fake-ssh" sync_it 2>/dev/null; RC1=$?
+AFTER1=$(fetch_alerts)
+# scheduler.sh detects a GitHub outage by the "fetch-failed:" prefix; keep it.
+if [ "$RC1" = 1 ] && grep -q '^last_error=fetch-failed: fetch-auth: ' "$WORK/state/demo.state" && [ -f "$PENDING" ] && [ "$AFTER1" = "$BEFORE" ]; then
+  ok "first publickey refusal → class fetch-auth, marker set, no alert"
+else
+  bad "first publickey refusal deferred" "rc=$RC1 err=$(state_get last_error) pending=$([ -f "$PENDING" ] && echo yes || echo no) alerts=$AFTER1/$BEFORE"
+fi
+FAKE_SSH_MODE=publickey GIT_SSH_COMMAND="$WORK/bin/fake-ssh" sync_it 2>/dev/null; RC2=$?
+if [ "$RC2" = 1 ] && [ "$(fetch_alerts)" = $((BEFORE + 1)) ] && alerts | grep -q 'не принимает ключ сервера'; then
+  ok "second consecutive refusal → exactly one alert naming the key"
+else
+  bad "second consecutive refusal alerts" "rc=$RC2 alerts=$(alerts | tail -2)"
+fi
+git -C "$SERVER" remote set-url origin "$WORK/origin.git"
+RECOV_BEFORE=$(alerts | grep -c '✅ Копия репозитория «demo» ' || true)
+sync_it 2>/dev/null; RC3=$?
+if [ "$RC3" = 0 ] && [ ! -e "$PENDING" ] && [ "$(alerts | grep -c '✅ Копия репозитория «demo» ')" = $((RECOV_BEFORE + 1)) ]; then
+  ok "success clears the marker and sends one recovery for the alert that went out"
+else
+  bad "recovery after fetch alert" "rc=$RC3 pending=$([ -f "$PENDING" ] && echo yes || echo no)"
+fi
+
+echo "13d. one failed run between successes → no alert at all, no recovery message"
+git -C "$SERVER" remote set-url origin "ssh://git@example.invalid/demo.git"
+ALL_BEFORE=$(alerts | wc -l)
+FAKE_SSH_MODE=publickey GIT_SSH_COMMAND="$WORK/bin/fake-ssh" sync_it 2>/dev/null || true
+git -C "$SERVER" remote set-url origin "$WORK/origin.git"
+sync_it 2>/dev/null; RC=$?
+if [ "$RC" = 0 ] && [ "$(alerts | wc -l)" = "$ALL_BEFORE" ] && [ ! -e "$PENDING" ]; then ok "transient single failure stays silent"; else bad "transient single failure silent" "rc=$RC lines=$(alerts | wc -l)/$ALL_BEFORE"; fi
+
+echo "13e. fast failure is retried once; timeout (124) is classified fetch-timeout and not retried"
+git -C "$SERVER" remote set-url origin "ssh://git@example.invalid/demo.git"
+rm -f "$FAKE_SSH_CALLS"
+FAKE_SSH_MODE=publickey GIT_SSH_COMMAND="$WORK/bin/fake-ssh" sync_it 2>/dev/null || true
+FAST_CALLS=$(wc -l < "$FAKE_SSH_CALLS")
+rm -f "$FAKE_SSH_CALLS"
+FAKE_SSH_MODE=hang GIT_SSH_COMMAND="$WORK/bin/fake-ssh" bash "$SUT" sync --repo "$SERVER" --branch main --state demo --fetch-timeout 1 2>/dev/null || true
+SLOW_CALLS=$(wc -l < "$FAKE_SSH_CALLS")
+git -C "$SERVER" remote set-url origin "$WORK/origin.git"
+if [ "$FAST_CALLS" = 2 ] && [ "$SLOW_CALLS" = 1 ] && grep -q '^last_error=fetch-failed: fetch-timeout: ' "$WORK/state/demo.state"; then
+  ok "publickey → 2 attempts; hang → 1 attempt, class fetch-timeout"
+else
+  bad "retry policy" "fast=$FAST_CALLS slow=$SLOW_CALLS err=$(state_get last_error)"
+fi
+sync_it 2>/dev/null || true
+
+echo "13f. fetch failure, then a dirty refusal, then one fetch failure → no fetch alert (not two in a row)"
+git -C "$SERVER" remote set-url origin "ssh://git@example.invalid/demo.git"
+FETCH_BEFORE=$(fetch_alerts)
+FAKE_SSH_MODE=publickey GIT_SSH_COMMAND="$WORK/bin/fake-ssh" sync_it 2>/dev/null || true
+echo junk > "$SERVER/untracked-13f"
+sync_it 2>/dev/null || true
+rm -f "$SERVER/untracked-13f"
+FAKE_SSH_MODE=publickey GIT_SSH_COMMAND="$WORK/bin/fake-ssh" sync_it 2>/dev/null || true
+if [ "$(fetch_alerts)" = "$FETCH_BEFORE" ] && [ -f "$PENDING" ]; then
+  ok "a dirty run in between resets the count; the next failure only sets the marker"
+else
+  bad "stuck marker" "fetch alerts $(fetch_alerts)/$FETCH_BEFORE pending=$([ -f "$PENDING" ] && echo yes || echo no)"
+fi
+git -C "$SERVER" remote set-url origin "$WORK/origin.git"
 sync_it 2>/dev/null || true
 
 echo "13b. lock held by another process → skipped tick (exit 1), state not rewritten"

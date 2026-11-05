@@ -140,8 +140,16 @@ describe_failure() {
                          DESCRIBE_ACTION="Дальше: попросите агента проверить владельца правок и сохранить работу до решения об обновлении." ;;
     diverged)            DESCRIBE_REASON="история копии разошлась с общей версией"
                          DESCRIBE_ACTION="Часто это коммиты, которые уже есть в общей версии под другими номерами; нужна проверка агентом." ;;
-    fetch-failed)        DESCRIBE_REASON="не удалось получить обновления с GitHub"
+    # fetch-* alerts are only ever sent on the second consecutive failed run
+    # (see defer_fetch_alert), so the texts say so.
+    fetch-auth)          DESCRIBE_REASON="GitHub уже два запуска подряд не принимает ключ сервера"
+                         DESCRIBE_ACTION="Часто это временное ограничение со стороны GitHub, которое проходит само; если тревога повторится, нужно проверить ключ сервера на GitHub." ;;
+    fetch-timeout)       DESCRIBE_REASON="GitHub уже два запуска подряд не отвечает вовремя"
                          DESCRIBE_ACTION="Если это повторяется больше часа, нужно проверить связь сервера с GitHub." ;;
+    fetch-network)       DESCRIBE_REASON="сервер уже два запуска подряд не может связаться с GitHub"
+                         DESCRIBE_ACTION="Нужно проверить сеть сервера." ;;
+    fetch-failed)        DESCRIBE_REASON="git уже два запуска подряд не может получить обновления с GitHub"
+                         DESCRIBE_ACTION="Причина записана в журнал сервера; нужна проверка агентом." ;;
     wrong-branch)        DESCRIBE_REASON="в копии открыта другая ветка"
                          DESCRIBE_ACTION="Дальше: попросите агента проверить, кому принадлежит ветка, прежде чем её переключать." ;;
     missing)             DESCRIBE_REASON="копии репозитория нет на сервере"
@@ -238,6 +246,8 @@ alert_recovered() {
 REPO=""; BRANCH=""; NAME=""; REMOTE="origin"
 LOCK_FILE="${IWE_VERIFIED_SYNC_LOCK:-$HOME/IWE/.iwe-git-ops.lock}"
 LOCK_WAIT=60; FETCH_TIMEOUT=45; TTL_H=6
+FETCH_RETRY_SEC="${IWE_VERIFIED_SYNC_FETCH_RETRY_SEC:-10}"
+FETCH_RC=0; FETCH_ERR=""
 DIRTY_GRACE_SEC="${IWE_VERIFIED_SYNC_DIRTY_GRACE_SEC:-15}"
 
 parse_args() {
@@ -282,11 +292,72 @@ record_refusal() {
     prev_ok=$(state_get "$path" last_success_ts)
   fi
   now=$(date -u +%s)
+  # scheduler.sh (DS-ai-systems) matches last_error by the "fetch-failed:" prefix
+  # to detect a GitHub outage and retry the index pass; the subclass goes after it.
+  local state_error="$class: $message"
+  case "$class" in fetch-*) state_error="fetch-failed: $class: $message" ;; esac
   state_write "$NAME" "schema_version=1" "repo=$REPO" "remote=$REMOTE" "branch=$BRANCH" \
     "sha=$prev_sha" "upstream_sha=$prev_up" "status=refused" \
-    "last_success_ts=$prev_ok" "last_attempt_ts=$now" "last_error=$(state_safe "$class: $message")"
+    "last_success_ts=$prev_ok" "last_attempt_ts=$now" "last_error=$(state_safe "$state_error")"
   log "$NAME refused [$class]: $message"
-  alert_fail "$NAME" "$class" "$message"
+  case "$class" in
+    fetch-*) defer_fetch_alert "$NAME" "$class" "$message" ;;
+    *)       clear_fetch_pending "$NAME"; alert_fail "$NAME" "$class" "$message" ;;
+  esac
+}
+
+# A single failed fetch is not news (WP-545 Ф28, peer-session
+# 2026-11-05-11-wp545-sync-alert-fixes, pilot's decision): on 04.11 and 05.11
+# GitHub refused the server key for minutes and it passed by itself, while the
+# consumer gate keeps the last good copy for TTL_H and alerts "stale" on its own.
+# The first failed run only leaves a marker; the second consecutive one alerts.
+# A successful fetch or any other refusal in between (dirty, wrong branch...)
+# clears the marker, so "два запуска подряд" in the alert text stays true.
+fetch_pending_path() { printf '%s/%s.fetch-pending' "$STATE_DIR" "$1"; }
+
+defer_fetch_alert() {
+  local name="$1" class="$2" message="$3" ppath
+  ppath=$(fetch_pending_path "$name")
+  if [ -f "$ppath" ]; then
+    alert_fail "$name" "$class" "$message"
+    return 0
+  fi
+  mkdir -p "$STATE_DIR"
+  printf 'class=%s\nts=%s\n' "$class" "$(date -u +%s)" > "$ppath"
+  log "$name: first failed fetch [$class] - alert deferred to the next run"
+}
+
+clear_fetch_pending() { rm -f "$(fetch_pending_path "$1")"; }
+
+# fetch_with_retry — sets FETCH_RC and FETCH_ERR (stderr of the last attempt).
+# One retry after FETCH_RETRY_SEC, only for a fast failure: a refused key or a
+# reset connection returns in 1-2 s, so the shared lock is held ~15 s, well
+# under a rival's LOCK_WAIT. A timeout (124) is not retried for the same reason.
+fetch_with_retry() {
+  local attempt
+  for attempt in 1 2; do
+    FETCH_RC=0
+    FETCH_ERR=$(with_timeout "$FETCH_TIMEOUT" git -C "$REPO" fetch --quiet --prune "$REMOTE" "$BRANCH" 2>&1 > /dev/null) || FETCH_RC=$?
+    [ "$FETCH_RC" -eq 0 ] && return 0
+    [ -n "$FETCH_ERR" ] && log "$NAME: fetch attempt $attempt rc=$FETCH_RC: $FETCH_ERR"
+    if [ "$FETCH_RC" -eq 124 ] || [ "$attempt" -eq 2 ]; then
+      return 1
+    fi
+    sleep "$FETCH_RETRY_SEC"
+  done
+}
+
+# classify_fetch_failure RC STDERR → failure class on stdout.
+classify_fetch_failure() {
+  local rc="$1" err="$2"
+  if [ "$rc" -eq 124 ]; then echo "fetch-timeout"; return 0; fi
+  case "$err" in
+    *"Permission denied (publickey)"*|*"Repository not found"*|*"Authentication failed"*)
+      echo "fetch-auth" ;;
+    *"Could not resolve host"*|*"Connection refused"*|*"Connection reset"*|*"Connection closed"*|*"Connection timed out"*|*"Network is unreachable"*)
+      echo "fetch-network" ;;
+    *) echo "fetch-failed" ;;
+  esac
 }
 
 record_success() {
@@ -330,9 +401,12 @@ cmd_sync() {
 
   local before_sha upstream_sha after_sha
   before_sha=$(git -C "$REPO" rev-parse HEAD)
-  if ! with_timeout "$FETCH_TIMEOUT" git -C "$REPO" fetch --quiet --prune "$REMOTE" "$BRANCH"; then
-    record_refusal "fetch-failed" "git fetch $REMOTE $BRANCH failed or timed out (${FETCH_TIMEOUT}s)"; return 1
+  if ! fetch_with_retry; then
+    record_refusal "$(classify_fetch_failure "$FETCH_RC" "$FETCH_ERR")" \
+      "git fetch $REMOTE $BRANCH failed rc=$FETCH_RC (timeout ${FETCH_TIMEOUT}s): $(printf '%s' "$FETCH_ERR" | head -1)"
+    return 1
   fi
+  clear_fetch_pending "$NAME"
   upstream_sha=$(git -C "$REPO" rev-parse "$ref" 2>/dev/null || echo "")
   if [ -z "$upstream_sha" ]; then
     record_refusal "no-upstream" "cannot resolve $ref after fetch"; return 1

@@ -172,13 +172,23 @@ let
     )
 
     failed=()
+    fetch_pending_dir="''${PULL_REPOS_FETCH_PENDING_DIR:-${iwe}/.iwe-runtime/iwe-pull-repos-fetch-pending.d}"
+    ${pkgs.coreutils}/bin/mkdir -p "$fetch_pending_dir" 2>/dev/null || true
+    # One retry of a fast fetch failure costs ~12 s under the shared lock held
+    # for the whole loop; during a GitHub-wide refusal every repo would retry,
+    # so the run gets at most this many retries in total.
+    fetch_retries_left=2
     for repo in "''${repos[@]}"; do
       dir="${iwe}/$repo"
+      # Marker of a failed fetch on the previous tick (WP-545 Ф28, see the fetch below);
+      # any tick that does not reach the fetch clears it, so "два запуска подряд" stays true.
+      fetch_pending="$fetch_pending_dir/''${repo//\//__}"
       if [ ! -d "$dir/.git" ]; then
         echo "SKIP: $repo (не клонирован)"
+        ${pkgs.coreutils}/bin/rm -f "$fetch_pending"
         continue
       fi
-      cd "$dir" || { failed+=("$repo (cd failed)"); continue; }
+      cd "$dir" || { failed+=("$repo (cd failed)"); ${pkgs.coreutils}/bin/rm -f "$fetch_pending"; continue; }
       # DS-agent-workspace: исключить scheduler/feedback-triage/ из dirty-check.
       # Это output ночного агента, коммитится auto-commit.sh (git add -A + push,
       # synchronizer agent-workspace-commit, 05:00+ МСК, см. DS-agent-workspace/scripts/auto-commit.sh).
@@ -223,6 +233,7 @@ let
             *)
               failed+=("$repo (незаконченная работа другой сессии на ветке $dirty_branch, обновление пропущено; вам делать ничего не нужно: $dirty_paths)") ;;
           esac
+          ${pkgs.coreutils}/bin/rm -f "$fetch_pending"
           continue
         fi
         echo "RECOVERED: $repo (был транзиентный dirty, продолжаю pull)"
@@ -244,11 +255,45 @@ let
       # occur in the first place. `--prune` keeps the one useful side
       # effect (stale remote-tracking branches removed) without touching a
       # single tracked or untracked file on disk.
-      if ${pkgs.coreutils}/bin/timeout 60s ${pkgs.git}/bin/git fetch --prune 2>&1; then
+      # WP-545 Ф28 (05.11, peer-session 2026-11-05-11-wp545-sync-alert-fixes,
+      # pilot's decision): same policy as iwe-verified-sync — one retry after
+      # 10 s for a fast failure (not a timeout), and a fetch failure reaches
+      # Telegram only on the second consecutive tick; the first leaves a marker,
+      # a successful fetch clears it. GitHub refused the server key for minutes
+      # on 04.11 and 05.11 and it passed by itself.
+      fetch_rc=0
+      fetch_out=$(${pkgs.coreutils}/bin/timeout 60s ${pkgs.git}/bin/git fetch --prune 2>&1) || fetch_rc=$?
+      if [ "$fetch_rc" -ne 0 ] && [ "$fetch_rc" -ne 124 ] && [ "$fetch_retries_left" -gt 0 ]; then
+        fetch_retries_left=$((fetch_retries_left - 1))
+        [ -n "$fetch_out" ] && echo "$fetch_out"
+        echo "RETRY: $repo (rc=$fetch_rc) in 10s"
+        ${pkgs.coreutils}/bin/sleep 10
+        fetch_rc=0
+        fetch_out=$(${pkgs.coreutils}/bin/timeout 60s ${pkgs.git}/bin/git fetch --prune 2>&1) || fetch_rc=$?
+      fi
+      [ -n "$fetch_out" ] && echo "$fetch_out"
+      if [ "$fetch_rc" -eq 0 ]; then
         echo "OK: $repo"
+        ${pkgs.coreutils}/bin/rm -f "$fetch_pending"
+        continue
+      fi
+      if [ "$fetch_rc" -eq 124 ]; then
+        fetch_reason="GitHub уже два запуска подряд не отвечает вовремя"
       else
-        echo "FAIL: $repo"
-        failed+=("$repo (fetch failed)")
+        case "$fetch_out" in
+          *"Permission denied (publickey)"*|*"Repository not found"*|*"Authentication failed"*)
+            fetch_reason="GitHub уже два запуска подряд не принимает ключ сервера; часто это временное ограничение GitHub" ;;
+          *"Could not resolve host"*|*"Connection refused"*|*"Connection reset"*|*"Connection closed"*|*"Connection timed out"*|*"Network is unreachable"*)
+            fetch_reason="сервер уже два запуска подряд не может связаться с GitHub" ;;
+          *) fetch_reason="git уже два запуска подряд не может получить обновления, причина в журнале сервера" ;;
+        esac
+      fi
+      if [ -f "$fetch_pending" ]; then
+        echo "FAIL: $repo (rc=$fetch_rc, second consecutive tick)"
+        failed+=("$repo ($fetch_reason)")
+      else
+        echo "FAIL: $repo (rc=$fetch_rc, first tick - alert deferred)"
+        ${pkgs.coreutils}/bin/touch "$fetch_pending" 2>/dev/null || true
       fi
     done
 
