@@ -1819,8 +1819,14 @@ in
     # NEON_AIST_BOT_URL, NEON_SUBSCRIPTION_URL, NEON_PERSONA_URL, HEARTBEAT_URL
     # (BetterStack heartbeat contract-sync). TELEGRAM_BOT_TOKEN/CHAT_ID уже есть.
 
+    # restartIfChanged = false on the three timer-driven sync units (WP-545 Ф28,
+    # 05.11): the activation must not run a scheduled job. With the Aisystant DB
+    # down since 02.11 every run fails, so any change to their definition (e.g.
+    # verifiedSyncPre) made switch-to-configuration exit 4 and deploy-rs roll the
+    # whole server back. The next timer tick picks up the new definition.
     systemd.services."payment-registry-sync-payment" = {
       description = "Payment Registry — incremental payment sync (10 мин)";
+      restartIfChanged = false;
       unitConfig  = paymentRegistryUnitConfig;
       serviceConfig = commonServiceConfig // {
         ExecStartPre = verifiedSyncPre "payment-registry" "main" "payment-registry";
@@ -1843,6 +1849,7 @@ in
 
     systemd.services."payment-registry-sync-subscription" = {
       description = "Payment Registry — subscription sync (30 мин)";
+      restartIfChanged = false;
       unitConfig  = paymentRegistryUnitConfig;
       serviceConfig = commonServiceConfig // {
         ExecStartPre = verifiedSyncPre "payment-registry" "main" "payment-registry";
@@ -1865,6 +1872,7 @@ in
 
     systemd.services."payment-registry-sync-contract" = {
       description = "Payment Registry — contract sync + health-check + heartbeat (15 мин)";
+      restartIfChanged = false;
       unitConfig  = paymentRegistryUnitConfig;
       serviceConfig = commonServiceConfig // {
         ExecStartPre = verifiedSyncPre "payment-registry" "main" "payment-registry";
