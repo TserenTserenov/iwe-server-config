@@ -183,9 +183,27 @@ check_divergence_alert() {
   [ -f "$telegram_lib" ] || return 0
   # shellcheck disable=SC1090
   . "$telegram_lib"
-  local host_label
-  case "$(uname -s 2>/dev/null)" in Darwin) host_label="Мак" ;; *) host_label=$(hostname -s 2>/dev/null || echo "хост") ;; esac
-  telegram_send "⚠️ ${host_label}: репозиторий ${path} разошёлся с сервером - ${ahead} своих коммитов и ${behind} серверных не слиты уже $(( age / 60 )) мин. Свести: scripts/canon-reconcile-published.sh или ручной merge." || true
+  local host_label branch branch_note=""
+  local advice="Свести: scripts/canon-reconcile-published.sh или ручной merge."
+  # The NixOS service PATH has no `hostname` binary, so the old fallback
+  # printed a nameless "хост" for tsekh-1 (WP-568 Ф12, 05.11). Bash sets
+  # HOSTNAME itself, without any external program.
+  case "$(uname -s 2>/dev/null)" in
+    Darwin) host_label="Мак" ;;
+    *) host_label="${HOSTNAME%%.*}"; [ -n "$host_label" ] || host_label="сервер" ;;
+  esac
+  # A checkout left on a work branch (05.11: PACK-personal on a WP-518 branch)
+  # is not the same case as a diverged main; name the branch so the reader
+  # does not try to merge someone's unfinished work.
+  branch=$(git -C "$full_path" rev-parse --abbrev-ref HEAD 2>/dev/null) || branch=""
+  case "$branch" in
+    ""|HEAD|main|master) ;;
+    *)
+      branch_note=" (стоит на рабочей ветке ${branch})"
+      advice="Не сводить: это незаконченная работа на ветке; решение - у владельца этой работы."
+      ;;
+  esac
+  telegram_send "⚠️ ${host_label}: репозиторий ${path}${branch_note} разошёлся с сервером - ${ahead} своих коммитов и ${behind} серверных не слиты уже $(( age / 60 )) мин. ${advice}" || true
 }
 
 run_once() {

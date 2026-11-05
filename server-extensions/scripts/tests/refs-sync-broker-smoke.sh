@@ -300,4 +300,41 @@ grep -q 'notify-peer: FAIL' "$SANDBOX/notify-unreachable.log" || fail "notify-pe
 unset REFS_SYNC_PEER_HOST REFS_SYNC_NOTIFY_TIMEOUT_SECONDS
 pass "notify-peer against an unreachable peer fails visibly within its own timeout, never hangs the caller"
 
+# Divergence alert (WP-568 Ф12, 05.11): names the machine, not a bare "хост"
+# (the NixOS service PATH has no `hostname`), and names a work branch.
+TG_LOG="$SANDBOX/tg.log"
+mkdir -p "$IWE_ROOT/DS-my-strategy/scripts/lib"
+cat > "$IWE_ROOT/DS-my-strategy/scripts/lib/telegram.sh" <<STUB
+telegram_send() { printf '%s\n' "\$1" >> "$TG_LOG"; }
+STUB
+git -C "$REPO" checkout -q -b wp-test-branch
+echo "local only" > "$REPO/local.md"
+git -C "$REPO" add local.md
+git -C "$REPO" -c user.email=t@t -c user.name=t commit -q -m "local work"
+OTHER="$SANDBOX/other-clone"
+git clone -q "$BARE" "$OTHER"
+echo "server side" > "$OTHER/server.md"
+git -C "$OTHER" add server.md
+git -C "$OTHER" -c user.email=t@t -c user.name=t commit -q -m "server work"
+git -C "$OTHER" push -q origin main
+cat > "$REGISTRY" <<EOF
+repos:
+  - path: gov-repo
+    remote: origin
+    refspec: "+refs/heads/main:refs/remotes/origin/main"
+EOF
+rm -f "$IWE_RUNTIME"/refs-sync-broker/divergence-*
+export REFS_SYNC_DIVERGENCE_ALERT_AFTER_SECONDS=0
+bash "$BROKER" run >/dev/null 2>&1 || true   # first tick only records first-seen
+bash "$BROKER" run >/dev/null 2>&1 || true
+unset REFS_SYNC_DIVERGENCE_ALERT_AFTER_SECONDS
+[ -s "$TG_LOG" ] || fail "divergence: no alert was sent"
+grep -q '⚠️ хост:' "$TG_LOG" && fail "divergence: nameless 'хост' label: $(cat "$TG_LOG")"
+case "$(uname -s)" in Darwin) EXPECT_LABEL="Мак" ;; *) EXPECT_LABEL="${HOSTNAME%%.*}" ;; esac
+grep -qF "⚠️ ${EXPECT_LABEL}: репозиторий gov-repo (стоит на рабочей ветке wp-test-branch) разошёлся" "$TG_LOG" \
+  || fail "divergence: machine name and work branch expected: $(cat "$TG_LOG")"
+grep -qF "Не сводить: это незаконченная работа на ветке" "$TG_LOG" \
+  || fail "divergence on a work branch must not advise a merge: $(cat "$TG_LOG")"
+pass "divergence alert names the machine and the work branch, without merge advice"
+
 echo "ALL PASS"
