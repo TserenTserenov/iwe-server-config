@@ -2,6 +2,7 @@
 
 > Demoted from `.claude/rules/distinctions.md` when hot-memory exceeded budget.
 > Restore: перенести строку обратно в `.claude/rules/distinctions.md` (команды `/distinction` нет; lazy = Read этого файла).
+> Место: `.claude/rules-lazy/` (до 05.11.2026 лежал в `.claude/rules/memory/` и вопреки назначению грузился в каждую сессию, ≈ 1,1K токенов; перенесён без изменений текста, WP-7 Ф299).
 
 ## Demoted 2026-07-12 (CC-116)
 

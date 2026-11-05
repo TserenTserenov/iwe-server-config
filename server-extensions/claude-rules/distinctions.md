@@ -1,6 +1,7 @@
 # Различения — hot-каркас (≤150 строк)
 
 > Tier-A = суть + тест. Tier-B = краткая суть. Tier-C и полные тексты с источниками → `memory/distinctions-warm.md` (lazy = Read warm-файла). Правки сюда; авторские warm — туда.
+> Разжалованные из hot (холодный архив) → `.claude/rules-lazy/distinctions-cold.md` (перенесён из `.claude/rules/memory/` 05.11.2026, WP-7 Ф299: та папка грузилась в каждую сессию).
 
 ## Tier-A (всегда)
 

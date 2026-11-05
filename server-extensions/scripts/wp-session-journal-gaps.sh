@@ -17,8 +17,26 @@ SEM_DIR="$IWE_ROOT/.iwe-runtime/sessions"
 # ledger source, keep the semaphore-based primary scan working.
 if [ -n "${IWE_GOVERNANCE_REPO:-}" ]; then
   LEDGER_DIR="$IWE_ROOT/$IWE_GOVERNANCE_REPO/machine/ledger/day"
+  # WP-530 Ф158 (05.11): recent close events can sit only in the host's
+  # persistent ledger buffer (not yet drained to the published file) since
+  # buffer-first writing went live 28.10 -- a scan of the published file
+  # alone would miss them for exactly the "recent, unresolved gap" case
+  # this script exists to catch. Same fixed-per-host default as
+  # ledger_buffer_home() in lib/ledger-path.sh of the governance repo;
+  # sourcing that function (bash, stdlib-equivalent) keeps the default in
+  # one place instead of duplicating the path here.
+  LEDGER_LIB="$IWE_ROOT/$IWE_GOVERNANCE_REPO/scripts/lib/ledger-path.sh"
+  if [ -r "$LEDGER_LIB" ]; then
+    # shellcheck source=/dev/null
+    . "$LEDGER_LIB"
+    BUFFER_HOME="$(ledger_buffer_home)"
+  else
+    BUFFER_HOME="${IWE_LEDGER_BUFFER_HOME:-$HOME/.local/state/iwe/ledger-buffer}"
+  fi
+  BUFFER_DAY_DIRS="$BUFFER_HOME/pending/day,$BUFFER_HOME/acknowledged/day"
 else
   LEDGER_DIR=""
+  BUFFER_DAY_DIRS=""
 fi
 
 WP=""
@@ -42,9 +60,11 @@ PY="$("$SCRIPTS_DIR/lib/find-python3.sh" --stdlib-only 2>/dev/null)" || exit 0
 if [ -n "$EXCLUDE_SESSION_ID" ]; then
   "$PY" "$SCRIPTS_DIR/wp-session-journal-gaps.py" \
     --wp "$WP" --sessions-dir "$SESSIONS_DIR" --sem-dir "$SEM_DIR" --ledger-dir "$LEDGER_DIR" \
+    --buffer-ledger-dirs "$BUFFER_DAY_DIRS" \
     --exclude-session-id "$EXCLUDE_SESSION_ID" 2>/dev/null
 else
   "$PY" "$SCRIPTS_DIR/wp-session-journal-gaps.py" \
-    --wp "$WP" --sessions-dir "$SESSIONS_DIR" --sem-dir "$SEM_DIR" --ledger-dir "$LEDGER_DIR" 2>/dev/null
+    --wp "$WP" --sessions-dir "$SESSIONS_DIR" --sem-dir "$SEM_DIR" --ledger-dir "$LEDGER_DIR" \
+    --buffer-ledger-dirs "$BUFFER_DAY_DIRS" 2>/dev/null
 fi
 exit 0

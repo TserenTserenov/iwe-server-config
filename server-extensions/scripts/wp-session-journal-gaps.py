@@ -174,12 +174,11 @@ def scan_semaphores(wp: str, sem_dir: str, sessions_dir: str, exclude_session_id
     return found
 
 
-def scan_ledger(wp: str, ledger_dir: str, sessions_dir: str, days: int = 7):
-    found = {}
-    if not os.path.isdir(ledger_dir):
-        return found
-    # day/<YYYY>/<MM>/day-<YYYY-MM-DD>.yaml, newest `days` files by name.
+def list_day_files(ledger_dir: str) -> list[str]:
+    """day/<YYYY>/<MM>/day-<YYYY-MM-DD>.yaml files under one ledger-day root."""
     day_files = []
+    if not os.path.isdir(ledger_dir):
+        return day_files
     for year_name in os.listdir(ledger_dir):
         year_dir = os.path.join(ledger_dir, year_name)
         if not os.path.isdir(year_dir):
@@ -191,55 +190,88 @@ def scan_ledger(wp: str, ledger_dir: str, sessions_dir: str, days: int = 7):
             for fname in os.listdir(month_dir):
                 if fname.startswith("day-") and fname.endswith(".yaml"):
                     day_files.append(os.path.join(month_dir, fname))
-    day_files.sort(reverse=True)
-    # `kind` worth matching against the WP -- both the peer-conversation
-    # path (session_closed_direct) and the plain runner close path
-    # (session_closed) carry a `slug`, though session_closed's slug is often
-    # empty for Quick-Close-style closes (no peer-session folder involved);
-    # an empty slug is filtered out below, same as a missing one.
-    CLOSE_KINDS = ("session_closed_direct", "session_closed")
-    for path in day_files[:days]:
-        kind = None
-        data: dict = {}
-        try:
-            with open(path, encoding="utf-8", errors="replace") as f:
-                lines = f.readlines()
-        except OSError:
+    return day_files
+
+
+CLOSE_KINDS = ("session_closed_direct", "session_closed")
+
+
+def scan_day_file(path: str, wp: str, sessions_dir: str, found: dict) -> None:
+    """Hand-rolled line scan of one day-<YYYY-MM-DD>.yaml; mutates `found` in place."""
+    kind = None
+    data: dict = {}
+    try:
+        with open(path, encoding="utf-8", errors="replace") as f:
+            lines = f.readlines()
+    except OSError:
+        return
+    for line in lines + ["- ts: __eof__\n"]:
+        stripped = line.strip()
+        if stripped.startswith("- ts:"):
+            # Flush the PREVIOUS event (its `ts` was captured when ITS
+            # "- ts:" line was seen, one iteration ago -- the entry marker
+            # and the timestamp value are on the same line, so capturing
+            # `ts` only from a bare "ts:" line, as the first version of this
+            # parser did, never captured anything: that line never occurs in
+            # this ledger format.
+            if kind in CLOSE_KINDS and data.get("wp") == wp and data.get("slug"):
+                slug = data["slug"]
+                ts = data.get("ts", "")
+                for flat in flat_orz_candidates(slug, ts):
+                    if os.path.isfile(os.path.join(sessions_dir, flat)) and flat not in found:
+                        found[flat] = {"status": "closed (ledger)", "opened_at": ts, "source": "ledger"}
+                for month_dirname in os.listdir(sessions_dir) if os.path.isdir(sessions_dir) else []:
+                    candidate_root = os.path.join(sessions_dir, month_dirname)
+                    if not os.path.isdir(candidate_root):
+                        continue
+                    for day_dirname in os.listdir(candidate_root):
+                        candidate = f"{month_dirname}/{day_dirname}/{slug}"
+                        if os.path.isdir(os.path.join(sessions_dir, candidate)) and found.get(candidate) is None:
+                            found[candidate] = {"status": "closed (ledger)", "opened_at": ts, "source": "ledger"}
+            # Start the NEW event: its ts is embedded in this very line.
+            kind, data = None, {"ts": stripped[len("- ts:"):].strip().strip("'\"")}
             continue
-        for line in lines + ["- ts: __eof__\n"]:
-            stripped = line.strip()
-            if stripped.startswith("- ts:"):
-                # Flush the PREVIOUS event (its `ts` was captured when ITS
-                # "- ts:" line was seen, one iteration ago -- the entry
-                # marker and the timestamp value are on the same line, so
-                # capturing `ts` only from a bare "ts:" line (as the first
-                # version of this parser did) never captured anything: that
-                # line never occurs in this ledger format).
-                if kind in CLOSE_KINDS and data.get("wp") == wp and data.get("slug"):
-                    slug = data["slug"]
-                    ts = data.get("ts", "")
-                    for flat in flat_orz_candidates(slug, ts):
-                        if os.path.isfile(os.path.join(sessions_dir, flat)) and flat not in found:
-                            found[flat] = {"status": "closed (ledger)", "opened_at": ts, "source": "ledger"}
-                    for month_dirname in os.listdir(sessions_dir) if os.path.isdir(sessions_dir) else []:
-                        candidate_root = os.path.join(sessions_dir, month_dirname)
-                        if not os.path.isdir(candidate_root):
-                            continue
-                        for day_dirname in os.listdir(candidate_root):
-                            candidate = f"{month_dirname}/{day_dirname}/{slug}"
-                            if os.path.isdir(os.path.join(sessions_dir, candidate)):
-                                existing = found.get(candidate)
-                                if existing is None:
-                                    found[candidate] = {"status": "closed (ledger)", "opened_at": ts, "source": "ledger"}
-                # Start the NEW event: its ts is embedded in this very line.
-                kind, data = None, {"ts": stripped[len("- ts:"):].strip().strip("'\"")}
-                continue
-            if stripped.startswith("kind:"):
-                kind = stripped.split(":", 1)[1].strip()
-            elif stripped.startswith("wp:"):
-                data["wp"] = stripped.split(":", 1)[1].strip()
-            elif stripped.startswith("slug:"):
-                data["slug"] = stripped.split(":", 1)[1].strip().strip("'\"")
+        if stripped.startswith("kind:"):
+            kind = stripped.split(":", 1)[1].strip()
+        elif stripped.startswith("wp:"):
+            data["wp"] = stripped.split(":", 1)[1].strip()
+        elif stripped.startswith("slug:"):
+            data["slug"] = stripped.split(":", 1)[1].strip().strip("'\"")
+
+
+def scan_ledger(wp: str, ledger_dir: str, sessions_dir: str, days: int = 7, buffer_ledger_dirs: list[str] = ()):
+    found = {}
+    # WP-530 Ф158 (05.11): a recent close event can sit only in the host's
+    # persistent ledger buffer (pending/acknowledged), not yet drained to the
+    # published file -- buffer-first writing has been live since 28.10. The
+    # published root alone would then miss exactly the "recent, unresolved
+    # gap" case this scan exists to catch. Scanning the buffer's day files
+    # too (same filename layout, same per-file scan above) closes that
+    # without importing the shared reader's PyYAML dependency, which this
+    # script deliberately avoids (stdlib-only, see module docstring).
+    day_files = list_day_files(ledger_dir)
+    for buffer_dir in buffer_ledger_dirs:
+        day_files.extend(list_day_files(buffer_dir))
+    if not day_files:
+        return found
+    # Newest `days` DATES, not newest `days` files: a date drained from the
+    # buffer still has its canon copy, and a date not yet drained can have a
+    # copy in both pending and acknowledged -- up to 3 files per date. Slicing
+    # the flat file list by `days` (cold review, WP-530 Ф158, 05.11) would
+    # then let one recent date eat 2-3 slots and silently push an
+    # older-but-still-in-window date out of the scan -- exactly the kind of
+    # missed-event gap this script exists to catch, just at the far end of
+    # the window. Select dates first (basename sorts correctly across roots:
+    # the buffer and published roots have different path prefixes, so a
+    # full-path sort would not group a date's copies together), then keep
+    # every file whose date made the cut.
+    files_by_date: dict[str, list[str]] = {}
+    for path in day_files:
+        files_by_date.setdefault(os.path.basename(path), []).append(path)
+    newest_dates = sorted(files_by_date, reverse=True)[:days]
+    for date in newest_dates:
+        for path in files_by_date[date]:
+            scan_day_file(path, wp, sessions_dir, found)
     return found
 
 
@@ -249,6 +281,10 @@ def main():
     ap.add_argument("--sessions-dir", required=True)
     ap.add_argument("--sem-dir", required=True)
     ap.add_argument("--ledger-dir", required=True)
+    ap.add_argument(
+        "--buffer-ledger-dirs", default="",
+        help="comma-separated day-dirs under the host ledger buffer (pending, acknowledged)",
+    )
     ap.add_argument("--exclude-session-id", default=None)
     ap.add_argument("--window-days", type=int, default=7)
     args = ap.parse_args()
@@ -257,8 +293,11 @@ def main():
         datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(days=args.window_days)
     ).strftime("%Y-%m-%dT%H:%M:%SZ")
 
+    buffer_ledger_dirs = [d for d in args.buffer_ledger_dirs.split(",") if d]
     combined = scan_semaphores(args.wp, args.sem_dir, args.sessions_dir, args.exclude_session_id, cutoff)
-    for folder, entry in scan_ledger(args.wp, args.ledger_dir, args.sessions_dir, days=args.window_days).items():
+    for folder, entry in scan_ledger(
+        args.wp, args.ledger_dir, args.sessions_dir, days=args.window_days, buffer_ledger_dirs=buffer_ledger_dirs
+    ).items():
         combined.setdefault(folder, entry)
 
     if not combined:
