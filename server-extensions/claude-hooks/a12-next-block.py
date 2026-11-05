@@ -128,6 +128,33 @@ def this_chat_place_line(next_line):
     return None
 
 
+# РП-605 Ф6 (05.11.2026, пир-сессия 2026-11-05-04-wp605-next-dup): the style guard's
+# block comes back as an isMeta user record "Stop hook feedback:". It resets
+# `last_user`, so the rewrite is analysed alone and, with the new block text that
+# says "do not repeat the line", it would be flagged MISSING although the line was
+# already shown. A line shown in the reply just before the feedback counts.
+FEEDBACK_PREFIX = "stop hook feedback:"
+
+
+def shown_before_guard_feedback(rows):
+    """True if the last user record is guard feedback and the reply shown right
+    before it ended with a "Дальше:" line (no other record in between)."""
+    last_user = max((i for i, r in enumerate(rows) if _a12._role(r) == "user"), default=-1)
+    if last_user < 1:
+        return False
+    texts = _a12._text_blocks(rows[last_user])
+    if not texts or not texts[0].lstrip().lower().startswith(FEEDBACK_PREFIX):
+        return False
+    shown = []
+    for row in reversed(rows[:last_user]):
+        if _a12._role(row) == "user":
+            break
+        if _a12._role(row) == "assistant":
+            shown = _a12._text_blocks(row) + shown
+    lines = [ln.strip() for ln in "\n".join(shown).splitlines() if ln.strip()]
+    return any(NEXT_LINE_RE.match(ln) for ln in lines[-3:])
+
+
 def detect(path):
     """Returns (missing, empty_content_line, unnamed_launcher_line, this_chat_line)."""
     # Rule 6 covers replies to the pilot only. A peer's turn in a peer
@@ -139,7 +166,7 @@ def detect(path):
     tail = final_assistant_lines(rows)
     next_line = next((m.group(1) for ln in tail if (m := NEXT_LINE_RE.match(ln))), None)
     if next_line is None:
-        return True, None, None, None
+        return not shown_before_guard_feedback(rows), None, None, None
     if not LETTER_RE.search(next_line):
         return False, next_line, None, None
     return False, None, unnamed_launcher_line(next_line), this_chat_place_line(next_line)

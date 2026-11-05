@@ -174,6 +174,19 @@ def opener_kind(row):
     return "unknown"
 
 
+def opener_detail(row, kind):
+    """For a service opener: 'stop_hook_feedback' (the style guard's block came
+    back) or 'notification' (background task, system reminder, queued command).
+    Lets a calibration run split duplicates caused by guard blocks (РП-605 Ф6,
+    05.11.2026). None for any other opener."""
+    if kind != "service":
+        return None
+    texts = [t for t in _a12._text_blocks(row) if t.strip()]
+    if texts and texts[0].lstrip().lower().startswith("stop hook feedback:"):
+        return "stop_hook_feedback"
+    return "notification"
+
+
 def episodes(rows):
     """List of {index, row, opener, items}; items are ('a', texts, tool_use) / ('t',)."""
     eps = []
@@ -188,7 +201,8 @@ def episodes(rows):
 def _add_row(eps, i, row):
     kind = opener_kind(row)
     if kind is not None:
-        eps.append({"index": len(eps), "row": i, "opener": kind, "items": []})
+        eps.append({"index": len(eps), "row": i, "opener": kind,
+                    "detail": opener_detail(row, kind), "items": []})
         return
     if not eps:
         return
@@ -258,7 +272,8 @@ def compare(prev_ep, cur_ep):
     """Diagnostic record for a pair of adjacent episodes; `fires` is the signal."""
     rec = {"prev_episode": prev_ep["index"], "cur_episode": cur_ep["index"],
            "prev_row": prev_ep["row"], "cur_row": cur_ep["row"],
-           "opener": cur_ep["opener"], "threshold": threshold(),
+           "opener": cur_ep["opener"], "opener_detail": cur_ep.get("detail"),
+           "threshold": threshold(),
            "next_threshold": next_threshold(), "part": None,
            "score": None, "masked_score": None, "pre_score": None, "next_score": None,
            "words": None, "trigrams": None, "hashes": None, "skip": None, "fires": False}

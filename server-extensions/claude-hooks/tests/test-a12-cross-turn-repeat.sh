@@ -215,5 +215,16 @@ else
   FAIL=$((FAIL + 1)); echo "FAIL hook-logs-signal-on-stop-hook-active: no log line"
 fi
 
+# 30. РП-605 Ф6 (05.11): the calibration record says what opened the second reply.
+explain_check opener-detail-stop-hook-feedback \
+  '[U("Что?"), A(BLOCK), FB(), A(BLOCK)]' \
+  'r["opener"] == "service" and r["opener_detail"] == "stop_hook_feedback" and r["fires"]'
+explain_check opener-detail-notification \
+  '[U("Что?"), A(BLOCK), U(NOTIF), A(BLOCK)]' \
+  'r["opener"] == "service" and r["opener_detail"] == "notification" and r["fires"]'
+explain_check opener-detail-none-for-human \
+  '[U("Что?"), A(BLOCK), U("А теперь?"), A(BLOCK)]' \
+  'r["opener"] == "human" and r["opener_detail"] is None'
+
 echo "a12-cross-turn-repeat: pass=$PASS fail=$FAIL"
 [ "$FAIL" -eq 0 ]
