@@ -185,7 +185,7 @@ Respond in Russian unless the user writes in English.
 
 ## 8. Staging (обкатка → шаблон)
 
-> Новое авторское поведение → запись `status: testing` в `STAGING.md`; там же активные/отклонённые записи и доказательства. Промоция на Week Close → `/author-mode`; алгоритм → `.claude/rules-lazy/blocking-rules-full.md §8`.
+> Новое поведение → `status: testing` в `STAGING.md`; в ядро — с вытеснением равного объёма; правила не удаляются, только переносятся. Промоция → `/author-mode`; детали → `.claude/rules-lazy/blocking-rules-full.md §8`.
 
 ---
 
