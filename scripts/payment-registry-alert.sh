@@ -7,8 +7,11 @@
 #
 # Usage: payment-registry-alert.sh failure|success <unit>
 #
-# failure: announces the incident at once; while it lasts, repeats at most once
-#          per PR_ALERT_REPEAT_SEC, whichever of the three services fails.
+# failure: announces the incident in the chat at once; while it lasts, repeats
+#          at most once per PR_ALERT_REPEAT_SEC, whichever of the three services
+#          fails — as a line in the morning digest, not the chat (WP-568 Ф12 П5,
+#          06.11: an LMS outage of four days gave 4 chat messages a day). With no
+#          digest on the host the repeat goes to the chat as before.
 # success: forgets this service's failure; once none is failing, sends a single
 #          recovery message (only if the incident was announced).
 set -uo pipefail
@@ -38,6 +41,22 @@ send_tg() {
   curl -s --fail --max-time 10 -X POST \
     "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
     -d "chat_id=$1" --data-urlencode "text=$2" > /dev/null
+}
+
+# repeat_via_gateway <text>: the shared gateway (iwe-tg, source iwe-failure-alert,
+# channel "decision" without TELEGRAM_NEEDS_DECISION) puts the repeat into the
+# digest, or delivers it live itself where no digest is read on the host. Either
+# outcome is a delivery; a refusal (no gateway, quarantine, failed digest write)
+# returns 1 and the caller sends it directly as before.
+repeat_via_gateway() {
+  command -v iwe-tg >/dev/null 2>&1 || return 1
+  local out
+  out=$(iwe-tg --source iwe-failure-alert "$1" 2>&1) || { echo "шлюз отказал: $out" >&2; return 1; }
+  case "$out" in
+    *"iwe-tg: outcome=deferred"*|*"iwe-tg: outcome=sent"*) return 0 ;;
+  esac
+  echo "шлюз не подтвердил доставку, отправляю сам: $out" >&2
+  return 1
 }
 
 # Duration in Russian without declension traps: "2 ч 15 мин", "40 мин".
@@ -99,7 +118,11 @@ if [ "$mode" = "failure" ]; then
 Причина: ${cause%%|*}.
 Данные, как правило, не теряются: после восстановления обмен догонит их сам.
 Что делать: ${cause#*|}.
-Следующее сообщение: при восстановлении или через $((repeat_sec / 3600)) ч."
+Следующее сообщение в чат: при восстановлении. Пока простой длится, раз в $((repeat_sec / 3600)) ч — строка в утренней сводке."
+  if [ "$announced_at" -gt 0 ] && repeat_via_gateway "$text"; then
+    echo "$now" > "$state_dir/announced-at"
+    exit 0
+  fi
   # A failed send leaves announced-at untouched, so the next tick retries.
   send_direct "$text" || exit 1
   echo "$now" > "$state_dir/announced-at"
