@@ -276,7 +276,7 @@ def parse_journal(commit, documents):
             elif kind == "plan_decision":
                 validate_decision(data)
                 _oid(data["base_commit"])
-                if not data["final"] or data["outcome"] == "wait":
+                if not data["final"]:
                     raise BridgeError(
                         "MALFORMED_DECISION", "journal contains a nonfinal proposal"
                     )
@@ -405,14 +405,15 @@ class GitPlanReader:
 
 
 def publication_documents(records, decisions, origin):
-    """Publish only a continuous decided prefix (К6); wait must block its tail."""
+    """Publish only a continuous decided prefix (К6): stop at the first record
+    this pass has no decision for (the batch is shorter than the queue)."""
     documents = {}
     total_bytes = 0
     for record in records:
         request = record["request"]
         event_id, digest = request["event_id"], record["request_digest"]
         decision = decisions.get(event_id)
-        if decision is None or decision["outcome"] == "wait":
+        if decision is None:
             break
         timestamp = record["registered_at"]
         day = (

@@ -76,6 +76,9 @@ let
   # здесь они превращаются в вызов отправителя с фиксированными сокетом и
   # именем производителя — выбрать их со стороны Мака нельзя.
   macSocketDir = "/run/iwe-plan-bridge-mac";
+  # The budget day's timezone has one source: limits.json in the vendored code
+  # copy, the same file that is part of the rules version (WP-561 Ф58).
+  macTimezone = (builtins.fromJSON (builtins.readFile (cfg.codeSrc + "/${cfg.limitsPath}"))).timezone or "";
   macChannelArgs = lib.optionalString cfg.macChannel.enable
     " --channel ${macSocketDir}/receiver.sock iwe-plan-mac mac-agent-channel";
   macGateway = pkgs.writeShellScript "iwe-plan-mac-gateway" ''
@@ -96,7 +99,7 @@ let
         resume=()
         if [ "''${#words[@]}" -eq 9 ]; then resume=(--resume-start "''${words[8]}"); fi
         exec ${python}/bin/python -I ${code}/scripts/plan-session-reserve.py \
-          "''${fixed[@]}" --timezone ${lib.escapeShellArg cfg.macChannel.timezone} \
+          "''${fixed[@]}" --timezone ${lib.escapeShellArg macTimezone} \
           --wp "''${words[2]}" --session "''${words[4]}" --minutes "''${words[6]}" \
           "''${resume[@]}"
         ;;
@@ -258,11 +261,6 @@ in
         default = "";
         description = "Открытый ключ Мака; закрытая часть остаётся на Маке.";
       };
-      timezone = lib.mkOption {
-        type = lib.types.str;
-        default = "Asia/Nicosia";
-        description = "Часовой пояс дня бюджета; тот же, что в limits.json.";
-      };
     };
     intraCommitOrderTrusted = lib.mkOption {
       type = lib.types.bool;
@@ -296,6 +294,10 @@ in
       {
         assertion = !cfg.macChannel.enable || (cfg.receiver.enable && lib.hasPrefix "ssh-ed25519 " cfg.macChannel.publicKey);
         message = "tsekh.planBridge.macChannel: нужны приёмник и открытый ключ ssh-ed25519.";
+      }
+      {
+        assertion = !cfg.macChannel.enable || builtins.isString macTimezone && macTimezone != "";
+        message = "tsekh.planBridge.macChannel: в limits.json копии кода нужен непустой timezone.";
       }
       {
         assertion = !cfg.receiver.enable || (cfg.admit != [ ] && lib.all (id: id != "") cfg.admit);

@@ -97,10 +97,10 @@ in
     inherit codePaths producersPath limitsPath;
     rulesPaths = codePaths ++ [ producersPath limitsPath ];
     admit = [ "tsekh-agent-channel" ];
-    # Утверждено пилотом 04.11 слиянием №14 с этой точной версией (П3).
-    # Версия — 10 файлов кода моста, реестр и лимиты.
+    # Срез правил Ф58 (06.11): утверждение пилотом — слияние этого запроса.
+    # Версия — 10 файлов кода моста, реестр и лимиты (DS-my-strategy b403370b9f).
     # Бюджет: постоянный, 600 минут каждый день (решение пилота 04.11).
-    approvedRulesVersion = "plan-rules/1:9a156bb7c4dd7b1829db413264982a755d8378b742849cd1671a0caeacbb98b2";
+    approvedRulesVersion = "plan-rules/1:c4174f5b4aed95ef8aebc49f2cba32fe885beec4ad05be322d4dc0e81e6d6bf0";
     # Канал Мака через «Цех» (решение пилота 04.11). Закрытый ключ — только на
     # Маке (~/.ssh/iwe-plan-mac); ключ умеет лишь подать заявку и ответ.
     macChannel = {

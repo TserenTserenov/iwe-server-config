@@ -16,6 +16,7 @@ import grp
 import json
 import logging
 from pathlib import Path
+import queue
 import subprocess
 import sys
 import threading
@@ -24,6 +25,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent / "lib"))
 
 import plan_bridge_host as host  # noqa: E402
 import plan_bridge_receiver as receiver  # noqa: E402
+
+_LOG = logging.getLogger("plan-receiver")
 
 
 def _kick_unit(unit: str):
@@ -81,14 +84,43 @@ def main(argv):
         )
         for socket_path, group, admit in channels
     ]
-    for server in servers[1:]:
-        threading.Thread(target=server.serve_forever, daemon=True).start()
-    try:
-        servers[0].serve_forever()
-    finally:
-        for server in servers:
-            server.server_close()
-    return 0
+    return _serve_until_first_exit(
+        servers, [path for path, _, _ in channels], write_lock
+    )
+
+
+def _serve_until_first_exit(servers, names, write_lock):
+    """Serve every channel; the first one to stop ends the process with 1.
+
+    Exit code 2 stays reserved for "host configuration closed" at startup
+    (RestartPreventExitStatus=2); 1 makes systemd restart the receiver
+    (Restart=on-failure). shutdown() is never called: it waits for a handler
+    without a timeout and could keep a half-dead process running. Server
+    threads are daemons, so returning abandons them with the process.
+    Before exiting it waits, bounded, for a sibling channel to finish an
+    in-flight write, so a durably queued request still gets its reply.
+    Known limit: serve_forever survives an OSError from accept, so such a
+    half-dead channel is not detected here (WP-561 Ф58).
+    """
+    stopped = queue.Queue()
+
+    def serve(server, name):
+        try:
+            server.serve_forever()
+        except BaseException:
+            _LOG.exception("[plan-receiver] channel %s failed", name)
+        finally:
+            stopped.put(name)
+
+    for server, name in zip(servers, names):
+        threading.Thread(target=serve, args=(server, name), daemon=True).start()
+    name = stopped.get()
+    _LOG.error("[plan-receiver] channel %s stopped; exiting for restart", name)
+    if not write_lock.acquire(timeout=receiver.READ_TIMEOUT_SECONDS):
+        _LOG.error("[plan-receiver] in-flight write did not finish; exiting anyway")
+    for server in servers:
+        server.server_close()
+    return 1
 
 
 if __name__ == "__main__":

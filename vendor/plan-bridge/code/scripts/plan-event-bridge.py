@@ -331,6 +331,15 @@ def main(argv=None):
         _log("stopped", action, state="closed", code=exc.code)
         return 78
     except Exception as exc:
+        # Another writer holds the queue lock: the same retryable state as the
+        # result path's lock_busy, not a runtime failure (WP-561 Ф58). The WAL
+        # module is loaded lazily by _runtime(); if it was never loaded, this
+        # exception cannot be its StreamBusy.
+        wal = sys.modules.get("plan_event_wal")
+        if wal is not None and isinstance(exc, wal.StreamBusy):
+            _emit(dict(state="lock_busy", code="STREAM_BUSY"))
+            _log("complete", action, state="lock_busy", code="STREAM_BUSY")
+            return 75
         # Only classification is exposed; verifier/Git exception text may carry
         # private context. No failure path removes the queue or advances a cursor.
         supplied = getattr(exc, "code", None)
@@ -340,9 +349,7 @@ def main(argv=None):
             and re.fullmatch(r"[A-Z][A-Z0-9_]{0,63}", supplied)
             else "RUNTIME_FAILURE"
         )
-        retry = (
-            getattr(exc, "stop", True) is False or type(exc).__name__ == "StreamBusy"
-        )
+        retry = getattr(exc, "stop", True) is False
         _emit(dict(state="retry" if retry else "stopped", code=code))
         _log("stopped", action, state="retry" if retry else "stopped", code=code)
         return 75 if retry else 1
