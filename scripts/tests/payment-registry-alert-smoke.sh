@@ -36,6 +36,19 @@ cat > "$SANDBOX/bin/journalctl" <<'STUB'
 cat "$JOURNAL" 2>/dev/null
 STUB
 printf '#!/bin/bash\nexit 0\n' > "$SANDBOX/bin/flock"
+# The shared gateway: queues the line for the digest (DIGEST_MODE=deferred) or
+# reports a live delivery (sent), as the real iwe-tg does on its stderr.
+export DIGEST="$SANDBOX/digest" DIGEST_MODE_FILE="$SANDBOX/digest-mode"
+cat > "$SANDBOX/bin/iwe-tg" <<'STUB'
+#!/bin/bash
+mode=$(cat "$DIGEST_MODE_FILE" 2>/dev/null || echo deferred)
+case "$mode" in
+  deferred) printf '%s\n===\n' "${@: -1}" >> "$DIGEST" ;;
+  sent)     printf '%s\n===\n' "${@: -1}" >> "$SENT" ;;   # the library sent it live
+  refused)  echo "iwe-tg: quarantined" >&2; exit 3 ;;
+esac
+echo "iwe-tg: outcome=$mode" >&2
+STUB
 chmod +x "$SANDBOX/bin/"*
 export PATH="$SANDBOX/bin:$PATH"
 
@@ -55,14 +68,23 @@ grep -q "(платежи)" "$SENT" && ok "служба названа" || bad "�
 for _ in 1 2 3 4 5 6 7 8; do run failure "$P" >/dev/null; run failure "$C" >/dev/null; run failure "$S" >/dev/null; done
 [ "$(count)" = 1 ] && ok "24 сбоя трёх служб внутри окна: без новых сообщений" || bad "подавление" "$(count)"
 
-echo "Сценарий: истекло окно повтора"
+grep -q "при восстановлении. Пока простой длится" "$SENT" && ok "первое сообщение обещает чат только при восстановлении" || bad "обещание" "$(cat "$SENT")"
+
+echo "Сценарий: истекло окно повтора, сводка работает (WP-568 Ф12 П5)"
 age_announcement 21601
 run failure "$S"
-[ "$(count)" = 2 ] && ok "после 6 часов: один повтор" || bad "повтор" "$(count)"
-grep -q "обмена нет уже" "$SENT" && ok "повтор говорит о длительности" || bad "текст повтора" "$(cat "$SENT")"
-grep -q "договоры, платежи, подписки" "$SENT" && ok "повтор перечисляет все три службы" || bad "перечень" "$(tail -8 "$SENT")"
+[ "$(count)" = 1 ] && ok "после 6 часов: в чат ничего" || bad "повтор в чат" "$(count)"
+grep -q "обмена нет уже" "$DIGEST" && ok "повтор ушёл в сводку и говорит о длительности" || bad "повтор в сводке" "$(cat "$DIGEST" 2>&1)"
+grep -q "договоры, платежи, подписки" "$DIGEST" && ok "повтор перечисляет все три службы" || bad "перечень" "$(cat "$DIGEST")"
 run failure "$P" >/dev/null
-[ "$(count)" = 2 ] && ok "сразу после повтора снова тишина" || bad "после повтора" "$(count)"
+[ "$(grep -c '^===$' "$DIGEST")" = 1 ] && ok "сразу после повтора снова тишина и в сводке" || bad "после повтора" "$(cat "$DIGEST")"
+
+echo "Сценарий: истекло окно, сводку на хосте не читают"
+echo sent > "$DIGEST_MODE_FILE"
+age_announcement 21601
+run failure "$S" 2>/dev/null
+[ "$(count)" = 2 ] && ok "повтор пришёл в чат один раз (шлюз отправил сам, без дубля)" || bad "повтор без сводки" "$(count)"
+
 
 echo "Сценарий: восстановление"
 run success "$P"
@@ -116,6 +138,14 @@ TELEGRAM_TEAM_CHAT_ID=222 run failure "$P" 2>/dev/null; rc=$?
 echo "Сценарий: чужая служба"
 run failure iwe-other.service 2>/dev/null; rc=$?
 [ "$rc" = 2 ] && ok "чужая служба отклонена" || bad "чужая служба" "$rc"
+
+echo "Сценарий: шлюз отказал"
+echo refused > "$DIGEST_MODE_FILE"
+age_announcement 21601
+before=$(count)
+run failure "$S" 2>/dev/null
+[ "$(count)" = "$((before + 1))" ] && ok "отказ шлюза: повтор не теряется, прямая отправка" || bad "отказ шлюза" "$(count)"
+rm -f "$DIGEST_MODE_FILE"
 
 echo ""
 echo "Итог: успешно $PASS, провалов $FAIL"
