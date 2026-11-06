@@ -1,0 +1,6 @@
+{
+  "schema": "plan-limits/3",
+  "timezone": "Asia/Nicosia",
+  "default_daily_minutes": 600,
+  "daily_personal_minutes": {}
+}

@@ -25,6 +25,7 @@ CURSOR_SCHEMA_VERSION = 1
 FINAL_OUTCOMES = frozenset({"accepted", "rejected"})
 REASON_ORDER = (
     "dependency_rejected",
+    "unknown_dependency",
     "status_conflict",
     "stale_version",
     "constraint_violation",
@@ -107,7 +108,7 @@ def validate_decision(decision: Mapping) -> None:
     )
     if (
         not isinstance(outcome, str)
-        or outcome not in FINAL_OUTCOMES | {"wait"}
+        or outcome not in FINAL_OUTCOMES
         or type(decision["final"]) is not bool
     ):
         raise BridgeError("MALFORMED_DECISION", "invalid outcome/final flag")
@@ -117,9 +118,10 @@ def validate_decision(decision: Mapping) -> None:
         raise BridgeError("MALFORMED_DECISION", "invalid rejection reason")
     if outcome == "accepted" and reason not in (None, "migration_accepted"):
         raise BridgeError("MALFORMED_DECISION", "invalid acceptance reason")
-    if outcome == "wait" and (reason is not None or decision["final"]):
-        raise BridgeError("MALFORMED_DECISION", "waiting is not a final decision")
-    if reason in {"dependency_rejected", "status_conflict"} and dependency is None:
+    if (
+        reason in {"dependency_rejected", "unknown_dependency", "status_conflict"}
+        and dependency is None
+    ):
         raise BridgeError("MALFORMED_DECISION", "rejection requires its dependency")
     if not _text(decision["base_commit"]):
         raise BridgeError("MALFORMED_DECISION", "decision must name its checked base")
@@ -306,8 +308,12 @@ def _evaluate(request, view, validator):
     if parent is not None:
         if parent in view.rejected:
             return "rejected", "dependency_rejected", parent
+        # Everything before this batch is already published and earlier batch
+        # members are already in `view`, so an absent parent is a reference to
+        # a record that does not exist (WP-561 Ф58). Rejecting it keeps the
+        # queue moving; waiting for it would block the tail forever.
         if parent not in view.accepted:
-            return "wait", None, parent
+            return "rejected", "unknown_dependency", parent
     if view.tips.get(_element_key(request)) != parent:
         for other in view.accepted.values():
             if (
@@ -349,7 +355,6 @@ def evaluate_batch(
     if check_history is not None:
         check_history(local.copy())
     decisions, seen = [], {}
-    blocked_by = None
     for request in requests:
         digest = request_digest(request)
         event_id = request["event_id"]
@@ -365,19 +370,13 @@ def evaluate_batch(
             raise BridgeError(
                 "DECISION_ALREADY_EXISTS", f"{event_id} must be confirmed from origin"
             )
-        outcome, reason, dependency = (
-            ("wait", None, blocked_by)
-            if blocked_by
-            else _evaluate(request, local, validator)
-        )
+        outcome, reason, dependency = _evaluate(request, local, validator)
         decision = make_decision(
             request, outcome, reason, dependency, base_commit=base_commit
         )
         seen[event_id] = decision
         decisions.append(decision)
-        if outcome == "wait" and blocked_by is None:
-            blocked_by = event_id
-        elif outcome == "accepted":
+        if outcome == "accepted":
             local.accept(request)
         elif outcome == "rejected":
             local.reject(event_id)

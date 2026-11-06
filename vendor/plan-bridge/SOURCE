@@ -1,24 +1,29 @@
-# Происхождение vendor/plan-bridge/code (WP-561 Ф55)
+# Происхождение vendor/plan-bridge/code (WP-561 Ф55, Ф58)
 #
-# Источник: DS-my-strategy, коммит fa7abcb830a0dfabd1435d6c6fafc0bd222fd2db
-# (основная ветка после правок холодной проверки 04.11).
-# Код моста — 8 модулей и 2 команды (codePaths, входят в версию правил) — и три
-# клиентские команды для канала Мака (отправитель, заявка, ответ). Клиенты в
-# версию правил не входят: план не пишут, решение по заявке принимает мост.
+# Источник: DS-my-strategy, коммит b403370b9f5c2910b7f4971c2543ae901b2ab578
+# (ветка wp561-f58-bridge-rules, DS-my-strategy #224 — срез правил моста Ф58).
+# Код моста — 8 модулей и 2 команды (codePaths, входят в версию правил), три
+# клиентские команды для канала Мака (отправитель, заявка, ответ) и лимиты
+# плана: из них сборка берёт часовой пояс канала Мака (Ф58), лимиты тоже
+# входят в версию правил. Клиенты в версию правил не входят: план не пишут,
+# решение по заявке принимает мост.
 # Все файлы взяты из Git-объектов указанной ревизии без изменений.
+# Сверки копии с этими хешами в репозитории нет: проверять вручную
+# (`git hash-object` каждого файла) при обновлении копии.
 # SOURCE находится вне code/ и не влияет на код службы.
 #
 # Хеши объектов Git:
+#   4b77597956029e290920a25043f2bf2e4cf247fc machine/plan-bridge/limits.json
 #   70284c63241e1032d4e3502cd81f2663933541d9 scripts/lib/plan_allocation.py
 #   348cf7ac8460996889d15d28f27c0873d276d9ea scripts/lib/plan_bridge_allocation.py
-#   bfccc83af88f2a73673e45711317d3467f2a9b01 scripts/lib/plan_bridge_decisions.py
+#   5c20199f82d06305617ab7346cead6246e15b37b scripts/lib/plan_bridge_decisions.py
 #   7f19e742b2e471486272e13409d884af0cbb7ca1 scripts/lib/plan_bridge_host.py
 #   c694b292a1b342352ca4fbc7bcef2bc45c35806b scripts/lib/plan_bridge_receiver.py
-#   2c73f08f8745de0049f4194720a63ef5f8f3ab08 scripts/lib/plan_event_bridge.py
+#   52da0571105c5ee35ba5ef95858b118c9815d82d scripts/lib/plan_event_bridge.py
 #   aaa218adb2b6792777f4aacfc11eb28efed818ed scripts/lib/plan_event_intake.py
 #   fbb3395861e9dd13a64863bed07c0fe2a8c8172e scripts/lib/plan_event_wal.py
-#   fedecf3077659ce3a7f8d6b65e6902d2c525c70c scripts/plan-event-bridge.py
-#   fa666f84e7aa982109661e8fb68b44b1af1e91a7 scripts/plan-event-receiver.py
+#   8757fcbeec2b32fcb609181541fca7032b034ee9 scripts/plan-event-bridge.py
+#   0a211eb86fef8b5cdc1673e07f0843f2c45b6ffd scripts/plan-event-receiver.py
 #   e40ee8469b56541fc2e1514f8df015d3789a23dc scripts/plan-event-send.py
 #   3e47fe932a535239d0825cd69e102a137c9041ba scripts/plan-session-reserve.py
 #   476978912e9cbce9a3ab2a681a617345000d289f scripts/plan-summary-answer.py
