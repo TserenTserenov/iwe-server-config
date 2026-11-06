@@ -52,11 +52,22 @@ chmod +x "$WORK/lint.sh"
 cat > "$WORK/classifier.py" <<'EOF'
 raise SystemExit(0)
 EOF
+# WP-568 Ф12: a failing iwe-notify sources check must warn, not stop the
+# sync, and must scan only the delivered scripts tree.
+cat > "$WORK/sources-check.sh" <<EOF
+#!/usr/bin/env bash
+printf '%s' "\$IWE_NOTIFY_SOURCES_DIRS" > "$WORK/sources-dirs"
+exit 1
+EOF
 
 IWE_EXTENSIONS_SOURCE_ROOT="$SOURCE" \
 SYNC_EXTENSIONS_LINT="$WORK/lint.sh" \
 SYNC_EXTENSIONS_CLASSIFIER="$WORK/classifier.py" \
-  bash "$FIXTURE_REPO/scripts/sync-extensions.sh" >/dev/null
+SYNC_EXTENSIONS_SOURCES_CHECK="$WORK/sources-check.sh" \
+  bash "$FIXTURE_REPO/scripts/sync-extensions.sh" >/dev/null 2>"$WORK/sync.err"
+
+test "$(cat "$WORK/sources-dirs")" = "$SOURCE/scripts"
+grep -q 'WARN: вызов iwe-notify без доверенной строки' "$WORK/sync.err"
 
 test "$(cat "$FIXTURE_REPO/server-extensions/ROOT_COMMIT_SHA")" = "$EXPECTED_SHA"
 test "$(cat "$FIXTURE_REPO/server-extensions/scripts/from-snapshot.sh")" = snapshot-script

@@ -68,13 +68,15 @@ bash "$LINT" || { echo "ERROR: сырой Telegram-текст найден — �
 # WP-568 Ф12 С4 (ArchGate 06.11.2026): a root script that sends through
 # `iwe-notify --source <id>` needs a trusted row in the gateway allowlist,
 # otherwise its alert is quarantined and reaches only a digest line.
+# Only warns, never stops: the allowlist lives in a governance checkout that
+# may lag behind this source, and a stop here would halt delivery of every
+# extension, not just one alert. The quarantined alert still reaches the
+# day-close digest. Scans only the tree this sync delivers.
 SOURCES_CHECK="${SYNC_EXTENSIONS_SOURCES_CHECK:-$HOME/IWE/DS-my-strategy/scripts/tests/iwe-notify-sources-smoke.sh}"
-# A governance checkout that has not pulled the check yet only warns: a hard
-# stop here would halt every sync (and alert) until that pull lands.
 if [ ! -f "$SOURCES_CHECK" ]; then
     echo "WARN: $SOURCES_CHECK не найден — источники iwe-notify в этот раз не сверены" >&2
-else
-    bash "$SOURCES_CHECK" || { echo "ERROR: вызов iwe-notify без доверенной строки отправителя — синк остановлен, см. вывод выше" >&2; exit 1; }
+elif ! IWE_NOTIFY_SOURCES_DIRS="$SOURCE_ROOT/scripts" bash "$SOURCES_CHECK" >&2; then
+    echo "WARN: вызов iwe-notify без доверенной строки отправителя — его тревога уйдёт в карантин (строка в сводке); синк продолжен, см. вывод выше" >&2
 fi
 
 rsync -a --delete "$SOURCE_ROOT/scripts/"                 "$DST/scripts/"
