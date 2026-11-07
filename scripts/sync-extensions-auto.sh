@@ -79,12 +79,37 @@ fi
 # (bash 3.2-совместимость, per-key flock, fail-open) — не заводить свою
 # отдельную реализацию. Все известные классы сбоя этого скрипта, для alert_ok
 # (перечислять новый класс сюда при добавлении нового failure-branch):
-ALERT_CLASSES=(cd pull source-behind source-snapshot sync-script test-env test-gate add commit push)
+ALERT_CLASSES=(cd pull source-behind source-snapshot sync-script test-env test-gate add commit push push-race)
 # test-gate-partial is deliberately NOT here (cold review 25.09): unlike
 # every other class, it can fire and still reach a successful alert_ok() in
 # the SAME run, so this blanket sweep would immediately erase its own alert
 # and defeat the 6h/24h escalation backoff. It gets its own recovery check
 # further down instead.
+# drop_unpushed_auto_commits: fetch, then reset to origin/main — but only when
+# HEAD is on main, the copy REALLY diverged (origin/main is not an ancestor of
+# HEAD: a push refused for another reason, e.g. a server-side hook, must stay a
+# loud alert), and every local-ahead commit has EXACTLY the subject this script
+# writes (a `git revert` of an auto-commit also carries the marker in its
+# subject, and must count as foreign). Any foreign local commit → return 1 (a
+# human must look). `reset --keep` refuses to overwrite uncommitted edits, so a
+# parallel session's work is never lost; it does reset the index, so a change
+# another session had only staged stays in the tree but becomes unstaged.
+drop_unpushed_auto_commits() {
+  git fetch --quiet origin 2>&1 || return 1
+  [ "$(git symbolic-ref --short -q HEAD)" = "main" ] || return 1
+  git merge-base --is-ancestor origin/main HEAD && return 1
+  local ahead foreign
+  ahead=$(git log --format=%s origin/main..HEAD) || return 1
+  [ -n "$ahead" ] || return 1
+  foreign=$(printf '%s\n' "$ahead" \
+    | grep -v -E '^sync: auto extensions \([0-9]+ файлов\) \[sync-extensions-auto\]$' || true)
+  [ -z "$foreign" ] || return 1
+  local count
+  count=$(printf '%s\n' "$ahead" | wc -l | tr -d ' ')
+  git reset --keep origin/main || return 1
+  echo "$LOG_PREFIX dropped $count unpushed auto-commit(s), recoverable via reflog"
+}
+
 NOTIFY_LIB="${SYNC_EXTENSIONS_NOTIFY_LIB:-$HOME/IWE/DS-my-strategy/scripts/lib/notification-render.sh}"
 NOTIFY_LIB_AVAILABLE=false
 if [ -f "$NOTIFY_LIB" ]; then
@@ -139,7 +164,7 @@ alert_class_subject() {
     cd|source-behind|source-snapshot|pull) printf 'Доставка расширений на сервер стоит: не удаётся получить свежие файлы' ;;
     sync-script) printf 'Доставка расширений на сервер стоит: не проходит сборка файлов для сервера' ;;
     test-env|test-gate) printf 'Доставка расширений на сервер стоит: не проходят тесты' ;;
-    add|commit|push) printf 'Доставка расширений на сервер стоит: не удаётся записать и отправить изменения' ;;
+    add|commit|push|push-race) printf 'Доставка расширений на сервер стоит: не удаётся записать и отправить изменения' ;;
     *) printf 'Доставка расширений на сервер стоит (шаг %s)' "$1" ;;
   esac
 }
@@ -345,9 +370,17 @@ lock_acquire || exit 0
 
 # Синхронизируемся с origin ДО генерации diff — иначе можем закоммитить поверх
 # устаревшей базы и словить push-reject на каждом последующем тике.
-if ! git pull --ff-only --quiet 2>&1; then
-  alert pull "🚨 sync-extensions-auto: git pull --ff-only провалился (iwe-server-config разошёлся с origin) — auto-sync пропущен, нужна ручная проверка"
-  exit 1
+if ! PULL_OUT=$(git pull --ff-only --quiet 2>&1); then
+  # Real git error goes to the log, not only the alert (the old text guessed
+  # "diverged" for any failure). A diverged copy whose only local-ahead commits
+  # are our own auto-commits is safe to drop: the next copy regenerates them.
+  echo "$LOG_PREFIX pull error: $(echo "$PULL_OUT" | tail -2 | tr '\n' ' ')"
+  if drop_unpushed_auto_commits && git pull --ff-only --quiet 2>&1; then
+    log_event self_healed "reason=pull_diverged"
+  else
+    alert pull "🚨 sync-extensions-auto: git pull --ff-only провалился и само не лечится (в iwe-server-config есть чужие локальные коммиты или правки, либо origin недоступен) — auto-sync пропущен, нужна ручная проверка; причина git в логе на Маке"
+    exit 1
+  fi
 fi
 
 # Канонический ~/IWE — общая рабочая копия нескольких живых сессий. Защитный
@@ -666,6 +699,18 @@ PUSH_OUT=""
 log_event copy_committed "source_sha=$SOURCE_SHA" "config_sha=$(git rev-parse HEAD)" "file_count=$FILE_COUNT" "gate_partial=$GATE_FAILED"
 if ! PUSH_OUT=$(git push 2>&1); then
   echo "$LOG_PREFIX push error tail: $(echo "$PUSH_OUT" | tail -3 | tr '\n' ' ')"
+  # Long tick (test gate can take 25+ min): origin moved meanwhile, push is
+  # rejected as non-fast-forward. Drop our unpushed auto-commit now, otherwise
+  # every later pull --ff-only fails (WP-485, stuck 05-07.11.2026). The next
+  # tick re-copies from the source; nothing is lost. If this repeats (every
+  # tick longer than origin stays still) nothing is delivered, so it is an
+  # alert of its own class, not a silent exit.
+  if echo "$PUSH_OUT" | grep -q -E 'non-fast-forward|fetch first' \
+     && drop_unpushed_auto_commits; then
+    log_event self_healed "reason=push_rejected_origin_moved"
+    alert push-race "⚠️ Доставка расширений на сервер: пока шёл тест, GitHub ушёл вперёд, отправку отменил и пересоберу на следующем тике (само, действие не нужно; если сообщение повторяется — тик слишком долгий)"
+    exit 1
+  fi
   alert push "🚨 sync-extensions-auto: коммит создан локально, но push провалился (${FILE_COUNT} файлов: ${FILE_LIST}...) — требуется ручное вмешательство, подробности в логе на Маке"
   exit 1
 fi
