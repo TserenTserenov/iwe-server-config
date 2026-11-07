@@ -177,6 +177,44 @@ alert_ok "✅ test: автосинк прошёл после долгого пр
 grep -q "sync-script:" "$TG_LOG" && ok "urgent: восстановление после urgent-инцидента называет класс и длительность" \
     || bad "urgent: восстановление называет sync-script" "$(cat "$TG_LOG")"
 
+# --- Сценарий 11: текст ошибки git доходит до пилота (WP-484 Ф294) ---------
+# 05-07.11 тревога говорила только «причина в логе на Маке», а urgent-текст
+# заменял и это: 110 попыток подряд пилот не видел «Not possible to
+# fast-forward». Отдельный класс ("commit"), чтобы не делить state с выше.
+GIT_OUT=$(printf 'remote: Permission denied for ghp_abcdEFGH12345678\nhint: Diverging branches cannot be fast-forwarded\nhint:\nfatal: unable to access https://user:ghp_SECRET@github.com/x/y.git/: Not possible to fast-forward, aborting.\n')
+DETAIL=$(git_error_detail "$GIT_OUT")
+case "$DETAIL" in
+  *hint:*) bad "git_error_detail: строки hint: отброшены" "$DETAIL" ;;
+  *) ok "git_error_detail: строки hint: отброшены" ;;
+esac
+case "$DETAIL" in
+  *ghp_abcd*) bad "git_error_detail: токен вне адреса закрыт" "$DETAIL" ;;
+  *"Permission denied for ***"*) ok "git_error_detail: токен вне адреса закрыт" ;;
+  *) bad "git_error_detail: строка с токеном вне адреса сохранена с маской" "$DETAIL" ;;
+esac
+case "$DETAIL" in
+  *ghp_SECRET*|*user:*) bad "git_error_detail: логин и токен в адресе закрыты" "$DETAIL" ;;
+  *"https://***@github.com"*) ok "git_error_detail: логин и токен в адресе закрыты" ;;
+  *) bad "git_error_detail: адрес сохранён с маской" "$DETAIL" ;;
+esac
+: > "$TG_LOG"
+alert commit "🚨 test: commit провалился" "" "$DETAIL"
+grep -q "^Ошибка git: .*fatal: unable to access" "$TG_LOG" && ok "обычная тревога: в ней есть текст ошибки git" \
+    || bad "обычная тревога: текст ошибки git" "$(cat "$TG_LOG")"
+STATE_FILE_COMMIT="$DS_PUBLISH_ADMISSION_DIR/incidents/sync-extensions-auto-commit.state"
+OLD_TS_COMMIT=$(( $(date -u +%s) - 25200 ))
+printf '%s:%s:%s' "$OLD_TS_COMMIT" "$OLD_TS_COMMIT" "$(cut -d: -f3 "$STATE_FILE_COMMIT")" > "$STATE_FILE_COMMIT"
+: > "$TG_LOG"
+alert commit "🚨 test: commit провалился снова" "" "$DETAIL"
+grep -q "🆘" "$TG_LOG" && grep -q "^Ошибка git: .*fatal: unable to access" "$TG_LOG" \
+    && ok "срочная тревога (🆘): текст ошибки git не потерян при замене текста" \
+    || bad "срочная тревога: текст ошибки git" "$(cat "$TG_LOG")"
+: > "$TG_LOG"
+alert_ok "✅ test: commit снова проходит" >/dev/null
+alert source-behind "🚨 test: без подробностей"
+grep -q "Ошибка git" "$TG_LOG" && bad "без подробностей: лишней строки нет" "$(cat "$TG_LOG")" \
+    || ok "без подробностей: строка «Ошибка git» не добавляется"
+
 # --- Сценарий 7: нет библиотеки отправки — предупреждение, не молчание ----
 # WP-7 Ф174 (24.09.2026): пропавшая отправка не должна быть неотличима в
 # логе от штатного подавления. После WP-568 Ф10 токен проверяет сама

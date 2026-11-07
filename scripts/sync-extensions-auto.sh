@@ -110,6 +110,19 @@ drop_unpushed_auto_commits() {
   echo "$LOG_PREFIX dropped $count unpushed auto-commit(s), recoverable via reflog"
 }
 
+# git_error_detail <git output>: the part of a git error worth showing in a
+# Telegram alert — `hint:` advice and blank lines dropped, credentials in URLs
+# masked, last two lines joined, capped at 300 chars. The alert used to say
+# only "see the log on the Mac", and the urgent text replaced even that, so
+# the pilot never saw why git failed (stuck 05-07.11.2026, WP-484 Ф294).
+git_error_detail() {
+  printf '%s\n' "$1" \
+    | grep -v -E '^[[:space:]]*(hint:|$)' \
+    | sed -E 's#(https?://)[^/@[:space:]]+@#\1***@#g' \
+    | sed -E 's/(gh[pousr]_[A-Za-z0-9]{8,}|github_pat_[A-Za-z0-9_]{8,}|glpat-[A-Za-z0-9_-]{8,})/***/g' \
+    | tail -2 | tr '\n' ' ' | sed -E 's/[[:space:]]+/ /g; s/ $//' | cut -c1-300
+}
+
 NOTIFY_LIB="${SYNC_EXTENSIONS_NOTIFY_LIB:-$HOME/IWE/DS-my-strategy/scripts/lib/notification-render.sh}"
 NOTIFY_LIB_AVAILABLE=false
 if [ -f "$NOTIFY_LIB" ]; then
@@ -170,7 +183,7 @@ alert_class_subject() {
 }
 
 alert() {
-  local class="$1" text="$2" subject="${3:-}"
+  local class="$1" text="$2" subject="${3:-}" detail="${4:-}"
   echo "$LOG_PREFIX $text"
   local full_text="$text" needs_decision=0
   if $NOTIFY_LIB_AVAILABLE; then
@@ -192,6 +205,9 @@ alert() {
       return 0
     fi
   fi
+  # Appended after the phase text, so the urgent replacement keeps it too.
+  [ -n "$detail" ] && full_text="$full_text
+Ошибка git: $detail"
   send_telegram "$full_text" "$needs_decision"
 }
 
@@ -374,11 +390,11 @@ if ! PULL_OUT=$(git pull --ff-only --quiet 2>&1); then
   # Real git error goes to the log, not only the alert (the old text guessed
   # "diverged" for any failure). A diverged copy whose only local-ahead commits
   # are our own auto-commits is safe to drop: the next copy regenerates them.
-  echo "$LOG_PREFIX pull error: $(echo "$PULL_OUT" | tail -2 | tr '\n' ' ')"
-  if drop_unpushed_auto_commits && git pull --ff-only --quiet 2>&1; then
+  echo "$LOG_PREFIX pull error: $(git_error_detail "$PULL_OUT")"
+  if drop_unpushed_auto_commits && PULL_OUT=$(git pull --ff-only --quiet 2>&1); then
     log_event self_healed "reason=pull_diverged"
   else
-    alert pull "🚨 sync-extensions-auto: git pull --ff-only провалился и само не лечится (в iwe-server-config есть чужие локальные коммиты или правки, либо origin недоступен) — auto-sync пропущен, нужна ручная проверка; причина git в логе на Маке"
+    alert pull "🚨 sync-extensions-auto: git pull --ff-only провалился и само не лечится (в iwe-server-config есть чужие локальные коммиты или правки, либо origin недоступен) — auto-sync пропущен, нужна ручная проверка" "" "$(git_error_detail "$PULL_OUT")"
     exit 1
   fi
 fi
@@ -698,7 +714,7 @@ fi
 PUSH_OUT=""
 log_event copy_committed "source_sha=$SOURCE_SHA" "config_sha=$(git rev-parse HEAD)" "file_count=$FILE_COUNT" "gate_partial=$GATE_FAILED"
 if ! PUSH_OUT=$(git push 2>&1); then
-  echo "$LOG_PREFIX push error tail: $(echo "$PUSH_OUT" | tail -3 | tr '\n' ' ')"
+  echo "$LOG_PREFIX push error tail: $(git_error_detail "$PUSH_OUT")"
   # Long tick (test gate can take 25+ min): origin moved meanwhile, push is
   # rejected as non-fast-forward. Drop our unpushed auto-commit now, otherwise
   # every later pull --ff-only fails (WP-485, stuck 05-07.11.2026). The next
@@ -711,7 +727,7 @@ if ! PUSH_OUT=$(git push 2>&1); then
     alert push-race "⚠️ Доставка расширений на сервер: пока шёл тест, GitHub ушёл вперёд, отправку отменил и пересоберу на следующем тике (само, действие не нужно; если сообщение повторяется — тик слишком долгий)"
     exit 1
   fi
-  alert push "🚨 sync-extensions-auto: коммит создан локально, но push провалился (${FILE_COUNT} файлов: ${FILE_LIST}...) — требуется ручное вмешательство, подробности в логе на Маке"
+  alert push "🚨 sync-extensions-auto: коммит создан локально, но push провалился (${FILE_COUNT} файлов: ${FILE_LIST}...) — требуется ручное вмешательство" "" "$(git_error_detail "$PUSH_OUT")"
   exit 1
 fi
 PUSH_COMPLETED=true
