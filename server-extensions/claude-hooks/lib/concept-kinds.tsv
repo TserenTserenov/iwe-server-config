@@ -76,7 +76,9 @@ system	модул
 system	функциональн[а-яё]+ подсистем
 system	подсистем
 system	средств
-description	цел(ь|и|ей|ью|ям|ями|ях)(?![а-яё])
+description	потребност
+description	изменени
+collection	релиз
 work_plan	стади[яиюей]+ работ
 ambiguous	баз[аеыу] данных
 ambiguous	хранилищ
