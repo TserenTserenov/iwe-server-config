@@ -89,6 +89,26 @@ let
     ln -s ${iwe}/DS-my-strategy/scripts/iwe-tg $out/bin/iwe-tg
   '';
 
+  # serverNotify <source-id> <text> — the one sending path for the watchers below
+  # (WP-568 Ф12 С4 stage 2, 07.11.2026). iwe-notify hands the text to the gateway,
+  # which picks live chat / morning digest by the source row in
+  # DS-my-strategy/scripts/telegram-transport-allowlist.conf; a direct Bot API
+  # send happens only inside iwe-notify when the gateway is unreachable, and is
+  # counted in the digest. Exit 0 = delivered or deferred to the digest.
+  # Without iwe-notify (root scripts not synced yet) nothing is sent and the
+  # failure is logged — a fallback curl here would be the bypass this replaces.
+  serverNotify = pkgs.writeShellScript "iwe-server-notify" ''
+    set -uo pipefail
+    export IWE_ROOT="${iwe}"
+    export PATH="${lib.makeBinPath (with pkgs; [ coreutils curl bash gnugrep gnused jq ])}:$PATH"
+    notify="${iwe}/scripts/iwe-notify"
+    if [ ! -x "$notify" ]; then
+      ${pkgs.util-linux}/bin/logger -p user.err -t iwe-server-notify "iwe-notify missing at $notify — message from $1 not sent"
+      exit 1
+    fi
+    exec "$notify" --source "$1" -- "$2"
+  '';
+
   commonPath = with pkgs; [ git openssh bash curl jq gawk caffeinate-stub postgresql pythonForIWE nodejs perl gh restic iweTgShim ]
     ++ [ "/home/tseren/.npm-global" "/run/wrappers" ];
 
@@ -417,11 +437,7 @@ let
 
       if [ "''${#to_send[@]}" -gt 0 ]; then
         msg="⚠️ На tsekh-1 сторож свежести не завершил проверку: ''${to_send[*]}. Рабочие файлы не менялись. Дальше: поручите агенту проверить журнал и владельцев локальных правок. Решение от вас пока не требуется. Повтор той же проблемы — не чаще раза в сутки."
-        ${pkgs.curl}/bin/curl -s --max-time 10 -X POST \
-          "https://api.telegram.org/bot''${TELEGRAM_BOT_TOKEN}/sendMessage" \
-          -d "chat_id=''${TELEGRAM_CHAT_ID}" \
-          --data-urlencode "text=$msg" \
-          > /dev/null || true
+        ${serverNotify} iwe-pull-repos "$msg" || true
       else
         ${pkgs.util-linux}/bin/logger -t iwe-pull-repos "all ''${#failed[@]} problem(s) withheld from Telegram (dedup or index-digest route)"
       fi
@@ -502,12 +518,8 @@ let
 
     # TG-алерт только при реальном push-failure (не на каждый skip). exit 0 always.
     if [ "''${#failed[@]}" -gt 0 ]; then
-      msg="⚠️ IWE push-ahead warnings (tsekh-1, $(${pkgs.coreutils}/bin/date '+%Y-%m-%d %H:%M')): ''${failed[*]}"
-      ${pkgs.curl}/bin/curl -s --max-time 10 -X POST \
-        "https://api.telegram.org/bot''${TELEGRAM_BOT_TOKEN}/sendMessage" \
-        -d "chat_id=''${TELEGRAM_CHAT_ID}" \
-        --data-urlencode "text=$msg" \
-        > /dev/null || true
+      msg="⚠️ На tsekh-1 не удалось отправить на GitHub сохранённые правки: ''${failed[*]}. Правки на сервере целы, следующая попытка через 2 часа. Что делать: если повторится, поручите агенту разобрать журнал отправки правок."
+      ${serverNotify} iwe-push-ahead "$msg" || true
     fi
 
     exit 0
@@ -688,14 +700,12 @@ let
       rejectHash=$(${pkgs.coreutils}/bin/sha256sum "$rejectLog" | ${pkgs.coreutils}/bin/cut -d' ' -f1) || exit 1
       prevHash=$(${pkgs.coreutils}/bin/cat "$rejectState" 2>/dev/null || true)
       if [ "$rejectHash" != "$prevHash" ]; then
-        # HTTP success alone is insufficient: Telegram can return ok=false.
-        # Do not consume the retry when delivery fails. A crash after delivery
-        # but before persisting the hash may duplicate the message (at-least-once).
-        if response=$(${pkgs.curl}/bin/curl -fsS --max-time 10 -X POST \
-          "https://api.telegram.org/bot''${TELEGRAM_BOT_TOKEN}/sendMessage" \
-          -d "chat_id=''${TELEGRAM_CHAT_ID}" \
-          --data-urlencode "text=⚠️ Contract sync (tsekh-1): ''${rejectedCount} подписок пропущено (некорректный период from/to в LMS), остальные синхронизированы. Список: $rejectLog на сервере.") \
-          && printf '%s' "$response" | ${pkgs.jq}/bin/jq -e '.ok == true' >/dev/null; then
+        # serverNotify exits 0 only when the gateway delivered the text or put it
+        # into the morning digest, so a failed delivery does not consume the retry.
+        # A crash after delivery but before persisting the hash may duplicate the
+        # message (at-least-once).
+        if ${serverNotify} payment-registry-contract-sync \
+          "⚠️ Сверка подписок с LMS на tsekh-1: ''${rejectedCount} подписок пропущено, у них в LMS неверный период действия. Остальные сверены. Что делать: поручите агенту разобрать список пропущенных подписок на сервере."; then
           stateTmp=$(${pkgs.coreutils}/bin/mktemp "''${rejectState}.XXXXXX") || exit 1
           if ! { printf '%s\n' "$rejectHash" > "$stateTmp" \
             && ${pkgs.coreutils}/bin/mv -f "$stateTmp" "$rejectState"; }; then
@@ -732,11 +742,8 @@ let
       exit 1
     fi
     if [ "$abe" -gt 20 ]; then
-      ${pkgs.curl}/bin/curl -s --max-time 10 -X POST \
-        "https://api.telegram.org/bot''${TELEGRAM_BOT_TOKEN}/sendMessage" \
-        -d "chat_id=''${TELEGRAM_CHAT_ID}" \
-        --data-urlencode "text=⚠️ Contract sync (tsekh-1): зелёный, но active-but-expired=''${abe} (порог 20). Возможно продления не доезжают." \
-        > /dev/null || true
+      TELEGRAM_NEEDS_DECISION=1 ${serverNotify} payment-registry-contract-sync \
+        "⚠️ Сверка подписок с LMS на tsekh-1 прошла, но ''${abe} подписок числятся активными с уже истёкшим сроком (порог 20). Похоже, продления не доходят до реестра. Что делать: поручите агенту проверить, доходят ли продления из LMS." || true
     fi
 
     # Dead-man's switch: пинг только при полном успехе (как в contract-sync.yml).
