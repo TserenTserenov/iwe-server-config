@@ -78,11 +78,11 @@ log_alert() {
   echo "$line" >&2
 }
 
+# WP-568 Ф12 С4: through iwe-notify (next to this script), which hands the
+# message to the governance gateway so the channel decision (chat vs morning
+# digest) applies; a direct Bot API send only when no gateway runs.
 notify_telegram() {
-  local msg="$1"
-  [ -n "${TELEGRAM_BOT_TOKEN:-}" ] && [ -n "${TELEGRAM_CHAT_ID:-}" ] || return 0
-  curl -s --max-time 10 -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
-    -d "chat_id=${TELEGRAM_CHAT_ID}" --data-urlencode "text=$msg" > /dev/null || true
+  "$(dirname "${BASH_SOURCE[0]}")/iwe-notify" --source semaphore-watchdog "$1" || true
 }
 
 # Найти meta.yaml пир-сессии по slug семафора. Свежая пир-сессия без единого

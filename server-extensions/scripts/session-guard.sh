@@ -6997,7 +6997,9 @@ for line in lines:
     if len(fields) not in (2, 4) or not re.fullmatch(r"[0-9a-fA-F]{40,64}", fields[1]):
         refuse("неоднозначный commit claim")
     if fields[0] != Path(repo).name:
-        other_claims.append(tuple(fields))
+        # Only repo and sha take part in the proof (WP-484 F290: a 4-field claim
+        # kept whole crashed `for name, commit in other_claims`).
+        other_claims.append((fields[0], fields[1]))
         continue
     commit = fields[1]
     parents = git("rev-list", "--parents", "-n", "1", commit).split()

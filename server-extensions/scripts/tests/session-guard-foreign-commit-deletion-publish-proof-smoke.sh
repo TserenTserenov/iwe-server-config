@@ -13,6 +13,8 @@
 #
 #   U: a claimed third-repo commit DELETING a claimed path -> owners resolve, no refusal
 #   V: the same commit ADDING the path (regression guard, must keep working)
+#   W: the same claims in the 4-field form `note-commit` writes (WP-484 F290:
+#      a 4-field foreign claim crashed close with "too many values to unpack")
 set -euo pipefail
 
 ROOT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
@@ -117,4 +119,15 @@ OUT_V=$(bash "$PROOF_HELPER" "$REPO" "governance checkout" "$SEM_V" "$REMOTE" \
 [ "$RC_V" -eq 0 ] || fail "V: scoped publish proof refused an ADD delivered by its claimed commit (rc $RC_V): $OUT_V"
 echo "PASS: V -- a claimed third-repo commit adding a claimed path still resolves ownership (regression guard)"
 
-echo "OK: session-guard scoped publish proof resolves foreign-repo deletions by commit (U/V)"
+# --- W: both claims in the 4-field form note-commit writes (`<repo> <sha> - -`).
+SEM_W="$TEST_ROOT/semaphore-w"
+make_semaphore "$SEM_W"
+sed -i.bak -E 's/^(commit: [^ ]+ [0-9a-f]+)$/\1 - -/' "$SEM_W"
+[ "$(grep -c '^commit: [^ ]* [0-9a-f]* - -$' "$SEM_W")" -eq 2 ] || fail "W: fixture does not hold two 4-field claims"
+OUT_W=$(bash "$PROOF_HELPER" "$REPO" "governance checkout" "$SEM_W" "$REMOTE" \
+  governance_worktree orz_sessions_dir "" "" 2>&1) && RC_W=0 || RC_W=$?
+grep -qF "too many values to unpack" <<<"$OUT_W" && fail "W: 4-field foreign claim crashed the proof: $OUT_W"
+[ "$RC_W" -eq 0 ] || fail "W: scoped publish proof refused 4-field claims (rc $RC_W): $OUT_W"
+echo "PASS: W -- 4-field claims (note-commit form) resolve like 2-field ones"
+
+echo "OK: session-guard scoped publish proof resolves foreign-repo deletions by commit (U/V/W)"
