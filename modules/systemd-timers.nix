@@ -136,6 +136,8 @@ let
   #   - skip dirty репо (защита локальных правок) + grace-період 30s + retry,
   #     чтобы не алертить на транзиентный dirty от фоновых синхронизаторов
   #     (synchronizer пишет sync-hashes/pulse state, knowledge-mcp reindex и т.п.)
+  #   - алерт о dirty только если самая свежая правка старше
+  #     PULL_REPOS_DIRTY_MIN_AGE_MIN (180 мин): свежие правки = живая сессия
   #   - exit 0 always (не блокирует scheduler tick)
   #
   # Исключения: DS-my-strategy обновляет собственный защищённый сервис;
@@ -223,6 +225,29 @@ let
           dirty_paths=$(echo "$dirty_non_triage_after" | ${pkgs.coreutils}/bin/head -3 | ${pkgs.coreutils}/bin/tr '\n' '|')
           dirty_paths="''${dirty_paths%|}"
           echo "DIRTY: $repo (uncommitted changes — пропускаю pull): $dirty_paths"
+          # WP-484 (07.11): a live session edits files for tens of minutes before
+          # committing (PACK-rhetoric 09:01 edit → 09:23 alert → 09:52 commit), and
+          # the 30s grace above cannot tell that from abandoned edits. Alert only
+          # when the newest dirty file is older than the threshold; fresher edits
+          # still skip the pull but stay in the log only. A path without a readable
+          # mtime (deleted, oddly quoted) counts as old, so the alert is never lost.
+          dirty_min_age_min="''${PULL_REPOS_DIRTY_MIN_AGE_MIN:-180}"
+          [[ "$dirty_min_age_min" =~ ^[0-9]+$ ]] || dirty_min_age_min=180
+          newest_mtime=0
+          while IFS= read -r dirty_line; do
+            dirty_path="''${dirty_line:3}"
+            dirty_path="''${dirty_path##* -> }"
+            path_mtime=$(${pkgs.coreutils}/bin/stat -c %Y -- "$dirty_path" 2>/dev/null) || continue
+            [ "$path_mtime" -gt "$newest_mtime" ] && newest_mtime=$path_mtime
+          done <<< "$dirty_non_triage_after"
+          if [ "$newest_mtime" -gt 0 ]; then
+            dirty_age_min=$(( ($(${pkgs.coreutils}/bin/date +%s) - newest_mtime) / 60 ))
+            if [ "$dirty_age_min" -lt "$dirty_min_age_min" ]; then
+              echo "DIRTY-FRESH: $repo (newest edit ''${dirty_age_min}min old < ''${dirty_min_age_min}min — likely a live session, no alert)"
+              ${pkgs.coreutils}/bin/rm -f "$fetch_pending"
+              continue
+            fi
+          fi
           # A checkout on a work branch holds another session's unfinished
           # edits (05.11: PACK-agent-rules on a WP-7 branch); the bare text read
           # to the pilot as "your rules are not saved" (WP-568 Ф12).
