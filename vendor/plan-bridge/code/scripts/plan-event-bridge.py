@@ -167,8 +167,10 @@ def scheduler_documents(configuration):
     timer = (
         "# Nominal retry while the host runs; no bound during sleep or outage.\n"
         "[Unit]\nDescription=Retry durable plan delivery\n\n"
-        "[Timer]\nOnCalendar=*-*-* *:*:00,25,50\nAccuracySec=1s\n"
-        "RandomizedDelaySec=0\nPersistent=true\nUnit=plan-event-bridge.service\n\n"
+        # K14: count from the end of the previous pass; a calendar tick merges
+        # into a still-running oneshot and widens the gap past 30 s.
+        "[Timer]\nOnActiveSec=5s\nOnBootSec=30s\nOnUnitInactiveSec=5s\nAccuracySec=1s\n"
+        "RandomizedDelaySec=0\nUnit=plan-event-bridge.service\n\n"
         "[Install]\nWantedBy=timers.target\n"
     )
     return {
