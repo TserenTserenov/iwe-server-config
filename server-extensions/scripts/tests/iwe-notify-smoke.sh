@@ -17,7 +17,9 @@ ok()  { echo "  ✅ $1"; PASS=$((PASS + 1)); }
 bad() { echo "  ❌ $1 — факт: ${2:-нет данных}"; FAIL=$((FAIL + 1)); }
 
 mkdir -p "$WORK/bin" "$WORK/iwe/DS-strategy/scripts"
-printf '%s\n' '#!/bin/bash' 'echo "$*" >> "$CURL_CALLS"' 'exit "${CURL_RC:-0}"' > "$WORK/bin/curl"
+# CURL_BODY: Telegram's reply (default ok:true); CURL_RC: curl's own failure.
+printf '%s\n' '#!/bin/bash' 'echo "$*" >> "$CURL_CALLS"' \
+  'printf "%s" "${CURL_BODY-{\"ok\":true\}}"' 'exit "${CURL_RC:-0}"' > "$WORK/bin/curl"
 GATEWAY="$WORK/iwe/DS-strategy/scripts/iwe-tg"
 # GATEWAY_STAGE: what the gateway's library would have written before dying.
 printf '%s\n' '#!/bin/bash' 'echo "$*" >> "$GATEWAY_CALLS"' \
@@ -174,6 +176,21 @@ if [ -x /bin/bash ] && /bin/bash -c '[ "${BASH_VERSINFO[0]}" -lt 4 ]'; then
   [ "$out" = "iwe-notify: outcome=direct-sent" ] && [ "$(count "$CURL_CALLS")" = 1 ] \
     && ok "bash 3.2: прямая отправка без кнопок работает" || bad "bash 3.2" "stdout=$out curl=$(count "$CURL_CALLS")"
 fi
+
+# --html, proxy, ok:false (peer-session 2026-11-08-06, template notifier parity).
+reset
+IWE_ROOT="$WORK/empty" "$NOTIFY" --source s-test --html "<b>Жирный</b> &amp; текст" >/dev/null 2>&1
+grep -q "parse_mode=HTML" "$CURL_CALLS" 2>/dev/null && ok "--html без шлюза: прямая отправка с разметкой HTML" \
+  || bad "--html без шлюза" "$(cat "$CURL_CALLS" 2>&1)"
+reset
+GATEWAY_RC=0 IWE_ROOT="$WORK/iwe" "$NOTIFY" --source s-test --html "<b>Жирный</b> &amp; текст" >/dev/null 2>&1
+grep -q -- "--source s-test -- Жирный & текст" "$GATEWAY_CALLS" 2>/dev/null \
+  && ok "--html со шлюзом: шлюзу уходит текст без тегов, &amp; раскрыт" || bad "--html со шлюзом" "$(cat "$GATEWAY_CALLS" 2>&1)"
+reset
+TELEGRAM_PROXY=socks5://p:1080 IWE_ROOT="$WORK/empty" "$NOTIFY" --source s-test "текст" >/dev/null 2>&1
+grep -q -- "--proxy socks5://p:1080" "$CURL_CALLS" 2>/dev/null && ok "TELEGRAM_PROXY: прямая отправка идёт через прокси" \
+  || bad "прокси" "$(cat "$CURL_CALLS" 2>&1)"
+outcome_case "Telegram ответил ok:false с кодом 200" direct-failed CURL_BODY='{"ok":false}' IWE_ROOT="$WORK/empty"
 
 # The gateway's own stdout never reaches the caller's outcome line.
 reset
