@@ -494,11 +494,16 @@ in
     systemd.timers.plan-event-bridge = lib.mkIf cfg.delivery.enable {
       description = "Повтор доставки плана, пока сервер доступен";
       wantedBy = [ "timers.target" ];
+      # K14 (DR-06): at most 30 s between delivery attempts. A calendar tick that
+      # lands on a still-running oneshot merges into it, so a 17 s pass turned the
+      # 25 s grid into a 35 s gap (WP-530 F85, 08.11). Counting from the end of the
+      # previous pass keeps the gap at pass length + 5 s with no phase merge.
       timerConfig = {
-        OnCalendar = "*-*-* *:*:00,25,50";
+        OnActiveSec = "5s";
+        OnBootSec = "30s";
+        OnUnitInactiveSec = "5s";
         AccuracySec = "1s";
         RandomizedDelaySec = 0;
-        Persistent = true;
         Unit = "plan-event-bridge.service";
       };
     };
