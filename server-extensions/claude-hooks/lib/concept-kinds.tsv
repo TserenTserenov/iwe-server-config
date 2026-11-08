@@ -80,6 +80,7 @@ description	потребност
 description	изменени
 collection	релиз
 work_plan	стади[яиюей]+ работ
+work_plan	фаз(а|ы|е|у|ой|ам|ами|ах)?(?![а-яё])
 ambiguous	баз[аеыу] данных
 ambiguous	хранилищ
 ambiguous	сервис
