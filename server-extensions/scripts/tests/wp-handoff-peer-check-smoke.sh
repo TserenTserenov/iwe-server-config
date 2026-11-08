@@ -265,6 +265,22 @@ OUT="$(run --sem "$IWE/.iwe-runtime/sessions/claude-code-s1.open")"
 has "$OUT" "без свежего fetch" "baseline без fetch: предупреждение"
 has "$(tail -1 "$LOG")" '"baseline_source": "local-unfetched"' "baseline без fetch: пометка в журнале"
 
+# 13c. F285 M1 revision: the task written at open names the session's phases; a phase it
+# names, whose block is in the field, but the writer's next step leaves out fails; the same
+# next step passes when the task names only Ф1.
+write_card "$(printf 'Ф1 — новое действие: проверить хук\n- Ф2 — второй шаг этой сессии')"
+printf '%s\n' "Ф1 — новое действие: проверить хук" >"$NEXT_FILE"
+make_sem peer-session with-baseline
+echo "task: РП-9 Ф1 и Ф2, РП-561 Ф46" >>"$IWE/.iwe-runtime/sessions/claude-code-s1.open"
+OUT="$(run --sem "$IWE/.iwe-runtime/sessions/claude-code-s1.open")"
+has "$(tail -1 "$LOG")" "| fail | HANDOFF_AGENT_PHASE_MISSING |" "заявленная Ф2 без блока: отказ"
+has "$(tail -1 "$LOG")" '"missing_in_agent_next": ["Ф2"]' "заявленная Ф2 без блока: какая фаза"
+write_card "Ф1 — новое действие: проверить хук"
+make_sem peer-session with-baseline
+echo "task: РП-9 Ф1, РП-561 Ф46" >>"$IWE/.iwe-runtime/sessions/claude-code-s1.open"
+OUT="$(run --sem "$IWE/.iwe-runtime/sessions/claude-code-s1.open")"
+has "$(tail -1 "$LOG")" "| pass | HANDOFF_OK |" "заявлена только своя Ф1: проходит"
+
 # 14. the two insertions in session-guard.sh are still there (open records the baseline, close calls the check)
 SG="$SCRIPTS/session-guard.sh"
 grep -q 'echo "baseline_card_oid: \$BASELINE_CARD_OID"' "$SG" && ok || bad "open не записывает baseline_card_oid"

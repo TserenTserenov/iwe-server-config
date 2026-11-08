@@ -291,22 +291,6 @@ iwe_scheduler_active() {
   [ "$(iwe_scheduler_state)" = "active" ]
 }
 
-# tg_notify MESSAGE — best-effort Telegram alert via TELEGRAM_BOT_TOKEN/
-# TELEGRAM_CHAT_ID. No-op, not an error, when either is unset — most callers
-# run in contexts (CI, smoke-tests, fresh installs) that never configure them.
-# jq-built payload (not hand-escaped JSON) so a message containing a quote or
-# newline can't produce malformed JSON that silently drops the alert.
-tg_notify() {
-  local msg="$1"
-  if [ -n "${TELEGRAM_BOT_TOKEN:-}" ] && [ -n "${TELEGRAM_CHAT_ID:-}" ]; then
-    local payload
-    payload=$(jq -n --arg chat "$TELEGRAM_CHAT_ID" --arg text "$msg" \
-      '{chat_id: $chat, text: $text, parse_mode: "Markdown"}')
-    curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
-      -H "Content-Type: application/json" -d "$payload" > /dev/null
-  fi
-}
-
 # iwe_safe_pull [-C REPO] — git pull --rebase that refuses to silently DROP a
 # local commit whose patch is already upstream under a different hash (the
 # case a plain `git rebase` mishandles: same change, different SHA, dropped

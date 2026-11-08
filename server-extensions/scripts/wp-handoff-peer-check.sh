@@ -180,8 +180,20 @@ fi
 set -- peer --card "$CARD"
 [ "$HAVE_BASELINE" = 1 ] && set -- "$@" --origin-file "$BASELINE_FILE"
 [ -n "$NEXT_ARGS" ] && set -- "$@" --what-next-file "$NEXT_FILE"
-RESULT="$(limited "$PY" "$CHECKER" "$@" 2>/dev/null)"
-RC=$?
+# F285 M1 revision (08.11): the task written at open names this session's phases, so the
+# checker can require their blocks in the writer's next step without trusting that text.
+TASK_TEXT="$(field task)"
+RESULT=""
+RC=2
+if [ -n "$TASK_TEXT" ]; then
+  RESULT="$(limited "$PY" "$CHECKER" "$@" --declared-text "$TASK_TEXT" 2>/dev/null)"
+  RC=$?
+fi
+if [ "$RC" -eq 2 ]; then
+  # No task, or a checker older than the revision rejects --declared-text: run without it.
+  RESULT="$(limited "$PY" "$CHECKER" "$@" 2>/dev/null)"
+  RC=$?
+fi
 STALE_CHECKER=0
 if [ "$RC" -eq 2 ] && [ -n "$NEXT_ARGS" ]; then
   # A governance worktree older than F285: its checker rejects --what-next-file.  Check

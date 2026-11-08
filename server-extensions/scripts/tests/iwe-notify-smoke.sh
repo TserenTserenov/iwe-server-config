@@ -145,5 +145,71 @@ IWE_ROOT="$W/iwe" GATEWAY_RC=0 bash "$W/scripts/semaphore-watchdog.sh" 2>/dev/nu
   && ok "сторож блокировок шлёт через шлюз со своим источником" \
   || bad "сторож блокировок" "gateway=$(cat "$GATEWAY_CALLS" 2>&1) curl=$(count "$CURL_CALLS")"
 
+# Outcome line (peer-session 2026-11-08-06): one stdout line tells a phone
+# delivery from a digest line; exit codes stay as before.
+# outcome_case <label> <expected outcome> <env...> -- run with that env
+outcome_case() {
+  local label="$1" want="$2" out; shift 2
+  reset
+  out="$(env "$@" "$NOTIFY" --source s-test "текст" 2>/dev/null)"
+  [ "$out" = "iwe-notify: outcome=$want" ] \
+    && ok "исход «${want}»: $label" || bad "исход «${want}»: $label" "stdout=$out"
+}
+outcome_case "Telegram подтвердил приём" sent GATEWAY_STAGE=sent GATEWAY_RC=0 IWE_ROOT="$WORK/iwe"
+outcome_case "шлюз отложил в сводку" deferred GATEWAY_RC=0 IWE_ROOT="$WORK/iwe"
+outcome_case "сбой транспорта у шлюза" transport-failed GATEWAY_RC=2 IWE_ROOT="$WORK/iwe"
+outcome_case "карантин" quarantined GATEWAY_RC=3 IWE_ROOT="$WORK/iwe"
+outcome_case "шлюз упал после начала отправки" skipped GATEWAY_STAGE=attempt GATEWAY_RC=143 IWE_ROOT="$WORK/iwe"
+outcome_case "нет шлюза" direct-sent IWE_ROOT="$WORK/empty"
+outcome_case "нет шлюза, Telegram отклонил" direct-failed CURL_RC=22 IWE_ROOT="$WORK/empty"
+outcome_case "нет шлюза и ключей" not-sent TELEGRAM_BOT_TOKEN= IWE_ROOT="$WORK/empty"
+
+outcome_case "шлюз упал после подтверждения Telegram" sent GATEWAY_STAGE=sent GATEWAY_RC=1 IWE_ROOT="$WORK/iwe"
+
+# macOS system bash 3.2 (launchd jobs): an empty array under set -u must not
+# stop the direct send (review 08.11). Skipped where /bin/bash is not 3.x.
+if [ -x /bin/bash ] && /bin/bash -c '[ "${BASH_VERSINFO[0]}" -lt 4 ]'; then
+  reset
+  out="$(IWE_ROOT="$WORK/empty" /bin/bash "$NOTIFY" --source s-test "текст" 2>/dev/null)"
+  [ "$out" = "iwe-notify: outcome=direct-sent" ] && [ "$(count "$CURL_CALLS")" = 1 ] \
+    && ok "bash 3.2: прямая отправка без кнопок работает" || bad "bash 3.2" "stdout=$out curl=$(count "$CURL_CALLS")"
+fi
+
+# The gateway's own stdout never reaches the caller's outcome line.
+reset
+printf '%s\n' '#!/bin/bash' 'echo "noise on stdout"' 'exit 0' > "$WORK/noisy-gw"; chmod +x "$WORK/noisy-gw"
+out="$(IWE_NOTIFY_GATEWAY="$WORK/noisy-gw" "$NOTIFY" --source s-test "текст" 2>/dev/null)"
+[ "$out" = "iwe-notify: outcome=deferred" ] && ok "вывод шлюза не попадает в строку исхода" || bad "вывод шлюза" "stdout=$out"
+
+# --reply-markup: with a gateway the text goes through it without buttons and
+# its verdict stays final (quarantine -> no direct send); without a gateway the
+# one direct send carries the buttons.
+reset
+GATEWAY_RC=3 IWE_ROOT="$WORK/iwe" "$NOTIFY" --source s-test --reply-markup '{"inline_keyboard":[]}' "текст" >/dev/null 2>&1; rc=$?
+[ "$rc" = 3 ] && [ "$(count "$GATEWAY_CALLS")" = 1 ] && ! grep -q "inline_keyboard" "$GATEWAY_CALLS" \
+  && [ "$(count "$CURL_CALLS")" = 0 ] \
+  && ok "кнопки при шлюзе: текст через шлюз без кнопок, карантин окончателен" \
+  || bad "кнопки при шлюзе" "rc=$rc gateway=$(cat "$GATEWAY_CALLS" 2>&1) curl=$(count "$CURL_CALLS")"
+reset
+IWE_ROOT="$WORK/empty" "$NOTIFY" --source s-test --reply-markup '{"inline_keyboard":[]}' "текст" >/dev/null 2>&1
+grep -q "reply_markup=" "$CURL_CALLS" 2>/dev/null && [ "$(count "$CURL_CALLS")" = 1 ] \
+  && ok "кнопки без шлюза: одна прямая отправка с кнопками" || bad "кнопки без шлюза" "$(cat "$CURL_CALLS" 2>&1)"
+
+# Copies of this canon (server-extensions, template) must be byte-equal, or the
+# three hosts would run three different 0/2/3 contracts (peer-session
+# 2026-11-08-06, Kimi). A copy whose repository is not on this host is skipped.
+# IWE_NOTIFY_COPIES overrides the list (colon-separated paths).
+COPIES="${IWE_NOTIFY_COPIES:-$HOME/IWE/iwe-server-config/server-extensions/scripts/iwe-notify:$HOME/IWE/FMT-exocortex-template/scripts/iwe-notify}"
+IFS=: read -r -a copy_list <<< "$COPIES"
+for copy in "${copy_list[@]}"; do
+  if [ ! -d "$(dirname "$(dirname "$copy")")" ]; then
+    echo "  ⏭  копия $copy: репозитория нет на этом хосте — пропуск"
+  elif cmp -s "$NOTIFY" "$copy"; then
+    ok "копия совпадает с каноном: $copy"
+  else
+    bad "копия расходится с каноном (перенесите scripts/iwe-notify побайтово)" "$copy"
+  fi
+done
+
 echo "итог: ✅ $PASS  ❌ $FAIL"
 [ "$FAIL" -eq 0 ]
