@@ -12480,6 +12480,131 @@ if not reflog or reflog[-1] != head:
 PY_NCC
 }
 
+# --- Intent gate at the claim point (WP-561 Ф33) ---------------------------
+# Opt-in observation: IWE_INTENT_GATE_NOTE_FILE=warn turns it on, anything else
+# (default: unset) keeps note-file exactly as before; rollback is
+# `unset IWE_INTENT_GATE_NOTE_FILE`. After a NEW claim is written and the
+# session lock is released, the claim is declared as an intent through
+# intent-gate.sh and checked against earlier open intents of other agents on
+# the same <repo>:<path> in the same WP. A non-zero check is appended to
+# .iwe-runtime/intent-gate-note-file.log: note-file runs from a PostToolUse hook
+# that discards its output, so stderr alone would never reach anyone.
+# There is no refusing mode here: the claim point runs after the file is
+# already written, so refusing the claim cannot prevent the write.
+# Limits (by the gate's key and rules): sessions of DIFFERENT WPs claiming one
+# shared file, and two sessions of the SAME agent name, are not conflicts.
+intent_gate_enabled() {
+  case "${IWE_INTENT_GATE_NOTE_FILE:-off}" in
+    warn) return 0 ;;
+    off) return 1 ;;
+    *)
+      echo "intent gate: unknown IWE_INTENT_GATE_NOTE_FILE='${IWE_INTENT_GATE_NOTE_FILE}', treated as off" >&2
+      mkdir -p "$IWE_ROOT/.iwe-runtime" 2>/dev/null \
+        && printf '%s\tunknown_flag\t%s\n' "$(now_iso)" "${IWE_INTENT_GATE_NOTE_FILE}" \
+          >> "$IWE_ROOT/.iwe-runtime/intent-gate-note-file.log" 2>/dev/null || true
+      return 1
+      ;;
+  esac
+}
+
+intent_gate_script() {
+  printf '%s\n' "$IWE_ROOT/$GOV_REPO/scripts/intent-gate.sh"
+}
+
+# Intents of a session live in their own directory, not beside the semaphore:
+# sweepers treat any `<name>.open.*` file there as a semaphore in a terminal state.
+intent_gate_intents_file() {  # <semaphore path as opened>
+  printf '%s\n' "$IWE_ROOT/.iwe-runtime/intent-gate/$(basename "$1").intents"
+}
+
+intent_gate_wp_number() {  # <semaphore file>; prints N for `wp: WP-N`, fails otherwise
+  local wp
+  wp=$(_unique_record_field "$1" wp 2>/dev/null) || return 1
+  [[ "$wp" =~ ^WP-([0-9]+)$ ]] || return 1
+  printf '%s\n' "${BASH_REMATCH[1]}"
+}
+
+# intent_gate_repo_name <repo root>: the origin repository name, the same on every
+# host and in every worktree; the checkout directory name only when there is no origin.
+intent_gate_repo_name() {
+  local url
+  url=$(git -C "$1" remote get-url origin 2>/dev/null || true)
+  url="${url%/}"
+  url="${url%.git}"
+  if [ -n "$url" ]; then
+    printf '%s\n' "${url##*[/:]}"
+  else
+    basename "$(git -C "$1" rev-parse --show-toplevel)"
+  fi
+}
+
+# intent_gate_observe <semaphore> <target> <agent> -- never fails note-file. Must run
+# with the session lock already released: check fetches origin (up to ~20 s).
+intent_gate_observe() {
+  local sem="$1" target="$2" agent="$3" script wp intent_id rc=0
+  local log="$IWE_ROOT/.iwe-runtime/intent-gate-note-file.log"
+  script=$(intent_gate_script)
+  if [ ! -f "$script" ]; then
+    echo "intent gate: $script not found, $target claimed without an intent" >&2
+    return 0
+  fi
+  if ! wp=$(intent_gate_wp_number "$sem"); then
+    echo "intent gate: session wp is not WP-<number>, $target claimed without an intent" >&2
+    return 0
+  fi
+  if ! intent_id=$(bash "$script" declare --wp "$wp" --target "$target" --type note-file \
+      --agent "$agent" </dev/null 2>/dev/null 195>&- 196>&-); then
+    printf '%s\t%s\tWP-%s\t%s\tdeclare_failed\n' "$(now_iso)" "$agent" "$wp" "$target" >> "$log"
+    return 0
+  fi
+  if [ ! -f "$sem" ]; then
+    # The session closed while this claim was being declared: nothing will read
+    # an intents file for it any more, so the intent is withdrawn at once.
+    bash "$script" resolve --intent-id "$intent_id" --wp "$wp" --agent "$agent" \
+      </dev/null >/dev/null 2>&1 195>&- 196>&- || true
+    return 0
+  fi
+  mkdir -p "$IWE_ROOT/.iwe-runtime/intent-gate"
+  printf '%s %s %s\n' "$intent_id" "$agent" "$target" >> "$(intent_gate_intents_file "$sem")"
+  bash "$script" check --wp "$wp" --target "$target" --agent "$agent" --intent-id "$intent_id" \
+    </dev/null >/dev/null 2>&1 195>&- 196>&- || rc=$?
+  if [ "$rc" -ne 0 ]; then
+    printf '%s\t%s\tWP-%s\t%s\tcheck_rc=%s\t%s\n' "$(now_iso)" "$agent" "$wp" "$target" "$rc" "$intent_id" >> "$log"
+    echo "intent gate: check exited $rc for $target (1 = earlier open intent of another agent), see $log" >&2
+  fi
+  return 0
+}
+
+# intent_gate_resolve_session <semaphore path as opened> <closed copy> -- best effort,
+# never fails close. Runs whenever intents were recorded, whatever the flag says now:
+# the closing process may not share the claiming process's environment. One overall
+# budget (each resolve fetches origin): what does not fit lapses with the two-day
+# check window instead of holding the close.
+INTENT_GATE_RESOLVE_BUDGET_SEC="${INTENT_GATE_RESOLVE_BUDGET_SEC:-30}"
+intent_gate_resolve_session() {
+  local intents closed="$2" script wp intent_id agent left deadline
+  intents=$(intent_gate_intents_file "$1")
+  [ -f "$intents" ] || return 0
+  script=$(intent_gate_script)
+  deadline=$((SECONDS + INTENT_GATE_RESOLVE_BUDGET_SEC))
+  if [ -f "$script" ] && wp=$(intent_gate_wp_number "$closed"); then
+    while read -r intent_id agent _; do
+      [ -n "$intent_id" ] || continue
+      left=$((deadline - SECONDS))
+      if [ "$left" -le 0 ]; then
+        echo "intent gate: close budget ${INTENT_GATE_RESOLVE_BUDGET_SEC}s spent; remaining intents lapse with the two-day check window" >&2
+        break
+      fi
+      # `timeout` is coreutils; without it the per-call fetch cap of the gate still applies.
+      $(command -v timeout >/dev/null 2>&1 && printf 'timeout %s' "$left") bash "$script" resolve --intent-id "$intent_id" --wp "$wp" --agent "$agent" \
+        </dev/null >/dev/null 2>&1 195>&- 196>&- \
+        || echo "intent gate: resolve of $intent_id at close failed; it lapses with the two-day check window" >&2
+    done < "$intents"
+  fi
+  rm -f "$intents"
+  return 0
+}
+
 if [ "$CMD" = "close" ]; then
   if [ -n "$HOUSEKEEPING" ]; then
     [[ "$HOUSEKEEPING" =~ ^[a-zA-Z0-9][a-zA-Z0-9._-]{0,127}$ ]] \
@@ -13510,6 +13635,8 @@ print(json.dumps({"wp": sys.argv[1], "slug": sys.argv[2], "agent": sys.argv[3], 
 
   prune_closed_session_worktrees "$_sem_read"
 
+  intent_gate_resolve_session "$SEM_FILE" "$_sem_read"
+
   exit 0
 fi
 
@@ -13878,7 +14005,11 @@ print(os.path.relpath(f, r))
   NOTE_V2=$(python3 -c 'import json,os,sys; print("file_v2: " + json.dumps({"repo":os.path.realpath(sys.argv[1]),"path":sys.argv[2]},sort_keys=True))' "$NOTE_COMMON" "$REL_PATH") || exit 1
   # Pair only this new legacy-compatible line with its following v2 record.
   # Never reinterpret an older unqualified claim of the same name.
-  grep -qxF "$NOTE_V2" "$SEM_FILE" || printf '%s\n%s\n' "file: $REL_PATH" "$NOTE_V2" >> "$SEM_FILE"
+  NOTE_NEW_CLAIM=false
+  if ! grep -qxF "$NOTE_V2" "$SEM_FILE"; then
+    printf '%s\n%s\n' "file: $REL_PATH" "$NOTE_V2" >> "$SEM_FILE"
+    NOTE_NEW_CLAIM=true
+  fi
 
   # WP-484 Ф133 (24.08, пир-сессия с Codex): авто-продление аренды при
   # реальной активности. Живой инцидент Ф132 п.5 -- многораундовая пир-сессия
@@ -13908,6 +14039,10 @@ print(os.path.relpath(f, r))
   fi
 
   echo "Noted in scope: $REL_PATH"
+  if [ "$NOTE_NEW_CLAIM" = true ] && intent_gate_enabled; then
+    release_session_transition_lock || true
+    intent_gate_observe "$SEM_FILE" "$(intent_gate_repo_name "$REPO_ROOT"):$REL_PATH" "$NOTE_AGENT" || true
+  fi
   exit 0
 fi
 
