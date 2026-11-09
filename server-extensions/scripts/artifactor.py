@@ -59,10 +59,10 @@ import sys
 import json
 import re
 
-# Реестр — сиблинг-репозиторий PACK-digital-platform (см. тот же паттерн
-# резолва в DS-my-strategy/scripts/check-result-kind.py). IWE_ROOT: явный env
-# override, иначе родитель этого файла на два уровня выше scripts/
-# (штатная раскладка ~/IWE/scripts/artifactor.py рядом с ~/IWE/PACK-digital-platform).
+# The registry is a sibling repository PACK-digital-platform (see the same resolution
+# pattern in DS-my-strategy/scripts/check-result-kind.py). IWE_ROOT: explicit env
+# override, otherwise the parent of this file two levels above scripts/
+# (standard layout ~/IWE/scripts/artifactor.py next to ~/IWE/PACK-digital-platform).
 PACK_ROOT_REL = "PACK-digital-platform"
 PACK_REGISTRY_REL = os.path.join(
     PACK_ROOT_REL, "pack", "digital-platform", "result-kinds-registry.yaml"
@@ -98,21 +98,21 @@ def load_registry_kind_ids():
         pack_root = os.path.join(resolve_iwe_root(), PACK_ROOT_REL)
         if not os.path.isdir(pack_root):
             raise RegistryPackMissing(pack_root) from None
-        return None  # Pack установлен, но файла реестра в нём нет — порча, CONFIG_ERROR
+        return None  # Pack is installed but the registry file is missing from it -- corruption, CONFIG_ERROR
     except OSError:
         return None
     ids = {m.group(1) for line in lines if (m := KIND_ID_LINE_RE.match(line))}
     return ids or None
 
-# Третий элемент — expected kind_id (WP-481 Ф7), четвёртый — название
-# артефакта, пятый — result_type (WP-575 Ф2: "system" | "episteme" |
-# "unresolved", см. докстринг модуля). Все значения живут в одной карте:
-# отдельные параллельные словари незаметно разошлись бы с маршрутизацией.
-# None/"unresolved" + запись в SPECIAL_RESOLUTION — для осознанных исключений
-# (peer_session, spec_writing, и записи с неоднозначным result_type), не
-# «забыли заполнить».
+# The third element is the expected kind_id (WP-481 Phase 7), the fourth is the
+# artifact name, the fifth is result_type (WP-575 Phase 2: "system" | "episteme" |
+# "unresolved", see the module docstring). All values live in one map:
+# separate parallel dictionaries would silently drift from the routing.
+# None/"unresolved" + an entry in SPECIAL_RESOLUTION are for deliberate exceptions
+# (peer_session, spec_writing, and entries with an ambiguous result_type), not
+# "forgot to fill in".
 KEYWORD_MAP = {
-    # trivial — WorkDone: детерминированный трейс завершённого протокола
+    # trivial -- WorkDone: a deterministic trace of a completed protocol
     "day-open": ("day_open", "trivial", "WorkDone", "План дня", "episteme"),
     "day open": ("day_open", "trivial", "WorkDone", "План дня", "episteme"),
     "открывай день": ("day_open", "trivial", "WorkDone", "План дня", "episteme"),
@@ -127,16 +127,16 @@ KEYWORD_MAP = {
     "ошибк бота": ("bot_fix", "closed-loop", "WorkDone", "Бот", "system"),     # matches «ошибка» and «ошибки»
     "фиксы": ("bug_fix", "closed-loop", "WorkDone", "Патч кода", "system"),
     "устранить": ("bug_fix", "closed-loop", "WorkDone", "Патч кода", "system"),
-    "доделать рп": ("wp_finish", "closed-loop", "WorkDone", "Файлы фазы РП", "unresolved"),  # результат зависит от конкретного РП — код или документ
+    "доделать рп": ("wp_finish", "closed-loop", "WorkDone", "Файлы фазы РП", "unresolved"),  # the result depends on the specific WP -- code or a document
     "хвосты рп": ("wp_finish", "closed-loop", "WorkDone", "Файлы фазы РП", "unresolved"),
     "закрыть рп": ("wp_close", "closed-loop", "WorkDone", "Отчёт о закрытии РП", "unresolved"),
     "передать андрею": ("wp_close", "closed-loop", "WorkDone", "Файлы РП", "unresolved"),
     "актуализация wp": ("wp_actualize", "closed-loop", "WorkDone", "Карточка РП", "episteme"),
     "ревью рп": ("code_review", "closed-loop", "Episteme", "Отчёт ревью", "episteme"),
     "ревью работы": ("code_review", "closed-loop", "Episteme", "Отчёт ревью", "episteme"),
-    "разбор ke": ("ke_review", "closed-loop", "ChoiceResult", "Решение по кандидатам знаний", "episteme"),  # R15 accept/reject/defer, не граф claim'ов
+    "разбор ke": ("ke_review", "closed-loop", "ChoiceResult", "Решение по кандидатам знаний", "episteme"),  # R15 accept/reject/defer, not a graph of claims
     "триаж": ("wp_triage", "closed-loop", "ChoiceResult", "Решение по триажу РП", "episteme"),
-    "реализация плана": ("wp_implement", "closed-loop", "WorkDone", "Рабочие пакеты из плана", "unresolved"),  # план уже был; появляются РП, кодом или документом
+    "реализация плана": ("wp_implement", "closed-loop", "WorkDone", "Рабочие пакеты из плана", "unresolved"),  # the plan already existed; WPs appear, as code or a document
     "миграция": ("wp_implement", "closed-loop", "WorkDone", "Данные в целевом контуре", "system"),
     "создай pack": ("pack_create", "closed-loop", "Episteme", "Паспорт Pack", "episteme"),
     "новый pack": ("pack_create", "closed-loop", "Episteme", "Паспорт Pack", "episteme"),
@@ -161,8 +161,8 @@ for _kw, _entry in KEYWORD_MAP.items():
         raise AssertionError(f"KEYWORD_MAP[{_kw!r}]: invalid result_type {_entry[4]!r}")
 del _kw, _entry
 
-# Статусы связки «документ ↔ производитель» (WP-575 Ф4). Блокирующие для
-# регистрации РП — mismatch, needs_result, unresolved (решает потребитель).
+# Statuses of the document <-> producer link (WP-575 Phase 4). Blocking for
+# work-product registration: mismatch, needs_result, unresolved (the consumer decides).
 VALID_PAIR_STATUSES = (
     "ok",
     "mismatch",
@@ -172,41 +172,44 @@ VALID_PAIR_STATUSES = (
     "agent_check_required",
 )
 
-# Keyword-путь не рассуждает: связку проверяет потребитель по тексту запроса.
+# The keyword path does not reason: the consumer checks the link against the request text.
 KEYWORD_PAIR_LINK = {"status": "agent_check_required", "producer": None, "output": None}
 
-# --- Жёсткая сверка названия с Реестром понятий и родов (WP-575 Ф5) -----------
-# Решение пилота 27.10: блок на всё, что реестр не подтвердил; обход — только
-# флагом --registry-waiver скрипта create-wp.sh с причиной в карточке.
-# Для системы совместим один род «система» (правило реестра: системой называется
-# только он); для документа — описание, документ, план работ, набор.
+# --- Hard check of the name against the concept-kinds registry (WP-575 Phase 5) ---
+# Pilot decision 27.10: block everything the registry did not confirm; the only bypass
+# is the --registry-waiver flag of create-wp.sh with a reason in the card.
+# A system is compatible with one kind only, "system" (registry rule: only it is called
+# a system); a document with description, document, work plan, collection.
+# Without the PACK-digital-platform directory and without CONCEPT_KINDS_REGISTRY the
+# check is skipped (code 0, "no-pack"): the registry ships with the author's Pack, not
+# with the template, the same distinction as issue #1231 makes for the result-kinds registry.
 REGISTRY_COMPAT = {
     "system": ("system",),
     "episteme": ("description", "document", "work_plan", "collection"),
 }
-# Название лучше начинать с существительного — предмета результата (пожелание пилота 27.10).
-# Первое слово-прилагательное, местоимение, число, предлог, союз или приставка
-# («Системный журнал», «Нового реестр», «Для реестра», «Мини реестр») даёт предупреждение
-# и требует ответа ИИ о предмете результата; это не отказ — списки окончаний и служебных
-# слов неполны и ошибаются на существительных («Описание», «Решение», «Пост», «Слой»).
+# A name should start with a noun, the subject of the result (pilot's wish 27.10).
+# A first word that is an adjective, pronoun, number, preposition, conjunction or prefix
+# («Системный журнал», «Нового реестр», «Для реестра», «Мини реестр») gives a warning
+# and requires the AI's answer about the subject of the result; it is not a refusal: the lists
+# of endings and function words are incomplete and misfire on nouns («Описание», «Решение», «Пост», «Слой»).
 INTRODUCTORY_WORDS = frozenset((
-    # местоимения и определители
+    # pronouns and determiners
     "мой", "моя", "моё", "мои", "наш", "наша", "наше", "наши", "ваш", "ваша", "ваше", "ваши",
     "свой", "своя", "своё", "свои", "этот", "эта", "это", "эти", "тот", "та", "то", "те",
     "один", "одна", "одно", "одни", "весь", "вся", "всё", "все", "всех", "каждый", "любой", "такой",
     "его", "её", "ее", "их", "сам", "сама", "само", "сами", "какой", "какая", "какое", "какие",
-    # числительные словами
+    # numerals spelled out
     "два", "две", "три", "четыре", "пять", "шесть", "семь", "восемь", "девять", "десять", "сто",
     "двух", "трёх", "трех", "первый", "второй", "третий",
-    # предлоги, союзы, частицы
+    # prepositions, conjunctions, particles
     "для", "по", "из", "в", "на", "с", "со", "к", "о", "об", "от", "при", "без", "через", "между",
     "над", "под", "за", "у", "про", "не", "что", "как", "ещё", "еще", "или", "и", "либо", "а", "но",
-    # приставки, стоящие отдельным словом
+    # prefixes written as a separate word
     "мини", "микро", "мета", "супер", "ультра", "авто", "пост", "пре", "нано", "макро", "псевдо",
     "квази", "анти", "мульти",
 ))
-# Окончания прилагательных, в том числе косвенных форм. Окончания, которыми часто оканчиваются
-# существительные (им, ем, ом, ым: «режим», «дым»), сюда намеренно не входят.
+# Adjective endings, oblique forms included. Endings that nouns often have
+# (им, ем, ом, ым: «режим», «дым») are deliberately left out.
 ADJECTIVE_END_RE = re.compile(r"(?:ый|ий|ой|ая|яя|ое|ее|ую|юю|ые|ие|ого|его|ому|ему|ых|их|ыми|ими)$")
 NUMERAL_RE = re.compile(r"^\d+(?:-[а-яa-z]+)?$", re.IGNORECASE)
 WORD_RE = re.compile(r"[а-яёa-z0-9]+(?:-[а-яёa-z0-9]+)*", re.IGNORECASE)
@@ -226,7 +229,7 @@ def load_concept_kinds():
     spec = importlib.util.spec_from_file_location("concept_kind", path)
     module = importlib.util.module_from_spec(spec)
     try:
-        spec.loader.exec_module(module)  # без PyYAML модуль завершается через SystemExit(0)
+        spec.loader.exec_module(module)  # without PyYAML the module exits via SystemExit(0)
     except SystemExit as exc:
         raise RuntimeError("нет модуля PyYAML для чтения реестра понятий") from exc
     return module
@@ -303,14 +306,14 @@ def registry_verdict(ck, data, digest, name, result_type, compatible, ai):
         if words[1:2] and words[1] in COORDINATORS:
             outcome, why = "ambiguous", f"составная голова «{' '.join(words[:4])}» не разобрана"
         else:
-            # Реестр спрашиваем первым: «Описание», «Решение» похожи на прилагательные по
-            # окончанию, но реестр знает их род, и конфликт с типом результата остаётся жёстким.
+            # Ask the registry first: «Описание», «Решение» look like adjectives by their
+            # ending, but the registry knows their kind, and a conflict with the result type stays hard.
             hits = ck.term_kind(data, head)
-            if warning:  # «системный», «платформенный» только начинаются как слово реестра
+            if warning:  # «системный», «платформенный» only start like a registry word
                 hits = [t for t in hits if stem_remainder(t, head) <= 2]
             kinds = sorted({t["kind"] for t in hits})
             by_name = close_kind_by_name if warning else ck.kind_by_name
-            named_kind = None if hits else by_name(data, head)  # «Система …», «Описание …»
+            named_kind = None if hits else by_name(data, head)  # «Система …», «Описание …» (the kind's own name)
             if named_kind is not None:
                 hits, kinds = [{"term": named_kind["name"]}], [named_kind["id"]]
             if not hits:
@@ -331,7 +334,7 @@ def registry_verdict(ck, data, digest, name, result_type, compatible, ai):
         known = {k for k in ck.kind_index(data) if k != "ambiguous"}
         code, text = ai_verdict(known, head, outcome, why, result_type, compatible, ai)
         if code == 0 and outcome == "modifier":
-            text += f" ⚠ {why}"  # предупреждение, не отказ: решает ответ ИИ
+            text += f" ⚠ {why}"  # a warning, not a refusal: the AI's answer decides
     ck.log("artifactor", digest, "gate", head, f"{outcome}->{code}", ai.get("kind") or result_type)
     return code, text
 
@@ -339,28 +342,35 @@ def registry_verdict(ck, data, digest, name, result_type, compatible, ai):
 def check_registry(result: dict, title: str | None = None, ai: dict | None = None) -> tuple[int, str]:
     """(код, пояснение): 0 — пропущено, 4 — блок, 5 — нужно решение пилота.
     Блок без обхода — только когда реестр знает слово и род противоречит типу результата.
-    Реестр не читается или имеет неожиданную структуру — закрытый отказ (4), не трассировка."""
+    Пак PACK-digital-platform не установлен и CONCEPT_KINDS_REGISTRY не задан — сверки
+    нет (0, «no-pack»), как в issue #1231. Пак есть, а реестр не читается или имеет
+    неожиданную структуру — закрытый отказ (4), не трассировка."""
     name = title or result.get("artifact") or ""
     result_type = result.get("result_type")
     compatible = REGISTRY_COMPAT.get(result_type)
     if compatible is None:
         return 4, f"тип результата «{result_type}» не определён (нужен system или episteme)"
+    # checked before load_concept_kinds(): without the Pack there is nothing to import or read
+    if not os.environ.get("CONCEPT_KINDS_REGISTRY") and not os.path.isdir(
+        os.path.join(resolve_iwe_root(), PACK_ROOT_REL)
+    ):
+        return 0, f"no-pack {PACK_ROOT_REL} не установлен — сверка названия с реестром понятий пропущена"
     try:
         ck = load_concept_kinds()
         data, digest = ck.load()
-    except Exception as exc:  # noqa: BLE001 — любой сбой загрузки = отказ, замок не открывается
+    except Exception as exc:  # noqa: BLE001 -- any load failure is a refusal, the lock does not open
         return 4, f"реестр понятий не читается или повреждён ({type(exc).__name__}: {exc})"
     try:
         return registry_verdict(ck, data, digest, name, result_type, compatible, ai or {})
-    except Exception as exc:  # noqa: BLE001 — своя ошибка проверки не должна открыть замок
+    except Exception as exc:  # noqa: BLE001 -- the check's own error must not open the lock
         return 4, f"внутренняя ошибка проверки названия ({type(exc).__name__}: {exc}); реестр загружен"
 
 
-# task_type → почему expected_result_kind = None. Единственное легитимное
-# основание для None — одна из этих двух причин, не «забыли решить».
+# task_type → why expected_result_kind = None. The only legitimate
+# ground for None is one of these two reasons, not "forgot to decide".
 SPECIAL_RESOLUTION = {
-    "peer_session": "deferred-to-session",  # мета-триггер старта процесса, kind решается на Decision Gate внутри сессии
-    "spec_writing": "unresolved",           # ни один из 6 kind-ов не покрывает — не подменять ближайшим (анти-утечка в супертип)
+    "peer_session": "deferred-to-session",  # a meta-trigger for starting a process, the kind is decided at the Decision Gate inside the session
+    "spec_writing": "unresolved",           # none of the 6 kinds covers it -- do not substitute the nearest one (anti-leak into a supertype)
 }
 
 BUDGET_BY_CLASS = {
@@ -446,7 +456,7 @@ def run_advice(args: list[str]) -> None:
         with open(args[0], encoding="utf-8") as fh:
             advice = producer_advice(json.load(fh), producer)
     except (OSError, json.JSONDecodeError):
-        advice = None  # без читаемого результата подсказывать нечего: замок уже отказал бы выше
+        advice = None  # no readable result, nothing to advise: the lock would have refused above
     if advice:
         print(advice)
     sys.exit(0)
@@ -507,8 +517,8 @@ def main() -> None:
             "pair_link": dict(KEYWORD_PAIR_LINK),
             "expected_result_kind": expected_result_kind,
             "result_kind_resolution": result_kind_resolution,
-            # Стратегическая связь не выводится из ключевых слов: Артефактор
-            # передаёт обязательный вопрос в WP Gate, а не приписывает H-NNN.
+            # The strategic link is not derived from keywords: the Artifactor
+            # passes the mandatory question to the WP Gate, and does not assign an H-NNN.
             "hypothesis_relation": "unclassified",
         }
         print(json.dumps(result, ensure_ascii=False))

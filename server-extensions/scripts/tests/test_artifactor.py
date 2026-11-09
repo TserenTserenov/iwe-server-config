@@ -116,12 +116,23 @@ def test_no_keyword_match_unchanged():
     assert r.stdout.strip() == "NO_KEYWORD_MATCH"
 
 
-def test_config_error_on_missing_registry():
-    """Fail-closed (не тихий откат к schema 1) — тот же принцип, что в
-    check-result-kind.py."""
-    r = run_artifactor("открывай день", env_extra={"IWE_ROOT": "/tmp/nonexistent-iwe-root-test"})
+def test_config_error_on_missing_registry(tmp_path):
+    """Пак есть, а реестра видов результата в нём нет → fail-closed (не тихий откат
+    к schema 1) — тот же принцип, что в check-result-kind.py."""
+    (tmp_path / af.PACK_ROOT_REL).mkdir()
+    r = run_artifactor("открывай день", env_extra={"IWE_ROOT": str(tmp_path)})
     assert r.returncode == 3
     assert "CONFIG_ERROR" in r.stderr
+
+
+def test_missing_pack_is_unresolved_not_config_error(tmp_path):
+    """Пак не установлен (issue #1231, обычная установка шаблона) → keyword-путь
+    отвечает, вид результата не определён, а не CONFIG_ERROR."""
+    r = run_artifactor("открывай день", env_extra={"IWE_ROOT": str(tmp_path)})
+    assert r.returncode == 0, r.stderr
+    out = json.loads(r.stdout)
+    assert out["result_kind_resolution"] == "unresolved"
+    assert out["expected_result_kind"] is None
 
 
 def test_config_error_on_registry_drift(tmp_path):
@@ -217,6 +228,37 @@ def test_check_registry_blocks_when_registry_unreadable(tmp_path):
     """Реестра нет → fail-closed: блок, а не тихий пропуск."""
     rc, out = check_registry_cli(tmp_path, "Платформа обучения", "system", registry=None)
     assert rc == 4
+    assert out.startswith("REGISTRY_BLOCK")
+
+
+def run_check_registry_bare(tmp_path, with_pack_dir):
+    """--check-registry без CONCEPT_KINDS_REGISTRY, IWE_ROOT — пустой каталог (с паком или без)."""
+    root = tmp_path / "iwe"
+    root.mkdir()
+    if with_pack_dir:
+        (root / af.PACK_ROOT_REL).mkdir()
+    res = tmp_path / "result.json"
+    res.write_text(json.dumps({"artifact": "Платформа обучения", "result_type": "system"}), encoding="utf-8")
+    env = {k: v for k, v in os.environ.items() if k != "CONCEPT_KINDS_REGISTRY"}
+    env.update(IWE_ROOT=str(root), CONCEPT_KIND_LOG=str(tmp_path / "ck.log"))
+    r = subprocess.run(
+        [sys.executable, ARTIFACTOR, "--check-registry", str(res)],
+        capture_output=True, text=True, env=env, check=False,
+    )
+    return r.returncode, r.stdout.strip()
+
+
+def test_check_registry_skips_without_pack(tmp_path):
+    """Пак не установлен (обычная установка шаблона) → сверки нет: код 0, слово no-pack (как issue #1231)."""
+    rc, out = run_check_registry_bare(tmp_path, with_pack_dir=False)
+    assert rc == 0, out
+    assert out.startswith("REGISTRY_OK no-pack ")
+
+
+def test_check_registry_blocks_when_pack_present_but_registry_missing(tmp_path):
+    """Пак есть, а реестра понятий в нём нет → порча, закрытый отказ, а не пропуск."""
+    rc, out = run_check_registry_bare(tmp_path, with_pack_dir=True)
+    assert rc == 4, out
     assert out.startswith("REGISTRY_BLOCK")
 
 
