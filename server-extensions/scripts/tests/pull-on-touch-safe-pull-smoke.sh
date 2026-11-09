@@ -234,6 +234,7 @@ REAL_REPO="$INTEGRATION_ROOT/repo-real"
 mkdir -p "$INTEGRATION_ROOT/scripts" "$INTEGRATION_HOME"
 cp "$ROOT_DIR/scripts/iwe-safe-pull.sh" "$INTEGRATION_ROOT/scripts/iwe-safe-pull.sh"
 cp "$ROOT_DIR/scripts/git-dirty-guard.sh" "$INTEGRATION_ROOT/scripts/git-dirty-guard.sh"
+cp "$ROOT_DIR/scripts/iwe-notify" "$INTEGRATION_ROOT/scripts/iwe-notify"   # the guard sends its alert through iwe-notify next to it (WP-568)
 mkdir -p "$INTEGRATION_ROOT/scripts/lib"
 cp "$ROOT_DIR/scripts/lib/dirty-guard-lock.sh" "$INTEGRATION_ROOT/scripts/lib/dirty-guard-lock.sh"   # the guard sources its lock library from lib/ next to it
 chmod +x "$INTEGRATION_ROOT/scripts/iwe-safe-pull.sh" "$INTEGRATION_ROOT/scripts/git-dirty-guard.sh"
@@ -392,7 +393,10 @@ EOF
 chmod +x "$ALERT_BIN/curl"
 "$REAL_GIT" -C "$DEST_REPO" rev-parse HEAD > "$DEST_GIT_DIR/MERGE_HEAD"
 set +e
-HOME="$INTEGRATION_HOME" TELEGRAM_BOT_TOKEN='' TELEGRAM_CHAT_ID='' \
+# Credentials absent from the environment (not merely empty): only the AIST env
+# file supplies them, so the alert proves they were loaded and handed to iwe-notify.
+env -u TELEGRAM_BOT_TOKEN -u TELEGRAM_CHAT_ID -u IWE_NOTIFY_GATEWAY -u IWE_ROOT -u IWE_WORKSPACE \
+    HOME="$INTEGRATION_HOME" \
     ALERT_LOG="$ALERT_LOG" PATH="$ALERT_BIN:$ORIGINAL_PATH" \
     bash "$INTEGRATION_ROOT/scripts/git-dirty-guard.sh" "$DEST_REPO" main >/dev/null 2>&1
 alert_guard_rc=$?

@@ -225,8 +225,11 @@ tg_alert() {
   # channel decision applies. Its outcome line says whether the alert is
   # handled: a digest line or a quarantine is final, and "skipped" means the
   # gateway may already have sent it, so a retry could duplicate it.
+  # load_aist_credentials sets plain shell variables; pass them to the child
+  # explicitly, or a token read from ~/.config/aist/env never reaches iwe-notify.
   local outcome
-  outcome=$("$(dirname "${BASH_SOURCE[0]}")/iwe-notify" --source git-dirty-guard "$msg" \
+  outcome=$(TELEGRAM_BOT_TOKEN="${TELEGRAM_BOT_TOKEN:-}" TELEGRAM_CHAT_ID="${TELEGRAM_CHAT_ID:-}" \
+    "$(dirname "${BASH_SOURCE[0]}")/iwe-notify" --source git-dirty-guard "$msg" \
     | sed -n 's/^iwe-notify: outcome=//p')
   case "$outcome" in
     sent|deferred|direct-sent|quarantined|skipped) return 0 ;;
