@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # iwe-verified-sync-smoke.sh — behavioural coverage for scripts/iwe-verified-sync.sh
 # (WP-545 Ф12). Drives the REAL script against a synthetic bare "origin" and a
-# clone in a temp dir, with curl stubbed on PATH so alerts are captured instead
+# clone in a temp dir, with the notifier stubbed so alerts are captured instead
 # of sent. Every check asserts an observable result (exit code, state field,
 # HEAD, captured alert) — never the absence of an error alone.
 #
@@ -21,19 +21,17 @@ WORK=$(mktemp -d "${TMPDIR:-/tmp}/iwe-verified-sync-smoke.XXXXXX")
 cleanup() { rm -rf "$WORK"; }
 trap cleanup EXIT
 
-# curl stub: append the text= payload to a capture file, exit 0.
+# Notifier stub (the Nix build passes the real one in IWE_SERVER_NOTIFY): check
+# the source id and append the text to a capture file, exit 0.
 mkdir -p "$WORK/bin"
-cat > "$WORK/bin/curl" <<'EOF'
+cat > "$WORK/bin/notify" <<'STUB'
 #!/usr/bin/env bash
-for ((i=1; i<=$#; i++)); do
-  if [ "${!i}" = "--data-urlencode" ]; then j=$((i+1)); echo "${!j#text=}" >> "$ALERT_CAPTURE"; fi
-done
-exit 0
-EOF
-chmod +x "$WORK/bin/curl"
-export PATH="$WORK/bin:$PATH"
+[ "$1" = iwe-verified-sync ] || { echo "bad source: $1" >&2; exit 64; }
+echo "$2" >> "$ALERT_CAPTURE"
+STUB
+chmod +x "$WORK/bin/notify"
+export IWE_SERVER_NOTIFY="$WORK/bin/notify"
 export ALERT_CAPTURE="$WORK/alerts.log"
-export TELEGRAM_BOT_TOKEN=stub TELEGRAM_CHAT_ID=stub
 export IWE_VERIFIED_SYNC_STATE_DIR="$WORK/state"
 export IWE_VERIFIED_SYNC_LOCK="$WORK/git-ops.lock"
 export IWE_VERIFIED_SYNC_ALERT_TTL_MIN=240

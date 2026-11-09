@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Exercise delivery acknowledgement and retry state without a network call.
+# Exercise delivery outcome handling and retry state without a network call.
 set -euo pipefail
 ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
 FIXTURE=$(mktemp -d)
@@ -12,31 +12,35 @@ GIT_DIR="$FIXTURE/git"
 REPO=fixture
 GIT_DIRTY_GUARD_TG_ALERTS=true
 CALLS="$FIXTURE/calls"
-RESPONSE='{"ok":true}'
-TRANSPORT_RC=0
-curl() { printf 'called\n' >> "$CALLS"; printf '%s' "$RESPONSE"; return "$TRANSPORT_RC"; }
-export TELEGRAM_BOT_TOKEN=fixture-token TELEGRAM_CHAT_ID=fixture-chat
+# WP-568 Ф12 С4: tg_alert sends through iwe-notify next to the script; the
+# fixture copy of it records the call and prints the outcome line under test.
+OUTCOME=sent
+export CALLS OUTCOME
+cat > "$FIXTURE/iwe-notify" <<'FAKE'
+#!/usr/bin/env bash
+[ "$1" = --source ] && [ "$2" = git-dirty-guard ] || { echo "bad args: $*" >&2; exit 64; }
+printf 'called\n' >> "$CALLS"
+[ "$OUTCOME" = none ] || printf 'iwe-notify: outcome=%s\n' "$OUTCOME"
+FAKE
+chmod +x "$FIXTURE/iwe-notify"
 STATE="$GIT_DIR/dirty-guard-alert-state"
 send() { alert_dedup_send differ-chronic fixed 'Хроническое расхождение' 'Проверьте синхронизацию'; }
 count() { if [ -f "$CALLS" ]; then wc -l < "$CALLS" | tr -d ' '; else printf 0; fi; }
 assert_pending() { [ ! -e "$STATE" ] || { echo 'failed delivery consumed dedup state' >&2; exit 1; }; }
 
-unset TELEGRAM_BOT_TOKEN
-if send; then echo 'missing credentials accepted' >&2; exit 1; fi
-assert_pending
-[ "$(count)" = 0 ]
-export TELEGRAM_BOT_TOKEN=fixture-token
-TRANSPORT_RC=7
-if send; then echo 'transport failure accepted' >&2; exit 1; fi
-assert_pending
-TRANSPORT_RC=0
-RESPONSE='{"ok":false}'
-if send; then echo 'API failure accepted' >&2; exit 1; fi
-assert_pending
-RESPONSE='not-json'
-if send; then echo 'malformed acknowledgement accepted' >&2; exit 1; fi
-assert_pending
-RESPONSE='{"ok":true}'
+# Not delivered: the alert stays pending (dedup state untouched).
+for OUTCOME in not-sent transport-failed direct-failed none; do
+  if send; then echo "outcome $OUTCOME accepted as delivered" >&2; exit 1; fi
+  assert_pending
+done
+[ "$(count)" = 4 ]
+# Handled: a digest line, a quarantine and a possibly-sent "skipped" are final.
+for OUTCOME in deferred quarantined skipped direct-sent; do
+  rm -f "$STATE"
+  send
+  grep -q '^version=2$' "$STATE"
+done
+OUTCOME=sent
 send
 grep -q '^version=2$' "$STATE"
 BEFORE=$(count)
@@ -54,10 +58,10 @@ grep -q '^version=2$' "$STATE"
 sed 's/last_alerted_at=.*/last_alerted_at=1/' "$STATE" > "$STATE.tmp"
 mv "$STATE.tmp" "$STATE"
 cp "$STATE" "$FIXTURE/before"
-TRANSPORT_RC=28
+OUTCOME=transport-failed
 if send; then echo 'failed escalation accepted' >&2; exit 1; fi
 cmp "$STATE" "$FIXTURE/before"
-TRANSPORT_RC=0
+OUTCOME=sent
 send
 ! grep -q '^last_alerted_at=1$' "$STATE"
 
@@ -68,4 +72,4 @@ BEFORE=$(count)
 send
 assert_pending
 [ "$(count)" = "$BEFORE" ]
-echo 'delivery acknowledgement, migration, escalation retry, silent inspection: OK'
+echo 'delivery outcome, migration, escalation retry, silent inspection: OK'

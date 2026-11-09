@@ -457,7 +457,8 @@ let
   # Policy, state format and failure classes: scripts/iwe-verified-sync.sh header.
   verifiedSync = pkgs.writeShellApplication {
     name = "iwe-verified-sync";
-    runtimeInputs = with pkgs; [ git coreutils util-linux curl gnugrep gnused ];
+    runtimeInputs = with pkgs; [ git coreutils util-linux gnugrep gnused ];
+    runtimeEnv.IWE_SERVER_NOTIFY = "${serverNotify}";
     text = builtins.readFile ../scripts/iwe-verified-sync.sh;
   };
   # ExecStartPre pair for a consumer unit: `-sync` never blocks (its refusal

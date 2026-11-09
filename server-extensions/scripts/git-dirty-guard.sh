@@ -221,22 +221,18 @@ tg_alert() {
   case "$GIT_DIRTY_GUARD_TG_ALERTS" in
     0|false|no|off) return 0 ;;
   esac
-  if [ -z "${TELEGRAM_BOT_TOKEN:-}" ] || [ -z "${TELEGRAM_CHAT_ID:-}" ]; then
-    echo "git-dirty-guard: Telegram credentials unavailable -- alert remains pending" >&2
-    return 1
-  fi
-  local response
-  # Never print the response or URL: either can expose notification credentials.
-  # Telegram may return HTTP 200 with ok=false, so transport success is insufficient.
-  if ! response=$(curl -fs --max-time 10 -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
-    -d "chat_id=${TELEGRAM_CHAT_ID}" --data-urlencode "text=$msg"); then
-    echo "git-dirty-guard: Telegram transport failed -- alert remains pending" >&2
-    return 1
-  fi
-  if ! printf '%s' "$response" | python3 -c 'import json,sys; sys.exit(0 if json.load(sys.stdin).get("ok") is True else 1)' 2>/dev/null; then
-    echo "git-dirty-guard: Telegram did not acknowledge alert -- alert remains pending" >&2
-    return 1
-  fi
+  # WP-568 Ф12 С4: through iwe-notify (next to this script) so the gateway's
+  # channel decision applies. Its outcome line says whether the alert is
+  # handled: a digest line or a quarantine is final, and "skipped" means the
+  # gateway may already have sent it, so a retry could duplicate it.
+  local outcome
+  outcome=$("$(dirname "${BASH_SOURCE[0]}")/iwe-notify" --source git-dirty-guard "$msg" \
+    | sed -n 's/^iwe-notify: outcome=//p')
+  case "$outcome" in
+    sent|deferred|direct-sent|quarantined|skipped) return 0 ;;
+  esac
+  echo "git-dirty-guard: alert not delivered (${outcome:-no outcome}) -- alert remains pending" >&2
+  return 1
 }
 
 # --- Alert dedup (WP-538 Ф4, 2026-09-02). Ported onto this file from the 18.08/01.09
