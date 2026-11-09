@@ -6,6 +6,9 @@
 # (ветка wp530-f85-generator-return, РП-530 Ф85: генератор расписания, К14).
 # В main DS-my-strategy перенесён cherry-pick'ом как be0ec2fa5886b873b0e9408ed1e72cd29c06ce6c
 # (08.11); сверять по хешам объектов ниже, они при переносе не меняются.
+# 09.11 (РП-530 Ф85, К13): scripts/lib/plan_event_bridge.py и
+# scripts/lib/plan_bridge_host.py — из a3701a9e3f (ветка
+# session-isolate/claude-code-1e5b17b43ef7998c, чтение журнала одним пакетом).
 # Код моста — 8 модулей и 2 команды (codePaths, входят в версию правил), три
 # клиентские команды для канала Мака (отправитель, заявка, ответ) и лимиты
 # плана: из них сборка берёт часовой пояс канала Мака (Ф58), лимиты тоже
@@ -21,9 +24,9 @@
 #   70284c63241e1032d4e3502cd81f2663933541d9 scripts/lib/plan_allocation.py
 #   348cf7ac8460996889d15d28f27c0873d276d9ea scripts/lib/plan_bridge_allocation.py
 #   5c20199f82d06305617ab7346cead6246e15b37b scripts/lib/plan_bridge_decisions.py
-#   7f19e742b2e471486272e13409d884af0cbb7ca1 scripts/lib/plan_bridge_host.py
+#   4753557c7b29f84dc9f49cf5ac32134e76c1b352 scripts/lib/plan_bridge_host.py
 #   c694b292a1b342352ca4fbc7bcef2bc45c35806b scripts/lib/plan_bridge_receiver.py
-#   52da0571105c5ee35ba5ef95858b118c9815d82d scripts/lib/plan_event_bridge.py
+#   f83d92e1ccaccb60597e1372f31b5bd4db7042e6 scripts/lib/plan_event_bridge.py
 #   aaa218adb2b6792777f4aacfc11eb28efed818ed scripts/lib/plan_event_intake.py
 #   fbb3395861e9dd13a64863bed07c0fe2a8c8172e scripts/lib/plan_event_wal.py
 #   3e56f868a7cb15e20086a6b530f330915cb2eb2b scripts/plan-event-bridge.py

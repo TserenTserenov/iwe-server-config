@@ -46,6 +46,7 @@ OVERDUE_SECONDS = 180
 MAX_BATCH_RECORDS = 32
 MAX_PUBLICATION_FILE_BYTES = 4 * 1024 * 1024
 MAX_PUBLICATION_BYTES = 16 * 1024 * 1024
+_READER_CACHE_COMMITS = 2
 _OID = re.compile(r"(?:[0-9a-f]{40}|[0-9a-f]{64})\Z")
 _LOG = logging.getLogger(__name__)
 
@@ -68,7 +69,12 @@ def _json(raw):
     )
 
 
-class _JournalLoader(yaml.SafeLoader):
+# libyaml is several times faster on the full-journal scan each pass makes
+# (WP-530 Ф85, К13 measurement 09.11); constructors below are the same.
+_SAFE_LOADER = getattr(yaml, "CSafeLoader", yaml.SafeLoader)
+
+
+class _JournalLoader(_SAFE_LOADER):
     pass
 
 
@@ -207,29 +213,40 @@ def _same_json(left, right):
     return _canonical_json(left) == _canonical_json(right)
 
 
+def decode_journal_document(raw):
+    """YAML bytes -> plain data, with the structural bounds of the journal."""
+    try:
+        depth = 0
+        for count, node in enumerate(yaml.parse(raw, Loader=_SAFE_LOADER), 1):
+            if (
+                count > 20000
+                or isinstance(node, yaml.AliasEvent)
+                or getattr(node, "anchor", None)
+            ):
+                raise ValueError("journal structure exceeds admitted bounds")
+            if isinstance(node, (yaml.MappingStartEvent, yaml.SequenceStartEvent)):
+                depth += 1
+            elif isinstance(node, (yaml.MappingEndEvent, yaml.SequenceEndEvent)):
+                depth -= 1
+            if depth > 32:
+                raise ValueError("journal nesting exceeds admitted bound")
+        return yaml.load(raw, Loader=_JournalLoader)
+    except (yaml.YAMLError, ValueError, TypeError, RecursionError) as exc:
+        raise BridgeError("MALFORMED_JOURNAL", "journal cannot be decoded") from exc
+
+
 def parse_journal(commit, documents):
     """Parse the entire v2 namespace before making any decision or confirmation."""
+    return build_published_plan(
+        commit, [decode_journal_document(raw) for raw in documents]
+    )
+
+
+def build_published_plan(commit, decoded):
+    """Validate decoded journal documents into a fresh PublishedPlan."""
     _oid(commit)
     requests, decisions, addresses = {}, {}, {}
-    for raw in documents:
-        try:
-            depth = 0
-            for count, node in enumerate(yaml.parse(raw), 1):
-                if (
-                    count > 20000
-                    or isinstance(node, yaml.AliasEvent)
-                    or getattr(node, "anchor", None)
-                ):
-                    raise ValueError("journal structure exceeds admitted bounds")
-                if isinstance(node, (yaml.MappingStartEvent, yaml.SequenceStartEvent)):
-                    depth += 1
-                elif isinstance(node, (yaml.MappingEndEvent, yaml.SequenceEndEvent)):
-                    depth -= 1
-                if depth > 32:
-                    raise ValueError("journal nesting exceeds admitted bound")
-            document = yaml.load(raw, Loader=_JournalLoader)
-        except (yaml.YAMLError, ValueError, TypeError, RecursionError) as exc:
-            raise BridgeError("MALFORMED_JOURNAL", "journal cannot be decoded") from exc
+    for document in decoded:
         _canonical_json(document)
         if not isinstance(document, dict) or document.get("schema") != "plan-events/1":
             raise BridgeError("INCOMPATIBLE_VERSION", "unknown journal schema")
@@ -319,6 +336,11 @@ def parse_journal(commit, documents):
     return published
 
 
+def _git_evidence_unreadable():
+    # Same transient class as a failed git call: the next pass retries.
+    return BridgeError("GIT_UNAVAILABLE", "Git evidence could not be read", stop=False)
+
+
 class GitPlanReader:
     """Read exact objects from a fresh, private fetch ref, without graph overlays."""
 
@@ -328,12 +350,18 @@ class GitPlanReader:
         self.repository = Path(repository).resolve()
         self.timeout = timeout
         self.max_journal_bytes = max_journal_bytes
+        # One pass reads the same commits several times; a commit oid names
+        # immutable content, so each is parsed once per reader (bounded).
+        self._parsed = {}
+        if _SAFE_LOADER is yaml.SafeLoader:
+            _LOG.warning("libyaml unavailable: journal parsing runs in pure Python")
 
-    def _git(self, *args, check=True):
+    def _git(self, *args, check=True, stdin=None):
         try:
             result = subprocess.run(
                 ["git", "-C", str(self.repository), *args],
                 env=_git_environment(),
+                input=stdin,
                 capture_output=True,
                 timeout=self.timeout,
                 check=False,
@@ -365,10 +393,21 @@ class GitPlanReader:
 
     def read(self, commit):
         _oid(commit)
+        if commit not in self._parsed:
+            if len(self._parsed) >= _READER_CACHE_COMMITS:
+                self._parsed.pop(next(iter(self._parsed)))
+            self._parsed[commit] = [
+                decode_journal_document(raw) for raw in self._journal_blobs(commit)
+            ]
+        # Only the YAML decode is reused; every read validates and builds anew,
+        # so callers never share mutable state.
+        return build_published_plan(commit, deepcopy(self._parsed[commit]))
+
+    def _journal_blobs(self, commit):
         entries = self._git(
             "ls-tree", "-r", "-z", commit, "--", JOURNAL_PREFIX
         ).stdout.split(b"\0")
-        documents, total = [], 0
+        blobs = []
         for entry in entries:
             if not entry:
                 continue
@@ -376,14 +415,48 @@ class GitPlanReader:
             mode, kind, blob = header.split()
             if mode != b"100644" or kind != b"blob" or not path.endswith(b".yaml"):
                 raise BridgeError("MALFORMED_JOURNAL", "unexpected journal tree entry")
-            size = int(self._git("cat-file", "-s", blob.decode()).stdout)
-            total += size
-            if total > self.max_journal_bytes:
-                raise BridgeError(
-                    "JOURNAL_LIMIT", "journal exceeds admitted reader bound"
-                )
-            documents.append(self._git("cat-file", "blob", blob.decode()).stdout)
-        return parse_journal(commit, documents)
+            blobs.append(blob)
+        if not blobs:
+            return []
+        request = b"".join(blob + b"\n" for blob in blobs)
+        # Sizes first, so the bound is enforced before any content is read.
+        sizes = self._batch_headers(
+            self._git("cat-file", "--batch-check", stdin=request).stdout, blobs
+        )
+        if sum(sizes) > self.max_journal_bytes:
+            raise BridgeError("JOURNAL_LIMIT", "journal exceeds admitted reader bound")
+        raw = self._git("cat-file", "--batch", stdin=request).stdout
+        documents, pos = [], 0
+        for blob, size in zip(blobs, sizes):
+            line_end = raw.find(b"\n", pos)
+            if line_end < 0 or raw[pos:line_end] != b"%s blob %d" % (blob, size):
+                raise _git_evidence_unreadable()
+            end = line_end + 1 + size
+            if raw[end : end + 1] != b"\n":
+                raise _git_evidence_unreadable()
+            documents.append(raw[line_end + 1 : end])
+            pos = end + 1
+        if pos != len(raw):
+            raise _git_evidence_unreadable()
+        return documents
+
+    @staticmethod
+    def _batch_headers(output, blobs):
+        lines = output.split(b"\n")
+        if len(lines) != len(blobs) + 1 or lines[-1] != b"":
+            raise _git_evidence_unreadable()
+        sizes = []
+        for blob, line in zip(blobs, lines):
+            fields = line.split(b" ")
+            if (
+                len(fields) != 3
+                or fields[0] != blob
+                or fields[1] != b"blob"
+                or not fields[2].isdigit()
+            ):
+                raise _git_evidence_unreadable()
+            sizes.append(int(fields[2]))
+        return sizes
 
     def is_ancestor(self, ancestor, descendant):
         _oid(ancestor)
