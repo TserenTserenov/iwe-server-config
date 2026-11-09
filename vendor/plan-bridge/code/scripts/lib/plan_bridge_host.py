@@ -563,7 +563,7 @@ def _load_bounded(raw):
         raise BridgeError("MALFORMED_JOURNAL", "journal file exceeds admitted size")
     try:
         depth = 0
-        for count, node in enumerate(yaml.parse(raw), 1):
+        for count, node in enumerate(yaml.parse(raw, Loader=bridge._SAFE_LOADER), 1):
             if (
                 count > 20000
                 or isinstance(node, yaml.AliasEvent)
