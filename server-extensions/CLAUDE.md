@@ -16,6 +16,7 @@
 > Пропуск Открытия = незапланированная работа. Пропуск Закрытия = незафиксированный результат. Открытая сессия без триггера — штатное состояние; незакрытый РП ≠ открытая сессия.
 > **Сессия:** `protocol-open.md § Сессия` → `protocol-work.md` → `/run-protocol close` · **День:** `/day-open` («открывай») → `/run-protocol day-close` · **Неделя:** `/run-protocol week-close` · **Месяц:** `/month-close` (последние дни месяца или первый Пн, до Strategy Session).
 
+<!-- TEMPLATE-ONLY-SLOT: new-person-light-onboarding -->
 ### Блокирующие правила
 
 > **SoT (WP-272 Ф1):** `PACK-agent-rules/rules/AR.NNN.md` (реестр `.claude/rules-registry.yaml`); полные тексты выжимки → `.claude/rules-lazy/blocking-rules-full.md`. **Приоритет = нумерация:** структурное (1-5) перевешивает поведенческое (6-10).
@@ -200,7 +201,7 @@ Respond in Russian unless the user writes in English.
 - **Именование РП:** русское существительное-артефакт (Pack-ID допустим), в реестре ≤80 символов; переименование синхронизировать по перечню в Agent Core.
 - **Память и планы:** новый `memory/*.md` требует frontmatter → `memory/memory-lifecycle-spec.md`; WeekPlan хранит интенты, WeekReport — факты.
 - **Аудиты и календарь:** каденция Security Audit → Agent Core; календарный SoT → `DS-my-strategy/calendar/process-catalog.yaml`, `date-ledger.yaml` не редактировать, новый процесс = каталог + plist.
-- **Pilot Shorthand — ПСЗ/СЗ (для Claude, все хосты):** «ПСЗ» = проверь субагентом → если ок, заливай (commit+push конкретных файлов, без вопросов) → закрывай (`Skill: run-protocol close`, пропустив шаг рефлексии/ретро); субагент нашёл проблему → стоп, доложить, не заливать. «СЗ» — то же без шага проверки субагентом. Полный текст, известное ограничение (механический гейт рефлексии не обходится) → `memory/reference/agent-core.md`. Ранее жило только в auto-memory одного хоста (Claude на tsekh-1 не знал) — для Kimi/Codex/Grok уже доставлено через `AGENTS-agent-blocks.md`; эта строка закрывает тот же пробел для Claude, читается напрямую из CLAUDE.md на любом хосте.
+- **Pilot Shorthand — ПСЗ/СЗ (для Claude, все хосты):** «ПСЗ» = проверь субагентом → если ок, заливай (commit+push конкретных файлов, без вопросов) → закрывай (`Skill: run-protocol close`, пропустив шаг рефлексии/ретро); субагент нашёл проблему → стоп, доложить, не заливать. «СЗ» — то же без шага проверки субагентом. Полный текст, известное ограничение (механический гейт рефлексии не обходится) → `memory/reference/agent-core.md`.
 
 ---
 
