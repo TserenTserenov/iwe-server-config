@@ -16,8 +16,12 @@
 # exactly one row lands, nothing gets silently erased by a loser's rollback.
 set -uo pipefail
 
-CREATE_WP="${CREATE_WP_UNDER_TEST:-$HOME/IWE/scripts/create-wp.sh}"
-SESSION_GUARD="${SESSION_GUARD_UNDER_TEST:-$HOME/IWE/iwe-local-config/scripts/session-guard.sh}"
+# Test the pair of scripts from this test's own tree (the snapshot the delivery
+# gate runs it from); no fallback to other trees, mixing versions is the bug
+# (WP-7 F303). Run by path, not by bare name from an unrelated cwd.
+SCRIPTS_DIR="$(cd "$(dirname "$0")/.." && pwd)" || { echo "FAIL: cannot resolve scripts dir from $0"; exit 1; }
+CREATE_WP="${CREATE_WP_UNDER_TEST:-$SCRIPTS_DIR/create-wp.sh}"
+SESSION_GUARD="${SESSION_GUARD_UNDER_TEST:-$SCRIPTS_DIR/session-guard.sh}"
 [ -f "$CREATE_WP" ] || { echo "FAIL: $CREATE_WP not found"; exit 1; }
 [ -f "$SESSION_GUARD" ] || { echo "FAIL: $SESSION_GUARD not found"; exit 1; }
 

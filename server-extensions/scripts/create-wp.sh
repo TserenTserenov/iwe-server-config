@@ -28,6 +28,10 @@
 # --hypothesis (WP-496 Ф8): REQUIRED when <governance>/current/hypotheses-log.md exists —
 #   H-NNN anchored in the log, or explicit dash with reason code (—:infra|techdebt|order|spinoff).
 # --hypothesis-relation: tests|enables|responds|researches|operational|unclassified.
+# --links (WP-503 Ф109): REQUIRED when <governance>/machine/wp-links-policy.yaml exists —
+#   JSON of links to the lists owned by WP-611, e.g.
+#   '{"needs":[38],"promises":["DP.SC.033"],"change_requests":["WP-611/И-13"]}'
+#   (exceptions: {"none":"material","decision":"<id>"} from machine/wp-links-decisions.yaml).
 # New work must resolve unclassified before it is started; the default preserves
 # older callers while making the missing strategic basis visible in frontmatter.
 #
@@ -64,6 +68,7 @@ RESULT=""
 STATE=""
 HYPOTHESIS=""
 HYPOTHESIS_RELATION="unclassified"
+LINKS=""
 SKIP_CONSENT=0
 ARTIFACTOR_RESULT_FILE=""
 PILOT_REVISION=""
@@ -87,6 +92,7 @@ while [[ $# -gt 0 ]]; do
     --state)    STATE="$2";    shift 2 ;;
     --hypothesis) HYPOTHESIS="$2"; shift 2 ;;
     --hypothesis-relation) HYPOTHESIS_RELATION="$2"; shift 2 ;;
+    --links) LINKS="$2"; shift 2 ;;
     --no-consent-check) SKIP_CONSENT=1; shift ;;
     --artifactor-result) ARTIFACTOR_RESULT_FILE="$2"; shift 2 ;;
     --pilot-revision) PILOT_REVISION="$2"; shift 2 ;;
@@ -418,6 +424,27 @@ if [[ "$SKIP_CONSENT" -eq 0 ]]; then
   echo "✅ Consent: $CONSENT_FILE"
 fi
 
+# --- Links Gate (WP-503 Ф109) ---
+# When the links policy exists (author install), a new WP names the need,
+# promise and changes it serves (or a pilot decision allowing an exception),
+# checked against the lists owned by WP-611 before anything is created.
+LINKS_POLICY="$STRATEGY/machine/wp-links-policy.yaml"
+LINKS_JSON=""
+if [[ -f "$LINKS_POLICY" ]]; then
+  if [[ -z "$LINKS" ]]; then
+    echo "🚫 Links Gate (WP-503 Ф109): --links обязателен — новый РП должен назвать потребность, обещание и изменения" >&2
+    echo "   Формат: '{\"needs\":[38],\"promises\":[\"DP.SC.033\"],\"changes\":[\"Ц38-01\"]}'" >&2
+    echo "   Нового изменения нет в списке — заявка: wp-inbox.sh add --to WP-611 …, затем \"change_requests\":[\"WP-611/И-N\"]" >&2
+    exit 1
+  fi
+  if ! LINKS_JSON=$(python3 "$STRATEGY/scripts/wp-links.py" validate --repo "$STRATEGY" \
+       --links "$LINKS" --wp new --purpose register); then
+    echo "🚫 Links Gate: связи не прошли проверку (причина выше); РП не создан" >&2
+    exit 1
+  fi
+fi
+
+
 # --- Дата ---
 TODAY=$(date +%Y-%m-%d)
 
@@ -570,6 +597,10 @@ fi
 FM_STAKE="${FM_STAKE}hypothesis: \"$(yaml_dq_escape "${HYPOTHESIS:-—}")\"
 hypothesis_relation: \"${HYPOTHESIS_RELATION}\"
 artifactor_resolution_path: \"${ARTF_RESOLUTION_PATH}\""
+if [[ -n "$LINKS_JSON" ]]; then
+  FM_STAKE="${FM_STAKE}
+links: ${LINKS_JSON}"
+fi
 if [[ -n "$ARTF_SHA256" ]]; then
   FM_STAKE="${FM_STAKE}
 artifactor_result_sha256: \"${ARTF_SHA256}\""
