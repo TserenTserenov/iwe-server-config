@@ -7,6 +7,7 @@ CRC detects damaged frames, not deletion of complete acknowledged frames; the
 delivery layer must compare the durable origin/receipt evidence separately.
 """
 
+from dataclasses import dataclass
 from datetime import datetime, timezone
 import hashlib
 import json
@@ -361,12 +362,60 @@ def _load_intake(stream_dir: Path, metadata: dict) -> tuple[list[dict], int]:
     return records, valid_length
 
 
-def read_intake(stream_dir: Path) -> list[dict]:
-    """Read validated records under the writer lock; does not authenticate them."""
+def read_intake(stream_dir: Path, *, wait_seconds: float = 0.0) -> list[dict]:
+    """Read validated records under the writer lock; does not authenticate them.
+
+    wait_seconds bounds how long a reader waits for the lock between writes
+    (a delivery pass must not give up on the first busy moment).
+    """
     if not stream_dir.exists():
         return []
-    with wal.locked_stream(stream_dir):
+    with wal.locked_stream(stream_dir, wait_seconds):
         return _load_intake(stream_dir, read_metadata(stream_dir))[0]
+
+
+@dataclass
+class _IntakeIndex:
+    """What receive_v2 needs about the accepted queue, without the records."""
+
+    stamp: tuple | None
+    metadata: dict
+    valid_length: int
+    receipts: dict
+    tip: str | None
+
+
+# One index per stream directory, kept by a long-running receiver between
+# requests. Used only under the writer lock and only while wal.log is exactly
+# as this process last left it; any other change forces a full validated reload.
+_INDEXES: dict[Path, _IntakeIndex] = {}
+
+
+def _wal_stamp(stream_dir: Path) -> tuple | None:
+    try:
+        info = os.stat(stream_dir / "wal.log")
+    except FileNotFoundError:
+        return None
+    return (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns)
+
+
+def _intake_index(stream_dir: Path, metadata: dict) -> _IntakeIndex:
+    key = Path(stream_dir).resolve()
+    cached = _INDEXES.get(key)
+    stamp = _wal_stamp(stream_dir)
+    if cached is not None and cached.stamp == stamp and cached.metadata == metadata:
+        return cached
+    _INDEXES.pop(key, None)
+    records, valid_length = _load_intake(stream_dir, metadata)
+    index = _IntakeIndex(
+        stamp=stamp,
+        metadata=dict(metadata),
+        valid_length=valid_length,
+        receipts={record["request"]["event_id"]: _receipt(record) for record in records},
+        tip=records[-1]["request"]["event_id"] if records else None,
+    )
+    _INDEXES[key] = index
+    return index
 
 
 def _durable_directory(stream_dir: Path) -> None:
@@ -441,18 +490,17 @@ def receive_v2(
     _durable_directory(stream_dir)
     with wal.locked_stream(stream_dir):
         metadata = _metadata_for_receive(stream_dir)
-        records, valid_length = _load_intake(stream_dir, metadata)
-        for prior in records:
-            if prior["request"]["event_id"] == request["event_id"]:
-                if prior["request_digest"] != digest:
-                    raise wal.IdempotencyConflict(
-                        "event_id already accepted with a different request"
-                    )
-                wal.sync_stream(stream_dir)
-                return _receipt(prior)
-        tip = records[-1]["request"]["event_id"] if records else None
-        if expected_wal_tip != tip:
-            raise wal.ParentMismatch(expected_wal_tip, tip)
+        index = _intake_index(stream_dir, metadata)
+        prior = index.receipts.get(request["event_id"])
+        if prior is not None:
+            if prior["request_digest"] != digest:
+                raise wal.IdempotencyConflict(
+                    "event_id already accepted with a different request"
+                )
+            wal.sync_stream(stream_dir)
+            return dict(prior)
+        if expected_wal_tip != index.tip:
+            raise wal.ParentMismatch(expected_wal_tip, index.tip)
         record = {
             "schema": SCHEMA,
             "request": request,
@@ -460,7 +508,7 @@ def receive_v2(
             "address": {
                 "delivery_id": metadata["delivery_id"],
                 "wal_epoch": metadata["wal_epoch"],
-                "intake_seq": len(records) + 1,
+                "intake_seq": len(index.receipts) + 1,
             },
             "registered_at": datetime.now(timezone.utc).isoformat(),
             "producer_proof": proof,
@@ -471,9 +519,19 @@ def receive_v2(
                 f"{encoded_size} bytes > max_record_bytes={max_record_bytes}"
             )
         if (
-            len(records) >= max_stream_records
-            or valid_length + encoded_size > max_stream_bytes
+            len(index.receipts) >= max_stream_records
+            or index.valid_length + encoded_size > max_stream_bytes
         ):
             raise wal.QueueFull("v2 intake capacity would be exceeded")
-        wal.append_framed_record_locked(stream_dir, record, valid_length)
-        return _receipt(record)
+        try:
+            wal.append_framed_record_locked(stream_dir, record, index.valid_length)
+        except BaseException:
+            # The file may be partly written: the next request reloads it in full.
+            _INDEXES.pop(Path(stream_dir).resolve(), None)
+            raise
+        receipt = _receipt(record)
+        index.receipts[receipt["event_id"]] = receipt
+        index.tip = receipt["event_id"]
+        index.valid_length += encoded_size
+        index.stamp = _wal_stamp(stream_dir)
+        return dict(receipt)

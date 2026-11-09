@@ -51,6 +51,10 @@ LIMITS_PATH = "machine/plan-bridge/limits.json"
 WP_PATTERN = re.compile(r"WP-[0-9]+")
 SESSION_PATTERN = re.compile(r"[0-9A-Za-z][0-9A-Za-z._-]{0,159}")
 TIP_ATTEMPTS = 5
+# A receiver that was not reached (connection refused or timed out under a
+# burst) gets the same request again: a repeated event_id is accepted once
+# and returns the original receipt, so resending cannot create a second one.
+TRANSPORT_ATTEMPTS = 3
 START_ATTEMPTS = 3
 RETRYABLE = frozenset({"StreamBusy", "TipContention"})
 # The queue lock is held for milliseconds by a write or a delivery pass.
@@ -129,10 +133,21 @@ def start(reserved):
     }
 
 
+def _exchange(socket_path, tip, request):
+    """One exchange; a transport failure is retried with the same request."""
+    for attempt in range(1, TRANSPORT_ATTEMPTS + 1):
+        try:
+            return send.exchange(socket_path, tip, request)
+        except send.SendError:
+            if attempt == TRANSPORT_ATTEMPTS:
+                raise
+            time.sleep(BUSY_PAUSE_SECONDS * attempt)
+
+
 def submit(socket_path, request, tip=None):
     """Send once; on a moved tip resend at the reported tip, on a busy queue a bit later."""
     for _ in range(TIP_ATTEMPTS):
-        reply = send.exchange(socket_path, tip, request)
+        reply = _exchange(socket_path, tip, request)
         if reply.get("code") == "StreamBusy":
             time.sleep(BUSY_PAUSE_SECONDS)
         elif reply.get("code") == "ParentMismatch" and "wal_tip" in reply:

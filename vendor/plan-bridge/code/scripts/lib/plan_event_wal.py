@@ -441,15 +441,29 @@ def _tip(records: list[dict]) -> Optional[str]:
     return records[-1]["envelope"]["event_id"] if records else None
 
 
+LOCK_POLL_SECONDS = 0.02
+
+
 @contextmanager
-def _locked(stream_dir: Path):
+def _locked(stream_dir: Path, wait_seconds: float = 0.0):
+    """Exclusive flock on .wal.lock; StreamBusy if not taken within wait_seconds.
+
+    Writers keep the default 0 (fail fast, the producer retries). A reader that
+    must not starve behind a steady stream of short writes, such as a delivery
+    pass, passes a bounded wait and takes the lock in the gap between writes.
+    """
     stream_dir.mkdir(parents=True, exist_ok=True)
     fd = os.open(stream_dir / ".wal.lock", os.O_CREAT | os.O_RDWR, 0o600)
-    try:
-        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-    except OSError as exc:
-        os.close(fd)
-        raise StreamBusy(f"{stream_dir}: another writer holds .wal.lock") from exc
+    deadline = time.monotonic() + max(0.0, wait_seconds)
+    while True:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            break
+        except OSError as exc:
+            if time.monotonic() >= deadline:
+                os.close(fd)
+                raise StreamBusy(f"{stream_dir}: another writer holds .wal.lock") from exc
+            time.sleep(LOCK_POLL_SECONDS)
     try:
         yield
     finally:
@@ -458,9 +472,9 @@ def _locked(stream_dir: Path):
 
 
 @contextmanager
-def locked_stream(stream_dir: Path):
-    """Public shared nonblocking flock; callers own format and CAS validation."""
-    with _locked(stream_dir):
+def locked_stream(stream_dir: Path, wait_seconds: float = 0.0):
+    """Public exclusive flock; callers own format and CAS validation."""
+    with _locked(stream_dir, wait_seconds):
         yield
 
 

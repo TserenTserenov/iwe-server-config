@@ -17,7 +17,6 @@ Replies never carry proofs, keys or paths.
 from __future__ import annotations
 
 from collections.abc import Callable
-import contextlib
 import json
 import logging
 import os
@@ -27,6 +26,7 @@ import socketserver
 import stat
 import struct
 import sys
+import threading
 
 import plan_bridge_host as host
 import plan_event_bridge as bridge
@@ -37,6 +37,17 @@ MAX_LINE_BYTES = 128 * 1024
 READ_TIMEOUT_SECONDS = 5
 SOCKET_MODE = 0o660
 _LOG = logging.getLogger(__name__)
+
+
+class _ThreadedServer(socketserver.ThreadingMixIn, socketserver.UnixStreamServer):
+    """Connections are read in parallel; writes stay one at a time via write_lock.
+
+    A single-threaded server with the default backlog refused most connections
+    of ten concurrent producers per host (WP-530 Ф85, run 4).
+    """
+
+    daemon_threads = True
+    request_queue_size = 128
 
 
 class WireError(Exception):
@@ -155,6 +166,8 @@ def make_server(
     """
     socket_path = Path(socket_path)
     _prepare_socket_path(socket_path)
+    if write_lock is None:
+        write_lock = threading.Lock()
 
     class Handler(socketserver.StreamRequestHandler):
         timeout = READ_TIMEOUT_SECONDS
@@ -163,14 +176,20 @@ def make_server(
             raw = self.rfile.readline(MAX_LINE_BYTES + 1)
             if not raw:
                 return  # connected and left without a word: a liveness probe
-            with write_lock or contextlib.nullcontext():
-                reply = handle_message(
-                    raw.rstrip(b"\n"),
-                    stream_dir=stream_dir,
-                    verifier=verifier,
-                    context=context,
-                    kick=kick,
-                )
+            if write_lock.acquire(timeout=READ_TIMEOUT_SECONDS):
+                try:
+                    reply = handle_message(
+                        raw.rstrip(b"\n"),
+                        stream_dir=stream_dir,
+                        verifier=verifier,
+                        context=context,
+                        kick=kick,
+                    )
+                finally:
+                    write_lock.release()
+            else:
+                # Nothing was written; answer before the producer's own timeout.
+                reply = {"ok": False, "code": "StreamBusy", "reason": "receiver busy"}
             _LOG.info(
                 "[plan-receiver] uid=%s ok=%s code=%s",
                 peer_uid(self.request),
@@ -184,7 +203,7 @@ def make_server(
 
     previous = os.umask(0o177)
     try:
-        server = socketserver.UnixStreamServer(str(socket_path), Handler)
+        server = _ThreadedServer(str(socket_path), Handler)
     finally:
         os.umask(previous)
     if group_id is not None:

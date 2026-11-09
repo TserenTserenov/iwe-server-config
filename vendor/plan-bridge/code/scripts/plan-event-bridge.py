@@ -229,7 +229,7 @@ def local_status(configuration):
     bridge, intake, _, _ = _runtime()
     with bridge.delivery_lock(directory):
         metadata = intake.read_metadata(directory)
-        records = intake.read_intake(directory)
+        records = intake.read_intake(directory, wait_seconds=bridge.READ_LOCK_WAIT_SECONDS)
         cursor = bridge.read_cursor(directory, metadata)
         if cursor["confirmed_seq"] > len(records):
             raise ClosedConfiguration("CONFIRMED_RECORD_LOST")
