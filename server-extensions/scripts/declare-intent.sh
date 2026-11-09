@@ -54,6 +54,26 @@ if [[ ! "$SESSION_ID" =~ ^[A-Za-z0-9_-]+$ ]]; then
   exit 1
 fi
 
+# WP-503 Ф109: admission to execute, checked BEFORE the intent is recorded, so
+# a refused WP leaves no declaration for intent-gate-check.sh to accept.
+# A new WP and new phases in progress must link to existing changes owned by
+# this WP (WP-611 lists) or to a pilot decision allowing an exception; a pending
+# request does not admit work. IWE_GOVERNANCE_REPO_PATH points to the copy the
+# session edits (isolated copy); unset = the shared checkout.
+if [[ "$INTENT" == WP-* ]]; then
+  GOV_DIR="${IWE_GOVERNANCE_REPO_PATH:-${IWE_WORKSPACE:-$HOME/IWE}/${IWE_GOVERNANCE_REPO:-DS-strategy}}"
+  if [ ! -d "$GOV_DIR" ]; then
+    echo "declare-intent.sh: репозиторий планов $GOV_DIR не найден — допуск по связям со списками не проверен" >&2
+  elif [ -f "$GOV_DIR/machine/wp-links-policy.yaml" ]; then
+    if ! python3 "$GOV_DIR/scripts/wp-links.py" check --repo "$GOV_DIR" --wp "${INTENT#WP-}" \
+         --purpose execute </dev/null; then
+      echo "declare-intent.sh: ${INTENT} не допущен к исполнению (связи со списками, выше); намерение не записано, работу не начинать" >&2
+      echo "  Карточка в отдельной копии — передайте её путь: IWE_GOVERNANCE_REPO_PATH=<копия> bash declare-intent.sh ${INTENT}" >&2
+      exit 3
+    fi
+  fi
+fi
+
 INTENT_DIR="${IWE_RUNTIME_DIR:-$HOME/IWE/.iwe-runtime}/intent-declarations"
 mkdir -p "$INTENT_DIR"
 

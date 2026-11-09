@@ -79,6 +79,7 @@ system	средств
 description	потребност
 description	изменени
 collection	релиз
+document	дистрибутив
 work_plan	стади[яиюей]+ работ
 work_plan	фаз(а|ы|е|у|ой|ам|ами|ах)?(?![а-яё])
 ambiguous	баз[аеыу] данных
@@ -87,9 +88,24 @@ ambiguous	сервис
 ambiguous	услуг
 ambiguous	клиент
 ambiguous	исполнител
-ambiguous	команд
+system	команд(?!н)
 ambiguous	групп
 system	iwe
+system	экосистем
+system	организаци(?!онн)
+system	сообществ
+system	сайт
+system	железн[а-яё]+ человек
+ambiguous	носител
+characteristic	режим доступа
+characteristic	режим[а-яё]+ доступа
+characteristic_value	без аккаунта
+characteristic_value	с аккаунтом
+characteristic_value	с подпиской
+collection	очеред[а-яё]+ задач
+collection	шин[аыуе] задач
+ambiguous	задани
+document	задани[а-яё]+ (в )?очеред
 ambiguous	экзокортекс
 ambiguous	цифров[а-яё]+ двойник
 method	рабоч[а-яё]+ процесс
