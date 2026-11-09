@@ -45,6 +45,9 @@ RETRY_INTERVAL_SECONDS = 25
 OVERDUE_SECONDS = 180
 MAX_BATCH_RECORDS = 32
 MAX_PUBLICATION_FILE_BYTES = 4 * 1024 * 1024
+# A pass waits this long for the queue lock between intake writes instead of
+# giving up at the first busy moment (steady intake starved delivery, WP-530 Ф85).
+READ_LOCK_WAIT_SECONDS = 10
 MAX_PUBLICATION_BYTES = 16 * 1024 * 1024
 _READER_CACHE_COMMITS = 2
 _OID = re.compile(r"(?:[0-9a-f]{40}|[0-9a-f]{64})\Z")
@@ -834,7 +837,7 @@ def deliver_once(
     stream_dir = Path(stream_dir).resolve()
     with delivery_lock(stream_dir):
         metadata = intake.read_metadata(stream_dir)
-        records = intake.read_intake(stream_dir)
+        records = intake.read_intake(stream_dir, wait_seconds=READ_LOCK_WAIT_SECONDS)
         for record in records:
             intake.verify_record(
                 record, trusted_context=trusted_context, verifier=verifier

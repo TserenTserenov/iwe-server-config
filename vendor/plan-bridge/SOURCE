@@ -9,6 +9,12 @@
 # 09.11 (РП-530 Ф85, К13): scripts/lib/plan_event_bridge.py и
 # scripts/lib/plan_bridge_host.py — из a3701a9e3f (ветка
 # session-isolate/claude-code-1e5b17b43ef7998c, чтение журнала одним пакетом).
+# 09.11 вечер (РП-530 Ф85, испытание двух машин): scripts/lib/plan_bridge_receiver.py,
+# scripts/lib/plan_event_bridge.py, scripts/lib/plan_event_intake.py,
+# scripts/lib/plan_event_wal.py, scripts/plan-event-bridge.py и клиент
+# scripts/plan-session-reserve.py — из DS-my-strategy 054fa202aa (main; локально
+# 65c762c3c9): память приёма вместо перечитывания очереди, ожидание блокировки
+# при доставке, многопоточный приёмник, повтор брони при недоступном приёмнике.
 # Код моста — 8 модулей и 2 команды (codePaths, входят в версию правил), три
 # клиентские команды для канала Мака (отправитель, заявка, ответ) и лимиты
 # плана: из них сборка берёт часовой пояс канала Мака (Ф58), лимиты тоже
@@ -25,12 +31,12 @@
 #   348cf7ac8460996889d15d28f27c0873d276d9ea scripts/lib/plan_bridge_allocation.py
 #   5c20199f82d06305617ab7346cead6246e15b37b scripts/lib/plan_bridge_decisions.py
 #   4753557c7b29f84dc9f49cf5ac32134e76c1b352 scripts/lib/plan_bridge_host.py
-#   c694b292a1b342352ca4fbc7bcef2bc45c35806b scripts/lib/plan_bridge_receiver.py
-#   f83d92e1ccaccb60597e1372f31b5bd4db7042e6 scripts/lib/plan_event_bridge.py
-#   aaa218adb2b6792777f4aacfc11eb28efed818ed scripts/lib/plan_event_intake.py
-#   fbb3395861e9dd13a64863bed07c0fe2a8c8172e scripts/lib/plan_event_wal.py
-#   3e56f868a7cb15e20086a6b530f330915cb2eb2b scripts/plan-event-bridge.py
+#   d399e0969088966138b6a86844142f07a9c0ece1 scripts/lib/plan_bridge_receiver.py
+#   81a8c327910fc60ef9a5d814740307e48d206f4c scripts/lib/plan_event_bridge.py
+#   418acd0f603052f1430640ed54e4a397bf7e30b4 scripts/lib/plan_event_intake.py
+#   7a253bff01ab97a818989538c27c5b6b58b2b44a scripts/lib/plan_event_wal.py
+#   f7d4025106be725aa00eed8e2bd88b98d9025689 scripts/plan-event-bridge.py
 #   0a211eb86fef8b5cdc1673e07f0843f2c45b6ffd scripts/plan-event-receiver.py
 #   e40ee8469b56541fc2e1514f8df015d3789a23dc scripts/plan-event-send.py
-#   3e47fe932a535239d0825cd69e102a137c9041ba scripts/plan-session-reserve.py
+#   daa85e61ca0bcef56e8c95b8ddc3557193fb7a7a scripts/plan-session-reserve.py
 #   476978912e9cbce9a3ab2a681a617345000d289f scripts/plan-summary-answer.py
