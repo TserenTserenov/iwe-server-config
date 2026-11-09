@@ -36,6 +36,14 @@ if [ -f "$AIST_ENV" ]; then
   set +a
 fi
 
+# WP-568 Ф12 С4: through iwe-notify (next to this script), which hands the
+# message to the governance gateway so the channel decision (chat vs morning
+# digest) applies; a direct Bot API send only when no gateway runs. Its
+# outcome line goes to stderr: stdout of this script is the JSON contract.
+notify_telegram() {
+  "$(dirname "${BASH_SOURCE[0]}")/iwe-notify" --source day-open-preflight "$1" >&2 || true
+}
+
 DATE="${1:-$(date +%Y-%m-%d)}"
 IWE="${IWE_ROOT:-$HOME/IWE}"
 GOV_REPO="${IWE_GOVERNANCE_REPO:-DS-strategy}"
@@ -83,11 +91,7 @@ elif [ -n "$SCOUT_LOG" ]; then
   else
     SCOUT_STATUS="fail"
     SCOUT_REASON="last log $LOG_DATE (expected $DATE), backlog has pending tasks"
-    if [ -n "${TELEGRAM_BOT_TOKEN:-}" ] && [ -n "${TELEGRAM_CHAT_ID:-}" ]; then
-      curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
-        -H "Content-Type: application/json" \
-        -d "{\"chat_id\":\"${TELEGRAM_CHAT_ID}\",\"text\":\"🚨 Разведчик задач молчит — последний раз отчитывался $LOG_DATE, а в очереди есть незакрытые задачи.\"}" > /dev/null
-    fi
+    notify_telegram "🚨 Разведчик задач молчит — последний раз отчитывался $LOG_DATE, а в очереди есть незакрытые задачи."
   fi
 else
   if [ "$HAS_PENDING" = "false" ]; then
@@ -95,11 +99,7 @@ else
   else
     SCOUT_STATUS="fail"
     SCOUT_REASON="no scout logs found at all, backlog has pending tasks"
-    if [ -n "${TELEGRAM_BOT_TOKEN:-}" ] && [ -n "${TELEGRAM_CHAT_ID:-}" ]; then
-      curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
-        -H "Content-Type: application/json" \
-        -d "{\"chat_id\":\"${TELEGRAM_CHAT_ID}\",\"text\":\"🚨 Разведчик задач вообще не отчитывался, а в очереди есть незакрытые задачи.\"}" > /dev/null
-    fi
+    notify_telegram "🚨 Разведчик задач вообще не отчитывался, а в очереди есть незакрытые задачи."
   fi
 fi
 
@@ -123,10 +123,8 @@ else
   fi
   YESTERDAY=$(portable_date_offset 1)
   YESTERDAY_FILE="$IWE/DS-agent-workspace/scheduler/feedback-triage/$YESTERDAY.md"
-  if [ ! -f "$YESTERDAY_FILE" ] && [ -n "${TELEGRAM_BOT_TOKEN:-}" ] && [ -n "${TELEGRAM_CHAT_ID:-}" ]; then
-    curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
-      -H "Content-Type: application/json" \
-      -d "{\"chat_id\":\"${TELEGRAM_CHAT_ID}\",\"text\":\"🚨 Разбор обратной связи не отчитывался с $YESTERDAY.\"}" > /dev/null
+  if [ ! -f "$YESTERDAY_FILE" ]; then
+    notify_telegram "🚨 Разбор обратной связи не отчитывался с $YESTERDAY."
   fi
 fi
 

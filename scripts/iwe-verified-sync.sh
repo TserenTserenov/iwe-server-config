@@ -112,16 +112,16 @@ state_write() {
 
 # --- alerting with per-class deduplication ------------------------------------
 
+# WP-568 Ф12 С4: one sending path through the server notifier (serverNotify in
+# modules/systemd-timers.nix -> iwe-notify -> gateway), whose path the Nix
+# build passes in IWE_SERVER_NOTIFY; the gateway picks chat or morning digest.
 send_telegram() {
   local text="$1"
-  if [ -z "${TELEGRAM_BOT_TOKEN:-}" ] || [ -z "${TELEGRAM_CHAT_ID:-}" ]; then
-    log "telegram not configured - alert only in journal: $text"
+  if [ -z "${IWE_SERVER_NOTIFY:-}" ]; then
+    log "notifier not configured - alert only in journal: $text"
     return 0
   fi
-  curl -s --max-time 10 -X POST \
-    "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
-    -d "chat_id=${TELEGRAM_CHAT_ID}" \
-    --data-urlencode "text=$text" > /dev/null || log "telegram send failed"
+  "$IWE_SERVER_NOTIFY" iwe-verified-sync "$text" > /dev/null || log "telegram send failed"
 }
 
 # human_repo_name NAME — state names look like "idx-PACK-digital-platform" (index
