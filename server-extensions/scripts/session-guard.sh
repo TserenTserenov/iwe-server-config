@@ -12488,7 +12488,10 @@ PY_NCC
 # intent-gate.sh and checked against earlier open intents of other agents on
 # the same <repo>:<path> in the same WP. A non-zero check is appended to
 # .iwe-runtime/intent-gate-note-file.log: note-file runs from a PostToolUse hook
-# that discards its output, so stderr alone would never reach anyone.
+# that discards its output, so stderr alone would never reach anyone. A failed
+# declare is logged with the last line of its stderr as the reason, and every
+# close that had intents logs one `close_resolve` row with how many were
+# resolved, failed and skipped (WP-561 Ф33 acceptance K4/K5, 10.11).
 # There is no refusing mode here: the claim point runs after the file is
 # already written, so refusing the claim cannot prevent the write.
 # Limits (by the gate's key and rules): sessions of DIFFERENT WPs claiming one
@@ -12538,6 +12541,19 @@ intent_gate_repo_name() {
   fi
 }
 
+# intent_gate_last_error_line <file>: the last error-looking stderr line (the
+# prefixes intent-gate.sh and ledger-append.sh fail with, or a Python error), else
+# the last non-blank one; tabs and control characters made spaces so it stays one
+# log field, cut to 200 characters; "no stderr" if none.
+intent_gate_last_error_line() {
+  local line LC_ALL=en_US.UTF-8
+  line=$(grep -E '^(ERROR|ORIGIN_UNREACHABLE|LEDGER_UNREADABLE|INTERNAL_ERROR|Traceback|[A-Za-z]+Error:)' "$1" 2>/dev/null | tail -n 1)
+  [ -n "$line" ] || line=$(grep -v '^[[:space:]]*$' "$1" 2>/dev/null | tail -n 1)
+  line=$(printf '%s' "$line" | tr '\000-\037\177' ' ')
+  line="${line:0:200}"
+  printf '%s\n' "${line:-no stderr}"
+}
+
 # intent_gate_observe <semaphore> <target> <agent> -- never fails note-file. Must run
 # with the session lock already released: check fetches origin (up to ~20 s).
 intent_gate_observe() {
@@ -12552,11 +12568,20 @@ intent_gate_observe() {
     echo "intent gate: session wp is not WP-<number>, $target claimed without an intent" >&2
     return 0
   fi
+  local declare_err reason
+  declare_err=$(mktemp "${TMPDIR:-/tmp}/intent-gate-declare.XXXXXX") || declare_err=""
   if ! intent_id=$(bash "$script" declare --wp "$wp" --target "$target" --type note-file \
-      --agent "$agent" </dev/null 2>/dev/null 195>&- 196>&-); then
-    printf '%s\t%s\tWP-%s\t%s\tdeclare_failed\n' "$(now_iso)" "$agent" "$wp" "$target" >> "$log"
+      --agent "$agent" </dev/null 2>"${declare_err:-/dev/null}" 195>&- 196>&-); then
+    if [ -n "$declare_err" ]; then
+      reason=$(intent_gate_last_error_line "$declare_err")
+    else
+      reason="stderr not captured (mktemp failed)"
+    fi
+    printf '%s\t%s\tWP-%s\t%s\tdeclare_failed\t%s\n' "$(now_iso)" "$agent" "$wp" "$target" "$reason" >> "$log"
+    [ -z "$declare_err" ] || rm -f "$declare_err"
     return 0
   fi
+  [ -z "$declare_err" ] || rm -f "$declare_err"
   if [ ! -f "$sem" ]; then
     # The session closed while this claim was being declared: nothing will read
     # an intents file for it any more, so the intent is withdrawn at once.
@@ -12581,26 +12606,49 @@ intent_gate_observe() {
 # budget (each resolve fetches origin): what does not fit lapses with the two-day
 # check window instead of holding the close.
 INTENT_GATE_RESOLVE_BUDGET_SEC="${INTENT_GATE_RESOLVE_BUDGET_SEC:-30}"
+#
+# One `close_resolve` row goes to the gate log per close that had intents:
+# resolved / failed / skipped (budget spent, or no gate script or WP number), so
+# lapsed intents are counted where they happen instead of being inferred later.
 intent_gate_resolve_session() {
-  local intents closed="$2" script wp intent_id agent left deadline
+  local intents closed="$2" script wp="" intent_id agent left deadline
+  local total resolved=0 failed=0 closer entry
+  local -a entries=()
   intents=$(intent_gate_intents_file "$1")
   [ -f "$intents" ] || return 0
+  # One snapshot for both the count and the loop: a claim still declaring may
+  # append to the file meanwhile, and a second read would count it as resolved
+  # without counting it in the total.
+  while read -r intent_id agent _; do
+    [ -n "$intent_id" ] && entries+=("$intent_id $agent")
+  done < "$intents"
+  total=${#entries[@]}
   script=$(intent_gate_script)
   deadline=$((SECONDS + INTENT_GATE_RESOLVE_BUDGET_SEC))
-  if [ -f "$script" ] && wp=$(intent_gate_wp_number "$closed"); then
-    while read -r intent_id agent _; do
-      [ -n "$intent_id" ] || continue
+  if [ "$total" -gt 0 ] && [ -f "$script" ] && wp=$(intent_gate_wp_number "$closed"); then
+    for entry in "${entries[@]}"; do
+      intent_id="${entry%% *}"
+      agent="${entry#* }"
       left=$((deadline - SECONDS))
       if [ "$left" -le 0 ]; then
         echo "intent gate: close budget ${INTENT_GATE_RESOLVE_BUDGET_SEC}s spent; remaining intents lapse with the two-day check window" >&2
         break
       fi
       # `timeout` is coreutils; without it the per-call fetch cap of the gate still applies.
-      $(command -v timeout >/dev/null 2>&1 && printf 'timeout %s' "$left") bash "$script" resolve --intent-id "$intent_id" --wp "$wp" --agent "$agent" \
-        </dev/null >/dev/null 2>&1 195>&- 196>&- \
-        || echo "intent gate: resolve of $intent_id at close failed; it lapses with the two-day check window" >&2
-    done < "$intents"
+      if $(command -v timeout >/dev/null 2>&1 && printf 'timeout %s' "$left") bash "$script" resolve --intent-id "$intent_id" --wp "$wp" --agent "$agent" \
+          </dev/null >/dev/null 2>&1 195>&- 196>&-; then
+        resolved=$((resolved + 1))
+      else
+        failed=$((failed + 1))
+        echo "intent gate: resolve of $intent_id at close failed; it lapses with the two-day check window" >&2
+      fi
+    done
   fi
+  closer=$(_unique_record_field "$closed" agent 2>/dev/null) || closer="?"
+  printf '%s\t%s\tWP-%s\tsession:%s\tclose_resolve\tresolved=%d failed=%d skipped=%d\n' \
+    "$(now_iso)" "$closer" "${wp:-?}" "$(basename "$1")" \
+    "$resolved" "$failed" "$((total - resolved - failed))" \
+    >> "$IWE_ROOT/.iwe-runtime/intent-gate-note-file.log" 2>/dev/null || true
   rm -f "$intents"
   return 0
 }

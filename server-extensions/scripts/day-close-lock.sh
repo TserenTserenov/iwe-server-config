@@ -71,15 +71,28 @@ lock_owner() {
 # Быстрый барьер для двух процессов на ОДНОЙ машине — необязательный, gateway недоступен → просто
 # продолжаем и полагаемся на межмашинную аренду ниже (она единственная работает между машинами).
 local_barrier() {
-  [ -x "$GATEWAY_LOCK_PY" ] || { log "gateway-lock.py не найден — пропускаю локальный барьер"; return 0; }
+  # Invoked via python3, so the exec bit is irrelevant: the file is tracked as 100644 in
+  # DS-my-strategy, and the old `-x` test silently disabled this barrier (WP-484 F298 defect 3).
+  [ -f "$GATEWAY_LOCK_PY" ] || { log "gateway-lock.py не найден — пропускаю локальный барьер"; return 0; }
   local rc=0
   python3 "$GATEWAY_LOCK_PY" acquire "day-close-lock" "$TTL_SECONDS" >/dev/null 2>&1 || rc=$?
   if [ "$rc" -eq 1 ]; then
-    log "Локальный барьер: день уже закрывается на этой машине (gateway lock занят) — выхожу"
+    log "Локальный барьер: день уже закрывается на этой машине (gateway lock занят) — выхожу. Если прошлый прогон прерван: из той же беседы — '$0 release', иначе замок истечёт сам через ${TTL_SECONDS}с от его взятия"
     exit 3
   elif [ "$rc" -eq 2 ]; then
     log "gateway недоступен — пропускаю локальный барьер, дальше решает межмашинная аренда"
+  elif [ "$rc" -ne 0 ]; then
+    log "локальный барьер вернул rc=$rc — пропускаю его, дальше решает межмашинная аренда"
   fi
+}
+
+# Releasing the local barrier is best-effort: it only ever guards one machine, and the
+# cross-machine lease below stays authoritative (WP-484 F298: since the barrier really
+# works, an interrupted close must not block a retry from another chat for its TTL).
+local_barrier_release() {
+  [ -f "$GATEWAY_LOCK_PY" ] || return 0
+  python3 "$GATEWAY_LOCK_PY" release "day-close-lock" >/dev/null 2>&1 \
+    || log "локальный барьер не отпущен (gateway недоступен или замок чужой) — истечёт сам через ${TTL_SECONDS}с"
 }
 
 # Финальный коммит "day-close: YYYY-MM-DD" несёт реальные файлы дня и никогда не был частью
@@ -150,6 +163,7 @@ acquire() {
 
 release() {
   cd "$REPO_DIR" || { log "не удалось перейти в $REPO_DIR — окружение не настроено, эскалирую"; exit 2; }
+  local_barrier_release
   local who epoch
   who=$(lock_owner)
   epoch=$(publish_lease_current_epoch "$REPO_DIR") || { log "не удалось прочитать состояние аренды"; exit 2; }

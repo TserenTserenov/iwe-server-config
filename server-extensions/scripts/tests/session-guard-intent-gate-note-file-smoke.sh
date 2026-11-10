@@ -34,7 +34,12 @@ write_stub_gate() {  # <governance repo>
 #!/usr/bin/env bash
 echo "$*" >> "$GATE_LOG"
 case "$1" in
-  declare) echo "intent-$(wc -l < "$GATE_LOG" | tr -d ' ')" ;;
+  declare)
+    if [ "${STUB_DECLARE_RC:-0}" != 0 ]; then
+      printf 'ledger: waiting for lock\n\nERROR:\tledger lock held by day close\nWARN: merge driver not installed\n' >&2
+      exit "$STUB_DECLARE_RC"
+    fi
+    echo "intent-$(wc -l < "$GATE_LOG" | tr -d ' ')" ;;
   check) exit "${STUB_CHECK_RC:-0}" ;;
   resolve) exit 0 ;;
 esac
@@ -114,6 +119,16 @@ echo "A6. warn, gate unavailable (check rc 4): claim recorded, logged with its c
 check "exit" 0 "$(note warn-down.md warn 4)"
 check "claim recorded" 1 "$(claims warn-down.md)"
 check "logged with rc 4" 1 "$(conflicts sessions-origin:warn-down.md 4)"
+
+echo "A6b. warn, declare fails: claim recorded, the reason (last stderr line, tab flattened) logged"
+echo x > "$SES/warn-declare.md"
+(export IWE_INTENT_GATE_NOTE_FILE=warn STUB_DECLARE_RC=2
+ guard note-file "$SES/warn-declare.md" --agent fixture --slug gate >/dev/null 2>"$TEST_ROOT/err"; echo $? > "$TEST_ROOT/rc")
+check "exit" 0 "$(cat "$TEST_ROOT/rc")"
+check "claim recorded" 1 "$(claims warn-declare.md)"
+check "declare_failed logged with its reason" 1 \
+  "$(grep -c "	sessions-origin:warn-declare.md	declare_failed	ERROR: ledger lock held by day close$" "$CONFLICTS" || true)"
+check "no check after a failed declare" 0 "$(grep -c '^check .*warn-declare.md' "$GATE_LOG" || true)"
 
 echo "A7. gate script missing: claim proceeds with a note"
 mv "$GOV/scripts/intent-gate.sh" "$TEST_ROOT/gate.bak"
@@ -198,13 +213,17 @@ check "close succeeds" 0 "$?"
 check "first intent resolved as its agent" 1 "$(grep -c '^resolve --intent-id intent-a1 --wp 484 --agent fixture$' "$GATE_LOG")"
 check "second intent resolved as its agent" 1 "$(grep -c '^resolve --intent-id intent-a2 --wp 484 --agent other-agent$' "$GATE_LOG")"
 check "intents file removed" no "$([ -e "$BINTENTS" ] && echo yes || echo no)"
+BLOG="$B/.iwe-runtime/intent-gate-note-file.log"
+check "close_resolve row: 2 resolved" 1 \
+  "$(grep -c "	fixture	WP-484	session:$(basename "$BSEM")	close_resolve	resolved=2 failed=0 skipped=0$" "$BLOG" || true)"
 
-echo "B2. close with the flag on and no intents at all succeeds without gate calls"
+echo "B2. close with the flag on and no intents at all succeeds without gate calls or a summary row"
 open_b gate-close-empty
 : > "$GATE_LOG"
 (export IWE_INTENT_GATE_NOTE_FILE=warn; bguard close --wp WP-484 --slug gate-close-empty --agent fixture >/dev/null 2>"$B/close2.err")
 check "close succeeds" 0 "$?"
 check "no gate call" 0 "$(wc -l < "$GATE_LOG" | tr -d ' ')"
+check "no close_resolve row" 0 "$(grep -c "session:$(basename "$BSEM")	close_resolve" "$BLOG" || true)"
 
 echo "B3. an exhausted close budget skips resolves, close still succeeds and the file is removed"
 open_b gate-close-budget
@@ -215,6 +234,8 @@ printf '%s\n' 'intent-b1 fixture MC-sessions:z.md' > "$BINTENTS"
 check "close succeeds" 0 "$?"
 check "no resolve attempted" 0 "$(wc -l < "$GATE_LOG" | tr -d ' ')"
 check "budget message" 1 "$(grep -c 'close budget 0s spent' "$B/close3.err")"
+check "close_resolve row counts the skipped intent" 1 \
+  "$(grep -c "	session:$(basename "$BSEM")	close_resolve	resolved=0 failed=0 skipped=1$" "$BLOG" || true)"
 check "intents file removed" no "$([ -e "$BINTENTS" ] && echo yes || echo no)"
 
 if [ "$FAILURES" -ne 0 ]; then

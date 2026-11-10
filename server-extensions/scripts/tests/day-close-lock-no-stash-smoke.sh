@@ -179,5 +179,15 @@ GIT_COMMITTER_DATE='2026-09-20T21:15:00Z' GIT_AUTHOR_DATE='2026-09-20T21:15:00Z'
 git_sandbox push --quiet origin HEAD:main
 check "закрытие до полуночи UTC найдено по местной дате" "$(IWE_CLOSE_DATE=2026-09-21 run_acquire)" "1"
 
+echo
+echo "== 6. Локальный барьер работает и без бита исполнения у gateway-lock.py (WP-484 Ф298) =="
+rm -rf "${SANDBOX:?}/origin.git" "$CLONE"
+setup_sandbox
+# The real gateway-lock.py is tracked as 100644; a busy stub with the same mode must stop acquire.
+rm -f "$CLONE/scripts/lib/gateway-lock.py"
+printf 'import sys\nsys.exit(1)\n' > "$CLONE/scripts/lib/gateway-lock.py"
+chmod 644 "$CLONE/scripts/lib/gateway-lock.py"
+check "занятый барьер (файл без бита исполнения) остановил acquire" "$(run_acquire)" "3"
+
 echo "Итого: пройдено $PASS, провалено $FAIL"
 [ "$FAIL" -eq 0 ]

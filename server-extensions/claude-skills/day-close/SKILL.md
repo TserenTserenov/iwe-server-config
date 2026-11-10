@@ -494,6 +494,12 @@ git status --short
 # WeekState и priorities — добавить только если они изменены.
 # Игнорируемые runtime-файлы (exocortex, sessions-today, кэши) не добавлять в Git.
 DC_FILES=(<каждый свой изменённый файл явным относительным путём>)
+# WP-484 Ф298 (вход И-10 п.1): заявить файлы за housekeeping-сессией закрытия дня, иначе
+# проверка границ сессии отклоняет коммит новых файлов («вне scope активных сессий»).
+for DC_FILE in "${DC_FILES[@]}"; do
+  IWE_AGENT=claude-code bash "${IWE_SCRIPTS:-$HOME/IWE/scripts}/session-guard.sh" note-file "$DC_FILE" \
+    --agent claude-code --slug day-close || echo "WARN: note-file $DC_FILE не прошёл — коммит может упереться в проверку границ" >&2
+done
 git add -- "${DC_FILES[@]}" || exit 1
 git diff --cached --name-only || exit 1
 # Сверить весь staged-список с DC_FILES до коммита.
