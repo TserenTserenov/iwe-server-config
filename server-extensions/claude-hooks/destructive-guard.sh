@@ -552,8 +552,10 @@ frozen_canon_paths() {
 # does not see a call behind `$(...)`, `do`, or an unresolved global option, and those
 # are exactly the forms the helper must judge. The helper lexes quotes, so prose such as
 # `git commit -m "add x"` comes back ALLOW.
-if printf '%s' "$CMD_EXEC" | grep -qE '(^|[^[:alnum:]_.-])git([^[:alnum:]_-]|$)' \
-   && printf '%s' "$CMD_EXEC" | grep -qE '(^|[^[:alnum:]_-])(add|stage|restore)([^[:alnum:]_-]|$)'; then
+# WP-484 Ф298 (third cold review 10.11): `$'echo hi\ngit add f'` hides both words behind
+# an escape letter, so the trigger is a substring match; the helper decides.
+if printf '%s' "$CMD_EXEC" | grep -q 'git' \
+   && printf '%s' "$CMD_EXEC" | grep -qE 'add|stage|restore'; then
   FROZEN_ARGS=()
   while IFS= read -r frozen; do
     [ -n "$frozen" ] && FROZEN_ARGS+=(--frozen "$frozen")

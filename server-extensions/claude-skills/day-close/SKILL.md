@@ -357,20 +357,28 @@ bash ~/IWE/scripts/day-close-step-log.sh end 5b
 ```bash
 DC_CONTEXT=$(bash "$HOME/IWE/.iwe-runtime/day-close-interactive.sh" --context '<токен из шага 0.5>') || exit 1; eval "$DC_CONTEXT"
 bash ~/IWE/scripts/day-close-step-log.sh start 6
-# Сначала собственная запись шага 11, затем история из закреплённой копии.
+# Сначала история дня через общий читатель (опубликованное + архив + буфер хоста,
+# WP-530 Ф158), затем собственная очередь шага 11 поверх.
 DAY_LEDGER_REL="day/${IWE_CLOSE_DATE:0:4}/${IWE_CLOSE_DATE:5:2}/day-$IWE_CLOSE_DATE.yaml"
-DIGEST_JSON=$(python3 - "$IWE_LEDGER_WRITE_DIR/$DAY_LEDGER_REL" "$GOV_REPO_ROOT/machine/ledger/$DAY_LEDGER_REL" "$IWE_CLOSE_DATE" <<'PY'
+DIGEST_JSON=$(python3 - "$IWE_LEDGER_WRITE_DIR/$DAY_LEDGER_REL" "$GOV_REPO_ROOT" "$IWE_CLOSE_DATE" <<'PY'
 import json, pathlib, sys, yaml
-digest = {}
-# Historical events first; this run's queue overlays only the fields it wrote.
-for name in (sys.argv[2], sys.argv[1]):
-    path = pathlib.Path(name)
-    if not path.exists():
-        continue
+gov = pathlib.Path(sys.argv[2])
+sys.path.insert(0, str(gov / "scripts" / "lib"))
+from ledger_path import read_ledger_document
+try:
+    documents = [read_ledger_document("day", sys.argv[3], str(gov / "machine" / "ledger"),
+                                      str(gov / "archive" / "ledger"))]
+except (OSError, ValueError, RuntimeError, yaml.YAMLError):
+    raise SystemExit("STOP: журнал шага 11 не читается")
+queue = pathlib.Path(sys.argv[1])
+if queue.exists():
     try:
-        doc = yaml.safe_load(path.read_text(encoding="utf-8"))
+        documents.append(yaml.safe_load(queue.read_text(encoding="utf-8")))
     except (OSError, yaml.YAMLError):
         raise SystemExit("STOP: журнал шага 11 не читается")
+digest = {}
+# History first; this run's queue overlays only the fields it wrote.
+for doc in documents:
     if not isinstance(doc, dict) or doc.get("schema") != "ledger/v1" or not isinstance(doc.get("events"), list):
         raise SystemExit("STOP: журнал шага 11 не читается")
     for event in doc["events"]:
@@ -387,7 +395,7 @@ printf '%s\n' "${DIGEST_JSON:-digest не записан}"
 
 > Условный шаг: если `params.yaml → multiplier_enabled: false` → пропустить.
 
-**Шаг 0 (перед расчётом): прочитать, что уже посчитал шаг 11.** Взять `facts_digest` из вывода команды выше: сначала собственная очередь, затем исходная история в закреплённой копии. Повреждённый файл не заменять старым числом. `wakatime_h` — физическое время (скрипт сам берёт его из клиента или по API). `multiplier_estimated` — НЕ мультипликатор протокола, а приблизительная метрика покрытия: WakaTime / минуты событий `session_closed` с известной длительностью (события без длительности и ещё не закрытые сессии в знаменатель не входят). Показать пилоту оба числа с названиями и пометкой «покрытие N из M сессий». Digest не записан (шаг 11 не отработал) — написать это одной строкой и продолжить с пунктом 1 ниже.
+**Шаг 0 (перед расчётом): прочитать, что уже посчитал шаг 11.** Взять `facts_digest` из вывода команды выше: история дня из опубликованного журнала, архива и буфера хоста (общий читатель), поверх неё собственная очередь шага 11. Повреждённый файл не заменять старым числом. `wakatime_h` — физическое время (скрипт сам берёт его из клиента или по API). `multiplier_estimated` — НЕ мультипликатор протокола, а приблизительная метрика покрытия: WakaTime / минуты событий `session_closed` с известной длительностью (события без длительности и ещё не закрытые сессии в знаменатель не входят). Показать пилоту оба числа с названиями и пометкой «покрытие N из M сессий». Digest не записан (шаг 11 не отработал) — написать это одной строкой и продолжить с пунктом 1 ниже.
 **Правило «недоступно»:** писать «WakaTime недоступен» разрешено только после проверки по порядку: `facts_digest` → клиент → API (ключ не печатать, читать через `scripts/with-aist-env.sh`; само число часов показывать). Инцидент 01.10.2026: агент проверил один клиент и записал «не рассчитан», хотя шаг 11 уже записал `wakatime_h`.
 **Часы сессии для бюджета** брать из карточки/ОРЗ-файла по содержанию, не из разницы времён семафора: сессия, открытая весь день при нескольких ходах, не равна долгой работе (РП-170, 01.10: 9 ч по семафору при 5 ходах).
 
