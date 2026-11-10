@@ -23,20 +23,22 @@ import hashlib
 import hmac
 import importlib
 import json
+import logging
 import os
 from pathlib import Path
+import re
 import site
 import stat
 import subprocess
 import sys
 import sysconfig
 
-import yaml
 
 import plan_event_bridge as bridge
 from plan_bridge_allocation import AllocationPlanValidator, PersonalTimeBudget
 from plan_bridge_decisions import BridgeError
 
+_LOG = logging.getLogger(__name__)
 DEFAULT_CONFIG_PATH = Path("/etc/iwe-plan-bridge/host.json")
 DEFAULT_TRUSTED_UIDS = (0,)
 CONFIG_SCHEMA = "plan-bridge-host/1"
@@ -557,73 +559,107 @@ def _check_history_is_trustworthy(reader):
         raise BridgeError("HISTORY_UNSAFE", "replace refs are present")
 
 
-def _load_bounded(raw):
-    """Decode one historical journal file under the same bounds as the tip reader."""
-    if len(raw) > MAX_JOURNAL_FILE_BYTES:
-        raise BridgeError("MALFORMED_JOURNAL", "journal file exceeds admitted size")
+def _blob_events(reader, blob):
+    """Decision and delivery events of one historical journal file.
+
+    The reader decodes under the tip's structural bounds and applies the
+    per-file size bound before reading or reusing the file.
+    """
+    document = reader.history_document(blob, MAX_JOURNAL_FILE_BYTES)
     try:
-        depth = 0
-        for count, node in enumerate(yaml.parse(raw, Loader=bridge._SAFE_LOADER), 1):
-            if (
-                count > 20000
-                or isinstance(node, yaml.AliasEvent)
-                or getattr(node, "anchor", None)
-            ):
-                raise ValueError("journal structure exceeds admitted bounds")
-            if isinstance(node, (yaml.MappingStartEvent, yaml.SequenceStartEvent)):
-                depth += 1
-            elif isinstance(node, (yaml.MappingEndEvent, yaml.SequenceEndEvent)):
-                depth -= 1
-            if depth > 32:
-                raise ValueError("journal nesting exceeds admitted bound")
-        events = yaml.load(raw, Loader=bridge._JournalLoader)["events"]
         return [
             (event["kind"], event["data"]["event_id"], event["data"])
-            for event in events
+            for event in document["events"]
             if event["kind"] in ("plan_decision", "plan_delivery")
         ]
-    except (yaml.YAMLError, ValueError, KeyError, TypeError, RecursionError) as exc:
+    except (KeyError, TypeError) as exc:
         raise BridgeError(
             "MALFORMED_JOURNAL", "journal file cannot be decoded"
         ) from exc
 
 
-def _blob_events(reader, revision, name):
-    return _load_bounded(reader._git("cat-file", "blob", f"{revision}:{name}").stdout)
+_NULL_OID = re.compile(rb"0+\Z")
 
 
-def _commit_events(reader, commit):
-    """Accepted decisions and delivery addresses this commit added (rename-safe).
+def _journal_changes(reader, commits):
+    """A/M journal changes of each commit, from one diff-tree over all of them.
+
+    Returns {commit: [(status, old blob, new blob), ...]}. The raw format names
+    both blobs, so a modified file is compared with exactly its parent version.
+    """
+    if not commits:
+        return {}
+    fields = reader._git(
+        "diff-tree",
+        "--stdin",
+        "--always",
+        "--root",
+        "--no-renames",
+        "-r",
+        "-z",
+        "--raw",
+        "--no-abbrev",
+        "--diff-filter=AM",
+        "--",
+        bridge.JOURNAL_PREFIX,
+        stdin=b"".join(commit.encode() + b"\n" for commit in commits),
+    ).stdout.split(b"\0")
+    changes, current, position = {}, None, 0
+    while position < len(fields):
+        field = fields[position]
+        position += 1
+        if not field:
+            continue
+        if field.startswith(b":"):
+            meta = field[1:].split(b" ")
+            if current is None or len(meta) != 5 or position >= len(fields):
+                raise BridgeError("HISTORY_UNSAFE", "unexpected history diff output")
+            _, _, old, new, status = meta
+            position += 1  # the path; the blob oids identify the content
+            changes[current].append(
+                (status, None if _NULL_OID.match(old) else old, new)
+            )
+        else:
+            current = field.decode()
+            changes[current] = []
+    if list(changes) != list(commits):
+        raise BridgeError("HISTORY_UNSAFE", "unexpected history diff output")
+    return changes
+
+
+def _batched_journal_changes(reader, commits):
+    """Changes of all commits in one call, or None to read them one by one.
+
+    A failed batch must not report an unreadable late commit before an earlier
+    commit's own refusal; the per-commit walk keeps that order.
+    """
+    try:
+        return _journal_changes(reader, commits)
+    except BridgeError as exc:
+        # An unreadable object, or output this parser does not expect.
+        if exc.code not in ("GIT_UNAVAILABLE", "HISTORY_UNSAFE"):
+            raise
+        _LOG.warning("batched history diff failed (%s); per commit", exc.code)
+        return None
+
+
+def _commit_events(reader, changes):
+    """Accepted decisions and delivery addresses one commit added (rename-safe).
 
     A file that was only modified contributes just the records absent from its
     previous version, so appending to an existing file counts as new records.
     """
-    fields = reader._git(
-        "diff-tree",
-        "--root",
-        "--no-commit-id",
-        "--no-renames",
-        "-r",
-        "-z",
-        "--diff-filter=AM",
-        "--name-status",
-        commit,
-        "--",
-        bridge.JOURNAL_PREFIX,
-    ).stdout.split(b"\0")
-    changes = list(zip(fields[0::2], fields[1::2]))
     if len(changes) > MAX_FILES_PER_COMMIT:
         raise BridgeError("HISTORY_UNSAFE", "commit changes too many journal files")
     accepted, addresses = [], {}
-    for status, name in changes:
-        name = name.decode()
+    for status, old, new in changes:
         before = set()
         if status == b"M":
             before = {
                 (kind, event_id, _freeze(data))
-                for kind, event_id, data in _blob_events(reader, f"{commit}^", name)
+                for kind, event_id, data in _blob_events(reader, old)
             }
-        for kind, event_id, data in _blob_events(reader, commit, name):
+        for kind, event_id, data in _blob_events(reader, new):
             if (kind, event_id, _freeze(data)) in before:
                 continue
             if kind == "plan_decision" and data["outcome"] == "accepted":
@@ -662,15 +698,38 @@ def publication_order(reader, base_commit, *, trust_intra_commit_order):
     )
     if len(lines) > MAX_HISTORY_COMMITS:
         raise BridgeError("HISTORY_UNSAFE", "journal history exceeds admitted bound")
+    walk = [line.split() for line in lines]
+    # Diffs are read in one call for the commits before the first merge; the
+    # merge itself still stops the walk in order, after the commits before it.
+    linear = []
+    for commit, *parents in walk:
+        if len(parents) > 1:
+            break
+        linear.append(commit)
+    changes = _batched_journal_changes(reader, linear)
+    if changes is not None:
+        reader.prefetch(
+            [
+                blob
+                for items in changes.values()
+                for _, old, new in items
+                for blob in (old, new)
+                if blob is not None
+            ],
+            MAX_JOURNAL_FILE_BYTES,
+        )
     seen, order = set(), []
-    for line in lines:
-        commit, *parents = line.split()
+    for commit, *parents in walk:
         if len(parents) > 1:
             raise BridgeError(
                 "HISTORY_UNSAFE", "journal changed on both sides of a merge"
             )
         try:
-            accepted, addresses = _commit_events(reader, commit)
+            if changes is None:
+                commit_changes = _journal_changes(reader, [commit])[commit]
+            else:
+                commit_changes = changes[commit]
+            accepted, addresses = _commit_events(reader, commit_changes)
         except BridgeError as exc:
             if exc.code != "GIT_UNAVAILABLE":
                 raise
