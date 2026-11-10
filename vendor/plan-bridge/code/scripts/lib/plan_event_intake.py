@@ -11,6 +11,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 import hashlib
 import json
+import math
 import os
 from pathlib import Path
 import tempfile
@@ -31,6 +32,7 @@ MAX_REQUEST_DEPTH = 16
 MAX_PARSE_DEPTH = 100  # parser guard for stored files; request limit stays 16
 MAX_REQUEST_NODES = 4000
 MAX_REQUEST_BYTES = 64 * 1024  # JCS bytes, before adding transport/proof metadata.
+_MAX_JSON_INTEGER = 2**53 - 1  # the rfc8785 package refuses integers beyond it
 REQUEST_FIELDS = frozenset(wal.PRODUCER_FIELDS)
 RECORD_FIELDS = frozenset(
     {
@@ -117,6 +119,14 @@ def _check_json_tree(value: object) -> None:
             _check_json_tree(item)
     elif value is not None and type(value) not in (str, int, float, bool):
         raise ValueError(f"not a JSON value: {type(value).__name__}")
+    # The values RFC 8785 itself refuses, so that a check without serializing
+    # (validate_request_shape) refuses them too.
+    elif type(value) is float and not math.isfinite(value):
+        raise ValueError("JSON numbers must be finite")
+    elif type(value) is int and abs(value) > _MAX_JSON_INTEGER:
+        raise ValueError("JSON integer outside the I-JSON range")
+    elif type(value) is str:
+        value.encode("utf-8")  # a lone surrogate raises UnicodeEncodeError
 
 
 def _canonical(value: object) -> bytes:
