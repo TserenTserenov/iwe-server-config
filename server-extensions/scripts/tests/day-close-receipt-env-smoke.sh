@@ -33,6 +33,8 @@ run_block() {  # <stub rc>; prints "ENV=<array>" then stderr on the next lines
     export IWE_ROOT="$T/root" IWE_SCRIPTS="$T/scripts" STUB_LOG="$T/log" STUB_RC="$1"
     # shellcheck disable=SC2034  # read by the extracted skill block
     DC_SHA="$SHA"
+    # shellcheck disable=SC2034  # the step names its repository instead of a top-level cd (WP-484 Ф298)
+    G="$T/DS-my-strategy"
     eval "$BLOCK"
     echo "ENV=${DC_RECEIPT_ENV[*]:-}"
   ) 2>&1
@@ -84,7 +86,7 @@ exit "${STUB_RC:-0}"
 STUB
 git -C "$T/DS-my-strategy" worktree add -q -b iso "$T/iso-copy"
 : > "$T/log"
-OUT=$(cd "$T/iso-copy" && IWE_ROOT="$T/root" IWE_SCRIPTS="$T/scripts" STUB_LOG="$T/log" STUB_RC=0 DC_SHA="$SHA" \
+OUT=$(cd "$T/iso-copy" && G="$T/iso-copy" IWE_ROOT="$T/root" IWE_SCRIPTS="$T/scripts" STUB_LOG="$T/log" STUB_RC=0 DC_SHA="$SHA" \
   bash -c "$BLOCK"$'\n'"echo ENV=\${DC_RECEIPT_ENV[*]:-}" 2>&1)
 expect "worktree" "$OUT" "ENV=IWE_AGENT=claude-code IWE_PUBLICATION_SESSION_ID=housekeeping-day-close" yes
 expect "worktree repo name" "$(cat "$T/log")" "--repo DS-my-strategy " yes
@@ -94,13 +96,13 @@ mkdir -p "$T/rootrepo/.iwe-runtime/sessions"
 git -C "$T/rootrepo" init -q -b main
 git -C "$T/rootrepo" -c user.email=t@example.test -c user.name=t commit -q --allow-empty -m x
 : > "$T/log"
-OUT=$(cd "$T/rootrepo" && IWE_ROOT="$T/rootrepo" IWE_SCRIPTS="$T/scripts" STUB_LOG="$T/log" STUB_RC=0 DC_SHA="$SHA" \
+OUT=$(cd "$T/rootrepo" && G="$T/rootrepo" IWE_ROOT="$T/rootrepo" IWE_SCRIPTS="$T/scripts" STUB_LOG="$T/log" STUB_RC=0 DC_SHA="$SHA" \
   bash -c "$BLOCK"$'\n'"echo ENV=\${DC_RECEIPT_ENV[*]:-}" 2>&1)
 expect "root repo name" "$(cat "$T/log")" "--repo iwe-root " yes
 
 # 5. The publisher call in the skill really takes the array (a fix that is not wired in is no fix).
 # shellcheck disable=SC2016  # the pattern is literal text, not an expansion
-grep -q 'env ${DC_RECEIPT_ENV\[@\]+"${DC_RECEIPT_ENV\[@\]}"} bash scripts/ds-publish.sh' "$SKILL" \
+grep -q 'env ${DC_RECEIPT_ENV\[@\]+"${DC_RECEIPT_ENV\[@\]}"} bash "$G/scripts/ds-publish.sh"' "$SKILL" \
   || { echo "FAIL: ds-publish.sh call in the skill does not use DC_RECEIPT_ENV"; FAIL=1; }
 
 [ "$FAIL" -eq 0 ] && echo "PASS: day-close receipt env" || exit 1

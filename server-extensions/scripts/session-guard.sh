@@ -12825,12 +12825,24 @@ if [ "$CMD" = "close" ]; then
     fail "ORZ не прошёл валидацию. Исправь замечания выше и повтори close. Семафор остаётся активным." 5
   fi
 
-  # WP-484 F257 M2: the peer-session path has no runner, so the card field
-  # «Следующий шаг» is checked here (shadow mode: warns, never blocks).
-  # Optional by design: a failure of the check must not stop a close.
+  # WP-484 F257 M2 / F285: the peer-session path has no runner, so the card field
+  # «Следующий шаг» is checked here.  Exit 10 = a blocking code on the published card
+  # (pilot decision 10.11); any other outcome, including a broken check, never stops a close.
+  # A resumed close (delivery already prepared/published) only warns: its card is bound to
+  # the delivery and cannot be fixed and republished from here (cold review 10.11).
   # Called only for a peer-session close: other sessions have no use for the check.
   if [ -n "${SEM_FILE:-}" ] && grep -qx 'close_path: peer-session' "$SEM_FILE" 2>/dev/null; then
-    bash "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/wp-handoff-peer-check.sh" --sem "$SEM_FILE" --from-close </dev/null || true
+    HANDOFF_RC=0
+    if [ "$CLOSE_RESUME_STATE" = "none" ]; then
+      bash "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/wp-handoff-peer-check.sh" --sem "$SEM_FILE" --from-close </dev/null \
+        || HANDOFF_RC=$?
+    else
+      IWE_HANDOFF_CHECK_MODE=shadow bash "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/wp-handoff-peer-check.sh" \
+        --sem "$SEM_FILE" --from-close </dev/null || true
+    fi
+    if [ "$HANDOFF_RC" -eq 10 ]; then
+      fail "поле «Следующий шаг» карточки не прошло проверку (причина выше). Исправь, опубликуй и повтори close. Семафор остаётся активным." 5
+    fi
   fi
 
   DEFERRED_NO_REFLECTION_EVENT=""

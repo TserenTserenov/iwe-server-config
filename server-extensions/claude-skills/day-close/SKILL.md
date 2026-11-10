@@ -81,8 +81,9 @@ rm -f "$DCI"
 [ "$RC_PREP" -eq 0 ] || exit "$RC_PREP"
 # Здесь агент сохраняет токен из вывода --prepare и подставляет его ниже.
 DC_CONTEXT=$(bash "$HOME/IWE/.iwe-runtime/day-close-interactive.sh" --context '<токен из шага 0.5>') || exit 1; eval "$DC_CONTEXT"
-cd "$GOV_REPO_ROOT" || exit 1
-IWE_AGENT=claude-code bash "${IWE_SCRIPTS:-$HOME/IWE/scripts}/session-guard.sh" open --housekeeping day-close --agent claude-code || exit 1
+# Subshell, not a top-level cd (WP-484 Ф298, И-10 п.4: destructive-guard blocks it); the
+# guard takes the repository from its working directory.
+(cd "$GOV_REPO_ROOT" && IWE_AGENT=claude-code bash "${IWE_SCRIPTS:-$HOME/IWE/scripts}/session-guard.sh" open --housekeeping day-close --agent claude-code) || exit 1
 bash ~/IWE/scripts/day-close-step-log.sh end 0.5
 ```
 
@@ -328,7 +329,7 @@ python3 ${GOV_REPO_ROOT:?}/scripts/check-index-health.py
 ```bash
 DC_CONTEXT=$(bash "$HOME/IWE/.iwe-runtime/day-close-interactive.sh" --context '<токен из шага 0.5>') || exit 1; eval "$DC_CONTEXT"
 bash ~/IWE/scripts/day-close-step-log.sh start 5
-cd ${GOV_REPO_ROOT:?} && python3 scripts/process-runner.py start day-close
+(cd "${GOV_REPO_ROOT:?}" && python3 scripts/process-runner.py start day-close)
 bash ~/IWE/scripts/day-close-step-log.sh end 5
 ```
 
@@ -488,8 +489,11 @@ bash ${GOV_REPO_ROOT:?}/scripts/day-close-prepare.sh --verify-week-summary --for
 ```bash
 DC_CONTEXT=$(bash "$HOME/IWE/.iwe-runtime/day-close-interactive.sh" --context '<токен из шага 0.5>') || exit 1; eval "$DC_CONTEXT"
 bash ~/IWE/scripts/day-close-step-log.sh start 10
-cd "$GOV_REPO_ROOT" || exit 1
-git status --short
+# No top-level cd (WP-484 Ф298, И-10 п.4): the hook blocks it, so the step did not run
+# verbatim. Every git call names the repository; note-file runs in a subshell because the
+# guard takes the claim's repository from its working directory.
+G="${GOV_REPO_ROOT:?}"
+git -C "$G" status --short
 # Перечислить только реально изменённые файлы своих шагов, включая результат раннера.
 # WeekState и priorities — добавить только если они изменены.
 # Игнорируемые runtime-файлы (exocortex, sessions-today, кэши) не добавлять в Git.
@@ -497,17 +501,17 @@ DC_FILES=(<каждый свой изменённый файл явным отн
 # WP-484 Ф298 (вход И-10 п.1): заявить файлы за housekeeping-сессией закрытия дня, иначе
 # проверка границ сессии отклоняет коммит новых файлов («вне scope активных сессий»).
 for DC_FILE in "${DC_FILES[@]}"; do
-  IWE_AGENT=claude-code bash "${IWE_SCRIPTS:-$HOME/IWE/scripts}/session-guard.sh" note-file "$DC_FILE" \
-    --agent claude-code --slug day-close || echo "WARN: note-file $DC_FILE не прошёл — коммит может упереться в проверку границ" >&2
+  (cd "$G" && IWE_AGENT=claude-code bash "${IWE_SCRIPTS:-$HOME/IWE/scripts}/session-guard.sh" note-file "$DC_FILE" \
+    --agent claude-code --slug day-close) || echo "WARN: note-file $DC_FILE не прошёл — коммит может упереться в проверку границ" >&2
 done
-git add -- "${DC_FILES[@]}" || exit 1
-git diff --cached --name-only || exit 1
+git -C "$G" add -- "${DC_FILES[@]}" || exit 1
+git -C "$G" diff --cached --name-only || exit 1
 # Сверить весь staged-список с DC_FILES до коммита.
-if ! git diff --cached --quiet -- "${DC_FILES[@]}"; then
-  git commit -m "day-close: $IWE_CLOSE_DATE" -- "${DC_FILES[@]}" || exit 1
+if ! git -C "$G" diff --cached --quiet -- "${DC_FILES[@]}"; then
+  git -C "$G" commit -m "day-close: $IWE_CLOSE_DATE" -- "${DC_FILES[@]}" || exit 1
 fi
-DC_SHA=$(git rev-parse HEAD) || exit 1
-DC_STATUS=$(git status --porcelain) || exit 1
+DC_SHA=$(git -C "$G" rev-parse HEAD) || exit 1
+DC_STATUS=$(git -C "$G" status --porcelain) || exit 1
 [ -z "$DC_STATUS" ] || { echo "STOP: неучтённые результаты в копии"; printf '%s\n' "$DC_STATUS"; exit 1; }
 # Проверить владение непосредственно перед публикацией. Публикуется вся копия:
 # process-runner мог создать отдельный коммит RUN, один DC_SHA его не покрывает.
@@ -521,7 +525,7 @@ bash "$DAY_CLOSE_WRAPPER" --context "$DAY_CLOSE_LOCK_TOKEN" >/dev/null || exit 1
 DC_GUARD="${IWE_SCRIPTS:-$HOME/IWE/scripts}/session-guard.sh"
 DC_SEM="${IWE_ROOT:-$HOME/IWE}/.iwe-runtime/sessions/claude-code-housekeeping-day-close.open"
 DC_RECEIPT_ENV=()
-DC_COMMON=$(git rev-parse --path-format=absolute --git-common-dir 2>/dev/null) || DC_COMMON=""
+DC_COMMON=$(git -C "$G" rev-parse --path-format=absolute --git-common-dir 2>/dev/null) || DC_COMMON=""
 DC_REPO_NAME=$(basename "$(dirname "$DC_COMMON")")
 # Имя корневого репозитория считается так же, как в isolate-push.sh (record_publication_receipts).
 [ "$(dirname "$DC_COMMON")" != "$(cd "${IWE_ROOT:-$HOME/IWE}" 2>/dev/null && pwd -P)" ] || DC_REPO_NAME=iwe-root
@@ -533,26 +537,25 @@ else
   echo "WARN: коммит дня не заявлен (нет охранника сессий, housekeeping-семафора или заявка отклонена) — публикация пойдёт без квитанции v2" >&2
 fi
 # END-RECEIPT-ENV
-env ${DC_RECEIPT_ENV[@]+"${DC_RECEIPT_ENV[@]}"} bash scripts/ds-publish.sh "$PWD" high --reason "day-close: $IWE_CLOSE_DATE" || exit 1
-git fetch -q origin main || exit 1
-DC_PUBLISHED_REVISION=$(git rev-parse origin/main) || exit 1
+env ${DC_RECEIPT_ENV[@]+"${DC_RECEIPT_ENV[@]}"} bash "$G/scripts/ds-publish.sh" "$G" high --reason "day-close: $IWE_CLOSE_DATE" || exit 1
+git -C "$G" fetch -q origin main || exit 1
+DC_PUBLISHED_REVISION=$(git -C "$G" rev-parse origin/main) || exit 1
 # Доказательство всей ветки: достижимость или проверяемая patch-эквивалентность
 # каждого обычного коммита. Неопубликованный merge требует отдельного разбора.
-if ! git merge-base --is-ancestor "$DC_SHA" "$DC_PUBLISHED_REVISION"; then
-  DC_MERGES=$(git rev-list --merges "$DC_PUBLISHED_REVISION..$DC_SHA") || exit 1
+if ! git -C "$G" merge-base --is-ancestor "$DC_SHA" "$DC_PUBLISHED_REVISION"; then
+  DC_MERGES=$(git -C "$G" rev-list --merges "$DC_PUBLISHED_REVISION..$DC_SHA") || exit 1
   [ -z "$DC_MERGES" ] || { echo 'STOP: доставка merge-коммита не доказана'; exit 1; }
-  DC_CHERRY=$(git cherry "$DC_PUBLISHED_REVISION" "$DC_SHA") || exit 1
+  DC_CHERRY=$(git -C "$G" cherry "$DC_PUBLISHED_REVISION" "$DC_SHA") || exit 1
   if printf '%s\n' "$DC_CHERRY" | grep -q '^+'; then
     echo 'STOP: остались неопубликованные коммиты'; exit 1
   fi
 fi
 # Передать R23 сохранённые дату, номер недели, DC_SHA и точный входной срез
 # DC_PUBLISHED_REVISION. Поиск коммита по заголовку доказательством не является.
-bash "${IWE_SCRIPTS:-$HOME/IWE/scripts}/session-guard.sh" close --housekeeping day-close --agent claude-code || exit 1
-cd "$HOME/IWE" || exit 1
+(cd "$G" && bash "${IWE_SCRIPTS:-$HOME/IWE/scripts}/session-guard.sh" close --housekeeping day-close --agent claude-code) || exit 1
 # --finish подтверждает стабильный срез внешней очереди и сохраняет копию/маршрут
 # для поздних хуков этого же запуска. Отказ оставляет замок и данные для повтора.
-bash "$DAY_CLOSE_WRAPPER" --finish "$DAY_CLOSE_LOCK_TOKEN" || exit 1
+(cd "$HOME/IWE" && bash "$DAY_CLOSE_WRAPPER" --finish "$DAY_CLOSE_LOCK_TOKEN") || exit 1
 bash ~/IWE/scripts/day-close-step-log.sh end 10
 ```
 

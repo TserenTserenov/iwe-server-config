@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
-# wp-handoff-peer-check-smoke.sh -- WP-484 F257 M2: the peer-session close path
-# checks the card field «Следующий шаг» in shadow mode.  Disposable repo and
-# semaphore only; pins the contract: warns on a bad field, logs every run, never
-# blocks, treats missing infrastructure as `infra`, not as a violation.
+# wp-handoff-peer-check-smoke.sh -- WP-484 F257 M2 / F285: the peer-session close path
+# checks the card field «Следующий шаг».  Disposable repo and semaphore only; pins the
+# contract: warns on a bad field, logs every run, treats missing infrastructure as
+# `infra`; blocks (rc 1) only a blocking code on the card as published (cases 15*).
 set -uo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -84,7 +84,7 @@ has "$(cat "$LOG")" "card_digest" "норма: отпечаток ревизии
 # 2. field unchanged since the baseline -> fail warning, still rc 0
 write_card "Ф1 — старое действие"
 OUT="$(run --sem "$IWE/.iwe-runtime/sessions/claude-code-s1.open")"
-has "$OUT" "режим наблюдения" "не изменилось: предупреждение"
+has "$OUT" "закрытие не блокируется" "не изменилось: предупреждение"
 has "$OUT" "HANDOFF_UNCHANGED" "не изменилось: код"
 has "$OUT" "rc=0" "не изменилось: закрытие не блокируется"
 
@@ -217,13 +217,18 @@ has "$(tail -1 "$LOG")" '"stale_checker": true' "старый проверщик
 has "$(tail -1 "$LOG")" "| pass | HANDOFF_OK |" "старый проверщик: проверка не пропала"
 cp "$TMP/new-checker.py" "$GOV/scripts/wp-handoff-check.py"
 
-# 12e. F285 review: slug equal to the WP is shared by sessions -> no default next-step file
+# 12e. F285 review: slug equal to the WP is shared by sessions -> the shared file is not taken;
+# the session's own id names the file instead (10.11: a blocking code needs a usable path)
 sed 's/^slug: s1$/slug: WP-9/' "$IWE/.iwe-runtime/sessions/claude-code-s1.open" >"$TMP/w.tmp" \
   && mv "$TMP/w.tmp" "$IWE/.iwe-runtime/sessions/claude-code-s1.open"
 printf 'Ф1 — новое действие: проверить хук\n' >"$IWE/.iwe-runtime/peer-prompts/WP-9-next-step.txt"
+mv "$NEXT_FILE" "$TMP/s1-next.saved"
 OUT="$(run --sem "$IWE/.iwe-runtime/sessions/claude-code-s1.open")"
 has "$OUT" "HANDOFF_AGENT_NEXT_MISSING" "slug = РП: общий файл по умолчанию не берётся"
-has "$OUT" "--next-file" "slug = РП: подсказка про --next-file"
+has "$OUT" "s1-next-step.txt" "slug = РП: подсказка называет файл по номеру сессии"
+mv "$TMP/s1-next.saved" "$NEXT_FILE"
+OUT="$(run --sem "$IWE/.iwe-runtime/sessions/claude-code-s1.open")"
+lacks "$OUT" "HANDOFF_AGENT_NEXT_MISSING" "slug = РП: файл по номеру сессии взят"
 rm -f "$IWE/.iwe-runtime/peer-prompts/WP-9-next-step.txt"
 
 # 12f. F285 review: called from session-guard close, the advice fits a closing session
@@ -251,11 +256,22 @@ git -C "$GOV" push -q origin HEAD:main 2>/dev/null
 git -C "$GOV" fetch -q origin 2>/dev/null
 make_sem peer-session with-baseline
 OUT="$(run --sem "$IWE/.iwe-runtime/sessions/claude-code-s1.open")"
-lacks "$OUT" "ещё не опубликована на origin" "карточка совпадает с origin: без предупреждения"
+lacks "$OUT" "отличается от опубликованной" "карточка совпадает с origin: без предупреждения"
+has "$(tail -1 "$LOG")" '"checked_against": "origin@' "снимок origin: в журнале ревизия"
 write_card "Ф1 — новое значение, ещё не опубликовано"
 OUT="$(run --sem "$IWE/.iwe-runtime/sessions/claude-code-s1.open")"
-has "$OUT" "ещё не опубликована на origin" "правка не на origin: предупреждение"
+has "$OUT" "отличается от опубликованной" "правка не на origin: предупреждение"
 has "$(tail -1 "$LOG")" '"not_on_origin": true' "правка не на origin: пометка в журнале"
+# The verdict is on the published card: the false mismatch of 09.11 (a working copy behind
+# origin, the writer's next step equal to the published field) passes.
+printf '%s\n' "Ф1 — опубликованное значение" >"$NEXT_FILE"
+OUT="$(run --sem "$IWE/.iwe-runtime/sessions/claude-code-s1.open")"
+has "$(tail -1 "$LOG")" "| pass | HANDOFF_OK |" "копия расходится с origin, поле на origin верно: проходит"
+
+publish_card() { # <next step text>: the card on origin, the working copy equal to it
+  write_card "$1"
+  git -C "$GOV" add -A && git -C "$GOV" commit -q -m card && git -C "$GOV" push -q origin HEAD:main 2>/dev/null
+}
 
 # 13b. a baseline recorded without the open-time fetch is flagged in the log and on stderr
 make_sem peer-session with-baseline
@@ -268,18 +284,65 @@ has "$(tail -1 "$LOG")" '"baseline_source": "local-unfetched"' "baseline без 
 # 13c. F285 M1 revision: the task written at open names the session's phases; a phase it
 # names, whose block is in the field, but the writer's next step leaves out fails; the same
 # next step passes when the task names only Ф1.
-write_card "$(printf 'Ф1 — новое действие: проверить хук\n- Ф2 — второй шаг этой сессии')"
+publish_card "$(printf 'Ф1 — новое действие: проверить хук\n- Ф2 — второй шаг этой сессии')"
 printf '%s\n' "Ф1 — новое действие: проверить хук" >"$NEXT_FILE"
 make_sem peer-session with-baseline
 echo "task: РП-9 Ф1 и Ф2, РП-561 Ф46" >>"$IWE/.iwe-runtime/sessions/claude-code-s1.open"
 OUT="$(run --sem "$IWE/.iwe-runtime/sessions/claude-code-s1.open")"
 has "$(tail -1 "$LOG")" "| fail | HANDOFF_AGENT_PHASE_MISSING |" "заявленная Ф2 без блока: отказ"
 has "$(tail -1 "$LOG")" '"missing_in_agent_next": ["Ф2"]' "заявленная Ф2 без блока: какая фаза"
-write_card "Ф1 — новое действие: проверить хук"
+has "$OUT" "rc=10" "заявленная Ф2 без блока: блок на опубликованной карточке"
+has "$(tail -1 "$LOG")" '"blocked": true' "заявленная Ф2 без блока: блок в журнале"
+publish_card "Ф1 — новое действие: проверить хук"
 make_sem peer-session with-baseline
 echo "task: РП-9 Ф1, РП-561 Ф46" >>"$IWE/.iwe-runtime/sessions/claude-code-s1.open"
 OUT="$(run --sem "$IWE/.iwe-runtime/sessions/claude-code-s1.open")"
 has "$(tail -1 "$LOG")" "| pass | HANDOFF_OK |" "заявлена только своя Ф1: проходит"
+
+# 15. F285 pilot decision 10.11: block only AGENT_NEXT_MISSING, AGENT_PHASE_MISSING and
+# UNKNOWN_PHASE, only on a published card; every other code warns.
+make_sem peer-session with-baseline
+publish_card "Ф1 — блок: следующий шаг не записан"
+rm -f "$NEXT_FILE"
+OUT="$(run --sem "$IWE/.iwe-runtime/sessions/claude-code-s1.open" --from-close)"
+has "$OUT" "rc=10" "нет следующего шага: блок"
+has "$OUT" "ОТКАЗ" "нет следующего шага: громкий отказ"
+lacks "$OUT" "сессия уже закрывается" "блок: без совета для незаблокированного закрытия"
+OUT="$(IWE_HANDOFF_CHECK_MODE=shadow run --sem "$IWE/.iwe-runtime/sessions/claude-code-s1.open")"
+has "$OUT" "rc=0" "режим shadow: аварийный откат блока"
+publish_card "Ф77 — несуществующая фаза"
+OUT="$(run --sem "$IWE/.iwe-runtime/sessions/claude-code-s1.open")"
+has "$OUT" "HANDOFF_UNKNOWN_PHASE" "неизвестная фаза: код"
+has "$OUT" "rc=10" "неизвестная фаза: блок"
+# a phase of another card that the (possibly old) working copy lacks: warning, not a block
+publish_card "Ф1 — шаг; РП-555 Ф3 — сверить"
+printf '%s\n' "Ф1 — шаг; РП-555 Ф3 — сверить" >"$NEXT_FILE"
+OUT="$(run --sem "$IWE/.iwe-runtime/sessions/claude-code-s1.open")"
+has "$OUT" "HANDOFF_UNKNOWN_PHASE" "чужая фаза неизвестна: код"
+has "$OUT" "rc=0" "чужая фаза неизвестна: без блока (чужая карточка из рабочей копии)"
+rm -f "$NEXT_FILE"
+mkdir -p "$GOV/machine" && printf 'WP-9: [Ф77]  # test\n' >"$GOV/machine/handoff-phase-allowlist.yaml"
+publish_card "Ф77 — несуществующая фаза"
+OUT="$(run --sem "$IWE/.iwe-runtime/sessions/claude-code-s1.open")"
+has "$OUT" "rc=0" "фаза из белого списка опубликованной ревизии: без блока"
+has "$(tail -1 "$LOG")" '"allowlisted_phases": ["Ф77"]' "белый список: пометка в журнале"
+publish_card "Ф1 — поле не совпадает"
+printf '%s\n' "Ф1 — у писателя другое" >"$NEXT_FILE"
+OUT="$(run --sem "$IWE/.iwe-runtime/sessions/claude-code-s1.open")"
+has "$OUT" "HANDOFF_MISMATCH_WHAT_NEXT" "расхождение: код"
+has "$OUT" "rc=0" "расхождение: только предупреждение до решения 17.11"
+# a card not on origin yet, and an unreachable origin: never a block
+rm -f "$NEXT_FILE"
+git -C "$GOV" rm -q "inbox/WP-9/WP-9.md" && git -C "$GOV" commit -q -m drop && git -C "$GOV" push -q origin HEAD:main 2>/dev/null
+mkdir -p "$GOV/inbox/WP-9"; write_card "Ф1 — карточки ещё нет на origin"; rm -f "$NEXT_FILE"
+OUT="$(run --sem "$IWE/.iwe-runtime/sessions/claude-code-s1.open")"
+has "$(tail -1 "$LOG")" '"checked_against": "origin_verified_new"' "карточки нет на origin: статус"
+has "$OUT" "rc=0" "карточки нет на origin: без блока"
+git -C "$GOV" remote set-url origin "$TMP/missing.git"
+OUT="$(run --sem "$IWE/.iwe-runtime/sessions/claude-code-s1.open")"
+has "$(tail -1 "$LOG")" '"checked_against": "origin_unreachable"' "origin недоступен: статус"
+has "$OUT" "rc=0" "origin недоступен: без блока"
+git -C "$GOV" remote set-url origin "$TMP/origin.git"
 
 # 14. the two insertions in session-guard.sh are still there (open records the baseline, close calls the check)
 SG="$SCRIPTS/session-guard.sh"
@@ -287,6 +350,8 @@ grep -q 'echo "baseline_card_oid: \$BASELINE_CARD_OID"' "$SG" && ok || bad "open
 grep -q 'echo "baseline_source: \$BASELINE_SOURCE"' "$SG" && ok || bad "open не записывает baseline_source"
 grep -q 'fetch -q origin main </dev/null' "$SG" && ok || bad "open не делает ограниченный fetch перед baseline"
 grep -q 'wp-handoff-peer-check.sh" --sem "\$SEM_FILE"' "$SG" && ok || bad "close не вызывает проверку пути пир-сессии"
+grep -q 'if \[ "\$HANDOFF_RC" -eq 10 \]; then' "$SG" && ok || bad "close не отказывает при блоке проверки"
+grep -q 'IWE_HANDOFF_CHECK_MODE=shadow bash' "$SG" && ok || bad "возобновлённое закрытие не переводится в наблюдение"
 grep -q "grep -qx 'close_path: peer-session'" "$SG" && ok || bad "close вызывает проверку не только для пир-сессий"
 
 echo "wp-handoff-peer-check smoke: pass=$PASS fail=$FAIL"
