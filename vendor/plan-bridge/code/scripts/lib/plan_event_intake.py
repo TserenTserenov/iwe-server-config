@@ -164,6 +164,29 @@ def _validate_request_budget(request: dict) -> None:
 
 def validate_request(request: dict) -> None:
     """Validate the exact explicit producer fields; semantic policy is separate."""
+    _validated_canonical(request)
+
+
+def _validated_canonical(request: dict) -> bytes:
+    """Validate the request and return its RFC 8785 bytes, serialized once.
+
+    The size bound and the digest need the same bytes; serializing twice made
+    request_digest the largest cost of a delivery pass (WP-530 Ф85, package B).
+    """
+    validate_request_shape(request)
+    canonical = _canonical(request)
+    if len(canonical) > MAX_REQUEST_BYTES:
+        raise wal.MalformedEnvelope(f"request JCS bytes exceed {MAX_REQUEST_BYTES}")
+    return canonical
+
+
+def validate_request_shape(request: dict) -> None:
+    """Every check of validate_request except the RFC 8785 size bound.
+
+    For a request already validated in full whose copy may have been changed
+    in memory since: fields, types and JSON values are checked again cheaply;
+    only the serialization for the byte bound is skipped.
+    """
     if not isinstance(request, dict):
         raise wal.MalformedEnvelope("request must be a JSON object")
     if type(request.get("schema_version")) is not int or request["schema_version"] != 2:
@@ -214,14 +237,17 @@ def validate_request(request: dict) -> None:
             "occurred_at must be an ISO timestamp with timezone"
         )
     _validate_request_budget(request)
-    if len(_canonical(request)) > MAX_REQUEST_BYTES:
-        raise wal.MalformedEnvelope(f"request JCS bytes exceed {MAX_REQUEST_BYTES}")
+    try:
+        _check_json_tree(request)
+    except (ValueError, TypeError, RecursionError) as exc:
+        raise wal.MalformedEnvelope(
+            f"not representable as RFC 8785 JSON: {exc}"
+        ) from exc
 
 
 def request_digest(request: dict) -> str:
     """SHA256 of the complete immutable request, encoded using RFC 8785 JCS."""
-    validate_request(request)
-    return hashlib.sha256(_canonical(request)).hexdigest()
+    return hashlib.sha256(_validated_canonical(request)).hexdigest()
 
 
 def parse_request_json(raw: str | bytes) -> dict:
@@ -312,6 +338,23 @@ def verify_record(
 ) -> None:
     """Delivery rechecks trusted provenance; reading CRC alone never authenticates."""
     _validate_record(record)
+    authorize_read_record(
+        record, trusted_context=trusted_context, verifier=verifier
+    )
+
+
+def authorize_read_record(
+    record: dict,
+    *,
+    trusted_context: object = None,
+    verifier: ProducerVerifier | None = None,
+) -> None:
+    """Recheck trusted provenance of a record returned by read_intake.
+
+    read_intake has already validated every record it returns (_load_intake),
+    so only the producer proof is checked here. For any other record use
+    verify_record.
+    """
     _authorize(
         record["request"],
         record["request_digest"],

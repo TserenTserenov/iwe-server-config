@@ -17,7 +17,7 @@ from typing import Protocol
 
 import rfc8785
 
-from plan_event_intake import request_digest, validate_request
+from plan_event_intake import request_digest, validate_request, validate_request_shape
 
 
 DECISION_SCHEMA_VERSION = 1
@@ -173,6 +173,41 @@ class PlanView:
         migration_roots=(),
         ordered_accepted: Sequence[str] | None = None,
     ):
+        self._assign(rules_version, accepted, rejected, migration_roots)
+        for event_id, request in self.accepted.items():
+            validate_request(request)
+            self._check_entry(event_id, request)
+        self._finish(tips, ordered_accepted)
+
+    @classmethod
+    def from_checked_requests(
+        cls,
+        rules_version,
+        accepted=None,
+        rejected=(),
+        tips=None,
+        *,
+        migration_roots=(),
+        ordered_accepted: Sequence[str] | None = None,
+    ):
+        """The same view and plan checks, for requests validated once in full.
+
+        Every accepted request must have passed validate_request (a published
+        request bound to its digest, or a view's own history). Fields, types
+        and JSON values are checked again, since a copy may have been changed
+        in memory; only the RFC 8785 serialization for the byte bound is
+        skipped, which dominated a delivery pass when every batch member copied
+        the view (WP-530 Ф85, package B).
+        """
+        view = cls.__new__(cls)
+        view._assign(rules_version, accepted, rejected, migration_roots)
+        for event_id, request in view.accepted.items():
+            validate_request_shape(request)
+            view._check_entry(event_id, request)
+        view._finish(tips, ordered_accepted)
+        return view
+
+    def _assign(self, rules_version, accepted, rejected, migration_roots):
         if not _text(rules_version):
             raise BridgeError("MALFORMED_PLAN", "missing current rules version")
         self.rules_version = rules_version
@@ -183,10 +218,12 @@ class PlanView:
             raise BridgeError(
                 "MALFORMED_PLAN", "migration exception must name an accepted record"
             )
-        for event_id, request in self.accepted.items():
-            validate_request(request)
-            if event_id != request["event_id"] or event_id in self.rejected:
-                raise BridgeError("MALFORMED_PLAN", "contradictory accepted history")
+
+    def _check_entry(self, event_id, request):
+        if event_id != request["event_id"] or event_id in self.rejected:
+            raise BridgeError("MALFORMED_PLAN", "contradictory accepted history")
+
+    def _finish(self, tips, ordered_accepted):
         if not all(_text(event_id) for event_id in self.rejected):
             raise BridgeError("MALFORMED_PLAN", "invalid rejected event ID")
         self.tips = self._derive_tips()
@@ -268,7 +305,8 @@ class PlanView:
             complete.update(path)
 
     def copy(self):
-        return PlanView(
+        # This view's requests were validated when it was built or accepted.
+        return PlanView.from_checked_requests(
             self.rules_version,
             self.accepted,
             self.rejected,
@@ -278,6 +316,7 @@ class PlanView:
         )
 
     def accept(self, request):
+        """Add a request that has passed validate_request (evaluate_batch's own)."""
         self.accepted[request["event_id"]] = deepcopy(request)
         self.tips[_element_key(request)] = request["event_id"]
         if self.ordered_accepted is not None:

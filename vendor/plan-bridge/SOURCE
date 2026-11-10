@@ -15,6 +15,12 @@
 # scripts/plan-session-reserve.py — из DS-my-strategy 054fa202aa (main; локально
 # 65c762c3c9): память приёма вместо перечитывания очереди, ожидание блокировки
 # при доставке, многопоточный приёмник, повтор брони при недоступном приёмнике.
+# 10.11 (РП-530 Ф85, пакет Б): scripts/lib/plan_event_bridge.py,
+# scripts/lib/plan_bridge_host.py, scripts/lib/plan_event_intake.py и
+# scripts/lib/plan_bridge_decisions.py — из DS-my-strategy 06670c4695 (main;
+# локально 232a10d19b): проход моста не повторяет работу — файлы журнала по
+# идентификатору блоба один раз, запрос сериализуется один раз, история одним
+# пакетом, копия вида плана без повторной сериализации запросов.
 # Код моста — 8 модулей и 2 команды (codePaths, входят в версию правил), три
 # клиентские команды для канала Мака (отправитель, заявка, ответ) и лимиты
 # плана: из них сборка берёт часовой пояс канала Мака (Ф58), лимиты тоже
@@ -29,11 +35,11 @@
 #   4b77597956029e290920a25043f2bf2e4cf247fc machine/plan-bridge/limits.json
 #   70284c63241e1032d4e3502cd81f2663933541d9 scripts/lib/plan_allocation.py
 #   348cf7ac8460996889d15d28f27c0873d276d9ea scripts/lib/plan_bridge_allocation.py
-#   5c20199f82d06305617ab7346cead6246e15b37b scripts/lib/plan_bridge_decisions.py
-#   4753557c7b29f84dc9f49cf5ac32134e76c1b352 scripts/lib/plan_bridge_host.py
+#   9dc28efa08bc6939f71dbb2666c6c7d2035ec00d scripts/lib/plan_bridge_decisions.py
+#   3baefc59724a9cc1b0eb5ff782cc14012427167c scripts/lib/plan_bridge_host.py
 #   d399e0969088966138b6a86844142f07a9c0ece1 scripts/lib/plan_bridge_receiver.py
-#   81a8c327910fc60ef9a5d814740307e48d206f4c scripts/lib/plan_event_bridge.py
-#   418acd0f603052f1430640ed54e4a397bf7e30b4 scripts/lib/plan_event_intake.py
+#   1d75c23ddd587d78e8cb93759458fd5b07a19a5c scripts/lib/plan_event_bridge.py
+#   0d901ab025cd5c737688070be90e0eeb9f8a120d scripts/lib/plan_event_intake.py
 #   7a253bff01ab97a818989538c27c5b6b58b2b44a scripts/lib/plan_event_wal.py
 #   f7d4025106be725aa00eed8e2bd88b98d9025689 scripts/plan-event-bridge.py
 #   0a211eb86fef8b5cdc1673e07f0843f2c45b6ffd scripts/plan-event-receiver.py
