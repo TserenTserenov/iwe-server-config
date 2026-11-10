@@ -4579,6 +4579,11 @@ OWNER_PID=""
 SCHEDULED_OWNER=""
 SCHEDULED_RUN_ID=""
 SESSION_ID_ARG=""
+# WP-484 (10.11): the quick-close run whose session-guard-release step invoked
+# this close. Its runner holds that run's card lock for the whole step, so the
+# post-close sweep must never wait on it (the 900 s hang of
+# quick-close-2026-11-10-14-wp529-f261-readiness).
+CALLER_RUN_ID_ARG=""
 OWNER_SESSION_ID_ARG=""
 OWNER_AGENT_ARG=""
 REPO_ARG=""
@@ -4678,6 +4683,12 @@ while [[ $# -gt 0 ]]; do
       fi
       SCHEDULED_RUN_ID="$2"; shift 2 ;;
     --session-id) SESSION_ID_ARG="$2"; shift 2 ;;
+    --caller-run-id)
+      [[ $# -ge 2 && "$2" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,255}$ ]] \
+        || fail "--caller-run-id требует run_id вызывающего прогона" 1
+      # Cards store the bare id; a RUN- prefix would pass verification but
+      # miss the --exclude match and bring the deadlock back.
+      CALLER_RUN_ID_ARG="${2#RUN-}"; shift 2 ;;
     --owner-session-id)
       [[ $# -ge 2 && -n "$2" ]] || fail "--owner-session-id требует значение" 1
       OWNER_SESSION_ID_ARG="$2"; shift 2 ;;
@@ -13390,6 +13401,28 @@ print(json.dumps({"wp": sys.argv[1], "slug": sys.argv[2], "agent": sys.argv[3], 
     POST_CLOSE_CANCEL_MODE="forced"
     POST_CLOSE_FORCED_RUN_ID=$(grep "^run_id: " "$FORCED_CARD" 2>/dev/null | head -1 | cut -d' ' -f2- || true)
   fi
+  # WP-484 (10.11, peer session 2026-11-10-22-wp484-close-release-hang): a
+  # runner-invoked close names its own run. Validate it while the semaphore is
+  # still open -- a wrong but well-formed id would exempt another run of this
+  # session from the sweep. The check is lock-free by design: that run's
+  # runner holds its card lock right now.
+  # The sweep below only scans the canonical cards dir, so only a caller card
+  # there can deadlock it -- and only there can the runner find it. A run
+  # executing from an isolated worktree keeps its card elsewhere: nothing to
+  # verify, nothing to exempt. A canonical runner older than this guard has no
+  # verify-caller-run; the exclusion is still passed (last, see below).
+  CALLER_RUNNER="$IWE_ROOT/$GOV_REPO/scripts/process-runner.py"
+  if [ -n "$CALLER_RUN_ID_ARG" ]; then
+    if [ ! -f "$IWE_ROOT/$GOV_REPO/inbox/agent/tasks/RUN-$CALLER_RUN_ID_ARG.md" ]; then
+      echo "Session CLOSE: карточки вызывающего прогона $CALLER_RUN_ID_ARG нет в основной копии -- уборка её не касается, проверка не нужна" >&2
+    elif ! grep -q 'verify-caller-run' "$CALLER_RUNNER" 2>/dev/null; then
+      echo "⚠️  Session CLOSE: раннер основной копии не умеет verify-caller-run -- вызывающий $CALLER_RUN_ID_ARG исключается из уборки без проверки" >&2
+    else
+      CALLER_CHECK=$(cd "$IWE_ROOT/$GOV_REPO" && python3 "$CALLER_RUNNER" \
+        verify-caller-run quick-close "$SESSION_ID" "$CALLER_RUN_ID_ARG" 2>&1) \
+        || fail "close: вызывающий прогон $CALLER_RUN_ID_ARG не подтверждён: $CALLER_CHECK. Семафор остаётся активным." 7
+    fi
+  fi
 
   audit_runner_cards
 
@@ -13504,18 +13537,25 @@ print(json.dumps({"wp": sys.argv[1], "slug": sys.argv[2], "agent": sys.argv[3], 
       session_closed_no_reflection "$DEFERRED_NO_REFLECTION_EVENT" session-guard \
       || echo "⚠️  terminal close завершён, но no-reflection ledger projection не записана" >&2
   fi
+  # Every sweep skips the run that invoked this close: its runner holds the
+  # card lock until this step returns, and cancel-session blocks on it.
+  # The caller goes LAST: a runner older than repeatable --exclude keeps only
+  # the final value, and the caller is the one whose lock would deadlock us.
+  POST_CLOSE_EXCLUDE_ARGS=()
+  [ -z "$POST_CLOSE_EXCLUDE_RUN_ID" ] || POST_CLOSE_EXCLUDE_ARGS+=(--exclude "$POST_CLOSE_EXCLUDE_RUN_ID")
+  [ -z "$CALLER_RUN_ID_ARG" ] || POST_CLOSE_EXCLUDE_ARGS+=(--exclude "$CALLER_RUN_ID_ARG")
   if [ "$POST_CLOSE_CANCEL_MODE" = "happy" ]; then
     (cd "$IWE_ROOT/$GOV_REPO" && python3 "$IWE_ROOT/$GOV_REPO/scripts/process-runner.py" \
-      cancel-session quick-close "$SESSION_ID" --exclude "$POST_CLOSE_EXCLUDE_RUN_ID") \
+      cancel-session quick-close "$SESSION_ID" "${POST_CLOSE_EXCLUDE_ARGS[@]+"${POST_CLOSE_EXCLUDE_ARGS[@]}"}") \
       2>&1 || echo "cancel-session (happy path) не прошёл — terminal close уже завершён" >&2
   elif [ "$POST_CLOSE_CANCEL_MODE" = "forced" ]; then
-    if [ -n "$POST_CLOSE_FORCED_RUN_ID" ]; then
+    if [ -n "$POST_CLOSE_FORCED_RUN_ID" ] && [ "$POST_CLOSE_FORCED_RUN_ID" != "$CALLER_RUN_ID_ARG" ]; then
       (cd "$IWE_ROOT/$GOV_REPO" && python3 "$IWE_ROOT/$GOV_REPO/scripts/process-runner.py" \
         cancel "$POST_CLOSE_FORCED_RUN_ID") 2>&1 \
         || echo "адресный cancel принятой карточки не прошёл — terminal close уже завершён" >&2
     fi
     (cd "$IWE_ROOT/$GOV_REPO" && python3 "$IWE_ROOT/$GOV_REPO/scripts/process-runner.py" \
-      cancel-session quick-close "$SESSION_ID") 2>&1 \
+      cancel-session quick-close "$SESSION_ID" "${POST_CLOSE_EXCLUDE_ARGS[@]+"${POST_CLOSE_EXCLUDE_ARGS[@]}"}") 2>&1 \
       || echo "cancel-session (force path) не прошёл — terminal close уже завершён" >&2
   fi
   [ ${#SLUG_MARKERS_TO_REMOVE[@]} -eq 0 ] || rm -f "${SLUG_MARKERS_TO_REMOVE[@]}" 2>/dev/null || true
