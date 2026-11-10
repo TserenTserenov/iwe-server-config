@@ -25,6 +25,9 @@ Path(sys.argv[2]).write_text("\n".join(lines[start:end + 1]), encoding="utf-8")
 PY
 # shellcheck source=/dev/null
 . "$SANDBOX/fn.sh"
+# Read by the extracted function sourced above.
+# shellcheck disable=SC2034
+GUARD_LIB_DIR="$(dirname "$GUARD")/lib"
 
 PASS=0
 FAIL=0
@@ -94,6 +97,40 @@ check "empty slug is refused" "$(peer_session_evidence peer-session "$SEM" "" "$
 
 check "a missing semaphore never aborts the close" \
   "$(peer_session_evidence peer-session "$SANDBOX/absent" no-folder "$ORZ")" "no"
+
+# Kimi may open its standalone WP session before the peer journal receives a
+# reserved name. The two note-file claims then bind that journal to the same
+# semaphore even though its slug remains WP-7.
+PAIR_REL="2026-11/08/2026-11-08-07-session"
+PAIR_DIR="$ORZ/$PAIR_REL"
+mkdir -p "$PAIR_DIR"
+printf 'session_id: "2026-11-08-07-session"\n' > "$PAIR_DIR/meta.yaml"
+printf '%s\n' '---' 'role: writer' '---' > "$PAIR_DIR/00-writer.md"
+printf 'file: %s/meta.yaml\nfile: %s/00-writer.md\n' "$PAIR_REL" "$PAIR_REL" > "$SEM"
+check "a claimed peer journal counts when the semaphore slug is WP-7" \
+  "$(peer_session_evidence peer-session "$SEM" WP-7 "$ORZ")" "yes"
+
+printf 'file: %s/meta.yaml\n' "$PAIR_REL" > "$SEM"
+check "one claimed file is not a peer journal" \
+  "$(peer_session_evidence peer-session "$SEM" WP-7 "$ORZ")" "no"
+
+printf 'file: %s/meta.yaml\nfile: %s/00-writer.md\n' "$PAIR_REL" "$PAIR_REL" > "$SEM"
+: > "$PAIR_DIR/00-writer.md"
+check "an empty writer turn is not peer evidence" \
+  "$(peer_session_evidence peer-session "$SEM" WP-7 "$ORZ")" "no"
+printf '%s\n' '---' 'role: writer' '---' > "$PAIR_DIR/00-writer.md"
+
+printf 'session_id: "other-session"\n' > "$PAIR_DIR/meta.yaml"
+check "a mismatched session id is not peer evidence" \
+  "$(peer_session_evidence peer-session "$SEM" WP-7 "$ORZ")" "no"
+printf 'session_id: "2026-11-08-07-session"\n' > "$PAIR_DIR/meta.yaml"
+
+OTHER_REL="2026-11/08/2026-11-08-08-session"
+mkdir -p "$ORZ/$OTHER_REL"
+printf 'file: %s/meta.yaml\nfile: %s/00-writer.md\nfile: %s/meta.yaml\n' \
+  "$PAIR_REL" "$PAIR_REL" "$OTHER_REL" > "$SEM"
+check "claims for two peer journals are ambiguous" \
+  "$(peer_session_evidence peer-session "$SEM" WP-7 "$ORZ")" "no"
 
 echo ""
 echo "PASS=$PASS FAIL=$FAIL"

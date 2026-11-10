@@ -668,70 +668,82 @@ latest_session_report_excerpt() {
 
 extract_open_phases() {
   local file="$1"
-  if has_structured_phases "$file"; then
-    extract_structured_open_phases "$file"
+  local phases rc
+  if phases=$(extract_structured_open_phases "$file"); then
+    [[ -z "$phases" ]] || printf '%s\n' "$phases"
+    return 0
   else
-    awk '/^---$/{fm++; next} fm<2{next} {print}' "$file" 2>/dev/null \
-      | grep -E '^\s*- \[ \]' \
-      | sed 's/^\s*- \[ \] //' \
-      || true
+    rc=$?
   fi
+  [[ "$rc" -eq 1 ]] || return "$rc"
+  awk '/^---$/{fm++; next} fm<2{next} {print}' "$file" 2>/dev/null \
+    | grep -E '^\s*- \[ \]' \
+    | sed 's/^\s*- \[ \] //' \
+    || true
 }
 
 count_open_phases() {
   local file="$1"
-  local cnt
-  if has_structured_phases "$file"; then
-    cnt=$(extract_structured_open_phases "$file" | wc -l | tr -d ' ')
+  local phases rc
+  if phases=$(extract_structured_open_phases "$file"); then
+    if [[ -n "$phases" ]]; then
+      printf '%s\n' "$phases" | wc -l | tr -d ' '
+    else
+      echo 0
+    fi
+    return 0
   else
-    cnt=$(awk '/^---$/{fm++; next} fm<2{next} /- \[ \]/{count++} END{print count+0}' "$file" 2>/dev/null || echo "0")
+    rc=$?
   fi
-  echo "$cnt"
-}
-
-has_structured_phases() {
-  local file="$1"
-  awk '
-    /^---$/ { fm++; if (fm == 2) exit; next }
-    fm != 1 { next }
-    /^phases:[[:space:]]*$/ { in_phases=1; next }
-    in_phases && /^- id:[[:space:]]*/ { found=1; exit }
-    END { exit(found ? 0 : 1) }
-  ' "$file" 2>/dev/null
+  [[ "$rc" -eq 1 ]] || return "$rc"
+  awk '/^---$/{fm++; next} fm<2{next} /- \[ \]/{count++} END{print count+0}' "$file" 2>/dev/null
 }
 
 extract_structured_open_phases() {
   local file="$1"
-  awk '
-    function emit() {
-      if (id != "" && (status == "pending" || status == "in_progress" || status == "blocked")) {
-        print id " (" status ")"
-      }
-    }
-    /^---$/ { fm++; if (fm == 2) exit; next }
-    fm != 1 { next }
-    /^phases:[[:space:]]*$/ { in_phases=1; next }
-    in_phases && /^[A-Za-z_][A-Za-z0-9_-]*:/ {
-      emit(); in_phases=0; id=""; status=""; next
-    }
-    !in_phases { next }
-    /^- id:[[:space:]]*/ {
-      emit()
-      id=$0
-      sub(/^- id:[[:space:]]*/, "", id)
-      status=""
-      next
-    }
-    /^  status:[[:space:]]*/ {
-      status=$0
-      sub(/^  status:[[:space:]]*/, "", status)
-      sub(/[[:space:]]+#.*/, "", status)
-      sub(/^[[:space:]]+/, "", status)
-      sub(/[[:space:]]+$/, "", status)
-      next
-    }
-    END { emit() }
-  ' "$file" 2>/dev/null
+  local py
+  py=$("$FIND_PYTHON3") || return 2
+  "$py" - "$file" <<'PY'
+import re
+import sys
+from pathlib import Path
+
+import yaml
+
+path = Path(sys.argv[1])
+try:
+    with path.open(encoding="utf-8") as source:
+        if source.readline().strip() != "---":
+            raise ValueError("missing opening frontmatter delimiter")
+        frontmatter = []
+        for line in source:
+            if line.strip() == "---":
+                break
+            frontmatter.append(line)
+        else:
+            raise ValueError("missing closing frontmatter delimiter")
+    document = yaml.safe_load("".join(frontmatter)) or {}
+    if not isinstance(document, dict):
+        raise ValueError("frontmatter must be a mapping")
+    phases = document.get("phases")
+    if phases is None:
+        sys.exit(1)
+    if isinstance(phases, dict):
+        records = phases.items()
+    elif isinstance(phases, list):
+        records = ((phase.get("id"), phase.get("status")) for phase in phases if isinstance(phase, dict))
+    else:
+        raise ValueError("phases must be a mapping or list")
+    for identifier, status in records:
+        identifier = str(identifier)
+        if identifier.isdecimal():
+            identifier = f"Ф{identifier}"
+        if re.fullmatch(r"Ф\d+", identifier) and isinstance(status, str) and status in {"pending", "in_progress", "blocked"}:
+            print(f"{identifier} ({status})")
+except (OSError, ValueError, yaml.YAMLError) as exc:
+    print(f"[PARSE-ERROR] phases in {path}: {exc}", file=sys.stderr)
+    sys.exit(2)
+PY
 }
 
 # ---------------------------------------------------------------------------
@@ -946,7 +958,11 @@ main() {
   [[ -z "$spawned" ]] && spawned="_не указан_"
 
   local open_phases_count
-  open_phases_count=$(count_open_phases "$wp_file")
+  if ! open_phases_count=$(count_open_phases "$wp_file"); then
+    log_sync "$wp_num" "FAIL" "phase_parse_error card_source=${CARD_SOURCE}"
+    cleanup_tmp
+    exit 2
+  fi
 
   # Collect related WPs
   local related_from_fm
@@ -1011,7 +1027,11 @@ main() {
   if [[ "$open_phases_count" -gt 0 ]]; then
     echo "## Открытые фазы"
     local phases_list
-    phases_list=$(extract_open_phases "$wp_file")
+    if ! phases_list=$(extract_open_phases "$wp_file"); then
+      log_sync "$wp_num" "FAIL" "phase_parse_error card_source=${CARD_SOURCE}"
+      cleanup_tmp
+      exit 2
+    fi
     if [[ -n "$phases_list" ]]; then
       while IFS= read -r phase_line; do
         [[ -n "$phase_line" ]] && echo "- ${phase_line}"

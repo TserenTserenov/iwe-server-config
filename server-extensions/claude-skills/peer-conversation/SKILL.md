@@ -343,6 +343,19 @@ consensus: none
 НЕ пересказ задачи. Позиция с аргументами.>
 ```
 
+После заполнения `meta.yaml` и `00-writer.md` заявить оба файла в семафоре
+этой пир-сессии. Это даёт проверке закрытия явную связь с каталогом журнала
+в дополнение к поиску по `slug`. Пустые файлы не заявлять.
+
+```bash
+for PEER_CORE_FILE in "$SESSION_DIR/meta.yaml" "$SESSION_DIR/00-writer.md"; do
+  [ -s "$PEER_CORE_FILE" ] || { echo "пир-журнал ещё не заполнен: $PEER_CORE_FILE" >&2; exit 1; }
+  IWE_AGENT=claude-code bash "${IWE_SCRIPTS:-$HOME/IWE/scripts}/session-guard.sh" \
+    note-file "$PEER_CORE_FILE" --agent claude-code --wp "<WP-NNN из Шага 0б>" \
+    --slug "$SESSION_ID" || exit 1
+done
+```
+
 Показать пилоту краткое резюме: что написал в 00-writer.md.
 
 ---

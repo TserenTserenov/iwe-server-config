@@ -69,6 +69,27 @@ printf -- '---\nwp: 9201\ntitle: "Fixture WP-9201"\nstatus: in_progress\ncreated
 run_bundle WP-9201 > /dev/null
 assert_contains "$(gate_line)" "MATCH" "empty snapshot matches a card with zero open phases"
 
+echo "scenario F: YAML record lists with either indentation count phases, not body checkboxes"
+for indent in "" "  "; do
+  {
+    printf -- '---\nwp: 9201\ntitle: Fixture\nstatus: in_progress\nphases:\n'
+    printf '%s\n' "${indent}- id: Ф1" "${indent}  status: in_progress" \
+      "${indent}- id: '2'" "${indent}  status: blocked" \
+      "${indent}- id: Ф3" "${indent}  status: done"
+    printf -- '---\n# WP-9201\n\n- [ ] checkbox one\n- [ ] checkbox two\n- [ ] checkbox three\n'
+  } > "$WS/$GOV/inbox/WP-9201/WP-9201.md"
+  run_bundle WP-9201 > /dev/null
+  assert_contains "$(cat "$SANDBOX/out.md")" "- Открытых фаз: 2" "list indent '${indent}' counts two phases"
+  assert_contains "$(cat "$SANDBOX/out.md")" "Ф2 (blocked)" "numeric ID becomes Ф2"
+done
+
+echo "scenario G: YAML phase mapping uses the same parser"
+printf -- '---\nwp: 9201\ntitle: Fixture\nstatus: in_progress\nphases:\n  Ф1: pending\n  Ф2: done\n---\n# WP-9201\n' \
+  > "$WS/$GOV/inbox/WP-9201/WP-9201.md"
+run_bundle WP-9201 > /dev/null
+assert_contains "$(cat "$SANDBOX/out.md")" "- Открытых фаз: 1" "mapping counts one phase"
+assert_contains "$(cat "$SANDBOX/out.md")" "Ф1 (pending)" "mapping reports open status"
+
 if [ "$fails" -eq 0 ]; then
   echo "PASS: all scenarios"
   exit 0

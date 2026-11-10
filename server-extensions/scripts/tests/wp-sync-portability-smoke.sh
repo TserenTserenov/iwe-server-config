@@ -44,12 +44,15 @@ rm -rf "$WS/DS-my-strategy"
 echo "scenario E: wp-sync-bundle without scripts/lib/git-sync-status.sh -> warning + explicit status, exit 0"
 TREE="$SANDBOX/tree"; mkdir -p "$TREE/.claude/scripts" "$TREE/scripts/lib"
 cp "$ROOT"/.claude/scripts/wp-sync-bundle.sh "$ROOT"/.claude/scripts/wp-phase-digest.sh "$TREE/.claude/scripts/"
-cp "$ROOT/scripts/lib/find-python3.sh" "$TREE/scripts/lib/"
+cp "$ROOT/scripts/lib/find-python3.sh" "$ROOT/scripts/lib/phase-gate-check.sh" \
+  "$ROOT/scripts/lib/phase_sections.py" "$TREE/scripts/lib/"
+cp "$ROOT/scripts/wp-archive-closed-phases.py" "$TREE/scripts/"
 out=$(IWE_WORKSPACE="$WS" bash "$TREE/.claude/scripts/wp-sync-bundle.sh" WP-9201 2>"$SANDBOX/err.txt"); rc=$?
 assert "$rc" "0" "exit 0 (not 3)"
 contains "$out" "GIT_SYNC_STATUS: checker_unavailable" "status line names checker_unavailable"
 contains "$out" "GIT_SYNC_GATE: degraded" "explicit degraded gate line"
 contains "$(cat "$SANDBOX/err.txt")" "Sync Gate пропущен" "warning on stderr"
+contains "$out" "NO_BASELINE" "phase gate has its real dependencies and reads the fixture"
 
 echo "scenario F: an explicit IWE_GOVERNANCE_REPO without a registry is used as given, never replaced by a guess (DS-strategy)"
 out=$(IWE_GOVERNANCE_REPO=custom-gov bash "$ROOT/scripts/wp-archive-trigger-check.sh" 9201 "$WS" 2>&1)

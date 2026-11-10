@@ -309,6 +309,23 @@ consensus: none
 НЕ пересказ задачи. Позиция с аргументами.>
 ```
 
+После записи содержимого обоих файлов связать журнал с уже открытым семафором
+Kimi. Пока `meta.yaml` или `00-writer.md` пуст, связь не заявлять: проверка
+закрытия принимает только заполненную пару из одной папки. Использовать
+`$SEM_FILE`, выбранный в Шаге 0а, а не угадывать самый свежий семафор.
+
+```bash
+[ -n "$SEM_FILE" ] && [ -f "$SEM_FILE" ] || { echo "семафор Kimi не определён" >&2; exit 1; }
+GUARD_SESSION_ID=$(sed -n 's/^session_id: //p' "$SEM_FILE")
+[ -n "$GUARD_SESSION_ID" ] || { echo "в семафоре нет session_id" >&2; exit 1; }
+for PEER_CORE_FILE in "$SESSION_DIR/meta.yaml" "$SESSION_DIR/00-writer.md"; do
+  [ -s "$PEER_CORE_FILE" ] || { echo "пир-журнал ещё не заполнен: $PEER_CORE_FILE" >&2; exit 1; }
+  IWE_AGENT=kimi bash "${IWE_SCRIPTS:-$HOME/IWE/scripts}/session-guard.sh" \
+    note-file "$PEER_CORE_FILE" --agent kimi --wp "$PEER_WP" \
+    --session-id "$GUARD_SESSION_ID" || exit 1
+done
+```
+
 Показать пилоту краткое резюме: что написал в 00-writer.md.
 
 ---

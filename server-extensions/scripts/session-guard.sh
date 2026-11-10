@@ -456,13 +456,15 @@ sys.stdout.write(yaml.safe_dump({"task": value}, allow_unicode=True, default_flo
 # ordinary work sessions using it to get around a runner that cannot close an
 # isolated copy. This reports whether the declaration has any trace of a real peer
 # session: a journal folder <orz-dir>/<YYYY-MM>/<DD>/<slug>/ holding 00-writer.md
-# or meta.yaml, or an ORZ file of `type: peer-session`.
+# or meta.yaml, an ORZ file of `type: peer-session`, or a pair of journal files
+# claimed by this semaphore after the writer has filled them. The latter covers
+# Kimi standalone sessions opened with slug=WP-N before a peer directory exists.
 # Prints yes | no | n/a (the close path is not peer-session). Warn-only on purpose:
 # blocking before the regular path is proven for isolated sessions would leave them
 # unable to close at all; session-close-quality.py counts the "no" cases and the
 # pilot flips this to a block once that count is zero.
 peer_session_evidence() { # <close_path> <semaphore> <slug> <orz-dir>
-  local close_path="$1" semaphore="$2" slug="$3" orz_dir="$4" dir orz_name
+  local close_path="$1" semaphore="$2" slug="$3" orz_dir="$4" dir orz_name claimed
   if [ "$close_path" != "peer-session" ]; then
     echo "n/a"
     return 0
@@ -488,7 +490,14 @@ peer_session_evidence() { # <close_path> <semaphore> <slug> <orz-dir>
     echo "yes"
     return 0
   fi
-  echo "no"
+  # A standalone session's slug can be WP-N while the reserved peer directory
+  # has its own full ID. Count only a pair explicitly claimed by THIS semaphore;
+  # do not search all sessions or trust a free-form link in the ORZ body.
+  if ! claimed=$(python3 "$GUARD_LIB_DIR/peer-session-claimed-files.py" "$semaphore" "$orz_dir"); then
+    echo "peer evidence file check failed: helper could not run" >&2
+    claimed="no"
+  fi
+  echo "$claimed"
 }
 
 # clear_peer_session_obligation <semaphore> <slug> -- release the conversation's
