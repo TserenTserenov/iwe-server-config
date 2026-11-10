@@ -486,17 +486,18 @@ bash ${GOV_REPO_ROOT:?}/scripts/day-close-prepare.sh --verify-week-summary --for
 
 ### 15. Закоммитить DS-my-strategy [[gate:AR.005]]
 
+Четыре отдельных вызова (WP-484 Ф298, И-10 п.4 и п.5). Защитная проверка разбирает каждую команду со словами `git` и `add`: путь из подключённого контекста (`eval`), цикл с подоболочкой и вызов с массивом окружения она разобрать не может и блокирует весь вызов. Поэтому добавление файлов — отдельный короткий вызов с буквальными путями, остальное — в вызовах без него. Переходов в каталог верхнего уровня нет: git — через `git -C`, вызовы охранника — в подоболочке (он берёт репозиторий из рабочего каталога).
+
+**15а. Список и заявка файлов** (в выводе — путь копии дня `G=…` для 15б):
+
 ```bash
 DC_CONTEXT=$(bash "$HOME/IWE/.iwe-runtime/day-close-interactive.sh" --context '<токен из шага 0.5>') || exit 1; eval "$DC_CONTEXT"
 bash ~/IWE/scripts/day-close-step-log.sh start 10
-# No top-level cd (WP-484 Ф298, И-10 п.4): the hook blocks it, so the step did not run
-# verbatim. Every git call names the repository; note-file runs in a subshell because the
-# guard takes the claim's repository from its working directory.
-G="${GOV_REPO_ROOT:?}"
+G="${GOV_REPO_ROOT:?}"; echo "G=$G"
 git -C "$G" status --short
 # Перечислить только реально изменённые файлы своих шагов, включая результат раннера.
-# WeekState и priorities — добавить только если они изменены.
-# Игнорируемые runtime-файлы (exocortex, sessions-today, кэши) не добавлять в Git.
+# WeekState и priorities — только если они изменены.
+# Игнорируемые runtime-файлы (exocortex, sessions-today, кэши) в Git не включать.
 DC_FILES=(<каждый свой изменённый файл явным относительным путём>)
 # WP-484 Ф298 (вход И-10 п.1): заявить файлы за housekeeping-сессией закрытия дня, иначе
 # проверка границ сессии отклоняет коммит новых файлов («вне scope активных сессий»).
@@ -504,9 +505,21 @@ for DC_FILE in "${DC_FILES[@]}"; do
   (cd "$G" && IWE_AGENT=claude-code bash "${IWE_SCRIPTS:-$HOME/IWE/scripts}/session-guard.sh" note-file "$DC_FILE" \
     --agent claude-code --slug day-close) || echo "WARN: note-file $DC_FILE не прошёл — коммит может упереться в проверку границ" >&2
 done
-git -C "$G" add -- "${DC_FILES[@]}" || exit 1
-git -C "$G" diff --cached --name-only || exit 1
-# Сверить весь staged-список с DC_FILES до коммита.
+```
+
+**15б. Включить файлы в коммит** — только буквальные значения: путь `G` из вывода 15а и тот же список файлов, каждый путь в одинарных кавычках (в именах планов недели есть пробелы; переменные из прошлых вызовов проверка не видит):
+
+```bash
+git -C '<путь G из вывода 15а>' add -- '<файл 1>' '<файл 2>' && git -C '<путь G из вывода 15а>' diff --cached --name-only
+```
+
+**15в. Коммит и публикация** (тот же список файлов в `DC_FILES`):
+
+```bash
+DC_CONTEXT=$(bash "$HOME/IWE/.iwe-runtime/day-close-interactive.sh" --context '<токен из шага 0.5>') || exit 1; eval "$DC_CONTEXT"
+G="${GOV_REPO_ROOT:?}"
+DC_FILES=(<тот же список, что в 15а>)
+# Сверить весь подготовленный список с DC_FILES до коммита.
 if ! git -C "$G" diff --cached --quiet -- "${DC_FILES[@]}"; then
   git -C "$G" commit -m "day-close: $IWE_CLOSE_DATE" -- "${DC_FILES[@]}" || exit 1
 fi
@@ -552,9 +565,14 @@ if ! git -C "$G" merge-base --is-ancestor "$DC_SHA" "$DC_PUBLISHED_REVISION"; th
 fi
 # Передать R23 сохранённые дату, номер недели, DC_SHA и точный входной срез
 # DC_PUBLISHED_REVISION. Поиск коммита по заголовку доказательством не является.
+echo "DC_SHA=$DC_SHA DC_PUBLISHED_REVISION=$DC_PUBLISHED_REVISION"
 (cd "$G" && bash "${IWE_SCRIPTS:-$HOME/IWE/scripts}/session-guard.sh" close --housekeeping day-close --agent claude-code) || exit 1
-# --finish подтверждает стабильный срез внешней очереди и сохраняет копию/маршрут
-# для поздних хуков этого же запуска. Отказ оставляет замок и данные для повтора.
+```
+
+**15г. Завершение** — отдельный вызов с увеличенным лимитом времени (до 5 мин): `--finish` подтверждает стабильный срез внешней очереди журнала и при гонке с другой публикацией повторяет её до трёх раз (WP-484 Ф298, И-10 п.5), поэтому может идти дольше двух минут. Отказ оставляет замок и данные; повторять только этот вызов, не 15в:
+
+```bash
+DC_CONTEXT=$(bash "$HOME/IWE/.iwe-runtime/day-close-interactive.sh" --context '<токен из шага 0.5>') || exit 1; eval "$DC_CONTEXT"
 (cd "$HOME/IWE" && bash "$DAY_CLOSE_WRAPPER" --finish "$DAY_CLOSE_LOCK_TOKEN") || exit 1
 bash ~/IWE/scripts/day-close-step-log.sh end 10
 ```
