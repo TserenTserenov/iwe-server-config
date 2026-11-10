@@ -108,6 +108,13 @@ ambiguous	задани
 document	задани[а-яё]+ (в )?очеред
 ambiguous	экзокортекс
 ambiguous	цифров[а-яё]+ двойник
+collection	шаблон
+role_kind	выпускающ
+system	вендор
+collection	библиотек[а-яё]+ метод
+method	индексаци
+method	поиск
+method	отдач
 method	рабоч[а-яё]+ процесс
 method	процесс(а|у|ом|е)? разработки
 method	инженерн[а-яё]+ процесс
