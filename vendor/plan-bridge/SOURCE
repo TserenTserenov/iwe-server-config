@@ -17,8 +17,8 @@
 # при доставке, многопоточный приёмник, повтор брони при недоступном приёмнике.
 # 10.11 (РП-530 Ф85, пакет Б): scripts/lib/plan_event_bridge.py,
 # scripts/lib/plan_bridge_host.py и scripts/lib/plan_bridge_decisions.py — из
-# DS-my-strategy 06670c4695, scripts/lib/plan_event_intake.py — из f9fe57c2c2
-# (main; локально 232a10d19b и 0ae3550417): проход моста не повторяет работу —
+# DS-my-strategy 06670c4695, scripts/lib/plan_event_intake.py — из ca175a1e8f
+# (main; локально 232a10d19b и 23a188a5b5): проход моста не повторяет работу —
 # файлы журнала по идентификатору блоба один раз, запрос сериализуется один раз,
 # история одним пакетом, копия вида плана без повторной сериализации запросов
 # (проверка формы и значений остаётся).
@@ -40,7 +40,7 @@
 #   3baefc59724a9cc1b0eb5ff782cc14012427167c scripts/lib/plan_bridge_host.py
 #   d399e0969088966138b6a86844142f07a9c0ece1 scripts/lib/plan_bridge_receiver.py
 #   1d75c23ddd587d78e8cb93759458fd5b07a19a5c scripts/lib/plan_event_bridge.py
-#   f890a095cb3811a1d1fd8e0d1c153633e4521866 scripts/lib/plan_event_intake.py
+#   97485e38ec21ba740085f8a20c40cd6d4f85b723 scripts/lib/plan_event_intake.py
 #   7a253bff01ab97a818989538c27c5b6b58b2b44a scripts/lib/plan_event_wal.py
 #   f7d4025106be725aa00eed8e2bd88b98d9025689 scripts/plan-event-bridge.py
 #   0a211eb86fef8b5cdc1673e07f0843f2c45b6ffd scripts/plan-event-receiver.py

@@ -113,6 +113,7 @@ def _check_json_tree(value: object) -> None:
         for key, item in value.items():
             if type(key) is not str:
                 raise ValueError("JSON object keys must be strings")
+            key.encode("utf-8")  # a lone surrogate raises UnicodeEncodeError
             _check_json_tree(item)
     elif type(value) is list:
         for item in value:
