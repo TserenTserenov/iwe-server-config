@@ -67,7 +67,7 @@ rc=$(run_writer 9999)
 assert_eq "$rc" "1" "exit 1 for a missing card"
 
 echo "scenario F (WP-484 Ф299 п.4): a card WITH a phases: block -> open list comes from the records, sections only add diagnostics"
-card $'### Ф1 — открыта\n\nтело\n\n### Ф2 — ждёт приёмки\n\nтело\n\n### Ф3 ✅ — закрыта\n\nтело\n\n### Ф5 — раздел без записи\n\nтело\n' $'phases:\n  Ф1: pending\n  Ф2: implemented-partial\n  Ф3: done\n  Ф4: deferred\n  Ф6: pending\n'
+card $'### Ф1 — открыта\n\nтело\n\n### Ф2 — ждёт приёмки\n\nтело\n\n### Ф3 ✅ — закрыта\n\nтело\n\n### Ф5 — раздел без записи\n\nтело\n' $'phases:\n  Ф1: pending\n  Ф2: implemented-partial\n  Ф3: done\n  Ф4: waiting\n  Ф6: pending\n'
 rc=$(run_writer 9302)
 assert_eq "$rc" "0" "exit 0"
 snap=$(cat "$GOV/inbox/WP-9302/WP-9302.md")
@@ -108,6 +108,14 @@ card $'### Ф1 — открыта\n\nтело\n\n### Ф2 — новый разд
 rc=$(run_writer 9302)
 assert_eq "$rc" "0" "exit 0"
 assert_contains "$(cat "$GOV/inbox/WP-9302/WP-9302.md")" "observed_unaccounted: [Ф2]" "new diagnostic recorded although the open list did not change"
+
+echo "scenario K: deferred and cancelled are table words -> not open, and not reported as unknown"
+card $'### Ф1 — открыта\n\nтело\n\n### Ф2 — отложена\n\nтело\n\n### Ф3 — отменена\n\nтело\n' $'phases:\n  Ф1: pending\n  Ф2: deferred\n  Ф3: cancelled\n  Ф4: defer\n'
+rc=$(run_writer 9302)
+assert_eq "$rc" "0" "exit 0"
+snap=$(cat "$GOV/inbox/WP-9302/WP-9302.md")
+assert_contains "$snap" "observed_open_phases: [Ф1]" "only the pending phase is open"
+case "$snap$(cat "$SANDBOX/err.txt")" in *observed_unknown_status*|*"неизвестный статус"*) echo "  FAIL a table word was reported as unknown"; fails=$((fails+1)) ;; *) echo "  ok   no unknown-status report for table words" ;; esac
 
 if [ "$fails" -eq 0 ]; then
   echo "PASS: all scenarios"

@@ -29,7 +29,13 @@ CASES = {
     "  Completed ": "closed",
     "moved-to-": "unknown",
     "moved": "unknown",
-    "deferred": "unknown",
+    "deferred": "parked",
+    "defer": "parked",
+    "  Deferred ": "parked",
+    "cancelled": "closed",
+    "waiting": "unknown",
+    "queued": "unknown",
+    "frozen-off-path": "unknown",
     "": "unknown",
     None: "unknown",
     42: "unknown",
@@ -43,8 +49,17 @@ class ClassifyTable(unittest.TestCase):
                 self.assertEqual(phase_status.classify(status), expected)
 
     def test_unknown_is_neither_open_nor_closed(self):
-        self.assertFalse(phase_status.is_closed("deferred"))
+        self.assertFalse(phase_status.is_closed("waiting"))
+        self.assertFalse(phase_status.is_open("waiting"))
+
+    def test_parked_is_neither_open_nor_closed_nor_unknown(self):
         self.assertFalse(phase_status.is_open("deferred"))
+        self.assertFalse(phase_status.is_closed("deferred"))
+        self.assertTrue(phase_status.is_parked("defer"))
+        got = {"Ф1": "deferred", "Ф2": "defer", "Ф3": "waiting", "Ф4": "pending"}
+        self.assertEqual(phase_status.parked_ids(got), ["Ф1", "Ф2"])
+        self.assertEqual(phase_status.unknown_ids(got), ["Ф3"])
+        self.assertEqual(phase_status.open_ids(got), ["Ф4"])
 
     def test_cli_prints_class(self):
         out = subprocess.run(
@@ -119,7 +134,7 @@ class ParsePhases(unittest.TestCase):
 
     def test_statuses_seen_on_live_cards_are_unknown_not_open(self):
         got = {pid: status for pid, status in zip(
-            ("Ф1", "Ф2", "Ф3", "Ф4"), ("frozen-off-path", "defer", "cancelled", "diagnosed"))}
+            ("Ф1", "Ф2", "Ф3", "Ф4"), ("frozen-off-path", "diagnosed", "queued", "proposal"))}
         self.assertEqual(phase_status.open_ids(got), [])
         self.assertEqual(phase_status.unknown_ids(got), ["Ф1", "Ф2", "Ф3", "Ф4"])
 
@@ -146,7 +161,7 @@ class ParsePhases(unittest.TestCase):
         self.assertEqual(got, {"Ф1": "pending", "Ф2": "done"})
 
     def test_unknown_is_reported_apart_and_is_not_open(self):
-        got = {"Ф1": "pending", "Ф2": "deferred", "Ф3": "done", "Ф4": ""}
+        got = {"Ф1": "pending", "Ф2": "waiting", "Ф3": "done", "Ф4": ""}
         self.assertEqual(phase_status.open_ids(got), ["Ф1"])
         self.assertEqual(phase_status.unknown_ids(got), ["Ф2", "Ф4"])
 
@@ -176,7 +191,7 @@ CARD = textwrap.dedent(
       Ф2: implemented
       Ф3: merged
       Ф4: pending
-      Ф5: deferred
+      Ф5: waiting
       Ф6: moved-to-wp-9
     ---
     body
@@ -203,7 +218,7 @@ class ArchiverDiagnostics(unittest.TestCase):
 
     def test_phases_card_lists_open_records_and_diagnostics(self):
         report = self._report(
-            "---\nwp: 9301\nphases:\n  Ф1: pending\n  Ф2: done\n  Ф3: deferred\n  Ф4: pending\n---\n"
+            "---\nwp: 9301\nphases:\n  Ф1: pending\n  Ф2: done\n  Ф3: waiting\n  Ф4: pending\n---\n"
             "### Ф1 — a\n\nbody\n\n### Ф2 ✅ — b\n\nbody\n\n### Ф5 — no record\n\nbody\n"
         )
         self.assertTrue(report["phases_present"])
@@ -248,7 +263,7 @@ class Consumers(unittest.TestCase):
         mod = _load(ROOT / "scripts" / "wp-archive-closed-phases.py", "wp_archive_under_test")
         self.assertTrue(mod._phase_status.is_closed("merged"))
         self.assertFalse(mod._phase_status.is_closed("implemented"))
-        self.assertFalse(mod._phase_status.is_closed("deferred"))
+        self.assertFalse(mod._phase_status.is_closed("waiting"))
 
     def test_sync_bundle_lists_open_and_unknown_not_closed(self):
         tmp = tempfile.TemporaryDirectory()
@@ -270,7 +285,7 @@ class Consumers(unittest.TestCase):
         self.assertEqual(body.returncode, 0, body.stderr)
         listed = [line.split()[0] for line in body.stdout.splitlines()]
         self.assertEqual(listed, EXPECTED_NOT_CLOSED)
-        self.assertIn("неизвестный статус: deferred", body.stdout)
+        self.assertIn("неизвестный статус: waiting", body.stdout)
 
     def test_sync_bundle_count_does_not_count_unknown_as_open(self):
         tmp = tempfile.TemporaryDirectory()

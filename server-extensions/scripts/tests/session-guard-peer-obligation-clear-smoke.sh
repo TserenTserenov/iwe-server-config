@@ -212,6 +212,60 @@ PY
 )
 check "обычное закрытие и повтор стоят под проверкой close_path" "$WIRING" "ok"
 
+echo "6. обязательство беседы не снимается, пока в ней есть живая отметка (WP-484 Ф301, И-11)"
+# Real incident: the WP Gate opened semaphore A, the peer skill opened semaphore B in
+# the same conversation; closing B cleared the conversation's obligation, so A
+# answered `no_obligation` to every cancel. Both close paths must therefore ask
+# _closed_peer_has_no_live_owner before clearing. The helpers are extracted from the
+# shipped script, same as above.
+python3 - "$GUARD" "$SANDBOX/live_owner_fn.sh" <<'PY'
+import sys
+from pathlib import Path
+
+lines = Path(sys.argv[1]).read_text(encoding="utf-8").split("\n")
+out = []
+for name in ("_unique_record_field() {", "_closed_peer_has_no_live_owner() {"):
+    try:
+        start = next(i for i, line in enumerate(lines) if line.startswith(name))
+    except StopIteration:
+        raise SystemExit(name + " не найдена в session-guard.sh")
+    end = next(i for i in range(start + 1, len(lines)) if lines[i] == "}")
+    out.extend(lines[start:end + 1])
+Path(sys.argv[2]).write_text("\n".join(out) + "\n", encoding="utf-8")
+PY
+# shellcheck source=/dev/null
+. "$SANDBOX/live_owner_fn.sh"
+SESSION_DIR="$SANDBOX/live-owner-sessions"
+mkdir -p "$SESSION_DIR"
+SID_CONV="55555555-5555-5555-5555-555555555555"
+make_semaphore "$SESSION_DIR/peer.open.closed" "$SID_CONV"
+set +e
+_closed_peer_has_no_live_owner "$SESSION_DIR/peer.open.closed"; RC_ALONE=$?
+make_semaphore "$SESSION_DIR/gate.open" "$SID_CONV"
+_closed_peer_has_no_live_owner "$SESSION_DIR/peer.open.closed"; RC_SIBLING=$?
+make_semaphore "$SESSION_DIR/gate.open" "66666666-6666-6666-6666-666666666666"
+_closed_peer_has_no_live_owner "$SESSION_DIR/peer.open.closed"; RC_OTHER=$?
+set -e
+check "в беседе других отметок нет — обязательство можно снять" "$RC_ALONE" "0"
+check "живая отметка той же беседы — обязательство остаётся" "$RC_SIBLING" "1"
+check "живая отметка чужой беседы не мешает" "$RC_OTHER" "0"
+
+LIVE_WIRING=$(python3 - "$GUARD" <<'PY'
+import re, sys
+from pathlib import Path
+
+text = Path(sys.argv[1]).read_text(encoding="utf-8")
+calls = list(re.finditer(r"^\s*clear_peer_session_obligation ", text, re.M))
+bad = []
+for call in calls:
+    guard = "\n".join(text[:call.start()].rsplit("\n", 5)[-5:])
+    if "_closed_peer_has_no_live_owner" not in guard:
+        bad.append(guard)
+print("ok" if len(calls) == 2 and not bad else f"вызовов {len(calls)}, без проверки живого владельца: {len(bad)}")
+PY
+)
+check "оба пути закрытия спрашивают про живого владельца" "$LIVE_WIRING" "ok"
+
 echo
 echo "session-guard-peer-obligation-clear-smoke: прошло $PASS, провалено $FAIL"
 [ "$FAIL" -eq 0 ]

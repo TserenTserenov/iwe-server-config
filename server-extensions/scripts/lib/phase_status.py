@@ -9,15 +9,22 @@ Before this module three programs kept three different lists:
   * wp-sync-bundle.sh carried a third inline copy of the open list.
 wp-phase-snapshot-write.py reuses the archiver's classifier, so it follows.
 
-Contract (peer-session 2026-11-11-06-wp484-next-phase, Claude+Kimi+Codex):
+Contract (peer-session 2026-11-11-06-wp484-next-phase, Claude+Kimi+Codex; the "parked" class and
+`cancelled` added 2026-11-11, peer-session 2026-11-11-07-wp484-f299-phase-source, pilot's word
+«сделаем правило только из таблицы»):
   open    -- pending, in_progress, blocked, implemented, implemented-partial
              (implemented* wait for acceptance, they are not finished)
-  closed  -- done, closed, archived, completed, merged, superseded, moved-to-*
+  parked  -- deferred (`defer` is accepted as the same word): put aside on purpose, not worked now.
+             Not open (it does not demand a «Следующий шаг» naming it) and not closed (it is not
+             archived, the work still exists).
+  closed  -- done, closed, archived, completed, merged, superseded, cancelled, moved-to-<WP>
   unknown -- anything else, including an empty or missing status.  Unknown is
              never "closed": a caller must not archive on it and must report it.
+The table is the ONLY vocabulary: a status word that is not in it is a defect of the card, not a new
+word (docs/INBOX-CONVENTION.md of the governance repo lists the same words; a test keeps the two equal).
 
 CLI (for shell callers, no second copy of the table):
-  python3 phase_status.py classify <status>   -> open | closed | unknown
+  python3 phase_status.py classify <status>   -> open | parked | closed | unknown
 """
 from __future__ import annotations
 
@@ -25,7 +32,8 @@ import re
 import sys
 
 OPEN_STATUSES = frozenset({"pending", "in_progress", "blocked", "implemented", "implemented-partial"})
-CLOSED_STATUSES = frozenset({"done", "closed", "archived", "completed", "merged", "superseded"})
+PARKED_STATUSES = frozenset({"deferred", "defer"})
+CLOSED_STATUSES = frozenset({"done", "closed", "archived", "completed", "merged", "superseded", "cancelled"})
 MOVED_PREFIX = "moved-to-"
 
 
@@ -34,10 +42,12 @@ def _normalise(status: object) -> str:
 
 
 def classify(status: object) -> str:
-    """Return "open", "closed" or "unknown" for a phase status value."""
+    """Return "open", "parked", "closed" or "unknown" for a phase status value."""
     value = _normalise(status)
     if value in OPEN_STATUSES:
         return "open"
+    if value in PARKED_STATUSES:
+        return "parked"
     if value in CLOSED_STATUSES or (value.startswith(MOVED_PREFIX) and len(value) > len(MOVED_PREFIX)):
         return "closed"
     return "unknown"
@@ -49,6 +59,10 @@ def is_open(status: object) -> bool:
 
 def is_closed(status: object) -> bool:
     return classify(status) == "closed"
+
+
+def is_parked(status: object) -> bool:
+    return classify(status) == "parked"
 
 
 # ФN, sub-phases ФN.M(.K), optional letter suffix (Ф5а).  Kept equal to
@@ -142,6 +156,11 @@ def phase_sort_key(phase_id: str) -> tuple:
 def open_ids(phases: dict[str, str]) -> list[str]:
     """Ids whose status is open, in numeric order.  Unknown statuses are NOT open."""
     return sorted((pid for pid, status in phases.items() if is_open(status)), key=phase_sort_key)
+
+
+def parked_ids(phases: dict[str, str]) -> list[str]:
+    """Ids put aside on purpose (deferred): neither open nor closed, listed apart from the unknown ones."""
+    return sorted((pid for pid, status in phases.items() if is_parked(status)), key=phase_sort_key)
 
 
 def unknown_ids(phases: dict[str, str]) -> list[str]:
