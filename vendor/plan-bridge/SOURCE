@@ -22,6 +22,10 @@
 # файлы журнала по идентификатору блоба один раз, запрос сериализуется один раз,
 # история одним пакетом, копия вида плана без повторной сериализации запросов
 # (проверка формы и значений остаётся).
+# 11.11 (РП-530 Ф85, показатели табло): scripts/lib/plan_event_bridge.py и
+# scripts/plan-event-bridge.py — из DS-my-strategy fd9eb0e612 (main, слияние
+# DS-my-strategy #226): файл здоровья моста bridge-health.json после каждого
+# прохода под замком доставки, для табло РП-561 Ф34.
 # Код моста — 8 модулей и 2 команды (codePaths, входят в версию правил), три
 # клиентские команды для канала Мака (отправитель, заявка, ответ) и лимиты
 # плана: из них сборка берёт часовой пояс канала Мака (Ф58), лимиты тоже
@@ -39,10 +43,10 @@
 #   9dc28efa08bc6939f71dbb2666c6c7d2035ec00d scripts/lib/plan_bridge_decisions.py
 #   3baefc59724a9cc1b0eb5ff782cc14012427167c scripts/lib/plan_bridge_host.py
 #   d399e0969088966138b6a86844142f07a9c0ece1 scripts/lib/plan_bridge_receiver.py
-#   1d75c23ddd587d78e8cb93759458fd5b07a19a5c scripts/lib/plan_event_bridge.py
+#   07ee5729ff5211c6e5fbea4191009bb3fa32fd1e scripts/lib/plan_event_bridge.py
 #   97485e38ec21ba740085f8a20c40cd6d4f85b723 scripts/lib/plan_event_intake.py
 #   7a253bff01ab97a818989538c27c5b6b58b2b44a scripts/lib/plan_event_wal.py
-#   f7d4025106be725aa00eed8e2bd88b98d9025689 scripts/plan-event-bridge.py
+#   60e72c8864522c9f0d4477cd408a2ec146a6e844 scripts/plan-event-bridge.py
 #   0a211eb86fef8b5cdc1673e07f0843f2c45b6ffd scripts/plan-event-receiver.py
 #   e40ee8469b56541fc2e1514f8df015d3789a23dc scripts/plan-event-send.py
 #   daa85e61ca0bcef56e8c95b8ddc3557193fb7a7a scripts/plan-session-reserve.py

@@ -1016,6 +1016,11 @@ def _check_preserved(previous, current):
             )
 
 
+def _check_batch_size(batch_size):
+    if type(batch_size) is not int or not 1 <= batch_size <= MAX_BATCH_RECORDS:
+        raise BridgeError("INVALID_BATCH_BOUND", "batch must contain 1..32 records")
+
+
 def deliver_once(
     stream_dir: Path,
     *,
@@ -1028,109 +1033,151 @@ def deliver_once(
     batch_size=MAX_BATCH_RECORDS,
 ):
     """One locked pass; no internal retry and no cursor write on unknown outcome."""
-    if type(batch_size) is not int or not 1 <= batch_size <= MAX_BATCH_RECORDS:
-        raise BridgeError("INVALID_BATCH_BOUND", "batch must contain 1..32 records")
+    _check_batch_size(batch_size)
     stream_dir = Path(stream_dir).resolve()
     with delivery_lock(stream_dir):
-        metadata = intake.read_metadata(stream_dir)
-        records = intake.read_intake(stream_dir, wait_seconds=READ_LOCK_WAIT_SECONDS)
-        for record in records:
-            intake.authorize_read_record(
-                record, trusted_context=trusted_context, verifier=verifier
-            )
-        cursor = read_cursor(stream_dir, metadata)
-        current = reader.fresh()
-        _check_snapshot(records, metadata, cursor, current, reader)
-        pending = records[cursor["confirmed_seq"] :]
-        oldest_age = 0
-        if pending:
-            timestamp = datetime.fromisoformat(
-                pending[0]["registered_at"].replace("Z", "+00:00")
-            )
-            oldest_age = max(
-                0, ((now or datetime.now(timezone.utc)) - timestamp).total_seconds()
-            )
-        batch = pending[:batch_size]
-        undecided = [
-            record["request"]
-            for record in batch
-            if record["request"]["event_id"] not in current.origin.decisions
-        ]
-        decisions = {
-            key: dict(value) for key, value in current.origin.decisions.items()
-        }
-        if undecided:
-            if validator_factory is None:
-                raise BridgeError(
-                    "VALIDATOR_UNAVAILABLE", "no admitted whole-plan validator factory"
-                )
-            validator = validator_factory(current.origin.commit, reader)
-            rules = getattr(validator, "rules_version", None)
-            if not isinstance(rules, str) or not rules:
-                raise BridgeError(
-                    "VALIDATOR_UNAVAILABLE", "validator does not identify current rules"
-                )
-            order = getattr(validator, "ordered_accepted", None)
-            if (
-                order is not None
-                and getattr(validator, "base_commit", None) != current.origin.commit
-            ):
-                raise BridgeError(
-                    "VALIDATOR_BASE_MISMATCH",
-                    "publication order came from another base",
-                )
-            _, proposals = resolve_race(
-                [record["request"] for record in batch],
-                current.view(rules, ordered_accepted=order),
-                current.origin,
-                validator=validator,
-            )
-            decisions.update({item["event_id"]: item for item in proposals})
-        documents = publication_documents(batch, decisions, current)
-        state = "confirmed"
-        if documents:
-            result = publisher.publish(documents, current.origin.commit, stream_dir)
-            if result.state != "published":
-                return dict(
-                    state=result.state,
-                    confirmed_seq=cursor["confirmed_seq"],
-                    oldest_age_seconds=oldest_age,
-                    overdue=oldest_age > OVERDUE_SECONDS,
-                )
-            refreshed = reader.fresh()
-            _check_snapshot(records, metadata, cursor, refreshed, reader)
-            receipt = result.receipt
-            if (
-                receipt is None
-                or reader.parents(receipt["candidate_oid"]) != (current.origin.commit,)
-                or not reader.is_ancestor(
-                    current.origin.commit, refreshed.origin.commit
-                )
-                or not reader.is_ancestor(
-                    receipt["candidate_oid"], refreshed.origin.commit
-                )
-            ):
-                raise BridgeError(
-                    "UNCONFIRMED_PUBLICATION",
-                    "exact candidate is absent from fresh origin",
-                )
-            candidate = reader.read(receipt["candidate_oid"])
-            _check_preserved(current, candidate)
-            _check_preserved(candidate, refreshed)
-            current = refreshed
-            state = "published"
-        confirmed = _confirmed(records, current)
-        updated = advance_cursor(cursor, confirmed, current.origin.commit)
-        if updated != cursor:
-            _write_cursor(stream_dir, updated)
-        if updated["confirmed_seq"] < len(records) and state == "confirmed":
-            state = "waiting"
-        return dict(
-            state=state,
-            confirmed_seq=updated["confirmed_seq"],
-            oldest_age_seconds=oldest_age,
-            overdue=oldest_age > OVERDUE_SECONDS,
+        return deliver_locked(
+            stream_dir,
+            reader=reader,
+            publisher=publisher,
+            verifier=verifier,
+            trusted_context=trusted_context,
+            validator_factory=validator_factory,
+            now=now,
+            batch_size=batch_size,
         )
+
+
+def deliver_locked(
+    stream_dir: Path,
+    *,
+    reader: GitPlanReader,
+    publisher: GitCasPublisher,
+    verifier=None,
+    trusted_context=None,
+    validator_factory: Callable | None = None,
+    now=None,
+    batch_size=MAX_BATCH_RECORDS,
+    observation: dict | None = None,
+):
+    """The pass body; the caller already holds delivery_lock(stream_dir).
+
+    Calling deliver_once() from inside that lock would fail with LOCK_BUSY
+    against the caller's own flock, so a coordinator that must act under the
+    same lock (the service health file, WP-530 F85) calls this directly.
+    `observation`, when given, is filled as the pass learns facts: once the
+    intake and cursor are read it holds the snapshot, so the caller can still
+    report the queue when the pass raises later (for example Git is down).
+    """
+    _check_batch_size(batch_size)
+    stream_dir = Path(stream_dir).resolve()
+    seen = observation if observation is not None else {}
+    metadata = intake.read_metadata(stream_dir)
+    records = intake.read_intake(stream_dir, wait_seconds=READ_LOCK_WAIT_SECONDS)
+    for record in records:
+        intake.authorize_read_record(
+            record, trusted_context=trusted_context, verifier=verifier
+        )
+    cursor = read_cursor(stream_dir, metadata)
+    seen.update(
+        snapshot_at=(now or datetime.now(timezone.utc)).isoformat(),
+        delivery_id=metadata["delivery_id"],
+        wal_epoch=metadata["wal_epoch"],
+        records=records,
+        confirmed_seq_before=cursor["confirmed_seq"],
+        confirmed_seq=cursor["confirmed_seq"],
+        confirmed_origin_commit=cursor.get("confirmation_commit"),
+    )
+    current = reader.fresh()
+    _check_snapshot(records, metadata, cursor, current, reader)
+    pending = records[cursor["confirmed_seq"] :]
+    oldest_age = 0
+    if pending:
+        timestamp = datetime.fromisoformat(
+            pending[0]["registered_at"].replace("Z", "+00:00")
+        )
+        oldest_age = max(
+            0, ((now or datetime.now(timezone.utc)) - timestamp).total_seconds()
+        )
+    batch = pending[:batch_size]
+    undecided = [
+        record["request"]
+        for record in batch
+        if record["request"]["event_id"] not in current.origin.decisions
+    ]
+    decisions = {key: dict(value) for key, value in current.origin.decisions.items()}
+    if undecided:
+        if validator_factory is None:
+            raise BridgeError(
+                "VALIDATOR_UNAVAILABLE", "no admitted whole-plan validator factory"
+            )
+        validator = validator_factory(current.origin.commit, reader)
+        rules = getattr(validator, "rules_version", None)
+        if not isinstance(rules, str) or not rules:
+            raise BridgeError(
+                "VALIDATOR_UNAVAILABLE", "validator does not identify current rules"
+            )
+        order = getattr(validator, "ordered_accepted", None)
+        if (
+            order is not None
+            and getattr(validator, "base_commit", None) != current.origin.commit
+        ):
+            raise BridgeError(
+                "VALIDATOR_BASE_MISMATCH",
+                "publication order came from another base",
+            )
+        _, proposals = resolve_race(
+            [record["request"] for record in batch],
+            current.view(rules, ordered_accepted=order),
+            current.origin,
+            validator=validator,
+        )
+        decisions.update({item["event_id"]: item for item in proposals})
+    documents = publication_documents(batch, decisions, current)
+    state = "confirmed"
+    if documents:
+        result = publisher.publish(documents, current.origin.commit, stream_dir)
+        if result.state != "published":
+            return dict(
+                state=result.state,
+                confirmed_seq=cursor["confirmed_seq"],
+                oldest_age_seconds=oldest_age,
+                overdue=oldest_age > OVERDUE_SECONDS,
+            )
+        refreshed = reader.fresh()
+        _check_snapshot(records, metadata, cursor, refreshed, reader)
+        receipt = result.receipt
+        if (
+            receipt is None
+            or reader.parents(receipt["candidate_oid"]) != (current.origin.commit,)
+            or not reader.is_ancestor(current.origin.commit, refreshed.origin.commit)
+            or not reader.is_ancestor(receipt["candidate_oid"], refreshed.origin.commit)
+        ):
+            raise BridgeError(
+                "UNCONFIRMED_PUBLICATION",
+                "exact candidate is absent from fresh origin",
+            )
+        candidate = reader.read(receipt["candidate_oid"])
+        _check_preserved(current, candidate)
+        _check_preserved(candidate, refreshed)
+        current = refreshed
+        state = "published"
+    confirmed = _confirmed(records, current)
+    updated = advance_cursor(cursor, confirmed, current.origin.commit)
+    if updated != cursor:
+        _write_cursor(stream_dir, updated)
+    seen.update(
+        confirmed_seq=updated["confirmed_seq"],
+        confirmed_origin_commit=updated.get("confirmation_commit"),
+    )
+    if updated["confirmed_seq"] < len(records) and state == "confirmed":
+        state = "waiting"
+    return dict(
+        state=state,
+        confirmed_seq=updated["confirmed_seq"],
+        oldest_age_seconds=oldest_age,
+        overdue=oldest_age > OVERDUE_SECONDS,
+    )
 
 
 def receive_and_kick(stream_dir, request, *, kick: Callable, **kwargs):
