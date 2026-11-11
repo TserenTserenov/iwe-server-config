@@ -26,6 +26,9 @@
 # scripts/plan-event-bridge.py — из DS-my-strategy fd9eb0e612 (main, слияние
 # DS-my-strategy #226): файл здоровья моста bridge-health.json после каждого
 # прохода под замком доставки, для табло РП-561 Ф34.
+# 11.11 (РП-561 Ф55): machine/plan-bridge/limits.json — из DS-my-strategy
+# 3e9383ee88 (локально): дневной бюджет 1800 минут (600 × 3 параллельные
+# сессии, решение пилота 11.11).
 # Код моста — 8 модулей и 2 команды (codePaths, входят в версию правил), три
 # клиентские команды для канала Мака (отправитель, заявка, ответ) и лимиты
 # плана: из них сборка берёт часовой пояс канала Мака (Ф58), лимиты тоже
@@ -37,7 +40,7 @@
 # SOURCE находится вне code/ и не влияет на код службы.
 #
 # Хеши объектов Git:
-#   4b77597956029e290920a25043f2bf2e4cf247fc machine/plan-bridge/limits.json
+#   3bf1a5742e79c096b5cf0f0d2636060cc36919f5 machine/plan-bridge/limits.json
 #   70284c63241e1032d4e3502cd81f2663933541d9 scripts/lib/plan_allocation.py
 #   348cf7ac8460996889d15d28f27c0873d276d9ea scripts/lib/plan_bridge_allocation.py
 #   9dc28efa08bc6939f71dbb2666c6c7d2035ec00d scripts/lib/plan_bridge_decisions.py
