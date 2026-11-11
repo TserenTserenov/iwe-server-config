@@ -690,7 +690,8 @@ count_open_phases() {
   local phases rc
   if phases=$(extract_structured_open_phases "$file"); then
     if [[ -n "$phases" ]]; then
-      printf '%s\n' "$phases" | wc -l | tr -d ' '
+      # an unknown status is printed (so the card gets fixed) but is not an open phase
+      printf '%s\n' "$phases" | grep -v 'неизвестный статус:' | grep -c . || true
     else
       echo 0
     fi
@@ -707,13 +708,11 @@ extract_structured_open_phases() {
   local py
   py=$("$FIND_PYTHON3") || return 2
   "$py" - "$file" "$(dirname "$FIND_PYTHON3")" <<'PY'
-import re
 import sys
 from pathlib import Path
 
-import yaml
-
-# The one open/closed status list lives in scripts/lib/phase_status.py (WP-484 Ф299).
+# The one open/closed status list and the one `phases:` parser live in
+# scripts/lib/phase_status.py (WP-484 Ф299).
 sys.path.insert(0, sys.argv[2])
 try:
     import phase_status
@@ -724,43 +723,26 @@ except ImportError as exc:
 
 path = Path(sys.argv[1])
 try:
-    with path.open(encoding="utf-8") as source:
-        if source.readline().strip() != "---":
-            raise ValueError("missing opening frontmatter delimiter")
-        frontmatter = []
-        for line in source:
-            if line.strip() == "---":
-                break
-            frontmatter.append(line)
-        else:
-            raise ValueError("missing closing frontmatter delimiter")
-    document = yaml.safe_load("".join(frontmatter)) or {}
-    if not isinstance(document, dict):
-        raise ValueError("frontmatter must be a mapping")
-    phases = document.get("phases")
-    if phases is None:
-        sys.exit(1)
-    if isinstance(phases, dict):
-        records = phases.items()
-    elif isinstance(phases, list):
-        records = ((phase.get("id"), phase.get("status")) for phase in phases if isinstance(phase, dict))
-    else:
-        raise ValueError("phases must be a mapping or list")
-    for identifier, status in records:
-        identifier = str(identifier)
-        if identifier.isdecimal():
-            identifier = f"Ф{identifier}"
-        if not (re.fullmatch(r"Ф\d+", identifier) and isinstance(status, str)):
-            continue
-        kind = phase_status.classify(status)
-        if kind == "open":
-            print(f"{identifier} ({status})")
-        elif kind == "unknown":
-            # Unknown is never "closed": show it so the card gets fixed, not silently dropped.
-            print(f"{identifier} (неизвестный статус: {status})")
-except (OSError, ValueError, yaml.YAMLError) as exc:
+    text = path.read_text(encoding="utf-8")
+except (OSError, ValueError) as exc:
     print(f"[PARSE-ERROR] phases in {path}: {exc}", file=sys.stderr)
     sys.exit(2)
+frontmatter = phase_status.frontmatter_lines(text)
+if not frontmatter:
+    print(f"[PARSE-ERROR] phases in {path}: missing frontmatter", file=sys.stderr)
+    sys.exit(2)
+phases = phase_status.parse_phases(frontmatter)
+if not phases:
+    # no block, or a block of which nothing was readable (Latin ids, free-form list): rc 1 = fall back to the
+    # checkbox scan rather than report "no open phases" for a card that was not read
+    sys.exit(1)
+for identifier, status in phases.items():
+    kind = phase_status.classify(status)
+    if kind == "open":
+        print(f"{identifier} ({status})")
+    elif kind == "unknown":
+        # Unknown is never "closed": show it so the card gets fixed, not silently dropped.
+        print(f"{identifier} (неизвестный статус: {status})")
 PY
 }
 

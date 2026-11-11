@@ -13,7 +13,7 @@ absence of checkboxes does not prove closure, a research phase can be open in
 prose; ~~strike~~ may mean "cancelled", the word «закрыт» inside a heading may
 describe a blocker, not the phase):
   * frontmatter  phases:\n  ФN: a closed status (see lib/phase_status.py: done, closed,\n    archived, completed, merged, superseded, moved-to-*)        or
-  * a formal terminal marker in a fixed position of the H2 heading:
+  * a formal terminal marker in a fixed position of the H2 heading (a record that\n    calls the phase open still vetoes it -- the record wins over the marker):
       ## ФN ✅ ...   /  ## ФN — ✅ ...  /  ## ФN [done]  / ## ФN [закрыто] /
       ## ФN [status: done|closed]   / heading ends with ✅
 Everything else is a NEGATIVE veto (any one keeps the section in the card):
@@ -72,12 +72,8 @@ if _LIB_DIR not in sys.path:
 import phase_sections as _phase_sections  # noqa: E402  (needs sys.path set up above)
 import phase_status as _phase_status  # noqa: E402  (the one open/closed list, WP-484 Ф299)
 
-# ФN, sub-phases ФN.M(.K), optional letter suffix (Ф5а) -- the FIRST token after the
-# leading #'s. Cold review 27.09: `Ф\d+` alone truncated Ф16.2 to Ф16, so frontmatter
-# `Ф16: done` licensed the still-open sub-phase 16.2 for archival.
-# WP-484 Ф217: level-aware (## .. ######, not only H2) -- cards and create-wp.sh
-# commonly use ### ФN; the heading-level split itself lives in phase_sections.py.
-PHASE_ID = _phase_sections.PHASE_ID
+# The id grammar (ФN, sub-phases ФN.M(.K), letter suffix Ф5а) lives in phase_status.PHASE_ID,
+# the heading-level split in phase_sections.py (WP-484 Ф217: cards commonly use ### ФN).
 FIELD_LINE_RE = re.compile(r"^\*\*[^*]+\*\*")
 # formal terminal markers in a fixed position (see module docstring)
 HEAD_MARK_AFTER_ID_RE = re.compile(r"^\s*(?:[—\-:]\s*)?✅")
@@ -133,33 +129,10 @@ class Card:
                 return m.group(1).strip().strip('"').strip("'")
         return None
 
-    def fm_phases(self) -> dict[str, str]:
-        """`phases:` in frontmatter, map form (`  ФN: status`) or list form
-        (`- id: ФN` + `status: s`, the structured shape wp-sync-bundle treats as
-        SoT). Anything else -> {}."""
-        out: dict[str, str] = {}
-        fm = self.frontmatter_lines()
-        for i, ln in enumerate(fm):
-            if not re.match(r"^phases:\s*$", ln):
-                continue
-            current_id: str | None = None
-            for sub in fm[i + 1:]:
-                if sub.strip() == "":
-                    continue
-                if not sub.startswith(" ") and not sub.startswith("-"):
-                    break
-                m_map = re.match(rf"^\s{{2,}}({PHASE_ID})\s*:\s*(\S+)\s*$", sub)
-                m_id = re.match(rf"^\s*-\s*(?:id|phase)\s*:\s*\"?({PHASE_ID})\"?\s*$", sub)
-                m_status = re.match(r"^\s+status\s*:\s*\"?([A-Za-z_]+)\"?\s*$", sub)
-                if m_map:
-                    out[m_map.group(1)] = m_map.group(2).strip().strip('"').lower()
-                    current_id = None
-                elif m_id:
-                    current_id = m_id.group(1)
-                elif m_status and current_id:
-                    out[current_id] = m_status.group(1).lower()
-            break
-        return out
+    def fm_phases(self) -> dict[str, str] | None:
+        """`phases:` of the frontmatter through the one shared parser; None = a legacy
+        card without the key (WP-484 Ф299 п.4)."""
+        return _phase_status.parse_phases(self.frontmatter_lines())
 
     def _split_sections(self) -> list[dict]:
         """H2 sections of the body (after frontmatter), fenced code ignored."""
@@ -248,6 +221,12 @@ def next_step_text(card: Card) -> str:
 
 def analyze(card: Card, keep_last: int) -> dict:
     fm_phases = card.fm_phases()
+    records = fm_phases or {}
+    # A block that yields no record at all (Latin ids, free-form list, ...) is "present but unreadable":
+    # treating it as "no open phases" would blind the snapshot, the gate and the summary, so such a
+    # card is read by its headings like a legacy card and the report says why.
+    phases_present = bool(records)
+    phases_unreadable = fm_phases == {}
     phase_secs = card.phase_sections
     keep_ids = {s["id"] for s in phase_secs[-keep_last:]} if keep_last > 0 else set()
     next_step = next_step_text(card)
@@ -264,7 +243,7 @@ def analyze(card: Card, keep_last: int) -> dict:
     for s in phase_secs:
         pid = s["id"]
         body = card.section_text(s)
-        fm_status = fm_phases.get(pid, "")
+        fm_status = records.get(pid, "")
         positive = _phase_status.is_closed(fm_status) or heading_has_terminal_marker(s["heading"])
         referenced = bool(re.search(rf"(?<![\wФ]){re.escape(pid)}(?![\wа-я.]|\.\d)", next_step))
         unchecked = sum(1 for ln in body.split("\n") if UNCHECKED_RE.match(ln))
@@ -293,7 +272,17 @@ def analyze(card: Card, keep_last: int) -> dict:
             vetoed.append(entry)
         else:
             candidates.append(entry)
+    section_ids = {s["id"] for s in phase_secs}
+    open_by_record = _phase_status.open_ids(records)
+    sort = _phase_status.phase_sort_key
     return {"candidates": candidates, "vetoed": vetoed, "no_terminal_marker": no_marker,
+            # Ф299 п.4: the open list as the card's `phases:` block states it, and how the
+            # sections disagree with it (diagnostics, never a second source of status).
+            "phases_present": phases_present, "phases_unreadable": phases_unreadable,
+            "open_by_record": open_by_record,
+            "unknown_status": _phase_status.unknown_ids(records),
+            "sections_unaccounted": sorted(section_ids - set(records), key=sort) if phases_present else [],
+            "open_without_section": [pid for pid in open_by_record if pid not in section_ids],
             "attention": attention, "phase_sections": len(phase_secs),
             "self_check": self_check, "phase_diagnostics": card.phase_diagnostics}
 
@@ -769,6 +758,16 @@ def main(argv: list[str]) -> int:
             print(f"  ? {n['phase']}: нет явного маркера закрытия (✅ после номера / [done] / frontmatter phases){dup_note}")
         for at in report["attention"]:
             print(f"  ! {at['phase']}: {at['reason']}")
+        if report["phases_present"]:
+            for key, label in (("sections_unaccounted", "раздел есть, записи в phases: нет"),
+                               ("open_without_section", "запись открыта, раздела нет"),
+                               ("unknown_status", "неизвестный статус (не открыт и не закрыт)")):
+                if report[key]:
+                    print(f"  ⚠ {label}: {', '.join(report[key])}")
+        elif report["phases_unreadable"]:
+            print("  ⚠ блок phases: есть, но ни одной записи не прочитано (латинские номера или свободная форма) — фазы определяются по заголовкам разделов")
+        else:
+            print("  ⚠ в карточке нет блока phases: — фазы определяются по заголовкам разделов (прежний способ)")
         if "ostalos" in report:
             o = report["ostalos"]
             print(f"  «Осталось»: {'ок' if o.get('ok') else 'проблемы'} — " + ("; ".join(o.get("problems", [])) or f"{o.get('lines')} строк, {o.get('bytes')} байт"))

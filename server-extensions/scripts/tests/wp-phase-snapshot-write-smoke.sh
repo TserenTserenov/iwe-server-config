@@ -38,6 +38,7 @@ rc=$(run_writer 9302)
 assert_eq "$rc" "0" "exit 0"
 assert_contains "$(cat "$SANDBOX/out.txt")" "Ф1" "wrote the one real open phase"
 assert_contains "$(cat "$GOV/inbox/WP-9302/WP-9302.md")" "observed_open_phases: [Ф1]" "frontmatter has the entry"
+assert_contains "$(cat "$GOV/inbox/WP-9302/WP-9302.md")" "observed_source: sections" "legacy card (no phases: block) is read by headings"
 
 echo "scenario B: existing depends_on entry for ANOTHER WP must survive untouched"
 card $'### Ф1 — открыта\n\nтело\n' $'handoff_snapshot:\n  - ref: WP-123\n    observed_status: in_progress\n    observed_phase_digest: abc123\n'
@@ -64,6 +65,49 @@ assert_eq "$(grep -c '^  - ref: WP-9302$' "$GOV/inbox/WP-9302/WP-9302.md")" "1" 
 echo "scenario E: unknown WP -> exit 1, no file created"
 rc=$(run_writer 9999)
 assert_eq "$rc" "1" "exit 1 for a missing card"
+
+echo "scenario F (WP-484 Ф299 п.4): a card WITH a phases: block -> open list comes from the records, sections only add diagnostics"
+card $'### Ф1 — открыта\n\nтело\n\n### Ф2 — ждёт приёмки\n\nтело\n\n### Ф3 ✅ — закрыта\n\nтело\n\n### Ф5 — раздел без записи\n\nтело\n' $'phases:\n  Ф1: pending\n  Ф2: implemented-partial\n  Ф3: done\n  Ф4: deferred\n  Ф6: pending\n'
+rc=$(run_writer 9302)
+assert_eq "$rc" "0" "exit 0"
+snap=$(cat "$GOV/inbox/WP-9302/WP-9302.md")
+assert_contains "$snap" "observed_source: phases" "source is the phases: block"
+assert_contains "$snap" "observed_open_phases: [Ф1, Ф2, Ф6]" "open = is_open records (Ф5 has no record, Ф4 is unknown, Ф3 closed)"
+assert_contains "$snap" "observed_unaccounted: [Ф5]" "section without a record is named, not counted as open"
+assert_contains "$snap" "open_without_section: [Ф6]" "open record without a section is named"
+assert_contains "$snap" "observed_unknown_status: [Ф4]" "unknown status is recorded apart"
+assert_contains "$(cat "$SANDBOX/err.txt")" "Ф4" "unknown status is warned about, not a refusal"
+
+echo "scenario G: the same card run twice -> still idempotent with the new keys"
+before=$(cat "$GOV/inbox/WP-9302/WP-9302.md")
+rc=$(run_writer 9302)
+assert_eq "$rc" "0" "exit 0 on no-op"
+assert_contains "$(cat "$SANDBOX/out.txt")" "already up to date" "says already up to date"
+assert_eq "$before" "$(cat "$GOV/inbox/WP-9302/WP-9302.md")" "bytes unchanged"
+
+echo "scenario H: a closed record without a section raises no diagnostic"
+card $'### Ф1 — открыта\n\nтело\n' $'phases:\n  Ф1: pending\n  Ф7: completed\n'
+run_writer 9302 > /dev/null
+snap=$(cat "$GOV/inbox/WP-9302/WP-9302.md")
+assert_contains "$snap" "observed_open_phases: [Ф1]" "only the open record"
+case "$snap" in *open_without_section*|*observed_unaccounted*) echo "  FAIL archived closed record must not be a diagnostic"; fails=$((fails+1)) ;; *) echo "  ok   no diagnostic for a closed record without a section" ;; esac
+
+echo "scenario I: a phases: block of which nothing is readable -> snapshot by headings, with a warning (never 'no open phases')"
+card $'### Ф1 — открыта\n\nтело\n' $'phases:\n  f1: in_progress\n  F2: pending\n'
+rc=$(run_writer 9302)
+assert_eq "$rc" "0" "exit 0"
+snap=$(cat "$GOV/inbox/WP-9302/WP-9302.md")
+assert_contains "$snap" "observed_source: sections" "source falls back to the headings"
+assert_contains "$snap" "observed_open_phases: [Ф1]" "open phase found by heading"
+assert_contains "$(cat "$SANDBOX/err.txt")" "ни одной записи не прочитано" "the unreadable block is warned about"
+
+echo "scenario J: only the diagnostics change (open list is the same) -> the entry IS rewritten"
+card $'### Ф1 — открыта\n\nтело\n' $'phases:\n  Ф1: pending\n'
+run_writer 9302 > /dev/null
+card $'### Ф1 — открыта\n\nтело\n\n### Ф2 — новый раздел без записи\n\nтело\n' $'phases:\n  Ф1: pending\n'
+rc=$(run_writer 9302)
+assert_eq "$rc" "0" "exit 0"
+assert_contains "$(cat "$GOV/inbox/WP-9302/WP-9302.md")" "observed_unaccounted: [Ф2]" "new diagnostic recorded although the open list did not change"
 
 if [ "$fails" -eq 0 ]; then
   echo "PASS: all scenarios"

@@ -90,6 +90,33 @@ run_bundle WP-9201 > /dev/null
 assert_contains "$(cat "$SANDBOX/out.md")" "- Открытых фаз: 1" "mapping counts one phase"
 assert_contains "$(cat "$SANDBOX/out.md")" "Ф1 (pending)" "mapping reports open status"
 
+echo "scenario H (WP-484 Ф299 п.4): card with phases: + snapshot taken by the old scheme (no observed_source) -> NO_BASELINE, not MISMATCH"
+card $'phases:\n  Ф1: pending\n  Ф2: done\nhandoff_snapshot:\n  - ref: WP-9201\n    observed_status: in_progress\n    observed_open_phases: [Ф2, Ф9]\n'
+run_bundle WP-9201 > /dev/null
+assert_contains "$(gate_line)" "NO_BASELINE" "old-scheme snapshot is not compared"
+assert_contains "$(gate_line)" "другой схеме" "message says why"
+
+echo "scenario I: phases: card + snapshot with observed_source: phases, same open set -> MATCH"
+card $'phases:\n  Ф1: pending\n  Ф2: done\nhandoff_snapshot:\n  - ref: WP-9201\n    observed_status: in_progress\n    observed_source: phases\n    observed_open_phases: [Ф1]\n'
+run_bundle WP-9201 > /dev/null
+assert_contains "$(gate_line)" "MATCH" "records and snapshot agree"
+
+echo "scenario J: the RECORD decides, not the heading: Ф2 has a ✅ heading but status implemented -> it is open, MISMATCH names it"
+card $'phases:\n  Ф1: pending\n  Ф2: implemented\nhandoff_snapshot:\n  - ref: WP-9201\n    observed_status: in_progress\n    observed_source: phases\n    observed_open_phases: [Ф1]\n'
+run_bundle WP-9201 > /dev/null
+assert_contains "$(gate_line)" "MISMATCH" "heading marker does not hide an open record"
+assert_contains "$(gate_line)" "Ф2" "Ф2 is named"
+
+echo "scenario K: the card lost its phases: block but the snapshot says observed_source: phases -> NO_BASELINE (scheme changed), not a foreign-looking MISMATCH"
+card $'handoff_snapshot:\n  - ref: WP-9201\n    observed_status: in_progress\n    observed_source: phases\n    observed_open_phases: [Ф1, Ф7]\n'
+run_bundle WP-9201 > /dev/null
+assert_contains "$(gate_line)" "NO_BASELINE" "different scheme is not compared"
+
+echo "scenario L: a phases: block of which nothing is readable (Latin ids) is read by headings, not as 'no open phases'"
+card $'phases:\n  f1: in_progress\n  f2: done\nhandoff_snapshot:\n  - ref: WP-9201\n    observed_status: in_progress\n    observed_open_phases: [Ф1]\n'
+run_bundle WP-9201 > /dev/null
+assert_contains "$(gate_line)" "MATCH" "Ф1 open by its heading, snapshot by headings agrees"
+
 if [ "$fails" -eq 0 ]; then
   echo "PASS: all scenarios"
   exit 0

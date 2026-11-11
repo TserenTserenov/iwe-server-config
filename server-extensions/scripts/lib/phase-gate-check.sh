@@ -63,9 +63,13 @@ for ln in block:
     if m:
         if cur is not None:
             entries.append(cur)
-        cur = {"ref": m.group(1).strip().strip('"'), "has_key": False, "items": []}
+        cur = {"ref": m.group(1).strip().strip('"'), "has_key": False, "items": [], "source": ""}
         continue
     if cur is None:
+        continue
+    m_src = re.match(r"^\s+observed_source:\s*\"?([A-Za-z]+)\"?\s*$", ln)
+    if m_src:
+        cur["source"] = m_src.group(1)
         continue
     m2 = re.match(r"^\s+observed_open_phases:\s*\[(.*)\]\s*$", ln)
     if m2:
@@ -87,6 +91,7 @@ elif not self_entries[-1]["has_key"]:
     print("MALFORMED")
 else:
     print("FOUND")
+    print("SOURCE:" + self_entries[-1]["source"])
     for it in self_entries[-1]["items"]:
         print("ITEM:" + it)
 PYEOF
@@ -138,8 +143,16 @@ except Exception:
 if not r.get("self_check", {}).get("match", False):
     print("__SELF_CHECK_MISMATCH__")
     sys.exit(0)
-for n in r.get("no_terminal_marker", []):
-    print(n["phase"])
+# WP-484 Ф299 п.4: a card with a `phases:` block states its open list there; a legacy
+# card without one keeps the heading scan.  First line names which one this is.
+if r.get("phases_present"):
+    print("SOURCE:phases")
+    for pid in r.get("open_by_record", []):
+        print(pid)
+else:
+    print("SOURCE:sections")
+    for n in r.get("no_terminal_marker", []):
+        print(n["phase"])
 ' <<<"$report_json")
 
   if [[ "$current_ids" == "__JSON_ERROR__" ]]; then
@@ -151,6 +164,10 @@ for n in r.get("no_terminal_marker", []):
     return
   fi
 
+  local current_source
+  current_source=$(printf '%s\n' "$current_ids" | sed -n 's/^SOURCE://p')
+  current_ids=$(printf '%s\n' "$current_ids" | grep -v '^SOURCE:' || true)
+
   local snapshot_raw
   snapshot_raw=$(extract_self_phase_snapshot "$wp_file" "$wp_num")
   if [[ "$snapshot_raw" == "ABSENT" ]]; then
@@ -159,6 +176,17 @@ for n in r.get("no_terminal_marker", []):
   fi
   if [[ "$snapshot_raw" == "MALFORMED" ]]; then
     echo "PARSE_FAILED|self-entry handoff_snapshot для WP-${wp_num} существует без observed_open_phases"
+    return
+  fi
+
+  local snapshot_source
+  snapshot_source=$(printf '%s\n' "$snapshot_raw" | sed -n 's/^SOURCE://p')
+  if [[ "$current_source" == "phases" && "$snapshot_source" != "phases" ]] \
+     || [[ -n "$snapshot_source" && "$snapshot_source" != "$current_source" ]]; then
+    # The baseline and the current list come from different schemes (old snapshot by headings,
+    # or the card lost / gained its `phases:` block): comparing them would report the scheme's
+    # differences as if the card had changed.
+    echo "NO_BASELINE|снимок WP-${wp_num} записан по другой схеме (${snapshot_source:-по разделам} → ${current_source}) — обновится на следующем close"
     return
   fi
 

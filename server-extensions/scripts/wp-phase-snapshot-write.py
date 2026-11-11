@@ -29,6 +29,12 @@ import subprocess
 import sys
 import tempfile
 
+# snapshot key -> key of the archiver report; the snapshot keys say what was observed on the card.
+DIAGNOSTIC_KEYS = (
+    ("observed_unaccounted", "sections_unaccounted"),
+    ("open_without_section", "open_without_section"),
+    ("observed_unknown_status", "unknown_status"),
+)
 REF_RE = re.compile(r"^\s*-\s*ref:\s*(.+)$")
 TOPLEVEL_KEY_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_-]*:")
 
@@ -160,7 +166,16 @@ def main(argv: list[str]) -> int:
         print(f"self-check mismatch for WP-{wp} -- refusing to persist an unverified phase list", file=sys.stderr)
         return 3
 
-    open_ids = sorted(set(n["phase"] for n in report["no_terminal_marker"]))
+    # WP-484 Ф299 п.4: a card with a `phases:` block states its open list there (one parser,
+    # phase_status.parse_phases); a legacy card without one keeps the heading scan.  The
+    # sections only add diagnostics, they never decide a status.
+    if report.get("phases_present"):
+        source = "phases"
+        open_ids = list(report["open_by_record"])
+    else:
+        source = "sections"
+        open_ids = sorted(set(n["phase"] for n in report["no_terminal_marker"]))
+    diagnostics = [(snap_key, report.get(report_key) or []) for snap_key, report_key in DIAGNOSTIC_KEYS] if source == "phases" else []
 
     with open(card_path, encoding="utf-8") as f:
         lines = f.read().splitlines(keepends=True)
@@ -176,9 +191,16 @@ def main(argv: list[str]) -> int:
     new_entry = [
         f"  - ref: {want}\n",
         f"    observed_status: {status}\n",
+        f"    observed_source: {source}\n",
         f"    observed_open_phases: [{', '.join(open_ids)}]\n",
+        *[f"    {key}: [{', '.join(ids)}]\n" for key, ids in diagnostics if ids],
         f'    recorded_at: "{today}"\n',
     ]
+    unknown = dict(diagnostics).get("observed_unknown_status")
+    if unknown:
+        print(f"WP-{wp}: неизвестный статус фаз (не открыты и не закрыты): {', '.join(unknown)}", file=sys.stderr)
+    if report.get("phases_unreadable"):
+        print(f"WP-{wp}: блок phases: есть, но ни одной записи не прочитано — снимок по заголовкам разделов", file=sys.stderr)
 
     hs = handoff_snapshot_block_bounds(lines, fm_start, fm_end)
     if hs is None:
