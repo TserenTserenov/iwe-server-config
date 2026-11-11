@@ -91,7 +91,26 @@ lock_wp() {
   mkdir -p "$LEASE_DIR"
   command -v flock >/dev/null 2>&1 || { log_err "СТОП: установи flock для блокировки лицензии"; exit 2; }
   exec 9>"$LEASE_DIR/WP-$1.lock"
-  flock -n 9 || { log_err "СТОП: лицензия РП-$1 занята или блокировка недоступна; повтори после текущей операции"; exit 2; }
+  # Wait for a parallel session on the same WP instead of failing at once
+  # (WP-484 Ф301 П5в: `flock -n` gave random "busy" refusals).
+  flock -w "${IWE_LICENSE_LOCK_WAIT:-30}" 9 || { log_err "СТОП: лицензия РП-$1 занята или блокировка недоступна; повтори после текущей операции"; exit 2; }
+}
+
+# Default license id: the id of this conversation's open session mark, the same
+# one the card-edit hook checks under (WP-484 Ф301 П5б). Without it `actualize`
+# issued the license under the raw conversation id and the hook then denied.
+# Falls back to the conversation id unless exactly one isolated mark matches.
+default_session_id() {
+  local harness="${CLAUDE_CODE_SESSION_ID:-}" dir sem matches count
+  [ -n "$harness" ] || return 0
+  dir="$IWE_ROOT/.iwe-runtime/sessions"
+  matches=$(grep -lF "harness_session_id: $harness" "$dir/${IWE_AGENT:-claude-code}"-*.open 2>/dev/null || true)
+  count=$(printf '%s\n' "$matches" | grep -c . || true)
+  if [ "$count" -eq 1 ] && grep -qE '^isolated_worktree: .+' "$matches" 2>/dev/null; then
+    sem=$(sed -n 's/^session_id: //p' "$matches" | head -1)
+    if [[ "$sem" =~ ^[a-zA-Z0-9][a-zA-Z0-9._-]{0,255}$ ]]; then printf '%s' "$sem"; return 0; fi
+  fi
+  printf '%s' "$harness"
 }
 
 reject_pending_closure() {
@@ -229,7 +248,7 @@ cmd_actualize() {
   require_numeric_wp "$wp"
   lock_wp "$wp"
   reject_pending_closure "$wp" || exit 2
-  session_id="${session_id:-${CLAUDE_CODE_SESSION_ID:-}}"
+  session_id="${session_id:-$(default_session_id)}"
   [ -n "$session_id" ] || { log_err "СТОП: не удалось определить session_id (нет --session-id, нет CLAUDE_CODE_SESSION_ID в окружении — например, вызов от Kimi/Codex). Передай --session-id явно."; exit 1; }
 
   local repo card path digest origin_commit token lease
@@ -296,7 +315,7 @@ cmd_check_edit() {
   [ -n "$wp" ] || usage
   require_numeric_wp "$wp"
   lock_wp "$wp"
-  session_id="${session_id:-${CLAUDE_CODE_SESSION_ID:-}}"
+  session_id="${session_id:-$(default_session_id)}"
   [ -n "$session_id" ] || { log_err "СТОП: не удалось определить session_id (нет --session-id, нет CLAUDE_CODE_SESSION_ID в окружении — например, вызов от Kimi/Codex). Без него владение лицензией не проверяется — передай --session-id явно, отказано fail-closed."; exit 2; }
 
   local lease_f

@@ -306,4 +306,37 @@ fi
 [ "$("$GATE" check-edit --wp 444 --governance-repo "$REPO" --session-id s4)" = editing_allowed ] || fail "timed out fetch must release WP lock"
 pass "unresponsive transport is killed and WP lock is released"
 
+# 16. WP-484 Ф301 П5б: without --session-id the license goes under the id of the
+#     conversation's open session mark -- the id the card-edit hook checks under.
+mkdir -p "$REPO/inbox/WP-998"
+echo "revision 1" > "$REPO/inbox/WP-998/WP-998.md"
+git -C "$REPO" add inbox/WP-998/WP-998.md
+git -C "$REPO" -c user.email=t@t -c user.name=t commit -q -m "wp998"
+git -C "$REPO" push -q origin main
+mkdir -p "$SANDBOX/.iwe-runtime/sessions"
+cat > "$SANDBOX/.iwe-runtime/sessions/claude-code-semid1.open" <<EOF2
+session_id: semid1
+harness_session_id: conv-uuid-1
+isolated_worktree: $SANDBOX/iso
+EOF2
+CLAUDE_CODE_SESSION_ID=conv-uuid-1 "$GATE" actualize --wp 998 --governance-repo "$REPO" >/dev/null
+[ "$("$GATE" check-edit --wp 998 --governance-repo "$REPO" --session-id semid1)" = editing_allowed ] \
+  || fail "лицензия без --session-id должна выдаваться под id отметки (semid1)"
+pass "actualize без --session-id выдаёт лицензию под id отметки, как проверяет хук"
+
+# 17. WP-484 Ф301 П5в: a busy lock is waited for, not an instant random refusal.
+LOCK="$SANDBOX/.iwe-runtime/wp-reopen-leases/WP-998.lock"
+( exec 8>"$LOCK"; flock 8; sleep 2 ) &
+sleep 0.5
+[ "$(IWE_LICENSE_LOCK_WAIT=10 "$GATE" check-edit --wp 998 --governance-repo "$REPO" --session-id semid1)" = editing_allowed ] \
+  || fail "занятый замок должен дожидаться, а не отказывать сразу"
+wait
+( exec 8>"$LOCK"; flock 8; sleep 3 ) &
+sleep 0.5
+if IWE_LICENSE_LOCK_WAIT=1 "$GATE" check-edit --wp 998 --governance-repo "$REPO" --session-id semid1 >/dev/null 2>&1; then
+  fail "замок, не освободившийся за срок ожидания, должен давать отказ"
+fi
+wait
+pass "замок лицензии ждёт освобождения до срока, потом отказывает"
+
 echo "ALL PASS"
