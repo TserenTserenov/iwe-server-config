@@ -881,30 +881,12 @@ in
     };
 
     # =========================================================
-    # 2. SYNC FLEETING NOTES — com.exocortex.sync-fleeting-notes
+    # 2. SYNC FLEETING NOTES — removed 11.11.2026 (WP-568, pilot decision).
     # =========================================================
-    # git add + commit + push fleeting-notes.md каждые 2 минуты.
-    # Обеспечивает, что заметки с других устройств (Telegram, телефон)
-    # попадают в DS-my-strategy без задержки.
-
-    systemd.services."iwe-sync-fleeting-notes" = {
-      description = "IWE — git-синхронизация fleeting-notes.md (каждые 2 мин)";
-      unitConfig   = commonUnitConfig;
-      serviceConfig = commonServiceConfig // {
-        ExecStart = "${pkgs.bash}/bin/bash ${iwe}/DS-IT-systems/DS-ai-systems/synchronizer/scripts/sync-files.sh ${iwe}/DS-my-strategy inbox/fleeting-notes.md";
-      };
-      path = commonPath;
-      environment = commonEnv;
-    };
-
-    systemd.timers."iwe-sync-fleeting-notes" = {
-      wantedBy    = [ "timers.target" ];
-      description = "IWE fleeting-notes sync — каждые 2 мин";
-      timerConfig = {
-        OnBootSec       = "2min";
-        OnUnitActiveSec = "2min";
-      };
-    };
+    # sync-files.sh no longer writes into a checkout whose HEAD lags origin
+    # (DS-ai-systems 18f26ea): an unpublished working-tree change blocked the
+    # whole iwe-tsekh1-sync chain for 3.5 h on 10–11.11. Notes now reach
+    # DS-my-strategy with its own fast-forward sync (every 20 min).
 
     # =========================================================
     # 2a-2. REFS-SYNC-BROKER — WP-530 Ф66 Требование А (26.09.2026, peer-session

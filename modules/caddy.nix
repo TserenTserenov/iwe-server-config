@@ -30,7 +30,7 @@ let
     # Статус каждого IWE-таймера через systemctl show
     timers_json="["
     sep=""
-    for unit in iwe-scheduler iwe-sync-fleeting-notes iwe-activity-hub-sync \
+    for unit in iwe-scheduler iwe-activity-hub-sync \
                 iwe-activity-hub-sync-iwe iwe-overnight-scout \
                 iwe-rule-classifier iwe-rule-classifier-hourly; do
       active=$(${pkgs.systemd}/bin/systemctl is-active "$unit.service" 2>/dev/null || true)
