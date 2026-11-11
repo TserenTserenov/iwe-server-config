@@ -31,6 +31,8 @@ esac
 
 IWE_ROOT="${IWE_ROOT:-$HOME/IWE}"
 SCRIPTS_DIR="${IWE_SCRIPTS:-$IWE_ROOT/scripts}"
+# The origin checker is copied to a temp dir and cannot find scripts/lib/phase_status.py by its own path.
+export IWE_WORKSPACE="${IWE_WORKSPACE:-$IWE_ROOT}"
 
 echo "=== Передача работы по $WP ==="
 

@@ -4617,10 +4617,15 @@ RENEW_FOREIGN=0
 RETIRE_CONFIRM_NO_LIVE_OWNER=0
 HEAL_APPLY=0
 HEAL_DISCARD_UNPUBLISHED=0
+# WP-561 Ф55: the agent's estimate of the pilot's time for this session.
+ESTIMATE_MINUTES=""
+NO_PLAN_RESERVE=0
 POSITIONAL=()
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --wp)     WP="$2"; shift 2 ;;
+    --estimate-minutes) ESTIMATE_MINUTES="$2"; shift 2 ;;
+    --no-plan-reserve) NO_PLAN_RESERVE=1; shift ;;
     --task)   TASK="$2"; shift 2 ;;
     --files)  FILES="$2"; shift 2 ;;
     --slug|--topic) SLUG="$2"; shift 2 ;;
@@ -6508,6 +6513,18 @@ EOF
     timeout 5 bash "$JOURNAL_GAPS_SCRIPT" "$WP" --exclude-session-id "$SESSION_ID" >&2 || true
   fi
   echo "Session OPEN: $SEM_FILE (WP: $WP, agent: $AGENT, slug: ${SLUG:-$WP})"
+  # Pilot-time reservation (WP-561 Ф55, pilot 11.11): submitted here so it no
+  # longer depends on an agent following the protocol-open extension. Only
+  # interactive sessions by a WP; scheduled runs have no pilot. Never fails open.
+  case "$WP" in
+    WP-[0-9]*)
+      if [ -n "$ESTIMATE_MINUTES" ] && [ -z "$SCHEDULED_OWNER" ] && [ -z "$SCHEDULED_RUN_ID" ]; then
+        bash "$IWE_ROOT/scripts/plan-reserve-on-open.sh" "$WP" "${SLUG:-$SESSION_ID}" "$ESTIMATE_MINUTES" || true
+      elif [ "$NO_PLAN_RESERVE" -eq 0 ] && [ -z "$SCHEDULED_OWNER" ] && [ -z "$SCHEDULED_RUN_ID" ]; then
+        echo "⚠️  Бронь времени пилота не подана: нет --estimate-minutes. Подать: bash $IWE_ROOT/scripts/plan-reserve-on-open.sh $WP ${SLUG:-$SESSION_ID} <минуты>" >&2
+      fi
+      ;;
+  esac
   # session_opened ledger event (WP-561 Ф6-а, TACT-01 contract DP.SC.201;
   # designed peer-session 2026-09-03-13-wp561-sync-next-steps). Best-effort,
   # never blocks open -- same discipline as session_closed_direct below.
