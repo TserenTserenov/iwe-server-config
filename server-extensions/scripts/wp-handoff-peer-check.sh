@@ -132,6 +132,9 @@ if [ -z "$GOV" ] || [ ! -d "$GOV" ]; then
 fi
 CARD="$GOV/inbox/$WP/$WP.md"
 CHECKER="$GOV/scripts/wp-handoff-check.py"
+# The checker may run from an isolated governance copy: tell it where the root checkout
+# (scripts/lib/phase_status.py) is.
+export IWE_WORKSPACE="${IWE_WORKSPACE:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 if [ ! -f "$CARD" ]; then
   log_line "$WP" "infra" "CARD_MISSING" "{}"
   exit 0

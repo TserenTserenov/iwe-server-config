@@ -12,7 +12,7 @@ What counts as a CLOSED phase (positive evidence is REQUIRED -- Codex: the
 absence of checkboxes does not prove closure, a research phase can be open in
 prose; ~~strike~~ may mean "cancelled", the word «закрыт» inside a heading may
 describe a blocker, not the phase):
-  * frontmatter  phases:\n  ФN: done|closed|archived|completed        or
+  * frontmatter  phases:\n  ФN: a closed status (see lib/phase_status.py: done, closed,\n    archived, completed, merged, superseded, moved-to-*)        or
   * a formal terminal marker in a fixed position of the H2 heading:
       ## ФN ✅ ...   /  ## ФN — ✅ ...  /  ## ФN [done]  / ## ФN [закрыто] /
       ## ФN [status: done|closed]   / heading ends with ✅
@@ -70,8 +70,8 @@ _LIB_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "lib")
 if _LIB_DIR not in sys.path:
     sys.path.insert(0, _LIB_DIR)
 import phase_sections as _phase_sections  # noqa: E402  (needs sys.path set up above)
+import phase_status as _phase_status  # noqa: E402  (the one open/closed list, WP-484 Ф299)
 
-TERMINAL_STATUSES = {"done", "closed", "archived", "completed"}
 # ФN, sub-phases ФN.M(.K), optional letter suffix (Ф5а) -- the FIRST token after the
 # leading #'s. Cold review 27.09: `Ф\d+` alone truncated Ф16.2 to Ф16, so frontmatter
 # `Ф16: done` licensed the still-open sub-phase 16.2 for archival.
@@ -265,7 +265,7 @@ def analyze(card: Card, keep_last: int) -> dict:
         pid = s["id"]
         body = card.section_text(s)
         fm_status = fm_phases.get(pid, "")
-        positive = fm_status in TERMINAL_STATUSES or heading_has_terminal_marker(s["heading"])
+        positive = _phase_status.is_closed(fm_status) or heading_has_terminal_marker(s["heading"])
         referenced = bool(re.search(rf"(?<![\wФ]){re.escape(pid)}(?![\wа-я.]|\.\d)", next_step))
         unchecked = sum(1 for ln in body.split("\n") if UNCHECKED_RE.match(ln))
         if referenced and unchecked:
@@ -284,7 +284,7 @@ def analyze(card: Card, keep_last: int) -> dict:
             vetoes.append(f"одна из последних {keep_last} фаз (--keep-last)")
         if s["duplicate"]:
             vetoes.append(f"id фазы не уникален в карточке (вхождение {s['occurrence']} из нескольких -- Codex, 19.10: дубли считаются по id, не по тексту заголовка)")
-        if fm_status and fm_status not in TERMINAL_STATUSES:
+        if fm_status and not _phase_status.is_closed(fm_status):
             vetoes.append(f"frontmatter phases.{pid}={fm_status}")
         entry = {"phase": pid, "heading": s["heading"], "start": s["start"] + 1, "end": s["end"],
                  "lines": s["end"] - s["start"], "sha256": sha256_text(body), "start0": s["start"]}

@@ -66,6 +66,9 @@ PHASE_DIGEST_SCRIPT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/wp-phase-dige
 # архив. Резолвится от расположения ЭТОГО файла (та же схема, что
 # PHASE_DIGEST_SCRIPT и GIT_SYNC_LIB ниже), не хардкодом пути.
 ARCHIVE_SCRIPT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)/scripts/wp-archive-closed-phases.py"
+# WP-561 Ф60: real GitHub state of pull requests / branches the card names
+# (incident 10.11: a merge recorded only in a pack repo stayed invisible).
+MERGE_REFS_SCRIPT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)/scripts/wp-merge-refs-check.py"
 REGISTRY_FILE="$STRATEGY_DIR/docs/WP-REGISTRY.md"
 GIT_LOG_DAYS="${WP_SYNC_GIT_DAYS:-14}"
 
@@ -703,12 +706,21 @@ extract_structured_open_phases() {
   local file="$1"
   local py
   py=$("$FIND_PYTHON3") || return 2
-  "$py" - "$file" <<'PY'
+  "$py" - "$file" "$(dirname "$FIND_PYTHON3")" <<'PY'
 import re
 import sys
 from pathlib import Path
 
 import yaml
+
+# The one open/closed status list lives in scripts/lib/phase_status.py (WP-484 Ф299).
+sys.path.insert(0, sys.argv[2])
+try:
+    import phase_status
+except ImportError as exc:
+    # rc 2 = error; rc 1 would silently fall back to the checkbox scan and hide the missing module.
+    print(f"[PARSE-ERROR] phase_status.py unavailable in {sys.argv[2]}: {exc}", file=sys.stderr)
+    sys.exit(2)
 
 path = Path(sys.argv[1])
 try:
@@ -738,8 +750,14 @@ try:
         identifier = str(identifier)
         if identifier.isdecimal():
             identifier = f"Ф{identifier}"
-        if re.fullmatch(r"Ф\d+", identifier) and isinstance(status, str) and status in {"pending", "in_progress", "blocked"}:
+        if not (re.fullmatch(r"Ф\d+", identifier) and isinstance(status, str)):
+            continue
+        kind = phase_status.classify(status)
+        if kind == "open":
             print(f"{identifier} ({status})")
+        elif kind == "unknown":
+            # Unknown is never "closed": show it so the card gets fixed, not silently dropped.
+            print(f"{identifier} (неизвестный статус: {status})")
 except (OSError, ValueError, yaml.YAMLError) as exc:
     print(f"[PARSE-ERROR] phases in {path}: {exc}", file=sys.stderr)
     sys.exit(2)
@@ -1090,6 +1108,19 @@ main() {
     echo "- Нет неразобранных записей."
   fi
   echo ""
+
+  # WP-561 Ф60: card text vs real merge state. Network trouble is printed by
+  # the helper itself and is not drift; a helper crash is reported, not fatal.
+  local merge_py
+  if merge_py=$("$FIND_PYTHON3" --stdlib-only 2>/dev/null) && [[ -r "$MERGE_REFS_SCRIPT" ]]; then
+    "$merge_py" "$MERGE_REFS_SCRIPT" "$wp_file" --workspace "$IWE_WORKSPACE" \
+      --drift-file "$drift_file" --days "$GIT_LOG_DAYS" \
+      || { echo "- ⚠️ проверка запросов на слияние не выполнена (код $?)"; echo ""; }
+  else
+    echo "## Запросы на слияние и ветки из карточки (РП-561 Ф60)"
+    echo "- ⚠️ проверка недоступна: нет python3 или ${MERGE_REFS_SCRIPT}"
+    echo ""
+  fi
 
   # WP-484 Ф219: цитата §4/§5 последнего отчёта, не только его пересказ в
   # карточке -- см. комментарий у latest_session_report_excerpt() выше.
