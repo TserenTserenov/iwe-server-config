@@ -183,6 +183,16 @@ def _minutes(value, *, minimum=0):
     return type(value) is int and minimum <= value <= 1440
 
 
+# Parallel sessions add up in the day budget (pilot, 11.11): up to three
+# sessions at once, so a day holds up to 3 x 1440 reserved minutes. A single
+# reservation or terminal stays within one day (_minutes).
+PARALLEL_SESSIONS = 3
+
+
+def _budget_minutes(value):
+    return type(value) is int and 0 <= value <= PARALLEL_SESSIONS * 1440
+
+
 def personal_time_resource_id(plan_date, stream_id, element_id):
     """One reservation identity per work and day; no caller-chosen aliases."""
     return "personal_time:" + json.dumps(
@@ -309,12 +319,12 @@ class PersonalTimeBudget:
             raise BridgeError(
                 "BUDGET_VALIDATOR_UNAVAILABLE", "invalid budget timezone"
             ) from exc
-        if not _minutes(default_daily_minutes):
+        if not _budget_minutes(default_daily_minutes):
             raise BridgeError(
                 "BUDGET_VALIDATOR_UNAVAILABLE", "invalid default daily minutes"
             )
         if not isinstance(daily_personal_minutes, dict) or not all(
-            _plan_date(day) and _minutes(minutes)
+            _plan_date(day) and _budget_minutes(minutes)
             for day, minutes in daily_personal_minutes.items()
         ):
             raise BridgeError(
