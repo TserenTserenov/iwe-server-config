@@ -42,6 +42,19 @@ case "$1" in
     echo "intent-$(wc -l < "$GATE_LOG" | tr -d ' ')" ;;
   check) exit "${STUB_CHECK_RC:-0}" ;;
   resolve) exit 0 ;;
+  resolve-batch)
+    # Verdict per stdin line: STUB_REFUSE="id:reason ..." refuses, STUB_SKIP_IDS
+    # gives no verdict (a timed-out batch), the rest resolve; STUB_BATCH_RC exits.
+    [ -z "${STUB_SLEEP:-}" ] || sleep "$STUB_SLEEP"
+    while read -r id agent wp; do
+      [ -n "$id" ] || continue
+      echo "resolve-batch $id $agent $wp" >> "$GATE_LOG"
+      case " ${STUB_SKIP_IDS:-} " in *" $id "*) continue ;; esac
+      reason=""
+      for r in ${STUB_REFUSE:-}; do [ "${r%%:*}" = "$id" ] && reason="${r#*:}"; done
+      if [ -n "$reason" ]; then echo "refused $id $reason"; else echo "resolved $id"; fi
+    done
+    exit "${STUB_BATCH_RC:-0}" ;;
 esac
 EOF
   chmod +x "$1/scripts/intent-gate.sh"
@@ -202,20 +215,27 @@ open_b() {  # <slug>; sets BSEM and commits its ORZ
   git -C "$MC" add "$orz" && git -C "$MC" commit -qm "orz $1" && git -C "$MC" push -q origin HEAD:main
 }
 
-echo "B1. close with the flag unset still resolves recorded intents, as their agents, and removes the file"
+BLOG="$B/.iwe-runtime/intent-gate-note-file.log"
+IGDIR="$B/.iwe-runtime/intent-gate"
+mkdir -p "$IGDIR"
+summary_count() {  # <session basename> <counts>
+  grep -c "	session:$1	close_resolve	rc=[0-9]* dur_s=[0-9]* sources=[0-9]* $2\$" "$BLOG" || true
+}
+
+echo "B1. close with the flag unset resolves recorded intents in one batch, as their agents, and removes the file"
 open_b gate-close
-BINTENTS="$B/.iwe-runtime/intent-gate/$(basename "$BSEM").intents"
-mkdir -p "$(dirname "$BINTENTS")"
+BINTENTS="$IGDIR/$(basename "$BSEM").intents"
 printf '%s\n' 'intent-a1 fixture MC-sessions:x.md' 'intent-a2 other-agent DS-strategy:y.md' > "$BINTENTS"
 : > "$GATE_LOG"
 bguard close --wp WP-484 --slug gate-close --agent fixture >/dev/null 2>"$B/close.err"
 check "close succeeds" 0 "$?"
-check "first intent resolved as its agent" 1 "$(grep -c '^resolve --intent-id intent-a1 --wp 484 --agent fixture$' "$GATE_LOG")"
-check "second intent resolved as its agent" 1 "$(grep -c '^resolve --intent-id intent-a2 --wp 484 --agent other-agent$' "$GATE_LOG")"
+check "one batch call" 1 "$(grep -c '^resolve-batch$' "$GATE_LOG")"
+check "first intent sent as its agent, WP left to the declaration" 1 "$(grep -c '^resolve-batch intent-a1 fixture -$' "$GATE_LOG")"
+check "second intent sent as its agent" 1 "$(grep -c '^resolve-batch intent-a2 other-agent -$' "$GATE_LOG")"
+check "no per-intent resolve" 0 "$(grep -c '^resolve ' "$GATE_LOG")"
 check "intents file removed" no "$([ -e "$BINTENTS" ] && echo yes || echo no)"
-BLOG="$B/.iwe-runtime/intent-gate-note-file.log"
-check "close_resolve row: 2 resolved" 1 \
-  "$(grep -c "	fixture	WP-484	session:$(basename "$BSEM")	close_resolve	resolved=2 failed=0 skipped=0$" "$BLOG" || true)"
+check "no retry file" no "$([ -e "$BINTENTS.retry" ] && echo yes || echo no)"
+check "close_resolve row: 2 resolved" 1 "$(summary_count "$(basename "$BSEM")" 'resolved=2 already=0 retry=0 lapsed=0')"
 
 echo "B2. close with the flag on and no intents at all succeeds without gate calls or a summary row"
 open_b gate-close-empty
@@ -225,18 +245,108 @@ check "close succeeds" 0 "$?"
 check "no gate call" 0 "$(wc -l < "$GATE_LOG" | tr -d ' ')"
 check "no close_resolve row" 0 "$(grep -c "session:$(basename "$BSEM")	close_resolve" "$BLOG" || true)"
 
-echo "B3. an exhausted close budget skips resolves, close still succeeds and the file is removed"
-open_b gate-close-budget
-BINTENTS="$B/.iwe-runtime/intent-gate/$(basename "$BSEM").intents"
-printf '%s\n' 'intent-b1 fixture MC-sessions:z.md' > "$BINTENTS"
+echo "B3. a batch that times out keeps the unresolved intent in a retry file with its reason"
+open_b gate-close-timeout
+BINTENTS="$IGDIR/$(basename "$BSEM").intents"
+printf '%s\n' 'intent-b1 fixture MC-sessions:z.md' 'intent-b2 fixture MC-sessions:w.md' > "$BINTENTS"
 : > "$GATE_LOG"
-(export INTENT_GATE_RESOLVE_BUDGET_SEC=0; bguard close --wp WP-484 --slug gate-close-budget --agent fixture >/dev/null 2>"$B/close3.err")
+(export STUB_SKIP_IDS=intent-b1 STUB_BATCH_RC=124; bguard close --wp WP-484 --slug gate-close-timeout --agent fixture >/dev/null 2>"$B/close3.err")
 check "close succeeds" 0 "$?"
-check "no resolve attempted" 0 "$(wc -l < "$GATE_LOG" | tr -d ' ')"
-check "budget message" 1 "$(grep -c 'close budget 0s spent' "$B/close3.err")"
-check "close_resolve row counts the skipped intent" 1 \
-  "$(grep -c "	session:$(basename "$BSEM")	close_resolve	resolved=0 failed=0 skipped=1$" "$BLOG" || true)"
 check "intents file removed" no "$([ -e "$BINTENTS" ] && echo yes || echo no)"
+check "retry file keeps only the unresolved one" "intent-b1 fixture - 1 timeout" "$(cut -d" " -f1-5 "$BINTENTS.retry" 2>/dev/null)"
+check "retry line carries when the intent was first seen" yes "$(awk '$6 ~ /^[0-9]+$/ && $6 > 1700000000 {print "yes"}' "$BINTENTS.retry" 2>/dev/null)"
+check "retry_item row" 1 "$(grep -c "	retry_item	intent-b1 fixture attempts=1 reason=timeout$" "$BLOG" || true)"
+check "summary counts" 1 "$(summary_count "$(basename "$BSEM")" 'resolved=1 already=0 retry=1 lapsed=0')"
+RETRY_B3="$BINTENTS.retry"
+
+echo "B4. the next close on the host retries the leftover, and refusals are sorted"
+open_b gate-close-next
+BINTENTS="$IGDIR/$(basename "$BSEM").intents"
+printf '%s\n' 'intent-c1 fixture MC-sessions:a.md' 'intent-c2 fixture MC-sessions:b.md' 'intent-c3 fixture MC-sessions:c.md' > "$BINTENTS"
+: > "$GATE_LOG"
+(export STUB_REFUSE="intent-c2:owner_mismatch intent-c3:not_found"; bguard close --wp WP-484 --slug gate-close-next --agent fixture >/dev/null 2>"$B/close4.err")
+check "close succeeds" 0 "$?"
+check "leftover of the earlier close sent" 1 "$(grep -c '^resolve-batch intent-b1 fixture -$' "$GATE_LOG")"
+check "earlier retry file removed" no "$([ -e "$RETRY_B3" ] && echo yes || echo no)"
+check "owner mismatch lapses at once" 1 "$(grep -c "	lapsed	intent-c2 fixture attempts=1 reason=owner_mismatch$" "$BLOG" || true)"
+check "not_found kept for one more try" "intent-c3 fixture - 1 not_found" "$(cut -d" " -f1-5 "$BINTENTS.retry" 2>/dev/null)"
+RETRY_B4="$BINTENTS.retry"
+
+echo "B5. not_found twice lapses; an orphaned intents file is picked up with an unknown WP"
+open_b gate-close-third
+printf '%s\n' 'intent-o1 fixture MC-sessions:o.md' > "$IGDIR/fixture-gone-session.open.intents"
+: > "$GATE_LOG"
+(export STUB_REFUSE="intent-c3:not_found"; bguard close --wp WP-484 --slug gate-close-third --agent fixture >/dev/null 2>"$B/close5.err")
+check "close succeeds" 0 "$?"
+check "not_found lapses on the second try" 1 "$(grep -c "	lapsed	intent-c3 fixture attempts=2 reason=not_found$" "$BLOG" || true)"
+check "orphan sent with unknown WP" 1 "$(grep -c '^resolve-batch intent-o1 fixture -$' "$GATE_LOG")"
+check "orphan file removed" no "$([ -e "$IGDIR/fixture-gone-session.open.intents" ] && echo yes || echo no)"
+check "earlier retry file removed" no "$([ -e "$RETRY_B4" ] && echo yes || echo no)"
+
+echo "B6. a leftover older than the check window lapses without a gate call"
+open_b gate-close-old
+printf '%s\n' 'intent-x9 fixture - 1 timeout' > "$IGDIR/fixture-old.open.intents.retry"
+touch -t 202601010000 "$IGDIR/fixture-old.open.intents.retry"
+# A fresh retry file whose intent was first seen long ago: age follows the intent, not the file.
+printf '%s\n' 'intent-x8 fixture - 3 origin_unreachable 1700000000' > "$IGDIR/fixture-refreshed.open.intents.retry"
+: > "$GATE_LOG"
+bguard close --wp WP-484 --slug gate-close-old --agent fixture >/dev/null 2>"$B/close6.err"
+check "close succeeds" 0 "$?"
+check "not sent to the gate" 0 "$(grep -c 'intent-x9' "$GATE_LOG")"
+check "lapsed with its last reason" 1 "$(grep -c "	lapsed	intent-x9 fixture attempts=1 reason=timeout$" "$BLOG" || true)"
+check "rewritten retry file does not keep an old intent alive" 1 "$(grep -c "	lapsed	intent-x8 fixture attempts=3 reason=origin_unreachable$" "$BLOG" || true)"
+check "not sent to the gate either" 0 "$(grep -c 'intent-x8' "$GATE_LOG")"
+check "old file removed" no "$([ -e "$IGDIR/fixture-old.open.intents.retry" ] && echo yes || echo no)"
+
+echo "B7. a lock held by a live process defers: the own intents stay for a later close"
+open_b gate-close-busy
+BINTENTS="$IGDIR/$(basename "$BSEM").intents"
+printf '%s\n' 'intent-l1 fixture MC-sessions:l.md' > "$BINTENTS"
+python3 -c 'import fcntl, sys, time; f = open(sys.argv[1], "a"); fcntl.flock(f, fcntl.LOCK_EX); print("held", flush=True); time.sleep(20)' \
+  "$IGDIR/resolve.lock" > "$B/holder.out" &
+HOLDER=$!
+for _ in 1 2 3 4 5 6 7 8 9 10; do grep -q held "$B/holder.out" 2>/dev/null && break; sleep 0.3; done
+: > "$GATE_LOG"
+(export INTENT_GATE_LOCK_WAIT_SEC=1; bguard close --wp WP-484 --slug gate-close-busy --agent fixture >/dev/null 2>"$B/close7.err")
+check "close succeeds" 0 "$?"
+kill "$HOLDER" 2>/dev/null; wait "$HOLDER" 2>/dev/null
+check "no gate call" 0 "$(wc -l < "$GATE_LOG" | tr -d ' ')"
+check "retry_deferred row" 1 "$(grep -c "session:$(basename "$BSEM")	retry_deferred	lock busy" "$BLOG" || true)"
+check "own intents kept" yes "$([ -e "$BINTENTS" ] && echo yes || echo no)"
+DEFERRED="$BINTENTS"
+
+echo "B8. once the holder is gone the lock file left behind does not block; the deferred intents resolve as an orphan"
+open_b gate-close-after-holder
+: > "$GATE_LOG"
+bguard close --wp WP-484 --slug gate-close-after-holder --agent fixture >/dev/null 2>"$B/close8.err"
+check "close succeeds" 0 "$?"
+check "deferred intent resolved with unknown WP" 1 "$(grep -c '^resolve-batch intent-l1 fixture -$' "$GATE_LOG")"
+check "deferred file removed" no "$([ -e "$DEFERRED" ] && echo yes || echo no)"
+
+echo "B8b. an unreadable source is reported and kept; the rest still resolve"
+open_b gate-close-unreadable
+BINTENTS="$IGDIR/$(basename "$BSEM").intents"
+printf '%s\n' 'intent-u1 fixture MC-sessions:u.md' > "$BINTENTS"
+printf '%s\n' 'intent-u2 fixture - 1 timeout' > "$IGDIR/fixture-locked.open.intents.retry"
+chmod 000 "$IGDIR/fixture-locked.open.intents.retry"
+: > "$GATE_LOG"
+bguard close --wp WP-484 --slug gate-close-unreadable --agent fixture >/dev/null 2>"$B/close8b.err"
+check "close succeeds" 0 "$?"
+check "readable intent resolved" 1 "$(grep -c '^resolve-batch intent-u1 fixture -$' "$GATE_LOG")"
+check "unreadable source reported" 1 "$(grep -c "	source_unreadable	fixture-locked.open.intents.retry PermissionError$" "$BLOG" || true)"
+check "unreadable source kept" yes "$([ -e "$IGDIR/fixture-locked.open.intents.retry" ] && echo yes || echo no)"
+chmod 600 "$IGDIR/fixture-locked.open.intents.retry"; rm -f "$IGDIR/fixture-locked.open.intents.retry"
+
+echo "B9. a batch that outlives the budget is killed and its intents kept for retry"
+open_b gate-close-slow
+BINTENTS="$IGDIR/$(basename "$BSEM").intents"
+printf '%s\n' 'intent-s1 fixture MC-sessions:s.md' > "$BINTENTS"
+START=$SECONDS
+(export STUB_SLEEP=20 INTENT_GATE_RESOLVE_BUDGET_SEC=2; bguard close --wp WP-484 --slug gate-close-slow --agent fixture >/dev/null 2>"$B/close9.err")
+check "close succeeds" 0 "$?"
+check "close not held by the slow batch" yes "$([ $((SECONDS - START)) -lt 15 ] && echo yes || echo no)"
+check "kept for retry as timeout" "intent-s1 fixture - 1 timeout" "$(cut -d" " -f1-5 "$BINTENTS.retry" 2>/dev/null)"
+check "no taken file left behind" 0 "$(ls "$IGDIR" | grep -c '\.closing\.' || true)"
 
 if [ "$FAILURES" -ne 0 ]; then
   echo "FAIL: $FAILURES check(s) failed"

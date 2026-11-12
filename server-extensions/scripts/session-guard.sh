@@ -12671,56 +12671,46 @@ intent_gate_observe() {
   return 0
 }
 
-# intent_gate_resolve_session <semaphore path as opened> <closed copy> -- best effort,
-# never fails close. Runs whenever intents were recorded, whatever the flag says now:
-# the closing process may not share the claiming process's environment. One overall
-# budget (each resolve fetches origin): what does not fit lapses with the two-day
-# check window instead of holding the close.
+# Intent gate at close (WP-484 И-13, peer session 2026-11-12-07-wp484-intent-batch-resolve):
+# scripts/lib/intent_gate_close.py resolves the session's intents together with
+# leftovers of earlier closes on this host in one `intent-gate.sh resolve-batch`
+# call, under a host-wide flock; what is not resolved goes to a retry file before
+# its sources are removed. Best effort, never fails close. Retry needs a later
+# close on this host -- there is no other trigger (see the module docstring).
 INTENT_GATE_RESOLVE_BUDGET_SEC="${INTENT_GATE_RESOLVE_BUDGET_SEC:-30}"
-#
-# One `close_resolve` row goes to the gate log per close that had intents:
-# resolved / failed / skipped (budget spent, or no gate script or WP number), so
-# lapsed intents are counted where they happen instead of being inferred later.
+INTENT_GATE_RETRY_MAX_AGE_SEC="${INTENT_GATE_RETRY_MAX_AGE_SEC:-172800}"
+INTENT_GATE_LOCK_WAIT_SEC="${INTENT_GATE_LOCK_WAIT_SEC:-5}"
+
+# intent_gate_resolve_session <semaphore path as opened> <closed copy>
 intent_gate_resolve_session() {
-  local intents closed="$2" script wp="" intent_id agent left deadline
-  local total resolved=0 failed=0 closer entry
-  local -a entries=()
-  intents=$(intent_gate_intents_file "$1")
-  [ -f "$intents" ] || return 0
-  # One snapshot for both the count and the loop: a claim still declaring may
-  # append to the file meanwhile, and a second read would count it as resolved
-  # without counting it in the total.
-  while read -r intent_id agent _; do
-    [ -n "$intent_id" ] && entries+=("$intent_id $agent")
-  done < "$intents"
-  total=${#entries[@]}
-  script=$(intent_gate_script)
-  deadline=$((SECONDS + INTENT_GATE_RESOLVE_BUDGET_SEC))
-  if [ "$total" -gt 0 ] && [ -f "$script" ] && wp=$(intent_gate_wp_number "$closed"); then
-    for entry in "${entries[@]}"; do
-      intent_id="${entry%% *}"
-      agent="${entry#* }"
-      left=$((deadline - SECONDS))
-      if [ "$left" -le 0 ]; then
-        echo "intent gate: close budget ${INTENT_GATE_RESOLVE_BUDGET_SEC}s spent; remaining intents lapse with the two-day check window" >&2
-        break
-      fi
-      # `timeout` is coreutils; without it the per-call fetch cap of the gate still applies.
-      if $(command -v timeout >/dev/null 2>&1 && printf 'timeout %s' "$left") bash "$script" resolve --intent-id "$intent_id" --wp "$wp" --agent "$agent" \
-          </dev/null >/dev/null 2>&1 195>&- 196>&-; then
-        resolved=$((resolved + 1))
-      else
-        failed=$((failed + 1))
-        echo "intent gate: resolve of $intent_id at close failed; it lapses with the two-day check window" >&2
-      fi
-    done
-  fi
+  local sem="$1" closed="$2" dir closer wp session out err kind detail rc=0
+  dir="$IWE_ROOT/.iwe-runtime/intent-gate"
+  # Nothing ever recorded on this host: no file to look at, no python start.
+  [ -d "$dir" ] || return 0
   closer=$(_unique_record_field "$closed" agent 2>/dev/null) || closer="?"
-  printf '%s\t%s\tWP-%s\tsession:%s\tclose_resolve\tresolved=%d failed=%d skipped=%d\n' \
-    "$(now_iso)" "$closer" "${wp:-?}" "$(basename "$1")" \
-    "$resolved" "$failed" "$((total - resolved - failed))" \
-    >> "$IWE_ROOT/.iwe-runtime/intent-gate-note-file.log" 2>/dev/null || true
-  rm -f "$intents"
+  wp=$(intent_gate_wp_number "$closed") || wp="-"
+  session=$(basename "$sem")
+  err=$(mktemp "${TMPDIR:-/tmp}/intent-gate-close.XXXXXX") || err=/dev/null
+  out=$(python3 "$GUARD_LIB_DIR/intent_gate_close.py" --dir "$dir" \
+      --own "$(intent_gate_intents_file "$sem")" --sessions-dir "$SESSION_DIR" \
+      --gate "$(intent_gate_script)" --budget "$INTENT_GATE_RESOLVE_BUDGET_SEC" \
+      --lock-wait "$INTENT_GATE_LOCK_WAIT_SEC" --max-age "$INTENT_GATE_RETRY_MAX_AGE_SEC" \
+      2>"$err" 195>&- 196>&-) || rc=$?
+  if [ "$rc" -ne 0 ]; then
+    # The module failed before removing anything it had not published.
+    out="close_resolve	rc=module_failed $(intent_gate_last_error_line "$err")"
+  fi
+  [ "$err" = /dev/null ] || rm -f "$err"
+  while IFS=$'\t' read -r kind detail; do
+    [ -n "$kind" ] || continue
+    [ "$kind" != summary ] || kind=close_resolve
+    printf '%s\t%s\tWP-%s\tsession:%s\t%s\t%s\n' "$(now_iso)" "$closer" "$wp" "$session" "$kind" "$detail" \
+      >> "$IWE_ROOT/.iwe-runtime/intent-gate-note-file.log" 2>/dev/null || true
+    case "$kind" in
+      retry_deferred) echo "intent gate: resolve lock busy; intents left for a later close on this host" >&2 ;;
+      close_resolve) case "$detail" in rc=0\ *) ;; *) echo "intent gate: $detail (unresolved intents kept for retry)" >&2 ;; esac ;;
+    esac
+  done <<< "$out"
   return 0
 }
 

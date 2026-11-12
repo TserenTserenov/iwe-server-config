@@ -140,7 +140,7 @@ check "agent-a still has two recorded intents before close" 2 \
 guard agent-a close --wp WP-484 --slug sa --agent agent-a >/dev/null 2>"$B/close-a.err"
 check "close of agent-a succeeds" 0 "$?"
 check "close_resolve: both intents of agent-a resolved" 1 \
-  "$(grep -c "	agent-a	WP-484	session:$(basename "$SEM_A")	close_resolve	resolved=2 failed=0 skipped=0$" "$LOG" || true)"
+  "$(grep -c "	agent-a	WP-484	session:$(basename "$SEM_A")	close_resolve	rc=0 dur_s=[0-9]* sources=1 resolved=2 already=0 retry=0 lapsed=0$" "$LOG" || true)"
 claim agent-b sb shared-y.md
 check "agent-b claim of agent-a's closed file is checked clean" 0 "$(gate_rows agent-b shared-y.md)"
 check "...and that claim was really declared and checked" 1 \
