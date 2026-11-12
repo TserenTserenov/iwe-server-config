@@ -14,6 +14,11 @@
 #                                                      # только если раннер стоит именно на
 #                                                      # blocked-witness-unavailable И push уже
 #                                                      # подтверждён (all_pushed: true)
+#   close ... --pilot-release "<слово пилота>"        # закрыть живую отметку без Quick Close по явному слову
+#                                                      # пилота (WP-484 Ф301): нет ни карточки раннера, ни
+#                                                      # обязательства закрытия. Слово пишется в
+#                                                      # .iwe-runtime/pilot-release-audit.jsonl; проверки
+#                                                      # доставки те же, что у остальных путей закрытия
 #   close --housekeeping <reason> [--agent ...] [--expect-session-id <id>]  # закрыть housekeeping-сессию (с id: только если открыт именно этот запуск)
 #   close --abandon-prepared --i-understand-loss-risk --reason "<why>" # manual recovery (WP-484, peer-session
 #         --source-commit <oid> [--source-commit ...] # with Codex): PREPARED tree-proof cannot
@@ -541,6 +546,30 @@ _close_path_clears_obligation() {  # <close_path value>
     peer-session | no-code-changes) return 0 ;;
     *) return 1 ;;
   esac
+}
+
+# WP-484 Ф301: `close --pilot-release` is an exit by the pilot's word, so the word has to
+# outlive the command. One JSON line per release; a failed write refuses the release
+# (an unaudited exit is the thing this log exists to prevent).
+_record_pilot_release() {  # <slug> <agent> <wp> <word>
+  local audit="$IWE_ROOT/.iwe-runtime/pilot-release-audit.jsonl"
+  mkdir -p "$(dirname "$audit")" || return 1
+  python3 - "$audit" "$1" "$2" "$3" "$4" <<'AUDIT_PY'
+import json
+import sys
+import time
+
+audit, slug, agent, wp, word = sys.argv[1:]
+record = {
+    "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+    "slug": slug,
+    "agent": agent,
+    "wp": wp,
+    "word": word,
+}
+with open(audit, "a", encoding="utf-8") as handle:
+    handle.write(json.dumps(record, ensure_ascii=False, separators=(",", ":")) + "\n")
+AUDIT_PY
 }
 
 clear_peer_session_obligation() {
@@ -2192,6 +2221,16 @@ try:
             continue
         recorded_wp, recorded_slug = unique("wp"), unique("slug")
         if normalize_wp(recorded_wp) != normalize_wp(wp) or recorded_slug != slug:
+            # WP-484 Ф301 (И-11): a second live semaphore for the same work in the same
+            # conversation is how the closing dead end started. Opening stays allowed
+            # (the peer skill legitimately opens its own after the WP Gate), but the
+            # sibling and its exits are named at once, not at the failed close.
+            if (path.name.endswith(".open")
+                    and normalize_wp(recorded_wp) == normalize_wp(wp)):
+                print("open: ПРЕДУПРЕЖДЕНИЕ: в этой беседе на тот же РП уже есть живая отметка '"
+                      + recorded_slug + "' (" + path.name + "). Закрывай обе: " + "session-guard.sh close --slug "
+                      + recorded_slug + " (если закрытие откажет, отказ назовёт выход, включая --pilot-release).",
+                      file=sys.stderr)
             continue
         # From here on wp AND slug both match this record — it is
         # unambiguously about the SAME declared work, so host absence can no
@@ -4590,6 +4629,7 @@ REPO_ARG=""
 CLEANUP_ORPHANS=0
 QUARANTINE_DEAD_INTERACTIVE=0
 FORCE_NO_REFLECTION=""
+PILOT_RELEASE=""   # WP-484 Ф301: pilot-worded exit for a live semaphore with no terminal proof
 CANONICAL_OWNER=""
 EXPECT_SESSION_ID_SET=""
 EXPECT_SESSION_ID=""  # close --housekeeping: close only the open with this session_id (compare-and-close)
@@ -4796,6 +4836,13 @@ while [[ $# -gt 0 ]]; do
         fail "--force-no-reflection требует непустую причину как значение (например: --force-no-reflection \"work already pushed, commit_needed=false\")" 1
       fi
       FORCE_NO_REFLECTION="$2"; shift 2 ;;
+    --pilot-release)
+      # WP-484 Ф301: the word is the whole point of this flag, so an empty one (or a missing
+      # value under `set -u`) is refused with a readable message, same as --force-no-reflection.
+      if [[ $# -lt 2 || -z "$2" ]]; then
+        fail "--pilot-release требует непустое слово пилота как значение (например: --pilot-release \"закрой без Quick Close, работа опубликована\")" 1
+      fi
+      PILOT_RELEASE="$2"; shift 2 ;;
     --)       shift; POSITIONAL+=("$@"); break ;;
     # WP-7 Ф83: was a silent `shift` -- unrecognized flags vanished with no diagnostic.
     -*)       fail "неизвестный флаг: $1" 1 ;;
@@ -9046,7 +9093,7 @@ elif kind == "sentinel":
     # Sentinels are a closed set produced by the already-completed close
     # policy gate.  A missing RUN card path must never silently become one.
     if not re.fullmatch(
-        r"(?:declared-peer-session|declared-publish-only|declared-no-code-changes|declared-machine-publish-only|cancel-obligation):[A-Za-z0-9._-]{1,256}",
+        r"(?:declared-peer-session|declared-publish-only|declared-no-code-changes|declared-machine-publish-only|cancel-obligation|pilot-release):[A-Za-z0-9._-]{1,256}",
         value,
     ):
         raise SystemExit(1)
@@ -9436,7 +9483,7 @@ if (
 if fields["close_delivery_terminal_kind"] == "file" and not os.path.isabs(terminal_reference):
     raise SystemExit(1)
 if fields["close_delivery_terminal_kind"] == "sentinel" and not re.fullmatch(
-    r"(?:declared-peer-session|declared-publish-only|declared-no-code-changes|declared-machine-publish-only|cancel-obligation):[A-Za-z0-9._-]{1,256}",
+    r"(?:declared-peer-session|declared-publish-only|declared-no-code-changes|declared-machine-publish-only|cancel-obligation|pilot-release):[A-Za-z0-9._-]{1,256}",
     terminal_reference,
 ):
     raise SystemExit(1)
@@ -10549,7 +10596,11 @@ with open(os.path.join(dirp, ".lock"), "a+") as lock:
             continue
 for uuid in sorted(latest):
     rec = latest[uuid]
-    if rec.get("status") != "completed" and rec.get("repo"):
+    # WP-484, bug-2026-11-11-commit-intent-left-after-refused-commit-blocks-
+    # close.md: an "abandoned" intent (git commit was refused and no commit
+    # with its trailer exists) has no commit to promote -- never a close
+    # blocker.
+    if rec.get("status") not in ("completed", "abandoned") and rec.get("repo"):
         print(rec["repo"] + " " + uuid)
 PY
 )
@@ -13218,7 +13269,7 @@ print(json.dumps({"wp": sys.argv[1], "slug": sys.argv[2], "agent": sys.argv[3], 
       CANCEL_HINT="явная отмена через close_obligation.py недоступна -- у этой сессии не определился ни harness_session_id, ни session_id семафора. Используй session-guard.sh heal <slug> (сухой прогон покажет шаги и нужное слово пилота)"
     fi
     # bug-2026-11-03 (И-4): подсказка не называла --force-no-reflection; условия флага не менялись.
-    CANCEL_HINT="$CANCEL_HINT. Если пилот явно сказал закрыть без рефлексии, а работа уже опубликована (карточка на шаге blocked-witness-unavailable, commit_needed=false или all_pushed=true): session-guard.sh close --agent ${AGENT:-<агент>} --slug $SLUG --force-no-reflection \"<слово пилота>\""
+    CANCEL_HINT="$CANCEL_HINT. Если ни раннера, ни обязательства нет, а работа опубликована, и пилот сказал закрыть: session-guard.sh close --agent ${AGENT:-<агент>} --slug $SLUG --pilot-release \"<слово пилота>\" (WP-484 Ф301; закрытие блокирует неподтверждённая доставка файлов сессии и изолированной копии, неопубликованные коммиты других репозиториев ловит предупреждение после закрытия). Если пилот явно сказал закрыть без рефлексии, а работа уже опубликована (карточка на шаге blocked-witness-unavailable, commit_needed=false или all_pushed=true): session-guard.sh close --agent ${AGENT:-<агент>} --slug $SLUG --force-no-reflection \"<слово пилота>\""
   fi
 
   # WP-537 Ф29 (07.09, по решению пилота после ревью Fable): slug -> run_id
@@ -13336,6 +13387,25 @@ print(json.dumps({"wp": sys.argv[1], "slug": sys.argv[2], "agent": sys.argv[3], 
         done
       done
     fi
+  fi
+
+  # WP-484 Ф301 (11.11; входы И-11 и Ф221: один тупик дважды за три недели): живая отметка без
+  # терминальной карточки и без взведённого обязательства не имела легального выхода. Инвариант:
+  # у каждой живой отметки есть выход, и отказ close его называет (CANCEL_HINT выше). Слово
+  # пилота явное и журналируется, как --force-no-reflection: это рефлекс против самоодобрения,
+  # а не граница привилегий. Проверки доставки в _close_delivery_and_transition НЕ меняются и
+  # те же, что у cancel-obligation и force-no-reflection: блокирует неподтверждённая доставка
+  # файлов сессии и изолированной копии; неопубликованные коммиты других репозиториев ловит
+  # предупреждение после закрытия (_warn_unpushed).
+  # ${:-}: the select-close-cards smoke runs this function without the global defaults under set -u.
+  if [ -z "$RUNNER_OK" ] && [ -n "${PILOT_RELEASE:-}" ]; then
+    _record_pilot_release "$SLUG" "$AGENT" "${WP:-}" "$PILOT_RELEASE" \
+      || fail "close: слово пилота не удалось записать в журнал pilot-release-audit.jsonl; закрытие не выполнено" 7
+    RUNNER_OK="pilot-release:$SLUG"
+    TERMINAL_PROOF_MODE="sentinel"
+    FORCED_CARD="pilot-release:$SLUG"
+    echo "Session CLOSE: Quick Close не пройден, закрываю по явному слову пилота (WP-484 Ф301): $PILOT_RELEASE" >&2
+    echo "Session CLOSE: обязательство закрытия беседы этот путь не снимает; если Stop-хук потребует Quick Close, по тому же слову пилота: python3 $IWE_ROOT/$GOV_REPO/scripts/close_obligation.py cancel --session-id '${HARNESS_SESSION_ID:-<id беседы>}' --action cancel-close" >&2
   fi
 
   if [ -z "$RUNNER_OK" ]; then
@@ -13487,7 +13557,7 @@ print(json.dumps({"wp": sys.argv[1], "slug": sys.argv[2], "agent": sys.argv[3], 
       _wp561_persisted_kind=$(_unique_record_field "${SEM_FILE:-}" close_delivery_terminal_kind || true)
       _wp561_persisted_ref=$(_unique_record_field "${SEM_FILE:-}" close_delivery_terminal_reference || true)
       case "$_wp561_persisted_ref" in
-        cancel-obligation:*)
+        cancel-obligation:*|pilot-release:*)
           FORCED_CARD="$_wp561_persisted_ref"
           ;;
         *)
@@ -13705,6 +13775,7 @@ print(json.dumps({"wp": sys.argv[1], "slug": sys.argv[2], "agent": sys.argv[3], 
       declared-peer-session:*) _close_channel="peer-session" ;;
       declared-no-code-changes:*) _close_channel="no-code-changes" ;;
       cancel-obligation:*)     _close_channel="cancel-obligation" ;;
+      pilot-release:*)         _close_channel="pilot-release" ;;
       *)
         if [ -f "$FORCED_CARD" ]; then
           if grep -q '^current_step: wp-archive-run$' "$FORCED_CARD"; then
@@ -15036,6 +15107,12 @@ if [ "$CMD" = "note-publication" ]; then
   NOTE_AGENT=$(_family_record_agent "$SEM_FILE" "$NOTE_AGENT")
   LOCKED_NOTE_SESSION_ID=$(_locked_open_identity "$SEM_FILE" "$NOTE_AGENT" "${SESSION_ID_ARG:-}") || exit 1
   PUBLICATION_CLOSE_STATE=$(_close_delivery_state "$SEM_FILE" "$LOCKED_NOTE_SESSION_ID" || true)
+  # WP-484 Ф301 П5г: a pull-request branch is not a delivery target; say so
+  # instead of the generic refusal below (it cost a --forget round trip).
+  case "$PUBLICATION_TARGET_REF" in
+    refs/heads/main|refs/heads/pilot|refs/heads/new-architecture) ;;
+    *) fail "note-publication: ветка $PUBLICATION_TARGET_REF не цель доставки (доставкой считается слияние в main, pilot или new-architecture). Для коммита в запросе слияния квитанцию не пишут: допишите её на коммит слияния после merge, до этого коммит остаётся заявкой (note-commit)." 1 ;;
+  esac
   case "$PUBLICATION_CLOSE_STATE:$PUBLICATION_TARGET_REF" in
     none:refs/heads/main|none:refs/heads/pilot|none:refs/heads/new-architecture) ;;
     prepared:refs/heads/main|prepared:refs/heads/pilot|prepared:refs/heads/new-architecture) ;;
