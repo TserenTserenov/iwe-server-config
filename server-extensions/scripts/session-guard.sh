@@ -4630,6 +4630,7 @@ CLEANUP_ORPHANS=0
 QUARANTINE_DEAD_INTERACTIVE=0
 FORCE_NO_REFLECTION=""
 PILOT_RELEASE=""   # WP-484 Ф301: pilot-worded exit for a live semaphore with no terminal proof
+CLOSE_EXPLAIN=0    # WP-561 Ф61: close --explain prints the fact-based close route, changes nothing
 CANONICAL_OWNER=""
 EXPECT_SESSION_ID_SET=""
 EXPECT_SESSION_ID=""  # close --housekeeping: close only the open with this session_id (compare-and-close)
@@ -4843,6 +4844,7 @@ while [[ $# -gt 0 ]]; do
         fail "--pilot-release требует непустое слово пилота как значение (например: --pilot-release \"закрой без Quick Close, работа опубликована\")" 1
       fi
       PILOT_RELEASE="$2"; shift 2 ;;
+    --explain) CLOSE_EXPLAIN=1; shift ;;
     --)       shift; POSITIONAL+=("$@"); break ;;
     # WP-7 Ф83: was a silent `shift` -- unrecognized flags vanished with no diagnostic.
     -*)       fail "неизвестный флаг: $1" 1 ;;
@@ -4880,6 +4882,9 @@ if [ "$RETIRE_CONFIRM_NO_LIVE_OWNER" -eq 1 ] && [ "$CMD" != "retire-semaphore-ar
   fail "--i-confirm-no-live-owner применим только к retire-semaphore-artifact" 1
 fi
 
+if [ "$CLOSE_EXPLAIN" -eq 1 ] && [ "$CMD" != "close" ]; then
+  fail "--explain применим только к close" 1
+fi
 if { [ "$HEAL_APPLY" -eq 1 ] || [ "$HEAL_DISCARD_UNPUBLISHED" -eq 1 ]; } && [ "$CMD" != "heal" ]; then
   fail "--apply и --discard-unpublished применимы только к heal" 1
 fi
@@ -12449,15 +12454,17 @@ fi
 # moved since the worktree was created. Side effects outside the repository (MCP calls,
 # messages) are not covered by this contract. Any doubt returns 1 with the
 # reason on stderr; close then falls back to the ordinary terminal-card path.
-_no_code_changes_proof() {  # <semaphore>
-  python3 - "$1" <<'PY_NCC'
+_no_code_changes_proof() {  # <semaphore> [any: skip the declaration check, WP-561 Ф61]
+  python3 - "$1" "${2:-declared}" <<'PY_NCC'
 import json
 import os
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 sem = Path(sys.argv[1])
+require_declaration = sys.argv[2] != "any"
 fields = {}
 claims = []
 fences = 0
@@ -12486,9 +12493,20 @@ def refuse(reason):
     raise SystemExit(1)
 
 
+BUDGET_S = float(os.environ.get("IWE_NCC_BUDGET_S") or 0)  # 0: no overall budget (declared close)
+STARTED = time.monotonic()
+
+
 def run_git(repo, *args):
+    timeout = 60
+    if BUDGET_S:
+        timeout = min(timeout, BUDGET_S - (time.monotonic() - STARTED))
+        if timeout <= 0:
+            refuse(f"бюджет времени проверки ({BUDGET_S:g} с) исчерпан")
     try:
-        result = subprocess.run(["git", "-C", repo, *args], capture_output=True, text=True, timeout=60)
+        # No optional locks: --explain runs this without the session lock, next to live writers.
+        result = subprocess.run(["git", "-C", repo, *args], capture_output=True, text=True, timeout=timeout,
+                                env={**os.environ, "GIT_OPTIONAL_LOCKS": "0"})
     except (OSError, subprocess.TimeoutExpired) as exc:
         refuse(f"git {' '.join(args)} не выполнился: {exc}")
     if result.returncode != 0:
@@ -12502,7 +12520,7 @@ def common_dir(repo):
     return os.path.realpath(os.path.join(repo, run_git(repo, "rev-parse", "--git-common-dir").strip()))
 
 
-if single("close_path") != "no-code-changes":
+if require_declaration and single("close_path") != "no-code-changes":
     refuse("в семафоре нет close_path: no-code-changes")
 worktree, orz_file = single("isolated_worktree"), single("orz_file")
 governance, orz_dir = single("governance_worktree"), single("orz_sessions_dir")
@@ -12549,6 +12567,44 @@ head = run_git(worktree, "rev-parse", "HEAD").strip()
 if not reflog or reflog[-1] != head:
     refuse("HEAD изолированной копии сдвинут относительно момента её создания (коммит, переключение или обновление)")
 PY_NCC
+}
+
+# --- Close route from facts (WP-561 Ф61 stage 1) ---
+# Gathers the facts about one semaphore -- read-only: no lock, no fetch, git
+# without optional locks -- and asks scripts/lib/close_route.py which close
+# route the pilot's scheme (WP-484 Ф304) gives. Stage 1 only reports: `close
+# --explain` prints it, a real close records it next to the declared path.
+# Prints the classifier output (json|text); returns its exit code.
+_close_route_outcome() {  # <semaphore> <session-id> <json|text> [orz sessions dir]
+  local sem="$1" sid="$2" format="$3" declared wp slug orz_dir resume isolated
+  local no_changes="not-checked" ncc_reason="" peer
+  declared=$(_unique_record_field "$sem" close_path || true)
+  wp=$(_unique_record_field "$sem" wp || true)
+  slug=$(_unique_record_field "$sem" slug || true)
+  # A real close passes the ORZ directory it actually resolved (the snapshot one may be gone).
+  orz_dir="${4:-}"
+  [ -n "$orz_dir" ] || orz_dir=$(_unique_record_field "$sem" orz_sessions_dir || true)
+  orz_dir="${orz_dir:-$ORZ_DIR}"
+  # A damaged delivery state also means "a close was started": it must not be re-classified.
+  resume=$(_close_delivery_state "$sem" "$sid") || resume="damaged"
+  isolated=0
+  if _unique_record_field "$sem" isolated_worktree >/dev/null; then
+    isolated=1
+    # Bounded: observation must not hold a close (under its lock) for minutes.
+    if ncc_reason=$(IWE_NCC_BUDGET_S=20 _no_code_changes_proof "$sem" any 2>&1); then
+      no_changes="proven"
+    else
+      no_changes="refused"
+      ncc_reason=$(printf '%s' "$ncc_reason" | tr '\n' ' ' | cut -c1-300)
+    fi
+  fi
+  # Evidence is looked for whatever was declared: the route depends on traces, not on words.
+  peer=$(peer_session_evidence peer-session "$sem" "$slug" "$orz_dir" 2>/dev/null) || peer="unknown"
+  case "$peer" in yes|no) ;; *) peer="unknown" ;; esac
+  python3 "$GUARD_LIB_DIR/close_route.py" --format "$format" --semaphores 1 \
+    --declared "${declared:-unknown}" --wp "$wp" --resume-state "${resume:-damaged}" \
+    --isolated "$isolated" --no-changes "$no_changes" --no-changes-reason "$ncc_reason" \
+    --peer-evidence "$peer"
 }
 
 # --- Intent gate at the claim point (WP-561 Ф33) ---------------------------
@@ -12715,6 +12771,50 @@ intent_gate_resolve_session() {
 }
 
 if [ "$CMD" = "close" ]; then
+  # WP-561 Ф61 stage 1: `close --explain` -- which close route the facts give.
+  # Read-only on purpose: no lock, no fetch, no mutation; the facts are a
+  # snapshot and a real close re-reads them under its lock.
+  if [ "$CLOSE_EXPLAIN" -eq 1 ]; then
+    if [ -n "$HOUSEKEEPING" ]; then
+      python3 "$GUARD_LIB_DIR/close_route.py" --format text --semaphores 1 --housekeeping
+      exit $?
+    fi
+    # Only "no candidate at all" means nothing to close; a selector that misses
+    # an open session must not tell the pilot to just close the window.
+    EXPLAIN_ERR=$(mktemp)
+    if [ -n "$SESSION_ID_ARG" ]; then
+      EXPLAIN_SEM=$(resolve_semaphore_by_session_id "$AGENT" "$SESSION_ID_ARG" "${WP:-}" "${SLUG:-}" 2>"$EXPLAIN_ERR") \
+        && EXPLAIN_RC=0 || EXPLAIN_RC=$?
+      [ "$EXPLAIN_RC" -eq 0 ] || grep -q '^нет открытой сессии' "$EXPLAIN_ERR" || EXPLAIN_RC=2
+    else
+      EXPLAIN_SEM=$(select_semaphore "$AGENT" "${WP:-}" "${SLUG:-}" 2>"$EXPLAIN_ERR") && EXPLAIN_RC=0 || EXPLAIN_RC=$?
+    fi
+    cat "$EXPLAIN_ERR" >&2
+    EXPLAIN_SEMAPHORES=1
+    if [ "$EXPLAIN_RC" -eq 2 ]; then
+      if grep -q 'подходит несколько сессий\|несколько открытых семафоров' "$EXPLAIN_ERR"; then
+        EXPLAIN_SEMAPHORES=2
+      else
+        EXPLAIN_SEMAPHORES=-1
+      fi
+    elif [ "$EXPLAIN_RC" -ne 0 ] || [ ! -f "$EXPLAIN_SEM" ]; then
+      EXPLAIN_SEMAPHORES=0
+    fi
+    rm -f "$EXPLAIN_ERR"
+    if [ "$EXPLAIN_SEMAPHORES" -ne 1 ]; then
+      python3 "$GUARD_LIB_DIR/close_route.py" --format text --semaphores "$EXPLAIN_SEMAPHORES"
+      exit $?
+    fi
+    # The semaphore records its own session id; the file name is ambiguous for claude/claude-code.
+    EXPLAIN_SID=$(_unique_record_field "$EXPLAIN_SEM" session_id || true)
+    if [ -z "$EXPLAIN_SID" ]; then
+      EXPLAIN_SID=$(basename "$EXPLAIN_SEM" .open)
+      EXPLAIN_SID="${EXPLAIN_SID#"$AGENT"-}"
+    fi
+    echo "Сессия: $(basename "$EXPLAIN_SEM")"
+    _close_route_outcome "$EXPLAIN_SEM" "$EXPLAIN_SID" text
+    exit $?
+  fi
   if [ -n "$HOUSEKEEPING" ]; then
     [[ "$HOUSEKEEPING" =~ ^[a-zA-Z0-9][a-zA-Z0-9._-]{0,127}$ ]] \
       || fail "close --housekeeping: reason должен быть безопасным токеном длиной 1..128" 1
@@ -12876,6 +12976,23 @@ if [ "$CMD" = "close" ]; then
       echo "  ⚠️  ORZ не найден по snapshot-пути ($ORZ_FILE, worktree убран) — использую канонический: $CANONICAL_ORZ_FILE" >&2
       ORZ_SESSIONS_DIR="$ORZ_DIR"
       ORZ_FILE="$CANONICAL_ORZ_FILE"
+    fi
+  fi
+
+  # WP-561 Ф61 stage 1 (observation): record the fact-based close route next to
+  # the declared close_path. Never changes this close; a failure loses only the record.
+  if [ -f "$IWE_ROOT/$GOV_REPO/scripts/ledger-append.sh" ]; then
+    if ROUTE_JSON=$(_close_route_outcome "$SEM_FILE" "$LOCKED_SESSION_ID" json "$ORZ_SESSIONS_DIR" 2>/dev/null) \
+        && ROUTE_EVENT=$(python3 -c '
+import json, sys
+event = json.loads(sys.argv[1])
+event.update(wp=sys.argv[2], slug=sys.argv[3], agent=sys.argv[4], session_id=sys.argv[5])
+print(json.dumps(event, ensure_ascii=False))
+' "$ROUTE_JSON" "${WP:-}" "${SLUG:-}" "$AGENT" "$LOCKED_SESSION_ID"); then
+      # Do not lend the session lock descriptors to the ledger's detached publisher.
+      ledger_append_traced "$SLUG" close_route_observed no day "$(now_date)" close_route_observed "$ROUTE_EVENT" session-guard 195>&- 196>&-
+    else
+      echo "  ⚠️  close: путь закрытия по фактам не посчитан (наблюдение WP-561 Ф61); закрытие идёт как обычно" >&2
     fi
   fi
 
