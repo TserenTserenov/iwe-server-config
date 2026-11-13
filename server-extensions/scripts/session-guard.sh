@@ -82,6 +82,10 @@
 #   renew [--wp WP-N] [--slug "..."] [--agent ...]    # продлить право на коммит
 #   pre-commit-check
 #   note-file <path> [--agent ...]
+#   note-file --paths-from0 <file> --repo-root <dir> [--agent ...]
+#                                                      # пакет: NUL-список путей от корня одного
+#                                                      # репозитория, всё или ничего, одна замена
+#                                                      # семафора (WP-539 И-2/И-3); без --forget
 #   note-file --forget <path> [--agent ...]           # снять заявку на путь, которого нигде нет
 #                                                      # (файл создан и удалён/переименован до
 #                                                      # коммита); отказ, если путь есть на диске,
@@ -4638,6 +4642,10 @@ FORCE_FLAG=0
 FORCE_WP_ELSEWHERE_FLAG=0
 FORGET_FLAG=0
 FORGET_UNPROVABLE_FLAG=0
+# WP-539 (И-2/И-3): note-file batch mode -- NUL-terminated path list relative
+# to one repository root, claimed all-or-nothing in one locked transition.
+PATHS_FROM0_ARG=""
+REPO_ROOT_ARG=""
 # WP-484 Ф275 предусловие 3: optional 4-field claim enrichment (plain
 # note-commit add) and intent promotion; see the note-commit block.
 SOURCE_CHECKOUT_ARG=""
@@ -4787,6 +4795,16 @@ while [[ $# -gt 0 ]]; do
     --force-wp-elsewhere) FORCE_WP_ELSEWHERE_FLAG=1; shift ;;
     --forget) FORGET_FLAG=1; shift ;;
     --forget-unprovable) FORGET_UNPROVABLE_FLAG=1; shift ;;
+    --paths-from0)
+      if [[ $# -lt 2 || -z "$2" ]]; then
+        fail "--paths-from0 требует непустое значение (файл с путями, разделёнными NUL)" 1
+      fi
+      PATHS_FROM0_ARG="$2"; shift 2 ;;
+    --repo-root)
+      if [[ $# -lt 2 || -z "$2" ]]; then
+        fail "--repo-root требует непустое значение (корень репозитория, от которого заданы пути пакета)" 1
+      fi
+      REPO_ROOT_ARG="$2"; shift 2 ;;
     --source-checkout)
       if [[ $# -lt 2 || -z "$2" ]]; then
         fail "--source-checkout требует непустое значение (путь к checkout-источнику коммита)" 1
@@ -13935,9 +13953,42 @@ print(json.dumps({"wp": sys.argv[1], "slug": sys.argv[2], "agent": sys.argv[3], 
 fi
 
 # --- NOTE-FILE (manual scope registration for Bash-created/deleted files) ---
+# Shared by the single-path and batch claims: refresh owner pid and renew the
+# lease once per call, under the session-transition lock the caller holds.
+_note_file_renew_lease() {  # <semaphore file>
+  local sem="$1" lease_tmp="${1}.lease.tmp.$$"
+  _refresh_owner_pid "$sem"
+  {
+    echo "renewed_at: $(now_iso)"
+    echo "session_id: $(grep "^session_id: " "$sem" | cut -d' ' -f2- || echo unknown)"
+  } > "$lease_tmp" 2>/dev/null
+  # Проверка [ -f "$sem" ] вплотную к mv (не раньше) -- сужает, но не
+  # закрывает TOCTOU-окно с параллельным close (cold-review Ф133, High): mv
+  # переименовывает .lease по имени независимо от текущего состояния
+  # семафора, тот же класс окна, что и в renew выше, только без его fail.
+  if [ -s "$lease_tmp" ] && [ -f "$sem" ]; then
+    mv "$lease_tmp" "${sem}.lease" 2>/dev/null || rm -f "$lease_tmp"
+  else
+    echo "note-file: lease renewal skipped (сессия могла закрыться параллельно)" >&2
+    rm -f "$lease_tmp"
+  fi
+}
+
 if [ "$CMD" = "note-file" ]; then
   FILE_PATH="${POSITIONAL[0]:-}"
-  [ -z "$FILE_PATH" ] && fail "note-file: missing path argument" 1
+  if [ -n "$PATHS_FROM0_ARG" ]; then
+    [ -z "$FILE_PATH" ] || fail "note-file: --paths-from0 не сочетается с позиционным путём" 1
+    [ "$FORGET_FLAG" != "1" ] || fail "note-file: пакетный --forget не поддерживается; снимай заявки по одной" 1
+    [ -n "$REPO_ROOT_ARG" ] || fail "note-file: --paths-from0 требует --repo-root" 1
+    [ -f "$PATHS_FROM0_ARG" ] || fail "note-file: файл списка '$PATHS_FROM0_ARG' не найден" 1
+    if [ ! -s "$PATHS_FROM0_ARG" ]; then
+      echo "note-file batch: 0 paths, nothing to claim"
+      exit 0
+    fi
+  else
+    [ -n "$REPO_ROOT_ARG" ] && fail "note-file: --repo-root применяется только с --paths-from0" 1
+    [ -z "$FILE_PATH" ] && fail "note-file: missing path argument" 1
+  fi
   NOTE_AGENT="${AGENT:-${IWE_AGENT:-claude-code}}"
   # WP-464: resolve via select_semaphore, not the singleton current-<agent>.ptr —
   # the ptr gets clobbered by a second concurrent `open` of the same agent
@@ -13956,13 +14007,215 @@ if [ "$CMD" = "note-file" ]; then
       fail "note-file: нет открытой сессии для агента '$NOTE_AGENT'. Для разовой операции открой housekeeping-сессию:\n  session-guard.sh open --housekeeping note-file --agent $NOTE_AGENT\n  session-guard.sh note-file <path> --agent $NOTE_AGENT\n  git commit ...   # <-- закоммить ДО close: close снимает семафор и коммит перестанет проходить scope gate\n  session-guard.sh close --housekeeping note-file --agent $NOTE_AGENT" 1
     fi
   fi
+  NOTE_LOCK_T0="${EPOCHREALTIME:-}"
   acquire_session_transition_lock "$SEM_FILE"
+  NOTE_LOCK_T1="${EPOCHREALTIME:-}"
   NOTE_AGENT=$(_family_record_agent "$SEM_FILE" "$NOTE_AGENT")
   LOCKED_NOTE_SESSION_ID=$(_locked_open_identity "$SEM_FILE" "$NOTE_AGENT" "${SESSION_ID_ARG:-}" || true)
   [ -n "$LOCKED_NOTE_SESSION_ID" ] \
     || fail "note-file: semaphore изменился после resolve или уже закрывается" 1
   [ "$(_close_delivery_state "$SEM_FILE" "$LOCKED_NOTE_SESSION_ID" || true)" = "none" ] \
     || fail "note-file: close transition уже подготовлен; scope frozen" 1
+  # WP-539 (И-2/И-3, peer session 2026-11-13-09 with Kimi and Codex): batch
+  # claim. One call per path cost ~0.37 s and a 385-path fast-forward overran
+  # the sync unit's 150 s budget 37 times in a row (12-13.11). Contract: every
+  # path is validated and normalized exactly like the single-path branch below
+  # BEFORE any mutation; the semaphore is re-read under the transition lock
+  # (held on FD 196 since acquire above) and replaced as a whole snapshot
+  # (fsync file, os.replace, fsync dir), so readers never see a partial batch.
+  # The directory fsync runs even when nothing is new: a retry after a failed
+  # fsync must prove durability, not just visibility.
+  if [ -n "$PATHS_FROM0_ARG" ]; then
+    BATCH_ROOT=$(git -C "$REPO_ROOT_ARG" rev-parse --show-toplevel 2>/dev/null) \
+      || fail "note-file batch: '$REPO_ROOT_ARG' не внутри git-репозитория" 1
+    BATCH_COMMON=$(git -C "$BATCH_ROOT" rev-parse --path-format=absolute --git-common-dir) \
+      || fail "note-file batch: не удалось определить git-common-dir для '$BATCH_ROOT'" 1
+    NOTE_BATCH_NEW=$(mktemp) || fail "note-file batch: mktemp failed" 1
+    python3 - "$SEM_FILE" "$PATHS_FROM0_ARG" "$REPO_ROOT_ARG" "$BATCH_ROOT" "$BATCH_COMMON" \
+        "$NOTE_BATCH_NEW" "$NOTE_LOCK_T0" "$NOTE_LOCK_T1" <<'PY' \
+      || { NOTE_BATCH_RC=$?; rm -f "$NOTE_BATCH_NEW"; exit "$NOTE_BATCH_RC"; }
+import json
+import os
+import subprocess
+import sys
+import tempfile
+import time
+
+sem, list_file, root_arg, root, common, new_out, lock_t0, lock_t1 = sys.argv[1:9]
+started = time.time()
+PREFIX = "note-file batch: "
+MAX_REASONS = 20
+
+
+def epoch(value):
+    # EPOCHREALTIME follows the locale decimal separator; empty on bash < 5.
+    try:
+        return float(value.replace(",", "."))
+    except ValueError:
+        return None
+
+
+def die(message, reasons=()):
+    sys.stderr.write(PREFIX + message + "\n")
+    for reason in list(reasons)[:MAX_REASONS]:
+        sys.stderr.write("  - " + reason + "\n")
+    sys.exit(1)
+
+
+real_root = os.path.realpath(root)
+if os.path.realpath(root_arg) != real_root:
+    die("--repo-root '%s' не является корнем репозитория (корень: %s)" % (root_arg, root))
+
+data = open(list_file, "rb").read()
+if not data.endswith(b"\0"):
+    die("последний элемент списка не завершён NUL — список, возможно, обрезан; ничего не заявлено")
+raw_items = data[:-1].split(b"\0")
+total = len(raw_items)
+
+
+def git_paths(*args):
+    result = subprocess.run(["git", "-C", root, *args], capture_output=True)
+    if result.returncode != 0:
+        return set()
+    return {os.fsdecode(p) for p in result.stdout.split(b"\0") if p}
+
+
+tracked = git_paths("ls-files", "-z") | git_paths("ls-tree", "-r", "-z", "--name-only", "HEAD")
+tracked_dirs = set()
+for path in tracked:
+    parent = os.path.dirname(path)
+    while parent and parent not in tracked_dirs:
+        tracked_dirs.add(parent)
+        parent = os.path.dirname(parent)
+
+
+def known(rel):
+    # Same three proofs as the single-path path_known_to_repo: disk, index, HEAD
+    # (a directory counts when it holds a tracked path, as git pathspecs do).
+    return os.path.lexists(os.path.join(real_root, rel)) or rel in tracked or rel in tracked_dirs
+
+
+repo_name = os.path.basename(root)
+reasons, rels, normalized, future = [], [], [], []
+for raw in raw_items:
+    path = os.fsdecode(raw)
+    shown = repr(path)
+    if not path:
+        reasons.append("пустой элемент списка")
+        continue
+    if "\n" in path or "\r" in path:
+        reasons.append(shown + ": перевод строки в имени")
+        continue
+    try:
+        path.encode("utf-8")
+    except UnicodeEncodeError:
+        reasons.append(shown + ": имя не в UTF-8")
+        continue
+    if os.path.isabs(path):
+        reasons.append(shown + ": абсолютный путь, ожидается путь от --repo-root")
+        continue
+    full = os.path.join(real_root, path)
+    is_dir = os.path.isdir(full)
+    if is_dir:
+        top = subprocess.run(["git", "-C", full, "rev-parse", "--show-toplevel"],
+                             capture_output=True, text=True)
+        if top.returncode != 0 or os.path.realpath(top.stdout.strip()) != real_root:
+            reasons.append(shown + ": каталог принадлежит другому репозиторию")
+            continue
+    rel = os.path.relpath(os.path.realpath(full), real_root)
+    if rel == ".":
+        reasons.append(shown + ": корень репозитория не является заявляемым путём")
+        continue
+    if rel == ".." or rel.startswith("../") or os.path.isabs(rel):
+        reasons.append(shown + ": указывает вне репозитория")
+        continue
+    if not known(rel):
+        stripped = rel[len(repo_name) + 1:] if rel.startswith(repo_name + "/") else rel
+        if stripped != rel:
+            normalized.append(rel)
+            rel = stripped
+        else:
+            future.append(rel)
+    if is_dir and not rel.endswith("/"):
+        rel += "/"
+    rels.append(rel)
+
+if reasons:
+    die("refused %d of %d paths; ничего не заявлено" % (len(reasons), total), reasons)
+
+if normalized:
+    sys.stderr.write(PREFIX + "%d путей с префиксом имени репозитория '%s/' записаны без него (первые: %s)\n"
+                     % (len(normalized), repo_name, ", ".join(normalized[:5])))
+if future:
+    sys.stderr.write(PREFIX + "%d путей пока нет в репозитории (ни на диске, ни в индексе, ни в HEAD); "
+                     "записаны как будущие файлы (первые: %s)\n" % (len(future), ", ".join(future[:5])))
+
+real_common = os.path.realpath(common)
+snapshot = open(sem, "rb").read()
+try:
+    existing = set(snapshot.decode("utf-8").split("\n"))
+except UnicodeDecodeError as exc:
+    die("семафор не читается как UTF-8 (%s); ничего не заявлено" % exc)
+added, new_rels = [], []
+for rel in rels:
+    v2 = "file_v2: " + json.dumps({"repo": real_common, "path": rel}, sort_keys=True)
+    if v2 in existing:
+        continue
+    existing.add(v2)
+    added.append("file: %s\n%s\n" % (rel, v2))
+    new_rels.append(rel)
+
+sem_dir = os.path.dirname(sem)
+if added:
+    body = snapshot
+    if body and not body.endswith(b"\n"):
+        body += b"\n"
+    body += "".join(added).encode("utf-8")
+    mode = os.stat(sem).st_mode & 0o7777
+    fd, tmp = tempfile.mkstemp(dir=sem_dir, prefix=".note-batch-")
+    try:
+        with os.fdopen(fd, "wb") as handle:
+            handle.write(body)
+            handle.flush()
+            os.fchmod(handle.fileno(), mode)
+            os.fsync(handle.fileno())
+        if open(sem, "rb").read() != snapshot:
+            die("семафор изменился во время пакета; ничего не заявлено, повтори вызов")
+        os.replace(tmp, sem)
+    finally:
+        if os.path.exists(tmp):
+            os.unlink(tmp)
+# Written before the directory fsync: if that fsync fails the claims are
+# already visible, and the caller's intent-gate observation must not be lost.
+with open(new_out, "wb") as handle:
+    handle.write(b"".join(os.fsencode(rel) + b"\0" for rel in new_rels))
+try:
+    dir_fd = os.open(sem_dir, os.O_RDONLY)
+    try:
+        os.fsync(dir_fd)
+    finally:
+        os.close(dir_fd)
+except OSError as exc:
+    die("claims visible but not durable (directory fsync failed: %s); повтори вызов" % exc)
+
+t0, t1 = epoch(lock_t0), epoch(lock_t1)
+lock_wait = "%d ms" % ((t1 - t0) * 1000) if t0 is not None and t1 is not None else "n/a"
+total_ms = (time.time() - (t0 if t0 is not None else started)) * 1000
+sys.stderr.write(PREFIX + "%d paths, %d new, semaphore %d lines, lock wait %s, total %d ms\n"
+                 % (total, len(new_rels), snapshot.count(b"\n") + 2 * len(new_rels), lock_wait, total_ms))
+print("Noted in scope (batch): %d new of %d paths" % (len(new_rels), total))
+PY
+    _note_file_renew_lease "$SEM_FILE"
+    if [ -s "$NOTE_BATCH_NEW" ] && intent_gate_enabled; then
+      release_session_transition_lock || true
+      NOTE_BATCH_REPO=$(intent_gate_repo_name "$BATCH_ROOT")
+      while IFS= read -r -d '' NOTE_BATCH_REL; do
+        intent_gate_observe "$SEM_FILE" "$NOTE_BATCH_REPO:$NOTE_BATCH_REL" "$NOTE_AGENT" || true
+      done < "$NOTE_BATCH_NEW"
+    fi
+    rm -f "$NOTE_BATCH_NEW"
+    exit 0
+  fi
   # WP-484 (21.09, пир-сессия 2026-09-21-08): --forget снимает заявку на путь,
   # которого больше нигде нет. Живой случай: `report-draft.md` создан хуком Write
   # (заявка ставится сама), затем переименован в `report.md` до первого коммита;
@@ -14315,22 +14568,7 @@ print(os.path.relpath(f, r))
   # без нового отдельного вызова. Best-effort: неудача не блокирует note-file
   # (та же атомарная запись, что renew -- temp-файл + mv, проверка что семафор
   # ещё жив на случай гонки с параллельным close).
-  _refresh_owner_pid "$SEM_FILE"
-  _LEASE_TMP="${SEM_FILE}.lease.tmp.$$"
-  {
-    echo "renewed_at: $(now_iso)"
-    echo "session_id: $(grep "^session_id: " "$SEM_FILE" | cut -d' ' -f2- || echo unknown)"
-  } > "$_LEASE_TMP" 2>/dev/null
-  # Проверка [ -f "$SEM_FILE" ] вплотную к mv (не раньше) -- сужает, но не
-  # закрывает TOCTOU-окно с параллельным close (cold-review Ф133, High): mv
-  # переименовывает .lease по имени независимо от текущего состояния
-  # $SEM_FILE, тот же класс окна, что и в renew выше, только без его fail.
-  if [ -s "$_LEASE_TMP" ] && [ -f "$SEM_FILE" ]; then
-    mv "$_LEASE_TMP" "${SEM_FILE}.lease" 2>/dev/null || rm -f "$_LEASE_TMP"
-  else
-    echo "note-file: lease renewal skipped (сессия могла закрыться параллельно)" >&2
-    rm -f "$_LEASE_TMP"
-  fi
+  _note_file_renew_lease "$SEM_FILE"
 
   echo "Noted in scope: $REL_PATH"
   if [ "$NOTE_NEW_CLAIM" = true ] && intent_gate_enabled; then
