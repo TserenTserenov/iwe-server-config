@@ -604,7 +604,12 @@ let
       prev=$(${pkgs.coreutils}/bin/tail -n 1 "$log" 2>/dev/null) || true
       case "$prev" in ""|*[!0-9]*) prev=0 ;; esac
       keep=""
-      if [ $((now - prev)) -le 1200 ]; then
+      # Chain window: a caller whose own failures are spaced by its timer
+      # period plus a kill (iwe-tsekh1-sync: 20 min ticks, 600 s timeout)
+      # widens it, or every failure would restart the chain at 1 (WP-539 Ф22).
+      chain_window="''${IWE_ALERT_CHAIN_WINDOW_SEC:-1200}"
+      case "$chain_window" in ""|*[!0-9]*) chain_window=1200 ;; esac
+      if [ $((now - prev)) -le "$chain_window" ]; then
         keep=$(awk -v c="$((now - 14400))" '$1 ~ /^[0-9]+$/ && $1 >= c' "$log" 2>/dev/null) || true
       fi
       { if [ -n "$keep" ]; then ${pkgs.coreutils}/bin/printf '%s\n' "$keep"; fi; echo "$now"; } > "$log.tmp" 2>/dev/null \
@@ -1003,8 +1008,24 @@ in
       serviceConfig = commonServiceConfig // {
         WorkingDirectory = "${iwe}/DS-my-strategy";
         ExecStart = "${pkgs.bash}/bin/bash ${iwe}/DS-my-strategy/scripts/tsekh1-git-sync.sh";
-        # У guard есть общий бюджет до 15 с на повтор занятой блокировки.
-        TimeoutStartSec = 150;
+        # WP-539 (И-2/И-3, пир-сессия 2026-11-13-09): 150 -> 600 с, без
+        # запланированного возврата. 12-13.11 заявка 385 путей по одному
+        # процессу на путь не уложилась в 150 с 37 раз подряд. Пакетная
+        # заявка снимает причину; 600 с остаётся запасом на случай отката
+        # пакета. Менять бюджет — отдельным решением по длительностям из
+        # журнала (строка «scope claim: M paths in S s»).
+        TimeoutStartSec = 600;
+        # Обрыв по таймауту (и любое иное аварийное завершение) раньше был
+        # немым: SIGTERM обрывает скрипт до записи состояния и тревоги, а
+        # общего OnFailure здесь нет намеренно (см. выше). exit-code —
+        # ожидаемый отказ, его тревожит сам скрипт; success — норма.
+        ExecStopPost = "${pkgs.writeShellScript "iwe-tsekh1-sync-stop-alert" ''
+          case "$SERVICE_RESULT" in
+            success|exit-code) exit 0 ;;
+          esac
+          echo "iwe-tsekh1-sync ended abnormally: SERVICE_RESULT=$SERVICE_RESULT EXIT_CODE=$EXIT_CODE EXIT_STATUS=$EXIT_STATUS"
+          IWE_ALERT_CHAIN_WINDOW_SEC=1800 exec ${alertScript} iwe-tsekh1-sync.service
+        ''}";
       };
       # hostname labels sync state; cmp proves that a dirty mirror matches the
       # published path list before canon-refresh may recover it. Neither tool
