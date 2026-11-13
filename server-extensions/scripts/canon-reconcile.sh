@@ -80,6 +80,15 @@ if [ "$CURRENT_BRANCH" != "$BRANCH" ]; then
   exit 2
 fi
 
+# One check before every mutation below: the trial merge, the stash and both
+# fast-forwards (WP-530 Ф150).
+# shellcheck source=lib/sync-owned-canon.sh
+. "$SCRIPT_DIR/lib/sync-owned-canon.sh" || { echo "canon-reconcile: cannot load $SCRIPT_DIR/lib/sync-owned-canon.sh; nothing was done" >&2; exit 1; }
+if sync_owned_canon .; then
+  echo "canon-reconcile: deferred — $SYNC_OWNED_CANON_NOTE"
+  exit 0
+fi
+
 # Same lock directory as canon-refresh.sh/git-dirty-guard.sh (not a separate
 # namespace) so all three serialize against each other for free — whichever
 # acquires it first runs to completion before the next's mkdir can succeed.

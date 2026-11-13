@@ -80,13 +80,25 @@ export GIT_GRAFT_FILE=/dev/null/iwe-no-grafts
 SCRIPT_DIR="${BASH_SOURCE[0]}"; case "$SCRIPT_DIR" in */*) SCRIPT_DIR="${SCRIPT_DIR%/*}" ;; *) SCRIPT_DIR=. ;; esac; case "$SCRIPT_DIR" in /*) ;; *) SCRIPT_DIR="./$SCRIPT_DIR" ;; esac; SCRIPT_DIR=$(cd "$SCRIPT_DIR" >/dev/null 2>&1 && pwd && printf x); SCRIPT_DIR="${SCRIPT_DIR%x}"; SCRIPT_DIR="${SCRIPT_DIR%$'\n'}"   # computed before the cd below, without dirname (a minimal PATH has none) and without CDPATH; the marker x keeps a newline at the end of a directory name: the lock library is found next to this script
 # shellcheck source=lib/automation-contract.sh
 . "$SCRIPT_DIR/lib/automation-contract.sh"
+# shellcheck source=lib/sync-owned-canon.sh
+# Fail closed: without the predicate the main checkout would be merged unclaimed.
+. "$SCRIPT_DIR/lib/sync-owned-canon.sh" || { echo "canon-refresh: cannot load $SCRIPT_DIR/lib/sync-owned-canon.sh; nothing was done" >&2; exit 1; }
 
 if [ -z "${1:-}" ]; then
-  echo "usage: canon-refresh.sh <repo-path> [branch]" >&2
+  echo "usage: canon-refresh.sh <repo-path> [branch] [--owner-sync]" >&2
   exit 2
 fi
 REPO="$1"
 BRANCH="${2:-}"
+# --owner-sync: passed only by tsekh1-git-sync.sh, the owner of the main
+# DS-my-strategy checkout. It keeps the contract-mirror cleanup there; the
+# fast-forward stays deferred because the owner merges itself after its claim.
+OWNER_SYNC=false
+case "${3:-}" in
+  "") ;;
+  --owner-sync) OWNER_SYNC=true ;;
+  *) echo "canon-refresh: unknown argument '$3'" >&2; exit 2 ;;
+esac
 
 cd "$REPO" 2>/dev/null || { echo "canon-refresh: cannot cd to $REPO" >&2; exit 2; }
 git rev-parse --is-inside-work-tree >/dev/null 2>&1 || { echo "canon-refresh: $REPO is not a git repo" >&2; exit 2; }
@@ -460,6 +472,13 @@ if ! is_clean; then
   if [ -n "$REMOTE_OID_FOR_RECOVERY" ] && try_automation_mirror_recovery "$REMOTE_OID_FOR_RECOVERY"; then
     exit 0
   fi
+  # The contract-mirror discard rewrites files on disk (git restore), so the
+  # main DS-my-strategy checkout stops here; the reset --soft above changes no
+  # file and stays allowed (WP-530 Ф150).
+  if [ "$OWNER_SYNC" != true ] && sync_owned_canon .; then
+    echo "canon-refresh: deferred — $SYNC_OWNED_CANON_NOTE"
+    exit 0
+  fi
   if [ -z "$REMOTE_OID_FOR_RECOVERY" ] || ! try_contract_mirror_discard "$REMOTE_OID_FOR_RECOVERY"; then
     echo "canon-refresh: tree not clean — nothing to do (git-dirty-guard.sh/pilot own that case)"
     exit 0
@@ -476,6 +495,11 @@ fi
 
 if ! git merge-base --is-ancestor HEAD "origin/$BRANCH" 2>/dev/null; then
   echo "canon-refresh: HEAD has commit(s) origin/$BRANCH doesn't have — not a pure staleness case, leaving untouched"
+  exit 0
+fi
+
+if sync_owned_canon .; then
+  echo "canon-refresh: deferred — $SYNC_OWNED_CANON_NOTE"
   exit 0
 fi
 
