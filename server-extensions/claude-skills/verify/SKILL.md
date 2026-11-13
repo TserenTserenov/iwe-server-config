@@ -446,7 +446,7 @@ best-effort, ДО вывода пользователю. Строку `verdict: 
 сначала записать инструментом записи файлов в `$HOME/IWE/.iwe-runtime/verify/<slug-проверки>.evidence.txt`
 (имя артефакта не подставлять в кавычки команды):
 ```bash
-python3 "${IWE_SCRIPTS:-$HOME/IWE/DS-my-strategy/scripts}/post-culture-fact.py" \
+python3 "${IWE_WORKSPACE:-$HOME/IWE}/${IWE_GOVERNANCE_REPO:-DS-my-strategy}/scripts/post-culture-fact.py" \
   --element M13 --mode record --evidence "$(cat "$HOME/IWE/.iwe-runtime/verify/<slug-проверки>.evidence.txt")" \
   >/dev/null 2>>"${IWE_RUNTIME_DIR:-$HOME/IWE/.iwe-runtime}/culture-fact-errors.log" || true
 ```

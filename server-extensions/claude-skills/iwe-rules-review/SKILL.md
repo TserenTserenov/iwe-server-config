@@ -104,7 +104,7 @@ python3 "$HOME/IWE/scripts/hot-budget-ratchet.py" waivers > "<папка отч�
 в §4 для факта НЕ требуется — применение правок в DP.M.008 отдельно от самого факта
 «ответил содержательно»:
 ```bash
-python3 "${IWE_SCRIPTS:-$HOME/IWE/DS-my-strategy/scripts}/post-culture-fact.py" \
+python3 "${IWE_WORKSPACE:-$HOME/IWE}/${IWE_GOVERNANCE_REPO:-DS-my-strategy}/scripts/post-culture-fact.py" \
   --element M17 --mode record --evidence "<N нарушений>/<M кандидатов> в ревью W<N>" \
   >/dev/null 2>>"${IWE_RUNTIME_DIR:-$HOME/IWE/.iwe-runtime}/culture-fact-errors.log" || true
 ```
