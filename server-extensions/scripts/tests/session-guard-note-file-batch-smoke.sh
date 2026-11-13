@@ -106,6 +106,27 @@ nul_list "$LIST" inbox/agent/tasks/RUN-2.md
 guard note-file --paths-from0 "$LIST" --repo-root "$GOV/docs" --agent fixture >/dev/null 2>&1; RC=$?
 check "--repo-root below the repository root: refused" "1" "$RC"
 
+# --- tracked symlinks are claimed by their own path --------------------------
+ln -s a.md "$GOV/docs/in-link"
+ln -s /etc/hosts "$GOV/docs/ext-link"
+nul_list "$LIST" docs/in-link docs/ext-link
+guard note-file --paths-from0 "$LIST" --repo-root "$GOV" --agent fixture >/dev/null 2>&1; RC=$?
+check "symlinks: batch succeeds" "0" "$RC"
+check "symlink claimed by its own path" "1" "$(grep -cxF 'file: docs/in-link' "$SEM")"
+check "outward symlink claimed by its own path" "1" "$(grep -cxF 'file: docs/ext-link' "$SEM")"
+
+# --- a file inside a nested checkout is refused, not claimed on the outer repo
+mkdir -p "$GOV/nested"
+git -C "$GOV/nested" init -q
+echo n > "$GOV/nested/f.md"
+cp "$SEM" "$TEST_ROOT/sem.before"
+nul_list "$LIST" nested/f.md
+OUT=$(guard note-file --paths-from0 "$LIST" --repo-root "$GOV" --agent fixture 2>&1); RC=$?
+check "nested-repo file: refused" "1" "$RC"
+check "nested-repo file: reason named" "1" "$(printf '%s\n' "$OUT" | grep -c 'вложенному репозиторию')"
+check "nested-repo file: semaphore byte-identical" same "$(same_bytes)"
+cp "$SEM" "$TEST_ROOT/sem.before"
+
 # --- argument contract -------------------------------------------------------
 guard note-file --paths-from0 "$LIST" --agent fixture >/dev/null 2>&1; RC=$?
 check "missing --repo-root: refused" "1" "$RC"

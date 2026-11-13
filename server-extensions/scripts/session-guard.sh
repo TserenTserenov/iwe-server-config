@@ -14096,6 +14096,30 @@ def known(rel):
 
 
 repo_name = os.path.basename(root)
+owner_cache = {}
+
+
+def nested_repo_owner(directory):
+    # The nearest ancestor holding .git must be the batch root itself; a file
+    # inside a nested checkout belongs to that checkout, not to --repo-root.
+    walked, owner, cur = [], None, directory
+    while True:
+        if cur in owner_cache:
+            owner = owner_cache[cur]
+            break
+        walked.append(cur)
+        if cur == real_root or os.path.lexists(os.path.join(cur, ".git")):
+            owner = cur
+            break
+        parent = os.path.dirname(cur)
+        if parent == cur:
+            break
+        cur = parent
+    for seen in walked:
+        owner_cache[seen] = owner
+    return owner is not None and owner != real_root
+
+
 reasons, rels, normalized, future = [], [], [], []
 for raw in raw_items:
     path = os.fsdecode(raw)
@@ -14115,19 +14139,28 @@ for raw in raw_items:
         reasons.append(shown + ": абсолютный путь, ожидается путь от --repo-root")
         continue
     full = os.path.join(real_root, path)
-    is_dir = os.path.isdir(full)
+    # A tracked symlink is a git path of its own: never follow its last
+    # component, or the claim names the target and misses the changed path
+    # (an outward link would even refuse the whole batch).
+    is_link = os.path.islink(full)
+    is_dir = os.path.isdir(full) and not is_link
     if is_dir:
         top = subprocess.run(["git", "-C", full, "rev-parse", "--show-toplevel"],
                              capture_output=True, text=True)
         if top.returncode != 0 or os.path.realpath(top.stdout.strip()) != real_root:
             reasons.append(shown + ": каталог принадлежит другому репозиторию")
             continue
-    rel = os.path.relpath(os.path.realpath(full), real_root)
+    resolved = (os.path.join(os.path.realpath(os.path.dirname(full)), os.path.basename(full))
+                if is_link else os.path.realpath(full))
+    rel = os.path.relpath(resolved, real_root)
     if rel == ".":
         reasons.append(shown + ": корень репозитория не является заявляемым путём")
         continue
     if rel == ".." or rel.startswith("../") or os.path.isabs(rel):
         reasons.append(shown + ": указывает вне репозитория")
+        continue
+    if not is_dir and nested_repo_owner(os.path.dirname(os.path.join(real_root, rel))):
+        reasons.append(shown + ": файл принадлежит вложенному репозиторию")
         continue
     if not known(rel):
         stripped = rel[len(repo_name) + 1:] if rel.startswith(repo_name + "/") else rel
@@ -14185,8 +14218,9 @@ if added:
     finally:
         if os.path.exists(tmp):
             os.unlink(tmp)
-# Written before the directory fsync: if that fsync fails the claims are
-# already visible, and the caller's intent-gate observation must not be lost.
+# Written before the directory fsync. Known limit: if that fsync fails the
+# caller exits non-zero and skips the intent-gate observation of these claims;
+# a retry sees them as already claimed (0 new) and does not observe them either.
 with open(new_out, "wb") as handle:
     handle.write(b"".join(os.fsencode(rel) + b"\0" for rel in new_rels))
 try:
