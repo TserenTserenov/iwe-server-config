@@ -41,13 +41,15 @@ repos:
   - repo_id: MC-sessions
     class: undecided
     checkouts:
-      - {host: mac, path: MC-sessions}
+      - {host: mac, path: MC-sessions, class: reader, shared_lock: ds-commit}
       - {host: tsekh-1, path: MC-sessions}
     expected_branch: main
     upstream: origin/main
-    decision_owner: null
-    executor: null
-    mutation_mechanism: "ожидает Б4 (общий замок)"
+    decision_owner: {ref: "поручение пилота 13.11.2026 (пир-сессия 2026-11-13-20-wp539-root-autopull-mac): на Маке автоподтягивание и дневная тревога", scope: checkout}
+    executor: "Мак — scripts/reader-copies-sync.py каждые 5 мин под ds-commit.lock (неблокирующе); Цех — нет"
+    mutation_mechanism: "Мак: сессии коммитят здесь, шлюз публикует и сводит копию с origin; пока есть свои неопубликованные коммиты, перемотка в блоке (штатно), иначе ff-only чистой копии под общим замком"
+    note: "Двойная роль на Маке: в копию коммитят сессии (писатель) и её перематывает reader-copies-sync (читатель). Класс reader здесь — правило автоматической перемотки, не утверждение «только читается»; отдельного класса для такой роли исполнитель пока не знает. Тревога о «впереди» — через 120 мин (convergence-alarm.py AHEAD_GRACE_MIN)."
+    thresholds: {fetch_max_age_min: null, behind_max_commits: null, behind_observed_for_min: 30, block_resolution_max_age_min: null}
     note: "Мак: diverged +3/-8 на 29.10; Цех: копию никто не двигает (брокер обновляет только ссылки)"
   - repo_id: iwe-root
     class: undecided
@@ -59,6 +61,7 @@ repos:
     decision_owner: {ref: "поручение пилота 13.11.2026 (пир-сессия 2026-11-13-20-wp539-root-autopull-mac): автоподтягивание корня Мака; исключение из AR.006 для этой копии", scope: checkout}
     executor: "Мак — scripts/reader-copies-sync.py каждые 5 мин под ds-commit.lock (неблокирующе); ссылку получает refs-sync-broker"
     mutation_mechanism: "Мак: ff-only чистой копии на main под ds-commit.lock, ветка перечитывается до и после перемотки; ручные git checkout/commit агентов и Pull-on-Touch замок не берут — остаточное окно гонки принято пилотом (проигравший получает отказ index.lock, перемотка повторится через 5 мин). Цех: корень — зеркало Nix, не git-копия"
+    thresholds: {fetch_max_age_min: null, behind_max_commits: null, behind_observed_for_min: 30, block_resolution_max_age_min: null}
     note: "До 13.11 корень Мака двигали только ручные ff агентов и сведение шлюза после своей публикации; слияния PR на GitHub его не двигали (13.11: −14 коммитов за 09:57–19:18). Работающие сессии видят новые скрипты и хуки сразу после перемотки — так было и при ручном ff."
   - repo_id: PACK-MIM
     class: reader
@@ -220,13 +223,14 @@ repos:
   - repo_id: activity-hub
     class: working
     checkouts:
-      - {host: mac, path: DS-IT-systems/activity-hub}
+      - {host: mac, path: DS-IT-systems/activity-hub, class: reader}
       - {host: tsekh-1, path: DS-IT-systems/activity-hub, class: service, written_here: true}
     expected_branch: main
     upstream: origin/main
-    decision_owner: {ref: "решение пилота 03.11.2026, пир-сессия 2026-11-03-12-wp539-sync-processes-audit (proposals.md)", scope: checkout}
-    executor: "Цех — iwe-verified-sync перед запуском службы; Мак — нет (рабочая копия)"
-    mutation_mechanism: "сессии и службы коммитят; Цех отправляет то, что впереди"
+    decision_owner: {ref: "решение пилота 03.11.2026 (Цех — служба); поручение пилота 13.11.2026 (пир-сессия 2026-11-13-20-wp539-root-autopull-mac): на Маке автоподтягивание и дневная тревога", scope: checkout}
+    executor: "Цех — iwe-verified-sync перед запуском службы; Мак — scripts/reader-copies-sync.py каждые 5 мин (читательская копия с 13.11)"
+    mutation_mechanism: "Цех: службы коммитят и отправляют то, что впереди. Мак: ff-only чистой копии на main; свои коммиты на Маке блокируют перемотку до публикации (видно в журнале и тревоге)"
+    thresholds: {fetch_max_age_min: null, behind_max_commits: null, behind_observed_for_min: 30, block_resolution_max_age_min: null}
   - repo_id: iwe-server
     class: working
     checkouts:
@@ -240,13 +244,14 @@ repos:
   - repo_id: knowledge-mcp
     class: working
     checkouts:
-      - {host: mac, path: DS-MCP/knowledge-mcp}
+      - {host: mac, path: DS-MCP/knowledge-mcp, class: reader}
       - {host: tsekh-1, path: DS-MCP/knowledge-mcp, class: service, written_here: true}
     expected_branch: main
     upstream: origin/main
-    decision_owner: {ref: "решение пилота 03.11.2026, пир-сессия 2026-11-03-12-wp539-sync-processes-audit (proposals.md)", scope: checkout}
-    executor: "Цех — iwe-verified-sync перед запуском службы; Мак — нет (рабочая копия)"
-    mutation_mechanism: "сессии и службы коммитят; Цех отправляет то, что впереди"
+    decision_owner: {ref: "решение пилота 03.11.2026 (Цех — служба); поручение пилота 13.11.2026 (пир-сессия 2026-11-13-20-wp539-root-autopull-mac): на Маке автоподтягивание и дневная тревога", scope: checkout}
+    executor: "Цех — iwe-verified-sync перед запуском службы; Мак — scripts/reader-copies-sync.py каждые 5 мин (читательская копия с 13.11)"
+    mutation_mechanism: "Цех: службы коммитят и отправляют то, что впереди. Мак: ff-only чистой копии на main; свои коммиты на Маке блокируют перемотку до публикации (видно в журнале и тревоге)"
+    thresholds: {fetch_max_age_min: null, behind_max_commits: null, behind_observed_for_min: 30, block_resolution_max_age_min: null}
   - repo_id: DS-autonomous-agents
     class: working
     checkouts:

@@ -68,3 +68,10 @@ repos:
     optional: true  # Mac only
     remote: origin
     refspec: "+refs/heads/master:refs/remotes/origin/master"
+  # WP-539, поручение пилота 13.11: рабочие копии сервисов Мака стали читательскими.
+  - path: DS-MCP/knowledge-mcp
+    remote: origin
+    refspec: "+refs/heads/main:refs/remotes/origin/main"
+  - path: DS-IT-systems/activity-hub
+    remote: origin
+    refspec: "+refs/heads/main:refs/remotes/origin/main"

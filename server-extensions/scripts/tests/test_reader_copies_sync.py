@@ -162,6 +162,7 @@ class SharedLockTest(CopyFixture):
         finally:
             holder.kill()
             holder.wait()
+            holder.stdout.close()
         self.assertEqual(head(self.copy), before)
 
 

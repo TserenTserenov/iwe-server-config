@@ -31,8 +31,10 @@
     {
       "checkouts": [
         {
+          "class": "reader",
           "host": "mac",
-          "path": "MC-sessions"
+          "path": "MC-sessions",
+          "shared_lock": "ds-commit"
         },
         {
           "host": "tsekh-1",
@@ -40,12 +42,21 @@
         }
       ],
       "class": "undecided",
-      "decision_owner": null,
-      "executor": null,
+      "decision_owner": {
+        "ref": "поручение пилота 13.11.2026 (пир-сессия 2026-11-13-20-wp539-root-autopull-mac): на Маке автоподтягивание и дневная тревога",
+        "scope": "checkout"
+      },
+      "executor": "Мак — scripts/reader-copies-sync.py каждые 5 мин под ds-commit.lock (неблокирующе); Цех — нет",
       "expected_branch": "main",
-      "mutation_mechanism": "ожидает Б4 (общий замок)",
+      "mutation_mechanism": "Мак: сессии коммитят здесь, шлюз публикует и сводит копию с origin; пока есть свои неопубликованные коммиты, перемотка в блоке (штатно), иначе ff-only чистой копии под общим замком",
       "note": "Мак: diverged +3/-8 на 29.10; Цех: копию никто не двигает (брокер обновляет только ссылки)",
       "repo_id": "MC-sessions",
+      "thresholds": {
+        "behind_max_commits": null,
+        "behind_observed_for_min": 30,
+        "block_resolution_max_age_min": null,
+        "fetch_max_age_min": null
+      },
       "upstream": "origin/main"
     },
     {
@@ -72,6 +83,12 @@
       "mutation_mechanism": "Мак: ff-only чистой копии на main под ds-commit.lock, ветка перечитывается до и после перемотки; ручные git checkout/commit агентов и Pull-on-Touch замок не берут — остаточное окно гонки принято пилотом (проигравший получает отказ index.lock, перемотка повторится через 5 мин). Цех: корень — зеркало Nix, не git-копия",
       "note": "До 13.11 корень Мака двигали только ручные ff агентов и сведение шлюза после своей публикации; слияния PR на GitHub его не двигали (13.11: −14 коммитов за 09:57–19:18). Работающие сессии видят новые скрипты и хуки сразу после перемотки — так было и при ручном ff.",
       "repo_id": "iwe-root",
+      "thresholds": {
+        "behind_max_commits": null,
+        "behind_observed_for_min": 30,
+        "block_resolution_max_age_min": null,
+        "fetch_max_age_min": null
+      },
       "upstream": "origin/main"
     },
     {
@@ -440,6 +457,7 @@
     {
       "checkouts": [
         {
+          "class": "reader",
           "host": "mac",
           "path": "DS-IT-systems/activity-hub"
         },
@@ -452,13 +470,19 @@
       ],
       "class": "working",
       "decision_owner": {
-        "ref": "решение пилота 03.11.2026, пир-сессия 2026-11-03-12-wp539-sync-processes-audit (proposals.md)",
+        "ref": "решение пилота 03.11.2026 (Цех — служба); поручение пилота 13.11.2026 (пир-сессия 2026-11-13-20-wp539-root-autopull-mac): на Маке автоподтягивание и дневная тревога",
         "scope": "checkout"
       },
-      "executor": "Цех — iwe-verified-sync перед запуском службы; Мак — нет (рабочая копия)",
+      "executor": "Цех — iwe-verified-sync перед запуском службы; Мак — scripts/reader-copies-sync.py каждые 5 мин (читательская копия с 13.11)",
       "expected_branch": "main",
-      "mutation_mechanism": "сессии и службы коммитят; Цех отправляет то, что впереди",
+      "mutation_mechanism": "Цех: службы коммитят и отправляют то, что впереди. Мак: ff-only чистой копии на main; свои коммиты на Маке блокируют перемотку до публикации (видно в журнале и тревоге)",
       "repo_id": "activity-hub",
+      "thresholds": {
+        "behind_max_commits": null,
+        "behind_observed_for_min": 30,
+        "block_resolution_max_age_min": null,
+        "fetch_max_age_min": null
+      },
       "upstream": "origin/main"
     },
     {
@@ -488,6 +512,7 @@
     {
       "checkouts": [
         {
+          "class": "reader",
           "host": "mac",
           "path": "DS-MCP/knowledge-mcp"
         },
@@ -500,13 +525,19 @@
       ],
       "class": "working",
       "decision_owner": {
-        "ref": "решение пилота 03.11.2026, пир-сессия 2026-11-03-12-wp539-sync-processes-audit (proposals.md)",
+        "ref": "решение пилота 03.11.2026 (Цех — служба); поручение пилота 13.11.2026 (пир-сессия 2026-11-13-20-wp539-root-autopull-mac): на Маке автоподтягивание и дневная тревога",
         "scope": "checkout"
       },
-      "executor": "Цех — iwe-verified-sync перед запуском службы; Мак — нет (рабочая копия)",
+      "executor": "Цех — iwe-verified-sync перед запуском службы; Мак — scripts/reader-copies-sync.py каждые 5 мин (читательская копия с 13.11)",
       "expected_branch": "main",
-      "mutation_mechanism": "сессии и службы коммитят; Цех отправляет то, что впереди",
+      "mutation_mechanism": "Цех: службы коммитят и отправляют то, что впереди. Мак: ff-only чистой копии на main; свои коммиты на Маке блокируют перемотку до публикации (видно в журнале и тревоге)",
       "repo_id": "knowledge-mcp",
+      "thresholds": {
+        "behind_max_commits": null,
+        "behind_observed_for_min": 30,
+        "block_resolution_max_age_min": null,
+        "fetch_max_age_min": null
+      },
       "upstream": "origin/main"
     },
     {
