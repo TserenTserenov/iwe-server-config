@@ -1021,7 +1021,11 @@ in
         # ожидаемый отказ, его тревожит сам скрипт; success — норма.
         ExecStopPost = "${pkgs.writeShellScript "iwe-tsekh1-sync-stop-alert" ''
           case "$SERVICE_RESULT" in
-            success|exit-code) exit 0 ;;
+            success) exit 0 ;;
+            # Exit status 1 is the script's own accounted refusal (it alerts
+            # itself). Any other status (2 after a broken self-update, 126/127
+            # missing file) never reached the script's alert code.
+            exit-code) [ "$EXIT_STATUS" != 1 ] || exit 0 ;;
           esac
           echo "iwe-tsekh1-sync ended abnormally: SERVICE_RESULT=$SERVICE_RESULT EXIT_CODE=$EXIT_CODE EXIT_STATUS=$EXIT_STATUS"
           IWE_ALERT_CHAIN_WINDOW_SEC=1800 exec ${alertScript} iwe-tsekh1-sync.service
