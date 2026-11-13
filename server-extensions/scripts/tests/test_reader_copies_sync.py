@@ -1,6 +1,7 @@
 """Tests for scripts/reader-copies-sync.py (WP-539): which reader copies move and which stay blocked."""
 
 import importlib.util
+import os
 import subprocess
 import sys
 import tempfile
@@ -23,7 +24,9 @@ def head(repo):
                           capture_output=True, text=True).stdout.strip()
 
 
-class SyncOneTest(unittest.TestCase):
+class CopyFixture(unittest.TestCase):
+    """An origin and its clone; the clone has already fetched (the broker's job)."""
+
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         base = Path(self.tmp.name)
@@ -44,6 +47,9 @@ class SyncOneTest(unittest.TestCase):
 
     def outcome(self, dry_run=False):
         return sync.sync_one(self.copy, "main", "origin/main", dry_run)
+
+
+class SyncOneTest(CopyFixture):
 
     def test_current_stays(self):
         self.assertEqual(self.outcome(), "current")
@@ -100,6 +106,63 @@ class SyncOneTest(unittest.TestCase):
 
     def test_missing_upstream_ref_blocks(self):
         self.assertTrue(sync.sync_one(self.copy, "main", "origin/nope", False).startswith("BLOCKED нет ссылки"))
+
+    def test_branch_switched_between_check_and_merge_blocks(self):
+        """A manual checkout that lands after the first checks (no lock) is caught right before the merge."""
+        self.advance_origin()
+        before = head(self.copy)
+        real = sync.ignored_overwritten
+
+        def switch_then_check(repo, target):
+            run(self.copy, "switch", "-q", "-c", "topic")
+            return real(repo, target)
+
+        sync.ignored_overwritten = switch_then_check
+        try:
+            self.assertEqual(self.outcome(), "BLOCKED ветка или HEAD сменились во время проверки")
+        finally:
+            sync.ignored_overwritten = real
+        self.assertEqual(head(self.copy), before)
+
+
+class SharedLockTest(CopyFixture):
+    """The Mac root (`shared_lock: ds-commit`): moved only while the shared lock is free."""
+
+    def setUp(self):
+        super().setUp()
+        self.lock_file = Path(self.tmp.name) / "ds-commit.lock"
+        self.old_env = os.environ.get("DS_COMMIT_LOCK_FILE")
+        os.environ["DS_COMMIT_LOCK_FILE"] = str(self.lock_file)
+
+    def tearDown(self):
+        if self.old_env is None:
+            os.environ.pop("DS_COMMIT_LOCK_FILE", None)
+        else:
+            os.environ["DS_COMMIT_LOCK_FILE"] = self.old_env
+        super().tearDown()
+
+    def shared_outcome(self):
+        return sync.sync_shared(self.copy, Path(self.tmp.name), "main", "origin/main", False)
+
+    def test_free_lock_moves(self):
+        self.advance_origin()
+        self.assertEqual(self.shared_outcome(), "moved 1")
+        self.assertEqual(head(self.copy), head(self.origin))
+
+    def test_busy_lock_skips_without_touching_copy(self):
+        self.advance_origin()
+        before = head(self.copy)
+        holder = subprocess.Popen([sys.executable, "-c", (
+            "import fcntl, sys, time\n"
+            "f = open(sys.argv[1], 'a'); fcntl.flock(f, fcntl.LOCK_EX); print('held', flush=True); time.sleep(30)\n"
+        ), str(self.lock_file)], stdout=subprocess.PIPE, text=True)
+        try:
+            self.assertEqual(holder.stdout.readline().strip(), "held")
+            self.assertTrue(self.shared_outcome().startswith("SKIP общий замок занят"))
+        finally:
+            holder.kill()
+            holder.wait()
+        self.assertEqual(head(self.copy), before)
 
 
 if __name__ == "__main__":

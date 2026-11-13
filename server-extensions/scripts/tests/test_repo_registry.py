@@ -206,6 +206,40 @@ class CheckoutClassTest(unittest.TestCase):
         self.assertIn("класс service без записанного решения", errors[0])
 
 
+class SharedLockTest(unittest.TestCase):
+    def root_reader(self, **extra):
+        data = copy.deepcopy(VALID)
+        data["repos"][1]["decision_owner"] = {"ref": "pilot 13.11", "scope": "checkout"}
+        data["repos"][1]["checkouts"][0].update({"class": "reader", **extra})
+        return data
+
+    def test_reader_with_shared_lock_is_valid_and_selected(self):
+        data = self.root_reader(shared_lock="ds-commit")
+        self.assertEqual(repo_registry.validate(data), [])
+        picked = repo_registry.checkouts_of_class(data, "reader", "mac")
+        self.assertEqual([(c["path"], c["shared_lock"]) for _, c in picked], [(".", "ds-commit")])
+
+    def test_unknown_shared_lock_is_rejected(self):
+        errors = repo_registry.validate(self.root_reader(shared_lock="other"))
+        self.assertEqual(len(errors), 1)
+        self.assertIn("shared_lock должен быть одним из", errors[0])
+
+    def test_shared_lock_outside_reader_is_rejected(self):
+        data = self.root_reader(shared_lock="ds-commit")
+        data["repos"][1]["checkouts"][0]["class"] = "working"
+        errors = repo_registry.validate(data)
+        self.assertEqual(len(errors), 1)
+        self.assertIn("shared_lock допустим только у читательской копии", errors[0])
+
+    def test_shipped_registry_moves_mac_root_under_shared_lock(self):
+        registry, errors = repo_registry.load(SCRIPTS / "repo-convergence.registry.yaml")
+        self.assertEqual(errors, [])
+        roots = [c for _, c in repo_registry.checkouts_of_class(registry, "reader", "mac") if c["path"] == "."]
+        self.assertEqual([c.get("shared_lock") for c in roots], ["ds-commit"])
+        self.assertEqual([c for _, c in repo_registry.checkouts_of_class(registry, "reader", "tsekh-1")
+                          if c["path"] == "."], [])
+
+
 class CompareTest(unittest.TestCase):
     def test_four_separate_answers_on_mac(self):
         result = repo_registry.compare(VALID, ["canon", "stray", "."], "mac")

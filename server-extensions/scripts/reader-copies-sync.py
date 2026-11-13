@@ -12,11 +12,16 @@ Contract:
   * moves only a clean copy (no tracked changes) on its expected branch, only when HEAD is an
     ancestor of upstream (`merge --ff-only --no-autostash`); anything else is reported as
     BLOCKED and left untouched -- the morning convergence digest shows it.
+  * a checkout with `shared_lock: ds-commit` (the Mac root, pilot decision 13.11.2026) is also used
+    by sessions and the publication gateway: it is moved only under ds-commit.lock taken
+    non-blocking (busy -> SKIP this tick). Manual `git checkout` takes no lock, so the branch is
+    re-read right before and after the merge; the residual window is accepted, not closed.
 Exit code: 0 when every copy is current/moved/blocked-and-reported; 1 on a broken registry.
 """
 
 import argparse
 import fcntl
+import os
 import subprocess
 import sys
 import time
@@ -92,10 +97,44 @@ def sync_one(repo, expected_branch, upstream, dry_run):
     _, behind, _ = git(repo, "rev-list", "--count", f"HEAD..{target}")
     if dry_run:
         return f"would move {behind}"
+    # A shared copy (the Mac root) can be switched by a manual checkout that takes no lock: re-read the
+    # branch and HEAD right before the merge. This narrows the window, it does not close it.
+    if not on_branch_at(repo, expected_branch, head):
+        return "BLOCKED ветка или HEAD сменились во время проверки"
     rc, _, err = git(repo, "merge", "--ff-only", "--no-autostash", "--quiet", target, timeout=MERGE_TIMEOUT_S)
     if rc != 0:
         return f"BLOCKED перемотка отказала: {err.splitlines()[-1] if err else rc}"
+    if not on_branch_at(repo, expected_branch, target):
+        return f"BLOCKED после перемотки копия не на {expected_branch}@{upstream}: проверить вручную"
     return f"moved {behind}"
+
+
+def on_branch_at(repo, expected_branch, sha):
+    """True when the copy is still on `expected_branch` and HEAD is exactly `sha`."""
+    rc, ref, _ = git(repo, "symbolic-ref", "--quiet", "HEAD")
+    if rc != 0 or ref != f"refs/heads/{expected_branch}":
+        return False
+    rc, head, _ = git(repo, "rev-parse", "HEAD")
+    return rc == 0 and head == sha
+
+
+def ds_commit_lock_path(root):
+    """Same file session-guard.sh, isolate-push.sh and tsekh1-git-sync.sh take (DRR WP-539 F21 B4)."""
+    explicit = os.environ.get("DS_COMMIT_LOCK_FILE")
+    return Path(explicit) if explicit else root / ".claude" / "state" / "ds-commit.lock"
+
+
+def sync_shared(repo, root, expected_branch, upstream, dry_run):
+    """sync_one under the shared ds-commit.lock, non-blocking: this script already holds its own lock
+    (B4 order invariant), and a busy lock means a session start or a publication -- skip this tick."""
+    lock_path = ds_commit_lock_path(root)
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(lock_path, "a") as shared:
+        try:
+            fcntl.flock(shared, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            return "SKIP общий замок занят (старт сессии или публикация), следующий проход через 5 мин"
+        return sync_one(repo, expected_branch, upstream, dry_run)
 
 
 def main():
@@ -127,8 +166,12 @@ def main():
             if not (repo / ".git").exists():
                 outcome = "absent (optional)" if checkout.get("optional") else "BLOCKED нет копии на диске"
             else:
+                branch, upstream = entry.get("expected_branch", "main"), entry.get("upstream", "origin/main")
                 try:
-                    outcome = sync_one(repo, entry.get("expected_branch", "main"), entry.get("upstream", "origin/main"), args.dry_run)
+                    if checkout.get("shared_lock") == "ds-commit":
+                        outcome = sync_shared(repo, root, branch, upstream, args.dry_run)
+                    else:
+                        outcome = sync_one(repo, branch, upstream, args.dry_run)
                 except subprocess.TimeoutExpired as exc:
                     outcome = f"BLOCKED git дольше {exc.timeout:.0f} с"
                 except Exception as exc:  # one broken copy must not skip the rest; reported, not swallowed

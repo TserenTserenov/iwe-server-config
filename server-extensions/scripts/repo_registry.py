@@ -38,7 +38,10 @@ ENTRY_KEYS = {
     "repo_id", "class", "checkouts", "expected_branch", "upstream",
     "decision_owner", "executor", "mutation_mechanism", "thresholds", "note",
 }
-CHECKOUT_KEYS = {"host", "path", "purpose", "optional", "integrity_evidence", "class", "written_here"}
+CHECKOUT_KEYS = {"host", "path", "purpose", "optional", "integrity_evidence", "class", "written_here", "shared_lock"}
+# A reader copy that sessions and the publication gateway also touch (the Mac root) is moved only under
+# the same lock they take; the value names that lock.
+SHARED_LOCKS = ("ds-commit",)
 JSON_EXPORT = "repo-convergence.registry.json"  # Nix reads JSON only (builtins.fromJSON)
 REPO_ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")
 
@@ -68,6 +71,8 @@ def _validate_checkout(where, checkout, seen):
         errors.append(f"{where}: written_here должен быть булевым")
     if "class" in checkout and checkout["class"] not in CLASSES:
         errors.append(f"{where}: class должен быть одним из {CLASSES}")
+    if "shared_lock" in checkout and checkout["shared_lock"] not in SHARED_LOCKS:
+        errors.append(f"{where}: shared_lock должен быть одним из {SHARED_LOCKS}")
     return errors
 
 
@@ -104,6 +109,9 @@ def _validate_entry(index, entry, seen_ids, seen_paths):
             if isinstance(checkout, dict) and checkout.get("written_here") is True:
                 if checkout.get("class", entry.get("class")) == "reader" or checkout.get("purpose") == "copy":
                     errors.append(f"{label}.checkouts[{n}]: written_here несовместим с class reader и purpose copy")
+            # Only the reader mover takes the shared lock; on any other class the field would promise nothing.
+            if isinstance(checkout, dict) and "shared_lock" in checkout and checkout.get("class", entry.get("class")) != "reader":
+                errors.append(f"{label}.checkouts[{n}]: shared_lock допустим только у читательской копии (class reader)")
     owner = entry.get("decision_owner")
     if owner is not None:
         if not isinstance(owner, dict) or not owner.get("ref") or owner.get("scope") not in SCOPES:
