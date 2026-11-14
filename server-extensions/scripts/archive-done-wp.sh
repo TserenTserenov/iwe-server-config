@@ -111,6 +111,26 @@ if [[ -e "$ARCHIVE_TARGET" ]]; then
   rm -rf "$ARCHIVE_TARGET"
 fi
 
+# Guard (урок 11.05, WP-175 Ф9-B; РП-7 Ф309 пачка 2; после ревью Grok):
+# РП с незавершёнными фазами нельзя архивировать как done — такая фаза исчезает
+# из active-wp-sweep, WeekPlan и Day Open (hidden carry-over). Ищем: ⏳;
+# «status: pending» (с кавычками/без); «ФN: pending» (дефис/точка внутри токена
+# — «Ф9-B», «Ф8.7»; двоеточие обязательно — иначе ловится проза «Фаза pending»,
+# «Fix pending review»); ячейки таблиц «| pending |». Комментарии (# после
+# номера строки grep, с отступом или без) исключаем. Регистр — grep -i.
+# Без set -e/pipefail в этом скрипте; || true — на случай его появления
+# (grep на чистой карточке возвращает 1, pipefail с head убивает архивацию).
+if [[ "${IWE_ARCHIVE_ALLOW_PENDING:-0}" != "1" ]]; then
+  PENDING_HITS=$(grep -niE "⏳|(^|[^a-zA-Z])status:[[:space:]]*[\"']?pending([^a-zA-Z]|$)|^[[:space:]]*[-*]?[[:space:]]*(Ф|F)[0-9А-Яа-яA-Za-z.-]*:[[:space:]]*(pending|⏳|blocked|in_progress)([^a-zA-Z_-]|$)|\|[[:space:]]*(pending|⏳|blocked|in_progress)[[:space:]]*\|" "$WP_FILE" 2>/dev/null | grep -vE "^[0-9]+:[[:space:]]*#" | head -20 || true)
+  if [[ -n "$PENDING_HITS" ]]; then
+    echo "❌ WP-${WP_NUM}: в карточке найдены незавершённые (pending/blocked/in_progress) фазы:" >&2
+    echo "$PENDING_HITS" | sed 's/^/   /' >&2
+    echo "   Не архивирую: вынесите остаток в отдельный РП (create-wp.sh) или" >&2
+    echo "   разберите явно. Принудительно — IWE_ARCHIVE_ALLOW_PENDING=1 (пилот решает)." >&2
+    exit 1
+  fi
+fi
+
 # 1. Обновить frontmatter status → done
 # Ищем первый фронтматтер (между --- и ---)
 TMP=$(mktemp)
