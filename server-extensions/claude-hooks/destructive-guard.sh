@@ -43,7 +43,7 @@ fi
 # one line up), but "should never fail" is exactly the assumption Д22 exists
 # to not make.
 CMD=$(printf '%s' "$HOOK_INPUT" | jq -r '.tool_input.command') || block "jq отказал при извлечении команды после успешной валидации — блокирую."
-CWD=$(printf '%s' "$HOOK_INPUT" | jq -r '.cwd // .tool_input.cwd // empty' 2>/dev/null || true)
+CWD=$(printf '%s' "$HOOK_INPUT" | jq -r '.tool_input.cwd // .cwd // empty' 2>/dev/null || true)
 HOOK_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
 WORKSPACE_ROOT="$(cd "$HOOK_DIR/../.." && pwd -P)"
 

@@ -20,8 +20,13 @@ trap cleanup EXIT
 # An unrelated repo and a linked worktree of ROOT: both must stay writable.
 OTHER="$TMP_DIR/other"
 git init -q "$OTHER"
+git -C "$OTHER" -c user.name=Test -c user.email=test@example.invalid commit -q --allow-empty -m init
 WT="$TMP_DIR/worktree"
 git -C "$ROOT" worktree add -q --detach "$WT" HEAD 2>/dev/null
+MC_WT="$TMP_DIR/mc-worktree"
+NESTED_MC_WT="$WT/mc-worktree"
+git -C "$OTHER" worktree add -q --detach "$MC_WT" HEAD
+git -C "$OTHER" worktree add -q --detach "$NESTED_MC_WT" HEAD
 # Real git-dir of the frozen checkout (a file `.git` in a linked worktree, a directory otherwise).
 ROOTGIT="$(git -C "$ROOT" rev-parse --absolute-git-dir)"
 SPACED="$TMP_DIR/dir with space"
@@ -42,6 +47,21 @@ expect() {
   fi
 }
 
+expect_tool_cwd() {
+  local desc="$1" want="$2" actual="$3" cmd="$4" got rc
+  jq -n --arg c "$cmd" --arg outer "$ROOT" --arg actual "$actual" \
+    '{tool_name:"Bash",cwd:$outer,tool_input:{command:$c,cwd:$actual}}' \
+    | env NOOP=1 bash "$HOOK" >/dev/null 2>&1
+  rc=$?
+  [ "$rc" -eq 2 ] && got=block || got=pass
+  if [ "$got" = "$want" ]; then
+    PASS=$((PASS + 1))
+  else
+    FAIL=$((FAIL + 1))
+    echo "FAIL: $desc (want $want, got $got, rc=$rc)"
+  fi
+}
+
 expect "git add <path> in frozen root"            block "$ROOT" "git add scripts/x.sh"
 expect "git restore --staged in frozen root"      block "$ROOT" "git restore --staged scripts/x.sh"
 expect "git restore -S in frozen root"            block "$ROOT" "git restore -S scripts/x.sh"
@@ -52,6 +72,12 @@ expect "freeze switched off by empty override"    pass  "$ROOT" "git add scripts
 expect "git status is not staging"                pass  "$ROOT" "git status"
 expect "git restore without --staged"             pass  "$ROOT" "git restore file.txt"
 expect "quoted text is not a git call"            pass  "$ROOT" "echo git add foo"
+
+expect_tool_cwd "DS isolate uses the tool call cwd"                  pass  "$WT" "git add inbox/WP-581/WP-581.md"
+expect_tool_cwd "MC canonical uses the tool call cwd"                pass  "$OTHER" "git add 2026-11/2026-11-14-WP-581.md"
+expect_tool_cwd "MC worktree uses the tool call cwd"                 pass  "$MC_WT" "git add 2026-11/2026-11-14-WP-581.md"
+expect_tool_cwd "MC worktree inside root isolate uses tool call cwd" pass  "$NESTED_MC_WT" "git add 2026-11/2026-11-14-WP-581.md"
+expect_tool_cwd "tool call cwd into frozen root stays blocked"       block "$ROOT" "git add scripts/x.sh"
 
 # РП-561 Ф54, 29.10: the target is the real index file, not the hook's cwd.
 # False block: the staging happens in another repo inside a subshell.
@@ -190,6 +216,8 @@ expect_msg "frozen workspace root: hint names the publish-only path" "$ROOT" "gi
 expect_msg "frozen governance repo: hint keeps the DS-my-strategy route" "$OTHER" "git add a.md" "IWE_FROZEN_CANONICAL_PATH=$OTHER" \
   "cd DS-my-strategy &&" "--close-path quick-close"
 
+git -C "$OTHER" worktree remove --force "$MC_WT" 2>/dev/null
+git -C "$OTHER" worktree remove --force "$NESTED_MC_WT" 2>/dev/null
 git -C "$ROOT" worktree remove --force "$WT" 2>/dev/null
 
 echo "frozen-staging: PASS=$PASS FAIL=$FAIL"
