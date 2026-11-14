@@ -92,12 +92,14 @@ class WatchedTest(unittest.TestCase):
         self.assertEqual(alarm.watched(copy.deepcopy(self.REGISTRY), "mac"), [("a", 30)])
         self.assertEqual(alarm.watched(copy.deepcopy(self.REGISTRY), "tsekh-1"), [])
 
-    def test_shipped_registry_watches_the_four_mac_copies(self):
+    def test_shipped_registry_watches_mac_copies_with_their_limits(self):
         import repo_registry
         registry, errors = repo_registry.load(SCRIPTS / "repo-convergence.registry.yaml")
         self.assertEqual(errors, [])
-        paths = {p for p, _ in alarm.watched(registry, "mac")}
-        self.assertTrue({".", "MC-sessions", "DS-MCP/knowledge-mcp", "DS-IT-systems/activity-hub"} <= paths, paths)
+        limits = dict(alarm.watched(registry, "mac"))
+        expected = {".": 30, "MC-sessions": 30, "DS-MCP/knowledge-mcp": 30,
+                    "DS-IT-systems/activity-hub": 30, "DS-my-strategy": 90}
+        self.assertEqual({p: limits.get(p) for p in expected}, expected)
 
 
 def run(repo, *args):

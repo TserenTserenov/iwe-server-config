@@ -37,7 +37,8 @@ repos:
     decision_owner: {ref: "WP-539 Ф21 (диагноз 29.10, заморозка канона WP-520/WP-484 Ф104)", scope: repo}
     executor: "Цех — синхронизатор канона (tsekh1-git-sync.sh); Мак — страховочный проход (backstop)"
     mutation_mechanism: "ff-only синхронизатором под замком; сессии пишут только в изолированной копии"
-    thresholds: {fetch_max_age_min: 120, behind_max_commits: null, behind_observed_for_min: null, block_resolution_max_age_min: null}
+    # behind_observed_for_min 90: дневная тревога Мака (convergence-alarm.py), поручение пилота 14.11.2026; страховка Мака идёт раз в час
+    thresholds: {fetch_max_age_min: 120, behind_max_commits: null, behind_observed_for_min: 90, block_resolution_max_age_min: null}
   - repo_id: MC-sessions
     class: undecided
     checkouts:

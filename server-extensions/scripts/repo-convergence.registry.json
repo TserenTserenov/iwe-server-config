@@ -22,7 +22,7 @@
       "repo_id": "DS-my-strategy",
       "thresholds": {
         "behind_max_commits": null,
-        "behind_observed_for_min": null,
+        "behind_observed_for_min": 90,
         "block_resolution_max_age_min": null,
         "fetch_max_age_min": 120
       },
