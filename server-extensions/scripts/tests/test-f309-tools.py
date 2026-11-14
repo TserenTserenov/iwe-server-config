@@ -50,6 +50,23 @@ class DigestTest(unittest.TestCase):
             self.assertIn("over the 10000 window", out)
 
 
+class GeneratorGrokTest(unittest.TestCase):
+    def test_check_with_grok_finds_the_digest_script_under_the_real_bootstrap(self):
+        # Regression: the env bootstrap reassigned SCRIPT_DIR, so the generator
+        # looked for the digest script in .claude/lib and never wrote the digest.
+        with tempfile.TemporaryDirectory() as tmp:
+            env = {**os.environ, "GROK_RUNTIME_DIR": tmp}
+            env.pop("_IWE_ENV_BOOTSTRAP_SOURCED", None)
+            res = subprocess.run(
+                ["bash", str(SCRIPTS / "sync-agent-instructions.sh"), "--check", "--with-grok"],
+                cwd=ROOT, env=env, capture_output=True, text=True, check=False,
+            )
+            out = res.stdout + res.stderr
+            self.assertNotIn("can't open file", out)
+            self.assertEqual(res.returncode, 1, out)
+            self.assertIn("missing or stale", out)
+
+
 class SweepTest(unittest.TestCase):
     def test_groups(self):
         with tempfile.TemporaryDirectory() as tmp:

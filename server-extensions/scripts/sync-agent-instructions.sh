@@ -30,6 +30,8 @@
 set -euo pipefail
 # Load unified environment: WORKSPACE_DIR, IWE_ROOT, IWE_SCRIPTS, etc.
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# The bootstrap reassigns SCRIPT_DIR to its own folder (.claude/lib); keep ours.
+GENERATOR_DIR="$SCRIPT_DIR"
 source "$SCRIPT_DIR/../.claude/lib/iwe-env-bootstrap.sh" || exit 1
 CLAUDE_MD="$IWE_ROOT/CLAUDE.md"
 BLOCKS_MD="$IWE_ROOT/AGENTS-agent-blocks.md"
@@ -119,7 +121,7 @@ case "$MODE" in
       echo "Синхронизация: OK (AGENTS.md соответствует ядру)"
       # check mode exits here, so the optional Grok digest is checked here too
       if [ "$WITH_GROK" -eq 1 ] && [ -d "$GROK_DIR" ]; then
-        python3 "$SCRIPT_DIR/blocking-rules-digest.py" --agents "$OUT_MD" --check "$GROK_DIR/AGENTS.md" || exit 1
+        python3 "$GENERATOR_DIR/blocking-rules-digest.py" --agents "$OUT_MD" --check "$GROK_DIR/AGENTS.md" || exit 1
       fi
       exit 0
     else
@@ -180,7 +182,7 @@ if [ "$WITH_GROK" -eq 1 ]; then
   if [ ! -d "$GROK_DIR" ]; then
     echo "[WARN] --with-grok: $GROK_DIR not found — Grok digest skipped (Grok not installed)." >&2
   elif [ "$MODE" = "force" ]; then
-    python3 "$SCRIPT_DIR/blocking-rules-digest.py" --agents "$OUT_MD" --write "$GROK_DIR/AGENTS.md"
+    python3 "$GENERATOR_DIR/blocking-rules-digest.py" --agents "$OUT_MD" --write "$GROK_DIR/AGENTS.md"
   else
     echo "[INFO] --with-grok: the digest is written only with --force."
   fi
