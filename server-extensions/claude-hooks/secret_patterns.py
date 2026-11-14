@@ -84,6 +84,8 @@ PATTERNS = (
     ("database-url", re.compile(r"postgres(?:ql)?(?:\+[A-Za-z0-9_.-]+)?://[^:\s]+:[^@\s]+@", re.I), "[REDACTED-DATABASE-URL]"),
     ("anthropic-api", re.compile(r"sk-ant-api[0-9]{2}-[A-Za-z0-9_-]{30,}"), "[REDACTED-ANTHROPIC-KEY]"),
     ("openai-scoped", re.compile(r"sk-(?:proj|svcacct|admin)-[A-Za-z0-9_-]{20,}"), "[REDACTED-OPENAI-KEY]"),
+    # OpenRouter keys: "sk-or-v1-<hex>"; the hyphens defeat the openai-legacy run below.
+    ("openrouter-api", re.compile(r"sk-or-v1-[0-9a-f]{32,}"), "[REDACTED-OPENROUTER-KEY]"),
     ("openai-legacy", re.compile(r"sk-[A-Za-z0-9]{20,}"), "[REDACTED-OPENAI-KEY]"),
     ("stripe-key", re.compile(r"(?:sk|rk|pk)_(?:live|test)_[A-Za-z0-9]{16,}"), "[REDACTED-STRIPE-KEY]"),
     ("yookassa", YOOKASSA_CANDIDATE_RE, redact_yookassa),
@@ -1840,6 +1842,7 @@ def self_test():
         "openai-project": "sk-proj-" + "A" * 28,
         "openai-service": "sk-svcacct-" + "B" * 28,
         "openai-admin": "sk-admin-" + "C" * 28,
+        "openrouter": "sk-or-v1-" + "0123456789abcdef" * 4,
         "github-fine": "github_pat_" + "D" * 30,
         "github-stateless": "ghs_12345_eyJ" + "E" * 12 + "." + "F" * 12 + "." + "G" * 12,
         "telegram-bot-path": "/bot123456789:" + "H" * 35,

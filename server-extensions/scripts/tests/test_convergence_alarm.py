@@ -1,8 +1,10 @@
 """Tests for scripts/convergence-alarm.py (WP-539 F21 B0): one daytime message per lag episode."""
 
+import contextlib
 import copy
 import datetime as dt
 import importlib.util
+import io
 import json
 import subprocess
 import sys
@@ -192,6 +194,20 @@ class MainTest(unittest.TestCase):
         self.lib.write_text(good)
         self.assertEqual(self.main(), 0)
         self.assertIn("✅ a: снова совпадает", self.sent.read_text())
+
+    def test_log_names_copy_and_kind_of_each_message(self):
+        self.main()
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            self.main()  # alarm sent
+        self.assertRegex(out.getvalue(), r"convergence-alarm: \S+ sent: ⚠️ a: behind -1 уже \d+ мин")
+        self.catch_up()
+        hour = dt.datetime.now().hour
+        self.quiet = (hour, (hour + 1) % 24)
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            self.main()
+        self.assertIn("deferred (quiet hours): ✅ a: снова совпадает с GitHub", out.getvalue())
 
     def test_failed_send_keeps_episode_unalerted(self):
         self.lib.write_text("telegram_send() { return 1; }\n")

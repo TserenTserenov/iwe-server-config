@@ -118,6 +118,13 @@ def in_quiet_hours(now, start, end):
     return now.hour >= start or now.hour < end
 
 
+def log_messages(now, outcome, pending):
+    """One log line per message: when, what happened to it, and its headline (copy + alarm or recovery),
+    so a day of the log can be audited for false alarms without Telegram (WP-539 Ф21 Б0, 14.11)."""
+    for _, text in pending:
+        print(f"convergence-alarm: {now:%Y-%m-%dT%H:%M%z} {outcome}: {text.splitlines()[0]}")
+
+
 def send_telegram(lib, text):
     proc = subprocess.run(["bash", "-c", '. "$1" && telegram_send "$2"', "_", str(lib), text],
                           capture_output=True, text=True, timeout=60)
@@ -190,7 +197,7 @@ def main():
         print("\n\n".join(t for _, t in pending))
         status = 0
     elif in_quiet_hours(now, args.quiet_from, args.quiet_to):
-        print(f"convergence-alarm: {len(pending)} message(s) deferred (quiet hours)")
+        log_messages(now, "deferred (quiet hours)", pending)
         status = 0
     elif send_telegram(telegram_lib, "🔄 Сходимость git, Мак\n\n" + "\n\n".join(t for _, t in pending)):
         for path, _ in pending:
@@ -198,9 +205,10 @@ def main():
                 del state[path]
             elif path in state:
                 state[path]["alerted"] = True
-        print(f"convergence-alarm: sent {len(pending)} message(s)")
+        log_messages(now, "sent", pending)
         status = 0
     else:
+        log_messages(now, "send failed, retried next run", pending)
         status = 1
     if not args.dry_run:
         save_state(state_path, state)
