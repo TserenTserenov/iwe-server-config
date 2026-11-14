@@ -104,6 +104,61 @@ class SyncOneTest(CopyFixture):
         self.assertTrue(self.outcome().startswith("BLOCKED перемотка заменит игнорируемые"))
         self.assertEqual((self.copy / "new.txt").read_text(), "local\n")
 
+    def add_upstream_file(self, name, text):
+        (self.origin / name).parent.mkdir(parents=True, exist_ok=True)
+        (self.origin / name).write_text(text)
+        run(self.origin, "add", name)
+        run(self.origin, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "add " + name)
+        run(self.copy, "fetch", "-q", "origin")
+
+    def test_identical_untracked_copy_does_not_block(self):
+        """A writer that published elsewhere left a byte-equal copy behind (elar-window, 14.11)."""
+        (self.copy / "w").mkdir()
+        (self.copy / "w" / "day.md").write_text("same\n")
+        self.add_upstream_file("w/day.md", "same\n")
+        self.assertEqual(self.outcome(), "moved 1 (одинаковые локальные копии отложены в .git/reader-sync-parked: 1)")
+        self.assertEqual(head(self.copy), head(self.origin))
+        self.assertEqual((self.copy / "w" / "day.md").read_text(), "same\n")
+        parked = list((self.copy / ".git" / "reader-sync-parked").rglob("day.md"))
+        self.assertEqual([f.read_text() for f in parked], ["same\n"])  # set aside, never deleted
+
+    def test_symlink_in_the_way_blocks(self):
+        (self.copy / "real.md").write_text("same\n")
+        (self.copy / "day.md").symlink_to("real.md")
+        self.add_upstream_file("day.md", "same\n")
+        before = head(self.copy)
+        self.assertTrue(self.outcome().startswith("BLOCKED перемотка заменит"))
+        self.assertTrue((self.copy / "day.md").is_symlink())
+        self.assertEqual(head(self.copy), before)
+
+    def test_file_changed_after_check_is_put_back(self):
+        """A writer that rewrites the file between the check and the move: nothing moves, its bytes stay."""
+        (self.copy / "day.md").write_text("same\n")
+        self.add_upstream_file("day.md", "same\n")
+        before = head(self.copy)
+        real = sync.files_in_the_way
+
+        def check_then_writer_rewrites(repo, target):
+            result = real(repo, target)
+            (self.copy / "day.md").write_text("rewritten by the writer\n")
+            return result
+
+        sync.files_in_the_way = check_then_writer_rewrites
+        try:
+            self.assertEqual(self.outcome(), "BLOCKED файл day.md изменился во время перемотки")
+        finally:
+            sync.files_in_the_way = real
+        self.assertEqual((self.copy / "day.md").read_text(), "rewritten by the writer\n")
+        self.assertEqual(head(self.copy), before)
+
+    def test_differing_untracked_file_blocks_and_is_kept(self):
+        (self.copy / "day.md").write_text("local edit\n")
+        self.add_upstream_file("day.md", "upstream\n")
+        before = head(self.copy)
+        self.assertTrue(self.outcome().startswith("BLOCKED перемотка заменит игнорируемые или неотслеживаемые"))
+        self.assertEqual(head(self.copy), before)
+        self.assertEqual((self.copy / "day.md").read_text(), "local edit\n")
+
     def test_missing_upstream_ref_blocks(self):
         self.assertTrue(sync.sync_one(self.copy, "main", "origin/nope", False).startswith("BLOCKED нет ссылки"))
 
@@ -111,17 +166,17 @@ class SyncOneTest(CopyFixture):
         """A manual checkout that lands after the first checks (no lock) is caught right before the merge."""
         self.advance_origin()
         before = head(self.copy)
-        real = sync.ignored_overwritten
+        real = sync.files_in_the_way
 
         def switch_then_check(repo, target):
             run(self.copy, "switch", "-q", "-c", "topic")
             return real(repo, target)
 
-        sync.ignored_overwritten = switch_then_check
+        sync.files_in_the_way = switch_then_check
         try:
             self.assertEqual(self.outcome(), "BLOCKED ветка или HEAD сменились во время проверки")
         finally:
-            sync.ignored_overwritten = real
+            sync.files_in_the_way = real
         self.assertEqual(head(self.copy), before)
 
 

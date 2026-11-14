@@ -69,13 +69,63 @@ def blocked_reason(repo, expected_branch):
     return None
 
 
-def ignored_overwritten(repo, target):
-    """Ignored local files that the fast-forward would silently replace with tracked ones."""
-    _, names, _ = git(repo, "diff", "--name-only", "--diff-filter=A", f"HEAD..{target}")
+def same_bytes(repo, path, target, name):
+    """True when `path` is a regular file whose raw bytes (no .gitattributes filters) equal target:name."""
+    if os.path.islink(path) or not os.path.isfile(path):
+        return False
+    rc_local, local, _ = git(repo, "hash-object", "--no-filters", "--", str(path))
+    rc_target, wanted, _ = git(repo, "rev-parse", f"{target}:{name}")
+    return rc_local == 0 and rc_target == 0 and local == wanted
+
+
+def files_in_the_way(repo, target):
+    """(identical, differing): untracked local files (ignored or not) at paths the fast-forward adds.
+
+    git refuses a merge over a plain untracked file and silently replaces an ignored one. A regular file
+    whose raw bytes already equal the target blob is set aside (park_identical) instead of blocking:
+    a scheduled writer that publishes elsewhere and leaves its copy behind (MC-sessions elar-window,
+    14.11.2026) is the usual case. Anything else -- other bytes, a symlink -- blocks."""
+    _, names, _ = git(repo, "diff", "--name-only", "-z", "--no-renames", "--diff-filter=A", f"HEAD..{target}")
     if not names:
-        return []
-    _, ignored, _ = git(repo, "ls-files", "-o", "-i", "--exclude-standard", "--", *names.splitlines())
-    return ignored.splitlines()
+        return [], []
+    _, present, _ = git(repo, "ls-files", "-o", "-z", "--", *names.split("\0")[:-1])
+    identical, differing = [], []
+    for name in present.split("\0")[:-1]:
+        (identical if same_bytes(repo, Path(repo) / name, target, name) else differing).append(name)
+    return identical, differing
+
+
+def park_identical(repo, names, target):
+    """Move byte-equal copies out of the way into the git dir; re-check them there.
+
+    Nothing is deleted: a writer that touches a file between the check and the move ends up with its
+    bytes in the parked copy, which then fails the re-check and everything is put back.
+    Returns (parked [(name, parked_path)], None) or ([], reason)."""
+    _, git_dir, _ = git(repo, "rev-parse", "--absolute-git-dir")
+    stamp = time.strftime("%Y%m%dT%H%M%S")
+    parked = []
+    for name in names:
+        dest = Path(git_dir) / "reader-sync-parked" / stamp / name
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        os.rename(Path(repo) / name, dest)
+        parked.append((name, dest))
+        if not same_bytes(repo, dest, target, name):
+            restore_parked(repo, parked)
+            return [], f"файл {name} изменился во время перемотки"
+    return parked, None
+
+
+def restore_parked(repo, parked):
+    """Put parked copies back where nothing new took their place; report the ones that stay parked."""
+    kept = []
+    for name, dest in parked:
+        home = Path(repo) / name
+        if home.exists() or home.is_symlink():
+            kept.append(str(dest))
+        else:
+            os.rename(dest, home)
+    if kept:
+        log(f"{repo}: копии оставлены в {', '.join(kept[:3])} (на их месте появился новый файл)")
 
 
 def sync_one(repo, expected_branch, upstream, dry_run):
@@ -91,22 +141,29 @@ def sync_one(repo, expected_branch, upstream, dry_run):
         return "current"
     if git(repo, "merge-base", "--is-ancestor", "HEAD", target)[0] != 0:
         return f"BLOCKED свои коммиты, не перемотка ({upstream} не потомок HEAD)"
-    clobbered = ignored_overwritten(repo, target)
-    if clobbered:
-        return f"BLOCKED перемотка заменит игнорируемые локальные файлы: {', '.join(clobbered[:3])}"
+    identical, differing = files_in_the_way(repo, target)
+    if differing:
+        return ("BLOCKED перемотка заменит игнорируемые или неотслеживаемые локальные файлы, "
+                f"отличные от GitHub: {', '.join(differing[:3])}")
     _, behind, _ = git(repo, "rev-list", "--count", f"HEAD..{target}")
+    same_note = f" (одинаковые локальные копии отложены в .git/reader-sync-parked: {len(identical)})" if identical else ""
     if dry_run:
-        return f"would move {behind}"
+        return f"would move {behind}{same_note}"
     # A shared copy (the Mac root) can be switched by a manual checkout that takes no lock: re-read the
     # branch and HEAD right before the merge. This narrows the window, it does not close it.
     if not on_branch_at(repo, expected_branch, head):
         return "BLOCKED ветка или HEAD сменились во время проверки"
-    rc, _, err = git(repo, "merge", "--ff-only", "--no-autostash", "--quiet", target, timeout=MERGE_TIMEOUT_S)
+    parked, park_failure = park_identical(repo, identical, target)
+    if park_failure:
+        return f"BLOCKED {park_failure}"
+    rc, _, err = git(repo, "merge", "--ff-only", "--no-autostash", "--no-overwrite-ignore", "--quiet", target,
+                     timeout=MERGE_TIMEOUT_S)
     if rc != 0:
+        restore_parked(repo, parked)
         return f"BLOCKED перемотка отказала: {err.splitlines()[-1] if err else rc}"
     if not on_branch_at(repo, expected_branch, target):
         return f"BLOCKED после перемотки копия не на {expected_branch}@{upstream}: проверить вручную"
-    return f"moved {behind}"
+    return f"moved {behind}{same_note}"
 
 
 def on_branch_at(repo, expected_branch, sha):
