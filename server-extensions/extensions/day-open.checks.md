@@ -60,42 +60,20 @@ echo "  ✅ Саморазвитие: D-NNN/C-NNN присутствует, PEND
 <!-- CHECK: class=soft id=priorities-table -->
 ```bash
 FILE="${FILE:-$(ls ~/IWE/DS-my-strategy/current/DayPlan\ *.md 2>/dev/null | sort | tail -1)}"
-PRIO="${GOV_REPO_DIR:-$HOME/IWE/DS-my-strategy}/current/priorities.yaml"
-echo "=== Проверка: все РП из priorities.yaml присутствуют в DayPlan ==="
+GOV="${IWE_SCENARIO_GOV_DIR:-${GOV_REPO_DIR:-$HOME/IWE/DS-my-strategy}}"
+PRIO="${IWE_PRIORITIES_INPUT:-$GOV/current/priorities.yaml}"
+CHECKER="${IWE_PRIORITY_CHECKER:-${GOV_REPO_DIR:-$HOME/IWE/DS-my-strategy}/scripts/day-open-priorities-patch.py}"
+# Standalone checks without scripts in the data view use the installed checker.
+[ -f "$CHECKER" ] || CHECKER="$HOME/IWE/DS-my-strategy/scripts/day-open-priorities-patch.py"
+echo "=== Проверка: выбранные приоритеты присутствуют в DayPlan ==="
 if [ -f "$PRIO" ]; then
-  WPS=$(python3 -c "
-import yaml,sys
-d=yaml.safe_load(open('$PRIO')) or {}
-for w in (d.get('today') or []):
-    print(str(w).strip())
-" 2>/dev/null || true)
-  PLAN_TABLE=$(awk '/<summary><b>План на сегодня<\/b><\/summary>/{f=1} f&&/^\|/{print} f&&/<\/details>/{exit}' "$FILE")
-  MISSING=0
-  while IFS= read -r wp; do
-    [ -z "$wp" ] && continue
-    # priorities.yaml entries may carry a title suffix ("WP-385: ..." since 25.09);
-    # keep the digits only, otherwise the column-3 match never hits.
-    num="${wp#WP-}"
-    num="${num%%[^0-9]*}"
-    [ -z "$num" ] && continue
-    FOUND=0
-    while IFS= read -r row; do
-      case "$row" in \|*) ;; *) continue ;; esac
-      col3=$(printf '%s' "$row" | awk -F'|' '{gsub(/^[ \t]+|[ \t]+$/,"",$4); print $4}')
-      if [ "$col3" = "$num" ]; then FOUND=1; break; fi
-      if printf '%s' "$row" | grep -qE "WP-${num}([^0-9]|\$)"; then FOUND=1; break; fi
-    done <<< "$PLAN_TABLE"
-    if [ "$FOUND" -eq 0 ]; then
-      MISSING=$((MISSING+1))
-    fi
-  done <<< "$WPS"
-  if [ "$MISSING" -eq 0 ]; then
-    echo "  ✅ Все РП из priorities.yaml присутствуют в плане"
-  elif grep -qE "priorities\.yaml отсутствует в таблице" "$FILE"; then
-    echo "  ⚠️ $MISSING РП из priorities.yaml отсутствует в плане — уже отмечено в «Требует внимания» (не блокирует)"
-  else
-    echo "  ⚠️ $MISSING РП из priorities.yaml отсутствует в плане, И patch-скрипт не записал находку — проверь вручную (не блокирует)"
+  SOURCE_ARGS=(--find-weekplan)
+  if [ "${IWE_SCENARIO_WEEKPLAN+x}" = x ]; then
+    SOURCE_ARGS=(--weekplan "$IWE_SCENARIO_WEEKPLAN")
   fi
+  python3 "$CHECKER" --dayplan "$FILE" --priorities "$PRIO" --gov-dir "$GOV" \
+    --check-only "${SOURCE_ARGS[@]}" \
+    || echo "  ⚠️ Проверка приоритетов не выполнена — нужна ручная сверка (не блокирует)"
 else
   echo "  ⚠️ priorities.yaml не найден — проверка пропущена"
 fi
@@ -764,7 +742,7 @@ fi
 <!-- CHECK: class=soft id=phys-budget -->
 ```bash
 FILE="${FILE:-$(ls ~/IWE/DS-my-strategy/current/DayPlan\ *.md 2>/dev/null | sort | tail -1)}"
-PRIO="${GOV_REPO_DIR:-$HOME/IWE/DS-my-strategy}/current/priorities.yaml"
+PRIO="${IWE_PRIORITIES_INPUT:-${GOV_REPO_DIR:-$HOME/IWE/DS-my-strategy}/current/priorities.yaml}"
 echo "=== Проверка: «физ» в бюджете дня — не fallback-заглушка ==="
 PHYS_ISSUE=0
 if ! grep -qE "^phys_hours:" "$PRIO" 2>/dev/null; then
