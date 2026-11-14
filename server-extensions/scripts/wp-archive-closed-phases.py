@@ -35,8 +35,10 @@ Everything else is a NEGATIVE veto (any one keeps the section in the card):
     output stays a veto (fail closed, Codex).
 Safety of --apply (Codex): per-WP lock with bounded wait, precondition hashes,
 a recovery journal written BEFORE the first write, temp-file + atomic rename
-for both files, post-check by DELTA of exact block occurrences (Kimi), SIGINT/
-SIGTERM leave the journal for the idempotent re-run.
+for both files, post-check by DELTA of exact block occurrences (Kimi). Signals
+request an abort before the first file write; after that checkpoint the write
+sequence continues. An unfinished recovery journal refuses a new run until it
+is inspected/reconciled; only a completed move can be replayed as a no-op.
 
 Usage:
   wp-archive-closed-phases.py <WP_NUM> [--governance-repo DIR] [--apply]
