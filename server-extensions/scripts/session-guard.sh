@@ -7802,7 +7802,7 @@ _commit_claim_supersession_has_publish_proof() {  # <repo> <source> <remote OID>
   # supersession nor patch-id/receipt transitivity is sufficient.
   # Deadline 40s / kill 45s: measured 26.09 on DS-my-strategy (12 successor
   # claims, 700 KB current/hypotheses-log.md conflicts) the full candidate
-  # loop takes ~9.5s. Up to 32 claims and 32 verified receipt anchors share
+  # loop takes ~9.5s. Up to 32 claims in this repository and 32 verified receipt anchors share
   # the same 40s deadline / 45s process timeout; timeout never accepts proof.
   timeout 45 python3 - "$@" "$(cd "$(dirname "${BASH_SOURCE[0]:-}")" && pwd)/lib/publication_receipt.py" <<'PY'
 import difflib
@@ -8049,11 +8049,17 @@ try:
         raise ValueError("claim snapshot exceeds proof budget")
     claims = [line[8:].decode("ascii").split() for line in snapshot.splitlines()
               if line.startswith(b"commit: ")]
-    if len(claims) > 32 or any(len(claim) not in (2, 4) for claim in claims):
-        raise ValueError("invalid or excessive claims")
-    candidates = sorted({claim[1] for claim in claims if claim[0] == repo_name and claim[1] != source})
+    if any(len(claim) not in (2, 4) for claim in claims):
+        raise ValueError("invalid claims")
+    # The expensive proof only visits this repository. Unrelated claims are
+    # checked separately by _claimed_commits_have_publish_proof; counting them
+    # here incorrectly refuses multi-repository sessions within every budget.
+    repo_claims = [claim for claim in claims if claim[0] == repo_name]
+    if len(repo_claims) > 32:
+        raise ValueError("excessive repository claims")
+    candidates = sorted({claim[1] for claim in repo_claims if claim[1] != source})
     receipt_candidates = set()
-    if not any(claim[:2] == [repo_name, source] for claim in claims):
+    if not any(claim[1] == source for claim in repo_claims):
         raise ValueError("source is not a frozen claim")
 
     def successor_candidates():

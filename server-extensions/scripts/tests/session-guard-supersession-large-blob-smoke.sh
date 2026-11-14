@@ -254,4 +254,71 @@ set -e
 [ "$rc" -eq 1 ] || fail_test "T5: changed session row was accepted (rc=$rc): $out"
 echo "PASS T5: changed session row refused"
 
+# WP-484: the live WP-529 session has 40 claims across three repositories
+# (31 + 6 + 3). Only the local candidates consume this proof's 32-claim budget;
+# snapshot size, malformed records and exact publication must still be checked.
+MULTI_SEM="$TEST_ROOT/multi.open"
+write_semaphore "$MULTI_SEM" "$REBASE_SOURCE" "$REBASE_GOOD"
+MULTI_REMOTE="$REBASE_GOOD"
+REBASE_TREE=$(git -C "$REBASE_REPO" rev-parse "$REBASE_GOOD^{tree}")
+for i in $(seq 1 29); do
+  MULTI_REMOTE=$(git -C "$REBASE_REPO" commit-tree "$REBASE_TREE" -p "$MULTI_REMOTE" -m "padding $i")
+  printf 'commit: repo %s\n' "$MULTI_REMOTE" >> "$MULTI_SEM"
+done
+for i in $(seq 1 6); do
+  printf 'commit: governance %040d\n' "$i" >> "$MULTI_SEM"
+done
+for i in $(seq 1 3); do
+  printf 'commit: sessions %040d /fixture/sessions fixture-branch\n' "$i" >> "$MULTI_SEM"
+done
+
+check_multi_proof() {  # <label> <semaphore> <remote> <expected rc> <expected diagnostic>
+  local result result_rc=0
+  result=$(_commit_claim_supersession_has_publish_proof "$REBASE_REPO" "$REBASE_SOURCE" \
+    "$3" "$2" repo 2>&1) || result_rc=$?
+  [ "$result_rc" -eq "$4" ] || fail_test "$1: unexpected rc $result_rc: $result"
+  grep -qF "$5" <<< "$result" || fail_test "$1: unexpected proof outcome: $result"
+  echo "PASS $1"
+}
+
+[ "$(grep -c '^commit: ' "$MULTI_SEM")" -eq 40 ] || fail_test "T6: expected 40 claims"
+check_multi_proof T6 "$MULTI_SEM" "$MULTI_REMOTE" 0 \
+  "claimed changes preserved in OID-published claim: repo $REBASE_SOURCE -> $REBASE_GOOD"
+
+cp "$MULTI_SEM" "$TEST_ROOT/boundary.open"
+printf 'commit: repo %s\n' "$REBASE_BASE" >> "$TEST_ROOT/boundary.open"
+check_multi_proof T7 "$TEST_ROOT/boundary.open" "$MULTI_REMOTE" 0 \
+  "claimed changes preserved in OID-published claim: repo $REBASE_SOURCE -> $REBASE_GOOD"
+printf 'commit: repo %s\n' "$REBASE_UPSTREAM" >> "$TEST_ROOT/boundary.open"
+check_multi_proof T8 "$TEST_ROOT/boundary.open" "$MULTI_REMOTE" 1 "excessive repository claims"
+
+cp "$MULTI_SEM" "$TEST_ROOT/malformed.open"
+printf 'commit: unrelated malformed extra\n' >> "$TEST_ROOT/malformed.open"
+check_multi_proof T9 "$TEST_ROOT/malformed.open" "$MULTI_REMOTE" 1 "invalid claims"
+
+sed "s/^commit: repo $REBASE_SOURCE$/commit: unrelated $REBASE_SOURCE/" \
+  "$MULTI_SEM" > "$TEST_ROOT/foreign-source.open"
+check_multi_proof T10 "$TEST_ROOT/foreign-source.open" "$MULTI_REMOTE" 1 "source is not a frozen claim"
+
+sed "s/^commit: repo $REBASE_GOOD$/commit: unrelated $REBASE_GOOD/" \
+  "$MULTI_SEM" > "$TEST_ROOT/foreign-successor.open"
+check_multi_proof T11 "$TEST_ROOT/foreign-successor.open" "$MULTI_REMOTE" 1 \
+  "no exact published successor preserves the claimed changes"
+
+check_multi_proof T12 "$MULTI_SEM" "$REBASE_UPSTREAM" 1 \
+  "no exact published successor preserves the claimed changes"
+
+sed "s/$REBASE_GOOD/$REBASE_BAD/g" "$MULTI_SEM" > "$TEST_ROOT/lossy-multi.open"
+check_multi_proof T13 "$TEST_ROOT/lossy-multi.open" "$REBASE_BAD" 1 \
+  "no exact published successor preserves the claimed changes"
+
+cp "$MULTI_SEM" "$TEST_ROOT/oversized.open"
+python3 - "$TEST_ROOT/oversized.open" <<'PY'
+from pathlib import Path
+import sys
+with Path(sys.argv[1]).open("a") as stream:
+    stream.write("metadata: " + "x" * 65536 + "\n")
+PY
+check_multi_proof T14 "$TEST_ROOT/oversized.open" "$MULTI_REMOTE" 1 "claim snapshot exceeds proof budget"
+
 echo "PASS: session-guard-supersession-large-blob-smoke"
