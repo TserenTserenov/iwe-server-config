@@ -935,6 +935,39 @@ in
     };
 
     # =========================================================
+    # 2a-3. READER-COPIES-SYNC — WP-539 Ф21 Б3 (14.11.2026, pilot decision,
+    # peer-session 2026-11-14-04-wp539-scheduled-writers-isolation)
+    # =========================================================
+    # Mirrors the Mac launchd job (com.iwe.reader-copies-sync.plist, every 5 min).
+    # Fast-forwards the checkouts of class `reader` for tsekh-1 in
+    # scripts/repo-convergence.registry.yaml (MC-sessions, FMT-exocortex-template,
+    # iwe-server-config) to the upstream ref refs-sync-broker already fetched:
+    # clean copy on its branch, ff-only, anything else is logged as BLOCKED and left
+    # untouched. No fetch here and no commits. Not a replacement for the fetch-only
+    # iwe-pull-repos (WP-484 Ф108): that list is the `written_here` copies, which
+    # this job never moves.
+    systemd.services."iwe-reader-copies-sync" = {
+      description = "IWE — fast-forward reader checkouts (WP-539 Ф21 Б3)";
+      unitConfig   = commonUnitConfig;
+      serviceConfig = commonServiceConfig // {
+        ExecStart = "${pythonForIWE}/bin/python3 ${iwe}/scripts/reader-copies-sync.py --root ${iwe} --host tsekh-1";
+      };
+      path = commonPath;
+      environment = commonEnv // {
+        IWE_ROOT = iwe;
+      };
+    };
+
+    systemd.timers."iwe-reader-copies-sync" = {
+      wantedBy    = [ "timers.target" ];
+      description = "IWE reader-copies-sync — каждые 5 мин";
+      timerConfig = {
+        OnBootSec       = "3min";
+        OnUnitActiveSec = "5min";
+      };
+    };
+
+    # =========================================================
     # 2b. SYNC STRATEGY FILES — WP-WP-files + current/* + MEMORY.md
     # =========================================================
     # WP-7 S-C (7 мая 2026). Точечный pull WP-карточек и плана недели для DS-my-strategy.
