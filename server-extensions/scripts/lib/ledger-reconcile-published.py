@@ -312,7 +312,9 @@ def reconcile_locked(target, branch, head, snapshots, mirrors, deletions, origin
         # leaving an older equivalent ledger on disk. Normalize that proven dirt
         # under the same locks, but do not touch history or ORIG_HEAD again.
         if head != target:
-            git("merge", "--ff-only", target)
+            # No autostash, no silent overwrite of an ignored file on a
+            # fast-forward path (WP-530 Ф150, Fable review 14.11).
+            git("merge", "--ff-only", "--no-autostash", "--no-overwrite-ignore", target)
         reached_branch = git("symbolic-ref", "--short", "HEAD").stdout.strip().decode()
         if oid("HEAD") != target or reached_branch != branch:
             raise Refused("fast-forward did not reach the pinned branch tip")
