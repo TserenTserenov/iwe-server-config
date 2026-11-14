@@ -18,6 +18,7 @@
 #   ./sync-agent-instructions.sh --force    # записать AGENTS.md (с бэкапом .bak)
 #   ./sync-agent-instructions.sh --check    # exit 1 если drift (для CI / Day Open), без записи
 #   ./sync-agent-instructions.sh --with-hermes  # дополнительно сгенерить persona.md Гермеса
+#   ./sync-agent-instructions.sh --with-grok    # выжимка блокирующих правил в ~/.grok/AGENTS.md (окно Grok 10 000 символов)
 #   ./sync-agent-instructions.sh --help
 #
 # Переменные окружения:
@@ -34,14 +35,17 @@ CLAUDE_MD="$IWE_ROOT/CLAUDE.md"
 BLOCKS_MD="$IWE_ROOT/AGENTS-agent-blocks.md"
 OUT_MD="$IWE_ROOT/AGENTS.md"
 HERMES_DIR="${HERMES_RUNTIME_DIR:-$HOME/.hermes}"
+GROK_DIR="${GROK_RUNTIME_DIR:-$HOME/.grok}"
 
 MODE="dry-run"
 WITH_HERMES=0
+WITH_GROK=0
 for arg in "$@"; do
   case "$arg" in
     --force)       MODE="force" ;;
     --check)       MODE="check" ;;
     --with-hermes) WITH_HERMES=1 ;;
+    --with-grok)   WITH_GROK=1 ;;
     --help|-h)
       grep '^#' "$0" | sed 's/^# \{0,1\}//' | head -32
       exit 0 ;;
@@ -113,6 +117,10 @@ case "$MODE" in
     fi
     if diff -q <(printf '%s\n' "$GENERATED") "$OUT_MD" >/dev/null 2>&1; then
       echo "Синхронизация: OK (AGENTS.md соответствует ядру)"
+      # check mode exits here, so the optional Grok digest is checked here too
+      if [ "$WITH_GROK" -eq 1 ] && [ -d "$GROK_DIR" ]; then
+        python3 "$SCRIPT_DIR/blocking-rules-digest.py" --agents "$OUT_MD" --check "$GROK_DIR/AGENTS.md" || exit 1
+      fi
       exit 0
     else
       echo "[DRIFT] AGENTS.md расходится с ядром CLAUDE.md + agent-blocks. Запусти --force." >&2
@@ -162,5 +170,18 @@ if [ "$WITH_HERMES" -eq 1 ]; then
     echo "Записано: $PERSONA"
   else
     echo "[INFO] --with-hermes активен, но persona.md пишется только в режиме --force."
+  fi
+fi
+
+# --- Optional: Grok global digest (WP-7 F309) ---
+# Grok reads each rules file only up to 10 000 characters; ~/.grok/AGENTS.md
+# gets its own window, so it carries a generated digest of the blocking rules.
+if [ "$WITH_GROK" -eq 1 ]; then
+  if [ ! -d "$GROK_DIR" ]; then
+    echo "[WARN] --with-grok: $GROK_DIR not found — Grok digest skipped (Grok not installed)." >&2
+  elif [ "$MODE" = "force" ]; then
+    python3 "$SCRIPT_DIR/blocking-rules-digest.py" --agents "$OUT_MD" --write "$GROK_DIR/AGENTS.md"
+  else
+    echo "[INFO] --with-grok: the digest is written only with --force."
   fi
 fi

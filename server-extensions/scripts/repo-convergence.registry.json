@@ -37,19 +37,21 @@
           "shared_lock": "ds-commit"
         },
         {
+          "class": "reader",
           "host": "tsekh-1",
-          "path": "MC-sessions"
+          "path": "MC-sessions",
+          "shared_lock": "ds-commit"
         }
       ],
       "class": "undecided",
       "decision_owner": {
-        "ref": "поручение пилота 13.11.2026 (пир-сессия 2026-11-13-20-wp539-root-autopull-mac): на Маке автоподтягивание и дневная тревога",
+        "ref": "поручение пилота 13.11.2026 (пир-сессия 2026-11-13-20-wp539-root-autopull-mac): на Маке автоподтягивание и дневная тревога; решение пилота 14.11.2026 (пир-сессия 2026-11-14-04-wp539-scheduled-writers-isolation): на Цехе тоже",
         "scope": "checkout"
       },
-      "executor": "Мак — scripts/reader-copies-sync.py каждые 5 мин под ds-commit.lock (неблокирующе); Цех — нет",
+      "executor": "Мак и Цех — scripts/reader-copies-sync.py каждые 5 мин под ds-commit.lock (неблокирующе); на Цехе — служба iwe-reader-copies-sync (iwe-server-config)",
       "expected_branch": "main",
       "mutation_mechanism": "Мак: сессии коммитят здесь, шлюз публикует и сводит копию с origin; пока есть свои неопубликованные коммиты, перемотка в блоке (штатно), иначе ff-only чистой копии под общим замком",
-      "note": "Мак: diverged +3/-8 на 29.10; Цех: копию никто не двигает (брокер обновляет только ссылки)",
+      "note": "Мак: diverged +3/-8 на 29.10; Цех до 14.11 — копию никто не двигал (брокер обновлял только ссылки), сессии Цеха пишут в неё свои файлы, как на Маке",
       "repo_id": "MC-sessions",
       "thresholds": {
         "behind_max_commits": null,
@@ -658,6 +660,54 @@
       "expected_branch": "main",
       "mutation_mechanism": "сессии и службы коммитят; Цех отправляет то, что впереди",
       "repo_id": "DS-principles-curriculum",
+      "upstream": "origin/main"
+    },
+    {
+      "checkouts": [
+        {
+          "host": "mac",
+          "path": "FMT-exocortex-template"
+        },
+        {
+          "class": "reader",
+          "host": "tsekh-1",
+          "path": "FMT-exocortex-template"
+        }
+      ],
+      "class": "working",
+      "decision_owner": {
+        "ref": "решение пилота 14.11.2026 (пир-сессия 2026-11-14-04-wp539-scheduled-writers-isolation): на Цехе автоподтягивание",
+        "scope": "checkout"
+      },
+      "executor": "Цех — scripts/reader-copies-sync.py каждые 5 мин (служба iwe-reader-copies-sync); Мак — нет (рабочая копия автора шаблона)",
+      "expected_branch": "main",
+      "mutation_mechanism": "Мак: автор коммитит и публикует. Цех: только читается — из неё запускается разборщик (IWE_SCRIPTS у extractor-git-diff-feed); ff-only чистой копии на main",
+      "note": "14.11 Цех отставал на 164 коммита (10 дней): разборщик работал на старых скриптах шаблона. После перевода он получает каждое изменение main шаблона без задержки — риск принят пилотом",
+      "repo_id": "FMT-exocortex-template",
+      "upstream": "origin/main"
+    },
+    {
+      "checkouts": [
+        {
+          "host": "mac",
+          "path": "iwe-server-config"
+        },
+        {
+          "class": "reader",
+          "host": "tsekh-1",
+          "path": "iwe-server-config"
+        }
+      ],
+      "class": "working",
+      "decision_owner": {
+        "ref": "решение пилота 14.11.2026 (пир-сессия 2026-11-14-04-wp539-scheduled-writers-isolation): на Цехе автоподтягивание",
+        "scope": "checkout"
+      },
+      "executor": "Цех — scripts/reader-copies-sync.py каждые 5 мин (служба iwe-reader-copies-sync); Мак — нет (рабочая копия, в неё коммитит sync-extensions-auto)",
+      "expected_branch": "main",
+      "mutation_mechanism": "Мак: автор и sync-extensions-auto коммитят, push запускает пересборку Цеха (Action «Deploy to tsekh-1»). Цех: копией никто не пользуется — система собирается из GitHub; ff-only чистой копии, перемотка ничего не перезапускает",
+      "note": "14.11 Цех отставал на 280 коммитов при работающей системе с ревизии того же дня: устаревшая копия только путала агентов, читающих её как текущую настройку",
+      "repo_id": "iwe-server-config",
       "upstream": "origin/main"
     }
   ],

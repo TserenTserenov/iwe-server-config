@@ -43,15 +43,15 @@ repos:
     class: undecided
     checkouts:
       - {host: mac, path: MC-sessions, class: reader, shared_lock: ds-commit}
-      - {host: tsekh-1, path: MC-sessions}
+      - {host: tsekh-1, path: MC-sessions, class: reader, shared_lock: ds-commit}
     expected_branch: main
     upstream: origin/main
-    decision_owner: {ref: "поручение пилота 13.11.2026 (пир-сессия 2026-11-13-20-wp539-root-autopull-mac): на Маке автоподтягивание и дневная тревога", scope: checkout}
-    executor: "Мак — scripts/reader-copies-sync.py каждые 5 мин под ds-commit.lock (неблокирующе); Цех — нет"
+    decision_owner: {ref: "поручение пилота 13.11.2026 (пир-сессия 2026-11-13-20-wp539-root-autopull-mac): на Маке автоподтягивание и дневная тревога; решение пилота 14.11.2026 (пир-сессия 2026-11-14-04-wp539-scheduled-writers-isolation): на Цехе тоже", scope: checkout}
+    executor: "Мак и Цех — scripts/reader-copies-sync.py каждые 5 мин под ds-commit.lock (неблокирующе); на Цехе — служба iwe-reader-copies-sync (iwe-server-config)"
     mutation_mechanism: "Мак: сессии коммитят здесь, шлюз публикует и сводит копию с origin; пока есть свои неопубликованные коммиты, перемотка в блоке (штатно), иначе ff-only чистой копии под общим замком"
     note: "Двойная роль на Маке: в копию коммитят сессии (писатель) и её перематывает reader-copies-sync (читатель). Класс reader здесь — правило автоматической перемотки, не утверждение «только читается»; отдельного класса для такой роли исполнитель пока не знает. Тревога о «впереди» — через 120 мин (convergence-alarm.py AHEAD_GRACE_MIN)."
     thresholds: {fetch_max_age_min: null, behind_max_commits: null, behind_observed_for_min: 30, block_resolution_max_age_min: null}
-    note: "Мак: diverged +3/-8 на 29.10; Цех: копию никто не двигает (брокер обновляет только ссылки)"
+    note: "Мак: diverged +3/-8 на 29.10; Цех до 14.11 — копию никто не двигал (брокер обновлял только ссылки), сессии Цеха пишут в неё свои файлы, как на Маке"
   - repo_id: iwe-root
     class: undecided
     checkouts:
@@ -303,3 +303,25 @@ repos:
     decision_owner: {ref: "решение пилота 03.11.2026, пир-сессия 2026-11-03-12-wp539-sync-processes-audit (proposals.md)", scope: checkout}
     executor: "нет автоматической перемотки; Цех — отправка того, что впереди (iwe-push-ahead)"
     mutation_mechanism: "сессии и службы коммитят; Цех отправляет то, что впереди"
+  - repo_id: FMT-exocortex-template
+    class: working
+    checkouts:
+      - {host: mac, path: FMT-exocortex-template}
+      - {host: tsekh-1, path: FMT-exocortex-template, class: reader}
+    expected_branch: main
+    upstream: origin/main
+    decision_owner: {ref: "решение пилота 14.11.2026 (пир-сессия 2026-11-14-04-wp539-scheduled-writers-isolation): на Цехе автоподтягивание", scope: checkout}
+    executor: "Цех — scripts/reader-copies-sync.py каждые 5 мин (служба iwe-reader-copies-sync); Мак — нет (рабочая копия автора шаблона)"
+    mutation_mechanism: "Мак: автор коммитит и публикует. Цех: только читается — из неё запускается разборщик (IWE_SCRIPTS у extractor-git-diff-feed); ff-only чистой копии на main"
+    note: "14.11 Цех отставал на 164 коммита (10 дней): разборщик работал на старых скриптах шаблона. После перевода он получает каждое изменение main шаблона без задержки — риск принят пилотом"
+  - repo_id: iwe-server-config
+    class: working
+    checkouts:
+      - {host: mac, path: iwe-server-config}
+      - {host: tsekh-1, path: iwe-server-config, class: reader}
+    expected_branch: main
+    upstream: origin/main
+    decision_owner: {ref: "решение пилота 14.11.2026 (пир-сессия 2026-11-14-04-wp539-scheduled-writers-isolation): на Цехе автоподтягивание", scope: checkout}
+    executor: "Цех — scripts/reader-copies-sync.py каждые 5 мин (служба iwe-reader-copies-sync); Мак — нет (рабочая копия, в неё коммитит sync-extensions-auto)"
+    mutation_mechanism: "Мак: автор и sync-extensions-auto коммитят, push запускает пересборку Цеха (Action «Deploy to tsekh-1»). Цех: копией никто не пользуется — система собирается из GitHub; ff-only чистой копии, перемотка ничего не перезапускает"
+    note: "14.11 Цех отставал на 280 коммитов при работающей системе с ревизии того же дня: устаревшая копия только путала агентов, читающих её как текущую настройку"

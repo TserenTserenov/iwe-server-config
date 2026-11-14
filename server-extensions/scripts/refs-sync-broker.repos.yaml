@@ -75,3 +75,10 @@ repos:
   - path: DS-IT-systems/activity-hub
     remote: origin
     refspec: "+refs/heads/main:refs/remotes/origin/main"
+  # WP-539 Ф21 Б3, решение пилота 14.11.2026: читательские копии Цеха (шаблон и конфигурация сервера).
+  - path: FMT-exocortex-template
+    remote: origin
+    refspec: "+refs/heads/main:refs/remotes/origin/main"
+  - path: iwe-server-config
+    remote: origin
+    refspec: "+refs/heads/main:refs/remotes/origin/main"
