@@ -72,6 +72,28 @@ class RatchetTest(unittest.TestCase):
         res = subprocess.run(args, capture_output=True, text=True, check=False)
         return res.returncode, res.stdout
 
+    def test_agent_blocks_growth_fails_and_is_reported(self):
+        self.write("AGENTS-agent-blocks.md", "k" * 300)
+        self.commit("blocks")
+        self.base = self.git("rev-parse", "HEAD")
+        self.write("AGENTS-agent-blocks.md", "k" * 301)
+        self.commit("grow blocks")
+        code, out = self.check()
+        self.assertEqual(code, 1, out)
+        self.assertIn("блок агентов: 300 → 301 байт (+1)", out)
+        self.assertIn("AGENTS-agent-blocks.md) вырос на 1 байт", out)
+
+    def test_agent_blocks_shrink_does_not_pay_for_core_growth(self):
+        self.write("AGENTS-agent-blocks.md", "k" * 300)
+        self.commit("blocks")
+        self.base = self.git("rev-parse", "HEAD")
+        self.write("AGENTS-agent-blocks.md", "k" * 200)
+        self.write("CLAUDE.md", "x" * 1050)
+        self.commit("move bytes between sets")
+        code, out = self.check()
+        self.assertEqual(code, 1, out)
+        self.assertIn("горячий набор вырос на 50 байт", out)
+
     def test_growth_fails_and_nested_rules_count(self):
         self.write(".claude/rules/memory/cold.md", "n" * 50)
         self.commit("grow nested")

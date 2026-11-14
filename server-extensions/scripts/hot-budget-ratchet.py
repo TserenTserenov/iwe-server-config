@@ -29,6 +29,10 @@ import subprocess
 import sys
 
 HOT_GLOBS = ("CLAUDE.md", ".claude/rules/*.md", ".claude/rules/**/*.md")
+# Agent-specific blocks land whole in the generated AGENTS.md that Kimi, Codex and
+# Grok read (WP-7 F309). Not part of Claude's M2 budget, so a separate set that
+# only may not grow.
+AGENTS_GLOBS = ("AGENTS-agent-blocks.md",)
 BYTES_PER_TOKEN = (
     3.105  # calibrated ratio, same as verify-context-budget.sh (median-ratio.conf)
 )
@@ -50,17 +54,17 @@ def git(repo, *args):
 STAGED = ":staged"  # pseudo-ref: the index, for a local commit hook
 
 
-def hot_paths(repo, ref):
+def hot_paths(repo, ref, globs=HOT_GLOBS):
     if ref == STAGED:
         names = git(repo, "ls-files").splitlines()
     else:
         names = git(repo, "ls-tree", "-r", "--name-only", ref).splitlines()
-    return sorted(n for n in names if any(fnmatch.fnmatchcase(n, g) for g in HOT_GLOBS))
+    return sorted(n for n in names if any(fnmatch.fnmatchcase(n, g) for g in globs))
 
 
-def hot_bytes(repo, ref):
+def hot_bytes(repo, ref, globs=HOT_GLOBS):
     total = 0
-    for path in hot_paths(repo, ref):
+    for path in hot_paths(repo, ref, globs):
         total += len(
             subprocess.run(
                 [
@@ -116,9 +120,13 @@ def waiver_ok(label, text):
     return True, ""
 
 
-def verdict(base_b, head_b, changed, label, text):
+def verdict(base_b, head_b, changed, label, text, agents_growth=0):
     head_tokens = round(head_b / BYTES_PER_TOKEN)
     problems = []
+    if agents_growth > 0:
+        problems.append(
+            f"блок агентов (AGENTS-agent-blocks.md) вырос на {agents_growth} байт — уберите столько же в этой правке"
+        )
     if head_b > base_b:
         problems.append(
             f"горячий набор вырос на {head_b - base_b} байт — уберите столько же в этой правке"
@@ -142,6 +150,10 @@ def check(args):
             hot_bytes(args.repo, args.head),
         )
         changed = changed_bytes(args.repo, args.base, args.head)
+        agents_base, agents_head = (
+            hot_bytes(args.repo, args.base, AGENTS_GLOBS),
+            hot_bytes(args.repo, args.head, AGENTS_GLOBS),
+        )
     except subprocess.CalledProcessError as error:
         print(f"git failed: {error.stderr.strip()}", file=sys.stderr)
         return 2
@@ -149,11 +161,16 @@ def check(args):
     if args.waiver_text_file:
         with open(args.waiver_text_file, encoding="utf-8") as handle:
             text = handle.read()
-    result, problems = verdict(base_b, head_b, changed, args.waiver_label, text)
+    result, problems = verdict(
+        base_b, head_b, changed, args.waiver_label, text, agents_head - agents_base
+    )
     head_tokens = round(head_b / BYTES_PER_TOKEN)
     print(
         f"{result}: горячий набор {base_b} → {head_b} байт ({head_b - base_b:+d}), "
         f"~{head_tokens} токенов, до цели {M2_TOKENS}: {head_tokens - M2_TOKENS:+d}; изменено {changed} байт"
+    )
+    print(
+        f"  блок агентов: {agents_base} → {agents_head} байт ({agents_head - agents_base:+d})"
     )
     for problem in problems:
         print(f"  - {problem}")
