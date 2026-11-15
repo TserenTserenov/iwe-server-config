@@ -127,8 +127,23 @@ def published_entries(repo: Path, semaphore: Path, raw: bytes, name: str,
     return dict(published)
 
 
+def require_clean_path(checkout: Path, path: str, actual: dict | None,
+                       remote_entry: dict | None) -> None:
+    status = proof.git(checkout, "status", "--porcelain=v1", "-z", "--untracked-files=all",
+                       "--ignored", "--", path)
+    if not status:
+        return
+    # A stale shared checkout may hold the exact published report as an
+    # untracked projection. Never extend this exception to index changes.
+    require(status == b"?? " + os.fsencode(path) + b"\0" and remote_entry is not None
+            and actual == remote_entry
+            and not proof.git(checkout, "ls-files", "--stage", "-z", "--", path)
+            and proof.entries(checkout, "HEAD", [path])[0]["entry"] is None,
+            "uncommitted owned path: " + path)
+
+
 def verify_paths(repo: Path, checkouts: set[Path], paths: set[str], remote: str,
-                 published: dict[str, list[tuple[str, dict | None]]]) -> dict[tuple[Path, str], dict | None]:
+                 published: dict[str, list[tuple[str, dict | None]]]) -> dict:
     algorithm = proof.git(repo, "rev-parse", "--show-object-format").decode().strip()
     require(algorithm in {"sha1", "sha256"}, "unsupported Git object format")
     snapshots = {}
@@ -136,13 +151,11 @@ def verify_paths(repo: Path, checkouts: set[Path], paths: set[str], remote: str,
     for path in paths:
         expected = scope.latest_entry(repo, published[path]) if path in published else remote_entries[path]
         for checkout in checkouts:
-            require(not proof.git(checkout, "status", "--porcelain=v1", "--untracked-files=all",
-                                  "--ignored", "--", path),
-                    "uncommitted owned path: " + path)
             actual = scope.local_entry(checkout, path, algorithm)
+            require_clean_path(checkout, path, actual, remote_entries[path])
             require(actual == expected or actual == remote_entries[path],
                     "owned path differs from published content: " + path)
-            snapshots[(checkout, path)] = actual
+            snapshots[(checkout, path)] = (actual, remote_entries[path])
     return snapshots
 
 
@@ -187,11 +200,10 @@ def verify_session(workspace: Path, agent: str, session_id: str, harness: str) -
     require(checked_common == set(files), "file repository has no verified publication claims")
     report_filled(reports / report)
     for algorithm, snapshots in all_snapshots:
-        for (checkout, path), entry in snapshots.items():
-            require(scope.local_entry(checkout, path, algorithm) == entry
-                    and not proof.git(checkout, "status", "--porcelain=v1", "--untracked-files=all",
-                                      "--ignored", "--", path),
-                    "owned path changed during proof")
+        for (checkout, path), (entry, remote_entry) in snapshots.items():
+            actual = scope.local_entry(checkout, path, algorithm)
+            require(actual == entry, "owned path changed during proof")
+            require_clean_path(checkout, path, actual, remote_entry)
     require(all(proof.oid(repo, "refs/remotes/origin/main^{commit}") == remote for repo, remote in tips)
             and proof.snapshot(semaphore) == raw, "session or publication changed during proof")
     return {"check": "session_close", "result": "ok", "session_id": session_id,

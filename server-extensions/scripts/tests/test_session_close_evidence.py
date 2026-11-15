@@ -193,6 +193,24 @@ class SessionCloseEvidenceTest(unittest.TestCase):
                                                        f"orz_sessions_dir: {copied}"))
         self.refused()
 
+    def test_published_untracked_report_projection_requires_exact_bytes_and_empty_index(self) -> None:
+        checkout = self.base / "report-source"
+        git(self.reports, "worktree", "add", "-b", "report-source", str(checkout))
+        new_report = "2026-11/2026-11-15-WP-484.md"
+        source = self.publish(checkout, new_report, self.content)
+        self.sem.write_text(self.sem.read_text().replace(self.report, new_report).replace(
+            f"commit: MC-sessions {self.report_sha}",
+            f"commit: MC-sessions {source} {checkout} report-source"))
+        target = self.reports / new_report
+        target.write_text(self.content)
+        self.assertTrue(git(self.reports, "status", "--porcelain", "--", new_report).startswith("??"))
+        self.assertEqual(self.verify()["result"], "ok")
+        target.write_text("Unpublished projection\n")
+        self.refused()
+        git(self.reports, "add", new_report)
+        target.write_text(self.content)
+        self.refused()
+
     def test_missing_remote_blocks(self) -> None:
         git(self.gov, "remote", "set-url", "origin", str(self.base / "nonexistent"))
         self.refused()
