@@ -205,7 +205,7 @@ Respond in Russian unless the user writes in English.
 > Только ключевые сигналы; полные процедуры и примеры → `memory/reference/agent-core.md`.
 
 - **Локальный контекст:** `DS-my-strategy` (не `DS-strategy`), без Obsidian; корень `/Users/tserentserenov/IWE/`; `DS-IT-systems/{SystemsSchool_bot,aisystant}` — read-only.
-- **Код:** комментарии только EN, пользовательские строки — на языке интерфейса; авторские различения → `.claude/rules/distinctions.md` + `memory/distinctions-warm.md`.
+- **Код:** комментарии только EN, пользовательские строки — на языке интерфейса; **всё, что пишется в репо `aisystant/*` (коммиты, название и описание PR, issues, комментарии ревью) — только EN** (пилот, 15.11; чат с пилотом по-русски); авторские различения → `.claude/rules/distinctions.md` + `memory/distinctions-warm.md`.
 - **Extensions Gate (БЛОКИРУЮЩЕЕ):** пользователь меняет только `extensions/*.md` и `params.yaml`; автор (`author_mode: true`) может менять L1 и доставляет его через `DS-ai-systems/setup/scripts/template-sync.sh`. Структура `FMT-exocortex-template/README.md` — только по согласованию с владельцем.
 - **WP Entry Filter (S-47, БЛОКИРУЮЩЕЕ):** новый РП только при связи с R1-R6 месяца или внешнем заказчике; иначе → `DS-my-strategy/inbox/backlog-with-triggers.md`. Исключения: spin-off закрытого РП и прямое поручение пилота.
 - **Именование РП:** русское существительное-артефакт (Pack-ID допустим), в реестре ≤80 символов; переименование синхронизировать по перечню в Agent Core.
