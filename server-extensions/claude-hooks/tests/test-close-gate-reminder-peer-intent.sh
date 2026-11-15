@@ -95,6 +95,28 @@ class PeerIntentTests(unittest.TestCase):
         self.assertEqual(self.read_intent()["raw_text"], "Всё проверили")
         self.assert_peer_unarmed()
 
+    def test_switch_on_peer_close_takes_the_ordinary_close(self):
+        # WP-561 F61 stage 2 (pilot decision 15.11, one close path): with the close
+        # route switch on, the declared peer session is armed like any other.
+        flag = self.root / ".iwe-runtime/close-route-enforce"
+        flag.write_text("")
+        output = self.hook("закрывай сессию")
+        self.assertNotIn("пир-сессия", output.get("additionalContext", ""))
+        self.assertTrue(self.sentinel.exists(), "switch on: the close intent must arm the commit sentinel")
+        self.assertTrue(self.obligation.exists(), "switch on: the close intent must arm the runner obligation")
+
+    def test_zero_does_not_turn_the_host_file_off(self):
+        (self.root / ".iwe-runtime/close-route-enforce").write_text("")
+        self.env["IWE_CLOSE_ROUTE_ENFORCE"] = "0"
+        output = self.hook("закрывай сессию")
+        self.assertNotIn("пир-сессия", output.get("additionalContext", ""))
+        self.assertTrue(self.obligation.exists(), "the host file keeps the switch on")
+
+    def test_switch_off_keeps_the_peer_close(self):
+        output = self.hook("закрывай сессию")
+        self.assertIn("пир-сессия", output["additionalContext"])
+        self.assert_peer_unarmed()
+
     def test_neutral_peer_prompt_has_no_intent(self):
         self.hook("просто продолжаем работу")
         self.assertFalse(self.intent.exists())

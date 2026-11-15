@@ -197,6 +197,12 @@ for call in calls:
     # (a bare mention of the word, e.g. in a log line, does not count).
     inline = "close_path" in guard and "peer-session" in guard
     via_helper = re.search(r'if\s+_close_path_clears_obligation\s+"\$\([^)]*close_path', guard)
+    # WP-561 F61 stage 2: the record-level helper picks the clear action; for a
+    # close that is not a proven empty one it asks the same close_path question.
+    record_helper = re.search(r"^_record_obligation_clear_action\(\) \{.*?^\}", text, re.M | re.S)
+    if not via_helper and re.search(r"_record_obligation_clear_action\s+\"", guard) and record_helper:
+        via_helper = re.search(r'_close_path_clears_obligation\s+"\$\(_unique_record_field "\$1" close_path',
+                               record_helper.group(0))
     if not (inline or via_helper):
         print(f"вызов не под нужным условием: {guard!r}")
         break

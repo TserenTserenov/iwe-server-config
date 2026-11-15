@@ -22,6 +22,16 @@ The pilot's scheme (WP-484 F304) asks, in order; the first match decides:
   5. otherwise                                    -> ``close-changes``, plus the
      peer step when the session left peer-session traces.
 
+Stage 2 (pilot decisions 15.11) adds ``execution`` -- what ``close`` does when
+the fact-based choice is switched on (``IWE_CLOSE_ROUTE_ENFORCE``):
+  ``runner``     -- every close-changes, peer session or not: the quick-close
+                    runner with R23, phase/WP archiving and reflection (plus the
+                    peer step when there are traces). The pilot chose one close
+                    path over a short peer close: that one skipped archiving;
+  ``release``    -- release-empty: drop the mark without the runner;
+  ``resume``     -- an unfinished close keeps the decision frozen at its first attempt;
+  ``legacy``     -- refusals and ``nothing``: close keeps its declared behaviour.
+
 The facts are gathered by session-guard.sh (read-only for ``--explain``);
 this module never reads the disk, so every combination is unit-testable.
 """
@@ -33,6 +43,18 @@ RESUME = "resume"
 NOTHING = "nothing"
 RELEASE_EMPTY = "release-empty"
 CLOSE_CHANGES = "close-changes"
+
+EXEC_RUNNER = "runner"
+EXEC_RELEASE = "release"
+EXEC_RESUME = "resume"
+EXEC_LEGACY = "legacy"
+
+EXECUTION_TEXT = {
+    EXEC_RUNNER: "обычное закрытие через раннер quick-close с итоговой проверкой R23",
+    EXEC_RELEASE: "снять отметку без раннера: изменений нет",
+    EXEC_RESUME: "продолжить закрытие тем путём, который выбран при первой попытке",
+    EXEC_LEGACY: "прежний порядок по объявлению при открытии",
+}
 
 MACHINE_PATHS = {"pipeline", "machine-publish-only"}
 SERVICE_WPS = {"day-close"}
@@ -80,6 +102,7 @@ def classify(facts):
         "mismatch": False,
         "reasons": [],
         "pilot_phrase": "",
+        "execution": EXEC_LEGACY,
     }
     reasons = out["reasons"]
 
@@ -109,11 +132,16 @@ def classify(facts):
         out["route"] = RESUME
         out["owner_command"] = "machine-close" if declared == "machine-publish-only" else "close"
         out["pilot_phrase"] = PHRASE_RESUME
+        out["execution"] = EXEC_RESUME
         reasons.append(f"незавершённое закрытие в состоянии {resume_state}")
         # A resumed close keeps the kind chosen on the first attempt; no mismatch check.
         return out
 
-    if declared in MACHINE_PATHS or facts.get("wp") in SERVICE_WPS:
+    # A peer session is never a service protocol, whatever WP it was opened under:
+    # the peer skill opens with --wp day-close/unknown when no WP is assigned, and
+    # that one word must not bring back the short close (Fable review 15.11).
+    is_peer = declared == "peer-session" or facts.get("peer_evidence") == "yes"
+    if declared in MACHINE_PATHS or (facts.get("wp") in SERVICE_WPS and not is_peer):
         out["refuse"] = "out-of-scope"
         reasons.append(f"служебный протокол или машинный запуск (close_path={declared}, wp={facts.get('wp')}) — свой порядок, вне схемы")
         out["mismatch"] = _expected_route(declared) != "out-of-scope"
@@ -124,20 +152,27 @@ def classify(facts):
         reasons.append("объявлен узкий акт публикации (publish-only); чей это акт — решается до этапа 2")
         return out
 
-    if facts.get("isolated") and facts.get("no_changes") == "proven":
+    # A peer session with a journal is not released as empty: the "no changes" proof
+    # looks at the isolated copy and the claims, not at an unclaimed journal in the
+    # sessions repository, which would then stay unpublished (Fable review 15.11).
+    if facts.get("isolated") and facts.get("no_changes") == "proven" and facts.get("peer_evidence") != "yes":
         out["route"] = RELEASE_EMPTY
         out["pilot_phrase"] = PHRASE_RELEASE_EMPTY
+        out["execution"] = EXEC_RELEASE
         reasons.append("отдельная копия чистая, HEAD не сдвигался, заявок сверх служебных нет")
     else:
         out["route"] = CLOSE_CHANGES
         if not facts.get("isolated"):
             reasons.append("общая копия: «без изменений» не доказывается (решение пилота 12.11)")
+        elif facts.get("no_changes") == "proven":
+            reasons.append("отдельная копия чистая, но есть журнал пир-сессии — он публикуется обычным закрытием")
         else:
             detail = facts.get("no_changes_reason") or facts.get("no_changes") or "не проверено"
             reasons.append(f"«без изменений» не доказано: {detail}")
         out["peer_step"] = facts.get("peer_evidence") == "yes"
         if out["peer_step"]:
             reasons.append("есть следы пир-сессии — журнал и отчёт публикуются вместе с работой")
+        out["execution"] = EXEC_RUNNER
 
     expected = _expected_route(declared)
     out["mismatch"] = expected != out["route"] or (declared == "peer-session") != out["peer_step"]
@@ -147,7 +182,7 @@ def classify(facts):
     return out
 
 
-def render(outcome):
+def render(outcome, enforced=False):
     """Human-readable explanation for `close --explain`."""
     lines = []
     if outcome["refuse"]:
@@ -161,7 +196,12 @@ def render(outcome):
     lines.extend(f"- {reason}" for reason in outcome["reasons"])
     if outcome["pilot_phrase"]:
         lines.append(f"Сказать пилоту: {outcome['pilot_phrase']}")
-    lines.append("Этап 1 (наблюдение): команда close пока закрывает по объявлению, не по этому выбору.")
+    execution = EXECUTION_TEXT[outcome["execution"]]
+    if enforced:
+        lines.append(f"Исполнение по фактам включено: {execution}.")
+    else:
+        lines.append(f"Исполнение по фактам выключено: команда close закрывает по объявлению "
+                     f"(по фактам было бы: {execution}).")
     return "\n".join(lines)
 
 
@@ -177,6 +217,7 @@ def _parse(argv):
     parser.add_argument("--no-changes", choices=("proven", "refused", "not-checked"), default="not-checked")
     parser.add_argument("--no-changes-reason", default="")
     parser.add_argument("--peer-evidence", choices=("yes", "no", "unknown"), default="unknown")
+    parser.add_argument("--enforced", choices=("0", "1"), default="0")
     return parser.parse_args(argv)
 
 
@@ -193,8 +234,9 @@ def main(argv=None):
         "no_changes_reason": args.no_changes_reason,
         "peer_evidence": args.peer_evidence,
     })
+    outcome["enforced"] = args.enforced == "1"
     if args.format == "text":
-        print(render(outcome))
+        print(render(outcome, enforced=outcome["enforced"]))
     else:
         print(json.dumps(outcome, ensure_ascii=False))
     return 0

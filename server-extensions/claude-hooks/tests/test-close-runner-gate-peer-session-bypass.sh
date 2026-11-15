@@ -101,6 +101,15 @@ expect "peer-session: direct commit allowed"  0 'git commit -m x'
 expect "peer-session: direct push allowed"    0 'git push'
 expect "peer-session: -C form allowed"        0 'git -C repo commit -m x'
 
+# WP-561 Ф61 stage 2 (pilot decision 15.11, one close path): with the close route
+# switch on, the declaration no longer exempts; the variable cannot turn the host file off.
+IWE_CLOSE_ROUTE_ENFORCE=1 expect "switch on (variable): peer-session commit waits for the runner" 2 'git commit -m x'
+mkdir -p "$IWE_ROOT_TEST/.iwe-runtime" && : > "$IWE_ROOT_TEST/.iwe-runtime/close-route-enforce"
+IWE_CLOSE_ROUTE_ENFORCE= expect "switch on (host file): peer-session push waits for the runner" 2 'git push'
+IWE_CLOSE_ROUTE_ENFORCE=0 expect "0 does not turn the host file off" 2 'git commit -m x'
+rm -f "$IWE_ROOT_TEST/.iwe-runtime/close-route-enforce"
+IWE_CLOSE_ROUTE_ENFORCE=yes expect "unknown switch value: off, bypass as before" 0 'git commit -m x'
+
 # === close_path=quick-close (явно объявлен) → прежнее поведение, блок ===
 write_semaphore "quick-close"
 expect "quick-close: still blocks commit"     2 'git commit -m x'

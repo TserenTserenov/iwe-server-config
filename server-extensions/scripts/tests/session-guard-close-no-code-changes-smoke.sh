@@ -121,7 +121,9 @@ close_session() {  # <slug> <stderr file>
 # --- A. the promise holds: close needs no runner card -------------------------
 open_session no-code-a
 if close_session no-code-a "$TEST_ROOT/close-a.err" && grep -q 'close_path=no-code-changes объявлен и доказан' "$TEST_ROOT/close-a.err"; then
-  grep -q -- "cancel --session-id $CLAUDE_CODE_SESSION_ID --action peer-session-close" "$OBLIGATION_LOG" 2>/dev/null \
+  # WP-561 F61 stage 2: a proven empty close clears with no-changes-close;
+  # peer-session-close refused an obligation armed outside a peer session.
+  grep -q -- "cancel --session-id $CLAUDE_CODE_SESSION_ID --action no-changes-close" "$OBLIGATION_LOG" 2>/dev/null \
     || { cat "$OBLIGATION_LOG" 2>/dev/null >&2; fail "the light close must clear the conversation's close obligation"; }
   [ -f "$SEM.closed" ] || fail "a closed session must leave the .open.closed receipt"
   [ ! -e "$SEM" ] || fail "a closed session must no longer be live"
@@ -131,7 +133,7 @@ else
   cat "$TEST_ROOT/close-a.err" >&2; fail "proven no-code-changes close must bypass the runner"
 fi
 
-[ "$(grep -c -- "--action peer-session-close" "$OBLIGATION_LOG")" = 1 ] || fail "exactly one obligation clear expected after the first close"
+[ "$(grep -c -- "--action no-changes-close" "$OBLIGATION_LOG")" = 1 ] || fail "exactly one obligation clear expected after the first close"
 
 # --- B. an untracked file in the isolated worktree breaks the proof -----------
 open_session no-code-b
@@ -173,7 +175,7 @@ grep -q 'extra.md' "$SEM" || fail "the extra claim must be recorded in the semap
 if close_session no-code-b "$TEST_ROOT/close-e.err"; then fail "an extra claim must stop the light close"; fi
 grep -q 'extra.md' "$TEST_ROOT/close-e.err" || { cat "$TEST_ROOT/close-e.err" >&2; fail "refusal must show the extra claim"; }
 rm -f "$WT/extra.md"
-[ "$(grep -c -- "--action peer-session-close" "$OBLIGATION_LOG")" = 1 ] || { cat "$OBLIGATION_LOG" >&2; fail "a refused light close must not clear the obligation"; }
+[ "$(grep -c -- "--action no-changes-close" "$OBLIGATION_LOG")" = 1 ] || { cat "$OBLIGATION_LOG" >&2; fail "a refused light close must not clear the obligation"; }
 echo "OK: a claim beyond the own ORZ and open-sessions.log stops the light close"
 
 # --- G. the proof itself: bookkeeping lines are not claims, a foreign repository is ----

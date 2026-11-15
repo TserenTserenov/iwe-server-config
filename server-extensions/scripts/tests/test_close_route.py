@@ -1,4 +1,4 @@
-"""Close route classifier (WP-561 F61 stage 1): the pilot's scheme WP-484 F304 as a fact table.
+"""Close route classifier (WP-561 F61 stages 1-2): the pilot's scheme WP-484 F304 as a fact table.
 
 Rows follow Fable's check table: what the conversation did; who closes and how;
 what confirms it (declared / proven / signed); how it goes (normal / resume /
@@ -141,7 +141,67 @@ class CommandLine(unittest.TestCase):
         text = self.run_cli("--format", "text", "--semaphores", "1", "--declared", "peer-session",
                             "--peer-evidence", "yes")
         self.assertIn("close-changes + публикация журнала", text)
-        self.assertIn("Этап 1", text)
+        self.assertIn("Исполнение по фактам выключено", text)
+        self.assertIn("обычное закрытие через раннер", text)
+
+    def test_text_output_states_enforced_mode(self):
+        text = self.run_cli("--format", "text", "--semaphores", "1", "--peer-evidence", "yes", "--enforced", "1")
+        self.assertIn("Исполнение по фактам включено: обычное закрытие через раннер", text)
+
+    def test_json_output_carries_execution_and_switch(self):
+        out = json.loads(self.run_cli("--semaphores", "1", "--peer-evidence", "yes"))
+        self.assertEqual(out["execution"], cr.EXEC_RUNNER)
+        self.assertFalse(out["enforced"])
+
+    def test_removed_short_peer_close_option_is_rejected(self):
+        result = subprocess.run([sys.executable, str(LIB / "close_route.py"), "--semaphores", "1",
+                                 "--peer-light", "yes"], capture_output=True, text=True, check=False)
+        self.assertNotEqual(result.returncode, 0)
+
+
+class Execution(unittest.TestCase):
+    """Stage 2 (pilot 15.11): what close does when the fact-based choice is switched on."""
+
+    def test_peer_session_with_changes_goes_through_the_runner(self):
+        # Pilot 15.11: one close path; a journal-only peer session is no exception
+        # (the former short close skipped phase and WP archiving).
+        out = cr.classify(facts(declared="peer-session", peer_evidence="yes"))
+        self.assertEqual(out["execution"], cr.EXEC_RUNNER)
+        self.assertTrue(out["peer_step"])
+
+    def test_declared_peer_session_without_traces_goes_through_the_runner(self):
+        # The class found 15.11: a solo session declared peer-session and skipped R23.
+        out = cr.classify(facts(declared="peer-session", peer_evidence="no"))
+        self.assertEqual(out["execution"], cr.EXEC_RUNNER)
+
+    def test_proven_empty_is_released(self):
+        out = cr.classify(facts(no_changes="proven", declared="peer-session", peer_evidence="no"))
+        self.assertEqual(out["execution"], cr.EXEC_RELEASE)
+
+    def test_peer_session_with_journal_is_not_released_as_empty(self):
+        out = cr.classify(facts(no_changes="proven", declared="peer-session", peer_evidence="yes"))
+        self.assertEqual(out["route"], cr.CLOSE_CHANGES)
+        self.assertEqual(out["execution"], cr.EXEC_RUNNER)
+        self.assertTrue(out["peer_step"])
+        self.assertTrue(any("журнал пир-сессии" in r for r in out["reasons"]))
+
+    def test_peer_session_under_service_wp_is_not_out_of_scope(self):
+        for case in (facts(wp="day-close", declared="peer-session"),
+                     facts(wp="day-close", peer_evidence="yes")):
+            with self.subTest(case=case):
+                out = cr.classify(case)
+                self.assertIsNone(out["refuse"])
+                self.assertEqual(out["execution"], cr.EXEC_RUNNER)
+
+    def test_unfinished_close_is_resumed_not_rechosen(self):
+        out = cr.classify(facts(resume_state="prepared", peer_evidence="yes"))
+        self.assertEqual(out["execution"], cr.EXEC_RESUME)
+
+    def test_refusals_and_nothing_keep_the_declared_behaviour(self):
+        for case in (facts(declared="publish-only"), facts(declared="pipeline"), facts(wp="day-close"),
+                     facts(semaphores=0), facts(semaphores=2), facts(semaphores=-1)):
+            with self.subTest(case=case):
+                self.assertEqual(cr.classify(case)["execution"], cr.EXEC_LEGACY)
 
 
 if __name__ == "__main__":

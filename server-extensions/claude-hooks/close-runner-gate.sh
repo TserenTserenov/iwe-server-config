@@ -297,9 +297,21 @@ fi
 # -- the runner is structurally not applicable to its close flow. That is
 # still true, but it must not also skip the bookkeeping above for a
 # quick-close start the peer-session issues directly (own bug, same day).
+# WP-561 F61 stage 2 (pilot decision 15.11, one close path): with the close route
+# switch on, the declaration no longer exempts -- a peer session with changes closes
+# through the runner like any other, so its direct commit after a close intent waits
+# for the runner card exactly as an ordinary session's does.
+. "${BASH_SOURCE[0]%/*}/lib/close-route-switch.sh" 2>/dev/null || {
+  echo "[close-runner-gate] lib/close-route-switch.sh не найден — выключатель пути закрытия считается выключенным" >&2
+  close_route_enforced() { return 1; }
+}
 if [ "$CLOSE_PATH_MATCH" = "MATCH" ]; then
-  echo "[close-runner-gate] session=$SESSION_ID_SAFE close_path=peer-session — раннер не требуется, гейт пропускает" >&2
-  exit 0
+  if close_route_enforced "$IWE_ROOT"; then
+    echo "[close-runner-gate] session=$SESSION_ID_SAFE close_path=peer-session, исполнение по фактам включено — объявление от раннера не освобождает" >&2
+  else
+    echo "[close-runner-gate] session=$SESSION_ID_SAFE close_path=peer-session — раннер не требуется, гейт пропускает" >&2
+    exit 0
+  fi
 fi
 
 # Применимо к блокировке только прямой git commit/push. process-runner.py сам

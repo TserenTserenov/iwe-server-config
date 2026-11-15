@@ -545,6 +545,11 @@ peer_session_evidence() { # <close_path> <semaphore> <slug> <orz-dir>
 # WP-484 Ф267 п.2: a `no-code-changes` close has no runner card either, so the same
 # armed obligation would outlive it. Unlike peer-session it earns no standing Stop
 # exemption in close_obligation.py -- only this one-off clear after a proven close.
+# WP-561 F61 stage 2: a proven empty close (route-release-empty, or a declared
+# no-code-changes close by its sentinel) clears with `--action no-changes-close`:
+# `peer-session-close` refuses an obligation armed outside a peer session
+# (`skipped_next_work`), so an ordinary unchanged session stayed blocked at Stop
+# after a successful close. The action comes from _record_obligation_clear_action.
 _close_path_clears_obligation() {  # <close_path value>
   case "$1" in
     peer-session | no-code-changes) return 0 ;;
@@ -576,8 +581,8 @@ with open(audit, "a", encoding="utf-8") as handle:
 AUDIT_PY
 }
 
-clear_peer_session_obligation() {
-  local semaphore="$1" slug="$2"
+clear_peer_session_obligation() {  # <semaphore> <slug> [cancel action]
+  local semaphore="$1" slug="$2" action="${3:-peer-session-close}"
   local obligation_cli="$IWE_ROOT/$GOV_REPO/scripts/close_obligation.py"
   [ -f "$obligation_cli" ] || return 0
 
@@ -586,8 +591,8 @@ clear_peer_session_obligation() {
   [ -n "$harness_sid" ] || return 0
 
   timeout 10 python3 "$obligation_cli" cancel \
-    --session-id "$harness_sid" --action peer-session-close --actor session-guard-close \
-    --reason "peer-session $slug закрыта через session-guard, обязательство раннера неприменимо" \
+    --session-id "$harness_sid" --action "$action" --actor session-guard-close \
+    --reason "сессия $slug закрыта через session-guard (${action}), обязательство раннера неприменимо" \
     >/dev/null 2>&1 \
     || echo "  ⚠️  close_obligation cancel не прошёл (best-effort, не блокирует close)" >&2
   return 0
@@ -9125,7 +9130,7 @@ elif kind == "sentinel":
     # Sentinels are a closed set produced by the already-completed close
     # policy gate.  A missing RUN card path must never silently become one.
     if not re.fullmatch(
-        r"(?:declared-peer-session|declared-publish-only|declared-no-code-changes|declared-machine-publish-only|cancel-obligation|pilot-release):[A-Za-z0-9._-]{1,256}",
+        r"(?:declared-peer-session|declared-publish-only|declared-no-code-changes|declared-machine-publish-only|route-release-empty|cancel-obligation|pilot-release):[A-Za-z0-9._-]{1,256}",
         value,
     ):
         raise SystemExit(1)
@@ -9515,7 +9520,7 @@ if (
 if fields["close_delivery_terminal_kind"] == "file" and not os.path.isabs(terminal_reference):
     raise SystemExit(1)
 if fields["close_delivery_terminal_kind"] == "sentinel" and not re.fullmatch(
-    r"(?:declared-peer-session|declared-publish-only|declared-no-code-changes|declared-machine-publish-only|cancel-obligation|pilot-release):[A-Za-z0-9._-]{1,256}",
+    r"(?:declared-peer-session|declared-publish-only|declared-no-code-changes|declared-machine-publish-only|route-release-empty|cancel-obligation|pilot-release):[A-Za-z0-9._-]{1,256}",
     terminal_reference,
 ):
     raise SystemExit(1)
@@ -12628,10 +12633,74 @@ _close_route_outcome() {  # <semaphore> <session-id> <json|text> [orz sessions d
   # Evidence is looked for whatever was declared: the route depends on traces, not on words.
   peer=$(peer_session_evidence peer-session "$sem" "$slug" "$orz_dir" 2>/dev/null) || peer="unknown"
   case "$peer" in yes|no) ;; *) peer="unknown" ;; esac
+  local enforced=0
+  _close_route_enforced && enforced=1
   python3 "$GUARD_LIB_DIR/close_route.py" --format "$format" --semaphores 1 \
     --declared "${declared:-unknown}" --wp "$wp" --resume-state "${resume:-damaged}" \
     --isolated "$isolated" --no-changes "$no_changes" --no-changes-reason "$ncc_reason" \
-    --peer-evidence "$peer"
+    --peer-evidence "$peer" --enforced "$enforced"
+}
+
+# --- Close route execution (WP-561 Ф61 stage 2) -----------------------------
+# The switch. Off by default: on with IWE_CLOSE_ROUTE_ENFORCE=1, or durably for a
+# host with the flag file below. The environment cannot turn the file off (Fable
+# review 15.11: an agent's own `IWE_CLOSE_ROUTE_ENFORCE=0 ... close` brought the
+# short close back while the hooks kept reading the file); rollback on a host is
+# removing the file. Same rule: .claude/hooks/lib/close-route-switch.sh and
+# DS-my-strategy close_obligation.py, kept in step by close-route-switch-agreement-smoke.sh.
+_close_route_enforced() {
+  case "${IWE_CLOSE_ROUTE_ENFORCE:-}" in
+    1) return 0 ;;
+    '' | 0) ;;
+    *) echo "  ⚠️  IWE_CLOSE_ROUTE_ENFORCE=${IWE_CLOSE_ROUTE_ENFORCE} не понят (нужно 1): решает файл .iwe-runtime/close-route-enforce" >&2 ;;
+  esac
+  [ -f "$IWE_ROOT/.iwe-runtime/close-route-enforce" ]
+}
+
+# How this close executes once the switch is on: runner | release | legacy.
+# A peer session with changes takes the runner like any other (pilot decision 15.11:
+# one close path; the former short peer close skipped phase and WP archiving).
+# A fresh close takes the classifier's choice; a resumed close keeps the one frozen at
+# its first attempt (the terminal reference persisted with the prepared delivery), so a
+# close started under the old rules finishes under them. Without a usable choice a
+# declared runner bypass is not kept on a guess: the runner is always a valid way out.
+_close_execution() {  # <semaphore> <resume state> <route json, may be empty>
+  local sem="$1" resume="$2" route_json="$3" execution declared
+  if [ "$resume" != "none" ]; then
+    case "$(_unique_record_field "$sem" close_delivery_terminal_reference || true)" in
+      route-release-empty:*) echo release ;;
+      /*) echo runner ;;
+      *) echo legacy ;;
+    esac
+    return 0
+  fi
+  execution=$(python3 -c 'import json, sys; print(json.loads(sys.argv[1])["execution"])' "$route_json" 2>/dev/null) \
+    || execution=""
+  case "$execution" in
+    runner|release|legacy) echo "$execution"; return 0 ;;
+  esac
+  declared=$(_unique_record_field "$sem" close_path || true)
+  echo "  ⚠️  close: путь по фактам не выбран (${execution:-нет ответа классификатора}); объявленный обход раннера не применяется" >&2
+  case "$declared" in
+    peer-session|no-code-changes) echo runner ;;
+    *) echo legacy ;;
+  esac
+}
+
+# Which automatic obligation clear a closed session earns, printed as the cancel
+# action; nothing (status 1) when none. A proven empty close -- frozen in the terminal
+# reference as route-release-empty (stage 2) or declared-no-code-changes -- clears
+# with no-changes-close. Otherwise the declared path, as before: a declared peer
+# session closed through the runner still clears on purpose, because
+# close_obligation.py exempts the conversation by that declaration and a kept
+# exemption would outlive the session (see clear_peer_session_obligation).
+_record_obligation_clear_action() {  # <semaphore or its .closed record>
+  case "$(_unique_record_field "$1" close_delivery_terminal_reference || true)" in
+    route-release-empty:* | declared-no-code-changes:*) echo no-changes-close; return 0 ;;
+  esac
+  _close_path_clears_obligation "$(_unique_record_field "$1" close_path || true)" \
+    && { echo peer-session-close; return 0; }
+  return 1
 }
 
 # --- Intent gate at the claim point (WP-561 Ф33) ---------------------------
@@ -12899,7 +12968,11 @@ if [ "$CMD" = "close" ]; then
         || fail "close: exact closed receipt отсутствует, повреждён или не совпал с запросом; повтор не подтверждён" 3
       _cleanup_closed_session_projections "$EXACT_OPEN" "$AGENT" "$SESSION_ID_ARG" \
         || fail "close: receipt подтверждён, но локальные projections не восстановлены" 7
-      if _close_path_clears_obligation "$(_unique_record_field "$EXACT_OPEN.closed" close_path || true)" \
+      # A repeat of an already closed receipt only ever sends peer-session-close: an
+      # obligation armed after the first close belongs to the next work, and only that
+      # action refuses it (`skipped_next_work`). no-changes-close is issued by the first
+      # close alone, right when its proof held (Fable re-check 15.11).
+      if _record_obligation_clear_action "$EXACT_OPEN.closed" >/dev/null \
           && _closed_peer_has_no_live_owner "$EXACT_OPEN.closed"; then
         # Do not lend authority descriptors to the ledger's detached publisher.
         clear_peer_session_obligation "$EXACT_OPEN.closed" \
@@ -13006,20 +13079,42 @@ if [ "$CMD" = "close" ]; then
     fi
   fi
 
-  # WP-561 Ф61 stage 1 (observation): record the fact-based close route next to
-  # the declared close_path. Never changes this close; a failure loses only the record.
+  # WP-561 Ф61: the fact-based close route. Stage 1 records it next to the declared
+  # close_path; a failure loses only the record. Stage 2, behind _close_route_enforced
+  # (off by default), also executes it: CLOSE_EXECUTION drives the card handoff check,
+  # the runner requirement, resume and the obligation release below.
+  CLOSE_EXECUTION="legacy"
+  ROUTE_JSON=""
+  ROUTE_ENFORCED=0
+  _close_route_enforced && ROUTE_ENFORCED=1
+  if [ "$ROUTE_ENFORCED" = 1 ] || [ -f "$IWE_ROOT/$GOV_REPO/scripts/ledger-append.sh" ]; then
+    ROUTE_JSON=$(_close_route_outcome "$SEM_FILE" "$LOCKED_SESSION_ID" json "$ORZ_SESSIONS_DIR" 2>/dev/null) \
+      || ROUTE_JSON=""
+  fi
+  # A resumed close keeps the decision frozen at its first attempt whatever the switch
+  # says now: turning it off mid-close must not drop a route sentinel already prepared.
+  if [ "$ROUTE_ENFORCED" = 1 ] || [ "$CLOSE_RESUME_STATE" != "none" ]; then
+    CLOSE_EXECUTION=$(_close_execution "$SEM_FILE" "$CLOSE_RESUME_STATE" "$ROUTE_JSON")
+  fi
+  if [ "$ROUTE_ENFORCED" = 1 ]; then
+    echo "Session CLOSE: исполнение по фактам включено (WP-561 Ф61 этап 2): ${CLOSE_EXECUTION}" >&2
+  fi
   if [ -f "$IWE_ROOT/$GOV_REPO/scripts/ledger-append.sh" ]; then
-    if ROUTE_JSON=$(_close_route_outcome "$SEM_FILE" "$LOCKED_SESSION_ID" json "$ORZ_SESSIONS_DIR" 2>/dev/null) \
-        && ROUTE_EVENT=$(python3 -c '
+    if [ -n "$ROUTE_JSON" ] && ROUTE_EVENT=$(python3 -c '
 import json, sys
 event = json.loads(sys.argv[1])
-event.update(wp=sys.argv[2], slug=sys.argv[3], agent=sys.argv[4], session_id=sys.argv[5])
+event.update(wp=sys.argv[2], slug=sys.argv[3], agent=sys.argv[4], session_id=sys.argv[5],
+             enforced=sys.argv[6] == "1", executed=sys.argv[7])
 print(json.dumps(event, ensure_ascii=False))
-' "$ROUTE_JSON" "${WP:-}" "${SLUG:-}" "$AGENT" "$LOCKED_SESSION_ID"); then
+' "$ROUTE_JSON" "${WP:-}" "${SLUG:-}" "$AGENT" "$LOCKED_SESSION_ID" "$ROUTE_ENFORCED" "${CLOSE_EXECUTION:-legacy}"); then
       # Do not lend the session lock descriptors to the ledger's detached publisher.
       ledger_append_traced "$SLUG" close_route_observed no day "$(now_date)" close_route_observed "$ROUTE_EVENT" session-guard 195>&- 196>&-
     else
-      echo "  ⚠️  close: путь закрытия по фактам не посчитан (наблюдение WP-561 Ф61); закрытие идёт как обычно" >&2
+      if [ "$ROUTE_ENFORCED" = 1 ]; then
+        echo "  ⚠️  close: путь закрытия по фактам не посчитан и не записан в журнал (WP-561 Ф61); исполняется: ${CLOSE_EXECUTION:-legacy}" >&2
+      else
+        echo "  ⚠️  close: путь закрытия по фактам не посчитан (наблюдение WP-561 Ф61); закрытие идёт как обычно" >&2
+      fi
     fi
   fi
 
@@ -13036,14 +13131,20 @@ print(json.dumps(event, ensure_ascii=False))
   # A resumed close (delivery already prepared/published) only warns: its card is bound to
   # the delivery and cannot be fixed and republished from here (cold review 10.11).
   # Called only for a peer-session close: other sessions have no use for the check.
-  if [ -n "${SEM_FILE:-}" ] && grep -qx 'close_path: peer-session' "$SEM_FILE" 2>/dev/null; then
+  # Stage 2: only the declared direct close; the runner path has its own check (M1).
+  HANDOFF_ARGS=()
+  if [ "${CLOSE_EXECUTION:-legacy}" = legacy ] && [ -n "${SEM_FILE:-}" ] \
+      && grep -qx 'close_path: peer-session' "$SEM_FILE" 2>/dev/null; then
+    HANDOFF_ARGS=(--sem "$SEM_FILE")
+  fi
+  if [ "${#HANDOFF_ARGS[@]}" -gt 0 ]; then
     HANDOFF_RC=0
     if [ "$CLOSE_RESUME_STATE" = "none" ]; then
-      bash "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/wp-handoff-peer-check.sh" --sem "$SEM_FILE" --from-close </dev/null \
+      bash "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/wp-handoff-peer-check.sh" "${HANDOFF_ARGS[@]}" --from-close </dev/null \
         || HANDOFF_RC=$?
     else
       IWE_HANDOFF_CHECK_MODE=shadow bash "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/wp-handoff-peer-check.sh" \
-        --sem "$SEM_FILE" --from-close </dev/null || true
+        "${HANDOFF_ARGS[@]}" --from-close </dev/null || true
     fi
     if [ "$HANDOFF_RC" -eq 10 ]; then
       fail "поле «Следующий шаг» карточки не прошло проверку (причина выше). Исправь, опубликуй и повтори close. Семафор остаётся активным." 5
@@ -13157,7 +13258,7 @@ print(json.dumps(event, ensure_ascii=False))
   # ${SEM_FILE:-} (портировано из шаблона, T22, 30.08): T22 подключает это
   # окно отдельно под set -u без заглушки семафора; пустой путь -> grep не
   # находит совпадение -> обход корректно не срабатывает.
-  if grep -q '^close_path: peer-session$' "${SEM_FILE:-}" 2>/dev/null; then
+  if [ "${CLOSE_EXECUTION:-legacy}" = legacy ] && grep -q '^close_path: peer-session$' "${SEM_FILE:-}" 2>/dev/null; then
     RUNNER_OK="declared-peer-session:$SLUG"
     TERMINAL_PROOF_MODE="sentinel"
     FORCED_CARD="declared-peer-session:$SLUG"
@@ -13176,7 +13277,7 @@ print(json.dumps(event, ensure_ascii=False))
   # Ф25.1/Ф26 (осиротевший семафор второго/третьего слага одного разговора),
   # а не только лечит её постфактум маркером (Ф28/Ф29 выше, который остаётся
   # защитным слоем на случай пропущенного close_path).
-  if grep -q '^close_path: publish-only$' "${SEM_FILE:-}" 2>/dev/null; then
+  if [ "${CLOSE_EXECUTION:-legacy}" = legacy ] && grep -q '^close_path: publish-only$' "${SEM_FILE:-}" 2>/dev/null; then
     RUNNER_OK="declared-publish-only:$SLUG"
     TERMINAL_PROOF_MODE="sentinel"
     FORCED_CARD="declared-publish-only:$SLUG"
@@ -13188,7 +13289,7 @@ print(json.dumps(event, ensure_ascii=False))
   # ahead of origin/main). A failed proof does not fail the close: it falls
   # through to the ordinary terminal-card requirement below, which is the
   # ready exit for the same session (finish through quick-close).
-  if grep -q '^close_path: no-code-changes$' "${SEM_FILE:-}" 2>/dev/null; then
+  if [ "${CLOSE_EXECUTION:-legacy}" = legacy ] && grep -q '^close_path: no-code-changes$' "${SEM_FILE:-}" 2>/dev/null; then
     if NCC_REASON=$(_no_code_changes_proof "$SEM_FILE" 2>&1); then
       RUNNER_OK="declared-no-code-changes:$SLUG"
       TERMINAL_PROOF_MODE="sentinel"
@@ -13198,6 +13299,20 @@ print(json.dumps(event, ensure_ascii=False))
       echo "Session CLOSE: close_path=no-code-changes не доказан (${NCC_REASON}); обычное требование карточки закрытия остаётся — закрой эту же сессию через quick-close." >&2
     fi
   fi
+
+  # WP-561 Ф61 stage 2: the fact-based choice replaces the declared channels above.
+  # The release sentinel is frozen into the prepared delivery, so a resume keeps it.
+  case "${CLOSE_EXECUTION:-legacy}" in
+    release)
+      RUNNER_OK="route-release-empty:$SLUG"
+      TERMINAL_PROOF_MODE="sentinel"
+      FORCED_CARD="route-release-empty:$SLUG"
+      echo "Session CLOSE: по фактам изменений нет — раннер не требуется (WP-561 Ф61 этап 2)." >&2
+      ;;
+    runner)
+      echo "Session CLOSE: по фактам нужно обычное закрытие через quick-close с итоговой проверкой; объявление при открытии ($(_unique_record_field "${SEM_FILE:-}" close_path || echo unknown)) от него не освобождает (WP-561 Ф61 этап 2). Причина — в «close --explain»." >&2
+      ;;
+  esac
 
   # "${RUNNER_CARDS[@]+"${RUNNER_CARDS[@]}"}", not "${RUNNER_CARDS[@]}": a
   # peer-conversation close (no RUN-quick-close-* card ever written) leaves
@@ -13651,7 +13766,16 @@ print(json.dumps({"wp": sys.argv[1], "slug": sys.argv[2], "agent": sys.argv[3], 
     # resumed close (PREPARED -> --abandon-prepared) skipped the close events
     # below. close_path is fixed at open, so it can be re-read from the
     # semaphore; other bypass channels need a card and only exist on a fresh close.
-    if grep -q '^close_path: peer-session$' "${SEM_FILE:-}" 2>/dev/null; then
+    # Stage 2: the decision frozen at the first attempt wins over the declaration.
+    if [ "${CLOSE_EXECUTION:-legacy}" = release ]; then
+      FORCED_CARD=$(_unique_record_field "${SEM_FILE:-}" close_delivery_terminal_reference || true)
+      if [ "$CLOSE_RESUME_STATE" = "prepared" ]; then
+        NCC_REASON=$(_no_code_changes_proof "$SEM_FILE" any 2>&1) \
+          || fail "close: после PREPARED «без изменений» больше не доказано (${NCC_REASON}); продолжение запрещено" 7
+      fi
+    elif [ "${CLOSE_EXECUTION:-legacy}" = runner ]; then
+      : # the first attempt closed through a runner card; the generic resume below reads it
+    elif grep -q '^close_path: peer-session$' "${SEM_FILE:-}" 2>/dev/null; then
       FORCED_CARD="declared-peer-session:$SLUG"
     elif grep -q '^close_path: publish-only$' "${SEM_FILE:-}" 2>/dev/null; then
       FORCED_CARD="declared-publish-only:$SLUG"
@@ -13891,8 +14015,8 @@ print(json.dumps({"wp": sys.argv[1], "slug": sys.argv[2], "agent": sys.argv[3], 
     fi
     _direct_event=$(python3 -c '
 import json, sys
-print(json.dumps({"wp": sys.argv[1], "slug": sys.argv[2], "agent": sys.argv[3], "close_path": sys.argv[4], "peer_evidence": sys.argv[5]}))
-' "$WP" "$SLUG" "$AGENT" "$_cp_from_sem" "$_peer_evidence" 2>/dev/null) || _direct_event=""
+print(json.dumps({"wp": sys.argv[1], "slug": sys.argv[2], "agent": sys.argv[3], "close_path": sys.argv[4], "peer_evidence": sys.argv[5], "close_execution": sys.argv[6]}))
+' "$WP" "$SLUG" "$AGENT" "$_cp_from_sem" "$_peer_evidence" "${CLOSE_EXECUTION:-legacy}" 2>/dev/null) || _direct_event=""
     if [ -n "$_direct_event" ]; then
       ledger_append_traced "$SLUG" session_closed_direct no day "$(now_date)" session_closed_direct "$_direct_event" session-guard
     fi
@@ -13908,6 +14032,7 @@ print(json.dumps({"wp": sys.argv[1], "slug": sys.argv[2], "agent": sys.argv[3], 
     case "$FORCED_CARD" in
       declared-peer-session:*) _close_channel="peer-session" ;;
       declared-no-code-changes:*) _close_channel="no-code-changes" ;;
+      route-release-empty:*)   _close_channel="no-code-changes" ;;
       cancel-obligation:*)     _close_channel="cancel-obligation" ;;
       pilot-release:*)         _close_channel="pilot-release" ;;
       *)
@@ -13949,9 +14074,9 @@ print(json.dumps({"wp": sys.argv[1], "slug": sys.argv[2], "agent": sys.argv[3], 
   # closing a peer semaphore wiped the obligation of a sibling opened by the WP Gate
   # in the same conversation; the sibling then answered `no_obligation` to every
   # cancel and could not be closed.
-  if _close_path_clears_obligation "$(_unique_record_field "$_sem_read" close_path || true)" \
+  if _clear_action=$(_record_obligation_clear_action "$_sem_read") \
       && _closed_peer_has_no_live_owner "$_sem_read"; then
-    clear_peer_session_obligation "$_sem_read" "$SLUG"
+    clear_peer_session_obligation "$_sem_read" "$SLUG" "$_clear_action"
   fi
 
   prune_closed_session_worktrees "$_sem_read"
