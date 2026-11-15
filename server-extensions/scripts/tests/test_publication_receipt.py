@@ -261,6 +261,120 @@ class PublicationReceiptTest(unittest.TestCase):
         self.assertEqual(self.sem.read_bytes(), before)
         self.assertFalse(self.verify(sources[0], self.base))
 
+    def test_published_squash_prefix_does_not_publish_later_work(self):
+        first = self.commit("a.txt", "first\n")
+        second = self.commit("b.txt", "second\n")
+        self.git("checkout", "-q", "--detach", self.base)
+        self.git("merge", "--squash", second)
+        self.git("-c", "commit.gpgsign=false", "commit", "-qm", "published prefix")
+        anchor = self.git("rev-parse", "HEAD")
+        self.published(anchor)
+        self.git("checkout", "-q", "--detach", second)
+        later = self.commit("a.txt", "unpublished continuation\n")
+        for source in (first, second, later):
+            self.claim(source)
+        self.assertEqual(self.record(anchor), 2)
+        self.assertTrue(self.verify(first, anchor))
+        self.assertTrue(self.verify(second, anchor))
+        self.assertFalse(self.verify(later, anchor))
+        saved = [json.loads(line[len(receipt.PREFIX):]) for line in self.sem.read_text().splitlines()
+                 if line.startswith(receipt.PREFIX)]
+        self.assertTrue(all(item["series_commits"] == [first, second] for item in saved))
+
+    def rebased_squash_series(self):
+        first = self.commit("a.txt", "first\n")
+        second = self.commit("b.txt", "second\n")
+        # A rewritten base has a different OID but the identical complete tree.
+        base_tree = self.git("rev-parse", self.base + "^{tree}")
+        rewritten = self.git("commit-tree", base_tree, "-p", self.base, "-m", "rewritten base")
+        self.git("checkout", "-q", "--detach", rewritten)
+        alias_first = self.commit("a.txt", "first\n")
+        alias_second = self.commit("b.txt", "second\n")
+        correction = self.commit("a.txt", "review correction\n")
+        for source in (first, second, alias_first, alias_second, correction):
+            self.claim(source)
+        self.git("checkout", "-q", "--detach", rewritten)
+        self.git("merge", "--squash", correction)
+        self.git("-c", "commit.gpgsign=false", "commit", "-qm", "published rebased series")
+        anchor = self.git("rev-parse", "HEAD")
+        self.published(anchor)
+        return (first, second), (alias_first, alias_second, correction), anchor
+
+    def test_squash_prefix_rejects_ambiguous_matching_trees(self):
+        first = self.commit("a.txt", "first\n")
+        second = self.commit("b.txt", "second\n")
+        third = self.commit("a.txt", "temporary\n")
+        fourth = self.commit("a.txt", "first\n")
+        fifth = self.commit("c.txt", "unpublished tail\n")
+        for source in (first, second, third, fourth, fifth):
+            self.claim(source)
+        self.git("checkout", "-q", "--detach", self.base)
+        self.git("merge", "--squash", second)
+        self.git("-c", "commit.gpgsign=false", "commit", "-qm", "ambiguous prefix")
+        anchor = self.git("rev-parse", "HEAD")
+        self.published(anchor)
+        with self.assertRaisesRegex(receipt.ProofError, "does not reproduce"):
+            receipt.squash_receipt(self.repo, self.sem.read_bytes(), "repo", first,
+                                   anchor, receipt.MAIN_REF)
+
+    def test_exact_rebased_claims_are_proven_by_owned_squash_series(self):
+        originals, aliases, anchor = self.rebased_squash_series()
+        self.assertEqual(self.record(anchor), 5)
+        self.assertTrue(all(self.verify(source, anchor) for source in originals + aliases))
+        saved = [json.loads(line[len(receipt.PREFIX):]) for line in self.sem.read_text().splitlines()
+                 if line.startswith(receipt.PREFIX)]
+        rebased = [item for item in saved if item["proof"] == "exact-rebased-squash-series"]
+        self.assertEqual({item["source_commit"] for item in rebased}, set(originals))
+        self.assertTrue(all(item["series_commits"] == list(aliases) for item in rebased))
+        later = self.commit("a.txt", "another writer\n")
+        self.published(later)
+        self.assertTrue(all(self.verify(source, later) for source in originals))
+
+    def test_rebased_squash_rejects_unclaimed_alias_or_source_and_tampering(self):
+        originals, aliases, anchor = self.rebased_squash_series()
+        self.record(anchor)
+        valid = self.sem.read_text()
+        for missing in (originals[0], aliases[0], aliases[1]):
+            with self.subTest(missing=missing):
+                self.sem.write_text(valid.replace("commit: repo " + missing + "\n", ""))
+                self.assertFalse(self.verify(originals[0], anchor))
+        self.sem.write_text(valid.replace('"series_source":"' + aliases[0],
+                                         '"series_source":"' + aliases[1]))
+        self.assertFalse(self.verify(originals[0], anchor))
+        self.sem.write_text(valid)
+        self.published(self.base)
+        self.assertFalse(self.verify(originals[0], self.base))
+        with self.assertRaises(receipt.ProofError):
+            self.record(anchor)
+
+    def test_rebased_squash_rejects_equal_after_tree_with_different_before_tree(self):
+        originals, aliases, anchor = self.rebased_squash_series()
+        self.git("checkout", "-q", "--detach", self.base)
+        self.commit("foreign.txt", "foreign base\n")
+        self.git("read-tree", "--reset", "-u", originals[0])
+        self.git("-c", "commit.gpgsign=false", "commit", "-qm", "same result, different change")
+        different = self.git("rev-parse", "HEAD")
+        self.claim(different)
+        self.assertEqual(self.git("rev-parse", different + "^{tree}"),
+                         self.git("rev-parse", originals[0] + "^{tree}"))
+        with self.assertRaisesRegex(receipt.ProofError, "both complete trees"):
+            receipt.rebased_squash_receipt(self.repo, self.sem.read_bytes(), "repo",
+                                           different, aliases[0], anchor, receipt.MAIN_REF)
+
+    def test_unavailable_alias_does_not_hide_exact_historical_replay(self):
+        source = self.commit("a.txt", "own change\n")
+        self.claim(source)
+        self.claim("f" * 40)
+        self.git("checkout", "-q", "--detach", self.base)
+        self.commit("other.txt", "concurrent change\n")
+        self.git("cherry-pick", source)
+        anchor = self.git("rev-parse", "HEAD")
+        self.published(anchor)
+        evidence = receipt.find_receipt(self.repo, self.sem.read_bytes(), "repo", source, anchor)
+        self.assertEqual(evidence["proof"], "exact-replay")
+        self.assertEqual(evidence["source_commit"], source)
+        self.assertFalse(self.verify("f" * 40, anchor))
+
     def test_fetch_uses_global_transport_config_but_proof_stays_isolated(self):
         remote = self.root / "remote.git"
         subprocess.run(["git", "clone", "--bare", "-q", str(self.repo), str(remote)], check=True)

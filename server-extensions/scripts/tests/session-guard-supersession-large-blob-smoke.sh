@@ -321,4 +321,25 @@ with Path(sys.argv[1]).open("a") as stream:
 PY
 check_multi_proof T14 "$TEST_ROOT/oversized.open" "$MULTI_REMOTE" 1 "claim snapshot exceeds proof budget"
 
+# The historical replay fallback had the same global-count defect. Exercise
+# its real implementation too; a published source is a simple exact replay.
+extract_fn _commit_automerge_has_publish_proof > "$TEST_ROOT/history.sh"
+# shellcheck source=/dev/null
+source "$TEST_ROOT/history.sh"
+git -C "$REBASE_REPO" update-ref refs/remotes/origin/main "$MULTI_REMOTE"
+out=$(_commit_automerge_has_publish_proof "$REBASE_REPO" "$REBASE_GOOD" \
+  "$MULTI_REMOTE" "$MULTI_SEM" repo 2>&1) \
+  || fail_test "T15: 40-claim historical replay refused: $out"
+grep -qF "exact historical replay: repo $REBASE_GOOD -> $REBASE_GOOD" <<< "$out" \
+  || fail_test "T15: expected exact historical replay, got: $out"
+echo "PASS T15: historical replay with 40 claims"
+
+for scenario in boundary malformed foreign-successor oversized; do
+  if out=$(_commit_automerge_has_publish_proof "$REBASE_REPO" "$REBASE_GOOD" \
+      "$MULTI_REMOTE" "$TEST_ROOT/$scenario.open" repo 2>&1); then
+    fail_test "T16: historical replay accepted $scenario"
+  fi
+done
+echo "PASS T16: historical replay rejects excess, malformed, foreign and oversized claims"
+
 echo "PASS: session-guard-supersession-large-blob-smoke"

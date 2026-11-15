@@ -243,12 +243,42 @@ def squash_receipt(repo: Path, raw: bytes, name: str, source: str, anchor: str,
                    target_ref: str) -> dict:
     base, chain = owned_chain(repo, raw, name, source)
     anchor_row = git(repo, "rev-list", "--parents", "-n", "1", anchor).decode().split()
-    if (len(anchor_row) != 2 or not ancestor(repo, base, anchor_row[1])
-            or not range_replay_matches(repo, base, chain[-1], anchor)):
+    if len(anchor_row) != 2 or not ancestor(repo, base, anchor_row[1]):
         raise ProofError("published commit does not reproduce the owned series")
+    if not range_replay_matches(repo, base, chain[-1], anchor):
+        # Work can continue after an earlier PR was squashed. Prove that
+        # published prefix, leaving later claims to their own proof. Only an
+        # unambiguous exact full-tree match is eligible; replay still checks it.
+        anchor_tree = oid(repo, anchor + "^{tree}")
+        prefixes = [chain[:end] for end in range(max(2, chain.index(source) + 1), len(chain))
+                    if oid(repo, chain[end - 1] + "^{tree}") == anchor_tree]
+        if len(prefixes) != 1 or not range_replay_matches(repo, base, prefixes[0][-1], anchor):
+            raise ProofError("published commit does not reproduce the owned series")
+        chain = prefixes[0]
     result = receipt_identity(repo, raw, name, source, anchor, target_ref)
     return {**result, "proof": "exact-squash-series", "series_base": base,
             "series_commits": chain, "series_tip_tree": oid(repo, chain[-1] + "^{tree}")}
+
+
+def commit_tree_pair(repo: Path, source: str) -> tuple[str, str] | None:
+    row = git(repo, "rev-list", "--parents", "-n", "1", source).decode().split()
+    if len(row) != 2:
+        return None
+    return oid(repo, row[1] + "^{tree}"), oid(repo, source + "^{tree}")
+
+
+def rebased_squash_receipt(repo: Path, raw: bytes, name: str, source: str,
+                           alias: str, anchor: str, target_ref: str) -> dict:
+    """Reconstruct both a whole-tree rebase equivalence and its squash proof."""
+    owned = claims(raw, name, repo)
+    if (source not in owned or alias not in owned or source == alias or len(owned) > 256):
+        raise ProofError("rebase requires two bounded session-owned claims")
+    pair = commit_tree_pair(repo, source)
+    if pair is None or pair[0] == pair[1] or commit_tree_pair(repo, alias) != pair:
+        raise ProofError("rebase does not preserve both complete trees")
+    result = squash_receipt(repo, raw, name, alias, anchor, target_ref)
+    return {**result, **receipt_identity(repo, raw, name, source, anchor, target_ref),
+            "proof": "exact-rebased-squash-series", "series_source": alias}
 
 
 def tracking_ref(repo: Path, target_ref: str) -> str:
@@ -669,6 +699,18 @@ def find_receipt(repo: Path, raw: bytes, name: str, source: str, published: str,
         aggregate = None  # Individual historical publication may still prove this claim.
     if aggregate is not None:
         return aggregate
+    pair = commit_tree_pair(repo, source)
+    owned = claims(raw, name, repo)
+    if pair is not None and pair[0] != pair[1] and len(owned) <= 256:
+        for alias in owned:
+            if time.monotonic() > deadline:
+                raise ProofError("publication search exceeded time budget")
+            try:
+                if alias == source or commit_tree_pair(repo, alias) != pair:
+                    continue
+                return rebased_squash_receipt(repo, raw, name, source, alias, published, target_ref)
+            except ProofError:
+                continue
     candidates = git(repo, "rev-list", "--max-count=" + str(MAX_CANDIDATES),
                      published, "--", *changed_paths(repo, source)).decode().splitlines()
     for candidate in candidates:
@@ -683,6 +725,9 @@ def reconstruct_receipt(repo: Path, raw: bytes, name: str, source: str, saved: d
                         target_ref: str = MAIN_REF) -> dict:
     if saved.get("proof") == "exact-squash-series":
         return squash_receipt(repo, raw, name, source, saved["anchor_commit"], target_ref)
+    if saved.get("proof") == "exact-rebased-squash-series":
+        return rebased_squash_receipt(repo, raw, name, source, saved["series_source"],
+                                     saved["anchor_commit"], target_ref)
     if saved.get("proof") == "exact-line-superset":
         return bot_line_superset_receipt(repo, raw, name, source, saved["anchor_commit"], target_ref)
     return receipt(repo, raw, name, source, saved["anchor_commit"], target_ref)

@@ -8858,8 +8858,11 @@ try:
         raise ValueError("claim snapshot exceeds proof budget")
     claims = [line[8:].decode("ascii").split() for line in snapshot.splitlines()
               if line.startswith(b"commit: ")]
-    if (len(claims) > 32 or any(len(claim) not in (2, 4) for claim in claims)
-            or not any(claim[:2] == [repo_name, source] for claim in claims)):
+    if any(len(claim) not in (2, 4) for claim in claims):
+        raise ValueError("invalid claims")
+    repo_claims = [claim for claim in claims if claim[0] == repo_name]
+    if (len(repo_claims) > 32
+            or not any(claim[1] == source for claim in repo_claims)):
         raise ValueError("source is not an exact frozen claim")
     head = git(repo, "rev-parse", "--verify", "HEAD^{commit}").stdout.strip()
     if git(repo, "rev-parse", "--verify", "refs/remotes/origin/main^{commit}").stdout.strip().decode() != remote:
