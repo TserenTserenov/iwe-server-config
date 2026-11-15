@@ -33,7 +33,7 @@ AR112_DEDUP_DIR="${RULE_AR112_DEDUP_DIR:-${XDG_RUNTIME_DIR:-${TMPDIR:-/tmp}}/iwe
 
 # Session-state: per-session warn/block log (WP-272 Ф5)
 SESSION_ID="${CLAUDE_SESSION_ID:-default}"
-SESSION_STATE_DIR="$HOME/.claude/state"
+SESSION_STATE_DIR="${RULE_SESSION_STATE_DIR:-$HOME/.claude/state}"
 mkdir -p "$SESSION_STATE_DIR" 2>/dev/null || true
 SESSION_WARN_LOG="$SESSION_STATE_DIR/session-${SESSION_ID}-warns.jsonl"
 
@@ -1783,14 +1783,36 @@ PYEOF
             esac
         done
         AR005_OK=0
+        AR005_EVIDENCE='{}'
         if grep -q '\[\[gate:[^]]*AR\.005' "$PROTO" 2>/dev/null; then
-            _pc=$(_run_postconditions_for_close)
-            _pcv=$(printf '%s' "$_pc" | python3 -c 'import sys,json; print(json.loads(sys.stdin.read())["result"])' 2>/dev/null)
-            _ps=$(_check_pushed)
-            _psv=$(printf '%s' "$_ps" | python3 -c 'import sys,json; print(json.loads(sys.stdin.read())["result"])' 2>/dev/null)
-            [ "$_pcv" = "ok" ] && [ "$_psv" = "ok" ] && AR005_OK=1
+            # Calendar protocols retain their existing whole-repository checks.
+            # Every other scope needs an exact session, including abbreviated
+            # headings and the unscoped parser: neither is a legacy permission.
+            _workspace="${IWE_ROOT:-$HOME/IWE}"
+            _calendar_scope=0
+            case "$SECTION" in
+                "Week Close"|"Month Close") _calendar_scope=1 ;;
+            esac
+            if [ -z "$SECTION" ] && [ "$PROTO" -ef "$_workspace/.claude/skills/day-close/SKILL.md" ]; then
+                _calendar_scope=1
+            fi
+            if [ "$_calendar_scope" -eq 0 ]; then
+                _proof_root=$(cd "$HOOK_DIR/../.." && pwd -P)
+                _native="${CODEX_THREAD_ID:-${CLAUDE_CODE_SESSION_ID:-${KIMI_SESSION_ID:-}}}"
+                if AR005_EVIDENCE=$(python3 "$_proof_root/scripts/lib/session_close_evidence.py" \
+                    --workspace "$_workspace" --agent "${IWE_AGENT:-}" \
+                    --session-id "${IWE_SESSION_ID:-}" --harness-session-id "$_native"); then
+                    AR005_OK=1
+                fi
+            else
+                _pc=$(_run_postconditions_for_close)
+                _pcv=$(printf '%s' "$_pc" | python3 -c 'import sys,json; print(json.loads(sys.stdin.read())["result"])' 2>/dev/null)
+                _ps=$(_check_pushed)
+                _psv=$(printf '%s' "$_ps" | python3 -c 'import sys,json; print(json.loads(sys.stdin.read())["result"])' 2>/dev/null)
+                [ "$_pcv" = "ok" ] && [ "$_psv" = "ok" ] && AR005_OK=1
+            fi
         fi
-        export _CTS_PROTO="$PROTO" _CTS_EXCLUDE="$EXCLUDE" _CTS_SECTION="$SECTION" _CTS_STATE="$SESSION_STATE_DIR" _CTS_SID="$SESSION_ID" _CTS_AR005="$AR005_OK"
+        export _CTS_PROTO="$PROTO" _CTS_EXCLUDE="$EXCLUDE" _CTS_SECTION="$SECTION" _CTS_STATE="$SESSION_STATE_DIR" _CTS_SID="$SESSION_ID" _CTS_AR005="$AR005_OK" _CTS_AR005_EVIDENCE="$AR005_EVIDENCE"
         RESULT=$(python3 - << 'PYEOF'
 import os, re, json
 
@@ -1885,7 +1907,8 @@ for key, title in gates:
         continue
     ok = os.path.exists(os.path.join(state, f'trace-{sid}-{safe(key)}.done'))
     if key == 'AR.005':
-        ok = ok or ar005_ok
+        # Publication is measured, never granted by a manual trace marker.
+        ok = ar005_ok
     (satisfied if ok else unsatisfied).append({'key': key, 'title': title})
 verdict = 'block' if unsatisfied else 'ok'
 reason = ('все gate удовлетворены; narrative-пропуски не блокируют'
@@ -1893,7 +1916,8 @@ reason = ('все gate удовлетворены; narrative-пропуски н
           f"{len(unsatisfied)} gate не закрыто: " + ', '.join(g['key'] for g in unsatisfied))
 print(json.dumps({'verdict': verdict, 'rule_id': 'TRACE', 'protocol': os.environ['_CTS_PROTO'],
                   'satisfied': satisfied, 'unsatisfied': unsatisfied, 'excluded': excluded,
-                  'narrative_steps': narr, 'reason': reason}, ensure_ascii=False))
+                  'narrative_steps': narr, 'reason': reason,
+                  'publication_evidence': json.loads(os.environ['_CTS_AR005_EVIDENCE'] or '{}')}, ensure_ascii=False))
 PYEOF
 )
         RC=$?
