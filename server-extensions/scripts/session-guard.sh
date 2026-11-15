@@ -16975,11 +16975,15 @@ fi
 #     auto-recovery flags are neither read nor changed.
 # Default is a DRY RUN: no lock files, no registry, no ledger, no change to the
 # session. One exception (WP-484 Ф267 п.6): when the pilot's word is required,
-# the exact line to type is sent to the pilot's Telegram once per code (source
-# `session-guard-heal`, channel `decision`), so the pilot does not have to wait
+# the exact line to type is sent to the pilot's Telegram once per session and
+# owner-process state, at most one message per HEAL_NOTIFY_REPEAT_MIN-minute window
+# (source `session-guard-heal`, channel `decision`), so the pilot does not have to wait
 # for the agent to relay it. The send is
 # best-effort and never changes the dry run's result or exit code.
 HEAL_WORD_WINDOW_SEC=7200
+# Length of the window that holds one message for the same session and state
+# (15.11, WP-568 Ф10: the hourly code in the claim key sent 7 copies a day).
+HEAL_NOTIFY_REPEAT_MIN=360
 
 _heal_code() {  # <slug> <semaphore> <hour bucket>
   python3 - "$1" "$(_semaphore_last_field "$2" session_id)" "$(_semaphore_last_field "$2" opened_at)" \
@@ -17000,9 +17004,15 @@ PY
 #    send uses its own allowlist source `session-guard-heal` (channel `decision`)
 #    with TELEGRAM_NEEDS_DECISION=1 and a "Что делать:" line, which is what makes
 #    the router deliver it to the live chat;
-#  - once per slug+code, claimed BEFORE the send with an atomic mkdir (two parallel
-#    dry runs cannot both send); a failed send gives the claim back, so the next
-#    dry run retries; claims older than a day are swept;
+#  - claimed BEFORE the send with an atomic mkdir (two parallel dry runs cannot
+#    both send). The claim key is slug@state@window, NOT the hourly code (it used
+#    to open a new claim each hour). The window is part of the NAME, so there is no
+#    "drop the stale claim, then mkdir" step that two runs could race on. A
+#    still-unresolved session is repeated once per window (6 hours; at a window
+#    border two messages can come close together); claims go away when the word is no
+#    longer needed or the session is healed (_heal_clear_word_markers); a failed
+#    send gives the claim back, so the next dry run retries; claims older than a
+#    day are swept (old-format names too);
 #  - the line to type stands alone on its own line, with no punctuation after the
 #    code (the witness check needs the whole message to match);
 #  - facts for the decision (owner process, unsaved work) go into the text, and
@@ -17025,11 +17035,26 @@ _heal_owner_load_note() {  # <pid>
     }'
 }
 
+# The claim key part for the session identity and owner-process state: a new
+# session under the same slug, or a changed process state, is a new claim.
+_heal_state_key() {  # <semaphore> <owner process state text>
+  printf 's%s' "$(printf '%s|%s|%s' "$2" "$(_semaphore_last_field "$1" session_id)" "$(_semaphore_last_field "$1" opened_at)" | cksum | cut -d' ' -f1)"
+}
+
+# The word is no longer needed: forget the claims of this session, so a new
+# problem later is announced at once, not after the repeat interval.
+_heal_clear_word_markers() {  # <slug>
+  local marker_dir="$IWE_ROOT/.iwe-runtime/heal-word-notified"
+  [ -d "$marker_dir" ] || return 0
+  find "$marker_dir" -mindepth 1 -maxdepth 1 -type d -name "$1@*" -exec rmdir {} + 2>/dev/null || true
+}
+
 # Prints one status line; never fails the caller.
 _heal_send_word_to_pilot() {  # <slug> <semaphore> <code> <owner process state> <unsaved work>
   local slug="$1" sem="$2" code="$3" alive="$4" work="$5" wp task msg tg_rc=0 load_note
   local marker_dir="$IWE_ROOT/.iwe-runtime/heal-word-notified"
-  local marker="$marker_dir/$slug.$code"
+  # "@" cannot occur in a slug, so slug `a` never matches the claims of `a.b`.
+  local marker="$marker_dir/$slug@$(_heal_state_key "$sem" "$alive")@$(( $(date +%s) / (HEAL_NOTIFY_REPEAT_MIN * 60) ))"
   if ! command -v iwe-tg >/dev/null 2>&1; then
     echo "Строка слова в Телеграм не отправлена: iwe-tg недоступен"
     return 0
@@ -17040,7 +17065,7 @@ _heal_send_word_to_pilot() {  # <slug> <semaphore> <code> <owner process state> 
   }
   find "$marker_dir" -mindepth 1 -maxdepth 1 -type d -mtime +0 -exec rmdir {} + 2>/dev/null || true
   if ! mkdir "$marker" 2>/dev/null; then
-    echo "Строка слова уже передана пилоту в Телеграм (повторно не шлю)"
+    echo "Сообщение об этой сессии уже отправлено пилоту в Телеграм (повтор не чаще раза в $((HEAL_NOTIFY_REPEAT_MIN / 60)) ч); код в нём мог истечь — действующая строка напечатана выше, передай её пилоту"
     return 0
   fi
   wp=$(_semaphore_last_field "$sem" wp); task=$(_semaphore_last_field "$sem" task)
@@ -17435,6 +17460,7 @@ $HEAL_QUARANTINES" 1
       echo "  Ограничение: это рефлекс против самоодобрения, а не граница привилегий — агент того же пользователя может обойти его через дочерний headless-разговор (claude -p) или подбор чужого журнала; фильтры выше лишь удорожают обход."
       _heal_send_word_to_pilot "$HEAL_SLUG" "$HEAL_SEM" "$HEAL_CODE_NOW" "$HEAL_ALIVE" "$HEAL_WORK"
     else
+      _heal_clear_word_markers "$HEAL_SLUG"
       echo "Слово пилота: не требуется"
     fi
     [ "$HEAL_UNSAVED" -eq 0 ] || echo "Нужен флаг --discard-unpublished: да (есть несохранённая работа; файлы копии heal не удаляет, но сессия перестанет быть обязательством)"
@@ -17545,6 +17571,7 @@ print(json.dumps({"slug": sys.argv[1], "semaphore": sys.argv[2], "actor": sys.ar
     { [ -n "$HEAL_EVENT" ] && bash "$IWE_ROOT/$GOV_REPO/scripts/ledger-append.sh" day "$(now_date)" session_healed "$HEAL_EVENT" session-guard >/dev/null 2>&1; } \
       || echo "  ⚠️  ledger session_healed не записан (best-effort, лечение выполнено)" >&2
   fi
+  _heal_clear_word_markers "$HEAL_SLUG"  # the session is gone: a later one under this slug is announced at once
   if [ -n "$HEAL_LEFT" ]; then
     echo "heal $HEAL_SLUG: семафор снят, но осталось:" >&2
     printf '%s' "$HEAL_LEFT" | sed 's/^/  - /' >&2

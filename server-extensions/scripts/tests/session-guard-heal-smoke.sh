@@ -235,7 +235,7 @@ grep -q 'процесс: жив' <<<"$OUT" || fail "live owner not reported: $OU
 grep -q 'Смерть владельца доказана: нет' <<<"$OUT" || fail "live owner reported as proven dead: $OUT"
 CODE=$(code_from "$OUT" live-1)
 [ -n "$CODE" ] || fail "no confirmation code in the dry run: $OUT"
-# Ф267 п.6: the line to type goes to the pilot's Telegram right after the dry run, once per code.
+# Ф267 п.6: the line to type goes to the pilot's Telegram right after the dry run, once per session, state and 6-hour window.
 grep -q 'Строка слова передана в отправку пилоту в Телеграм' <<<"$OUT" || fail "dry run did not report the Telegram send: $OUT"
 # routing: own decision source, flagged as needing a decision, with the action line the router requires
 [ "$(grep -c '^1|--source session-guard-heal ' "$TG_LOG")" = 1 ] || fail "send must use source session-guard-heal with TELEGRAM_NEEDS_DECISION=1 once: $(cat "$TG_LOG" 2>/dev/null)"
@@ -245,7 +245,7 @@ grep -q 'Что делать: .\{10,\}' "$TG_LOG" || fail "the text must carry a
 grep -q 'процесс жив' "$TG_LOG" || fail "the text must carry the owner process state"
 ! grep -q 'копия: /' "$TG_LOG" || fail "the text must not carry an absolute worktree path (the router would scrub it)"
 OUT2=$(sg -- heal live-1)
-grep -q 'уже передана пилоту' <<<"$OUT2" || fail "repeated dry run must not resend: $OUT2"
+grep -q 'уже отправлено пилоту' <<<"$OUT2" || fail "repeated dry run must not resend: $OUT2"
 [ "$(grep -c '^1|--source session-guard-heal ' "$TG_LOG")" = 1 ] || fail "repeated dry run resent the Telegram message"
 # Ф279 п.2: the owner-load note in the pilot's text, with `ps` replaced by a stub.
 mkdir -p "$TEST_ROOT/psbin"
@@ -274,7 +274,7 @@ grep -qF 'её процесс жив, несохранённая' <<<"$TEXT" || 
 write_semaphore live-tgfail "$$" "$HOST"
 OUT3=$(sg STUB_TG_RC=1 -- heal live-tgfail) || fail "a failing notifier must not fail the dry run: $OUT3"
 grep -q 'Строка слова в Телеграм не отправлена (iwe-tg, код 1)' <<<"$OUT3" || fail "send failure not reported: $OUT3"
-! compgen -G "$TEST_ROOT/.iwe-runtime/heal-word-notified/live-tgfail.*" >/dev/null || fail "a failed send must not leave the once-per-code marker"
+! compgen -G "$TEST_ROOT/.iwe-runtime/heal-word-notified/live-tgfail@*" >/dev/null || fail "a failed send must not leave the claim marker"
 OUT3=$(sg -- heal live-tgfail)
 grep -q 'Строка слова передана в отправку пилоту в Телеграм' <<<"$OUT3" || fail "the retry after a failed send did not send: $OUT3"
 
@@ -282,7 +282,7 @@ grep -q 'Строка слова передана в отправку пилот
 write_semaphore live-tg3 "$$" "$HOST"
 OUT4=$(sg STUB_TG_RC=3 -- heal live-tg3) || fail "a quarantined send must not fail the dry run: $OUT4"
 grep -q 'задержано фильтром отправителей' <<<"$OUT4" || fail "quarantine not reported: $OUT4"
-! compgen -G "$TEST_ROOT/.iwe-runtime/heal-word-notified/live-tg3.*" >/dev/null || fail "a quarantined send must not keep the once-per-code claim"
+! compgen -G "$TEST_ROOT/.iwe-runtime/heal-word-notified/live-tg3@*" >/dev/null || fail "a quarantined send must not keep the claim"
 
 # Two parallel dry runs send once (the claim is taken before the send).
 write_semaphore live-par "$$" "$HOST"
@@ -290,6 +290,30 @@ sg -- heal live-par >/dev/null &
 sg -- heal live-par >/dev/null &
 wait
 [ "$(grep -c 'heal live-par ' "$TG_LOG")" = 1 ] || fail "parallel dry runs sent more than once: $(grep -c 'heal live-par ' "$TG_LOG")"
+
+# 15.11 (WP-568 Ф10): the claim key is slug@state@window, with no hourly code.
+MARK_DIR="$TEST_ROOT/.iwe-runtime/heal-word-notified"
+sent_count() { grep -c "heal $1 " "$TG_LOG" || true; }  # grep -c prints 0 and exits 1 on no match
+claim_of() { find "$MARK_DIR" -mindepth 1 -maxdepth 1 -type d -name "$1@*"; }  # <slug>: that slug's claim dirs
+[ "$(claim_of live-par | wc -l)" -eq 1 ] || fail "one claim expected for live-par, got: $(ls "$MARK_DIR")"
+sg -- heal live-par >/dev/null
+[ "$(sent_count live-par)" = 1 ] || fail "a repeat inside the same window must not resend"
+# the next 6-hour window: the same claim under the previous window number no longer blocks
+CLAIM=$(claim_of live-par); mv "$CLAIM" "${CLAIM%@*}@$(( ${CLAIM##*@} - 1 ))"
+sg -- heal live-par >/dev/null
+[ "$(sent_count live-par)" = 2 ] || fail "a repeat in the next window must resend once: $(sent_count live-par)"
+# a new session under the same slug (other opened_at) is announced at once, inside the window
+write_semaphore live-par "$$" "$HOST" "opened_at: 2001-01-01T00:00:00Z"
+sg -- heal live-par >/dev/null
+[ "$(sent_count live-par)" = 3 ] || fail "a new session under the same slug must be announced at once: $(sent_count live-par)"
+# the word is no longer needed (owner proven dead): the session's claims go, a claim of slug `a.b` stays for slug `a`
+write_semaphore dead-clear "$DEAD_PID" "$HOST"
+mkdir -p "$MARK_DIR/dead-clear@s123@1" "$MARK_DIR/dead-clear.b@s9@1"
+OUT=$(sg -- heal dead-clear)
+grep -q 'Слово пилота: не требуется' <<<"$OUT" || fail "dead-clear must take the no-word branch: $OUT"
+[ ! -e "$MARK_DIR/dead-clear@s123@1" ] || fail "claim must be cleared when the word is no longer needed"
+[ -d "$MARK_DIR/dead-clear.b@s9@1" ] || fail "the claim of slug dead-clear.b must survive a clear for dead-clear"
+[ "$(sent_count dead-clear)" = 0 ] || fail "no message expected when the word is not needed"
 if OUT=$(sg CLAUDE_CODE_SESSION_ID=caller-1 -- heal live-1 --apply --reason "no word"); then fail "live owner healed without the word"; fi
 grep -q 'слова пилота нет' <<<"$OUT" || fail "refusal does not explain the missing word: $OUT"
 [ -f "$SESSION_DIR/claude-code-live-1.open" ] || fail "refused heal moved the semaphore"
