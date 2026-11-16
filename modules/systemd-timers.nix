@@ -1071,7 +1071,12 @@ in
       # The system service launches a transient user unit for wp-pool wake.
       # Without the user runtime directory, systemd-run --user cannot reach
       # tseren's lingering user manager and silently skips every wake.
-      environment = commonEnv // { XDG_RUNTIME_DIR = "/run/user/1000"; };
+      # Signal C alert (unpublished local commits / stuck sync): off by default in
+      # the script, switched on by pilot decision 16.11.2026 (WP-503 F109, WP-538).
+      environment = commonEnv // {
+        XDG_RUNTIME_DIR = "/run/user/1000";
+        TSEKH1_SIGNAL_C_ALERT_ENABLED = "1";
+      };
     };
 
     systemd.timers."iwe-tsekh1-sync" = {
