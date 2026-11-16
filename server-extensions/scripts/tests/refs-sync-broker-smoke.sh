@@ -335,6 +335,24 @@ grep -qF "⚠️ ${EXPECT_LABEL}: репозиторий gov-repo (стоит н
   || fail "divergence: machine name and work branch expected: $(cat "$TG_LOG")"
 grep -qF "Не сводить: это незаконченная работа на ветке" "$TG_LOG" \
   || fail "divergence on a work branch must not advise a merge: $(cat "$TG_LOG")"
+grep -qF "Что делать: ничего сейчас" "$TG_LOG" \
+  || fail "divergence on a work branch must start its advice with 'Что делать:': $(cat "$TG_LOG")"
 pass "divergence alert names the machine and the work branch, without merge advice"
+
+# WP-538 Ф10: a diverged main must tell the reader what to do in plain words,
+# with no script name or "merge" jargon.
+git -C "$REPO" checkout -q main
+git -C "$REPO" -c user.email=t@t -c user.name=t cherry-pick wp-test-branch >/dev/null
+: > "$TG_LOG"
+rm -f "$IWE_RUNTIME"/refs-sync-broker/divergence-*
+export REFS_SYNC_DIVERGENCE_ALERT_AFTER_SECONDS=0
+bash "$BROKER" run >/dev/null 2>&1 || true
+bash "$BROKER" run >/dev/null 2>&1 || true
+unset REFS_SYNC_DIVERGENCE_ALERT_AFTER_SECONDS
+grep -qF "Что делать: попросите любого агента в чате: «Сведи репозиторий gov-repo с общей версией»" "$TG_LOG" \
+  || fail "divergence on main must carry a plain 'Что делать:' line: $(cat "$TG_LOG")"
+grep -qE "canon-reconcile|merge" "$TG_LOG" \
+  && fail "divergence advice must not use script names or merge jargon: $(cat "$TG_LOG")"
+pass "divergence alert on main says what to do in plain words"
 
 echo "ALL PASS"
