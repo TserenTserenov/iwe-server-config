@@ -184,7 +184,7 @@ check_divergence_alert() {
   # shellcheck disable=SC1090
   . "$telegram_lib"
   local host_label branch branch_note=""
-  local advice="Свести: scripts/canon-reconcile-published.sh или ручной merge."
+  local advice="Что делать: попросите любого агента в чате: «Сведи репозиторий ${path} с общей версией». Он сверит сам и спросит вас только если нужен выбор."
   # The NixOS service PATH has no `hostname` binary, so the old fallback
   # printed a nameless "хост" for tsekh-1 (WP-568 Ф12, 05.11). Bash sets
   # HOSTNAME itself, without any external program.
@@ -200,7 +200,7 @@ check_divergence_alert() {
     ""|HEAD|main|master) ;;
     *)
       branch_note=" (стоит на рабочей ветке ${branch})"
-      advice="Не сводить: это незаконченная работа на ветке; решение - у владельца этой работы."
+      advice="Что делать: ничего сейчас. Не сводить: это незаконченная работа на ветке; решение - у владельца этой работы."
       ;;
   esac
   telegram_send "⚠️ ${host_label}: репозиторий ${path}${branch_note} разошёлся с сервером - ${ahead} своих коммитов и ${behind} серверных не слиты уже $(( age / 60 )) мин. ${advice}" || true

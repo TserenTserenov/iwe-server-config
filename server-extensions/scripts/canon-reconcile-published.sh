@@ -582,10 +582,13 @@ if [ "$DETACHED" = 1 ]; then
   # Nothing may be lost: the branch ref must be missing-free and an ancestor of the target, so moving it forward drops no commit.
   OLD_BRANCH=$(git rev-parse --verify -q "refs/heads/$BRANCH") && git merge-base --is-ancestor "$OLD_BRANCH" "$PINNED" \
     || refuse "detached HEAD and refs/heads/$BRANCH is missing or holds commits the target lacks: not re-attaching"
+  # git allows the branch to be checked out elsewhere only because this copy is detached; moving the ref under that worktree would leave it with a false staged revert
+  ! git worktree list --porcelain 2>/dev/null | grep -qFx "branch refs/heads/$BRANCH" \
+    || refuse "detached HEAD and refs/heads/$BRANCH is checked out in another worktree: not re-attaching"
   if [ "$OLD_HEAD" = "$PINNED" ] || git merge-base --is-ancestor "$OLD_HEAD" "$PINNED"; then
     # plain shape: `git switch -C` (not reset --hard) refuses when untracked files are in the way and keeps tracked edits
     [ -z "$(git diff --cached --name-only -z 2>/dev/null)" ] || refuse "detached HEAD: index is not clean, not re-attaching"
-    git switch -q -C "$BRANCH" "$PINNED" 2>/dev/null || refuse "detached HEAD: git switch -C $BRANCH ${PINNED:0:12} refused (files in the way); nothing changed"
+    SWITCH_ERR=$(git switch -q -C "$BRANCH" "$PINNED" 2>&1) || refuse "detached HEAD: git switch -C $BRANCH ${PINNED:0:12} refused, nothing changed: $(printf '%s' "$SWITCH_ERR" | head -1)"
     [ "$(git rev-parse --abbrev-ref HEAD)" = "$BRANCH" ] && [ "$(git rev-parse HEAD)" = "$PINNED" ] || fail_after_swap "re-attached HEAD is not $BRANCH@${PINNED:0:12}"
     echo "canon-reconcile-published: $REPO re-attached to $BRANCH at ${PINNED:0:12} (was detached at ${OLD_HEAD:0:12})"
     log_line reattached "$OLD_HEAD -> $BRANCH@$PINNED"
@@ -809,7 +812,12 @@ LIVE_WRITERS=$(live_canonical_writers)
 
 # 5. compare-and-swap on the ref, then bring index + tracked tree along.
 [ -z "$REFUSAL_STARTED" ] || { echo "canon-reconcile-published: a refusal started earlier and its report was cut short -- stopping before the swap, canon untouched" >&2; exit 1; }   # tripwire, see refuse()
-if [ "$DETACHED" = 1 ]; then CAS_OLD="$OLD_BRANCH"; else CAS_OLD="$OLD_HEAD"; fi   # detached: the branch is compared with its own old value, not with HEAD
+if [ "$DETACHED" = 1 ]; then   # detached: the branch is compared with its own old value, so HEAD itself must be re-checked here (a commit made on the detached HEAD meanwhile would be wiped by the reset below)
+  [ "$(git rev-parse HEAD)" = "$OLD_HEAD" ] || refuse "HEAD moved during preflight (detached copy): not re-attaching"
+  CAS_OLD="$OLD_BRANCH"
+else
+  CAS_OLD="$OLD_HEAD"
+fi
 git update-ref -m "canon-reconcile-published: $OLD_HEAD -> $PINNED" "refs/heads/$BRANCH" "$PINNED" "$CAS_OLD"; CAS_RC=$?
 [ "$CAS_RC" -eq 0 ] || refuse "compare-and-swap on refs/heads/$BRANCH lost (HEAD moved)"
 [ "$CAS_RC" -eq 0 ] || exit 1   # a SEPARATE top-level command: reached only when the report above died halfway (see refuse()), so the reset below never runs after a lost swap

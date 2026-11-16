@@ -1463,4 +1463,19 @@ OUT=$(bash "$SCRIPT" "$WTD" main 2>&1); rc=$?
 assert "$rc" "1" "exit 1"; assert "$(current_branch "$WTD")" "HEAD" "still detached"
 assert "$(printf '%s' "$OUT" | grep -c 'not the expected one')" "1" "the old refusal text"
 
+echo "scenario 97 (detached): the branch is checked out in a linked worktree, main copy detached at origin -> refused, nothing moved"
+fresh s97; git -C "$CANON" checkout -q --detach; WT97="$SANDBOX/s97-wt"; git -C "$CANON" worktree add -q "$WT97" main
+B97=$(git -C "$CANON" rev-parse main)
+OUT=$(bash "$SCRIPT" "$CANON" main 2>&1); rc=$?
+assert "$rc" "1" "exit 1"; assert "$(current_branch "$CANON")" "HEAD" "main copy still detached"
+assert "$(git -C "$CANON" rev-parse main)" "$B97" "branch main untouched"; assert "$(current_branch "$WT97")" "main" "the linked worktree still holds main"
+assert "$(printf '%s' "$OUT" | grep -c 'checked out in another worktree')" "1" "the reason is named"
+
+echo "scenario 98 (detached, diverged): same as 97 but the detached copy holds a published-elsewhere commit -> refused before any swap"
+fresh s98; git -C "$CANON" checkout -q --detach; echo one > "$CANON/b.txt"; commit_in "$CANON" "local"; C=$(git -C "$CANON" rev-parse HEAD)
+republish_on_origin "$CANON" "$C"; WT98="$SANDBOX/s98-wt"; git -C "$CANON" worktree add -q "$WT98" main; B98=$(git -C "$CANON" rev-parse main)
+bash "$SCRIPT" "$CANON" main >/dev/null 2>&1; rc=$?
+assert "$rc" "1" "exit 1"; assert "$(git -C "$CANON" rev-parse HEAD)" "$C" "HEAD unchanged"; assert "$(git -C "$CANON" rev-parse main)" "$B98" "branch main untouched"
+assert "$(git -C "$WT98" status --porcelain | wc -l | tr -d ' ')" "0" "the linked worktree is clean (no false staged revert)"
+
 [ "$fails" = 0 ] && echo "PASS: all scenarios" || { echo "FAIL: $fails assertion(s)"; exit 1; }
