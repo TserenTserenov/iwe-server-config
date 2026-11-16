@@ -299,12 +299,23 @@ gate_detail_text() {
 # имя распадётся на несколько строк алерта (холодное ревью Codex, 26.10, ит.3).
 file_list_brief() {
   local total="$1"; shift
-  local shown="" p
+  local shown="" p q base same
   for p in "$@"; do
     p="${p//$'\n'/⏎}"
     # The pilot reads a file name, not a repository path (WP-538 F24, 16.11: the alert
-    # opened with "server-extensions/scripts/week-close-commit-guard.sh").
-    p="${p##*/}"
+    # opened with "server-extensions/scripts/week-close-commit-guard.sh"). Only when two
+    # listed files share a name does the parent directory come back, so they stay apart.
+    base="${p##*/}"
+    same=0
+    for q in "$@"; do
+      q="${q//$'\n'/⏎}"
+      [ "${q##*/}" = "$base" ] && same=$((same + 1))
+    done
+    if [ "$same" -gt 1 ] && [ "$p" != "$base" ]; then
+      p="${p%/*}"; p="${p##*/}/$base"
+    else
+      p="$base"
+    fi
     if [ -z "$shown" ]; then shown="$p"; else shown="$shown, $p"; fi
   done
   if [ "$total" -gt "$#" ]; then

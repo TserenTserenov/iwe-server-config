@@ -160,6 +160,11 @@ ATTEMPTS_ACTUAL="$(for n in 1 2 4 5 11 12 21 22 25 111; do printf '%s=%s ' "$n" 
 ATTEMPTS_WANT="1=попытка 2=попытки 4=попытки 5=попыток 11=попыток 12=попыток 21=попытка 22=попытки 25=попыток 111=попыток "
 [ "$ATTEMPTS_ACTUAL" = "$ATTEMPTS_WANT" ] && ok "склонение «попытка/попытки/попыток» верно на границах" \
     || bad "склонение числа попыток" "$ATTEMPTS_ACTUAL"
+# Две разные файлы с одним именем не должны слиться в «check.sh, check.sh» (ревью Codex, 16.11).
+eval "$(sed -n '/^file_list_brief() {/,/^}/p' "$SCRIPT_SRC")"
+BRIEF_ACTUAL="$(file_list_brief 3 server-extensions/scripts/a.sh server-extensions/hooks/a.sh server-extensions/scripts/b.sh)"
+[ "$BRIEF_ACTUAL" = "scripts/a.sh, hooks/a.sh, b.sh" ] && ok "краткий список: имя без пути, при совпадении имён — с каталогом" \
+    || bad "краткий список файлов" "$BRIEF_ACTUAL"
 grep -q "разбери доставку расширений" "$TG_LOG" && ok "urgent: явно назван следующий шаг (фраза для агента)" \
     || bad "urgent: назван следующий шаг" "$(cat "$TG_LOG")"
 [ "$(tail -1 "$DECISION_LOG")" = "$(printf 'sync-extensions-auto\t1')" ] && ok "urgent: отправка помечена «нужно решение пилота» (пропуск в живой чат)" \
