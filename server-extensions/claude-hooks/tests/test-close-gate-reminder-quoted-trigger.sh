@@ -48,10 +48,15 @@ class QuotedTriggerTests(unittest.TestCase):
         # symlink would use the real ledger writer. The stub makes cancel-close succeed in the
         # fixture; without it cancel fails on the ledger append and changes nothing.
         shutil.copy(CLOSE_CLI, self.cli)
-        # close_obligation.py imports this sibling module (WP-484 F228); without
-        # it every arm fails with ModuleNotFoundError and no state is left.
-        shutil.copy(Path(CLOSE_CLI).with_name("session_local_release.py"),
-                    self.cli.with_name("session_local_release.py"))
+        # close_obligation.py imports these siblings (session_local_release: WP-484 F228;
+        # close_expect and lib/ledger_path: 27.10, the latter loads ledger-event-diff.py);
+        # a missing one fails every arm with ModuleNotFoundError and leaves no state.
+        source_dir = Path(CLOSE_CLI).parent
+        for module in ("session_local_release.py", "close_expect.py",
+                       "lib/ledger_path.py", "lib/ledger-event-diff.py"):
+            target = self.cli.parent / module
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy(source_dir / module, target)
         stub = self.cli.with_name("ledger-append.sh")
         stub.write_text("#!/bin/bash\nexit 0\n")
         stub.chmod(0o755)

@@ -1,2 +1,1 @@
-server-extensions/claude-hooks/close-gate-reminder.sh
 server-extensions/scripts/week-close-commit-guard.sh

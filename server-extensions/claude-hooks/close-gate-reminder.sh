@@ -54,6 +54,9 @@ case "$SESSION_ID" in
   *[!A-Za-z0-9._-]*) SESSION_ID="unknown" ;;
 esac
 
+# The close route switch file is read from the same root as session-guard.sh and
+# close_obligation.py (IWE_ROOT), not from the project dir this hook works in.
+CLOSE_ROUTE_SWITCH_ROOT="${IWE_ROOT:-$HOME/IWE}"
 IWE_ROOT="${CLAUDE_PROJECT_DIR:-$HOME/IWE}"
 # F228: serialize this entire producer with release, including sentinel writes
 # outside close_obligation. An inherited FD is checked, never just an env flag.
@@ -398,7 +401,15 @@ if [ -z "$CLOSE_PATH_MATCH" ]; then
     -exec grep -Flx -- "harness_session_id: $SESSION_ID" {} + 2>/dev/null \
     | xargs -I{} stat -f '%m %N' {} 2>/dev/null | sort -rn | head -1 | cut -d' ' -f2-)
 fi
-if [ -n "$CLOSE_PATH_MATCH" ] && grep -q '^close_path: peer-session$' "$CLOSE_PATH_MATCH" 2>/dev/null; then
+# WP-561 F61 stage 2 (pilot decision 15.11, one close path): with the close route
+# switch on, a declared peer session takes the ordinary close below (obligation,
+# reminder of /run-protocol close) -- its own direct close no longer applies.
+. "${BASH_SOURCE[0]%/*}/lib/close-route-switch.sh" 2>/dev/null || {
+  echo "[close-gate-reminder] lib/close-route-switch.sh не найден — выключатель пути закрытия считается выключенным" >&2
+  close_route_enforced() { return 1; }
+}
+if [ -n "$CLOSE_PATH_MATCH" ] && grep -q '^close_path: peer-session$' "$CLOSE_PATH_MATCH" 2>/dev/null \
+    && ! close_route_enforced "$CLOSE_ROUTE_SWITCH_ROOT"; then
   if [ "$FILTER_NO" != true ] && echo "$PROMPT" | grep -qE "($CLOSE_TRIGGER_RE)"; then
     PREFIX_LEN=$(_prefix_char_len_before_trigger "$CLOSE_TRIGGER_RE")
     if [ -n "$PREFIX_LEN" ] && [ "$PREFIX_LEN" -gt "$CLOSE_TRIGGER_PREFIX_THRESHOLD" ] 2>/dev/null; then
