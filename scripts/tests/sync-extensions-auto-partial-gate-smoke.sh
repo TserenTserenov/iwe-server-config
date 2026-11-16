@@ -133,6 +133,7 @@ S1_PERSISTED=$(find "${S1_REPO}-gate-failures" -maxdepth 1 -name '*.log' 2>/dev/
 # 26.10 (WP-568): алерт больше не содержит пути к логу — он остаётся в
 # журнале/дайджесте; в тексте — имена файлов без пути (16.11) и честное «что делать».
 grep -F "ALERT[test-gate-partial]" "$WORKDIR/tick.out" | grep -qF "bar.sh" \
+  && ! grep -F "ALERT[test-gate-partial]" "$WORKDIR/tick.out" | grep -qF "server-extensions/scripts/" \
   && ok "смешанный тик: алерт test-gate-partial называет исключённый файл именем без пути" \
   || bad "смешанный тик: алерт называет исключённый файл" "$(grep -F 'ALERT[test-gate-partial]' "$WORKDIR/tick.out")"
 [ -n "$S1_PERSISTED" ] && ! grep -F "ALERT[test-gate-partial]" "$WORKDIR/tick.out" | grep -qF "$S1_PERSISTED" \
@@ -177,6 +178,7 @@ S2_PERSISTED=$(find "${S2_REPO}-gate-failures" -maxdepth 1 -name '*.log' 2>/dev/
 # 26.10 (WP-568): то же для ветки "все файлы исключены" (класс алерта test-gate) —
 # имя файла есть, пути к логу нет, есть честное «что делать» без обещания времени.
 grep -F "ALERT[test-gate]" "$WORKDIR/tick.out" | grep -qF "bar.sh" \
+  && ! grep -F "ALERT[test-gate]" "$WORKDIR/tick.out" | grep -qF "server-extensions/scripts/" \
   && ok "все файлы провалились: алерт test-gate называет файл именем без пути" \
   || bad "все файлы провалились: алерт называет файл" "$(grep -F 'ALERT[test-gate]' "$WORKDIR/tick.out")"
 [ -n "$S2_PERSISTED" ] && ! grep -F "ALERT[test-gate]" "$WORKDIR/tick.out" | grep -qF "$S2_PERSISTED" \

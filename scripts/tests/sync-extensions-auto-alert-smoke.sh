@@ -163,6 +163,10 @@ ATTEMPTS_WANT="1=попытка 2=попытки 4=попытки 5=попыто
 # Две разные файлы с одним именем не должны слиться в «check.sh, check.sh» (ревью Codex, 16.11).
 eval "$(sed -n '/^file_list_brief() {/,/^}/p' "$SCRIPT_SRC")"
 BRIEF_ACTUAL="$(file_list_brief 3 server-extensions/scripts/a.sh server-extensions/hooks/a.sh server-extensions/scripts/b.sh)"
+SKILL_BRIEF="$(file_list_brief 1 server-extensions/claude-skills/week-close/SKILL.md)"
+[ "$SKILL_BRIEF" = "week-close/SKILL.md" ] || bad "краткий список: SKILL.md с каталогом навыка" "$SKILL_BRIEF"
+[ "$(times_word 2) $(times_word 5) $(times_word 12) $(times_word 22)" = "раза раз раз раза" ] \
+    && ok "склонение «раз/раза»" || bad "склонение «раз/раза»" "$(times_word 2) $(times_word 5) $(times_word 12) $(times_word 22)"
 [ "$BRIEF_ACTUAL" = "scripts/a.sh, hooks/a.sh, b.sh" ] && ok "краткий список: имя без пути, при совпадении имён — с каталогом" \
     || bad "краткий список файлов" "$BRIEF_ACTUAL"
 grep -q "разбери доставку расширений" "$TG_LOG" && ok "urgent: явно назван следующий шаг (фраза для агента)" \

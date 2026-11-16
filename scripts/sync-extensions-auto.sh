@@ -179,6 +179,15 @@ attempts_word() {
   fi
 }
 
+# times_word <число> — «раз / раза» (2-4 → «раза», кроме 12-14).
+times_word() {
+  local n="$1" last two
+  last=$((n % 10)); two=$((n % 100))
+  if [ "$last" -ge 2 ] && [ "$last" -le 4 ] && { [ "$two" -lt 12 ] || [ "$two" -gt 14 ]; }; then printf 'раза'
+  else printf 'раз'
+  fi
+}
+
 # alert_class_subject <class>: the urgent message names the stuck step in
 # plain words instead of reusing the base text (which may say "no action
 # needed" — the contradiction of the 29.10 dump).
@@ -208,7 +217,7 @@ alert() {
         full_text="🆘 ${subject:-$(alert_class_subject "$class")}: так уже $(notify_format_duration "$NOTIFY_ESCALATION_DURATION_SEC") ($NOTIFY_ESCALATION_COUNT $(attempts_word "$NOTIFY_ESCALATION_COUNT") подряд), само не проходит. Нужен разбор: скажите агенту «разбери доставку расширений»."
         needs_decision=1
       elif [ "$NOTIFY_ESCALATION_PHASE" = "ongoing" ]; then
-        full_text="$text (повторяется $NOTIFY_ESCALATION_COUNT раз подряд, не решается уже $(notify_format_duration "$NOTIFY_ESCALATION_DURATION_SEC"))"
+        full_text="$text (повторяется $NOTIFY_ESCALATION_COUNT $(times_word "$NOTIFY_ESCALATION_COUNT") подряд, не решается уже $(notify_format_duration "$NOTIFY_ESCALATION_DURATION_SEC"))"
       fi
     else
       echo "$LOG_PREFIX подавлено (эскалация того же класса уже отправлена недавно, попытка #${NOTIFY_ESCALATION_COUNT:-?})"
@@ -237,7 +246,7 @@ alert_ok() {
     local class
     for class in "${ALERT_CLASSES[@]}"; do
       if notify_escalation_update "sync-extensions-auto/$class" ok; then
-        recovered_parts+=("$class: $NOTIFY_ESCALATION_COUNT попыток, $(notify_format_duration "$NOTIFY_ESCALATION_DURATION_SEC")")
+        recovered_parts+=("$class: $NOTIFY_ESCALATION_COUNT $(attempts_word "$NOTIFY_ESCALATION_COUNT"), $(notify_format_duration "$NOTIFY_ESCALATION_DURATION_SEC")")
       fi
     done
     if [ "${#recovered_parts[@]}" -gt 0 ]; then
@@ -311,6 +320,8 @@ file_list_brief() {
       q="${q//$'\n'/⏎}"
       [ "${q##*/}" = "$base" ] && same=$((same + 1))
     done
+    # SKILL.md / README.md / CLAUDE.md exist in dozens of directories: the name alone says nothing.
+    case "$base" in SKILL.md|README.md|CLAUDE.md|__init__.py) same=2 ;; esac
     if [ "$same" -gt 1 ] && [ "$p" != "$base" ]; then
       p="${p%/*}"; p="${p##*/}/$base"
     else
