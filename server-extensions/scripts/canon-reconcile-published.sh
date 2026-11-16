@@ -436,7 +436,15 @@ if [ -d "$GIT_DIR/rebase-merge" ] || [ -d "$GIT_DIR/rebase-apply" ] || [ -f "$GI
   refuse "repo is mid-rebase/merge/cherry-pick"
 fi
 CURRENT_BRANCH=$(git rev-parse --abbrev-ref HEAD 2>/dev/null)
-[ "$CURRENT_BRANCH" = "$BRANCH" ] || refuse "checked-out branch is not the expected one: '$CURRENT_BRANCH' instead of '$BRANCH'"
+# A MAIN working copy left without a branch is re-attached below, after every other check (found 16.11, WP-539: one
+# `git checkout origin/main` stopped this guard and the reader mover for a day). A linked worktree (git dir != common
+# dir) is detached by design and keeps the old refusal.
+DETACHED=0
+if [ "$CURRENT_BRANCH" = "HEAD" ] && [ "$(git rev-parse --git-common-dir 2>/dev/null)" = "$GIT_DIR" ]; then
+  DETACHED=1
+else
+  [ "$CURRENT_BRANCH" = "$BRANCH" ] || refuse "checked-out branch is not the expected one: '$CURRENT_BRANCH' instead of '$BRANCH'"
+fi
 
 # The repository lock is the one the other guard scripts take ($GIT_DIR/dirty-guard.lock) and it lives in ONE place, scripts/lib/
 # dirty-guard-lock.sh (WP-530 Phase 81 and its remainder, peer session 2026-10-02-01 with Kimi and Codex): the takeover rule (only when
@@ -569,6 +577,23 @@ if [ -n "$PINNED_ARG" ]; then
   [ "$PINNED" = "$REMOTE_TIP" ] || echo "canon-reconcile-published: origin/$BRANCH advanced past pinned ${PINNED:0:12}, targeting live tip ${REMOTE_TIP:0:12}"
 fi
 PINNED="$REMOTE_TIP"
+
+if [ "$DETACHED" = 1 ]; then
+  # Nothing may be lost: the branch ref must be missing-free and an ancestor of the target, so moving it forward drops no commit.
+  OLD_BRANCH=$(git rev-parse --verify -q "refs/heads/$BRANCH") && git merge-base --is-ancestor "$OLD_BRANCH" "$PINNED" \
+    || refuse "detached HEAD and refs/heads/$BRANCH is missing or holds commits the target lacks: not re-attaching"
+  if [ "$OLD_HEAD" = "$PINNED" ] || git merge-base --is-ancestor "$OLD_HEAD" "$PINNED"; then
+    # plain shape: `git switch -C` (not reset --hard) refuses when untracked files are in the way and keeps tracked edits
+    [ -z "$(git diff --cached --name-only -z 2>/dev/null)" ] || refuse "detached HEAD: index is not clean, not re-attaching"
+    git switch -q -C "$BRANCH" "$PINNED" 2>/dev/null || refuse "detached HEAD: git switch -C $BRANCH ${PINNED:0:12} refused (files in the way); nothing changed"
+    [ "$(git rev-parse --abbrev-ref HEAD)" = "$BRANCH" ] && [ "$(git rev-parse HEAD)" = "$PINNED" ] || fail_after_swap "re-attached HEAD is not $BRANCH@${PINNED:0:12}"
+    echo "canon-reconcile-published: $REPO re-attached to $BRANCH at ${PINNED:0:12} (was detached at ${OLD_HEAD:0:12})"
+    log_line reattached "$OLD_HEAD -> $BRANCH@$PINNED"
+    healthy
+    exit 0
+  fi
+  # diverged shape: falls through to the full checks below; the swap re-attaches the branch (step 5)
+fi
 
 if [ "$OLD_HEAD" = "$PINNED" ]; then healthy; echo "canon-reconcile-published: already at $PINNED"; exit 0; fi
 if git merge-base --is-ancestor "$OLD_HEAD" "$PINNED"; then
@@ -784,9 +809,11 @@ LIVE_WRITERS=$(live_canonical_writers)
 
 # 5. compare-and-swap on the ref, then bring index + tracked tree along.
 [ -z "$REFUSAL_STARTED" ] || { echo "canon-reconcile-published: a refusal started earlier and its report was cut short -- stopping before the swap, canon untouched" >&2; exit 1; }   # tripwire, see refuse()
-git update-ref -m "canon-reconcile-published: $OLD_HEAD -> $PINNED" "refs/heads/$BRANCH" "$PINNED" "$OLD_HEAD"; CAS_RC=$?
+if [ "$DETACHED" = 1 ]; then CAS_OLD="$OLD_BRANCH"; else CAS_OLD="$OLD_HEAD"; fi   # detached: the branch is compared with its own old value, not with HEAD
+git update-ref -m "canon-reconcile-published: $OLD_HEAD -> $PINNED" "refs/heads/$BRANCH" "$PINNED" "$CAS_OLD"; CAS_RC=$?
 [ "$CAS_RC" -eq 0 ] || refuse "compare-and-swap on refs/heads/$BRANCH lost (HEAD moved)"
 [ "$CAS_RC" -eq 0 ] || exit 1   # a SEPARATE top-level command: reached only when the report above died halfway (see refuse()), so the reset below never runs after a lost swap
+if [ "$DETACHED" = 1 ]; then git symbolic-ref HEAD "refs/heads/$BRANCH" || fail_after_swap "could not attach HEAD to $BRANCH"; fi
 git reset --hard --quiet || fail_after_swap "git reset --hard failed -- index/tree need manual sync to $PINNED"
 
 # 6. post-check.

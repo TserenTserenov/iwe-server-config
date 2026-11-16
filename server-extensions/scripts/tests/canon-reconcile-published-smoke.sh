@@ -1420,4 +1420,47 @@ assert "$([ -e "$CANON/$LEDGER_REL.lockdir" ] && echo left || echo gone)" "gone"
 assert "$(git -C "$CANON" status --porcelain -- machine/ledger | wc -l | tr -d ' ')" "0" "journal clean"
 fi
 
+current_branch() { git -C "$1" rev-parse --abbrev-ref HEAD; }
+
+echo "scenario 91 (detached): main copy detached exactly at origin/main -> re-attached to main, untracked kept"
+fresh s91; git -C "$CANON" checkout -q --detach; echo keep > "$CANON/note.tmp"
+OUT=$(bash "$SCRIPT" "$CANON" main 2>&1); rc=$?
+assert "$rc" "0" "exit 0"; assert "$(current_branch "$CANON")" "main" "HEAD is on main again"
+assert "$(git -C "$CANON" rev-parse HEAD)" "$(git -C "$CANON" rev-parse origin/main)" "HEAD == origin/main"
+assert "$(cat "$CANON/note.tmp")" "keep" "untracked file kept"; assert "$(printf '%s' "$OUT" | grep -c 're-attached')" "1" "the re-attach is said aloud"
+
+echo "scenario 92 (detached): detached behind origin (plain ancestor), branch behind too -> re-attached and moved forward"
+fresh s92; git -C "$CANON" checkout -q --detach
+pub="$SANDBOX/s92-pub"; git clone -q "$ORIGIN" "$pub"; echo two > "$pub/c.txt"; git -C "$pub" add c.txt; git -C "$pub" -c user.name=o -c user.email=o@o commit -qm two; git -C "$pub" push -q origin main
+bash "$SCRIPT" "$CANON" main >/dev/null 2>&1; rc=$?
+assert "$rc" "0" "exit 0"; assert "$(current_branch "$CANON")" "main" "HEAD is on main again"
+assert "$(git -C "$CANON" rev-parse HEAD)" "$(git -C "$CANON" rev-parse origin/main)" "HEAD == origin/main"
+assert "$(cat "$CANON/c.txt")" "two" "the new file arrived"
+
+echo "scenario 93 (detached): detached with a locally made commit that origin already has under another SHA -> replaced and re-attached"
+fresh s93; git -C "$CANON" checkout -q --detach; echo one > "$CANON/b.txt"; commit_in "$CANON" "local"; C=$(git -C "$CANON" rev-parse HEAD)
+republish_on_origin "$CANON" "$C"
+bash "$SCRIPT" "$CANON" main >/dev/null 2>&1; rc=$?; git -C "$CANON" fetch -q origin
+assert "$rc" "0" "exit 0"; assert "$(current_branch "$CANON")" "main" "HEAD is on main again"
+assert "$(git -C "$CANON" rev-parse HEAD)" "$(git -C "$CANON" rev-parse origin/main)" "HEAD == origin/main"
+assert "$(git -C "$CANON" rev-parse main)" "$(git -C "$CANON" rev-parse origin/main)" "branch main moved with it"
+
+echo "scenario 94 (detached): detached with a commit origin does not have -> refused, still detached, commit kept"
+fresh s94; git -C "$CANON" checkout -q --detach; echo uniq > "$CANON/u.txt"; commit_in "$CANON" "only here"; U=$(git -C "$CANON" rev-parse HEAD)
+bash "$SCRIPT" "$CANON" main >/dev/null 2>&1; rc=$?
+assert "$rc" "1" "exit 1"; assert "$(current_branch "$CANON")" "HEAD" "still detached"
+assert "$(git -C "$CANON" rev-parse HEAD)" "$U" "the unique commit is still HEAD"
+
+echo "scenario 95 (detached): branch main holds an unpublished commit, HEAD detached at origin -> refused, branch untouched"
+fresh s95; echo mine > "$CANON/m.txt"; commit_in "$CANON" "unpublished on main"; M=$(git -C "$CANON" rev-parse main)
+git -C "$CANON" checkout -q --detach origin/main
+bash "$SCRIPT" "$CANON" main >/dev/null 2>&1; rc=$?
+assert "$rc" "1" "exit 1"; assert "$(current_branch "$CANON")" "HEAD" "still detached"; assert "$(git -C "$CANON" rev-parse main)" "$M" "branch main untouched"
+
+echo "scenario 96 (detached): a linked worktree is detached by design -> refused as before"
+fresh s96; WTD="$SANDBOX/s96-wt"; git -C "$CANON" worktree add -q --detach "$WTD"
+OUT=$(bash "$SCRIPT" "$WTD" main 2>&1); rc=$?
+assert "$rc" "1" "exit 1"; assert "$(current_branch "$WTD")" "HEAD" "still detached"
+assert "$(printf '%s' "$OUT" | grep -c 'not the expected one')" "1" "the old refusal text"
+
 [ "$fails" = 0 ] && echo "PASS: all scenarios" || { echo "FAIL: $fails assertion(s)"; exit 1; }
