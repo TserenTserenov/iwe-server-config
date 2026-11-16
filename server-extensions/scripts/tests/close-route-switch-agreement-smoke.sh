@@ -63,6 +63,31 @@ for file in absent present; do
 done
 unset IWE_CLOSE_ROUTE_ENFORCE
 
+# Timed window: the flag file may carry `expires_at: <unix seconds>`; every copy must read it
+# the same way (past = absent; empty, unparsable or out of range = durable; env 1 always wins).
+now=$(date +%s)
+check_content() {  # label, file content (printf %b), expected, [env value]
+  local label=$1 content=$2 expected=$3 env=${4:-unset}
+  printf '%b' "$content" > "$TEST_ROOT/.iwe-runtime/close-route-enforce"
+  if [ "$env" = unset ]; then unset IWE_CLOSE_ROUTE_ENFORCE; else export IWE_CLOSE_ROUTE_ENFORCE="$env"; fi
+  [ "$(answer_guard)" = "$expected" ] || fail "session-guard: $label, expected $expected"
+  [ "$(answer_hook)" = "$expected" ] || fail "hook lib: $label, expected $expected"
+  if [ "$PY_CHECKED" = 1 ]; then
+    [ "$(answer_py)" = "$expected" ] || fail "close_obligation.py: $label, expected $expected"
+  fi
+  PASS=$((PASS+1))
+}
+check_content "empty file" "" on
+check_content "future expiry" "expires_at: $((now+3600))\n" on
+check_content "past expiry" "expires_at: $((now-60))\n" off
+check_content "past expiry, CRLF" "expires_at: $((now-60))\r\n" off
+check_content "past expiry among other lines" "note: window\nexpires_at: $((now-60))\nmore\n" off
+check_content "unparsable expiry stays durable" "expires_at: soon\n" on
+check_content "13-digit expiry is not a marker, stays durable" "expires_at: 9999999999999\n" on
+check_content "indented expiry is not a marker, stays durable" "  expires_at: $((now-60))\n" on
+check_content "env 1 wins over an expired file" "expires_at: $((now-60))\n" on 1
+unset IWE_CLOSE_ROUTE_ENFORCE
+
 if [ "$PY_CHECKED" = 1 ]; then
   echo "PASS=$PASS: close route switch agrees in session-guard, hooks and close_obligation.py"
 else

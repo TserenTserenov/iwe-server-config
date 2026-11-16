@@ -1,1 +1,2 @@
+server-extensions/scripts/session-guard.sh
 server-extensions/scripts/week-close-commit-guard.sh
