@@ -30,7 +30,7 @@ class StepTest(unittest.TestCase):
         state = {}
         self.assertIsNone(alarm.step(state, "x", "behind -3", 30, minutes(0)))
         self.assertIsNone(alarm.step(state, "x", "behind -5", 30, minutes(29)))
-        self.assertEqual(alarm.step(state, "x", "behind -5", 30, minutes(31)), "⚠️ x: behind -5 уже 31 мин (порог 30)")
+        self.assertEqual(alarm.step(state, "x", "behind -5", 30, minutes(31)), "⚠️ x: позади на 5 коммитов уже 31 мин (порог 30)")
         state["x"]["alerted"] = True  # main() marks it after a successful send
         self.assertIsNone(alarm.step(state, "x", "behind -6", 30, minutes(60)))
         self.assertEqual(alarm.step(state, "x", "equal", 30, minutes(61)), "✅ x: снова совпадает с GitHub")
@@ -47,13 +47,48 @@ class StepTest(unittest.TestCase):
         alarm.step(state, "x", "diverged +1/-2", 30, minutes(0))
         first = alarm.step(state, "x", "diverged +1/-2", 30, minutes(40))
         again = alarm.step(state, "x", "diverged +1/-2", 30, minutes(55))
-        self.assertTrue(first.startswith("⚠️ x: diverged"))
-        self.assertTrue(again.startswith("⚠️ x: diverged +1/-2 уже 55 мин"))
+        self.assertTrue(first.startswith("⚠️ x: расходится:"))
+        self.assertTrue(again.startswith("⚠️ x: расходится: впереди на 1 коммит, позади на 2 коммита уже 55 мин"))
 
     def test_relapse_before_recovery_was_sent_continues_the_episode(self):
         state = {"x": {"since": T0.isoformat(), "relation": "behind -1", "alerted": True, "recovered": True}}
         self.assertIsNone(alarm.step(state, "x", "behind -2", 30, minutes(90)))
         self.assertNotIn("recovered", state["x"])
+
+    def test_alarmed_episode_is_repeated_every_six_hours_after_the_last_sent_message(self):
+        state = {"x": {"since": T0.isoformat(), "relation": "behind -3", "alerted": True,
+                       "last_alert": T0.isoformat()}}
+        self.assertIsNone(alarm.step(state, "x", "behind -3", 30, minutes(359)))
+        text = alarm.step(state, "x", "behind -3", 30, minutes(360))
+        self.assertEqual(text, "⚠️ x: позади на 3 коммита уже 360 мин (порог 30) — повторное сообщение, эпизод не закрыт")
+
+    def test_state_without_last_alert_starts_the_repeat_clock_silently(self):
+        state = {"x": {"since": T0.isoformat(), "relation": "detached", "alerted": True}}
+        self.assertIsNone(alarm.step(state, "x", "detached", 30, minutes(600)))
+        self.assertEqual(state["x"]["last_alert"], minutes(600).isoformat())
+        self.assertIsNone(alarm.step(state, "x", "detached", 30, minutes(959)))
+        self.assertIn("повторное сообщение", alarm.step(state, "x", "detached", 30, minutes(960)))
+
+    def test_detached_text_names_the_whole_episode_and_when_the_branch_was_lost(self):
+        state = {"x": {"since": T0.isoformat(), "relation": "ahead +1", "alerted": False}}
+        self.assertIsNone(alarm.step(state, "x", "detached", 30, minutes(12)))  # kind changed, 12 < 30
+        text = alarm.step(state, "x", "detached", 30, minutes(31))
+        since = minutes(12).astimezone()
+        self.assertEqual(text, f"⚠️ x: расхождение длится 31 мин (порог 30); сейчас копия без ветки (с {since:%H:%M})")
+
+    def test_same_kind_with_a_changing_count_keeps_the_kind_clock(self):
+        state = {}
+        alarm.step(state, "x", "behind -1", 30, minutes(0))
+        alarm.step(state, "x", "behind -9", 30, minutes(5))
+        self.assertNotIn("kind_since", state["x"])
+
+    def test_humanize_words_and_russian_plural(self):
+        self.assertEqual(alarm.humanize("behind -27"), "позади на 27 коммитов")
+        self.assertEqual(alarm.humanize("behind -21"), "позади на 21 коммит")
+        self.assertEqual(alarm.humanize("behind -12"), "позади на 12 коммитов")
+        self.assertEqual(alarm.humanize("ahead +3"), "впереди на 3 коммита")
+        self.assertEqual(alarm.humanize("нет подтверждённого получения данных с GitHub"),
+                         "нет подтверждённого получения данных с GitHub")
 
     def test_quiet_hours_wrap_midnight_and_equal_bounds_mean_none(self):
         night = dt.datetime(2026, 11, 13, 23, 30)
@@ -154,11 +189,22 @@ class MainTest(unittest.TestCase):
         self.assertFalse(self.sent.exists())
         self.assertEqual(self.main(), 0)  # threshold 0: alarm now
         text = self.sent.read_text()
-        self.assertIn("⚠️ a: behind -1", text)
+        self.assertIn("⚠️ a: позади на 1 коммит", text)
         self.assertIn("перемотка: BLOCKED свои коммиты", text)
         self.assertTrue(json.loads(self.state.read_text())["a"]["alerted"])
         self.assertEqual(self.main(), 0)  # no repeat for the same episode
         self.assertEqual(self.sent.read_text().count("⚠️"), 1)
+
+    def test_sent_alarm_records_when_it_was_sent_and_a_failed_send_does_not(self):
+        self.main()
+        self.main()
+        self.assertTrue(json.loads(self.state.read_text())["a"]["last_alert"])
+        self.lib.write_text("telegram_send() { return 1; }\n")
+        stored = json.loads(self.state.read_text())
+        stored["a"]["last_alert"] = "2000-01-01T00:00:00+00:00"  # long ago: a repeat is due now
+        self.state.write_text(json.dumps(stored))
+        self.assertEqual(self.main(), 1)  # the repeat could not be sent
+        self.assertEqual(json.loads(self.state.read_text())["a"]["last_alert"], "2000-01-01T00:00:00+00:00")
 
     def catch_up(self):
         run(self.copy_dir, "merge", "-q", "--ff-only", "origin/main")
@@ -200,7 +246,7 @@ class MainTest(unittest.TestCase):
         out = io.StringIO()
         with contextlib.redirect_stdout(out):
             self.main()  # alarm sent
-        self.assertRegex(out.getvalue(), r"convergence-alarm: \S+ sent: ⚠️ a: behind -1 уже \d+ мин")
+        self.assertRegex(out.getvalue(), r"convergence-alarm: \S+ sent: ⚠️ a: позади на 1 коммит уже \d+ мин")
         self.catch_up()
         hour = dt.datetime.now().hour
         self.quiet = (hour, (hour + 1) % 24)

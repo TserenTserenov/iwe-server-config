@@ -41,6 +41,7 @@ WATCHED_CLASSES = ("canon", "reader")
 READER_LOG_TAIL = 400
 FETCH_STALE_MIN = 120  # the broker runs every few minutes; two hours without a confirmed fetch is broken
 AHEAD_GRACE_MIN = 120  # a session commit normally reaches GitHub within minutes
+REPEAT_MIN = 360  # an alarmed episode that lasts is repeated this often (6 h), only after a message was really sent
 
 
 def now_local():
@@ -85,10 +86,52 @@ def assess(relation, fetched, threshold, now):
     return "equal", threshold
 
 
+def plural_commits(n):
+    """'1 коммит', '2 коммита', '5 коммитов' (Russian plural of the number that follows 'на')."""
+    if n % 10 == 1 and n % 100 != 11:
+        return f"{n} коммит"
+    if 2 <= n % 10 <= 4 and not 12 <= n % 100 <= 14:
+        return f"{n} коммита"
+    return f"{n} коммитов"
+
+
+def humanize(label):
+    """Message text of a relation label. The label itself ('behind -27') stays as the report computes it:
+    its format is pinned by the morning report, only the message to the pilot gets words.
+    `behind -27` is 'позади на 27 коммитов', not a negative number (found 16.11, WP-539)."""
+    kind, _, rest = label.partition(" ")
+    if kind == "behind" and rest.startswith("-") and rest[1:].isdigit():
+        return f"позади на {plural_commits(int(rest[1:]))}"
+    if kind == "ahead" and rest.startswith("+") and rest[1:].isdigit():
+        return f"впереди на {plural_commits(int(rest[1:]))}"
+    if kind == "diverged" and rest.count("/") == 1:
+        ahead, behind = rest.split("/")
+        if ahead.startswith("+") and behind.startswith("-") and ahead[1:].isdigit() and behind[1:].isdigit():
+            return f"расходится: впереди на {plural_commits(int(ahead[1:]))}, позади на {plural_commits(int(behind[1:]))}"
+    return label
+
+
+def relation_kind(label):
+    return label.split(" ", 1)[0]
+
+
+def alarm_text(path, label, minutes, threshold, kind_since, repeat):
+    """One alarm message. The episode clock runs from the first deviation of any kind (`minutes`), so a
+    detached copy says how long the whole divergence lasts and since when the copy has no branch."""
+    if label == "detached":
+        since = f" (с {kind_since:%H:%M})" if kind_since else ""
+        body = f"расхождение длится {minutes} мин (порог {threshold}); сейчас копия без ветки{since}"
+    else:
+        body = f"{humanize(label)} уже {minutes} мин (порог {threshold})"
+    return f"⚠️ {path}: {body}" + (" — повторное сообщение, эпизод не закрыт" if repeat else "")
+
+
 def step(state, path, label, threshold, now):
     """Advance one copy's episode; return the message to send for it, or None.
 
-    A recovery of an alarmed episode stays in the state (recovered=True) until main() has sent it."""
+    A recovery of an alarmed episode stays in the state (recovered=True) until main() has sent it.
+    An alarmed episode that lasts is repeated every REPEAT_MIN minutes after the last message that was
+    actually sent: one message per episode left a second day of the same breakage silent (16.11, WP-539)."""
     episode = state.get(path)
     if label == "equal":
         if not episode:
@@ -101,12 +144,24 @@ def step(state, path, label, threshold, now):
     if not episode:
         state[path] = {"since": now.isoformat(), "relation": label, "alerted": False}
         return None
+    if relation_kind(episode["relation"]) != relation_kind(label):
+        episode["kind_since"] = now.isoformat()
     episode["relation"] = label
     episode.pop("recovered", None)
     minutes = int((now - dt.datetime.fromisoformat(episode["since"])).total_seconds() // 60)
-    if episode["alerted"] or minutes < threshold:
+    kind_since = episode.get("kind_since")
+    kind_since = dt.datetime.fromisoformat(kind_since).astimezone() if kind_since else None
+    if episode["alerted"]:
+        if "last_alert" not in episode:  # state written before repeats existed: count from the first run with them
+            episode["last_alert"] = now.isoformat()
+            return None
+        since_alert = (now - dt.datetime.fromisoformat(episode["last_alert"])).total_seconds() // 60
+        if since_alert < REPEAT_MIN:
+            return None
+        return alarm_text(path, label, minutes, threshold, kind_since, repeat=True)
+    if minutes < threshold:
         return None
-    return f"⚠️ {path}: {label} уже {minutes} мин (порог {threshold})"
+    return alarm_text(path, label, minutes, threshold, kind_since, repeat=False)
 
 
 def in_quiet_hours(now, start, end):
@@ -205,6 +260,7 @@ def main():
                 del state[path]
             elif path in state:
                 state[path]["alerted"] = True
+                state[path]["last_alert"] = now.isoformat()
         log_messages(now, "sent", pending)
         status = 0
     else:
