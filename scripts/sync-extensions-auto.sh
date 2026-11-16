@@ -169,6 +169,16 @@ send_telegram() {
 # сутки навсегда», а «раз в сутки, пока инцидент открыт».
 NOTIFY_ESCALATION_URGENT_AFTER_SEC="${NOTIFY_ESCALATION_URGENT_AFTER_SEC:-21600}"
 NOTIFY_ESCALATION_URGENT_REPEAT_MIN="${NOTIFY_ESCALATION_URGENT_REPEAT_MIN:-1440}"
+# attempts_word <число> — «попытка / попытки / попыток» по правилу русского склонения.
+attempts_word() {
+  local n="$1" last two
+  last=$((n % 10)); two=$((n % 100))
+  if [ "$last" -eq 1 ] && [ "$two" -ne 11 ]; then printf 'попытка'
+  elif [ "$last" -ge 2 ] && [ "$last" -le 4 ] && { [ "$two" -lt 12 ] || [ "$two" -gt 14 ]; }; then printf 'попытки'
+  else printf 'попыток'
+  fi
+}
+
 # alert_class_subject <class>: the urgent message names the stuck step in
 # plain words instead of reusing the base text (which may say "no action
 # needed" — the contradiction of the 29.10 dump).
@@ -195,7 +205,7 @@ alert() {
         # The urgent text REPLACES the base text: the base text of a routine
         # class may say "no action needed", and gluing both into one message
         # told the pilot two opposite things at once (dump 29.10).
-        full_text="🆘 ${subject:-$(alert_class_subject "$class")}: так уже $(notify_format_duration "$NOTIFY_ESCALATION_DURATION_SEC") ($NOTIFY_ESCALATION_COUNT попыток подряд), само не проходит. Нужен разбор: скажите агенту «разбери доставку расширений»."
+        full_text="🆘 ${subject:-$(alert_class_subject "$class")}: так уже $(notify_format_duration "$NOTIFY_ESCALATION_DURATION_SEC") ($NOTIFY_ESCALATION_COUNT $(attempts_word "$NOTIFY_ESCALATION_COUNT") подряд), само не проходит. Нужен разбор: скажите агенту «разбери доставку расширений»."
         needs_decision=1
       elif [ "$NOTIFY_ESCALATION_PHASE" = "ongoing" ]; then
         full_text="$text (повторяется $NOTIFY_ESCALATION_COUNT раз подряд, не решается уже $(notify_format_duration "$NOTIFY_ESCALATION_DURATION_SEC"))"
@@ -292,6 +302,9 @@ file_list_brief() {
   local shown="" p
   for p in "$@"; do
     p="${p//$'\n'/⏎}"
+    # The pilot reads a file name, not a repository path (WP-538 F24, 16.11: the alert
+    # opened with "server-extensions/scripts/week-close-commit-guard.sh").
+    p="${p##*/}"
     if [ -z "$shown" ]; then shown="$p"; else shown="$shown, $p"; fi
   done
   if [ "$total" -gt "$#" ]; then

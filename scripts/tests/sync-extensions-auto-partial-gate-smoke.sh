@@ -131,9 +131,9 @@ S1_PERSISTED=$(find "${S1_REPO}-gate-failures" -maxdepth 1 -name '*.log' 2>/dev/
   && ok "смешанный тик: полный вывод провалившегося теста сохранён в постоянный файл" \
   || bad "смешанный тик: полный вывод сохранён" "${S1_PERSISTED:-(файл не создан)}"
 # 26.10 (WP-568): алерт больше не содержит пути к логу — он остаётся в
-# журнале/дайджесте; в тексте — полные имена файлов и честное «что делать».
-grep -F "ALERT[test-gate-partial]" "$WORKDIR/tick.out" | grep -qF "server-extensions/scripts/bar.sh" \
-  && ok "смешанный тик: алерт test-gate-partial называет исключённый файл полным именем" \
+# журнале/дайджесте; в тексте — имена файлов без пути (16.11) и честное «что делать».
+grep -F "ALERT[test-gate-partial]" "$WORKDIR/tick.out" | grep -qF "bar.sh" \
+  && ok "смешанный тик: алерт test-gate-partial называет исключённый файл именем без пути" \
   || bad "смешанный тик: алерт называет исключённый файл" "$(grep -F 'ALERT[test-gate-partial]' "$WORKDIR/tick.out")"
 [ -n "$S1_PERSISTED" ] && ! grep -F "ALERT[test-gate-partial]" "$WORKDIR/tick.out" | grep -qF "$S1_PERSISTED" \
   && ok "смешанный тик: алерт test-gate-partial не тащит путь к логу в Telegram" \
@@ -176,8 +176,8 @@ S2_PERSISTED=$(find "${S2_REPO}-gate-failures" -maxdepth 1 -name '*.log' 2>/dev/
   || bad "все файлы провалились: полный вывод сохранён" "${S2_PERSISTED:-(файл не создан)}"
 # 26.10 (WP-568): то же для ветки "все файлы исключены" (класс алерта test-gate) —
 # имя файла есть, пути к логу нет, есть честное «что делать» без обещания времени.
-grep -F "ALERT[test-gate]" "$WORKDIR/tick.out" | grep -qF "server-extensions/scripts/bar.sh" \
-  && ok "все файлы провалились: алерт test-gate называет файл полным именем" \
+grep -F "ALERT[test-gate]" "$WORKDIR/tick.out" | grep -qF "bar.sh" \
+  && ok "все файлы провалились: алерт test-gate называет файл именем без пути" \
   || bad "все файлы провалились: алерт называет файл" "$(grep -F 'ALERT[test-gate]' "$WORKDIR/tick.out")"
 [ -n "$S2_PERSISTED" ] && ! grep -F "ALERT[test-gate]" "$WORKDIR/tick.out" | grep -qF "$S2_PERSISTED" \
   && ok "все файлы провалились: алерт test-gate не тащит путь к логу в Telegram" \
@@ -380,8 +380,8 @@ run_tick "$S8_REPO" "$S8_SRC"
 [ "$(cat "$S8_REPO/server-extensions/scripts/spaced name.sh")" = "spaced old" ] \
   && ok "пробел в имени: провалившийся файл откачен к старому" \
   || bad "пробел в имени: файл откачен" "$(cat "$S8_REPO/server-extensions/scripts/spaced name.sh" 2>&1)"
-grep -F "ALERT[test-gate]" "$WORKDIR/tick.out" | grep -qF "server-extensions/scripts/spaced name.sh" \
-  && ok "пробел в имени: алерт называет файл ПОЛНЫМ именем" \
+grep -F "ALERT[test-gate]" "$WORKDIR/tick.out" | grep -qF "spaced name.sh" \
+  && ok "пробел в имени: алерт называет файл именем без пути, пробел сохранён" \
   || bad "пробел в имени: полное имя в алерте" "$(grep -F 'ALERT[test-gate]' "$WORKDIR/tick.out")"
 
 echo "---"
