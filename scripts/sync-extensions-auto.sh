@@ -394,7 +394,7 @@ if ! PULL_OUT=$(git pull --ff-only --quiet 2>&1); then
   if drop_unpushed_auto_commits && PULL_OUT=$(git pull --ff-only --quiet 2>&1); then
     log_event self_healed "reason=pull_diverged"
   else
-    alert pull "🚨 sync-extensions-auto: git pull --ff-only провалился и само не лечится (в iwe-server-config есть чужие локальные коммиты или правки, либо origin недоступен) — auto-sync пропущен, нужна ручная проверка" "" "$(git_error_detail "$PULL_OUT")"
+    alert pull "🚨 sync-extensions-auto: git pull --ff-only провалился и само не лечится (в iwe-server-config есть чужие локальные коммиты или правки, либо origin недоступен) — auto-sync пропущен. Что делать: скажите любому агенту в чате «разбери доставку расширений» — он сверит копию на сервере и скажет, что сохранить, а что убрать" "" "$(git_error_detail "$PULL_OUT")"
     exit 1
   fi
 fi
