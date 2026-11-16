@@ -41,6 +41,10 @@ assert() {
   if [ "$1" = "$2" ]; then echo "  ok   $3"; else echo "  FAIL $3 (got '$1', want '$2')"; fails=$((fails + 1)); fi
 }
 
+# count: a line count without padding. BSD wc on macOS right-aligns the
+# number ("       0"), which never equals "0" in assert.
+count() { wc -l | tr -d ' '; }
+
 # sandbox <name> <origin-basename>: $IWE/DS-my-strategy cloned from a bare repo.
 sandbox() {
   local name="$1" origin_name="$2"
@@ -141,21 +145,21 @@ advance_origin current/other.md 'unrelated\n'
 printf 'a\nb\nc\nd\nweek report\n' > "$REPO/current/plan.md"
 echo "new" > "$REPO/current/new.md"
 rm "$REPO/current/gone.md"
-reflog_before=$(git -C "$REPO" reflog | wc -l)
+reflog_before=$(git -C "$REPO" reflog | count)
 index_before=$(git -C "$REPO" ls-files -s | sha1sum)
 assert "$(run_guard current/plan.md current/new.md current/gone.md)" 0 "exit code"
 assert "$(git -C "$BARE" show main:current/plan.md | tail -1)" "week report" "origin got the modified file"
 assert "$(git -C "$BARE" show main:current/new.md)" "new" "origin got the new file"
-assert "$(git -C "$BARE" ls-tree main -- current/gone.md | wc -l)" 0 "origin lost the deleted file"
+assert "$(git -C "$BARE" ls-tree main -- current/gone.md | count)" 0 "origin lost the deleted file"
 assert "$(git -C "$BARE" show main:current/other.md)" "unrelated" "the other publication survived"
-assert "$(git -C "$REPO" reflog | wc -l)" "$reflog_before" "the guard moved no branch in the main checkout"
+assert "$(git -C "$REPO" reflog | count)" "$reflog_before" "the guard moved no branch in the main checkout"
 assert "$(git -C "$REPO" ls-files -s | sha1sum)" "$index_before" "the guard did not stage in the main checkout"
-assert "$(git -C "$REPO" worktree list | wc -l)" 1 "the temporary worktree is gone"
-assert "$(wc -l < "$IWE/sync.calls")" 0 "the sync is not run inside the guard"
+assert "$(git -C "$REPO" worktree list | count)" 1 "the temporary worktree is gone"
+assert "$(count < "$IWE/sync.calls")" 0 "the sync is not run inside the guard"
 assert "$([ -s "$IWE/.iwe-runtime/canon-sync-requested" ] && echo yes)" yes "the sync was requested"
 assert "$(run_sync)" 0 "the next sync pass admits the published files"
 assert "$(git -C "$REPO" rev-parse HEAD)" "$(git -C "$BARE" rev-parse main)" "main checkout fast-forwarded to origin"
-assert "$(git -C "$REPO" status --porcelain | wc -l)" 0 "main checkout clean after the pass"
+assert "$(git -C "$REPO" status --porcelain | count)" 0 "main checkout clean after the pass"
 
 echo "2. Fable H1: origin changed the same file meanwhile -> the merged published version is written"
 sandbox s2 DS-my-strategy
@@ -164,13 +168,13 @@ printf 'a\nb\nc\nd\ne-week\n' > "$REPO/current/plan.md"
 assert "$(run_guard current/plan.md)" 0 "exit code"
 assert "$(cat "$REPO/current/plan.md")" "$(printf 'a-origin\nb\nc\nd\ne-week')" "the file shows the published merge, not an older version (Fable M3)"
 assert "$(run_sync)" 0 "the sync pass is not blocked by the file (was: dirty-overlap)"
-assert "$(git -C "$REPO" status --porcelain | wc -l)" 0 "main checkout clean after the pass"
-assert "$(ls "$REPO/.git/week-close-handover" 2>/dev/null | wc -l)" 0 "no backup left behind"
+assert "$(git -C "$REPO" status --porcelain | count)" 0 "main checkout clean after the pass"
+assert "$(ls "$REPO/.git/week-close-handover" 2>/dev/null | count)" 0 "no backup left behind"
 
 echo "3. nothing to commit: exit 1, nothing published"
 sandbox s3 DS-my-strategy
 assert "$(run_guard current/plan.md)" 1 "exit code"
-assert "$(wc -l < "$IWE/publish.calls")" 0 "ds-publish not called"
+assert "$(count < "$IWE/publish.calls")" 0 "ds-publish not called"
 
 echo "4. publication fails: exit 2, main checkout untouched"
 sandbox s4 DS-my-strategy
@@ -195,14 +199,14 @@ echo local > "$REPO/current/keep.md"
 git -C "$REPO" commit -qam "local only"
 echo "x" > "$REPO/current/plan.md"
 assert "$(run_guard current/plan.md)" 2 "exit code"
-assert "$(wc -l < "$IWE/publish.calls")" 0 "ds-publish not called"
+assert "$(count < "$IWE/publish.calls")" 0 "ds-publish not called"
 
 echo "7. not the main checkout: the old commit-and-push loop (run without the wrapper)"
 sandbox s7 other-repo
 echo "report" > "$REPO/current/plan.md"
 assert "$(GUARD_PATH_OVERRIDE="$PATH" run_guard current/plan.md)" 0 "exit code"
 assert "$(git -C "$BARE" show main:current/plan.md)" "report" "origin got the file"
-assert "$(wc -l < "$IWE/publish.calls")" 0 "ds-publish not used"
+assert "$(count < "$IWE/publish.calls")" 0 "ds-publish not used"
 
 echo "8. a writer recreates the file right after it is moved aside: its edit wins, ours is backed up"
 sandbox s8 DS-my-strategy
@@ -234,7 +238,7 @@ assert "$(run_guard current/run.sh)" 0 "exit code"
 assert "$(git -C "$BARE" ls-tree main -- current/run.sh | cut -c1-6)" 100755 "origin kept mode 100755"
 assert "$([ -x "$REPO/current/run.sh" ] && echo yes)" yes "the handed-over file is executable"
 assert "$(run_sync)" 0 "the sync pass admits it"
-assert "$(git -C "$REPO" status --porcelain | wc -l)" 0 "clean after the pass, mode included"
+assert "$(git -C "$REPO" status --porcelain | count)" 0 "clean after the pass, mode included"
 
 echo "11. a symlink in the list is published and stays in place"
 sandbox s11 DS-my-strategy
@@ -249,8 +253,8 @@ echo "12. Fable M1: a path that exists nowhere is an error, not a silent drop"
 sandbox s12 DS-my-strategy
 echo "report" > "$REPO/current/keep.md"
 assert "$(run_guard current/keep.md current/typo.md)" 2 "exit code"
-assert "$(wc -l < "$IWE/publish.calls")" 0 "ds-publish not called"
-assert "$(git -C "$REPO" worktree list | wc -l)" 1 "no temporary worktree created"
+assert "$(count < "$IWE/publish.calls")" 0 "ds-publish not called"
+assert "$(git -C "$REPO" worktree list | count)" 1 "no temporary worktree created"
 
 echo "13. Fable M4: the repository's commit hooks run and can refuse"
 sandbox s13 DS-my-strategy
@@ -259,9 +263,9 @@ chmod +x "$REPO/.git/hooks/pre-commit"
 echo "report" > "$REPO/current/keep.md"
 assert "$(run_guard current/keep.md)" 2 "exit code"
 assert "$(grep -c 'hook refused' "$T/out")" 1 "the hook ran"
-assert "$(wc -l < "$IWE/publish.calls")" 0 "ds-publish not called"
+assert "$(count < "$IWE/publish.calls")" 0 "ds-publish not called"
 assert "$(cat "$REPO/current/keep.md")" "report" "the edit is still there"
-assert "$(git -C "$REPO" worktree list | wc -l)" 1 "the temporary worktree is gone"
+assert "$(git -C "$REPO" worktree list | count)" 1 "the temporary worktree is gone"
 
 echo "14. review В1: origin moves the same file again before the sync pass -- still admitted"
 sandbox s14 DS-my-strategy
@@ -270,7 +274,7 @@ assert "$(run_guard current/plan.md)" 0 "exit code"
 advance_origin current/plan.md 'a-next\nb\nc\nd\ne-week\n'
 assert "$(run_sync)" 0 "the superseded published version does not block the sync"
 assert "$(head -1 "$REPO/current/plan.md")" "a-next" "the newest version is in place"
-assert "$(git -C "$REPO" status --porcelain | wc -l)" 0 "clean after the pass"
+assert "$(git -C "$REPO" status --porcelain | count)" 0 "clean after the pass"
 
 echo "15. review С2: a retry after the files were already published finishes the hand-over (exit 1)"
 sandbox s15 DS-my-strategy
@@ -278,7 +282,7 @@ printf 'a\nb\nc\nd\ne-week\n' > "$REPO/current/plan.md"
 advance_origin current/plan.md 'a\nb\nc\nd\ne-week\n'
 advance_origin current/plan.md 'a-next\nb\nc\nd\ne-week\n'
 assert "$(run_guard current/plan.md)" 1 "exit code: already done on a previous attempt"
-assert "$(wc -l < "$IWE/publish.calls")" 0 "nothing published again"
+assert "$(count < "$IWE/publish.calls")" 0 "nothing published again"
 assert "$(head -1 "$REPO/current/plan.md")" "a-next" "the published version is handed over"
 assert "$([ -s "$IWE/.iwe-runtime/canon-sync-requested" ] && echo yes)" yes "the sync was requested"
 assert "$(run_sync)" 0 "the sync pass admits it"
@@ -288,19 +292,32 @@ sandbox s16 DS-my-strategy
 echo "report" > "$REPO/current/keep.md"
 git -C "$REPO" add current/keep.md
 assert "$(run_guard current/keep.md)" 2 "exit code"
-assert "$(wc -l < "$IWE/publish.calls")" 0 "ds-publish not called"
+assert "$(count < "$IWE/publish.calls")" 0 "ds-publish not called"
 
 echo "17. review В2: an event journal path is refused before anything is committed"
 sandbox s17 DS-my-strategy
 mkdir -p "$REPO/machine/ledger" && echo "events: 1" > "$REPO/machine/ledger/day.yaml"
 assert "$(run_guard machine/ledger/day.yaml)" 2 "exit code"
-assert "$(wc -l < "$IWE/publish.calls")" 0 "ds-publish not called"
+assert "$(count < "$IWE/publish.calls")" 0 "ds-publish not called"
 
 echo "18. review Н4: an absolute path inside the checkout is accepted"
 sandbox s18 DS-my-strategy
 echo "report" > "$REPO/current/keep.md"
 assert "$(run_guard "$REPO/current/keep.md")" 0 "exit code"
 assert "$(git -C "$BARE" show main:current/keep.md)" "report" "origin got the file"
+
+echo "18b. an absolute path through a symlinked directory is accepted (macOS /var, any host)"
+sandbox s18b DS-my-strategy
+echo "report" > "$REPO/current/keep.md"
+ln -s "$REPO" "$T/s18b/repo-link"
+assert "$(run_guard "$T/s18b/repo-link/current/keep.md")" 0 "exit code"
+assert "$(git -C "$BARE" show main:current/keep.md)" "report" "origin got the file"
+
+echo "18c. an absolute path outside the checkout is still refused"
+sandbox s18c DS-my-strategy
+echo "x" > "$T/s18c/outside.md"
+assert "$(run_guard "$T/s18c/outside.md")" 2 "exit code"
+assert "$(count < "$IWE/publish.calls")" 0 "ds-publish not called"
 
 echo "19. third review С1: published as a merge but the hand-over could not run -> exit 2, not success"
 sandbox s19 DS-my-strategy

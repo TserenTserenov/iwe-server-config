@@ -21,6 +21,10 @@
 #   исключения для trivial/closed-loop, go-ahead пилота 2026-09-11) --
 #   экстренный обход: --no-artifactor-check.
 #
+# --no-weekplan (issue #1503): do not add the WP row to the WeekPlan «План» table — the
+#   WP lands only in the card and the registry. --weekplan forces the row (a strategy
+#   session approving the WP into the week). Precedence: --no-weekplan / --weekplan >
+#   params.yaml `wp_new_add_to_weekplan: false` > default (row is added); both flags → error.
 # --state (WP-505): target state transition (WP-457 State-Transition Gate).
 #   REQUIRED when <governance>/docs/state-axes-registry.yaml exists (author install);
 #   optional otherwise (typical user install — gate inactive per template contract).
@@ -79,6 +83,8 @@ NAME_KIND_ANSWER=""
 NAME_KIND_UNSURE=0
 NAME_KIND_PILOT=""
 PRODUCER=""
+NO_WEEKPLAN_FLAG=0
+WEEKPLAN_FLAG=0
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -103,9 +109,25 @@ while [[ $# -gt 0 ]]; do
     --name-kind-unsure) NAME_KIND_UNSURE=1; shift ;;
     --name-kind-pilot) NAME_KIND_PILOT="$2"; shift 2 ;;
     --producer) PRODUCER="$2"; shift 2 ;;
+    --no-weekplan) NO_WEEKPLAN_FLAG=1; shift ;;
+    --weekplan) WEEKPLAN_FLAG=1; shift ;;
     *) echo "Неизвестный флаг: $1" >&2; exit 1 ;;
   esac
 done
+
+# --- WeekPlan row: on unless the pilot turned it off (issue #1503) ---
+if [[ "$NO_WEEKPLAN_FLAG" == 1 && "$WEEKPLAN_FLAG" == 1 ]]; then
+  echo "ERROR: --weekplan и --no-weekplan взаимоисключающие" >&2
+  exit 1
+fi
+# Empty reason = the row is added.
+WEEKPLAN_OFF_REASON=""
+if [[ "$NO_WEEKPLAN_FLAG" == 1 ]]; then
+  WEEKPLAN_OFF_REASON="--no-weekplan"
+elif [[ "$WEEKPLAN_FLAG" == 0 && -f "$IWE/params.yaml" ]] \
+  && grep -qE '^wp_new_add_to_weekplan:[[:space:]]*false([[:space:]]*(#.*)?)?$' "$IWE/params.yaml"; then
+  WEEKPLAN_OFF_REASON="params.yaml wp_new_add_to_weekplan: false"
+fi
 
 # --- Artefactor Gate (WP-7 Ф142, 2026-09-11) ---
 # Title обязан прийти из результата Артефактора, не быть придуманным агентом
@@ -890,7 +912,9 @@ echo "3/5 WeekPlan..."
 # до этого шага одновременно, оба читают один WeekPlan, оба пишут -- второй
 # write() тихо стирает строку первого. Тот же temp+guarded-cp паттерн, что
 # уже применён к WP_FILE и REGISTRY выше в этом же файле.
-if [[ -n "$WEEKPLAN" ]]; then
+if [[ -n "$WEEKPLAN_OFF_REASON" ]]; then
+  echo "   ⏭️  WeekPlan: строка не добавляется ($WEEKPLAN_OFF_REASON)"
+elif [[ -n "$WEEKPLAN" ]]; then
   WEEKPLAN_HASH_BEFORE=""
   if [[ -f "$WEEKPLAN" ]]; then
     WEEKPLAN_HASH_BEFORE=$({ shasum -a 256 "$WEEKPLAN" 2>/dev/null || sha256sum "$WEEKPLAN" 2>/dev/null; } | cut -d' ' -f1)

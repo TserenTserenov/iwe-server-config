@@ -39,6 +39,11 @@ fi
 IWE_ROOT="${IWE_ROOT:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 IWE="${IWE:-$IWE_ROOT}"
 export IWE_ROOT IWE
+# The template copy finds the library under its own .claude/; a copy promoted to
+# the governance repo uses the workspace's installed one.
+I18N_LIB="$SCRIPT_DIR/../.claude/lib/i18n.sh"
+[ -f "$I18N_LIB" ] || I18N_LIB="$IWE/.claude/lib/i18n.sh"
+source "$I18N_LIB" || { echo "FATAL: i18n.sh not found (looked next to the template and in $IWE/.claude/lib)" >&2; exit 1; }
 DATE="${1:-$(date +%Y-%m-%d)}"
 CONFIG="$IWE/.iwe-runtime/day-rhythm-config.yaml"
 SERVER_MODE="${IWE_SERVER_MODE:-0}"  # WP-283: 1 = Linux server, Mac-only MCP недоступен
@@ -79,10 +84,16 @@ else
 fi
 
 DOW_NAMES=("" "Понедельник" "Вторник" "Среда" "Четверг" "Пятница" "Суббота" "Воскресенье")
-MONTH_NAMES=("" "января" "февраля" "марта" "апреля" "мая" "июня" "июля" "августа" "сентября" "октября" "ноября" "декабря")
+# Month names and the yesterday heading come from the language catalog (WP-610 F9);
+# all keys are read here, before anything is written.
+MONTH_NAMES=("")
+for _m in 1 2 3 4 5 6 7 8 9 10 11 12; do
+  MONTH_NAMES+=("$(i18n_msg "format.month_genitive.$_m")") || { echo "FATAL: month names missing from the language catalog" >&2; exit 1; }
+done
 DOW_RU="${DOW_NAMES[$DOW_NUM]}"
 MONTH_RU="${MONTH_NAMES[$MONTH_NUM]}"
 YDAY_MONTH_RU="${MONTH_NAMES[$YDAY_MNUM]}"
+YESTERDAY_HEADING=$(i18n_msg format.dayplan.yesterday "$YDAY_NUM" "$YDAY_MONTH_RU") || { echo "FATAL: yesterday heading missing from the language catalog" >&2; exit 1; }
 
 # --- YAML reader: parse config once, then do pure-bash lookup per call ---
 # _YAML_KEYS / _YAML_VALS are parallel arrays built by a single python3 invocation.
@@ -1519,7 +1530,7 @@ $WORLD_SECTION
 $(render_directions_today)
 
 <details>
-<summary><b>Итоги вчера ($YDAY_NUM $YDAY_MONTH_RU)</b></summary>
+<summary><b>$YESTERDAY_HEADING</b></summary>
 
 $(render_yesterday)
 

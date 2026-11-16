@@ -65,8 +65,17 @@ if [[ "$INTENT" == WP-* ]]; then
   if [ ! -d "$GOV_DIR" ]; then
     echo "declare-intent.sh: репозиторий планов $GOV_DIR не найден — допуск по связям со списками не проверен" >&2
   elif [ -f "$GOV_DIR/machine/wp-links-policy.yaml" ]; then
+    # Shared checkout (no explicit copy path): read the published card, because the
+    # checkout may lag origin and refuse a WP whose published card has the links
+    # (WP-503 Ф109, Fable review 16.11). A wp-links.py that predates the option
+    # would read "PUBLISHED" as a revision and refuse everything, so ask for it
+    # only when the script knows it.
+    LINKS_TREE=WORKTREE
+    if [ -z "${IWE_GOVERNANCE_REPO_PATH:-}" ] && grep -q PUBLISHED "$GOV_DIR/scripts/wp-links.py" 2>/dev/null; then
+      LINKS_TREE=PUBLISHED
+    fi
     if ! python3 "$GOV_DIR/scripts/wp-links.py" check --repo "$GOV_DIR" --wp "${INTENT#WP-}" \
-         --purpose execute </dev/null; then
+         --purpose execute --tree "$LINKS_TREE" </dev/null; then
       echo "declare-intent.sh: ${INTENT} не допущен к исполнению (связи со списками, выше); намерение не записано, работу не начинать" >&2
       echo "  Карточка в отдельной копии — передайте её путь: IWE_GOVERNANCE_REPO_PATH=<копия> bash declare-intent.sh ${INTENT}" >&2
       exit 3

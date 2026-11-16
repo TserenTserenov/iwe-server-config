@@ -1,2 +1,2 @@
-server-extensions/scripts/session-guard.sh
-server-extensions/scripts/week-close-commit-guard.sh
+server-extensions/claude-hooks/dry-run-gate.sh
+server-extensions/claude-hooks/protocol-stop-gate.sh

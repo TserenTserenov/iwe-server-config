@@ -6198,8 +6198,15 @@ $isolate_status_code $isolate_status_path"
       if lease_valid "$STALE"; then
         echo "NOTE: у агента открыта долгая сессия $(basename "$STALE") (WP: $STALE_WP, возраст ${STALE_AGE}s) — права на коммит действуют, не трогаю" >&2
       else
+        STALE_HK=$(grep "^housekeeping: " "$STALE" | cut -d' ' -f2- || true)
         echo "WARNING: сессия $(basename "$STALE") (WP: $STALE_WP, возраст ${STALE_AGE}s) потеряла права на коммит." >&2
-        echo "         Закрой её (close --wp $STALE_WP) или продли: renew --wp $STALE_WP" >&2
+        if [ -n "$STALE_HK" ]; then
+          # issue #1506: a housekeeping semaphore has no wp, so "close --wp unknown"
+          # cannot close it; point at the command that does.
+          echo "         Закрой её: close --housekeeping $STALE_HK --agent $AGENT" >&2
+        else
+          echo "         Закрой её (close --wp $STALE_WP) или продли: renew --wp $STALE_WP" >&2
+        fi
       fi
     fi
   done < <(ls -t "$SESSION_DIR/${AGENT}"-*.open 2>/dev/null || true)
@@ -12654,7 +12661,13 @@ _close_route_enforced() {
     '' | 0) ;;
     *) echo "  ⚠️  IWE_CLOSE_ROUTE_ENFORCE=${IWE_CLOSE_ROUTE_ENFORCE} не понят (нужно 1): решает файл .iwe-runtime/close-route-enforce" >&2 ;;
   esac
-  [ -f "$IWE_ROOT/.iwe-runtime/close-route-enforce" ]
+  # Optional timed window: `expires_at: <unix seconds, 1-12 digits>` in the file; past it the
+  # file counts as absent. Empty or unparsable = durable. Same rule in the hooks' lib and
+  # close_obligation.py, kept in step by close-route-switch-agreement-smoke.sh.
+  local flag="$IWE_ROOT/.iwe-runtime/close-route-enforce" until_ts
+  [ -f "$flag" ] || return 1
+  until_ts=$(sed -n 's/^expires_at:[[:space:]]*\([0-9]\{1,12\}\)[[:space:]]*$/\1/p' "$flag" 2>/dev/null | head -n 1)
+  [ -z "$until_ts" ] || [ "$(date +%s)" -lt "$until_ts" ]
 }
 
 # How this close executes once the switch is on: runner | release | legacy.

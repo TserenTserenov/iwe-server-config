@@ -1,0 +1,137 @@
+#!/bin/bash
+# routing: guard  deterministic=true
+# dry-run-begin.sh — exclusive creation of a dry-run rehearsal (issue #549 stage 2).
+#
+# The only standard creation point: transactional lock → refusal if an
+# active rehearsal already exists (prints its gate_id) → strict validation of
+# existing state files → atomic creation of state(active) → sentinel
+# referencing gate_id → unlock. Prints to stdout:
+#   gate_id=<id>
+#   owner_token=<token>          ← keep in the initiator's shell, NOT in state
+#   owner_session_id=<sid>
+# The token is stored in state only as sha256 — a rehearsal that reads state with a
+# read-only command does not get the preimage and cannot finish the gate itself
+# (Codex review r1: a decorative token + a whitelisted helper = a standard bypass).
+set -uo pipefail
+export PATH="/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin:${PATH:-}"
+
+# --help/-h — before any side effects (issue #757): a bare exit 0 without this branch
+# made --help actually arm the gate (INITIATOR="--help"), and the HELP smoke
+# in validate-fmt-scripts.sh took such an exit 0 as proof of safety.
+[[ "${1:-}" == "--help" || "${1:-}" == "-h" ]] && {
+    echo "dry-run-begin.sh — эксклюзивное создание dry-run репетиции (issue #549 stage 2)"
+    echo "Использование: dry-run-begin.sh [initiator] [session_id] [hold]"
+    echo "  hold — Stop-хук не завершает репетицию (подагент в фоне); завершить dry-run-complete.sh"
+    exit 0
+}
+
+INITIATOR="${1:-audit-installation}"
+SID="${2:-${CLAUDE_SESSION_ID:-dry-$(date +%s)-$$}}"
+# issue #1435: a background subagent outlives the owner's turn, and the Stop
+# hook would complete the rehearsal under it. "hold" leaves completion to
+# dry-run-complete.sh only; the sentinel TTL still bounds a forgotten one.
+STOP_FALLBACK="owner-stop"
+case "${3:-}" in
+    "") ;;
+    hold) STOP_FALLBACK="hold" ;;
+    *) echo "dry-run-begin: unknown third argument '${3}' (expected: hold)" >&2; exit 2 ;;
+esac
+command -v jq >/dev/null 2>&1 || { echo "dry-run-begin: jq required" >&2; exit 2; }
+
+fail() { echo "dry-run-begin: $*" >&2; exit 1; }
+
+# Path and privacy check come from the one shared library (also used by the
+# gate, the Stop hook and dry-run-complete.sh — issue #1447): on Git Bash the
+# criterion is the NTFS ACL of %LOCALAPPDATA%\iwe-dry-run, elsewhere 0700.
+# State and the token are written only after the check has passed.
+# The copy is the one the installed gate loads: in a workspace
+# (<ws>/FMT-exocortex-template/scripts/ next to <ws>/.claude/hooks/) that is
+# <ws>/.claude/lib, never the template's own copy, so a partial update cannot
+# make begin and the gate apply different criteria. A workspace gate without
+# its library is refused: a rehearsal the gate cannot read would lock it.
+# Outside a workspace (the template checkout itself) the template copy is used.
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+if [ -f "$SCRIPT_DIR/../../.claude/hooks/dry-run-gate.sh" ]; then
+    DRY_RUN_LIB="$SCRIPT_DIR/../../.claude/lib/dry-run-dir.sh"
+else
+    DRY_RUN_LIB="$SCRIPT_DIR/../.claude/lib/dry-run-dir.sh"
+fi
+# shellcheck source=../.claude/lib/dry-run-dir.sh
+{ [ -r "$DRY_RUN_LIB" ] && . "$DRY_RUN_LIB"; } || fail "$DRY_RUN_LIB missing — cannot locate dry-run state (run update.sh)"
+dry_run_resolve_paths || fail "$DRY_RUN_ERR"
+DRY_DIR="$DRY_RUN_DIR"
+SENTINEL="$DRY_RUN_SENTINEL"
+LOCK_DIR="$DRY_DIR/transaction.lock"
+dry_run_dir_check create || fail "$DRY_RUN_ERR"
+
+tries=0
+while ! mkdir "$LOCK_DIR" 2>/dev/null; do
+    tries=$((tries + 1))
+    if [ "$tries" -gt 20 ]; then
+        lock_pid=$(sed -n '1p' "$LOCK_DIR/pid" 2>/dev/null || true)
+        lock_start=$(sed -n '3p' "$LOCK_DIR/pid" 2>/dev/null || true)
+        cur_start=$(ps -o lstart= -p "$lock_pid" 2>/dev/null || true)
+        if [ -n "$lock_pid" ] && { ! kill -0 "$lock_pid" 2>/dev/null || { [ -n "$lock_start" ] && [ -n "$cur_start" ] && [ "$lock_start" != "$cur_start" ]; }; }; then
+            mv "$LOCK_DIR" "$DRY_DIR/.stale-lock-$$-$(date +%s)" 2>/dev/null || true
+            rm -rf "$DRY_DIR"/.stale-lock-* 2>/dev/null || true
+            mkdir "$LOCK_DIR" 2>/dev/null && break
+        fi
+        fail "transaction lock busy — другая dry-run операция в процессе"
+    fi
+    sleep 0.1 2>/dev/null || sleep 1
+done
+NONCE=$(od -An -N8 -tx1 /dev/urandom | tr -d ' \n')
+# An owner-file write error = lock not acquired (otherwise it is eternal).
+if ! { echo "$$"; echo "$NONCE"; ps -o lstart= -p $$ 2>/dev/null || echo "unknown"; } > "$LOCK_DIR/pid" 2>/dev/null; then
+    rm -rf "$LOCK_DIR" 2>/dev/null || true
+    fail "cannot record lock owner"
+fi
+trap 'if [ "$(sed -n "2p" "$LOCK_DIR/pid" 2>/dev/null)" = "$NONCE" ]; then rm -rf "$LOCK_DIR" 2>/dev/null; fi' EXIT
+
+# Exclusivity + strict validation of existing state under the lock.
+shopt -s nullglob
+for sf in "$DRY_DIR"/gate-*.state; do
+    jq -e . "$sf" >/dev/null 2>&1 || fail "corrupted state file: $sf"
+    [ "$(jq -r '.version // empty' "$sf" 2>/dev/null)" = "2" ] || fail "state file $sf has unknown version"
+    sf_gid=$(jq -r '.gate_id // empty' "$sf" 2>/dev/null || true)
+    [ "gate-$sf_gid.state" = "$(basename "$sf")" ] || fail "state filename/gate_id mismatch: $sf"
+    sf_state=$(jq -r '.state // empty' "$sf" 2>/dev/null || true)
+    case "$sf_state" in
+        active) fail "активная dry-run репетиция уже существует (gate_id=$sf_gid) — сначала завершите её: dry-run-complete.sh $sf_gid <reason> <sid> <token>" ;;
+        completed) ;;
+        *) fail "state file $sf has unknown state '$sf_state'" ;;
+    esac
+done
+
+GID="dry-$(date +%s)-$(od -An -N8 -tx1 /dev/urandom | tr -d ' \n')"
+TOKEN=$(od -An -N24 -tx1 /dev/urandom | tr -d ' \n')
+TOKEN_SHA=$(printf '%s' "$TOKEN" | shasum -a 256 | awk '{print $1}')
+OWNER_PID=$PPID
+OWNER_PID_START=$(ps -o lstart= -p "$OWNER_PID" 2>/dev/null || true)
+OWNER_PGID=$(ps -o pgid= -p "$OWNER_PID" 2>/dev/null | tr -d ' ')
+case "$OWNER_PID" in ''|*[!0-9]*) fail "cannot determine owner pid" ;; esac
+case "$OWNER_PGID" in ''|*[!0-9]*|0) fail "cannot determine owner pgid (got '$OWNER_PGID')" ;; esac
+[ -n "$OWNER_PID_START" ] || fail "cannot determine owner pid start"
+
+# The sentinel is checked BEFORE creating state (Codex r4: otherwise with an already
+# existing sentinel an active state remains without an issued token).
+[ ! -e "$SENTINEL" ] && [ ! -L "$SENTINEL" ] || fail "sentinel $SENTINEL already exists — refusing"
+
+umask 077
+TMP=$(mktemp "$DRY_DIR/.begin.XXXXXX") || fail "mktemp failed"
+jq -nc --arg gid "$GID" --arg sid "$SID" --arg tsha "$TOKEN_SHA" \
+  --argjson pid "$OWNER_PID" --arg pstart "$OWNER_PID_START" --argjson pgid "$OWNER_PGID" \
+  --arg created "$(date -u +%Y-%m-%dT%H:%M:%SZ)" --arg init "$INITIATOR" --arg stopfb "$STOP_FALLBACK" \
+  '{version:2,gate_id:$gid,owner_session_id:$sid,owner_pid:$pid,owner_pgid:$pgid,owner_pid_start:$pstart,owner_token_sha256:$tsha,state:"active",created_at:$created,initiator:$init,stop_fallback:$stopfb}' \
+  > "$TMP" && mv -f "$TMP" "$DRY_DIR/gate-$GID.state" || { rm -f "$TMP"; fail "atomic state create failed"; }
+
+# The sentinel is an exclusive creation, only after state. On a race (someone
+# created it after our check) — roll back exactly our own state.
+if ! ( set -C; jq -nc --arg gid "$GID" --arg sid "$SID" --arg created "$(date -u +%Y-%m-%dT%H:%M:%SZ)" --arg init "$INITIATOR" \
+    '{gate_id:$gid,created_at:$created,session_id:$sid,initiator:$init}' \
+    > "$SENTINEL" ) 2>/dev/null; then
+    rm -f "$DRY_DIR/gate-$GID.state" 2>/dev/null || true
+    fail "sentinel $SENTINEL already exists — refusing to overwrite (state rolled back)"
+fi
+
+printf 'gate_id=%s\nowner_token=%s\nowner_session_id=%s\n' "$GID" "$TOKEN" "$SID"
