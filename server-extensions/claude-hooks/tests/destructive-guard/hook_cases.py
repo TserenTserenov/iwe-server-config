@@ -53,6 +53,7 @@ CASES = [
     ('обычная команда', 'ls -la', 0, None),
     ('git add конкретных путей', 'git add a.txt b.txt', 0, None),
     ('git push --force-with-lease', 'git push --force-with-lease origin main', 0, None),
+    ('#1010: literal printf feeds shell stdin', "printf '%s\\n' 'rm -rf /important' | sh", 2, '.claude/bin/guarded-rm'),
     ('git clean -n', 'git clean -n', 0, None),
     ('пустая команда: нечего разбирать, вход отклоняется', '', 2, None),
     ('второй git add -A', 'git add one; git add -A', 2, 'git add -A'),
@@ -85,7 +86,9 @@ CASES = [
     ('Codex r3: апостроф в теле heredoc не прячет git после', "git add one; cat <<'EOF'\nDon't panic.\nEOF\ngit add -A", 2, 'git add -A'),
     ('command --help git add -A: консервативно блокируется', 'command --help git add -A', 2, None),
     ('апостроф в комментарии не прячет git после', "# don't\ngit add -A", 2, 'git add -A'),
-    ('экранированная ; делит, как в v8 (консервативно)', 'echo a\\; git add -A', 2, 'git add -A'),
+    ('экранированная ; буквальна, как в bash: echo печатает текст', 'echo a\\; git add -A', 0, None),
+    ('eval перечитывает экранированную ;', 'eval echo a\\; git add -A', 2, 'git add -A'),
+    ('экранированная ; в имени не прячет ключ', 'git add a\\;b -A', 2, 'git add -A'),
     ('экранированная кавычка не прячет git после', "echo it\\'s; git add -A", 2, 'git add -A'),
     ('nice -n 5 git', 'nice -n 5 git push --force origin', 2, 'git push --force'),
     ('вложенные обёртки sudo env git', 'sudo env GIT_TRACE=1 git add -A', 2, 'git add -A'),
@@ -434,7 +437,7 @@ def clean_repo():
     repo = tempfile.mkdtemp(prefix="dg-repo-")
     for args in (["init", "-q"], ["config", "user.email", "t@t.test"], ["config", "user.name", "t"]):
         subprocess.run(["git", "-C", repo, *args], check=True)
-    with open(os.path.join(repo, "a.txt"), "w") as f:
+    with open(os.path.join(repo, "a.txt"), "w", encoding="utf-8") as f:
         f.write("a\n")
     subprocess.run(["git", "-C", repo, "add", "a.txt"], check=True)
     subprocess.run(["git", "-C", repo, "commit", "-qm", "a"], check=True)
@@ -444,7 +447,7 @@ def clean_repo():
 def fake_env(tool, condition="true"):
     """PATH with a fake `tool`: exits 3 when the sh condition over "$*" holds, else runs the real one."""
     d = tempfile.mkdtemp(prefix="dg-fake-")
-    with open(os.path.join(d, tool), "w", newline="\n") as f:
+    with open(os.path.join(d, tool), "w", newline="\n", encoding="utf-8") as f:
         f.write(f'#!/bin/sh\nif {condition}; then exit 3; fi\nexec {real(tool)} "$@"\n')
     os.chmod(os.path.join(d, tool), 0o755)
     return dict(os.environ, PATH=d + os.pathsep + os.environ["PATH"])
@@ -496,7 +499,7 @@ def main():
     else:
         check(False, "the hook has no exit trap")
     env_file = os.path.join(tempfile.mkdtemp(prefix="dg-env-"), "env.sh")
-    with open(env_file, "w", newline="\n") as f:
+    with open(env_file, "w", newline="\n", encoding="utf-8") as f:
         f.write('printf() { if [ "${FUNCNAME[1]:-}" = matches ]; then return 3; fi; builtin printf "$@"; }\n')
     code, err = run(hook, "git add -A", env=dict(os.environ, BASH_ENV=env_file))
     check(code == 2 and "ошибка проверки" in err, f"a failing printf inside matches -> {code}: blocked as a failed check")
@@ -511,7 +514,7 @@ def main():
     check(code == 2, f"CC_ALLOW_DESTRUCTIVE_INPUT=0 is not a bypass -> {code}")
 
     # --- the guide tells the truth (WP-7): a pass-through below that the hook really has is named
-    # under «Вне гарантии»; the bypass is described as covering the whole process, not one command ---
+    # under "Outside the guarantee"; the bypass is described as covering the whole process, not one command ---
     doc_path = pathlib.Path(hook).resolve().parents[2] / "docs" / "DESTRUCTIVE-GUARD.md"
     if doc_path.is_file():
         doc = doc_path.read_text(encoding="utf-8")
@@ -523,7 +526,6 @@ def main():
         # Known limits remain observable until an executable detector replaces them (#1002).
         for command, named in (("bash <<< 'rm -rf /important'", "`bash <<<`"),
                                ("sh -s <<< 'rm -rf /important'", "`sh -s <<<`"),
-                               ("printf '%s\\n' 'rm -rf /important' | sh", "`| sh`"),
                                ('echo "$(rm -rf /important)"', "`$(...)`"),
                                ('echo "`rm -rf /important`"', "обратных кавычках"),
                                ('cat <<EOF\n$(rm -rf /important)\nEOF', "`cat <<EOF`"),

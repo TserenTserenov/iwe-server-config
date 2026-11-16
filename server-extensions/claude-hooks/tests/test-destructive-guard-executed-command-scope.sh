@@ -120,7 +120,9 @@ EOF'
 expect "уборка своего временного файла (rm -f без -r) не блокируется" pass \
 'rm -f /Users/t/IWE/DS-my-strategy/tmp-prompt.txt'
 
-expect "rm -rf в /tmp остаётся штатной уборкой" pass \
+# Release 0.42 rule accepted by the pilot on 2026-11-16: rm -rf is refused everywhere,
+# deletion goes through .claude/bin/guarded-rm, which checks the real path at run time.
+expect "rm -rf даже в /tmp идёт только через безопасное удаление" block \
 'rm -rf /tmp/wp-sync-bundle-512'
 
 # === git staging: the real forms are still refused ===
