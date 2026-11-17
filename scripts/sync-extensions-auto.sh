@@ -524,6 +524,11 @@ fi
 
 GATE_LOG=$(mktemp)
 GATE_FAILED=false
+# Exit 77 = "not verified" (WP-484 F274): the test could not run here (a tool
+# or another repo's file is missing on this host). It does not hold the file
+# back -- a missing prerequisite on the Mac is not a defect of the file -- but
+# it is named in the log, so a silent "SKIP ... exit 0" no longer reads as a pass.
+NOT_VERIFIED_TESTS=()
 # Paths whose own test failed (WP-530, bug-2026-09-16): excluded from this
 # tick's commit below instead of cancelling the whole batch for everyone else.
 FAILED_PATHS=()
@@ -596,13 +601,22 @@ for rel_path in "${CHANGED_PATHS[@]}"; do
       *.py) test_runner=("$GATE_TEST_PYTHON" "$test_file") ;;
       *)    test_runner=(bash "$test_file") ;;
     esac
-    if ! env "${STRIP_ENV_ARGS[@]}" PATH="$GATE_TEST_PATH" "${test_runner[@]}" >> "$GATE_LOG" 2>&1; then
+    test_rc=0
+    env "${STRIP_ENV_ARGS[@]}" PATH="$GATE_TEST_PATH" "${test_runner[@]}" >> "$GATE_LOG" 2>&1 || test_rc=$?
+    if [ "$test_rc" -eq 77 ]; then
+      echo "GATE NOT VERIFIED: $test_file (для $rel_path)" >> "$GATE_LOG"
+      NOT_VERIFIED_TESTS+=("$(basename "$test_file") (для $rel_path)")
+    elif [ "$test_rc" -ne 0 ]; then
       echo "GATE FAIL: $test_file (для $rel_path)" >> "$GATE_LOG"
       GATE_FAILED=true
       FAILED_PATHS+=("$rel_path")
     fi
   done <<< "$found_tests"
 done
+
+if [ "${#NOT_VERIFIED_TESTS[@]}" -gt 0 ]; then
+  echo "$LOG_PREFIX test-gate not verified (exit 77, file delivered): $(printf '%s; ' "${NOT_VERIFIED_TESTS[@]}")"
+fi
 
 if [ "$GATE_FAILED" = true ]; then
   # Раньше в лог (и в Telegram) шёл tail -5 всего GATE_LOG — при нескольких
