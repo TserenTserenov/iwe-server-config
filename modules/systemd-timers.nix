@@ -968,6 +968,36 @@ in
     };
 
     # =========================================================
+    # 2a-4. SHARED-COPIES-REFRESH — WP-484 Ф310 fix 5 (17.11.2026)
+    # =========================================================
+    # Puts the shared copies (registry classes reader/service, PACK-* and
+    # DS-IT-systems/*) back on their expected branch when an agent switched
+    # them: only a clean copy whose tip is already in the upstream ref; anything
+    # else is logged as BLOCKED and left untouched. No fetch, no commits.
+    # Fast-forward stays with iwe-reader-copies-sync above. The script reaches
+    # tsekh-1 through server-extensions (delivered 17.11, deploy of 87feb00).
+    systemd.services."iwe-shared-copies-refresh" = {
+      description = "IWE — return shared copies to their main branch (WP-484 Ф310)";
+      unitConfig   = commonUnitConfig;
+      serviceConfig = commonServiceConfig // {
+        ExecStart = "${pythonForIWE}/bin/python3 ${iwe}/scripts/shared-copies-refresh.py --root ${iwe} --host tsekh-1";
+      };
+      path = commonPath;
+      environment = commonEnv // {
+        IWE_ROOT = iwe;
+      };
+    };
+
+    systemd.timers."iwe-shared-copies-refresh" = {
+      wantedBy    = [ "timers.target" ];
+      description = "IWE shared-copies-refresh — каждый час";
+      timerConfig = {
+        OnBootSec       = "10min";
+        OnUnitActiveSec = "1h";
+      };
+    };
+
+    # =========================================================
     # 2b. SYNC STRATEGY FILES — WP-WP-files + current/* + MEMORY.md
     # =========================================================
     # WP-7 S-C (7 мая 2026). Точечный pull WP-карточек и плана недели для DS-my-strategy.
