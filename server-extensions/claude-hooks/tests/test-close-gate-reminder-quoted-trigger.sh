@@ -276,12 +276,26 @@ class QuotedTriggerTests(unittest.TestCase):
         self.assertTrue(json.loads(self.intent.read_text())["skip_reflection"])
 
     # --- WP-561 F61 (2D): the pilot's shorthands as the whole message ---
-    def test_shorthand_whole_message_closes_without_reflection(self):
-        for prompt in ("ПСЗ", "сз", " СЗ.", "псз!"):
+    def test_sz_whole_message_closes_without_reflection(self):
+        for prompt in ("сз", " СЗ.", "СЗ!"):
             with self.subTest(prompt=prompt):
                 self.reset_state()
                 self.assert_armed(prompt)
                 self.assertTrue(json.loads(self.intent.read_text())["skip_reflection"], prompt)
+
+    def test_psz_records_skip_but_does_not_arm_the_close(self):
+        # Pilot 17.11: «ПСЗ» checks with a subagent first; the close starts only
+        # after a clean check, so nothing is armed, only the skip is recorded.
+        for prompt in ("ПСЗ", " псз!"):
+            with self.subTest(prompt=prompt):
+                self.reset_state()
+                out = self.run_hook(prompt)
+                self.assertIn("субагентом", out["additionalContext"])
+                self.assertFalse(self.obligation.exists(), "ПСЗ armed the obligation")
+                self.assertFalse(self.sentinel.exists(), "ПСЗ wrote the commit sentinel")
+                record = json.loads(self.intent.read_text())
+                self.assertTrue(record["skip_reflection"], prompt)
+                self.assertEqual(record.get("raw_text", ""), "", prompt)
 
     def test_shorthand_inside_a_phrase_does_nothing(self):
         for prompt in ("СЗ сделай потом", "что такое ПСЗ?", "есз", "псзз", "СЗ?", "псз ?"):

@@ -91,7 +91,7 @@ Exit 1 (нет файлов) → пропустить молча. Несколь
 1. Для Close-протоколов — сначала `check-trace-satisfaction` со scope, соответствующим строке из таблицы Шага 1 (WP-481 Ф5.1 — один файл держит 3 масштаба, без scope гейты чужого масштаба попадают в проверку и блокируют гарантированно):
    - `close` / `close session` → `bash .claude/hooks/rule-engine.sh check-trace-satisfaction --section "Quick Close"`
    - `week-close` → `bash .claude/hooks/rule-engine.sh check-trace-satisfaction --section "Week Close"`
-   - `day-close` / `close day` → `bash .claude/hooks/rule-engine.sh check-trace-satisfaction --protocol .claude/skills/day-close/SKILL.md` (18 гейтов размечены прямо в Skill-файле, WP-481 Ф5.1)
+   - `day-close` / `close day` → `DC_SHA=<из шага 15в> DC_PUBLISHED_REVISION=<из шага 15в> bash .claude/hooks/rule-engine.sh check-trace-satisfaction --protocol .claude/skills/day-close/SKILL.md` (публикация AR.005 — по опубликованной ревизии, РП-484 Ф309; 18 гейтов размечены прямо в Skill-файле, WP-481 Ф5.1)
 
    block = есть незакрытый gate → вернуться и закрыть; ok → дальше. Narrative-пропуски вердикт не меняют.
 2. Вызови `/verify` с указанием артефактов протокола

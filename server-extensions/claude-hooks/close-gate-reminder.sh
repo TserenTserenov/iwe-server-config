@@ -34,6 +34,25 @@ INPUT=$(cat)
 SANITIZED=$(printf '%s' "$INPUT" | LC_ALL=C tr '\n\r\t' '   ')
 PROMPT_ORIGINAL_CASE=$(printf '%s' "$SANITIZED" | jq -r '.prompt // empty')
 PROMPT=$(printf '%s' "$PROMPT_ORIGINAL_CASE" | lower_text)
+# WP-561 F61, pilot decisions 2D (16.11) and 17.11: the pilot's shorthands
+# count only as the whole message; a question mark makes it a question.
+# «СЗ» = close without the reflection question: expanded to the phrase the
+# pilot would otherwise type, so every branch below treats it exactly like it.
+# «ПСЗ» = check with a subagent first, then push and close without reflection
+# (CLAUDE.md section 9). It must not arm the close: the check comes first and
+# may stop the close. Only the skip of the reflection question is recorded
+# (the PSZ branch below); the agent starts the close itself after the check.
+PSZ_SHORTHAND=false
+if printf '%s' "$PROMPT" | grep -qxE '[[:space:][:punct:]]*(п)?сз[[:space:][:punct:]]*' \
+    && ! printf '%s' "$PROMPT" | grep -q '?'; then
+  if printf '%s' "$PROMPT" | grep -q 'псз'; then
+    PSZ_SHORTHAND=true
+    PROMPT_ORIGINAL_CASE="без рефлексии"
+  else
+    PROMPT_ORIGINAL_CASE="закрывай без рефлексии"
+  fi
+  PROMPT="$PROMPT_ORIGINAL_CASE"
+fi
 SESSION_ID=$(printf '%s' "$INPUT" | jq -r '.session_id // empty' 2>/dev/null)
 # Fallback + exact-reject (WP-484 Ф148, cold-context review 31.08, peer-session
 # 2026-08-31-40-close-runner-gate-session): this hook (UserPromptSubmit) writes
@@ -401,6 +420,16 @@ if [ -z "$CLOSE_PATH_MATCH" ]; then
     -exec grep -Flx -- "harness_session_id: $SESSION_ID" {} + 2>/dev/null \
     | xargs -I{} stat -f '%m %N' {} 2>/dev/null | sort -rn | head -1 | cut -d' ' -f2-)
 fi
+# «ПСЗ» (see the top of this file): record the skip of the reflection question,
+# arm nothing, and tell the agent the order: check first, close only if clean.
+if [ "$PSZ_SHORTHAND" = true ]; then
+  _record_close_intent '[Рр]ефлекси[ия]'
+  rm -f "$SENTINEL_DIR/$SESSION_ID.flag" 2>/dev/null
+  jq -n --arg ctx "«ПСЗ» (CLAUDE.md §9): 1) сначала проверь результат сессии субагентом; 2) нашёл проблему — остановись и доложи пилоту, не заливай и не закрывай; 3) проверка прошла — закрывай через Skill run-protocol close. Пропуск вопроса о рефлексии уже записан по слову пилота, вопрос задан не будет. Закрытие пока не взведено: Stop-гейт не требует его до твоего запуска." \
+    '{additionalContext: $ctx}'
+  exit 0
+fi
+
 # WP-561 F61 stage 2 (pilot decision 15.11, one close path): with the close route
 # switch on, a declared peer session takes the ordinary close below (obligation,
 # reminder of /run-protocol close) -- its own direct close no longer applies.

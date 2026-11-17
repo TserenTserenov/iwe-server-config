@@ -397,6 +397,69 @@ _check_pushed() {
     fi
 }
 
+_check_day_close_publication() {
+    # WP-484 F309 (inbox I-20, day close 16.11): a day close publishes from an isolated copy
+    # through ds-publish.sh; the commit reaches origin cherry-picked under another sha and the
+    # frozen main checkout is not advanced, so its status/upstream say nothing about delivery.
+    # Measured like day-close step 15в, over the whole branch PUB..DC_SHA (a process-runner
+    # RUN commit below DC_SHA must be delivered too): DC_SHA is an ancestor of
+    # DC_PUBLISHED_REVISION, or the branch has no merge, changes something and `git cherry`
+    # finds every commit's patch there; DC_PUBLISHED_REVISION is on origin/main.  Both values
+    # are full shas as step 15в prints them (a ref name proves nothing), and DC_SHA is fresh:
+    # committed within DC_MAX_AGE_HOURS (36), so an old published commit is not today's close
+    # (review 17.11).  Prints one JSON object; returns 0 only when delivery is proven.
+    local repo_dir="${RULE_REPO_DIR:-$HOME/IWE/DS-my-strategy}"
+    local sha="" pub="" delivery="missing" on_origin="no" detail="" rc cherry base age
+    local max_age=$(( ${DC_MAX_AGE_HOURS:-36} * 3600 ))
+    if [[ ! "${DC_SHA:-}" =~ ^[0-9a-f]{40}$ ]] || [[ ! "${DC_PUBLISHED_REVISION:-}" =~ ^[0-9a-f]{40}$ ]]; then
+        detail="DC_SHA and DC_PUBLISHED_REVISION must be full 40-hex shas as printed by day-close step 15в"
+    else
+        sha=$(git -C "$repo_dir" rev-parse --verify --quiet "${DC_SHA}^{commit}" 2>/dev/null) || sha=""
+        pub=$(git -C "$repo_dir" rev-parse --verify --quiet "${DC_PUBLISHED_REVISION}^{commit}" 2>/dev/null) || pub=""
+        [ -n "$sha" ] && [ -n "$pub" ] || detail="DC_SHA or DC_PUBLISHED_REVISION is not a commit in $repo_dir"
+    fi
+    if [ -z "$detail" ]; then
+        age=$(( $(date +%s) - $(git -C "$repo_dir" log -1 --format=%ct "$sha") ))
+        [ "$age" -le "$max_age" ] || detail="DC_SHA was committed ${age}s ago, older than ${max_age}s: not this day close"
+    fi
+    if [ -z "$detail" ]; then
+        git -C "$repo_dir" merge-base --is-ancestor "$pub" refs/remotes/origin/main; rc=$?
+        case "$rc" in
+            0) on_origin="yes" ;;
+            1) detail="DC_PUBLISHED_REVISION is not on origin/main (fetch first, or it was never published)" ;;
+            *) on_origin="error"; detail="cannot compare DC_PUBLISHED_REVISION with origin/main" ;;
+        esac
+        git -C "$repo_dir" merge-base --is-ancestor "$sha" "$pub"; rc=$?
+        if [ "$rc" -eq 0 ]; then
+            delivery="ancestor"
+        elif [ "$rc" -eq 1 ]; then
+            base=$(git -C "$repo_dir" merge-base "$pub" "$sha") || base=""
+            if [ -z "$base" ]; then
+                delivery="error"
+            elif [ -n "$(git -C "$repo_dir" rev-list --merges "$pub..$sha")" ]; then
+                delivery="merge_in_branch"   # a merge has no single patch to look for
+            elif git -C "$repo_dir" diff --quiet "$base" "$sha"; then
+                delivery="empty_branch"      # empty patches match any empty commit on origin
+            elif cherry=$(git -C "$repo_dir" cherry "$pub" "$sha") && [ -n "$cherry" ] \
+                    && ! printf '%s\n' "$cherry" | grep -q '^+'; then
+                delivery="patch_equivalent"
+            fi
+        else
+            delivery="error"
+        fi
+        if [ -z "$detail" ] && [ "$delivery" != "ancestor" ] && [ "$delivery" != "patch_equivalent" ]; then
+            detail="branch up to DC_SHA is not delivered to DC_PUBLISHED_REVISION ($delivery)"
+        fi
+    fi
+    _DCP_REPO="$repo_dir" _DCP_SHA="$sha" _DCP_PUB="$pub" _DCP_DELIVERY="$delivery" _DCP_ON_ORIGIN="$on_origin" _DCP_DETAIL="$detail" \
+        python3 -c 'import json, os
+e = os.environ
+print(json.dumps({"mode": "day_close_revision", "repo": e["_DCP_REPO"], "dc_sha": e["_DCP_SHA"],
+                  "published_revision": e["_DCP_PUB"], "delivery": e["_DCP_DELIVERY"],
+                  "published_on_origin": e["_DCP_ON_ORIGIN"], "detail": e["_DCP_DETAIL"]}, ensure_ascii=False))'
+    [ -z "$detail" ]
+}
+
 _run_postconditions_for_close() {
     # WP-295 Ф5: deterministic post-condition checks on Close event (on_fail: warn).
     local rc_result rc_verdict orz_result orz_verdict
@@ -1796,7 +1859,16 @@ PYEOF
             if [ -z "$SECTION" ] && [ "$PROTO" -ef "$_workspace/.claude/skills/day-close/SKILL.md" ]; then
                 _calendar_scope=1
             fi
-            if [ "$_calendar_scope" -eq 0 ]; then
+            _day_close=0
+            if [ -z "$SECTION" ] && [ "$PROTO" -ef "$_workspace/.claude/skills/day-close/SKILL.md" ]; then
+                _day_close=1
+            fi
+            if [ "$_day_close" -eq 1 ] && { [ -n "${DC_SHA:-}" ] || [ -n "${DC_PUBLISHED_REVISION:-}" ]; }; then
+                # WP-484 F309: a day close proves AR.005 by its published revision only.  The
+                # frozen checkout's status and the session-close ORZ file (DS-my-strategy/sessions,
+                # moved to MC-sessions by WP-526) are not facts about a day close.
+                AR005_EVIDENCE=$(_check_day_close_publication) && AR005_OK=1
+            elif [ "$_calendar_scope" -eq 0 ]; then
                 _proof_root=$(cd "$HOOK_DIR/../.." && pwd -P)
                 _native="${CODEX_THREAD_ID:-${CLAUDE_CODE_SESSION_ID:-${KIMI_SESSION_ID:-}}}"
                 if AR005_EVIDENCE=$(python3 "$_proof_root/scripts/lib/session_close_evidence.py" \
@@ -2598,6 +2670,57 @@ FIXEOF
             FAIL=$((FAIL+1))
         fi
         CLAUDE_SESSION_ID="$TRACE_SID3" bash "$0" session-clear "$TRACE_SID3" >/dev/null 2>&1
+
+        # WP-484 F309 (inbox I-20): a day close proves AR.005 by DC_SHA/DC_PUBLISHED_REVISION;
+        # the whole branch must be delivered (cherry-picked under other shas counts).
+        T56_DIR=$(mktemp -d "${TMPDIR:-/tmp}/re-t56-XXXXXX")
+        git init -q --bare "$T56_DIR/origin.git"
+        git init -q -b main "$T56_DIR/gov"
+        T56_GIT=(git -C "$T56_DIR/gov" -c user.email=t@example.com -c user.name=t)
+        "${T56_GIT[@]}" remote add origin "$T56_DIR/origin.git"
+        echo base > "$T56_DIR/gov/a.txt"; "${T56_GIT[@]}" add a.txt
+        GIT_COMMITTER_DATE="2020-01-01T00:00:00Z" "${T56_GIT[@]}" commit -qm base
+        T56_OLD=$("${T56_GIT[@]}" rev-parse HEAD)
+        "${T56_GIT[@]}" push -q origin main
+        "${T56_GIT[@]}" checkout -q -b isolate
+        echo run > "$T56_DIR/gov/run.txt"; "${T56_GIT[@]}" add run.txt; "${T56_GIT[@]}" commit -qm run
+        T56_RUN=$("${T56_GIT[@]}" rev-parse HEAD)
+        echo day > "$T56_DIR/gov/day.txt"; "${T56_GIT[@]}" add day.txt; "${T56_GIT[@]}" commit -qm day-close
+        T56_SHA=$("${T56_GIT[@]}" rev-parse HEAD)
+        echo other > "$T56_DIR/gov/b.txt"; "${T56_GIT[@]}" add b.txt; "${T56_GIT[@]}" commit -qm unpublished
+        T56_UNPUB=$("${T56_GIT[@]}" rev-parse HEAD)
+        "${T56_GIT[@]}" checkout -q -b empty main
+        "${T56_GIT[@]}" commit -q --allow-empty -m empty
+        T56_EMPTY=$("${T56_GIT[@]}" rev-parse HEAD)
+        "${T56_GIT[@]}" checkout -q main
+        echo parallel > "$T56_DIR/gov/c.txt"; "${T56_GIT[@]}" add c.txt; "${T56_GIT[@]}" commit -qm parallel
+        "${T56_GIT[@]}" commit -q --allow-empty -m other-empty
+        "${T56_GIT[@]}" cherry-pick "$T56_SHA" >/dev/null
+        "${T56_GIT[@]}" push -q origin main; "${T56_GIT[@]}" fetch -q origin
+        T56_PUB1=$("${T56_GIT[@]}" rev-parse origin/main)
+        "${T56_GIT[@]}" cherry-pick "$T56_RUN" >/dev/null
+        "${T56_GIT[@]}" push -q origin main; "${T56_GIT[@]}" fetch -q origin
+        T56_PUB=$("${T56_GIT[@]}" rev-parse origin/main)
+        mkdir -p "$T56_DIR/ws/.claude/skills/day-close"
+        printf '15. Коммит и публикация [[gate:AR.005]]\n' > "$T56_DIR/ws/.claude/skills/day-close/SKILL.md"
+        t56_ar005() { # DC_SHA DC_PUBLISHED_REVISION -> "<verdict> <delivery>"
+            IWE_ROOT="$T56_DIR/ws" RULE_REPO_DIR="$T56_DIR/gov" DC_SHA="$1" DC_PUBLISHED_REVISION="$2" \
+                CLAUDE_SESSION_ID="test-f309-$$" bash "$0" check-trace-satisfaction \
+                --protocol "$T56_DIR/ws/.claude/skills/day-close/SKILL.md" 2>/dev/null \
+                | python3 -c 'import sys,json; d=json.loads(sys.stdin.read()); print(d["verdict"], d["publication_evidence"].get("delivery",""))' 2>/dev/null
+        }
+        T56_GOT="$(t56_ar005 "$T56_SHA" "$T56_PUB")|$(t56_ar005 "$T56_SHA" "$T56_PUB1")|$(t56_ar005 "$T56_UNPUB" "$T56_PUB")"
+        T56_GOT="$T56_GOT|$(t56_ar005 "$T56_SHA" "$T56_SHA")|$(t56_ar005 "$T56_SHA" "")|$(t56_ar005 main main)"
+        T56_GOT="$T56_GOT|$(t56_ar005 "$T56_OLD" "$T56_PUB")|$(t56_ar005 "$T56_EMPTY" "$T56_PUB")|$(t56_ar005 "$T56_PUB" "$T56_PUB")"
+        T56_WANT="ok patch_equivalent|block missing|block missing|block ancestor|block missing|block missing|block missing|block empty_branch|ok ancestor"
+        if [ "$T56_GOT" = "$T56_WANT" ]; then
+            echo "PASS Test 56: day close AR.005 by published revision — whole branch cherry-picked or ancestor ok; RUN commit left behind, unpublished, off origin, ref name, old commit, empty branch → block"
+            PASS=$((PASS+1))
+        else
+            echo "FAIL Test 56: expected '$T56_WANT', got '$T56_GOT'"
+            FAIL=$((FAIL+1))
+        fi
+        rm -rf "$T56_DIR"
 
         echo ""
         echo "=== Results: $PASS PASS / $FAIL FAIL (total $((PASS+FAIL))) ==="

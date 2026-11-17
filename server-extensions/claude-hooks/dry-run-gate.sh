@@ -1,54 +1,35 @@
 #!/bin/bash
 # Dry-run Gate Hook (PreToolUse)
-# Контракт: memory/dry-run-contract.md
-# WP-265 Ф5.2 (ArchGate v3 — вариант F3 sentinel-only). v2: WP-7/BUGTRIAGE2 (issue #237).
+# Contract: memory/dry-run-contract.md
+# WP-265 Phase 5.2 (ArchGate v3 — option F3 sentinel-only). v2: WP-7/BUGTRIAGE2 (issue #237).
 #
-# Назначение: блокировать write-tools при наличии валидного sentinel-файла.
-# Sentinel: единый файл /tmp/iwe-dry-run.flag (не session-bound).
-# Причина единого имени: CLAUDE_SESSION_ID не пробрасывается в окружение
-# субагентов, поэтому session-bound имя было ненадёжно в самом частом пути
-# smoke-теста — sentinel создавал главный агент, subagent Stop-хук снимал
-# по своему (пустому) SID, чужой sentinel оставался и залипал на весь TTL.
-# Единый файл убирает рассинхрон создания/очистки одним ходом (issue #237 п.2).
-# TTL: 2400 секунд (40 минут) от mtime — измеренный `close day` занимает ~26
-# минут (issue #460), запас держит легитимную репетицию живой без heartbeat.
+# Purpose: block write-tools while a valid sentinel file is present.
+# Sentinel: a single file /tmp/iwe-dry-run.flag (not session-bound).
+# Reason for the single name: CLAUDE_SESSION_ID is not propagated into the
+# subagent environment, so a session-bound name was unreliable on the most
+# common smoke-test path — the main agent created the sentinel, the subagent Stop hook
+# removed it under its own (empty) SID, the foreign sentinel stayed and got stuck for the whole TTL.
+# A single file removes the create/cleanup mismatch in one move (issue #237 item 2).
+# TTL: 2400 seconds (40 minutes) from mtime — a measured `close day` takes ~26
+# minutes (issue #460), the margin keeps a legitimate rehearsal alive without a heartbeat.
 #
-# Принципы:
-# - jq отсутствует / owner-файл сиротеет без sentinel / TTL истёк → fail-CLOSED,
-#   не skip/allow (memory/dry-run-contract.md §Fail-safe; issue #460 paths 1-3:
+# Principles:
+# - jq missing / owner file orphaned without sentinel / TTL expired → fail-CLOSED,
+#   not skip/allow (memory/dry-run-contract.md §Fail-safe; issue #460 paths 1-3:
 #   a gate that can't see its own state has no basis to allow).
-# - exit 0 = allow (sentinel отсутствует и никакой репетиции не объявлено)
-# - exit 2 = block (с диагностикой в stderr; включает jq missing,
-#   sentinel_missing-with-owner и TTL-expired)
+# - exit 0 = allow (no sentinel and no rehearsal declared)
+# - exit 2 = block (with diagnostics in stderr; includes jq missing,
+#   sentinel_missing-with-owner and TTL-expired)
 
 set -uo pipefail
 export PATH="/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin:${PATH:-}"
 
-SENTINEL="${IWE_DRY_RUN_SENTINEL:-/tmp/iwe-dry-run.flag}"
 TTL_SECONDS=2400
 HOOK_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 IWE_ROOT_GUESS="$(cd "$HOOK_DIR/../.." 2>/dev/null && pwd -P)"
 GATE_LOG="$IWE_ROOT_GUESS/.claude/logs/gate_log.jsonl"
 
-# issue #549 stage 2: каноническая запись состояния репетиции (redesign).
-# Sentinel остаётся маркером активного режима (на него завязана whitelist-
-# машинерия ниже), но решение о блокировке принимается по state-файлу.
-# Каталог приватный (только этот uid): symlink/чужой владелец/групповая
-# запись = попытка подмены → fail-closed.
-DRY_DIR="${IWE_DRY_RUN_DIR:-/tmp/iwe-dry-run-$(id -u)}"
-# Env-оверрайды путей — только явный тестовый режим (Codex r1: ambient
-# IWE_DRY_RUN_DIR/IWE_DRY_RUN_SENTINEL из конфигурации запуска не должны
-# отключать production-защиту). Маркер создаётся тестом внутри override-
-# каталога; без него действуют production-пути.
-if [ -n "${IWE_DRY_RUN_DIR:-}" ] || [ -n "${IWE_DRY_RUN_SENTINEL:-}" ]; then
-    if [ ! -f "${IWE_DRY_RUN_DIR:-/nonexistent}/.iwe-dry-run-test-mode" ]; then
-        DRY_DIR="/tmp/iwe-dry-run-$(id -u)"
-        SENTINEL="/tmp/iwe-dry-run.flag"
-    fi
-fi
-LOCK_DIR="$DRY_DIR/transaction.lock"
-
-fail_closed() { # <message...> — единая точка вечной блокировки с диагностикой
+fail_closed() { # <message...> — single point of permanent blocking with diagnostics
     {
         echo "[dry-run-gate] BLOCKED: $*"
         echo "Reason: dry-run state machine fail-closed (см. memory/dry-run-contract.md)"
@@ -56,55 +37,105 @@ fail_closed() { # <message...> — единая точка вечной блок
     exit 2
 }
 
+# jq is needed to parse the payload. Per contract (memory/dry-run-contract.md
+# §Fail-safe): a broken gate must fail-CLOSED, not open — a gate that can't
+# see its own state has no basis to allow (issue #460 path 1; this used to
+# exit 0, contradicting the fail-CLOSED example already documented in the
+# contract).
+if ! command -v jq >/dev/null 2>&1; then
+    echo "[dry-run-gate] FAIL-CLOSED: jq missing, blocking by default (install jq to restore normal operation)" >&2
+    exit 2
+fi
+
+# issue #549 stage 2: canonical rehearsal state record (redesign).
+# The sentinel remains the marker of the active mode (the whitelist
+# machinery below depends on it), but the blocking decision is made from the state file.
+# The directory is private to this user: symlink/foreign owner/open access =
+# tampering attempt → fail-closed. Path and privacy criterion come from the
+# one shared library (issue #1447: on Git Bash the criterion is the NTFS ACL,
+# not the mode bits); env overrides of the paths work in explicit test mode only.
+#
+# Without the library (an update interrupted between .claude/hooks and
+# .claude/lib) or without a resolvable path (Git Bash with LOCALAPPDATA unset
+# or cygpath failing) the gate cannot read the canonical state. It then fails
+# closed only when a rehearsal may be running, judged by evidence found at
+# fixed locations without the library; otherwise it warns and allows, so a
+# user who is not rehearsing is never locked out of the tool that repairs it.
+rehearsal_may_be_active() {
+    local f d sf st cand
+    for f in /tmp/iwe-dry-run.flag "${IWE_DRY_RUN_SENTINEL:-}"; do
+        [ -n "$f" ] || continue
+        { [ -e "$f" ] || [ -L "$f" ]; } && return 0
+    done
+    for d in /tmp "$(dirname "${IWE_DRY_RUN_SENTINEL:-/tmp/x}")"; do
+        for f in "$d"/iwe-dry-run-owner-*.token; do
+            [ -e "$f" ] && return 0
+        done
+    done
+    # Active state records in every directory a resolver could have chosen.
+    # A completed rehearsal leaves its directory behind, so the directory alone
+    # is not evidence; an active or unreadable state record is.
+    cand=("/tmp/iwe-dry-run-$(id -u)")  # evidence scan, not a resolver
+    [ -n "${IWE_DRY_RUN_DIR:-}" ] && cand+=("$IWE_DRY_RUN_DIR")  # evidence scan, not a resolver
+    if [ -n "${LOCALAPPDATA:-}" ]; then
+        cand+=("${LOCALAPPDATA%[\\/]}/iwe-dry-run")
+        d=$(cygpath -u "$LOCALAPPDATA" 2>/dev/null) && [ -n "$d" ] && cand+=("${d%/}/iwe-dry-run")
+    fi
+    for d in "${cand[@]}"; do
+        [ -L "$d" ] && return 0
+        [ -d "$d" ] || continue
+        for sf in "$d"/gate-*.state; do
+            [ -e "$sf" ] || continue
+            st=$(jq -r '.state // empty' "$sf" 2>/dev/null) || return 0
+            [ "$st" = "active" ] && return 0
+        done
+    done
+    return 1
+}
+dry_run_state_unavailable() { # <reason>
+    if rehearsal_may_be_active; then
+        fail_closed "$1 (a rehearsal may be active)"
+    fi
+    echo "[dry-run-gate] WARNING: $1 — no rehearsal is active, allowing; reinstall .claude/lib/dry-run-dir.sh (update.sh) before the next dry-run" >&2
+    exit 0
+}
+DRY_RUN_LIB="$HOOK_DIR/../lib/dry-run-dir.sh"
+# shellcheck source=../lib/dry-run-dir.sh
+{ [ -r "$DRY_RUN_LIB" ] && . "$DRY_RUN_LIB"; } || dry_run_state_unavailable "$DRY_RUN_LIB missing — cannot locate dry-run state"
+dry_run_resolve_paths || dry_run_state_unavailable "$DRY_RUN_ERR"
+DRY_DIR="$DRY_RUN_DIR"
+SENTINEL="$DRY_RUN_SENTINEL"
+LOCK_DIR="$DRY_DIR/transaction.lock"
+
 gate_log_event() { # <event> <detail>
     mkdir -p "$(dirname "$GATE_LOG")" 2>/dev/null || true
     printf '{"ts":"%s","gate":"dry-run-gate","event":"%s","detail":"%s"}\n' \
         "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$1" "$2" >> "$GATE_LOG" 2>/dev/null || true
 }
 
-# lstat-проверка приватного каталога (Codex design review: /tmp без защищённого
-# каталога допускает подмену и symlink-атаки). Вызывается лениво — только когда
-# dry-run реально задействован, чтобы не создавать каталог на каждый tool-call.
+# lstat/owner/privacy check of the private directory (Codex design review: /tmp
+# without a protected directory allows substitution and symlink attacks).
+# Called lazily — only when dry-run is actually in use, to avoid creating the
+# directory on every tool call.
 dry_dir_ensure() {
-    if [ -L "$DRY_DIR" ]; then
-        fail_closed "dry-run dir $DRY_DIR is a symlink — refusing (possible attack)"
-    fi
-    if [ ! -d "$DRY_DIR" ]; then
-        mkdir -m 0700 "$DRY_DIR" 2>/dev/null || fail_closed "cannot create $DRY_DIR with 0700"
-    fi
-    local owner
-    case "$(uname)" in
-        Darwin) owner=$(stat -f %u "$DRY_DIR" 2>/dev/null) ;;
-        *)      owner=$(stat -c %u "$DRY_DIR" 2>/dev/null) ;;
-    esac
-    [ "$owner" = "$(id -u)" ] || fail_closed "dry-run dir $DRY_DIR owned by uid $owner, expected $(id -u)"
-    # group/other write запрещены (lstat-форма без следования symlink — каталог уже проверен выше)
-    local perms
-    case "$(uname)" in
-        Darwin) perms=$(stat -f %Lp "$DRY_DIR" 2>/dev/null) ;;
-        *)      perms=$(stat -c %a "$DRY_DIR" 2>/dev/null) ;;
-    esac
-    [ -n "$perms" ] || fail_closed "cannot stat permissions of $DRY_DIR"
-    # perms — строка восьмеричных цифр ("700"); интерпретируем как octal.
-    # bash 3.2: ${var:-default} внутри $(( )) не парсится — default выше отдельно.
-    [ $(( 8#$perms & 077 )) -eq 0 ] || fail_closed "dry-run dir $DRY_DIR has group/other write permissions ($perms)"
+    dry_run_dir_check create || fail_closed "$DRY_RUN_ERR"
 }
 
-# Транзакционный замок через mkdir (переносимо; flock(1) на macOS отсутствует).
-# Замок несёт владельца (pid + lstart): доказуемо осиротевший замок (владелец
-# мёртв) снимается; живой владелец после исчерпания попыток → fail-closed
-# (Codex: голый mkdir-lock вечен после аварии внутри транзакции).
-# ABA-защита (Codex r1): устаревший замок уносится уникальным именем и
-# удаляется именно он, не потенциально новый замок другого процесса;
-# замок несёт owner (pid + nonce); освобождение — только по своему nonce.
+# Transactional lock via mkdir (portable; flock(1) is absent on macOS).
+# The lock carries an owner (pid + lstart): a provably orphaned lock (owner
+# dead) is removed; a live owner after attempts run out → fail-closed
+# (Codex: a bare mkdir lock is eternal after a crash inside the transaction).
+# ABA protection (Codex r1): a stale lock is carried off under a unique name and
+# that very one is deleted, not a potentially new lock of another process;
+# the lock carries an owner (pid + nonce); release — only by its own nonce.
 LOCK_NONCE=""
 lock_acquire() {
     local tries=0
     while ! mkdir "$LOCK_DIR" 2>/dev/null; do
         tries=$((tries + 1))
         if [ "$tries" -gt 20 ]; then
-            # Последний шанс: владелец замка доказуемо мёртв (pid не жив ИЛИ
-            # его старт не совпадает с записанным — pid reuse)?
+            # Last chance: is the lock owner provably dead (pid not alive OR
+            # its start does not match the recorded one — pid reuse)?
             local lock_pid lock_start cur_start
             lock_pid=$(sed -n '1p' "$LOCK_DIR/pid" 2>/dev/null || true)
             lock_start=$(sed -n '3p' "$LOCK_DIR/pid" 2>/dev/null || true)
@@ -120,9 +151,9 @@ lock_acquire() {
         sleep 0.1 2>/dev/null || sleep 1
     done
     LOCK_NONCE=$(od -An -N8 -tx1 /dev/urandom | tr -d ' \n')
-    # Owner: pid + nonce + lstart (stale-детект по смерти pid ИЛИ несовпадению
-    # старта — pid reuse). Ошибка записи owner-файла = замок не захвачен
-    # (Codex r2: подавленная ошибка записи делала замок вечным).
+    # Owner: pid + nonce + lstart (stale detection by pid death OR start
+    # mismatch — pid reuse). An owner-file write error = lock not acquired
+    # (Codex r2: a suppressed write error made the lock eternal).
     if ! { echo "$$"; echo "$LOCK_NONCE"; ps -o lstart= -p $$ 2>/dev/null || echo "unknown"; } > "$LOCK_DIR/pid" 2>/dev/null; then
         rm -rf "$LOCK_DIR" 2>/dev/null || true
         return 1
@@ -140,9 +171,9 @@ lock_release() {
 state_path() { printf '%s/gate-%s.state' "$DRY_DIR" "$1"; }
 state_field() { jq -r ".$2 // empty" "$1" 2>/dev/null || true; }
 
-# Строгая валидация state-файла (Codex r1: битый JSON / чужая версия /
-# mismatch имени и .gate_id / неизвестное состояние — corruption, fail-closed,
-# а не «не active»). Печатает gate_id валидного active-файла.
+# Strict validation of the state file (Codex r1: broken JSON / foreign version /
+# name vs .gate_id mismatch / unknown state — corruption, fail-closed,
+# not "not active"). Prints the gate_id of a valid active file.
 validate_state_file() { # <path> → rc 0 ok, 2 corruption; stdout: "state gate_id"
     local sf="$1" st gid ver
     jq -e . "$sf" >/dev/null 2>&1 || return 2
@@ -158,8 +189,8 @@ validate_state_file() { # <path> → rc 0 ok, 2 corruption; stdout: "state gate_
     esac
 }
 
-# Атомарный переход active→completed (tmp+mv в том же каталоге, монотонно,
-# идемпотентно: повторное завершение не перетирает исходные metadata).
+# Atomic active→completed transition (tmp+mv in the same directory, monotonic,
+# idempotent: repeated completion does not overwrite the original metadata).
 complete_gate() { # <gate_id> <reason>
     local gate_id="$1" reason="$2" sp tmp
     sp=$(state_path "$gate_id")
@@ -173,11 +204,11 @@ complete_gate() { # <gate_id> <reason>
     return 0
 }
 
-# Скан всех state-файлов со строгой валидацией. stdout: пары "state gate_id".
-# Любая corruption → rc 2 (НЕ «тихо пропустить файл»); вызывающий обязан
-# проверить код — через process substitution rc subshell теряется (Codex r1:
-# fail_closed внутри <( ) завершает только подпроцесс, гейт продолжал и
-# разрешал операцию).
+# Scan of all state files with strict validation. stdout: "state gate_id" pairs.
+# Any corruption → rc 2 (NOT "silently skip the file"); the caller must
+# check the code — with process substitution the subshell rc is lost (Codex r1:
+# fail_closed inside <( ) terminates only the subprocess, the gate continued and
+# allowed the operation).
 scan_states() {
     local sf entry
     shopt -s nullglob
@@ -188,14 +219,14 @@ scan_states() {
     shopt -u nullglob
 }
 
-# Доказуемое сиротство (оба условия, fail-closed при любой неоднозначности):
-# 1. owner_pid мёртв ИЛИ его lstart не совпадает с записанным (pid reuse);
-# 2. ни одного живого процесса с owner_pgid (погибло всё дерево репетиции).
-# Числовая валидация аргументов (Codex r1: pgid=0/foo — не доказано).
-# Ошибка ps / пустой вывод / нечисловые поля → return 2 (не доказано ≠ сиротство).
-# Известный остаток (документировано в контракте): если рантайм помещает сам
-# гейт в process group владельца, скан pgid всегда видит «живых» → вечный
-# fail-closed (безопасное направление), sweep не сработает.
+# Provable orphanhood (both conditions, fail-closed on any ambiguity):
+# 1. owner_pid is dead OR its lstart does not match the recorded one (pid reuse);
+# 2. no live process with owner_pgid (the whole rehearsal tree is gone).
+# Numeric validation of arguments (Codex r1: pgid=0/foo — not proven).
+# ps error / empty output / non-numeric fields → return 2 (not proven ≠ orphaned).
+# Known remainder (documented in the contract): if the runtime puts the gate
+# itself into the owner's process group, the pgid scan always sees "alive" → eternal
+# fail-closed (the safe direction), the sweep will not fire.
 orphan_proven() { # <pid> <pid_start> <pgid>
     local pid="$1" pid_start="$2" pgid="$3" cur_start snapshot
     case "$pid" in ''|*[!0-9]*|0) return 2 ;; esac
@@ -203,48 +234,39 @@ orphan_proven() { # <pid> <pid_start> <pgid>
     if kill -0 "$pid" 2>/dev/null; then
         cur_start=$(ps -o lstart= -p "$pid" 2>/dev/null) || return 2
         [ -n "$cur_start" ] || return 2
-        # Жив и старт совпадает — владелец жив, сиротства нет.
+        # Alive and start matches — the owner is alive, no orphanhood.
         [ "$cur_start" = "$pid_start" ] && return 1
-        # Жив, но старт другой — pid reuse: исходный владелец мёртв.
+        # Alive but a different start — pid reuse: the original owner is dead.
     fi
     snapshot=$(ps -eo pid=,pgid= 2>/dev/null) || return 2
     [ -n "$snapshot" ] || return 2
     if printf '%s\n' "$snapshot" | awk -v pg="$pgid" '$1 ~ /^[0-9]+$/ && $2 ~ /^[0-9]+$/ && $2 == pg {f=1} END{exit f?0:1}'; then
-        return 1  # дерево репетиции ещё живо — не сирот
+        return 1  # the rehearsal tree is still alive — not an orphan
     fi
     return 0
 }
 
-# jq нужен для разбора payload. Per contract (memory/dry-run-contract.md
-# §Fail-safe): a broken gate must fail-CLOSED, not open — a gate that can't
-# see its own state has no basis to allow (issue #460 path 1; this used to
-# exit 0, contradicting the fail-CLOSED example already documented in the
-# contract).
-if ! command -v jq >/dev/null 2>&1; then
-    echo "[dry-run-gate] FAIL-CLOSED: jq missing, blocking by default (install jq to restore normal operation)" >&2
-    exit 2
-fi
 
-# Sentinel-симлинк — попытка подмены, а не состояние (lstat-проверка,
-# Codex design review: битый symlink дал бы ложное «sentinel отсутствует»).
+# A sentinel symlink is a tampering attempt, not a state (lstat check,
+# Codex design review: a dangling symlink would give a false "sentinel missing").
 if [ -L "$SENTINEL" ]; then
     fail_closed "sentinel $SENTINEL is a symlink — refusing"
 fi
 
-# Sentinel отсутствует — dry-run неактивен. Если capability-файл владельца
-# остался, защита исчезла неожиданно или была снята явно до Stop: раньше
-# это только писалось в лог и всё равно allow'илось (#369) — тот же класс
-# fail-open, что путь 1 выше (issue #460 path 2). Owner-файл — прямое
-# доказательство, что репетиция ещё объявлена активной; блокируем вместо
-# молчаливого прохода записи мимо потерянной защиты.
+# Sentinel missing — dry-run is inactive. If the owner's capability file
+# remained, protection vanished unexpectedly or was removed explicitly before Stop: earlier
+# this was only logged and still allowed (#369) — the same fail-open
+# class as path 1 above (issue #460 path 2). The owner file is direct
+# evidence that a rehearsal is still declared active; we block instead of
+# silently letting a write pass around the lost protection.
 if [ ! -f "$SENTINEL" ]; then
-    # issue #549 stage 2: сначала канонические state-файлы (см. шапку).
-    # Доказуемое сиротство снимает вечную блокировку; недоказанное — нет.
+    # issue #549 stage 2: canonical state files first (see header).
+    # Provable orphanhood lifts the eternal block; unproven does not.
     if [ -d "$DRY_DIR" ] && [ ! -L "$DRY_DIR" ]; then
         dry_dir_ensure
-        # Строгий скан под транзакционным замком (Codex r1: без замка —
-        # TOCTOU с созданием новой репетиции; битый/чужой state — corruption,
-        # не «не active»).
+        # Strict scan under the transactional lock (Codex r1: without the lock —
+        # TOCTOU with creation of a new rehearsal; a broken/foreign state is corruption,
+        # not "not active").
         if ! lock_acquire; then
             fail_closed "transaction lock held by a live process — dry-run state busy, retry later"
         fi
@@ -271,8 +293,8 @@ if [ ! -f "$SENTINEL" ]; then
             owner_start=$(state_field "$sf" owner_pid_start)
             owner_pgid=$(state_field "$sf" owner_pgid)
             if orphan_proven "$owner_pid" "$owner_start" "$owner_pgid"; then
-                # Ошибка перехода ≠ разрешение (Codex r1): complete_gate
-                # провалился — fail-closed, state остаётся active.
+                # A transition error ≠ permission (Codex r1): complete_gate
+                # failed — fail-closed, state stays active.
                 if ! complete_gate "$gate_id" "orphan-sweep"; then
                     lock_release
                     fail_closed "orphan proven for gate_id=$gate_id but atomic completion failed — refusing to open"
@@ -291,9 +313,9 @@ if [ ! -f "$SENTINEL" ]; then
         fi
         lock_release
     fi
-    # Legacy-ветка старого формата (owner-*.token без state-файла) — без
-    # изменений: вечный fail-closed с точной командой восстановления.
-    OWNER_FILE=$(find -L /tmp -maxdepth 1 -name 'iwe-dry-run-owner-*.token' -type f -print -quit 2>/dev/null || true)
+    # Legacy branch of the old format (owner-*.token without a state file) — unchanged:
+    # eternal fail-closed with the exact recovery command.
+    OWNER_FILE=$(find -L "$(dirname "$SENTINEL")" -maxdepth 1 -name 'iwe-dry-run-owner-*.token' -type f -print -quit 2>/dev/null || true)
     if [ -n "$OWNER_FILE" ]; then
         gate_log_event "sentinel_missing" "owner_file=$(basename "$OWNER_FILE")"
         {
@@ -311,10 +333,10 @@ if [ ! -f "$SENTINEL" ]; then
     exit 0
 fi
 
-# issue #549 stage 2: sentinel с gate_id — решение по каноническому state,
-# не только по TTL ниже. Sentinel старого формата (без gate_id) идёт по
-# прежнему пути TTL+whitelist без изменений.
-# lstat-инварианты sentinel (Codex r1): обычный файл того же владельца.
+# issue #549 stage 2: a sentinel with gate_id — decision by the canonical state,
+# not only by the TTL below. A sentinel of the old format (no gate_id) follows the
+# previous TTL+whitelist path unchanged.
+# lstat invariants of the sentinel (Codex r1): a regular file of the same owner.
 case "$(uname)" in
     Darwin) S_UID=$(stat -f %u "$SENTINEL" 2>/dev/null || true) ;;
     *)      S_UID=$(stat -c %u "$SENTINEL" 2>/dev/null || true) ;;
@@ -325,16 +347,16 @@ if [ -n "$SENTINEL_GID" ]; then
     dry_dir_ensure
     SP=$(state_path "$SENTINEL_GID")
     [ -f "$SP" ] || fail_closed "sentinel references unknown gate_id=$SENTINEL_GID — corruption or manual edit"
-    # Валидация state-файла, на который ссылается sentinel (тот же строгий
-    # контракт, что у сканера: mismatch имени/.gate_id — corruption).
+    # Validation of the state file the sentinel refers to (the same strict
+    # contract as the scanner: name/.gate_id mismatch — corruption).
     validate_state_file "$SP" >/dev/null || fail_closed "state for gate_id=$SENTINEL_GID failed validation — corruption"
     ST=$(state_field "$SP" state)
     case "$ST" in
         completed)
-            # Самолечение ПОД ЗАМКОМ (Codex r1: без замка гонка — между чтением
-            # и rm новая репетиция может записать новый sentinel, и мы удалим
-            # чужой). Повторное чтение sentinel под замком: удаляем, только
-            # если он всё ещё про ЗАВЕРШЁННЫЙ gate_id и нет нового active.
+            # Self-healing UNDER THE LOCK (Codex r1: without the lock a race — between read
+            # and rm a new rehearsal may write a new sentinel and we would delete
+            # someone else's). Re-read the sentinel under the lock: delete only
+            # if it is still about the COMPLETED gate_id and there is no new active one.
             if ! lock_acquire; then
                 fail_closed "transaction lock busy during stale-sentinel sweep (gate_id=$SENTINEL_GID)"
             fi
@@ -356,12 +378,12 @@ if [ -n "$SENTINEL_GID" ]; then
                 exit 0
             fi
             lock_release
-            # Sentinel под замком сменился (новая репетиция / чужая запись) —
-            # не трогаем чужое и не открываем: fail-closed с диагностикой.
+            # The sentinel changed under the lock (new rehearsal / foreign write) —
+            # do not touch someone else's and do not open: fail-closed with diagnostics.
             fail_closed "sentinel changed during stale sweep (was gate_id=$SENTINEL_GID, now '${CUR_GID:-none}', active_present=$NEW_ACTIVE) — refusing to remove чужой sentinel"
             ;;
         active)
-            ;; # штатный dry-run режим — дальше TTL + whitelist
+            ;; # normal dry-run mode — then TTL + whitelist
         *)
             fail_closed "gate state for gate_id=$SENTINEL_GID is '$ST' — corruption"
             ;;
@@ -374,7 +396,7 @@ case "$(uname)" in
 esac
 
 if [ -z "$MTIME" ]; then
-    # Файл исчез между test и stat (race с параллельной очисткой) — allow.
+    # File vanished between test and stat (race with parallel cleanup) — allow.
     exit 0
 fi
 
@@ -389,16 +411,17 @@ if [ $((NOW - MTIME)) -gt $TTL_SECONDS ]; then
         echo "[dry-run-gate] BLOCKED: sentinel stale (older than ${TTL_SECONDS}s, mtime $MTIME)"
         echo "Reason: TTL expired without cleanup — owner likely crashed, protection kept fail-closed"
         echo "If the rehearsal really ended: rm -f $SENTINEL"
+        echo "A rehearsal begun with hold (issue #1435) stays active after that: then run dry-run-complete.sh <gate_id> manual-recovery"
     } >&2
     exit 2
 fi
 
-# Прочитать tool_name и tool_input из stdin
+# Read tool_name and tool_input from stdin
 INPUT=$(cat)
 TOOL_NAME=$(echo "$INPUT" | jq -r '.tool_name // ""')
 [ -z "$TOOL_NAME" ] && exit 0
 
-# Метаданные sentinel (для диагностики)
+# Sentinel metadata (for diagnostics)
 SENTINEL_META=$(cat "$SENTINEL" 2>/dev/null || echo '{}')
 SENTINEL_INITIATOR=$(echo "$SENTINEL_META" | jq -r '.initiator // "unknown"' 2>/dev/null || echo "unknown")
 SENTINEL_CREATED=$(echo "$SENTINEL_META" | jq -r '.created_at // "unknown"' 2>/dev/null || echo "unknown")
@@ -413,7 +436,7 @@ block() {
     exit 2
 }
 
-# === Прямые write-tools: Write, Edit, MultiEdit, NotebookEdit ===
+# === Direct write-tools: Write, Edit, MultiEdit, NotebookEdit ===
 case "$TOOL_NAME" in
     Write|Edit|MultiEdit|NotebookEdit)
         FP=$(echo "$INPUT" | jq -r '.tool_input.file_path // .tool_input.notebook_path // ""')
@@ -421,19 +444,58 @@ case "$TOOL_NAME" in
         ;;
 esac
 
-# === MCP-write whitelist (точные совпадения tool_name) ===
+# === IWE knowledge-namespace MCP gate (match by action, not by namespace
+# prefix — issue #219, VxxxlBxxxxv) ===
+#
+# Was: an exact list `mcp__claude_ai_IWE__<write-action>` below (carried over from
+# git blame of this file). The current knowledge MCP server is called `iwe-knowledge`
+# (see mcp__iwe-knowledge__* in the live tool list), and none of the
+# write tools under that name matched any line of the list —
+# the gate was fail-open for the whole namespace it was created for
+# (personal_write, dt_write_digital_twin, personal_delete, send_telegram_message
+# etc. passed the rehearsal unvalidated).
+#
+# Now: deny-by-default for any MCP tool_name whose server name contains
+# "iwe" or "knowledge" (survives a future server rename better than
+# an exact name list) — a reading action passes by the name pattern
+# (search/get_*/list_*/read_*/describe_*/*_status/*_stats/*_traverse/*_expand/
+# *_search_by_name/backlinks/whoami/get_instructions), everything else is blocked.
+# If a new read-only tool does not fall under the pattern — a false BLOCK
+# (the safe direction of error), not a false ALLOW.
+#
+# issue #1447: Kimi Code names the same IWE server `aisystant` (no "iwe" or
+# "knowledge" in it), so its writes passed. It joins as an exact server-name
+# PREFIX `mcp__aisystant__` — not a substring, so another server that merely
+# contains "aisystant" is not pulled in.
 case "$TOOL_NAME" in
-    mcp__claude_ai_IWE__personal_write|\
-    mcp__claude_ai_IWE__personal_delete|\
-    mcp__claude_ai_IWE__personal_create_pack|\
-    mcp__claude_ai_IWE__personal_propose_capture|\
-    mcp__claude_ai_IWE__personal_reindex_source|\
-    mcp__claude_ai_IWE__personal_scaffold_notes|\
-    mcp__claude_ai_IWE__dt_write_digital_twin|\
-    mcp__claude_ai_IWE__create_repository|\
-    mcp__claude_ai_IWE__github_connect|\
-    mcp__claude_ai_IWE__github_disconnect|\
-    mcp__claude_ai_IWE__knowledge_feedback|\
+    mcp__*iwe*__*|mcp__*knowledge*__*|mcp__*IWE*__*|mcp__aisystant__*)
+        ACTION="${TOOL_NAME##*__}"
+        # Substring patterns (`*get_*`, not just `get_*`): for half of the
+        # read tools the action does not start with a verb but contains it
+        # in the middle after a domain prefix (`knowledge_list_documents`,
+        # `user_profile_get_tier`, `dt_read_digital_twin`). Anchored-only
+        # `get_*`/`list_*`/`read_*`/`describe_*` falsely blocked all of those —
+        # found by a live run of the regression test on the full tool list
+        # of the server, not by assumption.
+        case "$ACTION" in
+            search|whoami|get_instructions|backlinks|\
+            *get_*|*list_*|*read_*|*describe_*|\
+            *_status|*_stats|*_traverse|*_expand|*_search_by_name|*_search|*_list)
+                : # read-only action — not blocked here, falls to the whitelist below/allow
+                ;;
+            *)
+                block "$TOOL_NAME"
+                ;;
+        esac
+        ;;
+esac
+
+# === MCP-write whitelist (exact tool_name matches, other servers) ===
+# Every name below is BLOCKED during a rehearsal (the list is of write tools;
+# read tools of the same servers are absent and pass). issue #1447: Kimi Code
+# names the calendar server `google-calendar` — its write tools are listed
+# explicitly next to the ext-/claude_ai_ variants.
+case "$TOOL_NAME" in
     mcp__claude_ai_Gmail__create_draft|\
     mcp__claude_ai_Gmail__create_label|\
     mcp__claude_ai_Gmail__label_message|\
@@ -450,6 +512,11 @@ case "$TOOL_NAME" in
     mcp__ext-google-calendar__delete-event|\
     mcp__ext-google-calendar__update-event|\
     mcp__ext-google-calendar__respond-to-event|\
+    mcp__google-calendar__create-event|\
+    mcp__google-calendar__create-events|\
+    mcp__google-calendar__delete-event|\
+    mcp__google-calendar__update-event|\
+    mcp__google-calendar__respond-to-event|\
     mcp__ext-google-drive__copy_file|\
     mcp__ext-google-drive__create_file|\
     mcp__ext-google-drive__create_folder|\
@@ -473,56 +540,69 @@ esac
 
 # === Bash matchers ===
 #
-# v2 (issue #237): вместо grep по всей строке команды — три прохода:
-#  1) вырезать кавычные спаны (текст внутри '...'/"..." не может изображать
-#     команду — раньше `echo "see: git commit"` ложно матчился, issue #237 п.4);
-#  2) разбить нормализованную строку на простые команды по разделителям
-#     ; & | && || ( ) { } $( ` — раньше `(git commit -am x)` в скобках
-#     проходил незамеченным, issue #237 п.1;
-#  3) классифицировать каждый фрагмент по первому слову (после пропуска
-#     VAR=val/command/env/nohup/time/sudo), а не искать подстроку где попало.
+# v2 (issue #237): instead of grep over the whole command string — three passes:
+#  1) strip quoted spans (text inside '...'/"..." cannot pose as a
+#     command — earlier `echo "see: git commit"` falsely matched, issue #237 item 4);
+#  2) split the normalized string into simple commands by the separators
+#     ; & | && || ( ) { } $( ` — earlier `(git commit -am x)` in parentheses
+#     slipped through unnoticed, issue #237 item 1;
+#  3) classify each fragment by its first word (after skipping
+#     VAR=val/command/env/nohup/time/sudo), not by searching for a substring anywhere.
 #
-# Единственное исключение из шага 1 — psql: SQL живёт внутри кавычек, поэтому
-# SQL-write матчится по НЕнормализованной команде, но только когда первое
-# слово фрагмента — psql (иначе `grep "psql -c INSERT" file` снова ложно бьёт).
+# The only exception to step 1 is psql: SQL lives inside quotes, so
+# SQL-write is matched against the UNnormalized command, but only when the first
+# word of the fragment is psql (otherwise `grep "psql -c INSERT" file` would again falsely hit).
 if [ "$TOOL_NAME" = "Bash" ]; then
     CMD=$(echo "$INPUT" | jq -r '.tool_input.command // ""')
     [ -z "$CMD" ] && exit 0
 
-    # Шаг 1: убрать кавычные спаны и безвредные redirect-в-null.
-    # issue #315-fix2: единственная реальная (документированная в day-close/SKILL.md,
-    # day-close-details.md) форма вызова day-close-prepare.sh — quoted var-expansion
-    # bash "$IWE_SCRIPTS/day-close-prepare.sh". Это ЛИТЕРАЛЬНАЯ строка (переменная
-    # ещё не раскрыта на момент PreToolUse — раскрытие делает bash при реальном
-    # исполнении, уже после гейта), но она попадает под общий s/"[^"]*"/ QSTR /g
-    # ниже и превращается в неотличимый от любой другой строки токен QSTR —
-    # whitelist-case ниже никогда не совпадает с этой формой (проверено живым
-    # воспроизведением команды из day-close-details.md:32). Точечная замена
-    # ДО общего схлопывания кавычек сохраняет опознаваемость именно этого
-    # прошитого паттерна, не открывая общий обход кавычек для прочего.
-    # issue #460 путь 5: day-close/SKILL.md шаги 1/2 вызывают два read-only
-    # диагностических python-скрипта через `${IWE_TEMPLATE:-<HOME_DIR>/IWE/...}/...`
-    # — unquoted brace-expansion. Тот же класс проблемы, что day-close-prepare.sh
-    # выше: `{`/`}` внутри `${...}` попадают под общий split-на-простые-команды
-    # (шаг 2, символы `(){}&;` — разделители) и рвут путь на куски раньше, чем
-    # whitelist-case у python|python3 успевает его увидеть целиком. Точечная
-    # замена ДО split сохраняет опознаваемость именно этих двух прошитых вызовов
-    # (подтверждено code review: без этого фикс путь 5 блокирует день. close на
-    # первом же шаге — читай-только скрипты, а не место реального write).
+    # issue #1434: the rules below read the command as code, so heredoc bodies
+    # and comments (data, not commands) are removed first. A reader failure
+    # fails closed, like a missing jq.
+    CMD_PARSER="$HOOK_DIR/dry-run-cmd-parse.pl"
+    command -v perl >/dev/null 2>&1 || fail_closed "perl not found — cannot classify command"
+    [ -r "$CMD_PARSER" ] || fail_closed "$CMD_PARSER missing — cannot classify command"
+    CMD_CODE=$(printf '%s' "$CMD" | perl "$CMD_PARSER" strip) \
+        || fail_closed "command reader failed — cannot classify command"
+
+    # Step 1: remove quoted spans and harmless redirects to null.
+    # issue #315-fix2: the only real (documented in day-close/SKILL.md,
+    # day-close-details.md) form of invoking day-close-prepare.sh is a quoted var-expansion
+    # bash "$IWE_SCRIPTS/day-close-prepare.sh". This is a LITERAL string (the variable
+    # is not yet expanded at PreToolUse time — expansion is done by bash during real
+    # execution, after the gate), but it falls under the general s/"[^"]*"/ QSTR /g
+    # below and turns into a token QSTR indistinguishable from any other string —
+    # the whitelist case below never matches this form (verified by a live
+    # reproduction of the command from day-close-details.md:32). A targeted replacement
+    # BEFORE the general quote collapse preserves the recognizability of exactly this
+    # hardwired pattern without opening a general quote bypass for the rest.
+    # issue #460 path 5: day-close/SKILL.md steps 1/2 call two read-only
+    # diagnostic python scripts via `${IWE_TEMPLATE:-<HOME_DIR>/IWE/...}/...`
+    # — unquoted brace-expansion. The same class of problem as day-close-prepare.sh
+    # above: `{`/`}` inside `${...}` fall under the general split-into-simple-commands
+    # (step 2, the characters `(){}&;` are separators) and break the path into pieces before
+    # the whitelist case for python|python3 gets to see it whole. A targeted
+    # replacement BEFORE the split preserves the recognizability of exactly these two hardwired calls
+    # (confirmed by code review: without it the path 5 fix blocks day-close at the
+    # very first step — read-only scripts, not a place of a real write).
     #
-    # Точный путь в паттерне, НЕ wildcard: `[^}]*` вместо конкретного
-    # default-значения разрешал бы `${IWE_TEMPLATE:-$(cmd)}/...` — command
-    # substitution внутри default оказывался бы проглочен маркером ДО того, как
-    # шаг 2 успевает его сегментировать и опознать (round-2 review, живое
-    # воспроизведение: `${IWE_TEMPLATE:-$(touch /tmp/PWNED)}/...` проходил как
-    # allow). Тот же урок, что уже применён к `WL_ABS`/`WL_ABS2` ниже (review-01
-    # High/review-02 H1) — whitelist только по точной строке, не по glob.
-    # issue #694: якорь — $IWE_ROOT_GUESS (путь самого хука, вычислен строкой
-    # ~27 из BASH_SOURCE), не $HOME/IWE — тот же приём, что уже используется
-    # для GATE_LOG выше. Не env-переменная (IWE_WORKSPACE/IWE_TEMPLATE
-    # инжектируемы вызывающим окружением — тот самый обход, который
-    # review-01/review-02 закрыли отказом от env-default в этом whitelist).
+    # The exact path in the pattern, NOT a wildcard: `[^}]*` instead of a specific
+    # default value would allow `${IWE_TEMPLATE:-$(cmd)}/...` — command
+    # substitution inside the default would be swallowed by the marker BEFORE
+    # step 2 gets to segment and recognize it (round-2 review, live
+    # reproduction: `${IWE_TEMPLATE:-$(touch /tmp/PWNED)}/...` passed as
+    # allow). The same lesson already applied to `WL_ABS`/`WL_ABS2` below (review-01
+    # High/review-02 H1) — whitelist only by the exact string, not by glob.
+    # issue #694: the anchor is $IWE_ROOT_GUESS (the path of the hook itself, computed at line
+    # ~27 from BASH_SOURCE), not $HOME/IWE — the same technique already used
+    # for GATE_LOG above. Not an env variable (IWE_WORKSPACE/IWE_TEMPLATE
+    # are injectable by the caller's environment — the very bypass that
+    # review-01/review-02 closed by dropping the env default in this whitelist).
     WL_TEMPLATE_ABS="$IWE_ROOT_GUESS/FMT-exocortex-template"
+    # The path is embedded in sed EREs below: every metacharacter (and the
+    # `@` delimiter) is escaped, so a workspace under e.g. "a+b (c)" neither
+    # widens the approved span nor stops matching the legitimate form.
+    WL_TEMPLATE_RE=$(printf '%s' "$WL_TEMPLATE_ABS" | sed 's/[][\.*^$+?(){}|/@]/\\&/g')
     # Cold-review finding (Codex, 2026-09-14): a STATIC marker string in a
     # NORM whitelist is spoofable — an attacker can type the marker text
     # literally as the command's own bare argument and bypass the gate by
@@ -534,13 +614,45 @@ if [ "$TOOL_NAME" = "Bash" ]; then
     # even exists) — scoped ONLY to issue #784/#785's whitelist, not to the
     # pre-existing static markers (__WL_DAY_CLOSE_PREPARE__ etc. below),
     # which are a separate, already-shipped finding outside this fix's scope.
+    #
+    # issue #1238: #1233's new .iwe-paths resolver (day-close/SKILL.md,
+    # dry-run-contract.md) is a compound statement ("IWE_PATHS=...; if ...;
+    # then for _c in ...; do ...; done; fi; [ -n ... ] && . \"$IWE_PATHS\""),
+    # not a single quoted argument like the two __WL_IWE_PATHS_* patterns
+    # above -- its final dot-source targets the *variable* $IWE_PATHS, whose
+    # value the per-segment classifier below can't see (each segment is
+    # classified independently; it has no memory of what an earlier segment
+    # assigned). Splitting the chain and whitelisting only the trailing
+    # `. "$IWE_PATHS"` segment would need taint-tracking PWD/IWE_WORKSPACE
+    # reassignment too -- and IWE_PATHS itself is legitimately assigned
+    # *twice* inside this very chain, so a blanket "IWE_PATHS= anywhere ->
+    # tampered" rule (the HOME_OR_IWE_PATHS_TAMPERED technique) would flag
+    # our own whitelisted text and never fire. The chain is whitelisted as
+    # ONE exact, pre-approved block instead: this pattern matches character-
+    # for-character only the known-safe text (verified both ends -- see
+    # scripts/tests/ test for this hook, which asserts the exact byte match,
+    # not just a smoke pass/fail), so there is no sub-pattern an attacker
+    # could reuse out of context. A single added/removed space anywhere in
+    # the chain fails the match and the whole command falls through to
+    # "indirect execution under dry-run" (fail-closed), same as any other
+    # unrecognized source|. target.
+    #
+    # Must run FIRST in this -e pipeline, before the standalone
+    # "$HOME/.iwe-paths" marker below: the chain's own last fallback
+    # candidate is that exact literal, so if the standalone marker ran
+    # first it would eat that substring out of the chain and the whole-
+    # block pattern below would never match the (now-mutated) text. Found
+    # live while adding this fix -- the two earlier tests in
+    # TestIwePathsChainWhitelist failed with the block pattern listed last.
     GATE_NONCE=$(od -An -N8 -tx1 /dev/urandom 2>/dev/null | tr -d ' \n')
     [ -n "$GATE_NONCE" ] || GATE_NONCE="$$-$(date +%s%N 2>/dev/null || date +%s)"
-    NORM=$(printf '%s' "$CMD" | sed -E \
+    NORM=$(printf '%s' "$CMD_CODE" | sed -E \
+        -e "s@IWE_PATHS=\"\\\$\\{IWE_PATHS_FILE:-\\}\"; if \\[ -z \"\\\$IWE_PATHS\" \\]; then for _c in \"\\\$PWD/\\.iwe-paths\" \"\\\$\\{IWE_WORKSPACE:-\\\$HOME/IWE\\}/\\.iwe-paths\" \"\\\$HOME/\\.iwe-paths\"; do \\[ -r \"\\\$_c\" \\] && \\{ IWE_PATHS=\"\\\$_c\"; break; \\}; done; fi; \\[ -n \"\\\$IWE_PATHS\" \\] && \\. \"\\\$IWE_PATHS\"@ __WL_IWE_PATHS_CHAIN_${GATE_NONCE}__ @g" \
         -e 's@"\$IWE_SCRIPTS/day-close-prepare\.sh"@ __WL_DAY_CLOSE_PREPARE__ @g' \
         -e 's@"\$IWE_SCRIPTS/dry-run-complete\.sh"@ __WL_DRY_RUN_COMPLETE__ @g' \
-        -e "s@\\\$\\{IWE_TEMPLATE:-${WL_TEMPLATE_ABS//\//\\/}\\}/\\.claude/scripts/memory-drift-scan\\.py@ __WL_PY_MDS__ @g" \
-        -e "s@\\\$\\{IWE_TEMPLATE:-${WL_TEMPLATE_ABS//\//\\/}\\}/\\.claude/scripts/check-index-health\\.py@ __WL_PY_CIH__ @g" \
+        -e "s@\"\\\$IWE_SCRIPTS/memory-bleed\\.sh\"@ __WL_MEMORY_BLEED_${GATE_NONCE}__ @g" \
+        -e "s@\\\$\\{IWE_TEMPLATE:-${WL_TEMPLATE_RE}\\}/\\.claude/scripts/memory-drift-scan\\.py@ __WL_PY_MDS__ @g" \
+        -e "s@\\\$\\{IWE_TEMPLATE:-${WL_TEMPLATE_RE}\\}/\\.claude/scripts/check-index-health\\.py@ __WL_PY_CIH__ @g" \
         -e "s@\"\\\$HOME/\\.iwe-paths\"@ __WL_IWE_PATHS_${GATE_NONCE}__ @g" \
         -e "s@\"\\\$\\{IWE_PATHS_FILE:-\\\$HOME/\\.iwe-paths\\}\"@ __WL_IWE_PATHS_${GATE_NONCE}__ @g" \
         -e "s/'[^']*'/ QSTR /g" \
@@ -561,69 +673,402 @@ if [ "$TOOL_NAME" = "Bash" ]; then
         fail_closed "NORM sed pipeline failed (exit $NORM_RC) — cannot classify command, refusing to allow"
     fi
 
-    # Редирект в реальный файл — проверяем по нормализованной строке целиком
-    # (позиционно-независим относительно сегментации ниже, как и раньше).
+    # Redirect into a real file — check against the whole normalized string
+    # (position-independent relative to the segmentation below, as before).
     if echo "$NORM" | grep -qE '[[:space:]]>>?[[:space:]]'; then
         block "$CMD (redirect to file)"
     fi
 
-    # Шаг 2: разбить на простые команды.
-    SPLIT=$(printf '%s\n' "$NORM" | sed -E 's/\$\(|`|[(){}&;]|\|\|?|&&/\n/g')
+    # Step 2: split into simple commands.
+    # review-03 M3: the split used `sed 's/.../\n/g'`; BSD sed (macOS) may
+    # print a literal "n" for "\n" in the replacement, which glues segments
+    # together. Bash parameter expansion behaves the same everywhere. `$(`
+    # goes first so its `(` does not leave a stray `$` behind; `||`/`&&`
+    # give empty segments, which every reader below skips.
+    split_segments() { # <text> — one simple command per line
+        local s=$1 sep='[`(){}&;|]'
+        s=${s//'$('/$'\n'}
+        s=${s//$sep/$'\n'}
+        printf '%s\n' "$s"
+    }
+    SPLIT=$(split_segments "$NORM")
 
-    # Live-review finding (Fable, 2026-09-14): whitelist для .iwe-paths матчит
-    # ЛИТЕРАЛЬНЫЙ ТЕКСТ "$HOME/.iwe-paths"/"${IWE_PATHS_FILE:-...}", а не
-    # разрешённое значение — цикл ниже классифицирует каждый сегмент НЕЗАВИСИМО
-    # и не помнит присваиваний из предыдущих сегментов. Живой прогон подтвердил
-    # обход: `HOME=/tmp/evil; . "$HOME/.iwe-paths"` при РЕАЛЬНОМ исполнении
-    # сорсит /tmp/evil/.iwe-paths (bash подставляет переменную в момент
-    # выполнения, уже после этого гейта), но классификатор видит второй сегмент
-    # изолированно и не знает о переопределении в первом. Обнаружено уже после
-    # деплоя — сканируем ВЕСЬ SPLIT заранее на переопределение HOME/
-    # IWE_PATHS_FILE где угодно в команде и отзываем whitelist для всей команды,
-    # если оно есть. round-2 cold-review (Codex, 2026-09-14) нашёл, что первая
-    # версия regex (якорь на начало сегмента, только export) пропускала:
-    # (a) префиксное присваивание НЕ первым словом сегмента (`x=1 HOME=evil cmd`),
+    # issue #1258: same split, but from $CMD (before $NORM collapses every
+    # quoted span to the literal text "QSTR") -- a quoted/escaped command
+    # name like "cd" or \cd needs its quoting intact to tell it apart from
+    # QSTR by the time the cd/pushd check below runs.
+    SPLIT_RAW=$(split_segments "$CMD_CODE")
+
+    # Live-review finding (Fable, 2026-09-14): the .iwe-paths whitelist matches the
+    # LITERAL TEXT "$HOME/.iwe-paths"/"${IWE_PATHS_FILE:-...}", not the
+    # resolved value — the loop below classifies each segment INDEPENDENTLY
+    # and does not remember assignments from previous segments. A live run confirmed
+    # the bypass: `HOME=/tmp/evil; . "$HOME/.iwe-paths"` on REAL execution
+    # sources /tmp/evil/.iwe-paths (bash substitutes the variable at execution
+    # time, after this gate), but the classifier sees the second segment
+    # in isolation and does not know about the override in the first. Discovered after
+    # deployment — we scan the WHOLE SPLIT in advance for an override of HOME/
+    # IWE_PATHS_FILE anywhere in the command and revoke the whitelist for the whole command
+    # if one is present. A round-2 cold review (Codex, 2026-09-14) found that the first
+    # version of the regex (anchored to segment start, export only) missed:
+    # (a) a prefix assignment NOT as the first word of a segment (`x=1 HOME=evil cmd`),
     # (b) readonly/declare/typeset/local/builtin export/command export,
-    # (c) printf -v HOME / read HOME (присваивание через builtin, не `VAR=`).
-    # Регекс ниже покрывает все три класса; кавычные спаны уже схлопнуты в QSTR
-    # к этому шагу (см. sed выше), поэтому "HOME=" внутри пользовательской
-    # строки (напр. python -c "...HOME=...") сюда не протекает.
+    # (c) printf -v HOME / read HOME (assignment via builtin, not `VAR=`).
+    # The regex below covers all three classes; quoted spans are already collapsed into QSTR
+    # at this step (see sed above), so "HOME=" inside a user
+    # string (e.g. python -c "...HOME=...") does not leak here.
+    #
+    # issue #1238: IWE_WORKSPACE and PWD were added to the same regex — they now
+    # also control which file is actually sourced (the #1233 fallback chain
+    # tries "$PWD/.iwe-paths" and "${IWE_WORKSPACE:-$HOME/IWE}/.iwe-paths"),
+    # the same attack as HOME/IWE_PATHS_FILE originally. Verified live
+    # (not only by text): `PWD=/tmp/evil; echo "$PWD/.iwe-paths"` really
+    # prints `/tmp/evil/.iwe-paths` in bash — a plain assignment overrides the
+    # substitution.
+    #
+    # Cold-review finding (Agent tool, 2026-10-15): `cd` — the ordinary, most frequent
+    # way to actually change `$PWD` in a running shell — was NOT caught by the assignment-
+    # oriented regex above (`cd` does not match `VAR=`). A live PoC confirmed a
+    # full bypass: `cd /tmp/evil-poc; <chain>` passed the gate (exit 0) and really
+    # sourced the forged `/tmp/evil-poc/.iwe-paths` on actual execution.
+    # `pushd` gives the same effect; `popd`/a jump through a function with another name —
+    # not covered, a documented residual boundary (memory/dry-run-contract.md).
     HOME_OR_IWE_PATHS_TAMPERED=0
     if printf '%s\n' "$SPLIT" | grep -qE \
-        '(^|[[:space:]])(builtin[[:space:]]+|command[[:space:]]+)?(export|readonly|declare|typeset|local)([[:space:]]+-[A-Za-z]+)*[[:space:]]+(HOME|IWE_PATHS_FILE)=|(^|[[:space:]])(HOME|IWE_PATHS_FILE)=|(^|[[:space:]])printf([[:space:]]+[^[:space:]]*)*[[:space:]]+-v[[:space:]]+(HOME|IWE_PATHS_FILE)([[:space:]]|$)|(^|[[:space:]])read([[:space:]]+-[A-Za-z]+)*[[:space:]]+(HOME|IWE_PATHS_FILE)([[:space:]]|$)' \
+        '(^|[[:space:]])(builtin[[:space:]]+|command[[:space:]]+)?(export|readonly|declare|typeset|local)([[:space:]]+-[A-Za-z]+)*[[:space:]]+(HOME|IWE_PATHS_FILE|IWE_WORKSPACE|PWD)(\[[^]]*\])?\+?=|(^|[[:space:]])(HOME|IWE_PATHS_FILE|IWE_WORKSPACE|PWD)(\[[^]]*\])?\+?=|(^|[[:space:]])printf([[:space:]]+[^[:space:]]*)*[[:space:]]+-v[[:space:]]+(HOME|IWE_PATHS_FILE|IWE_WORKSPACE|PWD)([[:space:]]|$)|(^|[[:space:]])read([[:space:]]+-[A-Za-z]+)*[[:space:]]+(HOME|IWE_PATHS_FILE|IWE_WORKSPACE|PWD)([[:space:]]|$)' \
     ; then
         HOME_OR_IWE_PATHS_TAMPERED=1
     fi
+    HOME_ASSIGNED=$HOME_OR_IWE_PATHS_TAMPERED
+
+    # issue #1454 review-01: the regexes above read assignments written out
+    # literally. A builtin can also assign a variable whose name is computed,
+    # quoted or indirect, which no list of spellings covers: `declare -n r=HOME;
+    # r=/x`, `declare "$v=/x"`, `printf -v "$v"`, `read "$v"`, `unset PWD`,
+    # `(( $v = 1 ))`, `let "$v=1"`, `$'...'` escapes, and so on. Any
+    # assignment-capable builtin, arithmetic evaluation or ANSI-C quoting in the
+    # command therefore revokes every trust placed in a variable's value
+    # (IWE_SCRIPTS, IWE_TEMPLATE, HOME, IWE_PATHS_FILE, IWE_WORKSPACE, PWD).
+    # Quotes and backslashes are removed first, the way the shell joins a word.
+    # review-02: builtins and definitions that rebind a command word or run
+    # code around it join the list — hash, enable, alias/unalias, trap (DEBUG
+    # runs before every command), set/shopt (xtrace, expand_aliases, ...) and
+    # any function definition (`bash() { ...; }` shadows the helper's
+    # interpreter) — and DYNAMIC_ASSIGN now revokes every helper whitelist,
+    # relative and absolute paths included (HELPER_TRUST_REVOKED below): a
+    # computed name (`a=BASH; export ${a}_ENV=...`) can set any variable.
+    CMD_JOINED=$(printf '%s' "$CMD_CODE" | tr -d "\"'\\\\")
+    # review-03 H1: a word whose name part (before the first `=`) holds `$`,
+    # a backtick or a brace builds the variable name at run time (`env
+    # {BASH,X}_ENV=...`, `env BASH${u}ENV=...`), so it is a dynamic
+    # assignment too.
+    DYNAMIC_ASSIGN=0
+    if printf '%s' "$CMD_CODE" | grep -qF "\$'" \
+        || printf '%s\n' "$CMD_JOINED" | grep -qE '(^|[^A-Za-z0-9_.-])(declare|typeset|local|readonly|export|read|mapfile|readarray|unset|getopts|let|wait|printf|hash|enable|alias|unalias|trap|set|shopt|function)([^A-Za-z0-9_.-]|$)|\(\(|\$\[|[A-Za-z0-9_.:-][[:space:]]*\([[:space:]]*\)' \
+        || printf '%s\n' "$CMD_JOINED" | grep -qE '(^|[[:space:];&|(])[^[:space:]=]*[$`{}][^[:space:]=]*='; then
+        DYNAMIC_ASSIGN=1
+    fi
+    [ "$DYNAMIC_ASSIGN" = "1" ] && HOME_OR_IWE_PATHS_TAMPERED=1
+    # review-03 H1: `env` is an external program that takes NAME=VALUE
+    # arguments, computed names included, and no rehearsal step uses it, so
+    # its presence as a word revokes every helper whitelist outright.
+    ENV_WORD=0
+    printf '%s\n' "$CMD_JOINED" | grep -qE '(^|[^A-Za-z0-9_.=-])env([^A-Za-z0-9_.=-]|$)' && ENV_WORD=1
+    HELPER_TRUST_REVOKED=0
+    [ "$DYNAMIC_ASSIGN" = "1" ] || [ "$HOME_ASSIGNED" = "1" ] || [ "$ENV_WORD" = "1" ] && HELPER_TRUST_REVOKED=1
+    # The segment loop below applies the revocation only when it reaches the
+    # helper's arm, and a quoted assignment value before it (`PS4='$(x)'`
+    # becomes `PS4= QSTR`) stops the loop on the word QSTR first. With trust
+    # revoked, any helper named anywhere in the command blocks it.
+    if [ "$HELPER_TRUST_REVOKED" = "1" ] && printf '%s\n' "$CMD_JOINED" | grep -qE \
+        '(load-extensions\.sh|day-close-prepare\.sh|dry-run-complete\.sh|memory-bleed\.sh|memory-drift-scan\.py|check-index-health\.py|\.iwe-paths)'; then
+        block "$CMD (whitelisted helper after a dynamic assignment, env, rebinding builtin, function definition or HOME change)"
+    fi
+
+    # review-03 M2: removing every quote let separators and `NAME=` inside
+    # plain quoted text count as code (`echo "done; hash it"`, `grep -n
+    # "PATH=" README.md`). join_quoted <all> rebuilds the command the way the
+    # shell joins words, but turns a quoted span into the word QSTR when it
+    # holds a space or a separator (all=0) or always (all=1). A double-quoted
+    # span with `$(` or a backtick runs code and is always kept.
+    join_quoted() {
+        printf '%s' "$CMD_CODE" | perl -e '
+            my $all = shift; local $/; my $s = <STDIN> // ""; my $o = "";
+            my ($i, $n) = (0, length $s);
+            while ($i < $n) {
+                my $c = substr($s, $i, 1);
+                if ($c eq "\\") { $o .= substr($s, $i + 1, 1); $i += 2; next; }
+                if ($c ne "\x27" && $c ne "\"") { $o .= $c; $i++; next; }
+                my ($j, $t) = ($i + 1, "");
+                while ($j < $n && substr($s, $j, 1) ne $c) {
+                    if ($c eq "\"" && substr($s, $j, 1) eq "\\") { $j++; }
+                    $t .= substr($s, $j, 1); $j++;
+                }
+                my $live = $c eq "\"" && $t =~ /\$\(|`/;
+                $o .= (!$live && ($all || $t =~ /[\s;&|(){}<>`]/)) ? " QSTR " : $t;
+                $i = $j + 1;
+            }
+            print $o;' "$1"
+    }
+    # Command words: a quoted word without spaces (`"hash"`) still counts.
+    CMD_WORDS=$(join_quoted 0) || fail_closed "quote reader failed — cannot classify command"
+    JOINED_SPLIT=$(split_segments "$CMD_WORDS")
+    # Assignments: a quoted word is never a shell assignment; only `env` or
+    # an assignment builtin (export, declare, ...) reads NAME=VALUE out of
+    # quoted text, so with neither present quoted text is data.
+    if [ "$ENV_WORD" = "1" ] || [ "$DYNAMIC_ASSIGN" = "1" ]; then
+        ASSIGN_SPLIT=$(split_segments "$CMD_JOINED")
+    else
+        CMD_DATA=$(join_quoted 1) || fail_closed "quote reader failed — cannot classify command"
+        ASSIGN_SPLIT=$(split_segments "$CMD_DATA")
+    fi
+
+    # hash -p / enable -f|-n point a command word (bash, python3, git, ...) at
+    # any program; a PATH change does the same for every word. No rehearsal
+    # step needs them: block the whole command when one is in command position
+    # or PATH is assigned anywhere.
+    REBIND_PREFIX='^[[:space:]]*([A-Za-z_][A-Za-z0-9_]*=[^[:space:]]*[[:space:]]+|(builtin|command|exec|env|nohup|time|sudo|if|then|elif|else|do|while|until|!)[[:space:]]+)*'
+    if printf '%s\n' "$JOINED_SPLIT" | grep -qE "${REBIND_PREFIX}(hash|enable)([[:space:]]|\$)"; then
+        block "$CMD (indirect execution under dry-run: hash/enable rebinds a command word)"
+    fi
+    if printf '%s\n' "$ASSIGN_SPLIT" | grep -qE '(^|[[:space:]])PATH(\[[^]]*\])?\+?='; then
+        block "$CMD (indirect execution under dry-run: a PATH change rebinds every command word)"
+    fi
+
+    # Variables that make bash or python run code from a file or a quoted
+    # string the gate never reads (BASH_ENV, an exported function passed as
+    # BASH_FUNC_*, xtrace PS4 via SHELLOPTS, the python import path) would
+    # turn any whitelisted helper — absolute paths included — into arbitrary
+    # code, and `env 'BASH_FUNC_x%%=...' ...` hides even the command word. No
+    # rehearsal step needs them: block the whole command. Only an assignment
+    # (plain, `export`/`declare -x`, or an `env` argument) counts, so reading
+    # the names (`grep -r PYTHONPATH .`) still passes; a computed name cannot
+    # be written here and revokes every helper whitelist (DYNAMIC_ASSIGN).
+    # review-03 H2: the dynamic loader variables (LD_PRELOAD, LD_AUDIT,
+    # LD_LIBRARY_PATH, DYLD_*) load a library into any program, helpers and
+    # git included.
+    if printf '%s\n' "$ASSIGN_SPLIT" | grep -qE '(^|[[:space:]])([A-Za-z_]*(BASH_ENV|BASH_FUNC_|SHELLOPTS|BASHOPTS|PYTHONPATH|PYTHONHOME|PYTHONSTARTUP|PYTHONUSERBASE)[^[:space:]]*|(LD|DYLD)_[A-Za-z0-9_]*(\[[^]]*\])?\+?)='; then
+        block "$CMD (BASH_ENV/BASH_FUNC_/SHELLOPTS/PYTHONPATH/PYTHONUSERBASE/LD_*/DYLD_* would run code the gate cannot see)"
+    fi
+
+    # issue #1258 (independent red-team audit, 2026-10-17): the `cd|pushd`
+    # alternative the regex above used to carry only matched the literal
+    # bytes "cd"/"pushd" with real whitespace around them — exactly the PoC
+    # #1238 itself used, nothing else. `\cd`, `"cd"`, `'cd'` and `$'cd'` all
+    # strip down to the plain word "cd" once bash parses them and invoke the
+    # identical builtin (confirmed live: `bash -c '\cd /tmp/x && pwd'` really
+    # changes directory) — the same attack #1238 closed, just not written in
+    # the one byte-exact shape the regex looked for. A fifth regex
+    # alternative for "\cd" would only buy one more round of the same trap
+    # (quoted-cd, ansi-c $'cd', ...), so this reuses the word tokenizer
+    # destructive-guard.sh already has for its own `rm` detection — it strips
+    # quotes/backslash/ANSI-C escapes the way bash's own parser does, so a
+    # command name survives disguising by construction, not by one more
+    # enumerated case.
+    CD_PUSHD_TOKEN_DETECTED=0
+    if printf '%s\n' "$SPLIT_RAW" | perl -e '
+        sub words {
+          my ($text) = @_;
+          my (@out, $word, $quote) = ();
+          for (my $i = 0; $i < length($text); $i++) {
+            my $char = substr($text, $i, 1);
+            if (defined $quote) {
+              if ($char eq "\\" && $quote eq "ansi" && $i + 1 < length($text)) {
+                my $esc = substr($text, $i + 1, 1);
+                my $tail = substr($text, $i + 1);
+                my %simple = (a => "\a", b => "\b", e => chr(27), E => chr(27), f => "\f", n => "\n", r => "\r", t => "\t", v => chr(11));
+                if ($esc eq "x" && $tail =~ /^x([0-9A-Fa-f]{1,2})/) {
+                  $word .= chr(hex $1);
+                  $i += length($1) + 1;
+                } elsif ($tail =~ /^([0-7]{1,3})/) {
+                  $word .= chr(oct($1) & 255);
+                  $i += length($1);
+                } elsif (($esc eq "u" && $tail =~ /^u([0-9A-Fa-f]{1,4})/) || ($esc eq "U" && $tail =~ /^U([0-9A-Fa-f]{1,8})/)) {
+                  $word .= chr(hex $1);
+                  $i += length($1) + 1;
+                } elsif (exists $simple{$esc}) {
+                  $word .= $simple{$esc};
+                  $i++;
+                } elsif ($esc eq "c" && $i + 2 < length($text)) {
+                  $word .= chr(ord(substr($text, $i + 2, 1)) & 31);
+                  $i += 2;
+                } elsif ($esc eq chr(92) || $esc eq chr(39) || $esc eq q{"} || $esc eq q{?}) {
+                  $word .= $esc;
+                  $i++;
+                } else {
+                  $word .= $char;
+                }
+              } elsif ($char eq "\\" && $quote eq q{"} && $i + 1 < length($text) && substr($text, $i + 1, 1) =~ /[\$`"\\\n]/) {
+                $word .= substr($text, ++$i, 1);
+              } elsif ($char eq ($quote eq "ansi" ? chr(39) : $quote)) {
+                undef $quote;
+              } else {
+                $word .= $char;
+              }
+            } elsif ($char eq q{$} && $i + 1 < length($text) && substr($text, $i + 1, 1) eq chr(39)) {
+              $quote = "ansi";
+              $i++;
+            } elsif ($char eq q{$} && $i + 1 < length($text) && substr($text, $i + 1, 1) eq q{"}) {
+              next;
+            } elsif ($char eq q{"} || $char eq chr(39)) {
+              $quote = $char;
+            } elsif ($char eq "\\" && $i + 1 < length($text)) {
+              $word .= substr($text, ++$i, 1);
+            } elsif ($char =~ /\s/) {
+              push @out, $word if length $word;
+              $word = q{};
+            } else {
+              $word .= $char;
+            }
+          }
+          push @out, $word if length $word;
+          return @out;
+        }
+        while (my $seg = <STDIN>) {
+          chomp $seg;
+          my @w = words($seg);
+          next unless @w;
+          my $i = 0;
+          $i++ if $i < @w && ($w[$i] eq "builtin" || $w[$i] eq "command");
+          exit 0 if $i < @w && ($w[$i] eq "cd" || $w[$i] eq "pushd" || $w[$i] eq "popd");
+        }
+        exit 1;
+    '; then
+        CD_PUSHD_TOKEN_DETECTED=1
+    fi
+    [ "$CD_PUSHD_TOKEN_DETECTED" = "1" ] && HOME_OR_IWE_PATHS_TAMPERED=1
+
+    # issue #1434: whitelisted helpers called by `$IWE_SCRIPTS/...` lose the
+    # whitelist when the same command reassigns IWE_SCRIPTS. issue #1454
+    # review-01: a list of assignment spellings kept missing forms (`+=`,
+    # namerefs, `IWE_SCRIPTS[0]=`), so the rule is now by absence: the value is
+    # trusted only when the command names IWE_SCRIPTS nowhere except in the
+    # helper paths themselves and has no dynamic assignment (above). The same
+    # rule covers IWE_TEMPLATE in the two python helper paths.
+    var_named_elsewhere() { # <var> <ERE of the approved spans>
+        printf '%s' "$CMD_CODE" | sed -E "s@$2@ @g" | tr -d "\"'\\\\" | grep -q "$1"
+    }
+    IWE_SCRIPTS_TAMPERED=$DYNAMIC_ASSIGN
+    var_named_elsewhere IWE_SCRIPTS '\$(IWE_SCRIPTS|\{IWE_SCRIPTS\})/(day-close-prepare|dry-run-complete|memory-bleed|check-dirty-repos)\.sh' \
+        && IWE_SCRIPTS_TAMPERED=1
+    IWE_TEMPLATE_TAMPERED=$DYNAMIC_ASSIGN
+    var_named_elsewhere IWE_TEMPLATE "\\\$\\{IWE_TEMPLATE:-${WL_TEMPLATE_RE}\\}/\\.claude/scripts/(memory-drift-scan|check-index-health)\\.py" \
+        && IWE_TEMPLATE_TAMPERED=1
+
+    # issue #1434: a program run by its own path (./x, ../x, $DIR/x.sh) or a
+    # script name through PATH (x.sh) is indirect execution, like `bash x.sh`.
+    # The quote-stripping NORM hides such a command word, so the raw command
+    # goes through the quote-aware reader. Outside: extensionless absolute
+    # paths (/tmp/x) — by text they look like system programs.
+    RUN_BY_PATH=$(printf '%s' "$CMD" | \
+        WL_ROOT=$([ "$HELPER_TRUST_REVOKED" = "0" ] && echo "$IWE_ROOT_GUESS/FMT-exocortex-template/scripts") \
+        WL_IWE_SCRIPTS_OK=$([ "$IWE_SCRIPTS_TAMPERED" = "0" ] && [ "$HELPER_TRUST_REVOKED" = "0" ] && echo 1 || echo 0) \
+        WL_RELATIVE_OK=$([ "$CD_PUSHD_TOKEN_DETECTED" = "0" ] && [ "$HELPER_TRUST_REVOKED" = "0" ] && echo 1 || echo 0) \
+        perl "$CMD_PARSER" run-by-path) \
+        || fail_closed "command reader failed — cannot classify command"
+    case "$RUN_BY_PATH" in
+        OK) ;;
+        "BLOCK "*) block "$CMD (indirect execution under dry-run: program run by path: ${RUN_BY_PATH#BLOCK })" ;;
+        *) fail_closed "command reader returned '$RUN_BY_PATH' — cannot classify command" ;;
+    esac
 
     while IFS= read -r SEG; do
         [ -z "$SEG" ] && continue
         # shellcheck disable=SC2086
         set -- $SEG
-        # Пропустить VAR=val / command / env / nohup / time / sudo / nice — переход
-        # к реальной команде. issue #825, две дыры (обе живьём подтверждены
-        # cold-review): (1) `nice` отсутствовал в списке обёрток — `nice rm -f
-        # ...` проходил непроверенным; (2) сравнение по литеральному слову не
-        # матчило `/usr/bin/nice ...`/абсолютный путь к любой обёртке —
-        # basename (`${1##*/}`) закрывает это без обращения к файловой системе
-        # (не readlink/stat — чистая строковая операция, не открывает тот же
-        # класс обхода, что был закрыт для WL_ABS/WL_ABS2/WL_ABS3 review-01/02:
-        # те сравнивают ВТОРОЙ токен — путь к скрипту-аргументу — для ALLOW,
-        # остаются литеральными; здесь меняется только то, в какой БЛОКИРУЮЩИЙ
-        # рукав попадёт команда).
+        # Skip VAR=val / command / env / nohup / time / sudo / nice — move
+        # to the real command. issue #825, two holes (both confirmed live by
+        # cold review): (1) `nice` was missing from the wrapper list — `nice rm -f
+        # ...` passed unchecked; (2) comparison by the literal word did not
+        # match `/usr/bin/nice ...`/an absolute path to any wrapper —
+        # basename (`${1##*/}`) closes this without touching the file system
+        # (not readlink/stat — a pure string operation, it does not open the same
+        # bypass class that was closed for WL_ABS/WL_ABS2/WL_ABS3 review-01/02:
+        # those compare the SECOND token — the path to the script argument — for ALLOW,
+        # and stay literal; here only the BLOCKING arm that
+        # the command falls into changes).
+        # issue #1434 (cold review): wrapper options (`env -i`, `sudo -u u`,
+        # `command -p`, `time -p`, `timeout 5`, `exec -a n`) and compound-command
+        # keywords (`if`, `while`, `!`, ...) used to stop this loop on a word no
+        # arm matches, so `if bash x.sh; then` or `env -i git commit` passed.
         while [ $# -gt 0 ]; do
             case "$1" in
                 *=*) shift ;;
+                [0-9]'<'*|[0-9]'>'*|'<'*|'>'*|'&>'*)
+                    # a redirection before the command word: drop it and a detached target
+                    case "$1" in *'<'|*'>'|*'>>'|*'<<<'|*'>&'|*'<&') shift; [ $# -gt 0 ] && shift ;; *) shift ;; esac
+                    ;;
                 *)
                     case "${1##*/}" in
-                        command|env|nohup|time|sudo) shift ;;
+                        if|then|elif|else|while|until|do|'!'|coproc|nohup|setsid|builtin|--) shift ;;
+                        command)
+                            shift
+                            [ "${1:-}" = "-p" ] && shift
+                            ;;
+                        time)
+                            shift
+                            [ "${1:-}" = "-p" ] && shift
+                            ;;
+                        exec)
+                            shift
+                            while [ $# -gt 0 ]; do
+                                case "$1" in
+                                    -a) [ $# -ge 2 ] && shift 2 || shift ;;
+                                    -c|-l|-cl|-lc) shift ;;
+                                    *) break ;;
+                                esac
+                            done
+                            ;;
+                        env)
+                            shift
+                            while [ $# -gt 0 ]; do
+                                case "$1" in
+                                    -u|-C|--unset|--chdir) [ $# -ge 2 ] && shift 2 || shift ;;
+                                    -|-i|-0|--ignore-environment|--null|--unset=*|--chdir=*|-u?*|-C?*) shift ;;
+                                    *) break ;;
+                                esac
+                            done
+                            ;;
+                        sudo)
+                            shift
+                            while [ $# -gt 0 ]; do
+                                case "$1" in
+                                    -u|-g|-C|-D|-h|-p|-r|-t|-U|-T) [ $# -ge 2 ] && shift 2 || shift ;;
+                                    --) shift; break ;;
+                                    -*) shift ;;
+                                    *) break ;;
+                                esac
+                            done
+                            ;;
+                        timeout)
+                            shift
+                            while [ $# -gt 0 ]; do
+                                case "$1" in
+                                    -k|-s|--kill-after|--signal) [ $# -ge 2 ] && shift 2 || shift ;;
+                                    -*) shift ;;
+                                    *) break ;;
+                                esac
+                            done
+                            [ $# -gt 0 ] && shift  # duration
+                            ;;
+                        stdbuf|ionice)
+                            shift
+                            while [ $# -gt 0 ]; do
+                                case "$1" in
+                                    -i|-o|-e|-c|-n|--input|--output|--error|--class|--classdata) [ $# -ge 2 ] && shift 2 || shift ;;
+                                    -*) shift ;;
+                                    *) break ;;
+                                esac
+                            done
+                            ;;
                         nice)
                             shift
-                            # nice сам принимает необязательный аргумент
-                            # приоритета — `nice -n 19 cmd`/`nice -n19 cmd`
-                            # (самая частая форма реального вызова) без этого
-                            # блока не матчили ни VAR=, ни список обёрток и
-                            # останавливали цикл на W0=-n, снова проходя
-                            # непроверенными (cold-review нашёл живьём).
+                            # nice itself accepts an optional priority
+                            # argument — `nice -n 19 cmd`/`nice -n19 cmd`
+                            # (the most frequent form of a real call) without this
+                            # block matched neither VAR= nor the wrapper list and
+                            # stopped the loop at W0=-n, again passing
+                            # unchecked (cold review found it live).
                             case "${1:-}" in
                                 -n) [ $# -ge 2 ] && shift 2 || shift ;;
                                 -n*|--adjustment=*) shift ;;
@@ -641,7 +1086,7 @@ if [ "$TOOL_NAME" = "Bash" ]; then
         case "$W0" in
             git)
                 shift
-                # Пропустить global opts: -C dir, --git-dir=X, --work-tree=X, -c key=val
+                # Skip global opts: -C dir, --git-dir=X, --work-tree=X, -c key=val
                 while [ $# -gt 0 ]; do
                     case "$1" in
                         -C|--git-dir|--work-tree) shift 2 ;;
@@ -665,7 +1110,7 @@ if [ "$TOOL_NAME" = "Bash" ]; then
                         *) ARGS="$ARGS $a" ;;
                     esac
                 done
-                # Cleanup-исключение: собственный dry-run sentinel — единственный allow.
+                # Cleanup exception: the dry-run sentinel itself — the only allow.
                 [ "$ARGS" = " $SENTINEL" ] && continue
                 block "$CMD (filesystem mutation)"
                 ;;
@@ -683,37 +1128,73 @@ if [ "$TOOL_NAME" = "Bash" ]; then
                     && block "$CMD (HTTP write)"
                 ;;
             psql)
-                # SQL живёт в кавычках исходной команды — проверяем оригинал $CMD,
-                # но только т.к. первое слово фрагмента уже подтверждено как psql.
+                # The SQL lives in the quotes of the original command — check the original $CMD,
+                # but only because the first word of the fragment is already confirmed as psql.
                 echo "$CMD" | grep -qiE '(INSERT|UPDATE|DELETE|TRUNCATE|DROP|ALTER)[[:space:]]' \
                     && block "$CMD (SQL write)"
                 ;;
             bash|sh|zsh)
-                # Whitelist read-only helpers (issue #264): явно перечисленные
-                # read-only скрипты-перечислители разрешены под dry-run — их
-                # payload инспектируем по коду скрипта (write-путей нет).
-                # Список синхронизирован с memory/dry-run-contract.md §Bash matchers;
-                # добавление = правка контракта + этого case + code review.
-                # Абсолютный путь захардкожен по точной строке, не по glob
-                # (review-01 High, review-02 H1): glob */.claude/... пропускал
-                # /tmp-подделку, а ${IWE_ROOT:-...}/${IWE_WORKSPACE:-...} открывал
-                # тот же обход через env-инъекцию (вызывающее окружение может
-                # подставить произвольный env перед Bash-вызовом). Якорь —
-                # $IWE_ROOT_GUESS (issue #694): путь самого хука через
-                # BASH_SOURCE (строка ~27), нестандартный WORKSPACE_DIR
-                # резолвится сам, инъекция через env невозможна.
+                # Whitelist of read-only helpers (issue #264): explicitly listed
+                # read-only enumerator scripts are allowed under dry-run — their
+                # payload is inspected by the script code (no write paths).
+                # The list is synchronized with memory/dry-run-contract.md §Bash matchers;
+                # adding = editing the contract + this case + code review.
+                # The absolute path is hardcoded by the exact string, not by glob
+                # (review-01 High, review-02 H1): glob */.claude/... let through a
+                # /tmp forgery, and ${IWE_ROOT:-...}/${IWE_WORKSPACE:-...} opened
+                # the same bypass via env injection (the calling environment may
+                # substitute an arbitrary env before the Bash call). The anchor is
+                # $IWE_ROOT_GUESS (issue #694): the hook's own path via
+                # BASH_SOURCE (line ~27), a non-standard WORKSPACE_DIR
+                # resolves itself, injection via env is impossible.
                 shift
                 WL_ABS="$IWE_ROOT_GUESS/.claude/scripts/load-extensions.sh"
-                # Реальный deployed путь — вложенный клон, не workspace-root
-                # (scripts/ не копируется в $WORKSPACE_DIR, в отличие от .claude/;
-                # см. IWE_SCRIPTS default в .claude/lib/iwe-env-bootstrap.sh:86).
+                # The real deployed path is a nested clone, not the workspace root
+                # (scripts/ is not copied into $WORKSPACE_DIR, unlike .claude/;
+                # see the IWE_SCRIPTS default in .claude/lib/iwe-env-bootstrap.sh:86).
                 WL_ABS2="$IWE_ROOT_GUESS/FMT-exocortex-template/scripts/day-close-prepare.sh"
-                # issue #549 stage 2: штатное завершение репетиции — переход
-                # active→completed через helper (rm sentinel внутри него идёт
-                # уже после completed, поэтому сам он безопасен под гейтом;
-                # его внутренний `rm -f "$SENTINEL"` покрыт cleanup-исключением
-                # ветки rm выше).
+                # issue #549 stage 2: normal completion of a rehearsal — the transition
+                # active→completed via the helper (the rm of the sentinel inside it goes
+                # after completed, so it is safe itself under the gate;
+                # its internal `rm -f "$SENTINEL"` is covered by the cleanup exception
+                # of the rm branch above).
                 WL_ABS3="$IWE_ROOT_GUESS/FMT-exocortex-template/scripts/dry-run-complete.sh"
+                # issue #1434: the `$IWE_SCRIPTS/...` markers and the relative
+                # forms trust the environment; a same-command reassignment of
+                # IWE_SCRIPTS or a cd/pushd revokes them.
+                # issue #1454: day-close step 4 runs memory-bleed.sh --hot-only,
+                # a report-only HOT-limit count (it exits before any other
+                # section; the script itself never writes). Only that exact argv
+                # is whitelisted — the full mode is not part of the rehearsal.
+                # The path comes either from the per-call nonce marker for the
+                # literal "$IWE_SCRIPTS/memory-bleed.sh" (its value comes from
+                # .iwe-paths, trusted like the other helpers above; revoked when
+                # the same command reassigns IWE_SCRIPTS) or from the absolute
+                # path in the trusted scripts dir, which must resolve to a file
+                # inside that dir (a symlink out of it is refused).
+                WL_MB_DIR="$IWE_ROOT_GUESS/FMT-exocortex-template/scripts"
+                WL_ABS4="$WL_MB_DIR/memory-bleed.sh"
+                # review-02: every form below — marker, relative, absolute —
+                # runs in an environment the command may have altered.
+                [ "$HELPER_TRUST_REVOKED" = "1" ] \
+                    && block "$CMD (whitelisted helper after a dynamic assignment, rebinding builtin, function definition or HOME change)"
+                if [ "${1:-}" = "__WL_MEMORY_BLEED_${GATE_NONCE}__" ] || [ "${1:-}" = "$WL_ABS4" ]; then
+                    if [ "$1" != "$WL_ABS4" ] && [ "$IWE_SCRIPTS_TAMPERED" = "1" ]; then
+                        block "$CMD (IWE_SCRIPTS reassigned earlier in the same command)"
+                    fi
+                    if [ $# -ne 2 ] || [ "$2" != "--hot-only" ]; then
+                        block "$CMD (memory-bleed.sh is read-only only as: memory-bleed.sh --hot-only)"
+                    fi
+                    [ "$1" = "$WL_ABS4" ] && { perl -MCwd=abs_path -e 'my ($f, $d) = map { abs_path($_) } @ARGV; exit(defined $f && defined $d && -f $f && index($f, "$d/") == 0 ? 0 : 1)' "$WL_ABS4" "$WL_MB_DIR" 2>/dev/null \
+                        || block "$CMD (memory-bleed.sh does not resolve to a file inside $WL_MB_DIR)"; }
+                    continue
+                fi
+                case "${1:-}" in
+                    __WL_DAY_CLOSE_PREPARE__|__WL_DRY_RUN_COMPLETE__)
+                        [ "$IWE_SCRIPTS_TAMPERED" = "1" ] && block "$CMD (IWE_SCRIPTS reassigned earlier in the same command)" ;;
+                    scripts/day-close-prepare.sh|scripts/dry-run-complete.sh|.claude/scripts/load-extensions.sh)
+                        [ "$CD_PUSHD_TOKEN_DETECTED" = "1" ] && block "$CMD (relative whitelisted path after cd/pushd)" ;;
+                esac
                 case "${1:-}" in
                     .claude/scripts/load-extensions.sh|"$WL_ABS") ;;
                     scripts/day-close-prepare.sh|"$WL_ABS2"|__WL_DAY_CLOSE_PREPARE__) ;;
@@ -721,20 +1202,41 @@ if [ "$TOOL_NAME" = "Bash" ]; then
                     *) block "$CMD (indirect execution under dry-run)" ;;
                 esac
                 ;;
+            "__WL_IWE_PATHS_CHAIN_${GATE_NONCE}__")
+                # issue #1238: whole-block marker from NORM above (see the
+                # comment on that sed -e line for why the #1233 fallback
+                # chain is whitelisted as ONE exact unit instead of per-
+                # segment). The marker IS the whole segment here -- no
+                # command word precedes it, unlike the source|. arm below,
+                # so this arm matches on W0 directly.
+                if [ "$HOME_OR_IWE_PATHS_TAMPERED" = "1" ]; then
+                    block "$CMD (HOME/IWE_PATHS_FILE/IWE_WORKSPACE/PWD reassigned earlier in the same command)"
+                fi
+                shift
+                # Same concatenation guard as the source|. arm's round-2
+                # cold-review fix below: NORM's replacement text has spaces
+                # on both sides of the marker, but sed's match itself has no
+                # end-of-string anchor -- text glued directly onto the
+                # matched literal with no separator (e.g. `...&& . "$IWE_PATHS"rm
+                # -rf /`) stays attached to the marker as extra tokens in
+                # this same segment. Any leftover token after the marker
+                # means the original text wasn't actually just our chain.
+                [ $# -gt 0 ] && block "$CMD (unexpected token after .iwe-paths chain whitelist marker)"
+                ;;
             source|.)
-                # issue #784/#785: сорсинг .iwe-paths (плоский KEY=VALUE
-                # файл без побочных эффектов — межвызовое shell-состояние
-                # не живёт между Bash-вызовами агента, поэтому его надо
-                # сорсить в той же команде) блокировался безусловно.
-                # Whitelist — по nonce-маркеру GATE_NONCE (см. NORM выше),
-                # не по статическому тексту: cold-review (Codex) нашёл, что
-                # статический маркер спуфится буквальным вводом атакующего
-                # (`source __WL_СТАТИКА__` + одноимённый файл на диске =
-                # обход гейта). eval/xargs намеренно НЕ включены сюда: общие
-                # индирект-векторы без известного безопасного случая в контракте.
+                # issue #784/#785: sourcing .iwe-paths (a flat KEY=VALUE
+                # file without side effects — shell state between calls
+                # does not live across the agent's Bash calls, so it has to be
+                # sourced in the same command) was blocked unconditionally.
+                # Whitelist — by the GATE_NONCE nonce marker (see NORM above),
+                # not by static text: cold review (Codex) found that a
+                # static marker is spoofed by the attacker's literal input
+                # (`source __WL_СТАТИКА__` + a same-named file on disk =
+                # gate bypass). eval/xargs are intentionally NOT included here: general
+                # indirect vectors with no known safe case in the contract.
                 # Live-review finding (Fable): HOME_OR_IWE_PATHS_TAMPERED
-                # (вычислен до этого цикла) отзывает whitelist, если HOME/
-                # IWE_PATHS_FILE переопределены где-то в этой же команде.
+                # (computed before this loop) revokes the whitelist if HOME/
+                # IWE_PATHS_FILE is overridden somewhere in the same command.
                 if [ "$HOME_OR_IWE_PATHS_TAMPERED" = "1" ]; then
                     block "$CMD (HOME/IWE_PATHS_FILE reassigned earlier in the same command)"
                 fi
@@ -742,12 +1244,12 @@ if [ "$TOOL_NAME" = "Bash" ]; then
                 case "${1:-}" in
                     "__WL_IWE_PATHS_${GATE_NONCE}__")
                         shift
-                        # round-2 cold-review (Codex): NORM вставляет пробелы
-                        # вокруг маркера при замене — без этой проверки
-                        # `. "$HOME/.iwe-paths"суффикс` (конкатенация без
-                        # пробела в исходной команде) резолвился бы в W0=.
-                        # $1=маркер $2=суффикс и прошёл бы как allow, хотя
-                        # реально сорсит другой файл.
+                        # round-2 cold review (Codex): NORM inserts spaces
+                        # around the marker on replacement — without this check
+                        # `. "$HOME/.iwe-paths"suffix` (concatenation without
+                        # a space in the original command) would resolve to W0=.
+                        # $1=marker $2=suffix and pass as allow, although it
+                        # actually sources a different file.
                         [ $# -gt 0 ] && block "$CMD (unexpected token after .iwe-paths whitelist marker)"
                         ;;
                     *) block "$CMD (indirect execution under dry-run)" ;;
@@ -764,11 +1266,14 @@ if [ "$TOOL_NAME" = "Bash" ]; then
                 case "${1:-}" in
                     # `-c "..."` inline snippets (e.g. day-close-details.md STRATEGY_DAY_NAME
                     # guard) — already outside this contract's threat model per
-                    # memory/dry-run-contract.md §«Не входит в контракт» (a malicious
+                    # memory/dry-run-contract.md §"Out of contract" (a malicious
                     # `python -c 'open(...,"w")'` was always an accepted gap); exempting
                     # read-only inline snippets doesn't remove protection that existed.
                     -c) ;;
-                    __WL_PY_MDS__|__WL_PY_CIH__) ;;
+                    __WL_PY_MDS__|__WL_PY_CIH__)
+                        [ "$IWE_TEMPLATE_TAMPERED" = "1" ] && block "$CMD (IWE_TEMPLATE reassigned earlier in the same command)"
+                        [ "$HELPER_TRUST_REVOKED" = "1" ] \
+                            && block "$CMD (whitelisted helper after a dynamic assignment, rebinding builtin, function definition or HOME change)" ;;
                     *) block "$CMD (indirect execution under dry-run)" ;;
                 esac
                 ;;

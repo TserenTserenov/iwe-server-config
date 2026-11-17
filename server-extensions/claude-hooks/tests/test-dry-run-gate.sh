@@ -39,6 +39,22 @@ chmod 0600 "$DRY_DIR/.iwe-dry-run-test-mode" 2>/dev/null || true
 cleanup() { rm -rf "$WORKDIR"; }
 trap cleanup EXIT
 
+# Reference point for the isolation check (#7): anything in the production
+# paths newer than this file was written by this test run. The v2 gate creates
+# the private state directory /tmp/iwe-dry-run-<uid> on any ordinary hook call
+# and keeps it, so the directory existing is normal; only a change is a leak.
+PROD_FLAG="/tmp/iwe-dry-run.flag"
+PROD_DIR="/tmp/iwe-dry-run-$(id -u)"
+FLAG_EXISTED=0
+[ -e "$PROD_FLAG" ] && FLAG_EXISTED=1
+DIR_EXISTED=0
+[ -d "$PROD_DIR" ] && DIR_EXISTED=1
+START_MARK="$WORKDIR/start.mark"
+touch "$START_MARK"
+# One second of margin: on a filesystem with whole-second timestamps a write
+# right after the mark would otherwise look as old as the mark itself.
+sleep 1
+
 run_hook() { # $1 = tool_name -> exit code
   printf '{"tool_name":"%s","tool_input":{"file_path":"/tmp/x.md"}}' "$1" \
     | IWE_DRY_RUN_SENTINEL="$SENTINEL" IWE_DRY_RUN_DIR="$DRY_DIR" bash "$HOOK" >/dev/null 2>"$WORKDIR/stderr"
@@ -99,9 +115,27 @@ expect_exit "26-minute rehearsal (issue #460 duration): still block" 2
 #    is what would catch it — not the FAIL count above, which would still
 #    read as "passing" if the hook happened to agree with production state
 #    by coincidence.
-if [ -e /tmp/iwe-dry-run.flag ] || [ -e "/tmp/iwe-dry-run-$(id -u)" ]; then
+#    Since the v2 gate (WP-529 Ф274 port) the production state directory
+#    exists on every machine where a session has run a hook, so "it exists"
+#    no longer means "this test leaked" (it failed on every such machine,
+#    WP-568, 17.11.2026). A leak is a change made after START_MARK: a flag
+#    that was not there before, a flag rewritten since, a state directory
+#    created by this run, or an entry written into it. The gate's own
+#    transaction.lock is excluded: any hook call of ANOTHER live session on this
+#    machine takes and drops it for a moment, which is not this test's leak.
+LEAKED=""
+if [ -e "$PROD_FLAG" ] && { [ "$FLAG_EXISTED" = 0 ] || [ "$PROD_FLAG" -nt "$START_MARK" ]; }; then
+  LEAKED="$PROD_FLAG"
+fi
+if [ -d "$PROD_DIR" ]; then
+  if [ "$DIR_EXISTED" = 0 ] \
+     || [ -n "$(find "$PROD_DIR" -mindepth 1 ! -name transaction.lock -newer "$START_MARK" -print -quit 2>/dev/null)" ]; then
+    LEAKED="$LEAKED $PROD_DIR"
+  fi
+fi
+if [ -n "$LEAKED" ]; then
   FAIL=$((FAIL+1))
-  echo "FAIL: production dry-run paths exist after this test run — isolation broke, verify by hand before trusting PASS above"
+  echo "FAIL: production dry-run paths changed during this test run (${LEAKED# }) — isolation broke, verify by hand before trusting PASS above"
 else
   PASS=$((PASS+1))
 fi

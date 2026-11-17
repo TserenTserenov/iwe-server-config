@@ -272,10 +272,11 @@ python3 ${GOV_REPO_ROOT:?}/scripts/day-close-weekstate-fill.py \
 `bash ~/IWE/scripts/day-close-step-log.sh start 4b`
 
 > Страховочная сетка — ловит то, что не обновили в Quick Close сессий за день.
+> Скан — только память этого рабочего места (`~/IWE/memory` — ссылка на неё): копии памяти другой машины в `~/.claude/projects/` (например, с Мака на Цехе) отсюда не исправить, они давали ежедневный шум (РП-484 И-22).
 
 ```bash
 grep -nE "→ ждёт|ждёт|dep:|блокер|blocked:|остановлен|ждёт согласования" \
-  {{HOME_DIR}}/.claude/projects/*/memory/MEMORY.md 2>/dev/null
+  {{HOME_DIR}}/IWE/memory/MEMORY.md 2>/dev/null
 ```
 
 Для каждого найденного паттерна:
@@ -597,7 +598,7 @@ python3 $HOME/IWE/.claude/scripts/rule-classifier.py
 
 `bash ~/IWE/scripts/day-close-step-log.sh start 11`
 
-Перед запуском R23 — `bash .claude/hooks/rule-engine.sh check-trace-satisfaction --protocol .claude/skills/day-close/SKILL.md` (WP-481 Ф5.1: удовлетворённость набора gate протокола, не линейность; narrative-пропуски не блокируют). **Без `--protocol`** дефолт — `memory/protocol-close.md`, который содержит гейты Quick Close/Week Close/Exit Protocol, а не Day Close — блок гарантирован на посторонних гейтах. Шаги 0-16 выше размечены `[[gate]]`/`[[narrative]]` (WP-481 Ф5.1) — каждый `[[gate]]` выведен из соответствующей строки «Чеклист Day Close» ниже, не придуман заново. Verdict block → вернуться на незакрытый gate, потом R23.
+Перед запуском R23 — `DC_SHA=<DC_SHA из 15в> DC_PUBLISHED_REVISION=<DC_PUBLISHED_REVISION из 15в> bash .claude/hooks/rule-engine.sh check-trace-satisfaction --protocol .claude/skills/day-close/SKILL.md` (значения — из строки, которую напечатал шаг 15в; с ними гейт публикации AR.005 засчитывается по доставке коммита на origin, в том числе под другим номером после cherry-pick, а не по состоянию замороженной главной копии — РП-484 Ф309; без них проверка прежняя и под freeze блокирует; WP-481 Ф5.1: удовлетворённость набора gate протокола, не линейность; narrative-пропуски не блокируют). **Без `--protocol`** дефолт — `memory/protocol-close.md`, который содержит гейты Quick Close/Week Close/Exit Protocol, а не Day Close — блок гарантирован на посторонних гейтах. Шаги 0-16 выше размечены `[[gate]]`/`[[narrative]]` (WP-481 Ф5.1) — каждый `[[gate]]` выведен из соответствующей строки «Чеклист Day Close» ниже, не придуман заново. Verdict block → вернуться на незакрытый gate, потом R23.
 
 **Проверка целостности тайминга шагов (WP-484 peer-session 2026-07-18-13).** `day-close-step-log.sh` пишет метки в `TZ=UTC` — дата в проверке ниже ОБЯЗАНА браться тем же поясом (иначе возле полуночи по местному времени пилота проверка ложно найдёт «0 аномалий», просто заглянув не в ту календарную дату — сама метрика тогда врёт молча, ровно то, против чего она построена): `grep "$(TZ=UTC date +%Y-%m-%d)" ~/logs/day-close-integrity.log` — есть ли аномалии за сегодня (неизвестный step_id, дубль start, end без start, немонотонность)? И `grep -c "$(TZ=UTC date +%Y-%m-%d).*start" ~/logs/day-close-steps.log` vs `grep -c "$(TZ=UTC date +%Y-%m-%d).*end" ~/logs/day-close-steps.log` — совпадает число start/end? Не блокирует закрытие дня — только доверие к метрике за сегодня (см. чеклист ниже).
 
@@ -629,7 +630,7 @@ python3 $HOME/IWE/.claude/scripts/rule-classifier.py
 - [ ] Снимок открытых сессий обновлён в изолированной копии; общий журнал не менялся
 - [ ] Captures за день применены (все Quick Close → KE пройден)
 - [ ] Синхронизация downstream: `update.sh` выполнен
-- [ ] **Трёхточечная синхронизация (поручение пилота 21.08):** Мак ↔ цех (tsekh-1) ↔ GitHub синхронизированы, за исключением работающих сейчас сессий. Проверка: `git -C ~/IWE/DS-my-strategy status -sb` (без ahead/behind) + `DS-my-strategy/scripts/tsekh1-git-sync.sh --status`. «Deferred из-за живого семафора» — норма, если семафор свежий и сессия реально работает; протухший семафор при запушенном отчёте (отчёт есть, close не вызван) — аномалия: закрыть семафор до завершения Day Close. Молчащий сторож (machine/state/supervisor-*.json старше суток) — тоже аномалия, записать в «Требует внимания».
+- [ ] **Трёхточечная синхронизация (поручение пилота 21.08):** Мак ↔ цех (tsekh-1) ↔ GitHub синхронизированы, за исключением работающих сейчас сессий. Проверка: `git -C ~/IWE/DS-my-strategy status -sb` (без ahead/behind) + `bash ~/IWE/DS-my-strategy/scripts/tsekh1-git-sync.sh --dry-run` (только читает: печатает последнее известное отставание и что синк сделал бы; ключа `--status` у скрипта нет — РП-484 И-21). На Цехе без Мака проверяются две точки (Цех ↔ GitHub); синхронность Мака отметить «не проверено с Цеха», это не провал пункта. «Deferred из-за живого семафора» — норма, если семафор свежий и сессия реально работает; протухший семафор при запушенном отчёте (отчёт есть, close не вызван) — аномалия: закрыть семафор до завершения Day Close. Молчащий сторож (machine/state/supervisor-*.json старше суток) — тоже аномалия, записать в «Требует внимания».
 - [ ] Linear sync: статусы соответствуют git. Пост-sync чек: кол-во active РП в REGISTRY = кол-во active issues в Linear
 - [ ] Repo CLAUDE.md: feat-коммиты → новые правила?
 - [ ] DayPlan сегодня → `archive/day-plans/` (старые DayPlan'ы в `current/` тоже)
