@@ -20,6 +20,8 @@
 #                                                      # .iwe-runtime/pilot-release-audit.jsonl; проверки
 #                                                      # доставки те же, что у остальных путей закрытия
 #   close --housekeeping <reason> [--agent ...] [--expect-session-id <id>]  # закрыть housekeeping-сессию (с id: только если открыт именно этот запуск)
+#   close --housekeeping <reason> --only-own-harness   # закрыть, только если отметку открыл этот же разговор
+#                                                      # (harness_session_id = CLAUDE_CODE_SESSION_ID/CODEX_THREAD_ID), иначе код 3
 #   close --abandon-prepared --i-understand-loss-risk --reason "<why>" # manual recovery (WP-484, peer-session
 #         --source-commit <oid> [--source-commit ...] # with Codex): PREPARED tree-proof cannot
 #                                                      # pass when a later legitimate REPLACE lands
@@ -4663,6 +4665,7 @@ PILOT_RELEASE=""   # WP-484 Ф301: pilot-worded exit for a live semaphore with n
 CLOSE_EXPLAIN=0    # WP-561 Ф61: close --explain prints the fact-based close route, changes nothing
 CANONICAL_OWNER=""
 EXPECT_SESSION_ID_SET=""
+ONLY_OWN_HARNESS=0  # close --housekeeping: close only a marker this conversation opened (release 0.42, issue #1506)
 EXPECT_SESSION_ID=""  # close --housekeeping: close only the open with this session_id (compare-and-close)
 FORCE_FLAG=0
 FORCE_WP_ELSEWHERE_FLAG=0
@@ -4719,6 +4722,7 @@ while [[ $# -gt 0 ]]; do
     --canonical-owner) CANONICAL_OWNER="$2"; shift 2 ;;
     # WP-7 Ф265: lets a scheduled runner reclaim a dead owner's barrier without
     # racing a fresh open -- the compare happens under the transition lock.
+    --only-own-harness) ONLY_OWN_HARNESS=1; shift ;;
     --expect-session-id)
       # An empty value must not read as "option absent" and silently skip the compare.
       [ -n "${2:-}" ] || fail "--expect-session-id требует непустой session_id" 1
@@ -4983,6 +4987,12 @@ fi
 # значения (WP-503 Ф12, тот же принцип, что уже применён к межвендорским
 # флагам peer-адаптеров: молчаливый игнор создаёт ложное ощущение применённого
 # режима).
+# --only-own-harness makes sense only for close --housekeeping: refuse elsewhere
+# instead of silently ignoring it (same principle as --base-sha below).
+if [ "$ONLY_OWN_HARNESS" = 1 ] && { [ "$CMD" != close ] || [ -z "$HOUSEKEEPING" ]; }; then
+  fail "--only-own-harness применяется только к close --housekeeping" 1
+fi
+
 if [ -n "$BASE_SHA" ] && [ "$ISOLATE_FLAG" != "1" ]; then
   fail "--base-sha требует --isolate (SHA-pin имеет смысл только для изолированного worktree)" 1
 fi
@@ -12987,6 +12997,15 @@ if [ "$CMD" = "close" ]; then
       || fail "close --housekeeping: identity изменилась после lock; mutation запрещена" 1
     [ -z "$EXPECT_SESSION_ID_SET" ] || [ "$HK_LOCKED_ID" = "$EXPECT_SESSION_ID" ] \
       || fail "close --housekeeping: открыт другой запуск (ожидался $EXPECT_SESSION_ID, найден $HK_LOCKED_ID); закрытие запрещено" 1
+    # Release 0.42 (issue #1506): checked under the transition lock, so a marker
+    # swapped in after the caller's own check is not closed. The marker carries the
+    # harness id written at open (_runtime_harness_session_id); no id on either
+    # side means "not provably ours" and is refused with code 3, nothing changed.
+    if [ "$ONLY_OWN_HARNESS" = 1 ]; then
+      HK_OWN_HARNESS=$(_runtime_harness_session_id "$AGENT" || true)
+      [ -n "$HK_OWN_HARNESS" ] && grep -qxF "harness_session_id: $HK_OWN_HARNESS" "$HK_FILE" \
+        || fail "close --housekeeping: отметку '${HOUSEKEEPING}' открыл другой разговор; не трогаю" 3
+    fi
     HK_SNAPSHOT=$(_owned_semaphore_snapshot_sha "$HK_FILE" 1 || true)
     [ -n "$HK_SNAPSHOT" ] \
       || fail "close --housekeeping: exact immutable snapshot не получен" 1
