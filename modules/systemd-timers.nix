@@ -972,12 +972,17 @@ in
     # =========================================================
     # Puts the shared copies (registry classes reader/service, PACK-* and
     # DS-IT-systems/*) back on their expected branch when an agent switched
-    # them: only a clean copy whose tip is already in the upstream ref; anything
-    # else is logged as BLOCKED and left untouched. No fetch, no commits.
-    # Fast-forward stays with iwe-reader-copies-sync above. The script reaches
-    # tsekh-1 through server-extensions (delivered 17.11, deploy of 87feb00).
+    # them: only a copy with no tracked edits, no untracked files, a HEAD that
+    # has not moved for 2 hours and a tip already in the upstream ref; anything
+    # else is logged as BLOCKED and left untouched. Most of these copies are
+    # written by sessions (class service), hence the quiet window. No fetch, no
+    # commits. Fast-forward stays with iwe-reader-copies-sync above. The script
+    # reaches tsekh-1 through server-extensions.
+    # restartIfChanged = false: activation must not run the job (WP-545 Ф28
+    # rationale below); the next timer tick picks up a changed definition.
     systemd.services."iwe-shared-copies-refresh" = {
       description = "IWE — return shared copies to their main branch (WP-484 Ф310)";
+      restartIfChanged = false;
       unitConfig   = commonUnitConfig;
       serviceConfig = commonServiceConfig // {
         ExecStart = "${pythonForIWE}/bin/python3 ${iwe}/scripts/shared-copies-refresh.py --root ${iwe} --host tsekh-1";
