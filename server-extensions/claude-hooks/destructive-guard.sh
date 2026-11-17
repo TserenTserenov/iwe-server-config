@@ -1219,7 +1219,7 @@ if printf '%s' "$CMD_EXEC" | grep -q 'git' \
         # it, and the runner route from a root copy needs close_path quick-close. A root copy
         # opened without --close-path now defaults to quick-close (session-guard.sh open).
         if [ "$FROZEN_CHECKOUT" = "$WORKSPACE_ROOT" ]; then
-          FROZEN_HINT="Открой изолированную копию КОРНЯ: (cd '$WORKSPACE_ROOT' && bash scripts/session-guard.sh open --isolate --wp WP-N --agent <агент> [--close-path publish-only] …) и стейдж там. Для публикации одного файла бери --close-path publish-only: коммить и пушь до слов о закрытии, затем session-guard.sh close; прямой коммит после слов о закрытии охранник раннера всё равно блокирует. Без --close-path копия корня получает close_path quick-close (закрытие через раннер). Раннер из копии корня запускается с IWE_ROOT, IWE_GOVERNANCE_REPO, IWE_GOVERNANCE_REPO_PATH (отдельная изолированная копия DS-my-strategy), IWE_AGENT, IWE_SESSION_ID (служебный id охранника, не slug); сессия должна быть живой."
+          FROZEN_HINT="Открой изолированную копию КОРНЯ: (cd '$WORKSPACE_ROOT' && bash scripts/session-guard.sh open --isolate --wp WP-N --agent <агент> …) и стейдж там. Копия корня получает close_path quick-close: закрытие через раннер (обход publish-only агентам запрещён решением пилота 16.11, РП-561 Ф61). Раннер из копии корня запускается с IWE_ROOT, IWE_GOVERNANCE_REPO, IWE_GOVERNANCE_REPO_PATH (отдельная изолированная копия DS-my-strategy), IWE_AGENT, IWE_SESSION_ID (служебный id охранника, не slug); сессия должна быть живой."
         else
           FROZEN_HINT="Открой изолированную копию ((cd DS-my-strategy && bash ../scripts/session-guard.sh open --isolate --wp WP-N …)) и стейдж там; для чужого репозитория — git -C <путь> add."
         fi

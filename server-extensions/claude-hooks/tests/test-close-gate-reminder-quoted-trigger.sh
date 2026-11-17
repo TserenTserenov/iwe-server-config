@@ -275,6 +275,20 @@ class QuotedTriggerTests(unittest.TestCase):
         self.assertTrue(self.intent.exists())
         self.assertTrue(json.loads(self.intent.read_text())["skip_reflection"])
 
+    # --- WP-561 F61 (2D): the pilot's shorthands as the whole message ---
+    def test_shorthand_whole_message_closes_without_reflection(self):
+        for prompt in ("ПСЗ", "сз", " СЗ.", "псз!"):
+            with self.subTest(prompt=prompt):
+                self.reset_state()
+                self.assert_armed(prompt)
+                self.assertTrue(json.loads(self.intent.read_text())["skip_reflection"], prompt)
+
+    def test_shorthand_inside_a_phrase_does_nothing(self):
+        for prompt in ("СЗ сделай потом", "что такое ПСЗ?", "есз", "псзз", "СЗ?", "псз ?"):
+            with self.subTest(prompt=prompt):
+                self.reset_state()
+                self.assert_not_armed(prompt)
+
     # --- the CLI contract itself, incl. the shared 600-character boundary ---
     def cli_answer(self, prompt):
         result = subprocess.run([sys.executable, FILTER, "--prompt-intends-close"], input=prompt,

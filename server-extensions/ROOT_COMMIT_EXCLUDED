@@ -1,2 +1,3 @@
+server-extensions/claude-hooks/close-gate-reminder.sh
 server-extensions/claude-hooks/dry-run-gate.sh
 server-extensions/claude-hooks/protocol-stop-gate.sh

@@ -238,8 +238,13 @@ class DeclaredTerminalProofTests(unittest.TestCase):
     def test_peer_with_known_harness_and_foreign_run(self):
         self.assert_sentinel("peer-session", [self.card("owner-B")], "owner-A")
 
-    def test_publish_only_with_foreign_run(self):
-        self.assert_sentinel("publish-only", [self.card("owner-B", "fixture-1")])
+    def test_retired_publish_only_gets_no_sentinel(self):
+        # WP-561 F61 (1B): a semaphore opened with publish-only before the ban
+        # closes like any other session; the declaration selects nothing itself.
+        cards = [self.card("owner-B", "fixture-1")]
+        selected = self.select("publish-only", cards)
+        self.assertNotEqual(selected[0], "declared-publish-only:fixture")
+        self.assertEqual(selected, self.select("quick-close", cards))
 
     def test_ordinary_exact_owner(self):
         card = self.card()

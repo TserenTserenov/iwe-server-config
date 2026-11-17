@@ -66,10 +66,11 @@ printf '%s' "$OUT_A" | grep -q "выставлен close_path quick-close" \
   || { echo "FAIL: A -- the open did not announce the default" >&2; exit 1; }
 expect_path "root copy without --close-path" root-default quick-close
 
-# B: root copy with an explicit path keeps it.
+# B: root copy with an explicit path keeps it (publish-only is refused since
+# WP-561 F61 1B, so the explicit path here is no-code-changes).
 (cd "$TEST_ROOT" && bash "$GUARD" open --isolate --force --force-wp-elsewhere --wp WP-518 \
-  --task fixture --slug root-explicit --agent fixture --close-path publish-only >/dev/null 2>&1)
-expect_path "root copy with --close-path publish-only" root-explicit publish-only
+  --task fixture --slug root-explicit --agent fixture --close-path no-code-changes >/dev/null 2>&1)
+expect_path "root copy with --close-path no-code-changes" root-explicit no-code-changes
 
 # C: governance-repo copy without --close-path stays unknown (behaviour unchanged).
 (cd "$TEST_ROOT/DS-strategy" && bash "$GUARD" open --isolate --wp WP-518 \

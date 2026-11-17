@@ -5059,6 +5059,13 @@ if [ "$CMD" = "open" ] && [ "$CLOSE_PATH" = "no-code-changes" ]; then
     || fail "close_path no-code-changes требует --isolate: без изолированной копии нечем доказать отсутствие правок" 1
 fi
 
+# WP-561 F61, pilot decision 1B (16.11): agents no longer get the publish-only
+# bypass. A session with changes closes through the runner; a session without
+# changes is released as empty; pipelines keep machine-publish-only.
+if [ "$CMD" = "open" ] && [ "$CLOSE_PATH" = "publish-only" ]; then
+  fail "close_path publish-only запрещён решением пилота 16.11 (РП-561 Ф61, 1Б): сессия с изменениями закрывается обычным путём через раннер, без изменений — снятием отметки; машинному запуску — close_path machine-publish-only" 1
+fi
+
 if [ "$CMD" = "open" ] && [ "$CLOSE_PATH" = "machine-publish-only" ]; then
   [ "$ISOLATE_FLAG" = "1" ] \
     || fail "close_path machine-publish-only требует --isolate" 1
@@ -6138,7 +6145,7 @@ $isolate_status_code $isolate_status_path"
     # so a root copy without an explicit path defaults to quick-close and says so.
     if [ -z "$CLOSE_PATH" ] && [ "$(realpath "$ISOLATE_BASE_DIR" 2>/dev/null)" = "$(realpath "$IWE_ROOT" 2>/dev/null)" ]; then
       CLOSE_PATH="quick-close"
-      echo "ℹ️  Копия корня IWE открыта без --close-path: выставлен close_path quick-close (раннер из копии корня принимает только его). Для публикации одного файла без раннера переоткрой копию с --close-path publish-only." >&2
+      echo "ℹ️  Копия корня IWE открыта без --close-path: выставлен close_path quick-close (раннер из копии корня принимает только его)." >&2
     fi
   fi
 
@@ -13278,24 +13285,11 @@ print(json.dumps(event, ensure_ascii=False))
     echo "Session CLOSE: close_path=peer-session объявлен при open — раннер не требуется (WP-484 Ф118)." >&2
   fi
 
-  # WP-537 Ф30 (08.09, АрхГейт по варианту (б) Ф25.1, совет Kimi+Codex —
-  # оба независимо выбрали этот вариант). Тот же паттерн, что close_path:
-  # peer-session выше: `open --close-path publish-only` объявляет заранее,
-  # что весь жизненный цикл этой изолированной копии -- открыть, закоммитить,
-  # запушить, закрыть -- один узкий служебный акт (протолкнуть файл в origin
-  # из-под заморозки канона), а не интерактивная работа, которой нужен
-  # ритуал quick-close. Назначение -- для мест, где `open --isolate` вызывается
-  # ИСКЛЮЧИТЕЛЬНО ради публикации (не для целой сессии под фризом, как в
-  # freeze-fallback peer-conversation) -- предотвращает саму находку
-  # Ф25.1/Ф26 (осиротевший семафор второго/третьего слага одного разговора),
-  # а не только лечит её постфактум маркером (Ф28/Ф29 выше, который остаётся
-  # защитным слоем на случай пропущенного close_path).
-  if [ "${CLOSE_EXECUTION:-legacy}" = legacy ] && grep -q '^close_path: publish-only$' "${SEM_FILE:-}" 2>/dev/null; then
-    RUNNER_OK="declared-publish-only:$SLUG"
-    TERMINAL_PROOF_MODE="sentinel"
-    FORCED_CARD="declared-publish-only:$SLUG"
-    echo "Session CLOSE: close_path=publish-only объявлен при open — раннер не требуется (WP-537 Ф30)." >&2
-  fi
+  # WP-561 F61, pilot decision 1B (16.11): the declared publish-only channel
+  # (WP-537 F30) no longer skips the runner on a fresh close. `open` refuses
+  # the declaration; a semaphore opened before the ban closes like any other
+  # session. Only a close already PREPARED through that channel resumes
+  # through it (resume branch below).
 
   # WP-484 Ф267 п.2: a session that declared `no-code-changes` at open skips the
   # runner ONLY while the proof holds (nothing claimed, worktree clean, nothing
@@ -13790,7 +13784,9 @@ print(json.dumps({"wp": sys.argv[1], "slug": sys.argv[2], "agent": sys.argv[3], 
       : # the first attempt closed through a runner card; the generic resume below reads it
     elif grep -q '^close_path: peer-session$' "${SEM_FILE:-}" 2>/dev/null; then
       FORCED_CARD="declared-peer-session:$SLUG"
-    elif grep -q '^close_path: publish-only$' "${SEM_FILE:-}" 2>/dev/null; then
+    elif [ "$(_unique_record_field "${SEM_FILE:-}" close_delivery_terminal_reference || true)" = "declared-publish-only:$SLUG" ]; then
+      # WP-561 F61 (1B): only a first attempt that really closed through the
+      # retired publish-only channel resumes through it.
       FORCED_CARD="declared-publish-only:$SLUG"
     elif [ "$(_unique_record_field "${SEM_FILE:-}" close_delivery_terminal_reference || true)" = "declared-no-code-changes:$SLUG" ]; then
       # Only a first attempt that really closed through this channel resumes

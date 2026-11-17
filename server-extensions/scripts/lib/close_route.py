@@ -12,8 +12,8 @@ The pilot's scheme (WP-484 F304) asks, in order; the first match decides:
   1. an unfinished close of this session exists  -> ``resume`` (same run; a
      machine run is resumed by its own command);
   2. a service protocol or a machine run         -> refuse ``out-of-scope``;
-     a ``publish-only`` act is reported as ``service-act`` (its owner is
-     decided before stage 2);
+     an agent's ``publish-only`` declaration gets no route of its own
+     (pilot decision 1B, 16.11): it is classified like any other session;
   3. no open mark (semaphore) for the conversation -> ``nothing``;
      several marks -> refuse ``ambiguous``; selectors that miss an open
      mark (``semaphores`` < 0) -> refuse ``unresolved``;
@@ -77,8 +77,6 @@ def _expected_route(declared):
     """What the declaration alone would have chosen, for the mismatch flag."""
     if declared in MACHINE_PATHS:
         return "out-of-scope"
-    if declared == "publish-only":
-        return "service-act"
     if declared == "no-code-changes":
         return RELEASE_EMPTY
     return CLOSE_CHANGES
@@ -145,11 +143,6 @@ def classify(facts):
         out["refuse"] = "out-of-scope"
         reasons.append(f"служебный протокол или машинный запуск (close_path={declared}, wp={facts.get('wp')}) — свой порядок, вне схемы")
         out["mismatch"] = _expected_route(declared) != "out-of-scope"
-        return out
-
-    if declared == "publish-only":
-        out["refuse"] = "service-act"
-        reasons.append("объявлен узкий акт публикации (publish-only); чей это акт — решается до этапа 2")
         return out
 
     # A peer session with a journal is not released as empty: the "no changes" proof

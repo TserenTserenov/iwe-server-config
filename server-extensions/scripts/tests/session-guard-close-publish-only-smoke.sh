@@ -1,13 +1,9 @@
 #!/usr/bin/env bash
-# Regression for WP-537 Ф30 (08.09, ArchGate decision after Fable's review of
-# Ф28/Ф28.1, advice from Kimi+Codex): `open --close-path publish-only` lets a
-# short, service-only isolated session (opened SOLELY to push one commit out
-# from under canon freeze) close without a quick-close RUN card -- the same
-# pattern already proven for `close_path: peer-session` (WP-484 Ф118). This
-# prevents the Ф25.1/Ф26 orphaned-semaphore class at its source (no full
-# session is ever created for a pure publish) rather than only curing it
-# after the fact (Ф28/Ф29's marker/heuristic fallbacks, which stay as a
-# defensive layer for callers that forget to pass the new flag).
+# Regression for WP-561 F61, pilot decision 1B (16.11): the publish-only bypass
+# (WP-537 F30) is retired for agents. `open --close-path publish-only` is
+# refused, and a semaphore that still carries the declaration from before the
+# ban no longer closes without a terminal card -- it closes like any other
+# session. An ordinary session keeps requiring the card as before.
 set -euo pipefail
 
 ROOT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
@@ -82,27 +78,51 @@ fixture
 EOF
 }
 
-# --- Scenario A: publish-only session closes with no RUN card at all ------
-bash "$GUARD" open --wp WP-484 --task fixture --slug publish-only-a --agent fixture --close-path publish-only >/dev/null
-SEM_A=$(grep -l '^slug: publish-only-a$' "$TEST_ROOT"/.iwe-runtime/sessions/fixture-*.open)
-grep -q '^close_path: publish-only$' "$SEM_A" || { echo "FAIL: fixture setup — close_path not recorded in semaphore" >&2; exit 1; }
-ORZ_A=$(grep '^orz_file: ' "$SEM_A" | cut -d' ' -f2-)
-ORZ_DIR_A=$(sed -n 's/^orz_sessions_dir: //p' "$SEM_A")
-[ "$ORZ_DIR_A" = "$MC" ] || { echo "FAIL: fixture setup — ORZ must go to the fixture sessions repo, got: $ORZ_DIR_A" >&2; exit 1; }
-write_orz "$ORZ_DIR_A/$ORZ_A"
-git -C "$MC" add "$ORZ_A"
-git -C "$MC" commit -qm "orz publish-only a"
-git -C "$MC" push -q origin HEAD:main
-
-CLOSE_A_ERR="$TEST_ROOT/close-a.err"
-if bash "$GUARD" close --wp WP-484 --slug publish-only-a --agent fixture 2>"$CLOSE_A_ERR" \
-   && grep -q 'close_path=publish-only' "$CLOSE_A_ERR"; then
-  echo "PASS: publish-only session closes with no quick-close RUN card at all"
-else
-  cat "$CLOSE_A_ERR" >&2
-  echo "FAIL: publish-only close_path did not bypass the runner requirement" >&2
+# --- Scenario A1: open refuses the retired declaration, no semaphore is left --
+OPEN_A_ERR="$TEST_ROOT/open-a.err"
+if bash "$GUARD" open --wp WP-484 --task fixture --slug publish-only-a --agent fixture --close-path publish-only 2>"$OPEN_A_ERR" >/dev/null; then
+  echo "FAIL: open accepted close_path publish-only" >&2
   exit 1
 fi
+grep -q 'publish-only запрещён' "$OPEN_A_ERR" || { cat "$OPEN_A_ERR" >&2; echo "FAIL: refusal does not name the ban" >&2; exit 1; }
+if grep -lq '^slug: publish-only-a$' "$TEST_ROOT"/.iwe-runtime/sessions/fixture-*.open 2>/dev/null; then
+  echo "FAIL: refused open still left a semaphore" >&2
+  exit 1
+fi
+echo "PASS: open refuses close_path publish-only and leaves no semaphore"
+
+# --- Scenario A2: a pre-ban publish-only semaphore needs the terminal card ----
+bash "$GUARD" open --wp WP-484 --task fixture --slug legacy-a2 --agent fixture >/dev/null
+SEM_A2=$(grep -l '^slug: legacy-a2$' "$TEST_ROOT"/.iwe-runtime/sessions/fixture-*.open)
+if grep -q '^close_path: ' "$SEM_A2"; then
+  sed -i.bak 's/^close_path: .*/close_path: publish-only/' "$SEM_A2" && rm -f "$SEM_A2.bak"
+else
+  sed -i.bak '1a\
+close_path: publish-only' "$SEM_A2" && rm -f "$SEM_A2.bak"
+fi
+grep -q '^close_path: publish-only$' "$SEM_A2" || { echo "FAIL: fixture setup — legacy close_path not written" >&2; exit 1; }
+ORZ_A2=$(grep '^orz_file: ' "$SEM_A2" | cut -d' ' -f2-)
+ORZ_DIR_A2=$(sed -n 's/^orz_sessions_dir: //p' "$SEM_A2")
+write_orz "$ORZ_DIR_A2/$ORZ_A2"
+git -C "$MC" add "$ORZ_A2"
+git -C "$MC" commit -qm "orz legacy a2"
+git -C "$MC" push -q origin HEAD:main
+
+CLOSE_A2_ERR="$TEST_ROOT/close-a2.err"
+if bash "$GUARD" close --wp WP-484 --slug legacy-a2 --agent fixture 2>"$CLOSE_A2_ERR"; then
+  echo "FAIL: a pre-ban publish-only semaphore closed without a terminal card" >&2
+  exit 1
+fi
+if ! grep -q 'нет terminal RUN-quick-close' "$CLOSE_A2_ERR"; then
+  cat "$CLOSE_A2_ERR" >&2
+  echo "FAIL: close refused the pre-ban semaphore for an unexpected reason" >&2
+  exit 1
+fi
+if grep -q 'close_path=publish-only объявлен' "$CLOSE_A2_ERR"; then
+  echo "FAIL: close still announced the retired publish-only bypass" >&2
+  exit 1
+fi
+echo "PASS: a pre-ban publish-only semaphore closes like any other session (card required)"
 
 # --- Scenario B: a session with NO close_path (ordinary interactive isolate
 # open) still requires the normal terminal card -- the new branch must not
@@ -123,4 +143,4 @@ else
   echo "PASS: an ordinary session without close_path still requires the normal terminal card"
 fi
 
-echo "PASS: session-guard close_path=publish-only bypass (WP-537 Ф30)"
+echo "PASS: session-guard publish-only ban (WP-561 Ф61, 1Б)"

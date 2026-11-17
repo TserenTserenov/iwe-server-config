@@ -530,9 +530,13 @@ printf '%s\n' "$NEW_POINTER_TARGET" > "$TEST_ROOT/.iwe-runtime/sessions/current-
   || { echo "FAIL: machine-close projection cleanup removed a newer pointer" >&2; exit 1; }
 rm -f "$TEST_ROOT/.iwe-runtime/sessions/current-night-cycle.ptr"
 
-# A legacy publish-only semaphore is not machine authority.
+# A legacy publish-only semaphore is not machine authority. `open` refuses
+# publish-only since WP-561 F61 (1B), so the pre-ban semaphore is written by hand.
 LEGACY_MACHINE_SID=$(python3 -c 'import uuid; print(uuid.uuid4())')
-prepare_machine_session "$LEGACY_MACHINE_SID" machine-spoof publish-only
+prepare_machine_session "$LEGACY_MACHINE_SID" machine-spoof machine-publish-only
+sed -i.bak 's/^close_path: machine-publish-only$/close_path: publish-only/' "$MACHINE_SEM" && rm -f "$MACHINE_SEM.bak"
+grep -qx 'close_path: publish-only' "$MACHINE_SEM" \
+  || { echo "FAIL: legacy machine spoof fixture setup" >&2; exit 1; }
 if /bin/bash "$GUARD" machine-close --agent night-cycle --session-id "$LEGACY_MACHINE_SID" \
    >/dev/null 2>&1; then
   echo "FAIL: machine-close accepted a legacy publish-only semaphore" >&2

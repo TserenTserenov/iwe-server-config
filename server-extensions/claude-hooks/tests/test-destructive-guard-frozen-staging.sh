@@ -211,8 +211,8 @@ expect_msg "env array: the reason names env, not a crash" "$ROOT" "env \${A[@]+\
 
 expect_msg "frozen workspace root: hint names the root route"  "$ROOT"  "git add scripts/x.sh" "NOOP=1" \
   "close_path quick-close" "cd DS-my-strategy &&"
-expect_msg "frozen workspace root: hint names the publish-only path" "$ROOT" "git add scripts/x.sh" "NOOP=1" \
-  "--close-path publish-only" "cd DS-my-strategy &&"
+expect_msg "frozen workspace root: hint no longer offers publish-only (WP-561 F61)" "$ROOT" "git add scripts/x.sh" "NOOP=1" \
+  "закрытие через раннер" "--close-path publish-only"
 expect_msg "frozen governance repo: hint keeps the DS-my-strategy route" "$OTHER" "git add a.md" "IWE_FROZEN_CANONICAL_PATH=$OTHER" \
   "cd DS-my-strategy &&" "--close-path quick-close"
 

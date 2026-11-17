@@ -55,10 +55,17 @@ class OrderOfQuestions(unittest.TestCase):
                 self.assertIsNone(out["route"])
                 self.assertEqual(out["refuse"], "out-of-scope")
 
-    def test_publish_only_is_reported_as_service_act_not_closed(self):
-        out = cr.classify(facts(declared="publish-only", no_changes="proven"))
-        self.assertIsNone(out["route"])
-        self.assertEqual(out["refuse"], "service-act")
+    def test_retired_publish_only_is_classified_like_any_session(self):
+        # WP-561 F61 (1B): no service-act refusal; proven-empty is released,
+        # anything else goes to the runner.
+        empty = cr.classify(facts(declared="publish-only", no_changes="proven"))
+        self.assertIsNone(empty["refuse"])
+        self.assertEqual(empty["route"], cr.RELEASE_EMPTY)
+        self.assertEqual(empty["execution"], cr.EXEC_RELEASE)
+        changed = cr.classify(facts(declared="publish-only", no_changes="refused"))
+        self.assertIsNone(changed["refuse"])
+        self.assertEqual(changed["route"], cr.CLOSE_CHANGES)
+        self.assertEqual(changed["execution"], cr.EXEC_RUNNER)
 
     def test_no_mark_means_nothing_to_close_with_the_limit_stated(self):
         out = cr.classify(facts(semaphores=0))
@@ -198,7 +205,7 @@ class Execution(unittest.TestCase):
         self.assertEqual(out["execution"], cr.EXEC_RESUME)
 
     def test_refusals_and_nothing_keep_the_declared_behaviour(self):
-        for case in (facts(declared="publish-only"), facts(declared="pipeline"), facts(wp="day-close"),
+        for case in (facts(declared="pipeline"), facts(wp="day-close"),
                      facts(semaphores=0), facts(semaphores=2), facts(semaphores=-1)):
             with self.subTest(case=case):
                 self.assertEqual(cr.classify(case)["execution"], cr.EXEC_LEGACY)
