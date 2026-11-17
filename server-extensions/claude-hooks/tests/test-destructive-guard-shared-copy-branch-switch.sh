@@ -13,6 +13,9 @@ set -uo pipefail
 HOOK="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/destructive-guard.sh"
 WORKSPACE_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd -P)"
 TMP_DIR=$(mktemp -d)
+# The hook expands ~ and $HOME from ITS OWN $HOME. The delivery gate runs this test in a clone under
+# the Mac's temp directory, outside the real home, so the hook gets a HOME that contains the clone.
+TEST_HOME="$(dirname "$WORKSPACE_ROOT")"
 PACK="$WORKSPACE_ROOT/PACK-guardtest-$$"
 BOT="$WORKSPACE_ROOT/DS-IT-systems/guardtest-$$"
 BOT2="$WORKSPACE_ROOT/DS-IT-systems/guardtest-newarch-$$"   # main branch is not main (the bot copy: new-architecture)
@@ -51,7 +54,7 @@ git -C "$BOT2" branch pilot
 expect() {
   local desc="$1" want="$2" cmd="$3" cwd="$4" input got err_file="$TMP_DIR/err"
   input=$(python3 -c 'import json,sys; print(json.dumps({"tool_input":{"command":sys.argv[1]},"cwd":sys.argv[2]}))' "$cmd" "$cwd")
-  printf '%s' "$input" | bash "$HOOK" >/dev/null 2>"$err_file"
+  printf '%s' "$input" | HOME="$TEST_HOME" bash "$HOOK" >/dev/null 2>"$err_file"
   if [ "$?" -eq 2 ]; then got="block"; else got="pass"; fi
   # a refusal must come from THIS rule, not from another one that happens to match
   if [ "$got" = "block" ] && ! grep -q "в общей копии" "$err_file"; then
@@ -79,7 +82,7 @@ expect "cd into the pack, then switch" block "(cd $PACK && git switch feature)" 
 expect "cd into the bot copy, then checkout" block "(cd $BOT && git checkout feature)" "$TMP_DIR"
 
 # the shell expands ~ and $HOME before git runs; the hook only sees the text
-HOME_REL="${PACK#"$HOME"}"
+HOME_REL="${PACK#"$TEST_HOME"}"
 expect "tilde path with -C" block "git -C ~$HOME_REL switch feature" "$TMP_DIR"
 expect "\$HOME path with -C" block 'git -C $HOME'"$HOME_REL"' switch feature' "$TMP_DIR"
 expect "\${HOME} path with -C" block 'git -C ${HOME}'"$HOME_REL"' switch feature' "$TMP_DIR"

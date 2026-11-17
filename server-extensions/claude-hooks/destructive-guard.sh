@@ -1444,6 +1444,135 @@ if [ -n "$GIT_BRANCH_WRITE$GIT_REMOTE_WRITE" ]; then
   block "git branch -d/-D/-f/-m/-M/-C/-u, --unset-upstream и git remote add/rename/remove/set-url/set-head/set-branches/prune, git remote update --prune запрещены — разрешены без запроса только для просмотра, а эти формы удаляют ветку или меняют адрес хранилища. Просмотр (git branch, git branch -a -vv, git remote -v, git remote get-url) работает; удаление ветки и смену адреса делает пилот сам. Разовая необходимость: CC_ALLOW_DESTRUCTIVE_INPUT=1 из реального шелла пилота."
 fi
 
+# bug-2026-11-17 (fix 5): the shared copies (PACK-*, DS-IT-systems/*) are read by every session and
+# by the rule/style hooks. A `git switch <branch>` or `git checkout <branch>` there makes everyone
+# after it read that branch's files, and it was nobody's decision. Refused in the MAIN checkout of
+# such a copy; a linked worktree is somebody's own copy and stays free, and so does going back to
+# main/master or restoring files (`git checkout -- <path>`). The hourly shared-copies-refresh job
+# returns a copy that was switched anyway (once its timer is installed on the server).
+shared_copy_toplevel() {  # <dir> -> prints the toplevel when <dir> is the main checkout of a shared copy
+  # No `rev-parse --path-format` (git >= 2.31 only): an unknown option would fail every call and
+  # silently switch the protection off, so the paths are made absolute through `cd ... && pwd -P`.
+  local dir="$1" top git_dir common_dir
+  top=$(cd "$dir" 2>/dev/null && git rev-parse --show-toplevel 2>/dev/null) || return 1
+  case "$top" in
+    "$WORKSPACE_ROOT"/PACK-*|"$WORKSPACE_ROOT"/DS-IT-systems/*) ;;
+    *) return 1 ;;
+  esac
+  git_dir=$(cd "$dir" && cd "$(git rev-parse --git-dir 2>/dev/null)" 2>/dev/null && pwd -P) || return 1
+  common_dir=$(cd "$dir" && cd "$(git rev-parse --git-common-dir 2>/dev/null)" 2>/dev/null && pwd -P) || return 1
+  [ "$git_dir" = "$common_dir" ] || return 1
+  printf '%s\n' "$top"
+}
+
+expand_home_prefix() {  # <path> -> the path with a leading ~, $HOME or ${HOME} made literal (the hook sees the text, not the shell's expansion)
+  local path="$1"
+  case "$path" in
+    "~") printf '%s\n' "$HOME" ;;
+    "~/"*) printf '%s\n' "$HOME/${path#\~/}" ;;
+    '$HOME') printf '%s\n' "$HOME" ;;
+    '$HOME/'*) printf '%s\n' "$HOME/${path#\$HOME/}" ;;
+    '${HOME}') printf '%s\n' "$HOME" ;;
+    '${HOME}/'*) printf '%s\n' "$HOME/${path#\$\{HOME\}/}" ;;
+    *) printf '%s\n' "$path" ;;
+  esac
+}
+
+absolute_against() {  # <path> <base> -> absolute path
+  local path
+  path=$(expand_home_prefix "$1")
+  case "$path" in /*) printf '%s\n' "$path" ;; *) printf '%s\n' "$2/$path" ;; esac
+}
+
+copy_default_branch() {  # <copy toplevel> -> the branch that copy treats as its main one (origin/HEAD), else main
+  local ref
+  ref=$(git -C "$1" symbolic-ref -q --short refs/remotes/origin/HEAD 2>/dev/null) || ref=""
+  printf '%s\n' "${ref#origin/}"
+}
+
+branch_change_in_shared_copy() {  # one normalised `git ...` segment -> prints the copy and returns 0 when the call must be refused
+  local segment="$1" base="${CWD:-$PWD}" dir sub="" token c_given=0 other_option=0 positional=0 first_positional=""
+  local after_separator=0 seen_separator=0
+  local -a tokens
+  set -f; read -r -a tokens <<< "$segment"; set +f
+  dir="$base"
+  local i=0 count=${#tokens[@]}
+  while [ "$i" -lt "$count" ]; do
+    token="${tokens[$i]}"
+    if [ -z "$sub" ]; then
+      if [ "$token" = "-C" ] && [ $((i + 1)) -lt "$count" ]; then
+        c_given=1
+        i=$((i + 1))
+        dir=$(absolute_against "${tokens[$i]}" "$dir")
+      elif [ "$token" = "switch" ] || [ "$token" = "checkout" ]; then
+        sub="$token"
+      fi
+    elif [ "$seen_separator" -eq 1 ]; then
+      after_separator=$((after_separator + 1))
+    else
+      case "$token" in
+        --) seen_separator=1 ;;
+        -q|--quiet) ;;
+        -*) other_option=1 ;;
+        *) positional=$((positional + 1)); [ -n "$first_positional" ] || first_positional="$token" ;;
+      esac
+    fi
+    i=$((i + 1))
+  done
+  [ -n "$sub" ] || return 1
+  # `checkout [<tree>] -- <path>` restores files and keeps the branch; `checkout <branch> --` has no
+  # path after the separator and still switches.
+  [ "$seen_separator" -eq 1 ] && [ "$after_separator" -gt 0 ] && return 1
+  # bare `git checkout` prints the status
+  [ "$sub" = "checkout" ] && [ "$other_option" -eq 0 ] && [ "$positional" -eq 0 ] && [ "$seen_separator" -eq 0 ] && return 1
+
+  # Which directory does git run in? `cd <copy> && git switch topic` runs it in the copy although the
+  # call's own cwd is elsewhere, and `cd <other repo> && git switch topic` runs it there although the
+  # cwd is a shared copy: when the command changes directory, its `cd` targets decide; the call's cwd
+  # (or `-C`) matters only without one.
+  local cd_line cd_target cd_lines top=""
+  cd_lines=$(shell_invocations cd)
+  if [ "$c_given" -eq 1 ] || [ -z "$cd_lines" ]; then
+    top=$(shared_copy_toplevel "$dir") || top=""
+  fi
+  if [ -z "$top" ]; then
+    while IFS= read -r cd_line; do
+      [ -n "$cd_line" ] || continue
+      cd_target=$(absolute_against "${cd_line##* }" "$base")
+      if top=$(shared_copy_toplevel "$cd_target"); then break; fi
+      top=""
+    done <<EOF_CD
+$cd_lines
+EOF_CD
+  fi
+  [ -n "$top" ] || return 1
+
+  # Going back to the copy's own main branch is the repair, not the problem: main/master, or whatever
+  # origin/HEAD names (the bot copy lives on new-architecture).
+  if [ "$other_option" -eq 0 ] && [ "$positional" -eq 1 ] && [ "$seen_separator" -eq 0 ]; then
+    case "$first_positional" in
+      main|master) return 1 ;;
+    esac
+    [ "$first_positional" = "$(copy_default_branch "$top")" ] && return 1
+    # `git checkout <path>` without `--`: a name that is a file and no branch is a restore
+    if [ "$sub" = "checkout" ] && [ -e "$top/$first_positional" ] \
+       && ! git -C "$top" rev-parse --verify -q "refs/heads/$first_positional" >/dev/null 2>&1; then
+      return 1
+    fi
+  fi
+  printf '%s\n' "$top"
+  return 0
+}
+
+if [ -n "$(git_segment switch)$(git_segment checkout)" ]; then
+  while IFS= read -r branch_segment; do
+    [ -n "$branch_segment" ] || continue
+    if SHARED_COPY=$(branch_change_in_shared_copy "$branch_segment"); then
+      block "git switch / git checkout <ветка> в общей копии ($SHARED_COPY) запрещены: её читают все сессии и хуки правил, чужая ветка подменит им файлы. Нужна другая ветка — открой отдельную рабочую копию (git worktree add) или клон. Вернуть копию на основную ветку: git switch main или скрипт scripts/shared-copies-refresh.py (он возвращает только чистую копию, вершина которой уже на origin)."
+    fi
+  done < <(git_segment switch; git_segment checkout)
+fi
+
 # rg reads extra options, --pre among them, from the file named by RIPGREP_CONFIG_PATH; with rg
 # pre-approved that is `rg --pre` without the word on the command line. A shell redirection or
 # tee onto a protective file (.claude/hooks, .claude/bin, settings*.json) zeroes a check the way
