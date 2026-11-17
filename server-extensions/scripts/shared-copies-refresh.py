@@ -11,8 +11,10 @@ Contract (hourly, no fetch, no commits, nothing deleted):
   * WHICH copies: registry checkouts of class reader or service on this host whose path starts
     with PACK- or DS-IT-systems/ (the shared packs and the bot docs).
   * returns a copy to its expected branch only when ALL hold: it is on another branch (or
-    detached), it has no tracked changes and no half-finished git operation, and its current tip
-    is already contained in the upstream ref (so nothing reachable only from this tip is left behind).
+    detached), it has no tracked changes, no untracked files and no half-finished git operation,
+    HEAD has not moved for QUIET_MINUTES (a session may still be working on the branch it just
+    switched to), and its current tip is already contained in the upstream ref (so nothing
+    reachable only from this tip is left behind).
   * anything else is reported as BLOCKED and left untouched.
   * fast-forwarding the returned copy is left to the existing sync jobs.
 Exit code: 0 on any outcome that was reported; 1 on a broken registry.
@@ -32,6 +34,11 @@ import repo_registry  # noqa: E402
 
 SHARED_PREFIXES = ("PACK-", "DS-IT-systems/")
 SHARED_CLASSES = ("reader", "service")
+# Most of these copies are written to by sessions (class service, written_here), so a branch
+# switch may be a session at work, not a leftover. Within this window after the last HEAD move the
+# copy is left alone (cold review 17.11: a session that ran `git switch -c` and had only new files
+# would have its next commit land on main after the hourly return).
+QUIET_MINUTES = 120
 
 
 def _load_reader_helpers():
@@ -49,7 +56,35 @@ def log(message):
     print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] [shared-copies-refresh] {message}", flush=True)
 
 
-def heal_one(repo, expected_branch, upstream, dry_run):
+def minutes_since_head_moved(repo):
+    """Minutes since the last HEAD reflog entry (switch, commit, reset), or None without a reflog."""
+    rc, stamp, _ = reader.git(repo, "reflog", "-1", "--date=unix", "--format=%gd", "HEAD")
+    if rc != 0 or not stamp.startswith("HEAD@{") or not stamp.endswith("}"):
+        return None
+    try:
+        moved_at = int(stamp[len("HEAD@{"):-1])
+    except ValueError:
+        return None
+    return (time.time() - moved_at) / 60
+
+
+def session_activity_reason(repo, quiet_minutes):
+    """Why this copy may still be in a session's hands, or None."""
+    rc, untracked, _ = reader.git(repo, "ls-files", "--others", "--exclude-standard")
+    if rc != 0:
+        return "не читается список новых файлов"
+    if untracked:
+        return f"новые неотслеживаемые файлы ({len(untracked.splitlines())}), возможно, идёт работа"
+    minutes = minutes_since_head_moved(repo)
+    if minutes is None:
+        # No reflog (disabled or expired): the quiet window cannot be proven, so do not move it.
+        return "нет журнала перемещений HEAD, нельзя убедиться, что работа не идёт"
+    if minutes < quiet_minutes:
+        return f"ветку переключали {minutes:.0f} мин назад (< {quiet_minutes}), возможно, идёт работа"
+    return None
+
+
+def heal_one(repo, expected_branch, upstream, dry_run, quiet_minutes=QUIET_MINUTES):
     """One line of outcome: 'current', 'returned <from>', 'would return <from>' or 'BLOCKED <reason>'."""
     rc, branch, _ = reader.git(repo, "branch", "--show-current")
     if rc != 0:
@@ -57,6 +92,9 @@ def heal_one(repo, expected_branch, upstream, dry_run):
     if branch == expected_branch:
         return "current"
     reason = reader.blocked_reason(repo, branch)  # same clean/in-progress/hidden-edits test, on the branch it is on
+    if reason:
+        return f"BLOCKED {reason}"
+    reason = session_activity_reason(repo, quiet_minutes)
     if reason:
         return f"BLOCKED {reason}"
     rc, target, _ = reader.git(repo, "rev-parse", "--verify", "--quiet", f"{upstream}^{{commit}}")
@@ -100,6 +138,8 @@ def main():
     parser.add_argument("--registry", default=str(SCRIPTS / "repo-convergence.registry.yaml"))
     parser.add_argument("--host", default=None, help="registry host id; default: detected")
     parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument("--quiet-minutes", type=int, default=QUIET_MINUTES,
+                        help="leave a copy alone this long after its HEAD last moved")
     args = parser.parse_args()
 
     registry, errors = repo_registry.load(args.registry)
@@ -125,7 +165,8 @@ def main():
             else:
                 try:
                     outcome = heal_one(repo, entry.get("expected_branch", "main"),
-                                       entry.get("upstream", "origin/main"), args.dry_run)
+                                       entry.get("upstream", "origin/main"), args.dry_run,
+                                       args.quiet_minutes)
                 except subprocess.TimeoutExpired as exc:
                     outcome = f"BLOCKED git дольше {exc.timeout:.0f} с"
                 except Exception as exc:  # one broken copy must not skip the rest; reported, not swallowed
