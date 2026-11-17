@@ -148,6 +148,33 @@ run_tick "$S1_REPO" "$S1_SRC"
   && ok "чистый тик после частичного: bar доставлен, список задержанных удалён" \
   || bad "чистый тик: список задержанных удалён" "$(git -C "$S1_REPO" show --stat HEAD)"
 
+# --- Сценарий 1b (WP-484 Ф274, 17.11): тест вернул 77 «не проверено» --
+#     файл не задерживается (недостающий на Маке инструмент -- не дефект файла),
+#     но гейт называет тест в журнале, а список задержанных его не содержит.
+S1B_SRC="$WORKDIR/s1b-source"; S1B_REPO="$WORKDIR/s1b-repo"
+mkdir -p "$S1B_REPO/server-extensions/scripts"
+make_source_file "$S1B_SRC" qux 77
+git -C "$S1B_REPO" init -q
+git -C "$S1B_REPO" config user.email t@t.local
+git -C "$S1B_REPO" config user.name t
+echo "qux old" > "$S1B_REPO/server-extensions/scripts/qux.sh"
+git -C "$S1B_REPO" add server-extensions/
+git -C "$S1B_REPO" commit -q -m baseline
+echo "qux content" > "$S1B_REPO/server-extensions/scripts/qux.sh"
+run_tick "$S1B_REPO" "$S1B_SRC"
+[ "$(git -C "$S1B_REPO" show HEAD:server-extensions/scripts/qux.sh 2>&1)" = "qux content" ] \
+  && ok "тест с кодом 77: файл доставлен" \
+  || bad "тест с кодом 77: файл доставлен" "$(git -C "$S1B_REPO" show --stat HEAD)"
+! git -C "$S1B_REPO" cat-file -e HEAD:server-extensions/ROOT_COMMIT_EXCLUDED 2>/dev/null \
+  && ok "тест с кодом 77: в списке задержанных его нет" \
+  || bad "тест с кодом 77: список задержанных" "$(git -C "$S1B_REPO" show HEAD:server-extensions/ROOT_COMMIT_EXCLUDED 2>&1)"
+grep -q "test-gate not verified (exit 77, file delivered): qux-smoke.sh (для server-extensions/scripts/qux.sh)" "$WORKDIR/tick.out" \
+  && ok "тест с кодом 77: журнал называет непроверенный тест" \
+  || bad "тест с кодом 77: строка журнала" "$(grep -i 'not verified' "$WORKDIR/tick.out" || tail -3 "$WORKDIR/tick.out")"
+! grep -q "ALERT\[test-gate" "$WORKDIR/tick.out" \
+  && ok "тест с кодом 77: тревоги о провале нет" \
+  || bad "тест с кодом 77: тревога" "$(grep 'ALERT' "$WORKDIR/tick.out")"
+
 # --- Сценарий 2: провалились ВСЕ изменённые файлы — тик завершается чисто --
 #     (exit 0, не ошибка), коммита нет вообще.
 S2_SRC="$WORKDIR/s2-source"; S2_REPO="$WORKDIR/s2-repo"
