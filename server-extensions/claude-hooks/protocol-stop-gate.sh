@@ -14,11 +14,6 @@
 set -uo pipefail
 export PATH="/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin:${PATH:-}"
 
-# --- WP-265 Ф5.2: cleanup dry-run sentinel on session end ---
-if [ -n "${CLAUDE_SESSION_ID:-}" ]; then
-    rm -f "/tmp/iwe-dry-run-${CLAUDE_SESSION_ID}.flag" 2>/dev/null || true
-fi
-
 # --- Infinite loop guard ---
 if [ "${STOP_HOOK_ACTIVE:-}" = "1" ]; then
   echo '{}'
@@ -47,6 +42,147 @@ SESSION_ID=$(echo "$INPUT" | jq -r '.session_id // empty')
 # close_obligation.py's own _validated_name() still rejects a malformed value
 # downstream (cmd_stop_check), so no extra charset check is duplicated here.
 [ -z "$SESSION_ID" ] && [ -n "${CLAUDE_CODE_SESSION_ID:-}" ] && SESSION_ID="$CLAUDE_CODE_SESSION_ID"
+
+# #369 protected the shared sentinel from a NEIGHBOUR session's Stop (matched
+# by session_id + owner-token, confirmed still correct by issue #460 path 7).
+# It did not protect against the SAME session's own Stop: audit-installation
+# creates the sentinel, launches a subagent rehearsal, and the parent turn's
+# Stop can fire (session_id matches trivially) while that subagent is still
+# writing under it — issue #460 path 6. Fix: this hook no longer deletes the
+# shared sentinel at all, matched session or not. Removal is now only the
+# explicit `rm -f` at the end of the owning procedure, backed by the
+# fail-closed TTL in dry-run-gate.sh (path 3) as the crash fallback. The
+# owner-file is still cleared here, but only once it's confirmed residue
+# (sentinel already gone) — never while the sentinel it points at is live.
+# Single path resolver (Codex r3), shared with dry-run-gate/begin/complete:
+# ANY override without the test-mode marker resets BOTH paths to production.
+# Owner tokens live next to the sentinel (production: /tmp).
+# issue #1447: the resolver itself lives in the shared library. If it is
+# missing or cannot resolve (Git Bash without LOCALAPPDATA), the fallback below
+# does nothing (an empty dir is skipped) — the gate fails closed on its own
+# while a rehearsal may be active and only warns otherwise.
+resolve_dry_run_paths() {
+  DRY_RUN_DIR_RESOLVED=""
+  DRY_RUN_SENTINEL_RESOLVED="/tmp/iwe-dry-run.flag"
+  local lib
+  lib="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/../lib/dry-run-dir.sh"
+  [ -r "$lib" ] || return 0
+  # shellcheck source=../lib/dry-run-dir.sh
+  . "$lib" || return 0
+  dry_run_resolve_paths || return 0
+  DRY_RUN_DIR_RESOLVED="$DRY_RUN_DIR"
+  DRY_RUN_SENTINEL_RESOLVED="$DRY_RUN_SENTINEL"
+}
+resolve_dry_run_paths
+
+cleanup_owned_dry_run_sentinel() {
+  local sid="$1" safe_sid owner_file
+  [ -n "$sid" ] || return 0
+  safe_sid=$(printf '%s' "$sid" | tr -cd 'A-Za-z0-9._-')
+  [ -n "$safe_sid" ] || return 0
+  owner_file="$(dirname "$DRY_RUN_SENTINEL_RESOLVED")/iwe-dry-run-owner-${safe_sid}.token"
+  [ -f "$owner_file" ] || return 0
+  [ -f "$DRY_RUN_SENTINEL_RESOLVED" ] && return 0
+  rm -f "$owner_file" 2>/dev/null || true
+}
+
+cleanup_owned_dry_run_sentinel "$SESSION_ID"
+
+# issue #549 stage 2: idempotent fallback -- if this session's rehearsal
+# is still active (the session died before normal completion), Stop moves it to
+# completed. The transition is performed BY THE HOOK itself (trusted runtime code), without a
+# helper and the --trusted-stop flag. Strictness (Codex r3): the whole scan under one
+# lock; we continue only with EXACTLY one valid v2 active-state of this
+# session -- corruption/multiple actives are not turned into allow, nothing is
+# touched. The sentinel is removed only after a SUCCESSFUL transition.
+complete_dry_run_on_stop() {
+  local sid="$1" dry_dir lock_dir sf gid recorded tmp nonce tries lock_pid lock_start cur_start
+  local active_file="" active_gid="" corrupted=0 active_count=0
+  [ -n "$sid" ] || return 0
+  dry_dir="$DRY_RUN_DIR_RESOLVED"
+  local sentinel="$DRY_RUN_SENTINEL_RESOLVED"
+  [ -d "$dry_dir" ] && [ ! -L "$dry_dir" ] || return 0
+  lock_dir="$dry_dir/transaction.lock"
+
+  # Lock for the whole scan+transition.
+  tries=0
+  while ! mkdir "$lock_dir" 2>/dev/null; do
+    tries=$((tries + 1))
+    [ "$tries" -gt 20 ] && return 0
+    lock_pid=$(sed -n '1p' "$lock_dir/pid" 2>/dev/null || true)
+    lock_start=$(sed -n '3p' "$lock_dir/pid" 2>/dev/null || true)
+    cur_start=$(ps -o lstart= -p "$lock_pid" 2>/dev/null || true)
+    if [ -n "$lock_pid" ] && { ! kill -0 "$lock_pid" 2>/dev/null || { [ -n "$lock_start" ] && [ -n "$cur_start" ] && [ "$lock_start" != "$cur_start" ]; }; }; then
+      mv "$lock_dir" "$dry_dir/.stale-lock-$$-$(date +%s)" 2>/dev/null || true
+      rm -rf "$dry_dir"/.stale-lock-* 2>/dev/null || true
+      mkdir "$lock_dir" 2>/dev/null && break
+    fi
+    sleep 0.1 2>/dev/null || sleep 1
+  done
+  nonce=$(od -An -N8 -tx1 /dev/urandom | tr -d ' \n')
+  if ! { echo "$$"; echo "$nonce"; ps -o lstart= -p $$ 2>/dev/null || echo "unknown"; } > "$lock_dir/pid" 2>/dev/null; then
+    rm -rf "$lock_dir" 2>/dev/null || true
+    return 0
+  fi
+  trap 'if [ "$(sed -n "2p" "$lock_dir/pid" 2>/dev/null)" = "$nonce" ]; then rm -rf "$lock_dir" 2>/dev/null; fi' RETURN 2>/dev/null || true
+
+  # Strict scan: broken/foreign version/mismatch is corruption (touch nothing).
+  shopt -s nullglob
+  for sf in "$dry_dir"/gate-*.state; do
+    jq -e . "$sf" >/dev/null 2>&1 || { corrupted=1; break; }
+    [ "$(jq -r '.version // empty' "$sf" 2>/dev/null)" = "2" ] || { corrupted=1; break; }
+    gid=$(jq -r '.gate_id // empty' "$sf" 2>/dev/null || true)
+    [ -n "$gid" ] && [ "gate-$gid.state" = "$(basename "$sf")" ] || { corrupted=1; break; }
+    case "$(jq -r '.state // empty' "$sf" 2>/dev/null)" in
+      active)
+        active_count=$((active_count + 1))
+        if [ "$(jq -r '.owner_session_id // empty' "$sf" 2>/dev/null)" = "$sid" ]; then
+          active_file="$sf"; active_gid="$gid"
+        fi
+        ;;
+      completed) ;;
+      *) corrupted=1; break ;;
+    esac
+  done
+  shopt -u nullglob
+
+  if [ "$corrupted" = "0" ] && [ "$active_count" -le 1 ] && [ -n "$active_file" ]; then
+    # Exactly one valid active, and it is ours -- a safe transition.
+    # issue #1435: a held rehearsal (background subagent) is completed only by
+    # dry-run-complete.sh; the sentinel TTL bounds a forgotten one.
+    if [ "$(jq -r '.state // empty' "$active_file" 2>/dev/null)" = "active" ] && \
+       [ "$(jq -r '.stop_fallback // empty' "$active_file" 2>/dev/null)" != "hold" ]; then
+      tmp=$(mktemp "$dry_dir/.complete.XXXXXX" 2>/dev/null || true)
+      if [ -n "$tmp" ] && \
+         jq --arg completed "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+            '.state="completed" | .completed_at=$completed | .completion_reason="stop-hook-fallback"' \
+            "$active_file" > "$tmp" 2>/dev/null && mv -f "$tmp" "$active_file" 2>/dev/null; then
+        # Sentinel -- only AFTER a successful transition and only for our own gate_id.
+        if [ -f "$sentinel" ] && [ ! -L "$sentinel" ] && \
+           [ "$(jq -r '.gate_id // empty' "$sentinel" 2>/dev/null)" = "$active_gid" ]; then
+          rm -f "$sentinel"
+        fi
+      else
+        rm -f "$tmp" 2>/dev/null || true
+      fi
+    fi
+  fi
+  # corruption / active_count>1 / foreign active -- touch nothing (fail-closed
+  # on the gate's side: it will sort out the state itself at the next tool-call).
+  if [ "$(sed -n '2p' "$lock_dir/pid" 2>/dev/null)" = "$nonce" ]; then
+    rm -rf "$lock_dir" 2>/dev/null || true
+  fi
+  # issue #818: the RETURN trap (line ~98) outlives this function -- bash does not
+  # scope `trap ... RETURN` to the function where it was set; it stays
+  # armed for ANY following return of a function/sourced script in
+  # the same process. Without an explicit cleanup here, a normal Stop without an active
+  # rehearsal fails under `set -u` when the hook later sources the bootstrap: the trap
+  # fires again on the already dead $lock_dir/$nonce.
+  trap - RETURN 2>/dev/null || true
+  return 0
+}
+
+complete_dry_run_on_stop "$SESSION_ID"
 
 # Нет транскрипта — пропустить
 if [ -z "$TRANSCRIPT_PATH" ] || [ ! -f "$TRANSCRIPT_PATH" ]; then
@@ -234,14 +370,17 @@ TASK_CREATE_MAX=$(count_task_tool TaskCreate | awk '{s+=$1} END {print s+0}')
 TASK_UPDATE_MAX=$(count_task_tool TaskUpdate | sort -n | tail -1)
 TASK_UPDATE_MAX="${TASK_UPDATE_MAX:-0}"
 
+# grep -i does not fold Cyrillic without a UTF-8 locale (launchd/cron start with an empty LANG), so
+# "Шаг 3 из 5" was missed there and the gate fired; lower_text folds it independently of the locale.
 STEP_MAX=$(jq -s -r '
   [.[] | select((.message.role // "assistant") == "assistant") | .message]
   | .[] | .content[]?
   | select(.type == "text" and (.text // "") != "")
   | .text
 ' "$TRANSCRIPT_PATH" 2>/dev/null \
-  | grep -oiE '(шаг|step)[[:space:]]+[0-9]+[[:space:]]+(из|of)[[:space:]]+[0-9]+' \
-  | grep -oiE '[0-9]+$' \
+  | lower_text \
+  | grep -oE '(шаг|step)[[:space:]]+[0-9]+[[:space:]]+(из|of)[[:space:]]+[0-9]+' \
+  | grep -oE '[0-9]+$' \
   | sort -n | tail -1)
 STEP_MAX="${STEP_MAX:-0}"
 

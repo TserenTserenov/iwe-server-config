@@ -560,15 +560,15 @@ _close_path_clears_obligation() {  # <close_path value>
 # WP-484 Ф301: `close --pilot-release` is an exit by the pilot's word, so the word has to
 # outlive the command. One JSON line per release; a failed write refuses the release
 # (an unaudited exit is the thing this log exists to prevent).
-_record_pilot_release() {  # <slug> <agent> <wp> <word>
+_record_pilot_release() {  # <slug> <agent> <wp> <word> [<close state the word was NOT applied in>]
   local audit="$IWE_ROOT/.iwe-runtime/pilot-release-audit.jsonl"
   mkdir -p "$(dirname "$audit")" || return 1
-  python3 - "$audit" "$1" "$2" "$3" "$4" <<'AUDIT_PY'
+  python3 - "$audit" "$1" "$2" "$3" "$4" "${5:-}" <<'AUDIT_PY'
 import json
 import sys
 import time
 
-audit, slug, agent, wp, word = sys.argv[1:]
+audit, slug, agent, wp, word, held_in_state = sys.argv[1:]
 record = {
     "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
     "slug": slug,
@@ -576,6 +576,10 @@ record = {
     "wp": wp,
     "word": word,
 }
+if held_in_state:
+    # The word was heard but the staged delivery decides the close, not the word.
+    record["applied"] = False
+    record["held_in_state"] = held_in_state
 with open(audit, "a", encoding="utf-8") as handle:
     handle.write(json.dumps(record, ensure_ascii=False, separators=(",", ":")) + "\n")
 AUDIT_PY
@@ -7026,7 +7030,13 @@ _repo_scope_has_publish_proof() {  # <repo> <role> <exact semaphore> <fresh remo
   # recursively. Resolution is lazy: unambiguous scope paths keep their old checks.
   local scope_resolver_functions
   scope_resolver_functions=$(declare -f normalize_remote_url _resolve_repo_checkout 2>/dev/null) || scope_resolver_functions=""
-  python3 - "$@" "$IWE_ROOT" "$scope_resolver_functions" <<'PY'
+  # bug-2026-11-17 (fix 3): the shared checkout moves under this proof whenever a neighbouring
+  # session commits. "HEAD changed" is a race with someone else's commit, not evidence about
+  # our files, so the proof (exit 75, only for that case) runs once more from a fresh HEAD.
+  # Every other refusal stays final on the first attempt.
+  local attempt proof_rc=0
+  for attempt in 1 2; do
+  if python3 - "$@" "$IWE_ROOT" "$scope_resolver_functions" <<'PY'
 import difflib
 import hashlib
 import os
@@ -7679,13 +7689,19 @@ for directory, previous in directory_snapshots.items():
     if directory_leaves(directory) != previous:
         refuse("состав заявленного каталога изменился во время проверки: " + directory)
 if git("rev-parse", "HEAD").strip().decode() != head:
-    refuse("HEAD изменился во время проверки")
+    sys.stderr.write("Session CLOSE: scoped publish proof: HEAD изменился во время проверки\n")
+    raise SystemExit(75)
 for path in sorted(foreign_card_snapshots):
     if not canonical_governance_owns_foreign_runner_card(path):
         refuse("чужая служебная карточка изменилась во время проверки: " + path)
 if Path(semaphore).read_bytes() != snapshot:
     refuse("scope изменился во время проверки")
 PY
+  then proof_rc=0; else proof_rc=$?; fi
+  [ "$proof_rc" -eq 75 ] && [ "$attempt" -eq 1 ] || break
+  echo "Session CLOSE: общая копия сдвинулась во время проверки (коммит соседней сессии); повторяю проверку один раз" >&2
+  done
+  return "$proof_rc"
 }
 
 # WP-530 Ф67 (peer-session 2026-09-25-16-wp530-close-hygiene-systemic,
@@ -13064,6 +13080,14 @@ if [ "$CMD" = "close" ]; then
   WP="${WP:-$WP_FROM_SEM}"
   SLUG_FROM_SEM=$(grep "^slug: " "$SEM_FILE" | cut -d' ' -f2- || true)
   SLUG="${SLUG:-$SLUG_FROM_SEM}"
+  # bug-2026-11-17 (fix 1): the pilot-release branch below runs only while no staged delivery
+  # exists (state none). In any other state the word used to vanish without a trace: no audit
+  # line, no answer. Record it and say plainly that the delivery proof, not the word, holds.
+  if [ -n "${PILOT_RELEASE:-}" ] && [ "$CLOSE_RESUME_STATE" != "none" ]; then
+    _record_pilot_release "$SLUG" "$AGENT" "${WP:-}" "$PILOT_RELEASE" "$CLOSE_RESUME_STATE" \
+      || fail "close: слово пилота не удалось записать в журнал pilot-release-audit.jsonl; закрытие не выполнено" 7
+    echo "Session CLOSE: слово пилота принято и записано в журнал, но закрытие держит доставка (состояние: $CLOSE_RESUME_STATE): слово его не отменяет. Закрытие продолжается по подготовленному набору; чтобы снять отметку иначе — см. close --explain." >&2
+  fi
   TASK_FROM_SEM=$(grep "^task: " "$SEM_FILE" | cut -d' ' -f2- || true)
   TASK="${TASK:-$TASK_FROM_SEM}"
   SESSION_ID="$LOCKED_SESSION_ID"
@@ -14677,6 +14701,14 @@ print("Forgot in scope: " + ", ".join(candidates))
 PY
     exit 0
   fi
+  # bug-2026-11-17 (multiline claim): one claim names one path. A newline or CR glues several
+  # paths into a single claim that matches no changed file, and once the close is PREPARED the
+  # claim is frozen and cannot be repaired. The batch form (--paths-from0) already refuses this.
+  case "$FILE_PATH" in
+    *$'\n'*|*$'\r'*)
+      fail "note-file: перевод строки в пути — одна заявка называет один путь; несколько путей заявляй по одному или пакетной формой --paths-from0 (ничего не заявлено)" 1
+      ;;
+  esac
   # Normalize to git-root-relative (resolve symlinks/macOS /tmp vs /private/tmp)
   if [ -d "$FILE_PATH" ]; then
     # Resolve a directory in its own Git context. Asking its parent mistakes

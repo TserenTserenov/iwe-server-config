@@ -261,6 +261,72 @@ iwe_repo_dirs() {
   done
 }
 
+# bug-2026-11-17 (fix 4): the reindex used to ask "did THIS checkout commit something since
+# midnight?". That misses what other sessions or hosts published, counts local commits that
+# never reached origin, and never looked inside DS-IT-systems/* (bot docs were not indexed at
+# all). The question is now: did the published main branch move past the last commit we indexed?
+REINDEX_STATE_DIR="${IWE_REINDEX_STATE_DIR:-$WORKSPACE_DIR/.iwe-runtime/reindex-state}"
+
+repo_main_ref() {  # <repo> -> prints origin/<main branch>, nothing when the repo has none
+  local repo="$1" ref
+  if ref=$(git -C "$repo" symbolic-ref -q --short refs/remotes/origin/HEAD 2>/dev/null) && [ -n "$ref" ]; then
+    echo "$ref"
+    return 0
+  fi
+  for ref in origin/main origin/master; do
+    if git -C "$repo" rev-parse -q --verify "refs/remotes/$ref" >/dev/null 2>&1; then
+      echo "$ref"
+      return 0
+    fi
+  done
+  return 0
+}
+
+# State file per checkout: the workspace-relative path with "/" encoded, so DS-IT-systems/foo and
+# PACK-foo can never share one file (a bare basename would).
+reindex_state_file() {  # <repo>
+  local rel="${1#"$WORKSPACE_DIR"/}"
+  printf '%s/%s.sha\n' "$REINDEX_STATE_DIR" "$(printf '%s' "$rel" | tr '/' '_')"
+}
+
+# Exit 0 = reindex needed. The reindex reads THIS working copy, so the question is whether its own
+# HEAD moved since the last indexed commit (pulled from another session or host, or committed here);
+# unpublished local commits are indexed once and then recorded like any other. Prints the commit to
+# record afterwards. No fetch here: the sync jobs keep origin's refs fresh, and a network call in the
+# middle of Day Close can hang it. A copy that lags behind origin's main branch is reported, because
+# what gets indexed is then older than what is published.
+repo_needs_reindex() {  # <repo>
+  local repo="$1" main indexed last state behind
+  main=$(repo_main_ref "$repo")
+  [ -n "$main" ] || return 1  # no published main branch: nothing to index
+  indexed=$(git -C "$repo" rev-parse HEAD 2>/dev/null) || return 1
+  behind=$(git -C "$repo" rev-list --count "HEAD..$main" 2>/dev/null || echo 0)
+  if [ "${behind:-0}" -gt 0 ]; then
+    echo "  ⚠ ${repo#"$WORKSPACE_DIR"/}: копия отстаёт от $main на $behind коммит(ов) — индексируется её содержимое, не опубликованное" >&2
+  fi
+  state=$(reindex_state_file "$repo")
+  if [ -f "$state" ]; then
+    last=$(tr -d '[:space:]' < "$state")
+    [ "$indexed" != "$last" ] || return 1
+  elif [ "$(git -C "$repo" log --since="today 00:00" --oneline --no-merges 2>/dev/null | wc -l | tr -d ' ')" -eq 0 ]; then
+    return 1  # no record yet: the first run keeps the old "changed today" rule
+  fi
+  echo "$indexed"
+}
+
+repo_mark_reindexed() {  # <repo> <commit that was indexed, as printed by repo_needs_reindex>
+  mkdir -p "$REINDEX_STATE_DIR" \
+    && printf '%s\n' "$2" > "$(reindex_state_file "$1")" \
+    || warn "  не удалось записать состояние reindex для ${1#"$WORKSPACE_DIR"/}"
+}
+
+mark_reindexed_all() {  # <space-separated "repo|head" pairs>
+  local pair
+  for pair in $1; do
+    repo_mark_reindexed "${pair%%|*}" "${pair#*|}"
+  done
+}
+
 # --- Шаг 2: Knowledge-MCP reindex ---
 do_reindex() {
   log "Шаг 2/3: Knowledge-MCP reindex"
@@ -288,14 +354,14 @@ for config_path in sys.argv[1:]:
 PYEOF
   ) || { warn "  Mapping build failed — пропуск reindex"; return 0; }
 
-  # Определяем, какие Pack/DS были изменены сегодня
-  local l2_sources="" l4_sources=""
+  # Определяем, какие Pack/DS изменились на опубликованной основной ветке с последнего
+  # проиндексированного коммита (bug-2026-11-17, fix 4). l2_marks/l4_marks хранят пары
+  # "репо|коммит" для записи состояния после успешного reindex своей ветки.
+  local l2_sources="" l4_sources="" l2_marks="" l4_marks=""
   while IFS= read -r repo; do
-    local repo_name
+    local repo_name published_head
     repo_name=$(basename "$repo")
-    local today_commits
-    today_commits=$(git -C "$repo" log --since="today 00:00" --oneline --no-merges 2>/dev/null | wc -l | tr -d ' ')
-    if [ "$today_commits" -gt 0 ]; then
+    if published_head=$(repo_needs_reindex "$repo"); then
       local match
       match=$(echo "$dir_map" | awk -F'\t' -v d="$repo_name" '$1==d {print $2"\t"$3; exit}')
       if [ -n "$match" ]; then
@@ -304,14 +370,16 @@ PYEOF
         cfg=$(echo "$match" | cut -f2)
         if [ "$cfg" = "$SOURCES_JSON" ]; then
           l2_sources="$l2_sources $src"
+          l2_marks="$l2_marks $repo|$published_head"
         else
           l4_sources="$l4_sources $src"
+          l4_marks="$l4_marks $repo|$published_head"
         fi
       else
         log "  ⚠ $repo_name: не в sources — пропуск"
       fi
     fi
-  done < <(iwe_repo_dirs "$WORKSPACE_DIR"/PACK-* "$WORKSPACE_DIR"/DS-*)
+  done < <(iwe_repo_dirs "$WORKSPACE_DIR"/PACK-* "$WORKSPACE_DIR"/DS-* "$WORKSPACE_DIR"/DS-IT-systems/*)
 
   if [ -z "$l2_sources" ] && [ -z "$l4_sources" ]; then
     log "  Нет изменений в индексируемых источниках — пропуск reindex"
@@ -341,6 +409,8 @@ PYEOF
     if [ "$l2_rc" -ne 0 ]; then
       failed=$((failed + 1))
       warn "  L2 reindex отказал (код $l2_rc)"
+    else
+      mark_reindexed_all "$l2_marks"
     fi
   fi
 
@@ -353,6 +423,8 @@ PYEOF
     if [ "$l4_rc" -ne 0 ]; then
       failed=$((failed + 1))
       warn "  L4 reindex отказал (код $l4_rc)"
+    else
+      mark_reindexed_all "$l4_marks"
     fi
   fi
 

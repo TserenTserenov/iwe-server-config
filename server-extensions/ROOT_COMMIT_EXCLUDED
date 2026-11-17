@@ -1,1 +1,1 @@
-server-extensions/claude-hooks/protocol-stop-gate.sh
+server-extensions/claude-hooks/destructive-guard.sh

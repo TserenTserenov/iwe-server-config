@@ -3,6 +3,10 @@
 # protocol-stop-gate.sh учитывает TaskCreate/TaskUpdate как замену TodoWrite,
 # включая одиночные вызовы с полями одной задачи (не массив) и JSONL-транскрипты.
 #
+# Хук всегда запускается с пустой локалью (LC_ALL=C): launchd и cron стартуют без LANG, и
+# нечувствительный к регистру grep тогда не сворачивает кириллицу («Шаг 3 из 5» не находился,
+# WP-484 Ф311, 17.11).
+#
 # Запуск: bash .claude/hooks/tests/test-protocol-stop-gate-task-replacement.sh
 
 set -uo pipefail
@@ -33,7 +37,7 @@ run_gate() {
 
   local code=0
   printf '{"session_id":"test-session","transcript_path":"%s"}\n' "$transcript" \
-    | IWE_ROOT="$IWE_ROOT" bash "$HOOK_DIR/protocol-stop-gate.sh" >/dev/null 2>&1 || code=$?
+    | LC_ALL=C LANG=C IWE_ROOT="$IWE_ROOT" bash "$HOOK_DIR/protocol-stop-gate.sh" >/dev/null 2>&1 || code=$?
   if [ "$code" -ne 0 ]; then
     echo "HOOK-ERROR:$code"
     return
