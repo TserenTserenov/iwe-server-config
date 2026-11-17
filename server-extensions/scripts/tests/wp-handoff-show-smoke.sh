@@ -8,8 +8,8 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SCRIPTS="$(cd "$HERE/.." && pwd)"
 CHECKER="${IWE_HANDOFF_CHECKER_SRC:-$HOME/IWE/${IWE_GOVERNANCE_REPO:-DS-my-strategy}/scripts/wp-handoff-check.py}"
 if [ ! -f "$CHECKER" ]; then
-  echo "SKIP: wp-handoff-check.py не найден ($CHECKER); задать IWE_HANDOFF_CHECKER_SRC"
-  exit 0
+  echo "NOT VERIFIED: wp-handoff-check.py не найден ($CHECKER); задать IWE_HANDOFF_CHECKER_SRC"
+  exit 77  # not verified (WP-484 F274)
 fi
 PASS=0
 FAIL=0

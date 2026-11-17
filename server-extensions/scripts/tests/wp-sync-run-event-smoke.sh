@@ -10,7 +10,7 @@ ROOT=$(cd "$(dirname "$0")/../.." && pwd)
 GOV="${IWE_GOV_CHECKOUT:-$HOME/IWE/DS-my-strategy}"
 BUNDLE="$ROOT/.claude/scripts/wp-sync-bundle.sh"
 FIXTURES="$GOV/scripts/tests/wp-pipeline-fixtures/DS-my-strategy"
-[ -x "$GOV/scripts/ledger-append.sh" ] && [ -d "$FIXTURES" ] || { echo "SKIP: нет $GOV/scripts/ledger-append.sh или фикстур карточек"; exit 0; }
+[ -x "$GOV/scripts/ledger-append.sh" ] && [ -d "$FIXTURES" ] || { echo "NOT VERIFIED: нет $GOV/scripts/ledger-append.sh или фикстур карточек"; exit 77; }  # 77 = not verified (WP-484 F274): a missing prerequisite is not a pass
 
 T=$(mktemp -d)
 trap 'chmod -R u+w "$T" 2>/dev/null; find "$T" -mindepth 1 -delete 2>/dev/null; rmdir "$T" 2>/dev/null' EXIT

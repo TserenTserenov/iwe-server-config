@@ -1373,7 +1373,8 @@ fresh_ledger() {  # <name> <origin events...> -- diverged canon (patch-equivalen
 # repository's CI does not check out, so its absence skips the ledger scenarios instead of
 # failing them (release 0.42 made it a FAIL; that holds only where the template ships a copy).
 if ! { [ -r "$LEDGER_TOOL_SRC" ] && python3 -c 'import yaml' 2>/dev/null; }; then
-  echo "scenarios 86-90 SKIPPED: need ledger-event-diff.py ($LEDGER_TOOL_SRC) and PyYAML"
+  echo "scenarios 86-90 NOT VERIFIED: need ledger-event-diff.py ($LEDGER_TOOL_SRC) and PyYAML"
+  LEDGER_NOT_VERIFIED=1
 else
 echo "scenario 86 (ledger A): 3 events on disk, all already on the target (which also has another host's event) -> replaced, exit 0, journal clean"
 fresh_ledger s86 "1:alpha" "2:beta" "3:gamma" "9:other-host"
@@ -1482,4 +1483,7 @@ bash "$SCRIPT" "$CANON" main >/dev/null 2>&1; rc=$?
 assert "$rc" "1" "exit 1"; assert "$(git -C "$CANON" rev-parse HEAD)" "$C" "HEAD unchanged"; assert "$(git -C "$CANON" rev-parse main)" "$B98" "branch main untouched"
 assert "$(git -C "$WT98" status --porcelain | wc -l | tr -d ' ')" "0" "the linked worktree is clean (no false staged revert)"
 
-[ "$fails" = 0 ] && echo "PASS: all scenarios" || { echo "FAIL: $fails assertion(s)"; exit 1; }
+[ "$fails" = 0 ] || { echo "FAIL: $fails assertion(s)"; exit 1; }
+# WP-484 F274: with the ledger scenarios skipped the run is partially verified, not a full pass.
+[ -z "${LEDGER_NOT_VERIFIED:-}" ] || { echo "PASS: all run scenarios; 86-90 not verified"; exit 77; }
+echo "PASS: all scenarios"

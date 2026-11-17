@@ -20,7 +20,7 @@ set -euo pipefail
 ROOT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
 GUARD="$ROOT_DIR/scripts/session-guard.sh"
 FLOCK=$(command -v flock || true)
-[ -n "$FLOCK" ] || { echo "SKIP: flock not installed"; exit 0; }
+[ -n "$FLOCK" ] || { echo "NOT VERIFIED: flock not installed"; exit 77; }  # 77 = not verified (WP-484 F274): a missing prerequisite is not a pass
 TEST_ROOT=$(mktemp -d "${TMPDIR:-/tmp}/session-guard-ds-commit-lock.XXXXXX")
 HOLDER_PID=""
 cleanup() {

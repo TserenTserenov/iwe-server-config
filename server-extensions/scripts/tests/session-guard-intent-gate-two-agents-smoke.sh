@@ -23,7 +23,8 @@ GUARD="$ROOT_DIR/scripts/session-guard.sh"
 # The gate and the ledger writer live in the governance repository, not here.
 GATE_SRC="${IWE_INTENT_GATE_SOURCE_DIR:-$HOME/IWE/DS-my-strategy/scripts}"
 for f in intent-gate.sh ledger-append.sh lib/ledger-path.sh; do
-  [ -f "$GATE_SRC/$f" ] || { echo "FAIL: $GATE_SRC/$f not found (set IWE_INTENT_GATE_SOURCE_DIR)"; exit 1; }
+  # Another repository missing (CI has no governance checkout): not verified, not failed (WP-484 F274).
+  [ -f "$GATE_SRC/$f" ] || { echo "NOT VERIFIED: $GATE_SRC/$f not found (set IWE_INTENT_GATE_SOURCE_DIR)"; exit 77; }
 done
 
 B=$(mktemp -d "${TMPDIR:-/tmp}/session-guard-intent-two-agents.XXXXXX")

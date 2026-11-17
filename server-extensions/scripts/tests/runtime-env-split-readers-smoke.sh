@@ -11,7 +11,7 @@ set -uo pipefail
 ROOT="${1:-$(cd "$(dirname "$0")/../.." && pwd)}"
 ARCHIVER="$ROOT/scripts/wp-archive-closed-phases.py"
 [ -f "$ARCHIVER" ] || { echo "FAIL: $ARCHIVER not found" >&2; exit 2; }
-command -v python3 >/dev/null 2>&1 || { echo "SKIP: python3 is required" >&2; exit 0; }
+command -v python3 >/dev/null 2>&1 || { echo "NOT VERIFIED: python3 is required" >&2; exit 77; }  # 77 = not verified (WP-484 F274): a missing prerequisite is not a pass
 T=$(mktemp -d "$(printf '%s' "${TMPDIR:-/tmp}" | sed 's#/*$##')/runtime-env-split-readers.XXXXXX"); trap 'rm -rf "$T"' EXIT
 mkdir -p "$T/legacy-rt"
 fails=0

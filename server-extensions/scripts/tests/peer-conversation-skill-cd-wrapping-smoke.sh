@@ -17,7 +17,7 @@
 set -euo pipefail
 
 SKILL_FILE="${IWE_ROOT:-$HOME/IWE}/.claude/skills/peer-conversation/SKILL.md"
-[ -f "$SKILL_FILE" ] || { echo "SKIP: не найден $SKILL_FILE"; exit 0; }
+[ -f "$SKILL_FILE" ] || { echo "NOT VERIFIED: не найден $SKILL_FILE"; exit 77; }  # 77 = not verified (WP-484 F274): a missing prerequisite is not a pass
 
 FAIL=0
 

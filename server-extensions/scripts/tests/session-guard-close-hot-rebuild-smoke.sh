@@ -43,17 +43,17 @@
 # the matching case fail, so the cases cannot pass by accident.
 #
 # Needs the governance scripts isolate-push.sh and hot_publish_cas.py:
-# IWE_HOT_SCRIPTS_DIR or $IWE_ROOT/DS-my-strategy/scripts; skipped when absent.
+# IWE_HOT_SCRIPTS_DIR or $IWE_ROOT/DS-my-strategy/scripts; exit 77 (not verified) when absent.
 set -euo pipefail
 
 ROOT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 REAL_GUARD="$ROOT_DIR/session-guard.sh"
 HOT_SCRIPTS_DIR="${IWE_HOT_SCRIPTS_DIR:-$(cd "$ROOT_DIR/.." && pwd)/DS-my-strategy/scripts}"
 if [ ! -f "$HOT_SCRIPTS_DIR/isolate-push.sh" ] || [ ! -f "$HOT_SCRIPTS_DIR/hot_publish_cas.py" ]; then
-  SKIP_MESSAGE="SKIPPED: hot-file rebuild NOT covered -- isolate-push.sh/hot_publish_cas.py not found in $HOT_SCRIPTS_DIR (set IWE_HOT_SCRIPTS_DIR)"
+  SKIP_MESSAGE="NOT VERIFIED: hot-file rebuild NOT covered -- isolate-push.sh/hot_publish_cas.py not found in $HOT_SCRIPTS_DIR (set IWE_HOT_SCRIPTS_DIR)"
   echo "$SKIP_MESSAGE"
   echo "$SKIP_MESSAGE" >&2
-  exit 0
+  exit 77  # not verified (WP-484 F274): a missing prerequisite is not a pass
 fi
 
 TEST_ROOT=$(mktemp -d "${TMPDIR:-/tmp}/session-guard-hot-rebuild.XXXXXX")

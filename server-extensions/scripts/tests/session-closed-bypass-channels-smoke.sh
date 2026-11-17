@@ -23,8 +23,9 @@ GOV_REPO_REAL="${IWE_GOVERNANCE_REPO:-DS-my-strategy}"
 LEDGER_APPEND="${IWE_LEDGER_SCRIPT:-$IWE_ROOT_REAL/$GOV_REPO_REAL/scripts/ledger-append.sh}"
 LEDGER_LIB_DIR="${IWE_LEDGER_LIB_DIR:-$IWE_ROOT_REAL/$GOV_REPO_REAL/scripts/lib}"
 
-[ -f "$GUARD" ] || { echo "SKIP: не найден $GUARD"; exit 0; }
-[ -f "$LEDGER_APPEND" ] || { echo "SKIP: не найден $LEDGER_APPEND"; exit 0; }
+# 77 = not verified (WP-484 F274): a missing prerequisite is not a pass
+[ -f "$GUARD" ] || { echo "NOT VERIFIED: не найден $GUARD"; exit 77; }
+[ -f "$LEDGER_APPEND" ] || { echo "NOT VERIFIED: не найден $LEDGER_APPEND"; exit 77; }
 
 SANDBOX=$(mktemp -d)
 trap 'chmod -R u+w "$SANDBOX" 2>/dev/null; rm -rf "$SANDBOX"' EXIT

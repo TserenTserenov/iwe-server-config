@@ -14,7 +14,7 @@ ROOT="${1:-$(cd "$(dirname "$0")/../.." && pwd)}"
 BOOT="$ROOT/.claude/lib/iwe-env-bootstrap.sh"
 HOOK="$ROOT/.claude/hooks/protocol-stop-gate.sh"
 [ -f "$BOOT" ] && [ -f "$HOOK" ] || { echo "FAIL: bootstrap or stop-gate hook not found under $ROOT" >&2; exit 2; }
-command -v jq >/dev/null 2>&1 || { echo "SKIP: jq is required by the stop-gate hook" >&2; exit 0; }
+command -v jq >/dev/null 2>&1 || { echo "NOT VERIFIED: jq is required by the stop-gate hook" >&2; exit 77; }  # 77 = not verified (WP-484 F274): a missing prerequisite is not a pass
 T=$(mktemp -d "$(printf '%s' "${TMPDIR:-/tmp}" | sed 's#/*$##')/runtime-env-split.XXXXXX"); trap 'rm -rf "$T"' EXIT
 WS="$T/ws"; mkdir -p "$WS" "$T/home"
 fails=0

@@ -134,8 +134,8 @@ echo "PASS: a runner-owned housekeeping session authorises another agent's commi
 # an isolated root checkout. The root-only guard suite has no DS checkout in CI.
 WRAPPER="${IWE_TEST_GIT_WRAPPER:-$ROOT_DIR/DS-my-strategy/scripts/git-wrapper/git-wrapper.sh}"
 if [ ! -f "$WRAPPER" ]; then
-  echo "SKIP: wrapper integration needs IWE_TEST_GIT_WRAPPER pointing at the DS candidate"
-  exit 0
+  echo "NOT VERIFIED: wrapper integration needs IWE_TEST_GIT_WRAPPER pointing at the DS candidate"
+  exit 77  # the scenarios above passed; this part was not checked (WP-484 F274)
 fi
 # The PATH entry named git can be the wrapper under test. Pass an actual Git
 # binary to its override, including when a fixture puts a shell shim first.

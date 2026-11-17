@@ -29,8 +29,10 @@ GUARD="${SESSION_GUARD_UNDER_TEST:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && p
 GOV_REPO_REAL="${IWE_GOVERNANCE_REPO:-DS-my-strategy}"
 OBLIGATION_CLI_REAL="$IWE_ROOT_REAL/$GOV_REPO_REAL/scripts/close_obligation.py"
 
-[ -f "$GUARD" ] || { echo "SKIP: не найден $GUARD"; exit 0; }
-[ -f "$OBLIGATION_CLI_REAL" ] || { echo "SKIP: не найден $OBLIGATION_CLI_REAL"; exit 0; }
+# The guard ships next to this test: missing means a broken checkout (fail). The
+# obligation CLI lives in the governance repo: missing means not verified (77, WP-484 F274).
+[ -f "$GUARD" ] || { echo "FAIL: не найден $GUARD"; exit 1; }
+[ -f "$OBLIGATION_CLI_REAL" ] || { echo "NOT VERIFIED: не найден $OBLIGATION_CLI_REAL"; exit 77; }
 
 SANDBOX=$(mktemp -d)
 trap 'rm -rf "$SANDBOX"' EXIT

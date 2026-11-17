@@ -295,9 +295,9 @@ new_ledger_case() {
 }
 
 if [ -z "$LEDGER_TOOL_SRC" ] || ! command -v flock >/dev/null 2>&1; then
-  echo "SKIP: scenarios 11-30 (need ledger-event-diff.py next to this checkout or in ~/IWE/DS-my-strategy, and flock)"
-  echo "PASS: canon-reconcile-smoke.sh (10 scenarios, 20 skipped)"
-  exit 0
+  echo "NOT VERIFIED: scenarios 11-30 (need ledger-event-diff.py next to this checkout or in ~/IWE/DS-my-strategy, and flock)"
+  echo "PASS: canon-reconcile-smoke.sh scenarios 1-10; 11-30 not verified"
+  exit 77  # WP-484 F274: partially verified is not a full pass
 fi
 
 # 11: unpublished local event survives the fast-forward as a union, no stash left.
