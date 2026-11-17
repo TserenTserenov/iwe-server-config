@@ -49,7 +49,7 @@ class OrderOfQuestions(unittest.TestCase):
 
     def test_new_close_of_machine_run_or_day_protocol_is_out_of_scope(self):
         for case in (facts(declared="pipeline"), facts(declared="machine-publish-only"),
-                     facts(wp="day-close"), facts(housekeeping=True)):
+                     facts(housekeeping=True)):
             with self.subTest(case=case):
                 out = cr.classify(case)
                 self.assertIsNone(out["route"])
@@ -192,6 +192,16 @@ class Execution(unittest.TestCase):
         self.assertTrue(out["peer_step"])
         self.assertTrue(any("журнал пир-сессии" in r for r in out["reasons"]))
 
+    def test_day_close_label_is_not_a_service_bypass(self):
+        # WP-561 F61 (17.11): the real day-close uses --housekeeping; the label
+        # `--wp day-close` alone classifies like any session.
+        changed = cr.classify(facts(wp="day-close"))
+        self.assertIsNone(changed["refuse"])
+        self.assertEqual(changed["route"], cr.CLOSE_CHANGES)
+        self.assertEqual(changed["execution"], cr.EXEC_RUNNER)
+        empty = cr.classify(facts(wp="day-close", no_changes="proven"))
+        self.assertEqual(empty["route"], cr.RELEASE_EMPTY)
+
     def test_peer_session_under_service_wp_is_not_out_of_scope(self):
         for case in (facts(wp="day-close", declared="peer-session"),
                      facts(wp="day-close", peer_evidence="yes")):
@@ -205,7 +215,7 @@ class Execution(unittest.TestCase):
         self.assertEqual(out["execution"], cr.EXEC_RESUME)
 
     def test_refusals_and_nothing_keep_the_declared_behaviour(self):
-        for case in (facts(declared="pipeline"), facts(wp="day-close"),
+        for case in (facts(declared="pipeline"),
                      facts(semaphores=0), facts(semaphores=2), facts(semaphores=-1)):
             with self.subTest(case=case):
                 self.assertEqual(cr.classify(case)["execution"], cr.EXEC_LEGACY)

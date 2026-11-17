@@ -57,7 +57,6 @@ EXECUTION_TEXT = {
 }
 
 MACHINE_PATHS = {"pipeline", "machine-publish-only"}
-SERVICE_WPS = {"day-close"}
 
 PHRASE_NOTHING = (
     "В этом разговоре отметки открытия нет, программе закрывать нечего — можно закрыть окно. "
@@ -135,13 +134,13 @@ def classify(facts):
         # A resumed close keeps the kind chosen on the first attempt; no mismatch check.
         return out
 
-    # A peer session is never a service protocol, whatever WP it was opened under:
-    # the peer skill opens with --wp day-close/unknown when no WP is assigned, and
-    # that one word must not bring back the short close (Fable review 15.11).
-    is_peer = declared == "peer-session" or facts.get("peer_evidence") == "yes"
-    if declared in MACHINE_PATHS or (facts.get("wp") in SERVICE_WPS and not is_peer):
+    # The day-close protocol opens and closes its own mark with --housekeeping
+    # (refused above), never with `--wp day-close`. That label is only "no WP
+    # assigned" (the peer skill and hand-opened sessions use it), so it is
+    # classified like any other session (WP-561 F61, 17.11: it was a bypass).
+    if declared in MACHINE_PATHS:
         out["refuse"] = "out-of-scope"
-        reasons.append(f"служебный протокол или машинный запуск (close_path={declared}, wp={facts.get('wp')}) — свой порядок, вне схемы")
+        reasons.append(f"машинный запуск (close_path={declared}) — свой порядок, вне схемы")
         out["mismatch"] = _expected_route(declared) != "out-of-scope"
         return out
 

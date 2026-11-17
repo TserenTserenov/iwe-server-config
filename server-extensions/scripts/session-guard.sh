@@ -935,6 +935,23 @@ git_identity_matches() {
 # a freeze bypass).
 # Fail closed onto the canonical path only when identity can't be confirmed,
 # not on every worktree caller -- worktree stays the common case here.
+# WP-561 F61: why a governance copy cannot be closed later, or nothing.
+# Mirrors the close runner's rule for hand-made copies (process-runner.py
+# _handmade_governance_refusal): a copy in a scratchpad or temporary directory
+# is refused. A copy inside $IWE_ROOT is always fine (fixtures live in $TMPDIR).
+_volatile_governance_copy_reason() {  # <dir>
+  local dir root real_root
+  dir=$(cd "$1" 2>/dev/null && pwd -P) || return 0
+  real_root=$(cd "$IWE_ROOT" 2>/dev/null && pwd -P) || real_root="$IWE_ROOT"
+  case "$dir/" in "$real_root"/*) return 0 ;; esac
+  case "/$dir/" in */scratchpad/*) printf 'во временной папке агента (scratchpad)'; return 0 ;; esac
+  for root in /tmp /var/tmp /private/tmp /private/var/tmp /dev/shm "${TMPDIR:-}"; do
+    [ -n "$root" ] || continue
+    root=$(cd "$root" 2>/dev/null && pwd -P) || continue
+    case "$dir/" in "$root"/*) printf 'во временном каталоге %s' "$root"; return 0 ;; esac
+  done
+}
+
 gov_repo_dir() {
   local canonical="$IWE_ROOT/$GOV_REPO" candidate candidate_rc=0
   candidate=$(git rev-parse --show-toplevel 2>/dev/null) || candidate_rc=$?
@@ -5560,6 +5577,16 @@ if [ "$CMD" = "open" ]; then
   # Kimi each opening their own checkout of the same WP is exactly the failure
   # mode this warns about.
   CURRENT_REPO_DIR="$(gov_repo_dir)"
+  # WP-561 F61 (17.11, live case of a WP-601 session): the close runner refuses a
+  # hand-made governance copy in a temporary or scratchpad directory
+  # (process-runner.py _handmade_governance_refusal), so `open` must refuse the
+  # same copy instead of recording it and failing only at the end of the work.
+  if [ "$ISOLATE_FLAG" != "1" ]; then
+    VOLATILE_REASON=$(_volatile_governance_copy_reason "$CURRENT_REPO_DIR")
+    if [ -n "$VOLATILE_REASON" ]; then
+      fail "open: копия репозитория стратегии $CURRENT_REPO_DIR лежит ${VOLATILE_REASON} — закрытие такую копию не примет. Открой сессию с отдельной копией от защиты: (cd \"$IWE_ROOT/$GOV_REPO\" && bash \"$IWE_ROOT/scripts/session-guard.sh\" open --isolate --wp $WP --agent $AGENT …)" 1
+    fi
+  fi
   CURRENT_REMOTE="$(git -C "$CURRENT_REPO_DIR" remote get-url origin 2>/dev/null || true)"
   if [ -n "$CURRENT_REMOTE" ]; then
     while IFS= read -r OTHER_SEM; do
