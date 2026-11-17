@@ -9441,6 +9441,25 @@ print(json.dumps(commits, separators=(",", ":")))
 '
 }
 
+# WP-484 F310, defect 2 (bug-2026-11-17-multiline-note-file-claim-blocks-product-receipt): a
+# product receipt needs every changed file of a claimed root-level commit claimed through
+# note-file, and that used to surface only after PREPARED, when the scope is frozen. Warn while
+# it can still be fixed (after note-commit, before PREPARED). A warning, not a refusal: only
+# product deliveries need full coverage, ordinary closes must not stop on it. Never fails.
+_warn_close_scope_gaps() {  # <semaphore>
+  local gaps
+  gaps=$(timeout 30 python3 "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/close_scope_gaps.py" \
+    "$1" "$IWE_ROOT" 2>/dev/null) || return 0
+  [ -n "$gaps" ] || return 0
+  {
+    echo "session-guard: ВНИМАНИЕ: у заявленных коммитов есть файлы без заявки note-file:"
+    printf '%s\n' "$gaps" | sed 's/^/  /'
+    echo "  Квитанция доставки в продуктовую ветку потребует их все, а после «подготовлено» дозаявить нельзя."
+    echo "  Дозаяви сейчас: (cd ~/IWE/<репозиторий> && bash ~/IWE/scripts/session-guard.sh note-file <путь>)"
+  } >&2
+  return 0
+}
+
 _close_delivery_state() {  # <semaphore> <session-id> [state|prepared-hook-json]
   python3 - "$1" "$2" "${3:-state}" <<'PY' 2>/dev/null
 import hashlib
@@ -12397,6 +12416,7 @@ _close_delivery_and_transition() {
     [ -n "${TERMINAL_PROOF_KIND:-}" ] && [ -n "${TERMINAL_PROOF_REFERENCE:-}" ] \
       && [ -n "${TERMINAL_PROOF_SHA256:-}" ] \
       || fail "close: immutable terminal proof не зафиксирован до PREPARED" 7
+    _warn_close_scope_gaps "$SEM_FILE"
     prepare_digest=$(_record_close_prepared "$SEM_FILE" "$SESSION_ID" "$CLOSING_WORKTREE" \
       "$common_dir" "$source_base" "$source_head" "$source_status" "$source_commits" \
       "$claims_json" "$TERMINAL_PROOF_KIND" "$TERMINAL_PROOF_REFERENCE" "$TERMINAL_PROOF_SHA256" \
@@ -15602,6 +15622,7 @@ finally:
     os.close(dir_fd)
 print("Noted commit: " + entry[len("commit: "):])
 PY
+  _warn_close_scope_gaps "$SEM_FILE"
   exit 0
 fi
 

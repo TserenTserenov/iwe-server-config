@@ -1450,6 +1450,35 @@ fi
 # such a copy; a linked worktree is somebody's own copy and stays free, and so does going back to
 # main/master or restoring files (`git checkout -- <path>`). The hourly shared-copies-refresh job
 # returns a copy that was switched anyway (once its timer is installed on the server).
+#
+# Scope (pilot's choice, variant A, 17.11): a copy is shared when the copy registry names it class
+# reader or service on THIS host -- the same set shared-copies-refresh returns. A working copy (the
+# bot on the Mac, where pilot/new-architecture are switched on purpose) is not touched. Fail closed:
+# an unreadable registry or no python3 keeps the protection on every PACK-*/DS-IT-systems/* copy.
+registry_marks_shared() {  # <toplevel> -> 0 when shared (or unknown), 1 when the registry says not shared
+  local rel="${1#"$WORKSPACE_ROOT"/}"
+  local registry="${IWE_REPO_REGISTRY_JSON:-$WORKSPACE_ROOT/scripts/repo-convergence.registry.json}"
+  # The JSON copy of the registry needs no PyYAML (the Mac's system python3 has none).
+  python3 - "$WORKSPACE_ROOT/scripts" "$registry" "$rel" <<'PY_REGISTRY' 2>/dev/null
+import json, sys
+scripts, path, rel = sys.argv[1:]
+try:
+    sys.path.insert(0, scripts)
+    import repo_registry  # host_id() and checkout_class(): one definition with the refresh job
+    with open(path, encoding="utf-8") as fh:
+        registry = json.load(fh)
+    host = repo_registry.host_id()
+    for entry in registry["repos"]:
+        for checkout in entry["checkouts"]:
+            if checkout["host"] == host and checkout["path"] == rel:
+                sys.exit(0 if repo_registry.checkout_class(entry, checkout) in ("reader", "service") else 1)
+except Exception:
+    sys.exit(0)  # unreadable registry: keep the protection
+sys.exit(1)  # not registered on this host: not a shared copy
+PY_REGISTRY
+  [ "$?" -ne 1 ]
+}
+
 shared_copy_toplevel() {  # <dir> -> prints the toplevel when <dir> is the main checkout of a shared copy
   # No `rev-parse --path-format` (git >= 2.31 only): an unknown option would fail every call and
   # silently switch the protection off, so the paths are made absolute through `cd ... && pwd -P`.
@@ -1462,6 +1491,7 @@ shared_copy_toplevel() {  # <dir> -> prints the toplevel when <dir> is the main 
   git_dir=$(cd "$dir" && cd "$(git rev-parse --git-dir 2>/dev/null)" 2>/dev/null && pwd -P) || return 1
   common_dir=$(cd "$dir" && cd "$(git rev-parse --git-common-dir 2>/dev/null)" 2>/dev/null && pwd -P) || return 1
   [ "$git_dir" = "$common_dir" ] || return 1
+  registry_marks_shared "$top" || return 1
   printf '%s\n' "$top"
 }
 

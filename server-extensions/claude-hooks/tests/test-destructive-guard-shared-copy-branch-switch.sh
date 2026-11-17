@@ -1,8 +1,9 @@
 #!/bin/bash
 # test-destructive-guard-shared-copy-branch-switch.sh — WP-484, bug-2026-11-17 fix 5:
 # `git switch <branch>` / `git checkout <branch>` in the MAIN checkout of a shared copy
-# (PACK-*, DS-IT-systems/*) is refused; going back to main, restoring files, a linked worktree
-# and any other repository pass.
+# (PACK-*, DS-IT-systems/* that the copy registry names reader/service on this host) is refused;
+# going back to main, restoring files, a linked worktree, a working copy and any other repository
+# pass. An unreadable registry keeps the protection (fail closed).
 #
 # Fixture command strings are fed as JSON `tool_input.command`, never run.
 #
@@ -19,10 +20,12 @@ TEST_HOME="$(dirname "$WORKSPACE_ROOT")"
 PACK="$WORKSPACE_ROOT/PACK-guardtest-$$"
 BOT="$WORKSPACE_ROOT/DS-IT-systems/guardtest-$$"
 BOT2="$WORKSPACE_ROOT/DS-IT-systems/guardtest-newarch-$$"   # main branch is not main (the bot copy: new-architecture)
+WORKING="$WORKSPACE_ROOT/DS-IT-systems/guardtest-working-$$"  # registered as a working copy on this host
+UNLISTED="$WORKSPACE_ROOT/PACK-guardtest-unlisted-$$"         # in no registry entry for this host
 PASS=0
 FAIL=0
 cleanup() {
-  rm -rf "${TMP_DIR:?}" "${PACK:?}" "${BOT:?}" "${BOT2:?}"
+  rm -rf "${TMP_DIR:?}" "${PACK:?}" "${BOT:?}" "${BOT2:?}" "${WORKING:?}" "${UNLISTED:?}"
   rmdir "$WORKSPACE_ROOT/DS-IT-systems" 2>/dev/null || true
 }
 trap cleanup EXIT
@@ -38,6 +41,8 @@ mk_repo() {  # <dir>
 }
 mk_repo "$PACK"
 mk_repo "$BOT"
+mk_repo "$WORKING"
+mk_repo "$UNLISTED"
 mk_repo "$TMP_DIR/other"
 git -C "$PACK" worktree add -q "$TMP_DIR/linked" feature
 # a copy cloned from an origin whose HEAD is new-architecture, with a second branch "pilot"
@@ -49,6 +54,23 @@ git -C "$BOT2" commit -q -m seed
 git -C "$BOT2" push -q origin HEAD:new-architecture
 git -C "$BOT2" remote set-head origin new-architecture >/dev/null 2>&1 || git -C "$BOT2" remote set-head origin -a >/dev/null 2>&1
 git -C "$BOT2" branch pilot
+
+# The copy registry the hook reads (variant A, 17.11): a fixture, not the real one, for a fixture host.
+REGISTRY="$TMP_DIR/registry.json"
+python3 - "$REGISTRY" "${PACK#"$WORKSPACE_ROOT"/}" "${BOT#"$WORKSPACE_ROOT"/}" "${BOT2#"$WORKSPACE_ROOT"/}" "${WORKING#"$WORKSPACE_ROOT"/}" "${UNLISTED#"$WORKSPACE_ROOT"/}" <<'PY_FIXTURE'
+import json, sys
+dst, pack, bot, bot2, working, unlisted = sys.argv[1:]
+def repo(rid, cls, checkouts):
+    return {"repo_id": rid, "class": cls, "checkouts": checkouts}
+json.dump({"version": 1, "repos": [
+    repo("pack", "reader", [{"host": "guardhost", "path": pack}]),
+    repo("bot", "working", [{"host": "guardhost", "path": bot, "class": "service"}]),
+    repo("bot2", "reader", [{"host": "guardhost", "path": bot2}]),
+    repo("working", "working", [{"host": "guardhost", "path": working}]),
+    repo("unlisted", "reader", [{"host": "otherhost", "path": unlisted}]),
+]}, open(dst, "w"))
+PY_FIXTURE
+export IWE_REPO_REGISTRY_JSON="$REGISTRY" CONVERGENCE_HOST_ID=guardhost
 
 # expect <desc> <want block|pass> <command> <cwd>
 expect() {
@@ -104,6 +126,15 @@ expect "cd into the pack, then back to main" pass "(cd $PACK && git switch main)
 expect "cd into another repository, then switch" pass "(cd $TMP_DIR/other && git switch feature)" "$PACK"
 expect "other repository: free" pass 'git switch feature' "$TMP_DIR/other"
 expect "-C into another repository: free" pass "git -C $TMP_DIR/other switch feature" "$PACK"
+
+# === variant A: the registry decides which copies are shared ===
+expect "working copy on this host: switch is free" pass 'git switch feature' "$WORKING"
+expect "copy registered only for another host: free" pass 'git switch feature' "$UNLISTED"
+IWE_REPO_REGISTRY_JSON="$TMP_DIR/no-such-registry.json" \
+  expect "registry missing: protection stays (fail closed)" block 'git switch feature' "$WORKING"
+printf 'not json' > "$TMP_DIR/broken.json"
+IWE_REPO_REGISTRY_JSON="$TMP_DIR/broken.json" \
+  expect "registry broken: protection stays (fail closed)" block 'git switch feature' "$UNLISTED"
 
 if [ "$FAIL" -eq 0 ]; then
   echo "PASS: $PASS проверок"
