@@ -1,0 +1,2 @@
+server-extensions/claude-hooks/protocol-artifact-validate.sh
+server-extensions/scripts/session-guard.sh

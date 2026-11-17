@@ -69,6 +69,7 @@ cat ~/.wakatime.cfg 2>/dev/null
 [settings]
 api_key = <ключ от пользователя>
 ```
+4. Время за прошлые дни (закрытие дня после полуночи, сводка WakaTime в Day Close): WakaTime может отвечать 403 на сводки по ключу плагина (issue #1451, выпуск 0.42). Тогда `"$IWE_TEMPLATE/scripts/wakatime-day-total.py"` берёт только сегодняшний день, а для прошлых дней нужен личный OAuth-токен (https://wakatime.com/oauth) в переменной окружения `WAKATIME_OAUTH_TOKEN` — пользователь задаёт её сам, токен в чат не присылать.
 
 ### Шаг 3: Хук-скрипт
 

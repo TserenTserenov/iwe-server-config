@@ -163,6 +163,7 @@ assert "$rc" "1" "exit 1 with live writer"; assert "$(git -C "$CANON" rev-parse 
 # WP-568: the ALERT names the writer in a detail tail; the class (streak key) stays without it
 o8=$(env CANON_RECONCILE_ALERT_AFTER_SEC=0 CANON_RECONCILE_ALERT_MIN_COUNT=1 CANON_RECONCILE_ALERT_REPEAT_SEC=0 bash "$SCRIPT" "$CANON" main 2>&1)
 assert "$(printf '%s' "$o8" | grep -c "refusals 'live canonical writer(s)', .* -- detail: claude-code-writer$")" "1" "the ALERT carries the writer's semaphore name as detail, outside the class"
+rm -f "$IWE_RUNTIME_DIR"/canon-reconcile-published.*.streak   # release 0.42: the refusal streak is keyed by the canon path, which later scenarios reuse: do not let it leak into them
 rm -f "$IWE_RUNTIME_DIR/sessions/claude-code-writer.open"   # only the pid-less semaphore may count from here (otherwise the previous live one would satisfy the check)
 printf 'agent: codex\n' > "$IWE_RUNTIME_DIR/sessions/codex-nopid.open"; H=$(git -C "$CANON" rev-parse HEAD)
 bash "$SCRIPT" "$CANON" main >/dev/null 2>&1; rc=$?
@@ -1368,6 +1369,9 @@ fresh_ledger() {  # <name> <origin events...> -- diverged canon (patch-equivalen
   echo one > "$CANON/b.txt"; commit_in "$CANON" "local"; republish_on_origin "$CANON" "$(git -C "$CANON" rev-parse HEAD)"
   local pub="$SANDBOX/pub-ledger-$name"; git clone -q "$ORIGIN" "$pub"; mk_ledger "$pub/$LEDGER_REL" "0:base" "$@"; commit_in "$pub" "publisher carries the journal"; git -C "$pub" push -q origin main
 }
+# Kept root behaviour (WP-529 F274 step 8): the tool lives in DS-my-strategy, which this
+# repository's CI does not check out, so its absence skips the ledger scenarios instead of
+# failing them (release 0.42 made it a FAIL; that holds only where the template ships a copy).
 if ! { [ -r "$LEDGER_TOOL_SRC" ] && python3 -c 'import yaml' 2>/dev/null; }; then
   echo "scenarios 86-90 SKIPPED: need ledger-event-diff.py ($LEDGER_TOOL_SRC) and PyYAML"
 else

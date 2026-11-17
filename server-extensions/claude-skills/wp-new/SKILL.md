@@ -123,7 +123,7 @@ gates_rationale: "операционный скилл; WP Gate применим 
 1. **`inbox/WP-{N}/WP-{N}.md`** → context file (всегда папка — WP-434, см. INBOX-CONVENTION)
 2. **`archive/wp-contexts/WP-{N}-{slug}.md`** → заготовка §Закрытия (stub с frontmatter)
 3. **`docs/WP-REGISTRY.md`** → новая строка таблицы
-4. **`current/WeekPlan W{N}…md`** → новая строка в таблице РП
+4. **`current/WeekPlan W{N}…md`** → новая строка в таблице РП — если добавление в план не отключено (issue #1503, выпуск 0.42). Порядок: флаг `--no-weekplan` или `--weekplan` > параметр `wp_new_add_to_weekplan: false` в `params.yaml` > по умолчанию строка добавляется. Отключённый параметр — РП только в карточке и реестре, в план недели РП попадает по отдельному слову пилота. Стратегическая сессия, утверждающая РП в план недели, передаёт `--weekplan`.
 5. **`current/active-wp.md`** → пересобирается автоматически (`build-active-wp.py`)
 
 **После скрипта — агент дополняет карточку и вызывает MCP:**
@@ -182,6 +182,7 @@ result_type: {system|episteme}
 ## Шаг 5. Подтверждение
 
 Выведи: *«РП #{N} создан. Скрипт записал в 5 местах: context file, archive stub, Registry, WeekPlan, active-wp пересобран. Linear — {TSR-NN}.»*
+Если `create-wp.sh` напечатал «WeekPlan: строка не добавляется» (issue #1503): *«РП #{N} создан: карточка, реестр и active-wp согласованы; в план недели не добавлен (по настройке).»*
 Если ≥3h и `--result` не передан: добавить «+ добавить маппинг в Strategy.md вручную».
 
 ```bash

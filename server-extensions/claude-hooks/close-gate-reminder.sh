@@ -162,10 +162,29 @@ if echo "$PROMPT" | grep -qE '(в обход раннера|без раннер�
 fi
 
 # Day Close → ПРИНУДИТЕЛЬНЫЙ вызов /run-protocol
-if echo "$PROMPT" | grep -qE '(итоги дня|закрываю день|закрывай день)'; then
-  cat <<'EOF'
-{"additionalContext": "⛔ БЛОКИРУЮЩЕЕ: Day Close выполняется ТОЛЬКО через skill /run-protocol с аргументом 'day-close'. ПЕРВОЕ И ЕДИНСТВЕННОЕ действие = вызвать Skill tool: skill='run-protocol', args='day-close'. НЕ читать protocol-close.md вручную. НЕ выполнять шаги самостоятельно. НЕ писать итоги без /run-protocol. Причина: 5 инцидентов пропуска шагов при ручном исполнении (15, 18, 19, 27 мар). /run-protocol гарантирует пошаговый TodoList + верификацию Haiku R23."}
-EOF
+# Release 0.42 (issue #1472, WP-610 F9): trigger phrases and the instruction come
+# from the language catalogs (.claude/lib/locale/*.json, every shipped language
+# is recognised), and quoted words are not requests: «…», „…“, "…" and “…” are
+# cut out before matching, so "я не писал «закрывай день»" stays silent.
+# A catalog failure falls back to the built-in Russian phrase and text, so the
+# instruction is never lost.
+DAY_CLOSE_TEXT_FALLBACK="⛔ БЛОКИРУЮЩЕЕ: Day Close выполняется ТОЛЬКО через skill /run-protocol с аргументом 'day-close'. ПЕРВОЕ И ЕДИНСТВЕННОЕ действие = вызвать Skill tool: skill='run-protocol', args='day-close'. НЕ читать protocol-close.md вручную. НЕ выполнять шаги самостоятельно. НЕ писать итоги без /run-protocol. Причина: 5 инцидентов пропуска шагов при ручном исполнении (15, 18, 19, 27 мар). /run-protocol гарантирует пошаговый TodoList + верификацию Haiku R23."
+DAY_PROMPT_UNQUOTED=$(printf '%s' "$SANITIZED" \
+  | jq -r '(.prompt // "") | gsub("«[^»]*»|„[^“]*“|\"[^\"]*\"|“[^”]*”"; " ")' 2>/dev/null \
+  | lower_text)
+DAY_CLOSE_TEXT=""
+if . "${BASH_SOURCE[0]%/*}/../lib/i18n.sh" 2>/dev/null; then
+  i18n_match recognition.close_day "$DAY_PROMPT_UNQUOTED"
+  case $? in
+    0) DAY_CLOSE_TEXT=$(i18n_msg agent.close_gate.day 2>/dev/null) || DAY_CLOSE_TEXT="$DAY_CLOSE_TEXT_FALLBACK" ;;
+    1) ;;
+    *) echo "$DAY_PROMPT_UNQUOTED" | grep -qE '(итоги дня|закрываю день|закрывай день)' && DAY_CLOSE_TEXT="$DAY_CLOSE_TEXT_FALLBACK" ;;
+  esac
+elif echo "$DAY_PROMPT_UNQUOTED" | grep -qE '(итоги дня|закрываю день|закрывай день)'; then
+  DAY_CLOSE_TEXT="$DAY_CLOSE_TEXT_FALLBACK"
+fi
+if [ -n "$DAY_CLOSE_TEXT" ]; then
+  jq -n --arg ctx "$DAY_CLOSE_TEXT" '{"additionalContext": $ctx}'
   exit 0
 fi
 
