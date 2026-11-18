@@ -69,6 +69,8 @@ ARCHIVE_SCRIPT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)/scripts/wp-a
 # WP-561 Ф60: real GitHub state of pull requests / branches the card names
 # (incident 10.11: a merge recorded only in a pack repo stayed invisible).
 MERGE_REFS_SCRIPT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)/scripts/wp-merge-refs-check.py"
+# WP-561 Ф74: state of external repositories (release branch, tags, issues, failed runs) next to the card.
+EXTERNAL_WATCH_SCRIPT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)/scripts/wp-external-watch-check.py"
 REGISTRY_FILE="$STRATEGY_DIR/docs/WP-REGISTRY.md"
 GIT_LOG_DAYS="${WP_SYNC_GIT_DAYS:-14}"
 
@@ -145,6 +147,15 @@ validate_frontmatter() {
   return 0
 }
 
+# Commit time of the card file (WP-561 Ф74): the "revision" the external-state
+# check compares events against. Same revision as the card text read (GIT_LOG_REV
+# in origin-pinned mode); empty when git cannot say, the helper then uses a window.
+card_revised_at() {
+  local relpath
+  relpath=$(card_relpath "$1")
+  git -C "$STRATEGY_DIR" log -1 --format=%cI ${GIT_LOG_REV:+"$GIT_LOG_REV"} -- "$relpath" 2>/dev/null || true
+}
+
 # Path relative to CARD_ROOT; falls back to the input when no python3 resolves.
 # Only the standard library is needed here, so PyYAML must not be required
 # (without it origin-pinned mode would log a snapshot path outside the repo).
@@ -198,7 +209,7 @@ materialize_origin_tree() {
   # missing pathspec makes `git archive` fail outright, so pass only paths
   # that exist in this commit. The registry stays mandatory (checked below).
   local tree_paths=() tp
-  for tp in inbox archive/wp-contexts docs/WP-REGISTRY.md; do
+  for tp in inbox archive/wp-contexts docs/WP-REGISTRY.md machine/wp-watch-registry.json; do
     git -C "$repo" cat-file -e "${remote_oid}:${tp}" 2>/dev/null && tree_paths+=("$tp")
   done
   [[ ${#tree_paths[@]} -gt 0 ]] || { rm -rf "$ORIGIN_WS"; ORIGIN_WS=""; return 1; }
@@ -1101,6 +1112,20 @@ main() {
   else
     echo "## Запросы на слияние и ветки из карточки (РП-561 Ф60)"
     echo "- ⚠️ проверка недоступна: нет python3 или ${MERGE_REFS_SCRIPT}"
+    echo ""
+  fi
+
+  # WP-561 Ф74: what happens in the repositories the card says nothing about.
+  # Never fatal: a failure is printed as a line, like the merge helper above.
+  local watch_py
+  if watch_py=$("$FIND_PYTHON3" --stdlib-only 2>/dev/null) && [[ -r "$EXTERNAL_WATCH_SCRIPT" ]]; then
+    "$watch_py" "$EXTERNAL_WATCH_SCRIPT" "$wp_file" --wp "$wp_num" --workspace "$IWE_WORKSPACE" \
+      --registry "$CARD_ROOT/machine/wp-watch-registry.json" --revised-at "$(card_revised_at "$wp_file")" \
+      --drift-file "$drift_file" --days "$GIT_LOG_DAYS" \
+      || { echo "- ⚠️ проверка внешнего состояния не выполнена (код $?)"; echo ""; }
+  else
+    echo "## Внешнее состояние по наблюдению (РП-561 Ф74)"
+    echo "- ⚠️ проверка недоступна: нет python3 или ${EXTERNAL_WATCH_SCRIPT}"
     echo ""
   fi
 

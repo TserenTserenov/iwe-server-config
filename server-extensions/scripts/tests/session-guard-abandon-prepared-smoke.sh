@@ -15,6 +15,9 @@
 # no isolate-push/close/RUN-card machinery needed to reach them.
 
 set -euo pipefail
+# WP-561 (18.11): peer-session close now needs --pilot-close-word; this smoke checks other close
+# behaviour, so the word check is switched off here (covered by test_pilot_close_word.py).
+export IWE_PEER_CLOSE_WORD_ENFORCE=0
 
 ROOT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 GUARD="$ROOT_DIR/session-guard.sh"

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Check pull requests and branches named in a WP card against GitHub (WP-561 Ф60).
+"""Check pull requests, issues and branches named in a WP card against GitHub (WP-561 Ф60, Ф74).
 
 Why: on 10.11.2026 an actualization of WP-616 repeated the card's own stale
 claim "branch wp616-translator-role, merge request after close" although the
@@ -20,6 +20,11 @@ What it does:
     request while the card still describes it as pending.
   Only merges and closures within --days are compared: older status words are
   history, not a claim about the present.
+
+  A "<repo> #N" reference that is no pull request is looked up among the issues
+  (WP-561 Ф74: on 17.11 the card said "start with #1567/#1568" while both issues
+  were already closed; pull requests alone never showed it). A closed issue is
+  a mismatch unless the text next to it says it is closed or done.
 
 Output: markdown lines on stdout; one "DRIFT: ..." line per mismatch appended
 to --drift-file. Exit 0 whenever the card was read (GitHub trouble is
@@ -58,6 +63,7 @@ MD_LINK_TAIL_RE = re.compile(r"^\]\([^)]*\)")
 NEGATION = r"(?<![Нн]е )(?<!будет )"
 MERGED_RE = re.compile(NEGATION + r"\b(?:слит[аоы]?|влит[аоы]?|merged|смёрж\w*)\b", re.IGNORECASE)
 CLOSED_RE = re.compile(r"\b(?:закрыт\w*|отклон\w*|closed)\b", re.IGNORECASE)
+ISSUE_DONE_RE = re.compile(r"\b(?:закрыт\w*|исправл\w*|реш[её]н\w*|выполнен\w*|closed|fixed|resolved|done)\b", re.IGNORECASE)
 # Words saying "not merged yet"; a bare reference or one next to a commit id is not a claim.
 PENDING_RE = re.compile(
     r"(?:жд[её]т|ожида\w*|после\s+закрыти\w*|\bоткрыт\b|на\s+ревью|создать|создам|не\s+создан\w*"
@@ -183,11 +189,11 @@ class GitHubTimeout(Exception):
     pass
 
 
-def fetch_pulls(slug: str, timeout_s: float) -> list[dict] | str:
-    """Recent pull requests of one repo, or an error text; raises GitHubTimeout on a hang."""
+def fetch_items(kind: str, slug: str, timeout_s: float) -> list[dict] | str:
+    """Recent pull requests ("pr") or issues ("issue") of one repo, or an error text; raises GitHubTimeout on a hang."""
     gh = os.environ.get("WP_MERGE_REFS_GH", "gh")
-    fields = "number,state,headRefName,mergedAt,closedAt"
-    cmd = [gh, "pr", "list", "-R", slug, "--state", "all", "--limit", str(PR_WINDOW), "--json", fields]
+    fields = "number,state,headRefName,mergedAt,closedAt" if kind == "pr" else "number,state,closedAt"
+    cmd = [gh, kind, "list", "-R", slug, "--state", "all", "--limit", str(PR_WINDOW), "--json", fields]
     try:
         done = subprocess.run(cmd, check=False, capture_output=True, text=True, timeout=timeout_s)
     except subprocess.TimeoutExpired as exc:
@@ -198,12 +204,12 @@ def fetch_pulls(slug: str, timeout_s: float) -> list[dict] | str:
         last = (done.stderr.strip().splitlines() or [f"код {done.returncode}"])[-1][:160]
         return TOKEN_RE.sub(r"\1***", last)
     try:
-        pulls = json.loads(done.stdout)
+        items = json.loads(done.stdout)
     except json.JSONDecodeError:
         return "ответ не JSON"
-    if not isinstance(pulls, list) or not all(isinstance(p, dict) for p in pulls):
+    if not isinstance(items, list) or not all(isinstance(p, dict) for p in items):
         return "неожиданная форма ответа"
-    return pulls
+    return items
 
 
 def says_merged(ref: Ref) -> bool:
@@ -232,11 +238,25 @@ def short_time(pr: dict) -> str:
     return str(pr.get("mergedAt") or "")[:16].replace("T", " ")
 
 
-def judge(ref: Ref, pulls: list[dict], merged_numbers_in_card: set[str], since: datetime) -> str | None:
+def judge_issue(ref: Ref, issues: list[dict], since: datetime) -> str | None:
+    """Mismatch for a "<repo> #N" reference that is an issue; LookupError when it is none or unchanged."""
+    issue = next((i for i in issues if str(i.get("number")) == ref.key), None)
+    if issue is None or not changed_since(issue, since):
+        raise LookupError
+    if issue.get("state") == "CLOSED" and not any(ISSUE_DONE_RE.search(m.window) for m in ref.mentions):
+        return f"обращение закрыто {str(issue.get('closedAt') or '')[:16].replace('T', ' ')} UTC, а карточка этого не говорит"
+    return None
+
+
+def judge(
+    ref: Ref, pulls: list[dict], issues: list[dict], merged_numbers_in_card: set[str], since: datetime
+) -> str | None:
     """Mismatch description, None when the card agrees; raises LookupError when there is nothing to compare."""
     if ref.kind == "pr":
         pr = next((p for p in pulls if str(p.get("number")) == ref.key), None)
-        if pr is None or not changed_since(pr, since):
+        if pr is None:
+            return judge_issue(ref, issues, since)
+        if not changed_since(pr, since):
             raise LookupError
         state, when = pr.get("state"), short_time(pr)
         if state == "MERGED" and ref.key not in merged_numbers_in_card and says_pending(ref) and not says_merged(ref):
@@ -257,12 +277,14 @@ def judge(ref: Ref, pulls: list[dict], merged_numbers_in_card: set[str], since: 
     return f"слита запросом #{', #'.join(numbers)} ({short_time(merged[0])} UTC), а карточка пишет о ней как о неслитой"
 
 
-def check_repo(refs: list[Ref], pulls: list[dict], bare_merged: set[str], since: datetime) -> tuple[int, list[str]]:
+def check_repo(
+    refs: list[Ref], pulls: list[dict], issues: list[dict], bare_merged: set[str], since: datetime
+) -> tuple[int, list[str]]:
     merged_in_card = bare_merged | {r.key for r in refs if r.kind == "pr" and says_merged(r)}
     compared, mismatches = 0, []
     for ref in refs:
         try:
-            problem = judge(ref, pulls, merged_in_card, since)
+            problem = judge(ref, pulls, issues, merged_in_card, since)
         except LookupError:
             continue
         compared += 1
@@ -298,14 +320,21 @@ def render(card: Path, workspace: Path, drift_file: Path | None, days: int) -> i
             break
         slug = github_slug(workspace, repo)
         try:
-            pulls = fetch_pulls(slug, remaining) if slug else "нет адреса origin на GitHub"
+            pulls = fetch_items("pr", slug, remaining) if slug else "нет адреса origin на GitHub"
+            unknown_numbers = isinstance(pulls, list) and any(
+                r.kind == "pr" and not any(str(p.get("number")) == r.key for p in pulls) for r in by_repo[repo]
+            )
+            issues = fetch_items("issue", slug, max(deadline - time.monotonic(), 1)) if unknown_numbers else []
         except GitHubTimeout:
             unavailable.append(f"{', '.join(order[index:MAX_REPOS])}: GitHub не ответил, опрос остановлен")
             break
         if isinstance(pulls, str):
             unavailable.append(f"{repo}: {pulls}")
             continue
-        repo_compared, repo_mismatches = check_repo(by_repo[repo], pulls, bare_merged, since)
+        if isinstance(issues, str):
+            unavailable.append(f"{repo}: обращения — {issues}")
+            issues = []
+        repo_compared, repo_mismatches = check_repo(by_repo[repo], pulls, issues, bare_merged, since)
         compared += repo_compared
         mismatches += repo_mismatches
 

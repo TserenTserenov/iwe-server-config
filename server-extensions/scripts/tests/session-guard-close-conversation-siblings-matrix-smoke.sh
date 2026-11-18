@@ -17,6 +17,9 @@
 #   5. with the work published, the pilot's word closes G and the word is kept in the audit log;
 #   6. a plain close never succeeds by itself (the exit is the pilot's word, not a silent default).
 set -euo pipefail
+# WP-561 (18.11): peer-session close now needs --pilot-close-word; this smoke checks other close
+# behaviour, so the word check is switched off here (covered by test_pilot_close_word.py).
+export IWE_PEER_CLOSE_WORD_ENFORCE=0
 
 ROOT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
 GUARD="${SESSION_GUARD_UNDER_TEST:-$ROOT_DIR/scripts/session-guard.sh}"

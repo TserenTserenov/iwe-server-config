@@ -18,7 +18,7 @@ assert_not_contains() {
 }
 
 WS="$SANDBOX/ws"
-for repo in PACK-digital-platform FMT-exocortex-template docs; do
+for repo in PACK-digital-platform FMT-exocortex-template iwe-local-config docs; do
   mkdir -p "$WS/$repo"
   git -C "$WS/$repo" init -q
   git -C "$WS/$repo" remote add origin "git@github.com:Org/$repo.git"
@@ -36,6 +36,11 @@ case "$*" in
           {"number":65,"state":"OPEN","headRefName":"wp616-next","mergedAt":null},
           {"number":66,"state":"CLOSED","headRefName":"wp616-dropped","mergedAt":null},
           {"number":50,"state":"MERGED","headRefName":"old-work","mergedAt":"2020-01-01T00:00:00Z"}]' ;;
+  "pr list"*"Org/iwe-local-config"*) echo '[]' ;;
+  "issue list"*"Org/iwe-local-config"*)
+    echo '[{"number":1567,"state":"CLOSED","closedAt":"2026-11-17T12:00:00Z"},
+          {"number":1568,"state":"CLOSED","closedAt":"2026-11-17T12:30:00Z"},
+          {"number":1570,"state":"OPEN","closedAt":null}]' ;;
   *) echo "HTTP 404" >&2; exit 1 ;;
 esac
 EOF
@@ -145,6 +150,15 @@ echo "scenario Q: tokens in GitHub error text are masked (review Н1)"
 OUT=$(GH_FAIL_TOKEN=1 run '- PACK-digital-platform #64 ждёт')
 assert_contains "$OUT" "ghp_***" "token masked"
 assert_not_contains "$OUT" "abcdef1234567890" "token body absent"
+
+echo "scenario R: issues (WP-561 Ф74) -- the card says 'start with #1567/#1568', both issues are closed"
+OUT=$(run '- iwe-local-config #1567 начать с него; iwe-local-config #1568 следом')
+assert_contains "$OUT" "iwe-local-config #1567 — обращение закрыто 2026-11-17 12:00 UTC, а карточка этого не говорит" "closed issue named as open work"
+assert_contains "$OUT" "iwe-local-config #1568 — обращение закрыто" "second issue too"
+OUT=$(run '- iwe-local-config #1567 закрыто, iwe-local-config #1568 исправлено')
+assert_contains "$OUT" "расхождений: 0" "card that says closed/fixed agrees"
+OUT=$(run '- iwe-local-config #1570 в работе')
+assert_contains "$OUT" "расхождений: 0" "open issue is not a mismatch"
 
 if [ "$fails" -gt 0 ]; then echo "FAILED: $fails"; exit 1; fi
 echo "ALL OK"
