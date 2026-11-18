@@ -83,13 +83,50 @@ if [ -z "$GOV_COMMON_DIR" ]; then
   exit 0
 fi
 
+COMMIT_INVOCATIONS=$(printf '%s\n' "$NORMALIZED_COMMAND" | grep -oE "git( $GIT_GLOBAL_FLAGS_RE)* commit")
+
+# WP-484 F313 (peer session 2026-11-18-04 with Codex): a commit spelled
+# `cd <repo> && git commit` or `(cd <repo> && git commit)` from a cwd outside
+# that repo used to resolve to no repository and pass unvalidated. Bounded
+# grammar: the last `cd [-L|-P|-e|-@|--]... <path>` that starts a command
+# (after start, `;`, `&`, `|` or `(`) before the first commit invocation; the
+# path is double-quoted, single-quoted or a bare token with `\`-escapes; a
+# leading `~` is $HOME. Known limit: one base directory for all invocations.
+# A path we cannot evaluate from text (`$`, backtick, `cd -`) or that does
+# not exist marks the target UNRESOLVED.
+TARGET_UNRESOLVED=false
+BASE_DIR="$CWD"
+FIRST_INVOCATION=$(printf '%s\n' "$COMMIT_INVOCATIONS" | head -1)
+if [ -n "$FIRST_INVOCATION" ]; then
+  COMMAND_PREFIX=${NORMALIZED_COMMAND%%"$FIRST_INVOCATION"*}
+  cd_word=$(printf '%s' "$COMMAND_PREFIX" \
+    | grep -oE '(^|[;&|(]) *cd +((-[LPe@]+|--) +)*("[^"]*"|'"'"'[^'"'"']*'"'"'|([^[:space:];&|()\\]|\\.)+)' | tail -1 \
+    | sed -E 's/^[;&|(]? *cd +((-[LPe@]+|--) +)*//')
+  case "$cd_word" in
+    \"*\" | \'*\') cd_arg=${cd_word:1:${#cd_word}-2} ;;
+    *) cd_arg=$(printf '%s' "$cd_word" | sed -E 's/\\(.)/\1/g') ;;
+  esac
+  case "$cd_arg" in
+    '~') cd_arg="$HOME" ;;
+    '~/'*) cd_arg="$HOME/${cd_arg#'~/'}" ;;
+  esac
+  case "$cd_arg" in
+    "") ;;
+    *'$'* | *'`'* | '-' | '~'*) TARGET_UNRESOLVED=true ;;
+    *)
+      cd_resolved=$(cd "${CWD:-.}" 2>/dev/null && cd "$cd_arg" 2>/dev/null && pwd)
+      if [ -n "$cd_resolved" ]; then BASE_DIR="$cd_resolved"; else TARGET_UNRESOLVED=true; fi
+      ;;
+  esac
+fi
+
 RESOLVE_FROM=""
 # Walk every `git <flags>* commit` invocation in the (possibly compound)
 # command — a single Bash call can chain commits to more than one repo, and
 # the one that matters may not be the first (found in peer review).
 while IFS= read -r invocation; do
   [ -n "$invocation" ] || continue
-  candidate="$CWD"
+  candidate="$BASE_DIR"
   c_arg=$(printf '%s' "$invocation" | grep -oE -- '-C ("[^"]*"|'"'"'[^'"'"']*'"'"'|[^[:space:];&|]+)' | head -1 | sed -E 's/^-C //; s/^"(.*)"$/\1/; s/^'"'"'(.*)'"'"'$/\1/')
   case "$c_arg" in
     *'$'*)
@@ -98,11 +135,13 @@ while IFS= read -r invocation; do
       # than giving up entirely. This hook is a formatting/hygiene gate, not
       # a security boundary: treating "can't resolve -C" as "assume it's the
       # governance repo, block" would recreate the exact false-positive bug
-      # this fix removes, just one level deeper.
+      # this fix removes, just one level deeper. The unresolved mark below
+      # only blocks when a plan is actually staged in the governance repo.
+      TARGET_UNRESOLVED=true
       ;;
     "") ;;
     *)
-      resolved=$(cd "${CWD:-.}" 2>/dev/null && cd "$c_arg" 2>/dev/null && pwd)
+      resolved=$(cd "${BASE_DIR:-.}" 2>/dev/null && cd "$c_arg" 2>/dev/null && pwd)
       [ -n "$resolved" ] && candidate="$resolved"
       ;;
   esac
@@ -116,10 +155,22 @@ while IFS= read -r invocation; do
     break
   fi
 done <<EOF
-$(printf '%s\n' "$NORMALIZED_COMMAND" | grep -oE "git( $GIT_GLOBAL_FLAGS_RE)* commit")
+$COMMIT_INVOCATIONS
 EOF
 
 if [ -z "$RESOLVE_FROM" ]; then
+  # Unresolved target while a plan is staged in the governance repo: a
+  # warning, not a block. A block here falsely stopped commits to other repos
+  # spelled `git -C "$R" commit` (cold review 18.11) — the 28e7eff incident
+  # class. The governance repo's own git pre-commit hook still checks a staged
+  # DayPlan whatever the command spelling.
+  if [ "$TARGET_UNRESOLVED" = true ] \
+     && git -C "$GOV_CANONICAL_PATH" -c core.quotePath=false diff --cached --name-only 2>/dev/null \
+        | grep -qE '^current/(DayPlan|WeekPlan).*\.md$'; then
+    jq -n --arg ctx "⚠️ protocol-artifact-validate: не смог определить, в каком репозитории выполняется этот коммит, а в $GOV_CANONICAL_PATH подготовлен к коммиту план дня или недели — он этой проверкой не проверен. Если коммит в этот репозиторий, укажи его явно: git -C <путь> commit ..." \
+      '{"additionalContext": $ctx}'
+    exit 0
+  fi
   echo '{}'
   exit 0
 fi

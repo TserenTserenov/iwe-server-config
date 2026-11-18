@@ -55,6 +55,11 @@ EOF
 cat > "$REPO/scripts/ledger-append.sh" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
+# One line per call (scale, period, kind, data): lets a case assert what the
+# guard wrote to the day ledger.
+if [ -n "${IWE_TEST_LEDGER_LOG:-}" ]; then
+  printf '%s\t%s\t%s\t%s\n' "$1" "$2" "$3" "$4" >> "$IWE_TEST_LEDGER_LOG"
+fi
 if [ "${IWE_TEST_DETACH_LEDGER:-0}" = 1 ]; then
   sleep 3 &
   detached_pid=$!
@@ -392,9 +397,18 @@ prepare_machine_session "$MACHINE_SID" machine-success machine-publish-only
 printf '%s\n' machine > "$MACHINE_WORKTREE/machine-owned.txt"
 git -C "$MACHINE_WORKTREE" add machine-owned.txt
 git -C "$MACHINE_WORKTREE" commit -qm "machine-owned change"
-/bin/bash "$GUARD" machine-close --agent night-cycle --session-id "$MACHINE_SID" >/dev/null
+MACHINE_LEDGER_LOG="$TEST_ROOT/machine-ledger-calls.tsv"
+: > "$MACHINE_LEDGER_LOG"
+IWE_TEST_LEDGER_LOG="$MACHINE_LEDGER_LOG" \
+  /bin/bash "$GUARD" machine-close --agent night-cycle --session-id "$MACHINE_SID" >/dev/null
 [ ! -e "$MACHINE_SEM" ] && [ -f "$MACHINE_SEM.closed" ] && [ ! -e "$MACHINE_WORKTREE" ] \
   || { echo "FAIL: machine-close did not publish, clean and terminate exact session" >&2; exit 1; }
+# WP-484 F313: Day Open counts a night run without session_closed as stuck.
+MACHINE_CLOSED_EVENTS=$(awk -F'\t' -v sid="$MACHINE_SID" \
+  '$3 == "session_closed" && index($4, "\"session_id\": \"" sid "\"") && index($4, "\"close_channel\": \"machine-publish-only\"")' \
+  "$MACHINE_LEDGER_LOG" | wc -l | tr -d ' ')
+[ "$MACHINE_CLOSED_EVENTS" = 1 ] \
+  || { echo "FAIL: machine-close wrote $MACHINE_CLOSED_EVENTS session_closed events for its session, expected 1" >&2; cat "$MACHINE_LEDGER_LOG" >&2; exit 1; }
 grep -q '^close_delivery_version: isolate-push/v2$' "$MACHINE_SEM.closed" \
   && grep -q '^close_publish_proof: isolate-push-exit0/v1$' "$MACHINE_SEM.closed" \
   && grep -q '^close_cleanup_proof: worktree-absent/v1$' "$MACHINE_SEM.closed" \

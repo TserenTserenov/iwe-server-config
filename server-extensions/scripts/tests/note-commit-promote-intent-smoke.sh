@@ -420,7 +420,7 @@ import re, subprocess, sys
 src = open(sys.argv[1]).read()
 out = []
 for name in ("_promote_commit_intent", "_cleanup_session_commit_intents",
-             "_finish_session_commit_intents"):
+             "_intent_repo_canonical_name", "_finish_session_commit_intents"):
     start = re.search(r"(?m)^" + re.escape(name) + r"\(\) \{", src)
     if not start:
         sys.exit("missing " + name)
@@ -777,6 +777,123 @@ out=$(IWE_ROOT="$IWE_ROOT" REPO="$REPO" bash -c '
   && [ ! -d "$DINTDIR" ]; } \
   && ok "P1b: exit-2 debt counts as processed -- cleanup proceeds" \
   || bad "P1b finish-with-debt (rc=$rc out=$out dir=$([ -d "$DINTDIR" ] && echo kept || echo removed))"
+
+
+echo "== WP-484 (peer-session 2026-11-18-06): intents recorded under a worktree PATH =="
+# commit-push.sh used to record repo ".iwe-runtime/isolated-worktrees/<id>" (a real
+# worktree, so it resolved); the guard rejects names with "/", so close refused for good.
+LEGACY_REL=".iwe-runtime/isolated-worktrees/claude-code-legacy"
+git -C "$REPO" worktree add -q "$IWE_ROOT/$LEGACY_REL" -b legacy-iso 2>/dev/null
+LEGACY_FILE_NAME=".iwe-runtime_isolated-worktrees_claude-code-legacy-$REPOKEY.jsonl"
+write_intent() {  # <file> <uuid> <status> <parent> <msgsha> <path> [sha]
+  python3 - "$@" "$LEGACY_REL" "$IWE_ROOT/$LEGACY_REL" <<'PY2'
+import json, sys, datetime
+path, uuid, status, parent, msgsha, rel = sys.argv[1:7]
+sha = sys.argv[7] if len(sys.argv) > 9 else None
+repo, checkout = sys.argv[-2], sys.argv[-1]
+rec = {"v": 1, "uuid": uuid, "repo": repo, "expected_parent": parent,
+       "message_sha256": msgsha, "paths": [rel], "source_checkout": checkout,
+       "branch": "legacy-iso",
+       "created_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+       "status": status}
+if sha:
+    rec["sha"] = sha
+open(path, "a").write(json.dumps(rec) + "\n")
+PY2
+}
+
+# (1) committed legacy intent: the close pass reads it under the canonical name
+# "myrepo" (the stub resolver refuses anything else) and writes a normal claim.
+UUIDL="aaaaaaaa-1111-2222-3333-444444444444"
+PL=$(git -C "$IWE_ROOT/$LEGACY_REL" rev-parse HEAD)
+MSGL="legacy commit
+
+Iwe-Intent: $UUIDL"
+echo legacy > "$IWE_ROOT/$LEGACY_REL/legacy.txt"
+git -C "$IWE_ROOT/$LEGACY_REL" add legacy.txt
+git -C "$IWE_ROOT/$LEGACY_REL" commit -qm "$MSGL"
+SHAL=$(git -C "$IWE_ROOT/$LEGACY_REL" rev-parse HEAD)
+MSGSHAL=$(git -C "$REPO" cat-file commit "$SHAL" | python3 -c 'import sys,hashlib; raw=sys.stdin.buffer.read(); print(hashlib.sha256(raw.split(b"\n\n",1)[1]).hexdigest())')
+SEML="$IWE_ROOT/.iwe-runtime/sessions/${AGENT}-legacy-fin.open"
+printf 'agent: %s\nsession_id: legacy-fin\nwp: 999\n' "$AGENT" > "$SEML"
+LINTDIR="$IWE_ROOT/.iwe-runtime/commit-intents/legacy-fin"
+mkdir -p "$LINTDIR"
+write_intent "$LINTDIR/$LEGACY_FILE_NAME" "$UUIDL" committed "$PL" "$MSGSHAL" legacy.txt "$SHAL"
+out=$(IWE_ROOT="$IWE_ROOT" REPO="$REPO" bash -c '
+  _resolve_repo_checkout() { [ "$1" = myrepo ] || return 2; printf "%s\n" "$REPO"; }
+  '"$FINISH_FUNCS"'
+  _finish_session_commit_intents "$1" "$2"' _ "$SEML" "legacy-fin" 2>&1); rc=$?
+{ [ $rc -eq 0 ] && grep -q "^commit: myrepo $SHAL " "$SEML" && [ ! -d "$LINTDIR" ]; } \
+  && ok "legacy path-named committed intent promoted under the repository name at close" \
+  || bad "legacy committed intent (rc=$rc out=$out sem=$(grep 'commit:' "$SEML"))"
+
+# (2) prepared legacy intent with NO commit: close refuses and names the command;
+# --abandon-intent with the repository name finds it in the path-named file.
+UUIDP="bbbbbbbb-1111-2222-3333-444444444444"
+SEMP="$IWE_ROOT/.iwe-runtime/sessions/${AGENT}-legacy-prep.open"
+printf 'agent: %s\nsession_id: legacy-prep\nwp: 999\n' "$AGENT" > "$SEMP"
+PINTDIR="$IWE_ROOT/.iwe-runtime/commit-intents/legacy-prep"
+mkdir -p "$PINTDIR"
+write_intent "$PINTDIR/$LEGACY_FILE_NAME" "$UUIDP" prepared "$PL" "$(printf x | shasum -a 256 | cut -c1-64)" never.txt
+finish_prep() {
+  IWE_ROOT="$IWE_ROOT" REPO="$REPO" bash -c '
+    _resolve_repo_checkout() { [ "$1" = myrepo ] || return 2; printf "%s\n" "$REPO"; }
+    '"$FINISH_FUNCS"'
+    _finish_session_commit_intents "$1" "$2"' _ "$SEMP" "legacy-prep" 2>&1
+}
+out=$(finish_prep); rc=$?
+{ [ $rc -ne 0 ] && printf '%s' "$out" | grep -q "intent-commit-missing" \
+  && printf '%s' "$out" | grep -q -- "--abandon-intent $UUIDP --repo myrepo"; } \
+  && ok "prepared intent without commit: close refuses and names --abandon-intent" \
+  || bad "prepared legacy at close (rc=$rc out=$out)"
+out=$( (cd "$REPO" && bash "$SG" note-commit --abandon-intent "$UUIDP" --repo myrepo --agent "$AGENT" --session-id legacy-prep 2>&1) ); rc=$?
+{ [ $rc -eq 0 ] && printf '%s' "$out" | grep -qx "ABANDONED $UUIDP" \
+  && grep -q '"status": "abandoned"' "$PINTDIR/$LEGACY_FILE_NAME"; } \
+  && ok "--abandon-intent marks the path-named prepared intent abandoned" \
+  || bad "--abandon-intent (rc=$rc out=$out)"
+out=$(finish_prep); rc=$?
+{ [ $rc -eq 0 ] && [ ! -d "$PINTDIR" ]; } \
+  && ok "after abandon the close pass succeeds and cleans the intents" \
+  || bad "close after abandon (rc=$rc out=$out)"
+
+# (3) abandon never applies to an intent that has a commit.
+UUIDH="cccccccc-1111-2222-3333-444444444444"
+mkdir -p "$PINTDIR"
+MSGH="has commit
+
+Iwe-Intent: $UUIDH"
+echo has-commit > "$IWE_ROOT/$LEGACY_REL/legacy-has-commit.txt"
+git -C "$IWE_ROOT/$LEGACY_REL" add legacy-has-commit.txt
+git -C "$IWE_ROOT/$LEGACY_REL" commit -qm "$MSGH"
+write_intent "$PINTDIR/$LEGACY_FILE_NAME" "$UUIDH" prepared "$PL" "$(printf y | shasum -a 256 | cut -c1-64)" legacy-has-commit.txt
+out=$( (cd "$REPO" && bash "$SG" note-commit --abandon-intent "$UUIDH" --repo myrepo --agent "$AGENT" --session-id legacy-prep 2>&1) ); rc=$?
+{ [ $rc -ne 0 ] && printf '%s' "$out" | grep -q "intent-has-commit" \
+  && ! grep -q '"status": "abandoned"' "$PINTDIR/$LEGACY_FILE_NAME"; } \
+  && ok "--abandon-intent refuses an intent whose commit exists (no write)" \
+  || bad "abandon with commit (rc=$rc out=$out)"
+out=$( (cd "$REPO" && bash "$SG" note-commit --abandon-intent "$UUIDH" --promote-intent "$UUIDH" --repo myrepo --agent "$AGENT" --session-id legacy-prep 2>&1) ); rc=$?
+[ $rc -ne 0 ] && ok "--abandon-intent and --promote-intent together refused" || bad "both flags accepted"
+
+# (4) intent recovery inside commit-push.sh passes the recorded (legacy path) repo to
+# --promote-intent; the guard reads it under the repository name.
+UUIDR="dddddddd-1111-2222-3333-444444444444"
+RINTDIR="$IWE_ROOT/.iwe-runtime/commit-intents/$SID"
+mkdir -p "$RINTDIR"
+PR=$(git -C "$IWE_ROOT/$LEGACY_REL" rev-parse HEAD)
+MSGR="recover commit
+
+Iwe-Intent: $UUIDR"
+echo recover > "$IWE_ROOT/$LEGACY_REL/legacy-recover.txt"
+git -C "$IWE_ROOT/$LEGACY_REL" add legacy-recover.txt
+git -C "$IWE_ROOT/$LEGACY_REL" commit -qm "$MSGR"
+SHAR=$(git -C "$IWE_ROOT/$LEGACY_REL" rev-parse HEAD)
+MSGSHAR=$(git -C "$REPO" cat-file commit "$SHAR" | python3 -c 'import sys,hashlib; raw=sys.stdin.buffer.read(); print(hashlib.sha256(raw.split(b"\n\n",1)[1]).hexdigest())')
+write_intent "$RINTDIR/$LEGACY_FILE_NAME" "$UUIDR" committed "$PR" "$MSGSHAR" legacy-recover.txt "$SHAR"
+out=$(note --promote-intent "$UUIDR" --repo "$LEGACY_REL"); rc=$?
+{ [ $rc -eq 0 ] && printf '%s' "$out" | grep -q "PROMOTED $SHAR" \
+  && grep -q "^commit: myrepo $SHAR " "$SEM"; } \
+  && ok "--promote-intent with the legacy worktree-path repo claims under the repository name" \
+  || bad "legacy --promote-intent (rc=$rc out=$out)"
 
 
 echo

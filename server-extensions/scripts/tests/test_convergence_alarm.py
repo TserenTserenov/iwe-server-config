@@ -195,6 +195,15 @@ class MainTest(unittest.TestCase):
         self.assertEqual(self.main(), 0)  # no repeat for the same episode
         self.assertEqual(self.sent.read_text().count("⚠️"), 1)
 
+    def test_send_names_its_source_for_the_telegram_gate(self):
+        # WP-484 F313: without a source id the gate saw $0 = "_" and the digest
+        # quarantined a real alarm as "вне реестра: _".
+        caller = self.tmp.name + "/caller.txt"
+        self.lib.write_text(f'telegram_send() {{ printf "%s|%s\\n" "$(basename -- "$0")" "${{TELEGRAM_SOURCE_ID:-}}" >> "{caller}"; }}\n')
+        self.main()
+        self.main()
+        self.assertEqual(Path(caller).read_text().strip(), "convergence-alarm.py|convergence-alarm")
+
     def test_sent_alarm_records_when_it_was_sent_and_a_failed_send_does_not(self):
         self.main()
         self.main()

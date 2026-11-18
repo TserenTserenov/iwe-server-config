@@ -98,6 +98,7 @@
 #                                      # "commit: <repo> <sha> <checkout> <branch>" — checkout
 #                                      # обязан быть worktree или клоном с тем же origin
 #   note-commit --promote-intent <uuid> --repo <name> [--agent ...] [--session-id ...]
+#   note-commit --abandon-intent <uuid> --repo <name> [--agent ...] [--session-id ...]  # prepared intent, no commit exists
 #                                      # WP-484 Ф275 предусловие 3: ЕДИНСТВЕННЫЙ путь, который
 #                                      # превращает commit-intent (.iwe-runtime/commit-intents/)
 #                                      # в заявку семафора; guard сам проверяет parent/message/paths
@@ -4680,6 +4681,7 @@ REPO_ROOT_ARG=""
 SOURCE_CHECKOUT_ARG=""
 BRANCH_ARG=""
 PROMOTE_INTENT_ARG=""
+INTENT_MODE="promote"   # promote | abandon (note-commit --abandon-intent)
 UNFREEZE_REASON=""
 ISOLATE_FLAG=0
 ABANDON_PREPARED=0
@@ -4845,10 +4847,13 @@ while [[ $# -gt 0 ]]; do
         fail "--branch требует непустое значение (имя ветки в checkout-источнике)" 1
       fi
       BRANCH_ARG="$2"; shift 2 ;;
-    --promote-intent)
+    --promote-intent|--abandon-intent)
       if [[ $# -lt 2 || -z "$2" ]]; then
-        fail "--promote-intent требует непустое значение (uuid intent-записи)" 1
+        fail "$1 требует непустое значение (uuid intent-записи)" 1
       fi
+      [ -z "$PROMOTE_INTENT_ARG" ] \
+        || fail "--promote-intent и --abandon-intent взаимно исключающие и не повторяются" 1
+      [ "$1" = "--abandon-intent" ] && INTENT_MODE="abandon"
       PROMOTE_INTENT_ARG="$2"; shift 2 ;;
     --isolate) ISOLATE_FLAG=1; shift ;;
     # WP-484 (peer-session with Codex): manual recovery for a PREPARED close
@@ -10333,8 +10338,9 @@ PY
 # a trailer and must not match. Direct `git commit` in the shared checkout
 # bypassing commit-push.sh is out of contract (it never takes ds-commit.lock);
 # such orphans are caught by the evidence checks as before, not by promote.
-_promote_commit_intent() {
-  python3 - "$1" "$2" "$3" "$4" "$5" "$6" <<'PY'
+_promote_commit_intent() {  # <sem> <repo-dir> <repo-name> <uuid> <session-id> <intents-root> [promote|abandon]
+  python3 - "$1" "$2" "$3" "$4" "$5" "$6" "${7:-promote}" <<'PY'
+import datetime
 import fcntl
 import hashlib
 import json
@@ -10347,10 +10353,11 @@ import tempfile
 from pathlib import Path
 
 sem, repo_dir, repo_name, intent_uuid, session_id, intents_root = sys.argv[1:7]
+mode = sys.argv[7] if len(sys.argv) > 7 else "promote"
 
 
 def refuse(message):
-    sys.stderr.write("note-commit --promote-intent: " + message + "\n")
+    sys.stderr.write("note-commit --" + mode + "-intent: " + message + "\n")
     sys.exit(1)
 
 
@@ -10401,18 +10408,37 @@ intent_dir = os.path.join(intents_root, sanitized_session)
 intent_path = os.path.join(intent_dir, sanitized + "-" + repo_key + ".jsonl")
 intent_lock_path = os.path.join(intent_dir, ".lock")
 
-latest = {}
-if os.path.exists(intent_path):
+def read_intent_file(path):
+    merged = {}
     with open(intent_lock_path, "a+") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)
-        with open(intent_path, encoding="utf-8") as src:
+        with open(path, encoding="utf-8") as src:
             for line in src:
                 try:
                     rec = json.loads(line)
                 except ValueError:
                     continue  # truncated/corrupt line (crash mid-append)
                 if rec.get("uuid"):
-                    latest[rec["uuid"]] = dict(latest.get(rec["uuid"]) or {}, **rec)
+                    merged[rec["uuid"]] = dict(merged.get(rec["uuid"]) or {}, **rec)
+    return merged
+
+
+latest = read_intent_file(intent_path) if os.path.exists(intent_path) else {}
+if intent_uuid not in latest and os.path.isdir(intent_dir):
+    # WP-484 (WP-561 peer-session 2026-11-18-06): commit-push.sh used to accept a
+    # worktree PATH as the repo name, so the intent file is named after that path
+    # (".iwe-runtime_isolated-worktrees_<id>-<key>.jsonl") while every reader is
+    # called with the repository name. The repo-id key still pins the object
+    # store, and the uuid is unique, so look the uuid up in any file of this
+    # store; the completion record goes back into the file that holds it.
+    for name in sorted(os.listdir(intent_dir)):
+        if not name.endswith("-" + repo_key + ".jsonl"):
+            continue
+        candidate_path = os.path.join(intent_dir, name)
+        found = read_intent_file(candidate_path)
+        if intent_uuid in found:
+            latest, intent_path = found, candidate_path
+            break
 record = latest.get(intent_uuid)
 if record is None:
     refuse("intent-not-found")
@@ -10426,6 +10452,47 @@ if not record.get("message_sha256"):
         refuse("intent-completed-without-sha")
     refuse("intent-not-found")
 
+def trailer_commits(include_reflog=False):
+    # abandon also searches the reflog: a commit made after prepare and then
+    # orphaned (reset, removed worktree) must not be declared non-existent.
+    scope = ["--all", "--reflog"] if include_reflog else ["--all"]
+    out = git_bytes("log", *scope, "--format=%H",
+                    "--grep=Iwe-Intent: " + intent_uuid).decode("ascii")
+    found = []
+    for cand in [ln for ln in out.splitlines() if ln.strip()]:
+        raw = git_bytes("cat-file", "commit", cand)
+        block = trailer_block(raw.split(b"\n\n", 1)[1])
+        if sum(1 for ln in block if ln == "Iwe-Intent: " + intent_uuid) == 1:
+            found.append(cand)
+    return found
+
+
+if mode == "abandon":
+    # WP-484 (WP-561 peer-session 2026-11-18-06): the explicit way out for an
+    # intent whose `git commit` never happened (process died or the run stopped
+    # between prepare and commit): commit-push.sh writes "abandoned" itself only
+    # after a REFUSED commit, so such a record blocked every close for good.
+    # Same evidence bar as that writer path: no recorded sha and no commit
+    # carrying this intent's trailer in the whole object store. Anything with a
+    # commit is promoted, never abandoned.
+    if record.get("status") in ("completed", "abandoned"):
+        refuse("intent-already-" + record["status"])
+    if record.get("sha"):
+        refuse("intent-has-commit " + record["sha"] + ": используй --promote-intent")
+    found = trailer_commits(include_reflog=True)
+    if found:
+        refuse("intent-has-commit " + found[0] + ": используй --promote-intent")
+    with open(intent_lock_path, "a+") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        with open(intent_path, "a", encoding="utf-8") as stream:
+            stream.write(json.dumps({
+                "uuid": intent_uuid, "status": "abandoned",
+                "reason": "note-commit --abandon-intent: no commit with this trailer",
+                "abandoned_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+            }) + "\n")
+    print("ABANDONED " + intent_uuid)
+    sys.exit(0)
+
 # --- resolve the commit ---
 recorded_sha = record.get("sha")
 if recorded_sha:
@@ -10433,14 +10500,7 @@ if recorded_sha:
         refuse("intent-commit-missing")
     sha = recorded_sha
 else:
-    out = git_bytes("log", "--all", "--format=%H",
-                    "--grep=Iwe-Intent: " + intent_uuid).decode("ascii")
-    candidates = []
-    for cand in [ln for ln in out.splitlines() if ln.strip()]:
-        raw = git_bytes("cat-file", "commit", cand)
-        block = trailer_block(raw.split(b"\n\n", 1)[1])
-        if sum(1 for ln in block if ln == "Iwe-Intent: " + intent_uuid) == 1:
-            candidates.append(cand)
+    candidates = trailer_commits()
     if not candidates:
         refuse("intent-commit-missing")
     if len(candidates) > 1:
@@ -10661,6 +10721,32 @@ PY
 # 1 when intents remain unresolved (no commit / ambiguous / stub without sha):
 # the caller (close) must NOT close, must keep the directory, and the retry
 # contract is "повторный close догоняет promote-pass".
+# _intent_repo_canonical_name <recorded repo>: the repository name a commit
+# intent should be read under. A plain name is returned as is. A relative path
+# to an isolated worktree under .iwe-runtime/isolated-worktrees/ (what
+# commit-push.sh recorded until WP-484, peer-session 2026-11-18-06) maps to its
+# canonical repository: the parent of the shared git-common-dir, "iwe-root"
+# for the IWE root itself. Anything else is returned unchanged and fails in
+# the resolver as before.
+_intent_repo_canonical_name() {
+  local recorded="$1" candidate common canonical
+  case "$recorded" in
+    *..*) printf '%s\n' "$recorded"; return 0 ;;
+    .iwe-runtime/isolated-worktrees/*) ;;
+    *) printf '%s\n' "$recorded"; return 0 ;;
+  esac
+  candidate="$IWE_ROOT/$recorded"
+  common=$(git -C "$candidate" rev-parse --path-format=absolute --git-common-dir 2>/dev/null) \
+    || { printf '%s\n' "$recorded"; return 0; }
+  canonical=$(cd "$(dirname "$common")" 2>/dev/null && pwd -P) \
+    || { printf '%s\n' "$recorded"; return 0; }
+  if [ "$canonical" = "$(cd "$IWE_ROOT" && pwd -P)" ]; then
+    printf 'iwe-root\n'
+  else
+    basename "$canonical"
+  fi
+}
+
 _finish_session_commit_intents() {  # <semaphore> <session-id>
   local sem="$1" sid="$2"
   local sanitized dir failures=0 line repo rest uuid repo_dir reason promoted debt
@@ -10672,8 +10758,13 @@ _finish_session_commit_intents() {  # <semaphore> <session-id>
     rest=${line#* }
     uuid=${rest%% *}
     [ -n "$repo" ] && [ "$rest" != "$line" ] && [ -n "$uuid" ] || continue
+    # Legacy records named by an isolated-worktree path (commit-push.sh accepted
+    # it until WP-484, peer-session 2026-11-18-06): read them under the canonical
+    # repository name the reader can resolve.
+    repo=$(_intent_repo_canonical_name "$repo")
     repo_dir=$(_resolve_repo_checkout "$repo" 2>/dev/null) || {
       echo "WARN: prepared-intent-left: $repo $uuid repo-not-resolved" >&2
+      echo "  хранилище намерения не находится (копия удалена?): разобрать вручную по записи в $dir, не удаляя её без проверки коммита" >&2
       failures=1
       continue
     }
@@ -10689,6 +10780,10 @@ _finish_session_commit_intents() {  # <semaphore> <session-id>
       reason=$(printf '%s\n' "$reason" | tail -1 \
         | sed 's/^note-commit --promote-intent: //')
       echo "WARN: prepared-intent-left: $repo $uuid $reason" >&2
+      case "$reason" in
+        intent-commit-missing*)
+          echo "  коммита с этим намерением нет: снять штатно — session-guard.sh note-commit --abandon-intent $uuid --repo $repo --session-id $sid" >&2 ;;
+      esac
       failures=1
     fi
   done < <(python3 - "$dir" <<'PY'
@@ -12547,6 +12642,14 @@ if [ "$CMD" = "machine-close" ]; then
     || fail "machine-close: terminal transition завершён, но exact lock не освободился" 7
   _cleanup_closed_session_projections "$SEM_FILE" "$AGENT" "$SESSION_ID" \
     || echo "⚠️  machine-close: terminal receipt создан, но projection CAS не завершён" >&2
+  # WP-484 F313 (peer session 2026-11-18-04): the night cycle closes here, and
+  # only the generic close below wrote `session_closed`, so Day Open reported
+  # every night run as a stuck session although it was published and closed.
+  # Written after the terminal transition (publication done); deduplicated by
+  # host/agent/session_id, so a repeated machine-close cannot add a second one.
+  # A crash between the transition and this line loses the event; the Day Open
+  # "no close record" line then stays as the signal to look.
+  emit_session_closed "machine-publish-only" "$SEM_FILE.closed" "$WP" "$SLUG" "$AGENT"
   if _agent_has_other_open_session "$AGENT"; then
     MACHINE_REPORT_IDLE=0
   else
@@ -15175,6 +15278,12 @@ PY
   # the root's basename is accepted as an alias for the same directory
   # (_resolve_repo_checkout owns both spellings now).
   NC_ROOT_ALIAS="iwe-root"
+  # Intent recovery (commit-push.sh commit_intent_recover) passes the repo exactly as the
+  # intent recorded it; legacy records carry an isolated-worktree path. Read them under
+  # the canonical repository name (WP-484, peer-session 2026-11-18-06).
+  if [ -n "$PROMOTE_INTENT_ARG" ] && [ -n "$REPO_ARG" ]; then
+    REPO_ARG=$(_intent_repo_canonical_name "$REPO_ARG")
+  fi
   if [ -n "$REPO_ARG" ]; then
     # cold review: ".." or a leading "/" would resolve outside $IWE_ROOT while
     # the failure message below still (falsely) claims the check happened.
@@ -15253,7 +15362,7 @@ PY
   if [ -n "$PROMOTE_INTENT_ARG" ]; then
     _promote_commit_intent "$SEM_FILE" "$NC_REPO_DIR" "$NC_REPO_NAME" \
       "$PROMOTE_INTENT_ARG" "$LOCKED_NOTE_SESSION_ID" \
-      "$IWE_ROOT/.iwe-runtime/commit-intents" || exit $?
+      "$IWE_ROOT/.iwe-runtime/commit-intents" "$INTENT_MODE" || exit $?
     exit 0
   fi
 

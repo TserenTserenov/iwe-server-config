@@ -180,9 +180,16 @@ def log_messages(now, outcome, pending):
         print(f"convergence-alarm: {now:%Y-%m-%dT%H:%M%z} {outcome}: {text.splitlines()[0]}")
 
 
+TELEGRAM_SOURCE_ID = "convergence-alarm"
+
+
 def send_telegram(lib, text):
-    proc = subprocess.run(["bash", "-c", '. "$1" && telegram_send "$2"', "_", str(lib), text],
-                          capture_output=True, text=True, timeout=60)
+    # The gate identifies a sender by TELEGRAM_SOURCE_ID, else by the basename of $0.
+    # With neither, $0 was "_" and the digest quarantined a real alarm as
+    # "вне реестра: _" (WP-484 F313, 18.11).
+    env = {**os.environ, "TELEGRAM_SOURCE_ID": TELEGRAM_SOURCE_ID}
+    proc = subprocess.run(["bash", "-c", '. "$1" && telegram_send "$2"', Path(__file__).name, str(lib), text],
+                          capture_output=True, text=True, timeout=60, env=env, check=False)
     if proc.returncode != 0:
         print(f"convergence-alarm: telegram_send failed: {proc.stderr.strip()[-300:]}", file=sys.stderr)
     return proc.returncode == 0
