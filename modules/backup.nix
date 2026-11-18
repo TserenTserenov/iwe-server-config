@@ -226,18 +226,24 @@ in
     # ExecStartPost выполняется только если основной ExecStart (restic backup) завершился успешно.
     # Решает проблему: uptime-монитор (каждые 5 мин) ≠ backup-монитор (раз в сутки).
     systemd.services."restic-backups-neon-dbs" = lib.mkIf (cfg.backupHeartbeatUrlFile != null) {
+      # WP-545 Ф29 (18.11): neon-dbs had no failure signal. A rotated Railway password
+      # kept one DB out of the backup for 16 days (03.11-18.11) while the unit stayed
+      # green; the check below now fails the unit on any DB error, which alerts here.
+      unitConfig.OnFailure = "iwe-failure-alert@%n.service";
       serviceConfig.ExecStartPost = pkgs.writeShellScript "backup-heartbeat-ping" ''
         # Проверяем статус pg_dump: пинговать только если ВСЕ БД задампились успешно
         fail_count_file="/tmp/restic-neon-fail-count"
         if [ -f "$fail_count_file" ]; then
           fail_count=$(cat "$fail_count_file" | tr -d '[:space:]')
           if [ "$fail_count" != "0" ]; then
-            echo "Backup heartbeat: пропускаю — $fail_count БД с ошибками" >&2
-            exit 0
+            # Snapshot of the DBs that did dump is already saved by ExecStart;
+            # failing here only raises the alert (OnFailure) and skips the ping.
+            echo "Backup heartbeat: пропускаю — ''${fail_count} БД с ошибками, помечаю задание как сбой" >&2
+            exit 1
           fi
         else
-          echo "Backup heartbeat: файл статуса не найден, пропускаю" >&2
-          exit 0
+          echo "Backup heartbeat: файл статуса не найден, помечаю задание как сбой" >&2
+          exit 1
         fi
 
         url_file="${cfg.backupHeartbeatUrlFile}"
