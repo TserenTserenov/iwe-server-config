@@ -109,7 +109,10 @@ let
     exec "$notify" --source "$1" -- "$2"
   '';
 
-  commonPath = with pkgs; [ git openssh bash curl jq gawk caffeinate-stub postgresql pythonForIWE nodejs perl gh restic iweTgShim ]
+  # gnutar: day_open_materialize_inputs unpacks `git archive` with tar. Without
+  # it iwe-night-cycle-verify-day failed silently every morning (15, 17, 18.11)
+  # as "не смог прочитать current/DayPlan … с сервера" (WP-484 F313).
+  commonPath = with pkgs; [ git openssh bash curl jq gawk gnutar caffeinate-stub postgresql pythonForIWE nodejs perl gh restic iweTgShim ]
     ++ [ "/home/tseren/.npm-global" "/run/wrappers" ];
 
   commonEnv = {
