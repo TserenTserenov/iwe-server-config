@@ -1712,11 +1712,14 @@ in
       environment = commonEnv;
     };
 
+    # WP-417 Ф9, решение пилота 18.11.2026 (вариант 4А): снимок пишется до открытия
+    # дня (iwe-day-open, 03:00), иначе план дня читал снимок предыдущего дня.
+    # Снимок считается сам (dashboard_gather.py), расчёта панели 04:00 не ждёт.
     systemd.timers."iwe-dashboard-nightly-writer" = {
       wantedBy    = [ "timers.target" ];
-      description = "IWE Ночная запись табло — ежедн 07:45 Europe/Nicosia";
+      description = "IWE Ночная запись табло — ежедн 02:30 Europe/Nicosia";
       timerConfig = {
-        OnCalendar = "*-*-* 07:45:00 Europe/Nicosia";
+        OnCalendar = "*-*-* 02:30:00 Europe/Nicosia";
         Persistent = true;
       };
     };
