@@ -9,6 +9,7 @@ import os
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 
@@ -47,11 +48,26 @@ class SharedCopyTest(unittest.TestCase):
     def branch(self):
         return git(self.repo, "branch", "--show-current")
 
-    def heal(self, dry_run=False):
-        return refresh.heal_one(self.repo, "main", "origin/main", dry_run)
+    def heal(self, dry_run=False, quiet_minutes=0):
+        # Every fixture switches branches seconds before healing; the quiet window (#200) is
+        # tested on its own below, the other tests check the branch and tip rules with it off.
+        return refresh.heal_one(self.repo, "main", "origin/main", dry_run, quiet_minutes=quiet_minutes)
 
     def test_already_on_main_is_left_alone(self):
         self.assertEqual(self.heal(), "current")
+
+    def test_recent_switch_keeps_the_copy_in_the_session_hands(self):
+        git(self.repo, "switch", "-q", "feature")
+        outcome = self.heal(quiet_minutes=refresh.QUIET_MINUTES)
+        self.assertTrue(outcome.startswith("BLOCKED ветку переключали"), outcome)
+        self.assertEqual(self.branch(), "feature")
+
+    def test_switch_older_than_the_quiet_window_is_returned(self):
+        past = int(time.time()) - (refresh.QUIET_MINUTES + 60) * 60
+        subprocess.run(["git", "-C", str(self.repo), "switch", "-q", "feature"], check=True,
+                       env={**ENV, "GIT_COMMITTER_DATE": f"@{past} +0000"})
+        self.assertEqual(self.heal(quiet_minutes=refresh.QUIET_MINUTES), "returned feature")
+        self.assertEqual(self.branch(), "main")
 
     def test_clean_foreign_branch_with_tip_on_origin_returns_to_main(self):
         git(self.repo, "switch", "-q", "feature")
