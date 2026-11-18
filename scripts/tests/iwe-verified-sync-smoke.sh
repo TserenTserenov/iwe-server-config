@@ -140,6 +140,7 @@ cat > "$WORK/bin/fake-ssh" <<'EOF'
 echo call >> "$FAKE_SSH_CALLS"
 case "$FAKE_SSH_MODE" in
   publickey) echo "git@github.com: Permission denied (publickey)." >&2; exit 255 ;;
+  notfound)  echo "ERROR: Repository not found." >&2; exit 1 ;;
   hang)      sleep 5; exit 255 ;;
 esac
 EOF
@@ -173,6 +174,22 @@ if [ "$RC3" = 0 ] && [ ! -e "$PENDING" ] && [ "$(alerts | grep -c '✅ Копи�
 else
   bad "recovery after fetch alert" "rc=$RC3 pending=$([ -f "$PENDING" ] && echo yes || echo no)"
 fi
+
+echo "13c2. repository not found (moved or renamed) → own class; the alert says it will not pass by itself"
+git -C "$SERVER" remote set-url origin "ssh://git@example.invalid/demo.git"
+NF_BEFORE=$(fetch_alerts)
+FAKE_SSH_MODE=notfound GIT_SSH_COMMAND="$WORK/bin/fake-ssh" sync_it 2>/dev/null || true
+FAKE_SSH_MODE=notfound GIT_SSH_COMMAND="$WORK/bin/fake-ssh" sync_it 2>/dev/null || true
+if grep -q '^last_error=fetch-failed: fetch-not-found: ' "$WORK/state/demo.state" \
+   && [ "$(fetch_alerts)" = $((NF_BEFORE + 1)) ] \
+   && alerts | tail -1 | grep -q 'хранилища по адресу этой копии нет' \
+   && ! alerts | tail -1 | grep -q 'проходит само'; then
+  ok "Repository not found → fetch-not-found, one alert naming a wrong address, no «passes by itself»"
+else
+  bad "Repository not found class" "err=$(state_get last_error) alerts=$(alerts | tail -3)"
+fi
+git -C "$SERVER" remote set-url origin "$WORK/origin.git"
+sync_it 2>/dev/null || true
 
 echo "13d. one failed run between successes → no alert at all, no recovery message"
 git -C "$SERVER" remote set-url origin "ssh://git@example.invalid/demo.git"

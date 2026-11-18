@@ -144,6 +144,11 @@ describe_failure() {
     # (see defer_fetch_alert), so the texts say so.
     fetch-auth)          DESCRIBE_REASON="GitHub уже два запуска подряд не принимает ключ сервера"
                          DESCRIBE_ACTION="Часто это временное ограничение со стороны GitHub, которое проходит само; если тревога повторится, нужно проверить ключ сервера на GitHub." ;;
+    # WP-484 F313: a moved or renamed repository answers "Repository not found";
+    # filed under fetch-auth it was told "often passes by itself" while the
+    # PACK-personal index clone stayed frozen on a dead address.
+    fetch-not-found)     DESCRIBE_REASON="GitHub уже два запуска подряд отвечает, что хранилища по адресу этой копии нет"
+                         DESCRIBE_ACTION="Нужен разбор: само не пройдёт. Скорее всего, хранилище переехали или переименовали; нужно проверить адрес копии (git remote) и поправить его на новый." ;;
     fetch-timeout)       DESCRIBE_REASON="GitHub уже два запуска подряд не отвечает вовремя"
                          DESCRIBE_ACTION="Если это повторяется больше часа, нужно проверить связь сервера с GitHub." ;;
     fetch-network)       DESCRIBE_REASON="сервер уже два запуска подряд не может связаться с GitHub"
@@ -352,7 +357,9 @@ classify_fetch_failure() {
   local rc="$1" err="$2"
   if [ "$rc" -eq 124 ]; then echo "fetch-timeout"; return 0; fi
   case "$err" in
-    *"Permission denied (publickey)"*|*"Repository not found"*|*"Authentication failed"*)
+    *"Repository not found"*)
+      echo "fetch-not-found" ;;
+    *"Permission denied (publickey)"*|*"Authentication failed"*)
       echo "fetch-auth" ;;
     *"Could not resolve host"*|*"Connection refused"*|*"Connection reset"*|*"Connection closed"*|*"Connection timed out"*|*"Network is unreachable"*)
       echo "fetch-network" ;;
