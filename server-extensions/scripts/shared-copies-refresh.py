@@ -17,12 +17,22 @@ Contract (hourly, no fetch, no commits, nothing deleted):
     reachable only from this tip is left behind).
   * anything else is reported as BLOCKED and left untouched.
   * fast-forwarding the returned copy is left to the existing sync jobs.
-Exit code: 0 on any outcome that was reported; 1 on a broken registry.
+  * a copy BLOCKED without a break for NOTIFY_AFTER_HOURS gets one message through iwe-notify
+    (WP-484 F312). Episode = uninterrupted BLOCKED; a new reason does not restart it (a copy
+    flapping between two reasons would otherwise never reach the threshold); any other outcome
+    or the copy leaving the registry ends it. Delivery is at least once per episode: a crash
+    between a delivered message and the state write repeats it next hour.
+Exit code: 0 on any outcome that was reported; 1 on a broken registry. Never non-zero for a
+BLOCKED copy: a failing timer unit rolls back the whole tsekh-1 deploy.
 """
 
 import argparse
+import datetime
 import fcntl
 import importlib.util
+import json
+import math
+import os
 import subprocess
 import sys
 import time
@@ -39,6 +49,13 @@ SHARED_CLASSES = ("reader", "service")
 # copy is left alone (cold review 17.11: a session that ran `git switch -c` and had only new files
 # would have its next commit land on main after the hourly return).
 QUIET_MINUTES = 120
+NOTIFY_AFTER_HOURS = 24
+# iwe-notify's outcome line: only these reached the phone (see scripts/iwe-notify header).
+DELIVERED_OUTCOMES = {"sent", "direct-sent"}
+# The pilot reads the message in Moscow time; the server clock is UTC.
+MSK = datetime.timezone(datetime.timedelta(hours=3))
+# iwe-notify-sources: shared-copies-refresh
+NOTIFY_SOURCE = "shared-copies-refresh"
 
 
 def _load_reader_helpers():
@@ -121,6 +138,108 @@ def heal_one(repo, expected_branch, upstream, dry_run, quiet_minutes=QUIET_MINUT
     return f"returned {where}"
 
 
+def load_state(path):
+    """Blocked episodes by copy path; an unreadable file starts over (logged), it never stops the job."""
+    try:
+        data = json.loads(path.read_text())
+    except FileNotFoundError:
+        return {}
+    except (OSError, ValueError) as exc:
+        log(f"WARN состояние {path} не читается ({exc}), начинаю заново")
+        return {}
+    if not isinstance(data, dict):
+        log(f"WARN состояние {path} не словарь, начинаю заново")
+        return {}
+    state = {}
+    for copy_path, ep in data.items():
+        if (isinstance(ep, dict) and isinstance(ep.get("first_blocked_at"), (int, float))
+                and not isinstance(ep.get("first_blocked_at"), bool)
+                and math.isfinite(ep["first_blocked_at"]) and ep["first_blocked_at"] > 0
+                and isinstance(ep.get("first_reason"), str)):
+            state[copy_path] = {"first_blocked_at": ep["first_blocked_at"],
+                                "first_reason": ep["first_reason"],
+                                "last_reason": str(ep.get("last_reason") or ep["first_reason"]),
+                                "notified": bool(ep.get("notified"))}
+        else:
+            log(f"WARN эпизод {copy_path} в состоянии повреждён, начинаю его заново")
+    return state
+
+
+def save_state(path, state):
+    tmp = path.with_name(path.name + ".tmp")
+    try:
+        tmp.write_text(json.dumps(state, ensure_ascii=False, indent=1, sort_keys=True))
+        os.replace(tmp, path)
+    except OSError as exc:  # lost state only delays or repeats a message (at least once)
+        log(f"WARN состояние {path} не записано: {exc}")
+        tmp.unlink(missing_ok=True)
+
+
+def track_episodes(state, outcomes, now):
+    """Update blocked episodes from this run's outcomes {copy path: outcome}; returns the new state."""
+    new_state = {}
+    for path, outcome in outcomes.items():
+        if not outcome.startswith("BLOCKED"):
+            continue
+        reason = outcome[len("BLOCKED "):]
+        episode = dict(state.get(path) or {"first_blocked_at": now, "first_reason": reason, "notified": False})
+        episode["last_reason"] = reason
+        new_state[path] = episode
+    return new_state
+
+
+def due_episodes(state, now, notify_after_hours):
+    return {path: ep for path, ep in state.items()
+            if not ep.get("notified") and now - ep["first_blocked_at"] >= notify_after_hours * 3600}
+
+
+def notify_text(due):
+    lines = [f"Общие копии на сервере не возвращаются на свою ветку больше {NOTIFY_AFTER_HOURS} ч:"]
+    for path, ep in sorted(due.items()):
+        since = datetime.datetime.fromtimestamp(ep["first_blocked_at"], MSK).strftime("%d.%m %H:%M МСК")
+        line = f"- {path}: {ep['first_reason']} (с {since})"
+        if ep["last_reason"] != ep["first_reason"]:
+            line += f"; сейчас: {ep['last_reason']}"
+        lines.append(line)
+    lines.append("Что делать: открыть копию, разобрать ветку и незакоммиченные файлы вручную; "
+                 "служба вернёт копию сама, когда препятствие уйдёт.")
+    return "\n".join(lines)
+
+
+def send_notification(notify_cmd, text):
+    """True only for a phone delivery: iwe-notify's outcome line says sent or direct-sent.
+
+    Exit 0 also covers not-sent (no gateway, no credentials) and deferred (digest only), so
+    the exit code alone would mark the one message of an episode delivered when it was not.
+    """
+    env = dict(os.environ, TELEGRAM_NEEDS_DECISION="1")
+    try:
+        proc = subprocess.run([notify_cmd, "--source", NOTIFY_SOURCE, text], env=env, check=False,
+                              capture_output=True, text=True, timeout=120)
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        log(f"WARN уведомление не отправлено: {exc}")
+        return False
+    if proc.returncode != 0:
+        log(f"WARN уведомление не отправлено: iwe-notify код {proc.returncode} {proc.stderr.strip()[-200:]}")
+        return False
+    outcome = next((line.split("=", 1)[1].strip() for line in proc.stdout.splitlines()
+                    if line.startswith("iwe-notify: outcome=")), "")
+    if outcome not in DELIVERED_OUTCOMES:
+        log(f"WARN уведомление не доставлено на телефон: outcome={outcome or 'нет строки'}, повторю через час")
+        return False
+    log(f"уведомление: outcome={outcome}")
+    return True
+
+
+def report_long_blocks(state_path, outcomes, notify_cmd, notify_after_hours, now):
+    state = track_episodes(load_state(state_path), outcomes, now)
+    due = due_episodes(state, now, notify_after_hours)
+    if due and send_notification(notify_cmd, notify_text(due)):
+        for path in due:
+            state[path]["notified"] = True
+    save_state(state_path, state)
+
+
 def shared_checkouts(registry, host):
     seen = set()
     for cls in SHARED_CLASSES:
@@ -140,6 +259,10 @@ def main():
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--quiet-minutes", type=int, default=QUIET_MINUTES,
                         help="leave a copy alone this long after its HEAD last moved")
+    parser.add_argument("--notify-after-hours", type=float, default=NOTIFY_AFTER_HOURS,
+                        help="message once a copy has been BLOCKED this long without a break")
+    parser.add_argument("--notify-cmd", default=None, help="default: <root>/scripts/iwe-notify")
+    parser.add_argument("--now", type=float, default=None, help=argparse.SUPPRESS)  # tests only
     args = parser.parse_args()
 
     registry, errors = repo_registry.load(args.registry)
@@ -158,6 +281,7 @@ def main():
             log("SKIP другой запуск держит замок")
             return 0
         counts = {}
+        outcomes = {}
         for entry, checkout in shared_checkouts(registry, host):
             repo = root / checkout["path"]
             if not (repo / ".git").exists():
@@ -173,10 +297,18 @@ def main():
                     outcome = f"BLOCKED ошибка {exc.__class__.__name__}: {exc}"
             kind = outcome.split()[0]
             counts[kind] = counts.get(kind, 0) + 1
+            outcomes[checkout["path"]] = outcome
             if kind not in ("current", "absent"):
                 log(f"{checkout['path']}: {outcome}")
         log("итог: " + ", ".join(f"{k} {v}" for k, v in sorted(counts.items())) if counts
             else "итог: общих копий на этом хосте нет")
+        if not args.dry_run:  # still under the lock: one run reads, notifies and writes the state
+            try:
+                report_long_blocks(root / ".iwe-runtime" / "shared-copies-refresh.state.json", outcomes,
+                                   args.notify_cmd or str(root / "scripts" / "iwe-notify"),
+                                   args.notify_after_hours, args.now if args.now is not None else time.time())
+            except Exception as exc:  # the message is optional; a failing unit would roll back the deploy
+                log(f"WARN уведомление/состояние: {exc.__class__.__name__}: {exc}")
     return 0
 
 
