@@ -79,12 +79,15 @@ fi
 # (bash 3.2-совместимость, per-key flock, fail-open) — не заводить свою
 # отдельную реализацию. Все известные классы сбоя этого скрипта, для alert_ok
 # (перечислять новый класс сюда при добавлении нового failure-branch):
-ALERT_CLASSES=(cd pull source-behind source-snapshot sync-script test-env test-gate add commit push push-race)
-# test-gate-partial is deliberately NOT here (cold review 25.09): unlike
-# every other class, it can fire and still reach a successful alert_ok() in
-# the SAME run, so this blanket sweep would immediately erase its own alert
-# and defeat the 6h/24h escalation backoff. It gets its own recovery check
-# further down instead.
+ALERT_CLASSES=(cd pull source-behind source-snapshot sync-script test-env add commit push push-race)
+# test-gate is deliberately NOT here (cold review 25.09): a tick that holds
+# back some files still delivers the rest and reaches alert_ok() in the SAME
+# run, so this blanket sweep would erase its own alert and defeat the 6h/24h
+# escalation backoff. It recovers only when the gate runs clean (below).
+# WP-484 F313 (18.11): "some files held back" and "all files held back" were
+# two classes (test-gate-partial / test-gate) with two counters, so one stuck
+# file produced two 🆘 with different durations. Now one class, one counter.
+TEST_GATE_LEGACY_CLASS=test-gate-partial
 # drop_unpushed_auto_commits: fetch, then reset to origin/main — but only when
 # HEAD is on main, the copy REALLY diverged (origin/main is not an ancestor of
 # HEAD: a push refused for another reason, e.g. a server-side hook, must stay a
@@ -228,6 +231,17 @@ alert() {
   [ -n "$detail" ] && full_text="$full_text
 Ошибка git: $detail"
   send_telegram "$full_text" "$needs_decision"
+}
+
+# clear_test_gate_incident: nothing is held back by the test gate any more.
+# Also closes an incident still open under the pre-F313 class name, so a
+# file stuck before this change does not leave an escalation that never ends.
+clear_test_gate_incident() {
+  $NOTIFY_LIB_AVAILABLE || return 0
+  local class
+  for class in test-gate "$TEST_GATE_LEGACY_CLASS"; do
+    notify_escalation_update "sync-extensions-auto/$class" ok >/dev/null || true
+  done
 }
 
 # alert_ok <text>: успешный прогон — снимает активную эскалацию у КАЖДОГО
@@ -476,6 +490,8 @@ while IFS= read -r -d '' p; do CHANGED_PATHS+=("$p"); done < "$CHANGED_TMP"
 rm -f "$CHANGED_TMP"
 if [ "${#CHANGED_PATHS[@]}" -eq 0 ]; then
   log_event no_changes "source_sha=$SOURCE_SHA"
+  # Nothing differs from the source any more, so nothing is held back either.
+  clear_test_gate_incident
   echo "$LOG_PREFIX нет изменений, выход"
   exit 0
 fi
@@ -678,9 +694,9 @@ if [ "$GATE_FAILED" = true ]; then
   # SHA keeps the receipt honest; a clean tick removes it below.
   printf '%s\n' "${FAILED_PATHS[@]}" | sort -u > server-extensions/ROOT_COMMIT_EXCLUDED
 elif $NOTIFY_LIB_AVAILABLE; then
-  # The gate ran clean this tick -- test-gate-partial's own cross-tick
-  # recovery point (see why it's excluded from ALERT_CLASSES above).
-  notify_escalation_update "sync-extensions-auto/test-gate-partial" ok >/dev/null
+  # The gate ran clean this tick -- test-gate's own cross-tick recovery point
+  # (see why it's excluded from ALERT_CLASSES above).
+  clear_test_gate_incident
 fi
 [ "$GATE_FAILED" = true ] || rm -f server-extensions/ROOT_COMMIT_EXCLUDED
 # Не удалять, если постоянное сохранение выше явно отказало (GATE_FAILED=true
@@ -726,7 +742,10 @@ if [ "${#DELIVERED_PATHS[@]}" -eq 0 ]; then
   done
   FAILED_TOP3=("${FAILED_UNIQ[@]:0:3}")
   FAILED_BRIEF=$(file_list_brief "${#FAILED_UNIQ[@]}" "${FAILED_TOP3[@]}")
-  alert test-gate "🚨 sync-extensions-auto: тестовый гейт нашёл провал во всех ${FILE_COUNT} изменённых файлах (${FAILED_BRIEF}) — доставлять на этом тике нечего. Сторож продолжит попытки по расписанию; вмешательство нужно, только если придёт отдельный сигнал 🆘 о затяжном простое"
+  # No "intervention only if a 🆘 arrives" here: the digest prints this base
+  # text even after the 🆘 went out (18.11), and then contradicts it.
+  alert test-gate "🚨 sync-extensions-auto: тестовый гейт нашёл провал во всех ${FILE_COUNT} изменённых файлах (${FAILED_BRIEF}) — доставлять на этом тике нечего. Сторож продолжит попытки по расписанию." \
+    "Доставка расширений на сервер: ${FAILED_BRIEF} не проходит тесты и не доезжает до сервера"
   exit 0
 fi
 FILE_COUNT=${#DELIVERED_PATHS[@]}
@@ -744,7 +763,7 @@ if [ "$GATE_FAILED" = true ]; then
   EXCLUDED_BRIEF=$(file_list_brief "${#EXCLUDED_UNIQ[@]}" "${EXCLUDED_TOP3[@]}")
   DELIVERED_TOP3=("${DELIVERED_PATHS[@]:0:3}")
   DELIVERED_BRIEF=$(file_list_brief "$FILE_COUNT" "${DELIVERED_TOP3[@]}")
-  alert test-gate-partial "⚠️ Доставка расширений на сервер: не прошли тесты и пока не доставлены ${#EXCLUDED_UNIQ[@]} файл(ов) (${EXCLUDED_BRIEF}); остальные ${FILE_COUNT} (${DELIVERED_BRIEF}) доставлены. Следующая попытка по расписанию, действие не нужно." \
+  alert test-gate "⚠️ Доставка расширений на сервер: не прошли тесты и пока не доставлены ${#EXCLUDED_UNIQ[@]} файл(ов) (${EXCLUDED_BRIEF}); остальные ${FILE_COUNT} (${DELIVERED_BRIEF}) доставлены. Следующая попытка по расписанию." \
     "Доставка расширений на сервер: ${EXCLUDED_BRIEF} не проходит тесты и не доезжает до сервера, остальные файлы доставляются"
 fi
 
