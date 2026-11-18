@@ -148,7 +148,7 @@ describe_failure() {
     # filed under fetch-auth it was told "often passes by itself" while the
     # PACK-personal index clone stayed frozen on a dead address.
     fetch-not-found)     DESCRIBE_REASON="GitHub уже два запуска подряд отвечает, что хранилища по адресу этой копии нет"
-                         DESCRIBE_ACTION="Нужен разбор: само не пройдёт. Скорее всего, хранилище переехали или переименовали; нужно проверить адрес копии (git remote) и поправить его на новый." ;;
+                         DESCRIBE_ACTION="Нужен разбор: само не пройдёт. Скорее всего, хранилище переехали или переименовали, либо у ключа сервера нет к нему доступа; нужно сверить адрес копии (git remote) и права ключа." ;;
     fetch-timeout)       DESCRIBE_REASON="GitHub уже два запуска подряд не отвечает вовремя"
                          DESCRIBE_ACTION="Если это повторяется больше часа, нужно проверить связь сервера с GitHub." ;;
     fetch-network)       DESCRIBE_REASON="сервер уже два запуска подряд не может связаться с GitHub"
