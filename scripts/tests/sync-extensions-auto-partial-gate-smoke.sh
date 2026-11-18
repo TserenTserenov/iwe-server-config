@@ -132,13 +132,13 @@ S1_PERSISTED=$(find "${S1_REPO}-gate-failures" -maxdepth 1 -name '*.log' 2>/dev/
   || bad "смешанный тик: полный вывод сохранён" "${S1_PERSISTED:-(файл не создан)}"
 # 26.10 (WP-568): алерт больше не содержит пути к логу — он остаётся в
 # журнале/дайджесте; в тексте — имена файлов без пути (16.11) и честное «что делать».
-grep -F "ALERT[test-gate-partial]" "$WORKDIR/tick.out" | grep -qF "bar.sh" \
-  && ! grep -F "ALERT[test-gate-partial]" "$WORKDIR/tick.out" | grep -qF "server-extensions/scripts/" \
-  && ok "смешанный тик: алерт test-gate-partial называет исключённый файл именем без пути" \
-  || bad "смешанный тик: алерт называет исключённый файл" "$(grep -F 'ALERT[test-gate-partial]' "$WORKDIR/tick.out")"
-[ -n "$S1_PERSISTED" ] && ! grep -F "ALERT[test-gate-partial]" "$WORKDIR/tick.out" | grep -qF "$S1_PERSISTED" \
-  && ok "смешанный тик: алерт test-gate-partial не тащит путь к логу в Telegram" \
-  || bad "смешанный тик: алерт без пути к логу" "$(grep -F 'ALERT[test-gate-partial]' "$WORKDIR/tick.out")"
+grep -F "ALERT[test-gate]" "$WORKDIR/tick.out" | grep -qF "bar.sh" \
+  && ! grep -F "ALERT[test-gate]" "$WORKDIR/tick.out" | grep -qF "server-extensions/scripts/" \
+  && ok "смешанный тик: алерт test-gate называет исключённый файл именем без пути" \
+  || bad "смешанный тик: алерт называет исключённый файл" "$(grep -F 'ALERT[test-gate]' "$WORKDIR/tick.out")"
+[ -n "$S1_PERSISTED" ] && ! grep -F "ALERT[test-gate]" "$WORKDIR/tick.out" | grep -qF "$S1_PERSISTED" \
+  && ok "смешанный тик: алерт test-gate не тащит путь к логу в Telegram" \
+  || bad "смешанный тик: алерт без пути к логу" "$(grep -F 'ALERT[test-gate]' "$WORKDIR/tick.out")"
 # Следующий тик, где тест bar прошёл: список удаляется вместе с доставкой bar.
 make_source_file "$S1_SRC" bar 0
 echo "bar fixed" > "$S1_REPO/server-extensions/scripts/bar.sh"
@@ -367,6 +367,8 @@ if [ -f "$NOTIFY_LIB" ]; then
     echo 'send_telegram() { :; }'
     sed -n '/^alert() {/,/^}/p' "$SCRIPT_SRC"
     sed -n '/^alert_ok() {/,/^}/p' "$SCRIPT_SRC"
+    grep -m1 "^TEST_GATE_LEGACY_CLASS=" "$SCRIPT_SRC"
+    sed -n '/^clear_test_gate_incident() {/,/^}/p' "$SCRIPT_SRC"
     sed -n '/^gate_detail_text() {/,/^}/p' "$SCRIPT_SRC"
     sed -n '/^file_list_brief() {/,/^}/p' "$SCRIPT_SRC"
     sed -n '/^changed_paths() {/,/^}/p' "$SCRIPT_SRC"
@@ -383,9 +385,14 @@ if [ -f "$NOTIFY_LIB" ]; then
     echo 'alert_ok "success"'
   } > "$WORKDIR/tick5.sh"
   bash "$WORKDIR/tick5.sh" > "$WORKDIR/tick5.out" 2>&1
-  [ -f "$SBXSTATE/incidents/sync-extensions-auto-test-gate-partial.state" ] \
+  [ -f "$SBXSTATE/incidents/sync-extensions-auto-test-gate.state" ] \
     && ok "частичный провал: предупреждение переживает alert_ok() в том же тике" \
     || bad "частичный провал: предупреждение переживает alert_ok()" "$(cat "$WORKDIR/tick5.out")"
+  # WP-484 F313: "some files held back" and "all files held back" share one
+  # incident and one counter; a second key gave two 🆘 with two durations.
+  [ ! -f "$SBXSTATE/incidents/sync-extensions-auto-test-gate-partial.state" ] \
+    && ok "частичный провал ведёт тот же счётчик, что и полный (одна тревога на застрявший файл)" \
+    || bad "частичный провал завёл отдельный счётчик test-gate-partial" "$(ls "$SBXSTATE/incidents")"
 else
   echo "  (пропущено: не найдена $NOTIFY_LIB на этой машине)"
 fi
