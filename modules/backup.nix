@@ -246,22 +246,27 @@ in
           exit 1
         fi
 
+        # WP-545 F29 (19.11): a missing URL, an HTTP error or a network failure used to
+        # print "OK"/"не критично" and exit 0, so a lost signal was invisible. Every
+        # case below fails the unit; the snapshot is already saved by ExecStart.
         url_file="${cfg.backupHeartbeatUrlFile}"
         if [ ! -f "$url_file" ]; then
-          echo "Backup heartbeat: файл $url_file не найден, пропускаю" >&2
-          exit 0
+          echo "Backup heartbeat: снимок сохранён, но файл $url_file не найден — сигнал не отправлен" >&2
+          exit 1
         fi
         url=$(tr -d '[:space:]' < "$url_file")
         if [ -z "$url" ]; then
-          echo "Backup heartbeat: пустой URL, пропускаю" >&2
-          exit 0
+          echo "Backup heartbeat: снимок сохранён, но адрес сигнала пуст — сигнал не отправлен" >&2
+          exit 1
         fi
-        ${pkgs.curl}/bin/curl \
-          --silent --show-error \
+        if ! ${pkgs.curl}/bin/curl \
+          --fail --silent --show-error \
           --max-time 10 --retry 3 --retry-delay 5 \
-          "$url" > /dev/null \
-          && echo "Backup heartbeat OK (все БД в норме)" \
-          || echo "Backup heartbeat FAIL (не критично)" >&2
+          "$url" > /dev/null; then
+          echo "Backup heartbeat: снимок сохранён, но Better Stack не принял сигнал" >&2
+          exit 1
+        fi
+        echo "Backup heartbeat OK (все БД в норме, Better Stack принял сигнал)"
       '';
     };
 
