@@ -181,6 +181,8 @@ def log_messages(now, outcome, pending):
 
 
 TELEGRAM_SOURCE_ID = "convergence-alarm"
+OUTCOME_MARKER = "CONVERGENCE_SEND_OUTCOME="
+DELIVERED_OUTCOMES = {"sent", "deferred"}
 
 
 def send_telegram(lib, text):
@@ -188,11 +190,23 @@ def send_telegram(lib, text):
     # With neither, $0 was "_" and the digest quarantined a real alarm as
     # "вне реестра: _" (WP-484 F313, 18.11).
     env = {**os.environ, "TELEGRAM_SOURCE_ID": TELEGRAM_SOURCE_ID}
-    proc = subprocess.run(["bash", "-c", '. "$1" && telegram_send "$2"', Path(__file__).name, str(lib), text],
+    # telegram_send exits 0 for a quarantined message too; what really happened is in
+    # TELEGRAM_SEND_OUTCOME (WP-538 Ф7). Only "sent" (and "deferred": a trusted channel that
+    # delivers later) counts as delivered, so a quarantined alarm stays unsent and is retried
+    # instead of being logged as sent for three days (WP-484 Ф316, 19.11).
+    script = '. "$1" && telegram_send "$2" && printf "\\n%s%s\\n" "' + OUTCOME_MARKER + '" "${TELEGRAM_SEND_OUTCOME:-}"'
+    proc = subprocess.run(["bash", "-c", script, Path(__file__).name, str(lib), text],
                           capture_output=True, text=True, timeout=60, env=env, check=False)
     if proc.returncode != 0:
         print(f"convergence-alarm: telegram_send failed: {proc.stderr.strip()[-300:]}", file=sys.stderr)
-    return proc.returncode == 0
+        return False
+    outcome = next((line[len(OUTCOME_MARKER):] for line in reversed(proc.stdout.splitlines())
+                    if line.startswith(OUTCOME_MARKER)), "")
+    if outcome not in DELIVERED_OUTCOMES:
+        print(f"convergence-alarm: message not delivered (outcome: {outcome or 'none'}) - episode stays unsent",
+              file=sys.stderr)
+        return False
+    return True
 
 
 def load_state(path):

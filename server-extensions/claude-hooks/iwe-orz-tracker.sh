@@ -155,35 +155,9 @@ print(json.dumps({'date': '${TODAY}', 'session_id': '${SESSION_ID}', 'source': '
   "$EMIT" "day_open" "day-open-${TODAY}" "$PAYLOAD"
 fi
 
-# ── ДЕТЕКТОР: day_close ───────────────────────────────────────────────────
-# Паттерн 1: текст агента содержит маркеры закрытия дня
-# Паттерн 2: git-commit в DS-my-strategy сегодня упоминает DayPlan/day-close
-# external_id = day-close-YYYY-MM-DD → идемпотентно (один per day).
-# payload: wakatime_h + multiplier из текста агента.
-TODAY="${TODAY:-$(date +%Y-%m-%d)}"
-DAYCLOSE_TRIGGERED=false
-if echo "$AGENT_TEXT" | grep -qiE '(день закрыт|day.?close завершён|day.?close.*✅|день закрыт.*✅|dayplan.*закрыт|закрытие дня.*✅|day close.*done|verify.*day.?close|чеклист.*day.?close)'; then
-  DAYCLOSE_TRIGGERED=true
-fi
-DS_STRATEGY="$IWE_ROOT/DS-my-strategy"
-if ! $DAYCLOSE_TRIGGERED && [ -d "$DS_STRATEGY/.git" ]; then
-  RECENT=$(git -C "$DS_STRATEGY" log --since="today 00:00" --oneline 2>/dev/null | \
-    grep -iE "(day.?close|dayplan|закрытие дня)" | head -1)
-  [ -n "$RECENT" ] && DAYCLOSE_TRIGGERED=true
-fi
-if $DAYCLOSE_TRIGGERED; then
-  WAKATIME_H=$(echo "$AGENT_TEXT" | grep -oE '[0-9]+ ч [0-9]+ мин' | head -1 | \
-    awk '{h=$1; m=$3; printf "%.2f", h + m/60}' 2>/dev/null || echo "0")
-  MULTIPLIER=$(echo "$AGENT_TEXT" | grep -oE '~[0-9]+\.[0-9]+x' | head -1 | \
-    grep -oE '[0-9]+\.[0-9]+' || echo "0")
-  TODAY=$(date +%Y-%m-%d)
-  PAYLOAD=$(python3 -c "
-import json
-wh = float('${WAKATIME_H}') if '${WAKATIME_H}' else 0.0; mx = float('${MULTIPLIER}') if '${MULTIPLIER}' else 0.0
-print(json.dumps({'wakatime_h': wh, 'multiplier': mx, 'date': '${TODAY}', 'session_id': '${SESSION_ID}', 'source': 'day-close-skill'}))
-" 2>/dev/null || echo '{}')
-  "$EMIT" "day_close" "day-close-${TODAY}" "$PAYLOAD"
-fi
+# day_close is not emitted here: the morning DayPlan commit made this detector
+# report a close every morning. Day closes come from the nightly activity-hub
+# collector (WP-427 F10.3/F10.7, pilot decision 2026-11-19).
 
 # ── ДЕТЕКТОР: iwe_session (всегда — базовое событие сессии) ───────────────
 # Каждый Stop = одна Claude Code сессия. Считаем time via transcript timestamps.

@@ -163,7 +163,7 @@ class MainTest(unittest.TestCase):
              "decision_owner": {"ref": "p", "scope": "repo"}, "thresholds": {"behind_observed_for_min": 0}}]}))
         self.sent = base / "sent.txt"
         self.lib = base / "telegram.sh"
-        self.lib.write_text(f'telegram_send() {{ printf "%s\\n--\\n" "$1" >> "{self.sent}"; }}\n')
+        self.lib.write_text(f'telegram_send() {{ printf "%s\\n--\\n" "$1" >> "{self.sent}"; TELEGRAM_SEND_OUTCOME=sent; }}\n')
         self.state = base / "state.json"
         self.log = base / "reader.log"
         self.log.write_text("[2026-11-13 12:00:00] [reader-copies-sync] a: BLOCKED свои коммиты\n")
@@ -199,7 +199,7 @@ class MainTest(unittest.TestCase):
         # WP-484 F313: without a source id the gate saw $0 = "_" and the digest
         # quarantined a real alarm as "вне реестра: _".
         caller = self.tmp.name + "/caller.txt"
-        self.lib.write_text(f'telegram_send() {{ printf "%s|%s\\n" "$(basename -- "$0")" "${{TELEGRAM_SOURCE_ID:-}}" >> "{caller}"; }}\n')
+        self.lib.write_text(f'telegram_send() {{ printf "%s|%s\\n" "$(basename -- "$0")" "${{TELEGRAM_SOURCE_ID:-}}" >> "{caller}"; TELEGRAM_SEND_OUTCOME=sent; }}\n')
         self.main()
         self.main()
         self.assertEqual(Path(caller).read_text().strip(), "convergence-alarm.py|convergence-alarm")
@@ -269,6 +269,28 @@ class MainTest(unittest.TestCase):
         self.main()
         self.assertEqual(self.main(), 1)
         self.assertFalse(json.loads(self.state.read_text())["a"]["alerted"])
+
+    def test_quarantined_message_is_not_counted_as_sent(self):
+        # WP-484 F316: telegram_send exits 0 when the gate quarantines a message; the alarm used to
+        # log "sent" for three days of a stuck copy while nothing reached the pilot.
+        self.lib.write_text("telegram_send() { TELEGRAM_SEND_OUTCOME=quarantined; return 0; }\n")
+        self.main()
+        self.assertEqual(self.main(), 1)
+        state = json.loads(self.state.read_text())["a"]
+        self.assertFalse(state["alerted"])
+        self.assertFalse(state.get("last_alert"))
+
+    def test_message_without_any_outcome_is_not_counted_as_sent(self):
+        self.lib.write_text("telegram_send() { return 0; }\n")  # creds missing: send path never reached
+        self.main()
+        self.assertEqual(self.main(), 1)
+        self.assertFalse(json.loads(self.state.read_text())["a"]["alerted"])
+
+    def test_deferred_message_counts_as_delivered(self):
+        self.lib.write_text("telegram_send() { TELEGRAM_SEND_OUTCOME=deferred; return 0; }\n")
+        self.main()
+        self.assertEqual(self.main(), 0)
+        self.assertTrue(json.loads(self.state.read_text())["a"]["alerted"])
 
 
 if __name__ == "__main__":

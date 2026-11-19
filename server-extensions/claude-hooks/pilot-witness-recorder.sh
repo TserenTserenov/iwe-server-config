@@ -27,6 +27,16 @@ SESSION_ID_SAFE=$(printf '%s' "$SESSION_ID" | tr -cd 'A-Za-z0-9._-')
 PROMPT=$(printf '%s' "$INPUT" | jq -r '.prompt // empty' 2>/dev/null)
 [ -n "$PROMPT" ] || exit 0
 
+# WP-484 (19.11, live case 18.11 x3): a background-task notification arrives as a
+# prompt and used to be recorded as if the pilot wrote it; the reflection step then
+# took it as the pilot's answer. Skip the two confirmed machine signatures (after
+# leading whitespace/CR). Text that merely resembles them is still the pilot's.
+# Same pair is skipped on read in handlers/session-reflection-append.sh.
+PROMPT_PROBE=${PROMPT#"${PROMPT%%[![:space:]]*}"}
+case "$PROMPT_PROBE" in
+  "[SYSTEM NOTIFICATION"*|"<task-notification"*|"<agent-message from="*) exit 0 ;;
+esac
+
 # WP-537 (18.08, пир-сессия с Codex): было ${CLAUDE_PROJECT_DIR:-$HOME/IWE} --
 # единственное оставшееся место в этой связке hook/handler-скриптов с этим
 # паттерном (close_obligation.py, session-guard.sh, close-runner-gate.sh уже

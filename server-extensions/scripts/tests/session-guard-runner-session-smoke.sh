@@ -214,6 +214,55 @@ open_runner >/dev/null || fail "owner fixture must open"
 wrap -C "$GOV" add wrapper.txt || fail "live ancestor owning exact repo must authorize add: $(cat "$TEST_ROOT/wrapper.out")"
 wrap -C "$GOV" -c alias.stage=add stage wrapper.txt || fail "runner-owned write alias must execute"
 [ "$(git -C "$GOV" diff --cached --name-only -- wrapper.txt)" = wrapper.txt ] || fail "runner-authorized add did not execute"
+# WP-530 F73: the guard stores pid_start under LC_ALL=C. A caller with a
+# localized LC_TIME (tsekh-1 runs ru_RU system-wide) must still be recognized,
+# and the recognized owner's name must reach the wrapper log.
+last_runner() { python3 -c 'import json,sys; print(json.loads(open(sys.argv[1]).read().splitlines()[-1])["runner"])' "$IWE_GIT_WRAPPER_LOG"; }
+FOREIGN_LC=""
+for candidate in ru_RU.UTF-8 de_DE.UTF-8 fr_FR.UTF-8; do
+  if [ "$(env -u LC_ALL LC_TIME="$candidate" ps -p $$ -o lstart=)" != "$(LC_ALL=C ps -p $$ -o lstart=)" ]; then
+    FOREIGN_LC="$candidate"; break
+  fi
+done
+if [ -n "$FOREIGN_LC" ]; then
+  git -C "$GOV" restore --staged wrapper.txt
+  ( unset LC_ALL; export LC_TIME="$FOREIGN_LC"; wrap -C "$GOV" add wrapper.txt ) \
+    || fail "live owner must be recognized under LC_TIME=$FOREIGN_LC: $(cat "$TEST_ROOT/wrapper.out")"
+  [ "$(last_runner)" = week-review ] || fail "recognized owner must be logged as runner, got: $(last_runner)"
+  echo "OK: live owner is recognized and logged under LC_TIME=$FOREIGN_LC"
+else
+  echo "NOT VERIFIED: no localized LC_TIME on this host, the F73 locale case did not run"
+fi
+# The guard writes pid_start in the opener's zone; a caller exporting another
+# TZ (several IWE scripts run under TZ=UTC) must still match the system zone.
+FOREIGN_TZ=""
+for candidate in Pacific/Kiritimati UTC Asia/Kamchatka; do
+  if [ "$(LC_ALL=C TZ="$candidate" ps -p $$ -o lstart=)" != "$(LC_ALL=C ps -p $$ -o lstart=)" ]; then
+    FOREIGN_TZ="$candidate"; break
+  fi
+done
+if [ -n "$FOREIGN_TZ" ] && [ -z "${TZ:-}" ]; then
+  git -C "$GOV" restore --staged wrapper.txt
+  ( export TZ="$FOREIGN_TZ"; wrap -C "$GOV" add wrapper.txt ) \
+    || fail "live owner must be recognized when the caller runs under TZ=$FOREIGN_TZ: $(cat "$TEST_ROOT/wrapper.out")"
+  echo "OK: live owner is recognized when the caller runs under TZ=$FOREIGN_TZ"
+else
+  echo "NOT VERIFIED: TZ is preset or no zone differs from the system one, the F73 zone case did not run"
+fi
+# Days 1-9 print as "Nov  5": the stored value keeps that double space.
+cp "$SEM" "$TEST_ROOT/owner.spacing"
+python3 - "$TEST_ROOT/owner.spacing" "$SEM" <<'PY'
+from pathlib import Path
+import sys
+source, target = sys.argv[1:]
+lines = [("pid_start: " + "  ".join(line[len("pid_start: "):].split()) if line.startswith("pid_start: ") else line)
+         for line in Path(source).read_text().splitlines()]
+Path(target).write_text("\n".join(lines) + "\n")
+PY
+grep -q '^pid_start: .*  ' "$SEM" || fail "spacing fixture did not double the inner spaces"
+git -C "$GOV" restore --staged wrapper.txt
+wrap -C "$GOV" add wrapper.txt || fail "inner whitespace of the stored pid_start must not break owner recognition"
+cp "$TEST_ROOT/owner.spacing" "$SEM"
 denied -C "$TEST_ROOT" add root.txt
 cp "$SEM" "$TEST_ROOT/owner.snapshot"
 for field in host pid_start pid canonical_owner canonical_repo; do

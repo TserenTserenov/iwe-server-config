@@ -28,7 +28,11 @@ export PATH="/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin:${PA
 
 EVENT_TYPE="${1:-}"
 EXT_SUFFIX="${2:-}"
-PAYLOAD="${3:-{}}"
+# "${3:-{}}" would append a stray "}" to any given payload (WP-427 F10.7).
+PAYLOAD="${3:-}"
+if [ -z "$PAYLOAD" ]; then
+  PAYLOAD='{}'
+fi
 
 [ -z "$EVENT_TYPE" ] && exit 0
 [ -z "$EXT_SUFFIX" ] && exit 0
@@ -48,8 +52,11 @@ import json, sys
 event_type, external_id, ts, owner_uuid, payload_str = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4], sys.argv[5]
 try:
     payload = json.loads(payload_str)
-except Exception:
-    payload = {}
+except ValueError:
+    payload = None
+if not isinstance(payload, dict):
+    # No body: the caller logs a loud ERROR instead of sending an empty payload.
+    sys.exit(2)
 if owner_uuid:
     payload['ory_uuid'] = owner_uuid
 
@@ -93,7 +100,10 @@ PYEOF
 
 BODY=$(cat "$TMPFILE" 2>/dev/null)
 if [ -z "$BODY" ] || [ "$BODY" = "null" ]; then
-  echo "[iwe_event_emit] ERROR: failed to build JSON body for ${EVENT_TYPE}" >&2
+  echo "[iwe_event_emit] ERROR: failed to build JSON body for ${EVENT_TYPE} (payload must be a JSON object)" >&2
+  if [ "${IWE_EMIT_SYNC:-0}" = "1" ]; then
+    exit 1
+  fi
   exit 0
 fi
 
