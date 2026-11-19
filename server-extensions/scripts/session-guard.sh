@@ -20,6 +20,9 @@
 #                                                      # .iwe-runtime/pilot-release-audit.jsonl; проверки
 #                                                      # доставки те же, что у остальных путей закрытия
 #   close --housekeeping <reason> [--agent ...] [--expect-session-id <id>]  # закрыть housekeeping-сессию (с id: только если открыт именно этот запуск)
+#   close --housekeeping <reason> --prove-owner-dead   # закрыть, только если охранник сам доказал смерть владельца (WP-530 Ф160 шаг 3):
+#                                                      # вердикт process_identity_verdict по pid и pid_start_id записи, под замком перехода;
+#                                                      # match/unknown/нет pid_start_id -> код 3, запись не меняется
 #   close --housekeeping <reason> --only-own-harness   # закрыть, только если отметку открыл этот же разговор
 #                                                      # (harness_session_id = CLAUDE_CODE_SESSION_ID/CODEX_THREAD_ID), иначе код 3
 #   close --abandon-prepared --i-understand-loss-risk --reason "<why>" # manual recovery (WP-484, peer-session
@@ -2971,6 +2974,30 @@ _owner_pid_start_id() {  # <pid>
   ( . "$_SG_PROCESS_IDENTITY_LIB" && process_identity "$1" ) 2>/dev/null || true
 }
 
+# WP-530 Ф160 step 3: the guard, not the caller, decides that a recorded owner is
+# provably dead. Called under the session transition lock with the exact record
+# snapshot already taken; the fields are read from that same locked file, so a
+# caller cannot supply a pid of its own. Only the verdict `dead` of
+# process_identity_verdict (pid absent, other boot, zombie, same boot with a
+# different start) passes: `match`, `unknown`, a missing or ambiguous pid /
+# pid_start_id (a record that predates the field: an absent pid does not prove a
+# --resume'd owner is gone) all refuse. Never falls back to `ps -o lstart=`.
+# Prints the reason on stdout; rc 0 only for a proven death.
+_prove_recorded_owner_dead() {  # <semaphore file>
+  local file="$1" rec_pid rec_id verdict
+  rec_pid=$(_unique_record_field "$file" pid || true)
+  rec_id=$(_unique_record_field "$file" pid_start_id || true)
+  [[ "$rec_pid" =~ ^[1-9][0-9]*$ ]] || { echo "в записи нет ровно одного числового pid"; return 1; }
+  [ -n "$rec_id" ] || { echo "в записи нет pid_start_id (запись старше этого поля): смерть владельца pid $rec_pid не доказана"; return 1; }
+  [ -r "$_SG_PROCESS_IDENTITY_LIB" ] || { echo "помощник process-identity.sh недоступен"; return 1; }
+  verdict=$( ( . "$_SG_PROCESS_IDENTITY_LIB" && process_identity_verdict "$rec_id" "$rec_pid" ) 2>/dev/null || true )
+  case "$verdict" in
+    dead) return 0 ;;
+    match) echo "владелец pid $rec_pid жив (идентичность совпала)"; return 1 ;;
+    *) echo "вердикт «$verdict» для pid $rec_pid: смерть не доказана"; return 1 ;;
+  esac
+}
+
 # WP-530 Ф61 (2026-09-25): `pid:` is written once, at `open`, and never again
 # -- a `--resume`d conversation runs under a brand-new OS process, but no code
 # path ever calls `open` a second time to correct the record. Found live: a
@@ -4725,6 +4752,7 @@ PILOT_CLOSE_WORD=""   # WP-561 (18.11): the pilot's own closing word, required t
 CLOSE_EXPLAIN=0    # WP-561 Ф61: close --explain prints the fact-based close route, changes nothing
 CANONICAL_OWNER=""
 EXPECT_SESSION_ID_SET=""
+PROVE_OWNER_DEAD=0  # close --housekeeping: close only when the guard itself proves the owner dead (WP-530 F160 step 3)
 ONLY_OWN_HARNESS=0  # close --housekeeping: close only a marker this conversation opened (release 0.42, issue #1506)
 EXPECT_SESSION_ID=""  # close --housekeeping: close only the open with this session_id (compare-and-close)
 FORCE_FLAG=0
@@ -4784,6 +4812,7 @@ while [[ $# -gt 0 ]]; do
     # WP-7 Ф265: lets a scheduled runner reclaim a dead owner's barrier without
     # racing a fresh open -- the compare happens under the transition lock.
     --only-own-harness) ONLY_OWN_HARNESS=1; shift ;;
+    --prove-owner-dead) PROVE_OWNER_DEAD=1; shift ;;
     --expect-session-id)
       # An empty value must not read as "option absent" and silently skip the compare.
       [ -n "${2:-}" ] || fail "--expect-session-id требует непустой session_id" 1
@@ -5062,6 +5091,9 @@ fi
 # instead of silently ignoring it (same principle as --base-sha below).
 if [ "$ONLY_OWN_HARNESS" = 1 ] && { [ "$CMD" != close ] || [ -z "$HOUSEKEEPING" ]; }; then
   fail "--only-own-harness применяется только к close --housekeeping" 1
+fi
+if [ "$PROVE_OWNER_DEAD" = 1 ] && { [ "$CMD" != close ] || [ -z "$HOUSEKEEPING" ]; }; then
+  fail "--prove-owner-dead применяется только к close --housekeeping" 1
 fi
 
 if [ -n "$BASE_SHA" ] && [ "$ISOLATE_FLAG" != "1" ]; then
@@ -13202,6 +13234,12 @@ if [ "$CMD" = "close" ]; then
     HK_SNAPSHOT=$(_owned_semaphore_snapshot_sha "$HK_FILE" 1 || true)
     [ -n "$HK_SNAPSHOT" ] \
       || fail "close --housekeeping: exact immutable snapshot не получен" 1
+    # WP-530 Ф160 step 3: proof of death is taken AFTER the snapshot and BEFORE the
+    # CAS rename, from the locked record; the CAS then fails if the record changed.
+    if [ "$PROVE_OWNER_DEAD" = 1 ]; then
+      HK_DEAD_REASON=$(_prove_recorded_owner_dead "$HK_FILE") \
+        || fail "close --housekeeping: --prove-owner-dead отказ: ${HK_DEAD_REASON}; запись не изменена. Вручную: session-guard.sh close --housekeeping ${HOUSEKEEPING} --agent ${AGENT} --expect-session-id ${HK_LOCKED_ID} (после проверки владельца человеком)" 3
+    fi
     _rename_owned_semaphore_cas "$HK_FILE" "$HK_FILE.closed" "$HK_SNAPSHOT" \
       || fail "close --housekeeping: no-clobber terminal transition не прошёл; open сохранён" 1
     _cleanup_closed_session_projections "$HK_FILE" "$AGENT" "$HK_LOCKED_ID" "$HOUSEKEEPING" \
