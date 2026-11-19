@@ -12,7 +12,10 @@
 # Identity format (ASCII only, no whitespace):
 #   linux:<boot_id>:<pid namespace of the WRITER>:<pid>:<start ticks>
 #   darwin:<kern.bootsessionuuid>:<pid>:<start epoch seconds>
-# Linux reads /proc only (no ps, works in systemd units without procps).
+# Linux reads /proc only, with bash builtins where possible (no ps, works in
+# systemd units without procps). macOS calls its system tools by absolute
+# path: a caller's PATH (launchd agents may lack /usr/sbin) can neither break
+# nor shadow them.
 # The pid namespace is the writer's own (/proc/self/ns/pid): another
 # process's ns link is often unreadable even for the same user.
 #
@@ -52,7 +55,11 @@ _pi_linux_stat_fields() {
   local pid=$1 stat rest had_noglob=0 IFS=$' \t\n'
   _pi_linux_proc_is_ours || return 2
   [ -e "/proc/$pid" ] || return 1
-  stat=$(cat "/proc/$pid/stat" 2>/dev/null) || { [ -e "/proc/$pid" ] && return 2; return 1; }
+  # The read builtin, not $(<file): under errexit bash 5.2 aborts the whole
+  # shell when $(<file) cannot open the file, even inside `||`.
+  stat=""
+  IFS= read -r -d '' stat 2>/dev/null <"/proc/$pid/stat" || [ -n "$stat" ] \
+    || { [ -e "/proc/$pid" ] && return 2; return 1; }
   case "$stat" in *') '*) ;; *) return 2 ;; esac
   rest=${stat##*) }
   case $- in *f*) had_noglob=1 ;; esac
@@ -65,7 +72,11 @@ _pi_linux_stat_fields() {
   return 0
 }
 
-_pi_linux_boot_id() { cat /proc/sys/kernel/random/boot_id 2>/dev/null || true; }
+_pi_linux_boot_id() {
+  local boot=""
+  { read -r boot </proc/sys/kernel/random/boot_id; } 2>/dev/null || true
+  printf '%s' "$boot"
+}
 
 _pi_linux_self_pidns() {
   local link
@@ -75,7 +86,11 @@ _pi_linux_self_pidns() {
   return 0
 }
 
-_pi_darwin_boot_id() { sysctl -n kern.bootsessionuuid 2>/dev/null || true; }
+_PI_PS=/bin/ps
+_PI_DATE=/bin/date
+_PI_SYSCTL=/usr/sbin/sysctl
+
+_pi_darwin_boot_id() { "$_PI_SYSCTL" -n kern.bootsessionuuid 2>/dev/null || true; }
 
 # Existence without trusting ps: kill -0 succeeds for own processes; for a
 # foreign one it fails with EPERM, which still proves existence.
@@ -95,10 +110,16 @@ _pi_darwin_exists() {
 # Any ps or date failure is unknown (rc 2), never "absent".
 _pi_darwin_start_epoch() {
   local lstart epoch
-  lstart=$(LC_ALL=C TZ=UTC ps -p "$1" -o lstart= 2>/dev/null) || return 2
-  lstart=$(printf '%s' "$lstart" | tr -s ' \t\n' ' ' | sed 's/^ //; s/ $//')
+  local IFS=$' \t\n' had_noglob=0 words
+  lstart=$(LC_ALL=C TZ=UTC "$_PI_PS" -p "$1" -o lstart= 2>/dev/null) || return 2
+  case $- in *f*) had_noglob=1 ;; esac
+  set -f
+  # shellcheck disable=SC2206 # collapse whitespace by word splitting
+  words=($lstart)
+  [ "$had_noglob" -eq 1 ] || set +f
+  lstart="${words[*]-}"
   [ -n "$lstart" ] || return 2
-  epoch=$(LC_ALL=C TZ=UTC date -j -u -f "%a %b %d %T %Y" "$lstart" +%s 2>/dev/null) || return 2
+  epoch=$(LC_ALL=C TZ=UTC "$_PI_DATE" -j -u -f "%a %b %d %T %Y" "$lstart" +%s 2>/dev/null) || return 2
   [[ $epoch =~ ^(0|[123456789][0123456789]*)$ ]] || return 2
   printf '%s' "$epoch"
 }
@@ -106,10 +127,19 @@ _pi_darwin_start_epoch() {
 # A pid is at most 10 ASCII digits and fits in int32.
 _pi_valid_pid() { [[ ${1:-} =~ $_PI_PID_RE ]] && [ "${#1}" -le 10 ] && [ "$1" -le 2147483647 ]; }
 
+# Platform from bash's own $OSTYPE, not uname: no external program, no PATH.
+_pi_system() {
+  case "${OSTYPE:-}" in
+    linux*) printf Linux ;;
+    darwin*) printf Darwin ;;
+    *) printf unknown ;;
+  esac
+}
+
 process_identity() {
   local pid=${1:-} boot ns epoch rc=0
   _pi_valid_pid "$pid" || return 2
-  case "$(uname -s 2>/dev/null || true)" in
+  case "$(_pi_system)" in
     Linux)
       _pi_linux_stat_fields "$pid" || return $?
       boot=$(_pi_linux_boot_id)
@@ -134,17 +164,20 @@ process_identity() {
 # rc 0 dead zombie, 1 not a zombie, 2 unknown.
 _pi_zombie_state() {
   local pid=$1 threads="" state
-  case "$(uname -s 2>/dev/null || true)" in
+  case "$(_pi_system)" in
     Linux)
       _pi_linux_stat_fields "$pid" || return 2
       [ "${PI_STAT_FIELDS[0]}" = Z ] || return 1
-      threads=$(sed -n 's/^Threads:[[:space:]]*//p' "/proc/$pid/status" 2>/dev/null) || true
+      local line
+      while IFS= read -r line; do
+        case "$line" in Threads:*) threads=${line#Threads:}; threads=${threads//[[:space:]]/} ;; esac
+      done 2>/dev/null <"/proc/$pid/status" || true
       [[ $threads =~ ^[0123456789]+$ ]] || return 2
       [ "$threads" -le 1 ] && return 0
       return 2
       ;;
     Darwin)
-      state=$(LC_ALL=C ps -p "$pid" -o stat= 2>/dev/null) || return 2
+      state=$(LC_ALL=C "$_PI_PS" -p "$pid" -o stat= 2>/dev/null) || return 2
       case "$state" in *Z*) return 0 ;; '') return 2 ;; esac
       return 1
       ;;
@@ -175,7 +208,7 @@ process_identity_verdict() {
   [ "$rpid" = "$pid" ] || { echo unknown; return 0; }
   local boot_re='^[0123456789abcdef-]+$'
   [ "$platform" = linux ] || boot_re='^[0123456789ABCDEF-]+$'
-  case "$platform:$(uname -s 2>/dev/null || true)" in
+  case "$platform:$(_pi_system)" in
     linux:Linux) here_boot=$(_pi_linux_boot_id) ;;
     darwin:Darwin) here_boot=$(_pi_darwin_boot_id) ;;
     *) echo unknown; return 0 ;;

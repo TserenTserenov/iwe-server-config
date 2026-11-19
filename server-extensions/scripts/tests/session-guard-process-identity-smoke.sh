@@ -129,28 +129,55 @@ rc=0; py_identity "$GONE" >/dev/null || rc=$?
 expect_verdict dead "$GONE_ID" "$GONE" "gone process"
 echo "OK: a gone process is absent and dead"
 
-# 5. A broken toolchain is unknown, never dead: failing ps / sysctl / cat.
+# 5. A broken or minimal PATH never turns a live process into "dead". macOS
+#    tools are called by absolute path, so there the verdict stays "match";
+#    on Linux only readlink comes from PATH, a broken one gives "unknown".
 mkdir -p "$SCRATCH/broken"
-for tool in ps sysctl cat readlink; do
+for tool in ps sysctl cat readlink date sed tr; do
   printf '#!/bin/sh\nexit 1\n' >"$SCRATCH/broken/$tool"; chmod +x "$SCRATCH/broken/$tool"
 done
-for path in "$SCRATCH/broken:$PATH" "/nonexistent"; do
-  got=$(PATH="$path" "$BASH_BIN" -c '. "$1"; process_identity_verdict "$2" "$3"' _ "$LIB" "$BASE" "$CHILD")
-  [ "$got" = unknown ] || fail "bash must say unknown without working tools (PATH=$path), got [$got]"
-  # python reads /proc itself on Linux, so match is legitimate there.
-  got=$(PATH="$path" "$PY_BIN" "$PY" verdict "$BASE" "$CHILD")
-  case "$SYSTEM:$got" in Linux:match|*:unknown) ;; *) fail "python verdict under PATH=$path: [$got]" ;; esac
+for path in "$SCRATCH/broken:$PATH" "/nonexistent" "/usr/bin:/bin"; do
+  for twin in bash python; do
+    if [ "$twin" = bash ]; then
+      got=$(PATH="$path" "$BASH_BIN" -c '. "$1"; process_identity_verdict "$2" "$3"' _ "$LIB" "$BASE" "$CHILD")
+    else
+      got=$(PATH="$path" "$PY_BIN" "$PY" verdict "$BASE" "$CHILD")
+    fi
+    case "$SYSTEM:$twin:$path:$got" in
+      Darwin:*:match) ;;
+      # Linux bash takes readlink from PATH: a broken or missing one is unknown.
+      Linux:bash:/usr/bin:/bin:match|Linux:bash:/usr/bin:/bin:unknown) ;;
+      Linux:bash:*:unknown) ;;
+      # python reads /proc and the namespace link itself.
+      Linux:python:*:match) ;;
+      *) fail "$twin verdict under PATH=$path must not be [$got]" ;;
+    esac
+  done
 done
-# A host boot id in a wrong format is unknown, not "other boot".
-mkdir -p "$SCRATCH/garbage"
-for tool in cat sysctl; do
-  printf '#!/bin/sh\necho garbage\n' >"$SCRATCH/garbage/$tool"; chmod +x "$SCRATCH/garbage/$tool"
-done
-got=$(PATH="$SCRATCH/garbage:$PATH" "$BASH_BIN" -c '. "$1"; process_identity_verdict "$2" "$3"' _ "$LIB" "$BASE" "$CHILD")
-[ "$got" = unknown ] || fail "garbage host boot id must be unknown in bash, got [$got]"
 if [ "$SYSTEM" = Darwin ]; then
-  got=$(PATH="$SCRATCH/garbage:$PATH" "$PY_BIN" "$PY" verdict "$BASE" "$CHILD")
-  [ "$got" = unknown ] || fail "garbage host boot id must be unknown in python, got [$got]"
+  # Failing, silent or garbage system tools (by absolute path) are unknown.
+  for stub in 'exit 1' 'exit 0' 'echo garbage'; do
+    printf '#!/bin/sh\n%s\n' "$stub" >"$SCRATCH/stub-tool"; chmod +x "$SCRATCH/stub-tool"
+    for var in _PI_PS _PI_DATE _PI_SYSCTL; do
+      got=$("$BASH_BIN" -c '. "$1"; eval "$4=\$5"; process_identity_verdict "$2" "$3"' \
+        _ "$LIB" "$BASE" "$CHILD" "$var" "$SCRATCH/stub-tool")
+      [ "$got" = unknown ] || fail "bash with $var replaced by [$stub] must be unknown, got [$got]"
+    done
+    for var in _PS _SYSCTL; do
+      got=$("$PY_BIN" -c 'import sys
+sys.path.insert(0, sys.argv[1])
+import process_identity as pi
+setattr(pi, sys.argv[2], sys.argv[3])
+print(pi.verdict(sys.argv[4], int(sys.argv[5])))' "$ROOT_DIR/scripts/lib" "$var" "$SCRATCH/stub-tool" "$BASE" "$CHILD")
+      [ "$got" = unknown ] || fail "python with $var replaced by [$stub] must be unknown, got [$got]"
+    done
+  done
+fi
+# launchd agents may run without /usr/sbin: on macOS identity must still be
+# readable (Linux needs readlink from PATH for the pid namespace).
+if [ "$SYSTEM" = Darwin ]; then
+  got=$(PATH=/usr/bin:/bin "$BASH_BIN" -c '. "$1"; process_identity "$2"' _ "$LIB" "$CHILD" || true)
+  [ "$got" = "$BASE" ] || fail "bash identity under PATH=/usr/bin:/bin: [$got] != $BASE"
 fi
 # Called directly (not in $(...)) under set -e it must not abort the caller.
 got=$(PATH="$SCRATCH/broken:$PATH" "$BASH_BIN" -c 'set -euo pipefail; . "$1"; process_identity_verdict "$2" "$3"; echo after' \

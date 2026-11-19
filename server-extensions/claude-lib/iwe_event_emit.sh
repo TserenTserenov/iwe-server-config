@@ -48,7 +48,7 @@ TMPFILE=$(mktemp "/tmp/iwe_emit_${EVENT_TYPE}_XXXXXX.json")
 trap 'rm -f "$TMPFILE"' EXIT
 
 python3 - "$EVENT_TYPE" "$EXTERNAL_ID" "$TS" "$OWNER_UUID" "$PAYLOAD" > "$TMPFILE" 2>/dev/null <<'PYEOF'
-import json, sys
+import json, os, sys
 event_type, external_id, ts, owner_uuid, payload_str = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4], sys.argv[5]
 try:
     payload = json.loads(payload_str)
@@ -59,6 +59,13 @@ if not isinstance(payload, dict):
     sys.exit(2)
 if owner_uuid:
     payload['ory_uuid'] = owner_uuid
+
+# Automation mark (WP-427 F10.8). Only a positive signal marks an event: schedulers
+# and mechanical commit steps export IWE_AUTOMATION=1. A missing field means
+# "unknown", never "human". The sender's claim, not proof of origin.
+AUTOMATION_MARKED_TYPES = {'git_commit', 'iwe_session'}
+if os.environ.get('IWE_AUTOMATION') == '1' and event_type in AUTOMATION_MARKED_TYPES:
+    payload['automatic'] = True
 
 # activity_domain tagging — WP-253 Блок 2 Ф0.4 (canon: iwe-actions-catalog.md §2.1-2.7)
 # Caller может override через payload['activity_domain'] (например, для wp_closed

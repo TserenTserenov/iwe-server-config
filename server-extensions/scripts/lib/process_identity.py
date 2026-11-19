@@ -20,6 +20,10 @@ import sys
 
 MATCH, DEAD, UNKNOWN = "match", "dead", "unknown"
 
+# macOS system tools by absolute path, as in the shell twin: a caller's PATH
+# (launchd agents may lack /usr/sbin) can neither break nor shadow them.
+_PS, _SYSCTL = "/bin/ps", "/usr/sbin/sysctl"
+
 # [0-9] in a str pattern is ASCII only, unlike str.isdigit().
 _PID_RE = re.compile(r"[1-9][0-9]*")
 _NUM_RE = re.compile(r"0|[1-9][0-9]*")
@@ -98,7 +102,7 @@ def _linux_self_pidns() -> str:
 
 def _darwin_boot_id() -> str:
     try:
-        result = subprocess.run(["sysctl", "-n", "kern.bootsessionuuid"],
+        result = subprocess.run([_SYSCTL, "-n", "kern.bootsessionuuid"],
                                 capture_output=True, text=True, check=False)
     except OSError:
         return ""
@@ -121,7 +125,7 @@ def _darwin_ps(pid: int, column: str) -> str:
     """A ps column of an existing pid; any failure is unknown, never absent."""
     env = {**os.environ, "LC_ALL": "C", "TZ": "UTC"}
     try:
-        result = subprocess.run(["ps", "-p", str(pid), "-o", f"{column}="],
+        result = subprocess.run([_PS, "-p", str(pid), "-o", f"{column}="],
                                 capture_output=True, text=True, check=False, env=env)
     except OSError as exc:
         raise IdentityUnknown(f"ps: {exc}") from exc

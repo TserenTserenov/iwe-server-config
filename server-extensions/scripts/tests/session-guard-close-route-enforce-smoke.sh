@@ -113,8 +113,11 @@ explain() {  # <slug> <out>
   (cd "$REPO" && bash "$GUARD" close --explain --wp WP-561 --slug "$1" --agent fixture) >"$2" 2>&1 || true
 }
 
-real_close() {  # <slug> <err file>; never fails the test by itself
-  (cd "$REPO" && bash "$GUARD" close --wp WP-561 --slug "$1" --agent fixture) >"$2.out" 2>"$2" || true
+real_close() {  # <slug> <err file> [pilot close word]; never fails the test by itself
+  local word_args=()
+  [ -z "${3:-}" ] || word_args=(--pilot-close-word "$3")
+  (cd "$REPO" && bash "$GUARD" close --wp WP-561 --slug "$1" --agent fixture "${word_args[@]+"${word_args[@]}"}") \
+    >"$2.out" 2>"$2" || true
 }
 
 has() { grep -q -- "$2" "$1" || { echo "--- $1" >&2; cat "$1" >&2; fail "$3"; }; }
@@ -137,7 +140,12 @@ lacks "$TEST_ROOT/c-a-on.err" "раннер не требуется" "switch on:
 grep 'close_route_observed .*"slug": "enf-a"' "$LEDGER_LOG" | grep '"enforced": true' | grep -q '"executed": "runner"' \
   || { cat "$LEDGER_LOG" >&2; fail "the ledger record must carry the switch and the executed route"; }
 ok "выключатель включён: объявление не освобождает от раннера"
-real_close enf-a "$TEST_ROOT/c-a-off.err"
+# WP-561 (18.11): the short peer-session close needs the pilot's own closing word
+# (the host recovery switch IWE_PEER_CLOSE_WORD_ENFORCE=0 must not leak into the test).
+IWE_PEER_CLOSE_WORD_ENFORCE=1 real_close enf-a "$TEST_ROOT/c-a-noword.err"
+has "$TEST_ROOT/c-a-noword.err" "закрывается только по слову пилота" "switch off: a peer-session close without the pilot's word must be refused"
+[ -e "$SEM" ] || fail "a close refused for the missing pilot word must keep the session open"
+real_close enf-a "$TEST_ROOT/c-a-off.err" "закрывай"
 has "$TEST_ROOT/c-a-off.err" "раннер не требуется (WP-484 Ф118)" "switch off: the declared peer bypass must still work"
 lacks "$TEST_ROOT/c-a-off.err" "исполнение по фактам включено" "switch off: close must not execute the facts"
 ok "выключатель выключен: прежний обход по объявлению"
