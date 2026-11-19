@@ -7,12 +7,23 @@ import os
 from pathlib import Path
 import re
 import shlex
+import shutil
 import stat
 import subprocess
 import tempfile
 import unittest
 
 import yaml
+
+# WP-484 F318: the real git binary, never the guard wrapper from PATH (the wrapper refuses
+# some commands on purpose). macOS has /usr/bin/git, NixOS keeps it under /run/current-system.
+# The per-call limit is raised for a loaded host (the Mac service ran this file in 758 s and
+# hit the old 30 s limit).
+GIT = next(
+    (path for path in ("/usr/bin/git", "/run/current-system/sw/bin/git") if os.access(path, os.X_OK)),
+    shutil.which("git") or "/usr/bin/git",
+)
+CALL_TIMEOUT = int(os.environ.get("IWE_TEST_CALL_TIMEOUT", "120"))
 
 
 GUARD = Path(os.environ.get(
@@ -564,7 +575,7 @@ class DeclaredTerminalProofTests(unittest.TestCase):
 
     def git(self, *args):
         return subprocess.run(
-            ["/usr/bin/git", *args], cwd=self.root, env=self.env,
+            [GIT, *args], cwd=self.root, env=self.env,
             text=True, capture_output=True, check=True,
         )
 
@@ -679,8 +690,8 @@ class ScopePublicationProofTests(unittest.TestCase):
 
     def git(self, *args, check=True):
         return subprocess.run(
-            ["/usr/bin/git", *args], cwd=self.root, env=self.env,
-            text=True, capture_output=True, check=check, timeout=20,
+            [GIT, *args], cwd=self.root, env=self.env,
+            text=True, capture_output=True, check=check, timeout=CALL_TIMEOUT,
         )
 
     def write(self, relative, text):
@@ -751,7 +762,7 @@ class ScopePublicationProofTests(unittest.TestCase):
         ) + "\n"
         result = subprocess.run(
             ["/bin/bash"], input=command, text=True, capture_output=True,
-            cwd=self.root, env=self.env, timeout=30,
+            cwd=self.root, env=self.env, timeout=CALL_TIMEOUT,
         )
         self.assertEqual(self.state(), before, "Proof mutated HEAD/index/worktree/semaphore")
         self.assertNotIn("command not found", result.stderr, result.stderr)
@@ -920,7 +931,7 @@ class CommitCurrentTreeTests(unittest.TestCase):
         ) + "\n"
         result = subprocess.run(
             ["/bin/bash"], input=command, text=True, capture_output=True,
-            cwd=self.root, env=self.env, timeout=30,
+            cwd=self.root, env=self.env, timeout=CALL_TIMEOUT,
         )
         self.assertEqual(self.state(), before, "Proof changed repository or semaphore")
         self.assertNotIn("command not found", result.stderr, result.stderr)
@@ -1121,7 +1132,7 @@ class ClaimedSupersessionTests(unittest.TestCase):
         target = CLAIMS_TARGET if caller else SUPERSESSION_TARGET
         result = subprocess.run(
             ["/bin/bash"], input="set -euo pipefail\n" + self.functions + "\n" + target + " " + shlex.join(arguments),
-            text=True, capture_output=True, cwd=self.root, env=self.env, timeout=30,
+            text=True, capture_output=True, cwd=self.root, env=self.env, timeout=CALL_TIMEOUT,
         )
         self.assertEqual(self.immutable_state(), before, "Proof mutated source, index, objects, refs or claims")
         for unexpected in ("command not found", "unbound variable", "Traceback (most recent call last)"):
@@ -1240,10 +1251,10 @@ class ClaimedSupersessionTests(unittest.TestCase):
         # from a content conflict into clean absorption, despite the source
         # replacing a base line. Local policy must not widen the insertion rule.
         control = subprocess.run(
-            ["/usr/bin/git", "-C", str(self.repo), "merge-tree", "--write-tree",
+            [GIT, "-C", str(self.repo), "merge-tree", "--write-tree",
              "--merge-base=" + self.base, self.source, self.candidate],
             env={**self.env, "GIT_ATTR_SOURCE": self.base}, cwd=self.root,
-            text=True, capture_output=True, timeout=20,
+            text=True, capture_output=True, timeout=CALL_TIMEOUT,
         )
         self.assertEqual(control.returncode, 0, control.stderr + control.stdout)
         expected = self.git("-C", str(self.repo), "rev-parse", self.candidate + "^{tree}").stdout.strip()
@@ -1398,7 +1409,7 @@ class PeerMetadataPublicationTests(unittest.TestCase):
                      [str(self.repo), self.source, self.remote, str(self.sem), self.repo.name])
         result = subprocess.run(
             ["/bin/bash"], input=source + "\n" + target + " " + shlex.join(arguments),
-            text=True, capture_output=True, cwd=self.root, env=self.env, timeout=30,
+            text=True, capture_output=True, cwd=self.root, env=self.env, timeout=CALL_TIMEOUT,
         )
         self.assertEqual(self.immutable_state(), before)
         return result
@@ -1547,7 +1558,7 @@ class PreparedDeliveryRetryTests(unittest.TestCase):
         result = subprocess.run(
             ["/bin/bash"], input="set -euo pipefail\n" + self.functions
             + "\n_publish_prepared_source " + shlex.join([str(self.sem), str(self.repo), str(self.replay)]),
-            text=True, capture_output=True, cwd=self.root, env=self.env, timeout=30,
+            text=True, capture_output=True, cwd=self.root, env=self.env, timeout=CALL_TIMEOUT,
         )
         # "prepared receipt v2 unavailable" is legitimate here (fixture has no
         # commit claims); a missing library or helper is not.
@@ -1738,7 +1749,7 @@ class ClaimedSourceChainPublicationTests(unittest.TestCase):
             str(self.repo), self.source, self.remote, str(self.sem), self.repo.name,
         ]
         result = subprocess.run(["/bin/bash"], input=functions + "\n" + target + " " + shlex.join(args),
-                                text=True, capture_output=True, cwd=self.root, env=self.env, timeout=30)
+                                text=True, capture_output=True, cwd=self.root, env=self.env, timeout=CALL_TIMEOUT)
         self.assertEqual(self.immutable_state(), before, "Proof modified repository or frozen claims")
         for error in ("command not found", "Traceback (most recent call last)"):
             self.assertNotIn(error, result.stderr)
@@ -1928,7 +1939,7 @@ class HistoricalAutomergePublicationTests(unittest.TestCase):
                                              str(self.sem), self.repo.name]
         return subprocess.run(["/bin/bash"], input="set -euo pipefail\n" + self.functions
                               + "\n" + target + " " + shlex.join(args),
-                              env=self.env, text=True, capture_output=True, timeout=30)
+                              env=self.env, text=True, capture_output=True, timeout=CALL_TIMEOUT)
 
     def proof(self, caller=False):
         self.semaphore()
@@ -2010,17 +2021,17 @@ class HistoricalAutomergePublicationTests(unittest.TestCase):
         # Real tracked attributes resolve this conflict to the exact historical
         # tree. The proof must require the clean default merge instead.
         empty_tree = subprocess.run(
-            ["/usr/bin/git", "-C", str(self.repo), "mktree"], input="",
+            [GIT, "-C", str(self.repo), "mktree"], input="",
             env=self.env, text=True, capture_output=True, check=True,
         ).stdout.strip()
         wanted = self.git("-C", str(self.repo), "rev-parse", self.published + "^{tree}").stdout.strip()
         for attribute_source, expected in ((self.base, 0), (empty_tree, 1)):
             with self.subTest(attributes=attribute_source):
                 control = subprocess.run(
-                    ["/usr/bin/git", "-C", str(self.repo), "merge-tree", "--write-tree",
+                    [GIT, "-C", str(self.repo), "merge-tree", "--write-tree",
                      "--merge-base=" + self.source_base, self.target, self.source],
                     env={**self.env, "GIT_ATTR_SOURCE": attribute_source},
-                    text=True, capture_output=True, timeout=20,
+                    text=True, capture_output=True, timeout=CALL_TIMEOUT,
                 )
                 self.assertEqual(control.returncode, expected, control.stderr)
                 if expected == 0:
@@ -2167,7 +2178,7 @@ _close_delivery_state "$SEM_FILE" one
     def invoke(self, command, *args, cwd=None, env=None):
         return subprocess.run(["bash", "-c", "set -euo pipefail\n" + self.functions + command,
                                "cleanup-test", *args], cwd=cwd or self.root,
-                              env={**self.env, **(env or {})}, capture_output=True, text=True, timeout=30)
+                              env={**self.env, **(env or {})}, capture_output=True, text=True, timeout=CALL_TIMEOUT)
 
     def assert_closed_from(self, cwd):
         result = self.invoke('''
