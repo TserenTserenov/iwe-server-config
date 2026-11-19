@@ -2960,6 +2960,17 @@ lease_valid() {
   [ "$(date +%s)" -lt "$deadline" ]
 }
 
+# WP-530 F160: locale- and time-zone-independent owner identity, written as
+# `pid_start_id:` next to the legacy `pid_start:` (scripts/lib/process-identity.sh).
+# Looked up next to this script first: tests run it with IWE_ROOT pointing at
+# a fixture tree. Prints nothing when the helper or the identity is unavailable.
+_SG_PROCESS_IDENTITY_LIB="$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd)/lib/process-identity.sh"
+[ -r "$_SG_PROCESS_IDENTITY_LIB" ] || _SG_PROCESS_IDENTITY_LIB="$IWE_ROOT/scripts/lib/process-identity.sh"
+_owner_pid_start_id() {  # <pid>
+  [ -r "$_SG_PROCESS_IDENTITY_LIB" ] || return 0
+  ( . "$_SG_PROCESS_IDENTITY_LIB" && process_identity "$1" ) 2>/dev/null || true
+}
+
 # WP-530 Ф61 (2026-09-25): `pid:` is written once, at `open`, and never again
 # -- a `--resume`d conversation runs under a brand-new OS process, but no code
 # path ever calls `open` a second time to correct the record. Found live: a
@@ -2974,23 +2985,48 @@ lease_valid() {
 # that never carried a `pid:` at all (kimi/codex adapters): those use a
 # different, escalate-only liveness model and are not this fix's target.
 _refresh_owner_pid() {  # <semaphore file>, called under an already-held session-transition-lock
-  local semaphore="$1" current_pid="${OWNER_PID:-${CLAUDE_PID:-}}" recorded_pid pid_start has_pid_start tmp
+  local semaphore="$1" current_pid="${OWNER_PID:-${CLAUDE_PID:-}}" recorded_pid pid_start="" start_id
+  local has_pid_start has_start_id tmp
   [[ "$current_pid" =~ ^[1-9][0-9]*$ ]] || return 0
   recorded_pid=$(grep '^pid: ' "$semaphore" 2>/dev/null | head -1 | cut -d' ' -f2- || true)
   [ -n "$recorded_pid" ] || return 0
-  [ "$recorded_pid" = "$current_pid" ] && return 0
-  pid_start=$(LC_ALL=C ps -p "$current_pid" -o lstart= 2>/dev/null | sed 's/^ *//; s/ *$//' || true)
-  [ -n "$pid_start" ] || return 0
   # `grep -c` already prints "0" on a clean no-match; `|| echo 0` here would
   # concatenate a SECOND "0" onto that output instead of replacing it
   # (`||` doesn't discard cmd1's stdout on failure) -- `|| true` is silent.
+  has_start_id=$(grep -c '^pid_start_id: ' "$semaphore" 2>/dev/null || true)
+  # WP-530 F160: an unchanged pid still gains pid_start_id when the record
+  # predates it, otherwise long-lived records would never carry the field.
+  [ "$recorded_pid" = "$current_pid" ] && [ "$has_start_id" != 0 ] && return 0
+  start_id=$(_owner_pid_start_id "$current_pid")
+  if [ "$recorded_pid" != "$current_pid" ]; then
+    pid_start=$(LC_ALL=C ps -p "$current_pid" -o lstart= 2>/dev/null | sed 's/^ *//; s/ *$//' || true)
+    [ -n "$pid_start" ] || return 0
+  else
+    [ -n "$start_id" ] || return 0
+  fi
   has_pid_start=$(grep -c '^pid_start: ' "$semaphore" 2>/dev/null || true)
   tmp="${semaphore}.tmp.$$"
-  if awk -v pid="$current_pid" -v start="$pid_start" -v has_start="$has_pid_start" '
-    /^pid: / { print "pid: " pid; if (has_start == "0") print "pid_start: " start; next }
-    /^pid_start: / { print "pid_start: " start; next }
+  # Legacy pid_start keeps its exact old format (old readers compare it as
+  # text). A pid_start_id of a previous pid is dropped when no new one could
+  # be read: an identity naming another pid would only mislead readers.
+  # Only the header is rewritten: it ends at the first `---` after content
+  # (a leading `---` opens it); body lines are copied verbatim.
+  if awk -v pid="$current_pid" -v start="$pid_start" -v has_start="$has_pid_start" \
+         -v start_id="$start_id" -v has_id="$has_start_id" '
+    BEGIN { header = 1; seen = 0 }
+    header && /^---$/ { if (seen) header = 0; print; next }
+    !header { print; next }
+    { seen = 1 }
+    /^pid: / {
+      print "pid: " pid
+      if (start != "" && has_start == "0") print "pid_start: " start
+      if (start_id != "" && has_id == "0") print "pid_start_id: " start_id
+      next
+    }
+    /^pid_start: / { if (start != "") print "pid_start: " start; else print; next }
+    /^pid_start_id: / { if (start_id != "") print "pid_start_id: " start_id; next }
     { print }
-  ' "$semaphore" > "$tmp" 2>/dev/null && [ -s "$tmp" ]; then
+  ' "$semaphore" > "$tmp" 2>/dev/null && [ -s "$tmp" ] && chmod 600 "$tmp"; then
     mv "$tmp" "$semaphore"
   else
     # Best-effort, same convention as note-file's own lease auto-renewal
@@ -3266,13 +3302,27 @@ _session_guard_notify() {  # <message> <semaphore> <type> <pass key> [reason ope
   fi
 }
 
+# Session age in hours, or "" when the number cannot be a real age. A session
+# older than a year is not credible on a platform this young: the opened-at
+# field was empty or parsed to a date around 2000, and the digest of 18-19.11
+# printed "235651ч" (about 27 years) 16 times (WP-568/538, peer-session
+# 2026-11-19-02). Saying "unknown" is honest; a made-up number is not.
+_session_age_hours() {  # <age seconds>
+  local seconds="$1" hours max_hours="${IWE_MAX_PLAUSIBLE_SESSION_AGE_H:-8760}"
+  [[ "$seconds" =~ ^[0-9]+$ ]] || return 0
+  hours=$(( seconds / 3600 ))
+  [ "$hours" -le "$max_hours" ] && printf '%s' "$hours"
+  return 0
+}
+
 notify_zombie_escalation() {  # <semaphore> <age seconds> <pass key> <reason> <opened epoch>
   local semaphore="$1" age_seconds="$2" pass_key="$3" reason="$4" opened_epoch="$5"
   # Human text (WP-538 addressee policy, peer-session 2026-09-03-05): what
   # happened, who owns the next step, when it resolves on its own -- this is
   # a fully automatic transition (see the comment above ZOMBIE_REGISTRY), so
   # the pilot owns nothing here beyond "read if curious".
-  local age_h=$(( age_seconds / 3600 )) wp task agent host work changed=0 unpublished=0 who age_txt msg
+  local age_h wp task agent host work changed=0 unpublished=0 who age_txt msg
+  age_h=$(_session_age_hours "$age_seconds")
   # The pilot acts on "which work, is anything lost", not on a semaphore file
   # name (WP-568/538, peer-session 2026-10-27-12): same facts and the same
   # unsaved-work check as notify_dead_quarantine. The owner is NOT proven dead
@@ -3280,7 +3330,13 @@ notify_zombie_escalation() {  # <semaphore> <age seconds> <pass key> <reason> <o
   wp=$(_semaphore_last_field "$semaphore" wp); task=$(_semaphore_last_field "$semaphore" task)
   agent=$(_semaphore_last_field "$semaphore" agent); host=$(_semaphore_last_field "$semaphore" host)
   who="сессия ${agent:-агента} по ${wp:-неизвестному РП}${task:+ «${task}»}${host:+ на ${host}}"
-  [ "$age_h" -ge 1 ] && age_txt="${age_h}ч" || age_txt="менее часа"
+  if [ -z "$age_h" ]; then
+    age_txt="давно (в записи сессии неверное время открытия)"
+  elif [ "$age_h" -ge 1 ]; then
+    age_txt="${age_h}ч"
+  else
+    age_txt="менее часа"
+  fi
   work=$(unsaved_work_in_worktree "$(_semaphore_last_field "$semaphore" isolated_worktree)")
   case "$work" in gone|unknown) ;; *) read -r changed unpublished <<< "$work" ;; esac
   if [ "$work" = unknown ]; then
@@ -3457,7 +3513,9 @@ unsaved_work_in_worktree() {
 }
 
 notify_dead_quarantine() {  # <quarantined path> <age> <worktree> <pass key> <reason> <original semaphore> <opened epoch>
-  local age_h=$(( $2 / 3600 )) wp task agent host work changed=0 unpublished=0 who left msg
+  local age_h dead_when wp task agent host work changed=0 unpublished=0 who left msg
+  age_h=$(_session_age_hours "$2")
+  if [ -n "$age_h" ]; then dead_when="${age_h}ч назад"; else dead_when="давно (в записи сессии неверное время открытия)"; fi
   # The pilot acts on "which work, is anything lost", not on a semaphore
   # file name and a worktree path (WP-568, peer-session 2026-10-24-07): the
   # guard checks the copy itself instead of saying "if there was any".
@@ -3467,14 +3525,14 @@ notify_dead_quarantine() {  # <quarantined path> <age> <worktree> <pass key> <re
   work=$(unsaved_work_in_worktree "$3")
   case "$work" in gone|unknown) ;; *) read -r changed unpublished <<< "$work" ;; esac
   if [ "$work" = unknown ]; then
-    msg="⚠️ Умершая ${age_h}ч назад ${who} снята с учёта (процесса нет, аренда истекла). Проверить, осталась ли в ней несохранённая работа, я не смог${3:+ (копия: ${3})}. Делать сейчас ничего не нужно: агент сверит её при следующей работе по ${wp:-этому РП}; если работа срочная - скажите агенту «проверь умершую сессию по ${wp:-РП}»."
+    msg="⚠️ Умершая ${dead_when} ${who} снята с учёта (процесса нет, аренда истекла). Проверить, осталась ли в ней несохранённая работа, я не смог${3:+ (копия: ${3})}. Делать сейчас ничего не нужно: агент сверит её при следующей работе по ${wp:-этому РП}; если работа срочная - скажите агенту «проверь умершую сессию по ${wp:-РП}»."
     _sweep_count_quiet_notice 1
   elif [ "$work" = gone ] || { [ "$changed" = 0 ] && [ "$unpublished" = 0 ]; }; then
     [ "$work" = gone ] && left="Её рабочей копии уже нет, терять нечего." || left="Несохранённой работы в ней нет."
-    msg="Умершая ${age_h}ч назад ${who} снята с учёта (процесса нет, аренда истекла). ${left} Делать ничего не нужно."
+    msg="Умершая ${dead_when} ${who} снята с учёта (процесса нет, аренда истекла). ${left} Делать ничего не нужно."
     _sweep_count_quiet_notice 0
   else
-    msg="⚠️ Умершая ${age_h}ч назад ${who} снята с учёта (процесса нет, аренда истекла). В её копии осталось: изменённых файлов ${changed}, неотправленных коммитов ${unpublished} - копия сохранена (${3}). Делать сейчас ничего не нужно: агент подберёт это при следующей работе по ${wp:-этому РП}; если работа срочная - скажите агенту «подбери работу умершей сессии по ${wp:-РП}»."
+    msg="⚠️ Умершая ${dead_when} ${who} снята с учёта (процесса нет, аренда истекла). В её копии осталось: изменённых файлов ${changed}, неотправленных коммитов ${unpublished} - копия сохранена (${3}). Делать сейчас ничего не нужно: агент подберёт это при следующей работе по ${wp:-этому РП}; если работа срочная - скажите агенту «подбери работу умершей сессии по ${wp:-РП}»."
     _sweep_count_quiet_notice 1
   fi
   _session_guard_notify "$msg" "$6" "quarantined" "$4" "$5" "$7" "$2" "quarantined"
@@ -4663,6 +4721,7 @@ CLEANUP_ORPHANS=0
 QUARANTINE_DEAD_INTERACTIVE=0
 FORCE_NO_REFLECTION=""
 PILOT_RELEASE=""   # WP-484 Ф301: pilot-worded exit for a live semaphore with no terminal proof
+PILOT_CLOSE_WORD=""   # WP-561 (18.11): the pilot's own closing word, required to close a peer-session
 CLOSE_EXPLAIN=0    # WP-561 Ф61: close --explain prints the fact-based close route, changes nothing
 CANONICAL_OWNER=""
 EXPECT_SESSION_ID_SET=""
@@ -4897,6 +4956,13 @@ while [[ $# -gt 0 ]]; do
         fail "--pilot-release требует непустое слово пилота как значение (например: --pilot-release \"закрой без Quick Close, работа опубликована\")" 1
       fi
       PILOT_RELEASE="$2"; shift 2 ;;
+    --pilot-close-word)
+      # WP-561 (18.11): a peer-session closes only on the pilot's own closing word. An empty
+      # or missing value is refused here, the phrase itself is checked in close.
+      if [[ $# -lt 2 || -z "$2" ]]; then
+        fail "--pilot-close-word требует дословную реплику пилота о закрытии (например: --pilot-close-word \"закрывай\")" 1
+      fi
+      PILOT_CLOSE_WORD="$2"; shift 2 ;;
     --explain) CLOSE_EXPLAIN=1; shift ;;
     --)       shift; POSITIONAL+=("$@"); break ;;
     # WP-7 Ф83: was a silent `shift` -- unrecognized flags vanished with no diagnostic.
@@ -5492,6 +5558,8 @@ if [ "$CMD" = "open" ]; then
       if [ -n "${OWNER_PID:-${CLAUDE_PID:-}}" ]; then
         OWNER_PID_START=$(LC_ALL=C ps -p "${OWNER_PID:-$CLAUDE_PID}" -o lstart= 2>/dev/null | sed 's/^ *//; s/ *$//' || true)
         [ -n "$OWNER_PID_START" ] && echo "pid_start: $OWNER_PID_START"
+        OWNER_PID_START_ID=$(_owner_pid_start_id "${OWNER_PID:-$CLAUDE_PID}")
+        [ -n "$OWNER_PID_START_ID" ] && echo "pid_start_id: $OWNER_PID_START_ID"
       fi
       _write_canonical_owner_identity
       echo "---"
@@ -6439,6 +6507,8 @@ $isolate_status_code $isolate_status_path"
     if [ -n "${OWNER_PID:-${CLAUDE_PID:-}}" ]; then
       OWNER_PID_START=$(LC_ALL=C ps -p "${OWNER_PID:-$CLAUDE_PID}" -o lstart= 2>/dev/null | sed 's/^ *//; s/ *$//' || true)
       [ -n "$OWNER_PID_START" ] && echo "pid_start: $OWNER_PID_START"
+      OWNER_PID_START_ID=$(_owner_pid_start_id "${OWNER_PID:-$CLAUDE_PID}")
+      [ -n "$OWNER_PID_START_ID" ] && echo "pid_start_id: $OWNER_PID_START_ID"
     fi
     echo "---"
     # initial --files CSV → append-log entries (git-root-relative expected from caller)
@@ -13311,6 +13381,21 @@ if [ "$CMD" = "close" ]; then
   fi
   if [ "$ROUTE_ENFORCED" = 1 ]; then
     echo "Session CLOSE: исполнение по фактам включено (WP-561 Ф61 этап 2): ${CLOSE_EXECUTION}" >&2
+  fi
+  # WP-561 (18.11 incident): the agent took the pilot's choice of a work variant for the order
+  # to close and closed a peer-session by itself. The skill rule alone did not hold, so the
+  # close of a peer-session is refused here without the pilot's own closing word. The check is
+  # on the phrase form (scripts/lib/pilot_close_word.py); the audit line lets a made-up phrase
+  # be found afterwards. Applies only to the short peer-session close (CLOSE_EXECUTION=legacy): a close driven by the
+  # runner carries the pilot's word through the runner itself. IWE_PEER_CLOSE_WORD_ENFORCE=0 switches it off for a host (recovery).
+  CLOSE_PATH_FROM_SEM=$(grep "^close_path: " "$SEM_FILE" | cut -d' ' -f2- || true)
+  if [ "$CLOSE_PATH_FROM_SEM" = "peer-session" ] && [ "${CLOSE_EXECUTION:-legacy}" = legacy ] && [ "${IWE_PEER_CLOSE_WORD_ENFORCE:-1}" != 0 ]; then
+    [ -n "$PILOT_CLOSE_WORD" ] \
+      || fail "close: сессия пир-типа закрывается только по слову пилота. Пилот слова о закрытии не говорил (выбор варианта работы и «согласен, делай» им не являются): не закрывать, показать итог и ждать. Сказал «закрывай» — повторить close с --pilot-close-word \"<его реплика>\"" 3
+    PCW_REASON=$(python3 "$GUARD_LIB_DIR/pilot_close_word.py" "$PILOT_CLOSE_WORD" 2>&1 >/dev/null) \
+      || fail "close: --pilot-close-word не принят: ${PCW_REASON}" 3
+    _record_pilot_release "$SLUG" "$AGENT" "$WP" "$PILOT_CLOSE_WORD" \
+      || fail "close: слово пилота не удалось записать в журнал pilot-release-audit.jsonl; закрытие не выполнено" 7
   fi
   if [ -f "$IWE_ROOT/$GOV_REPO/scripts/ledger-append.sh" ]; then
     if [ -n "$ROUTE_JSON" ] && ROUTE_EVENT=$(python3 -c '
