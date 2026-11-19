@@ -34,6 +34,15 @@ INPUT=$(cat)
 SANITIZED=$(printf '%s' "$INPUT" | LC_ALL=C tr '\n\r\t' '   ')
 PROMPT_ORIGINAL_CASE=$(printf '%s' "$SANITIZED" | jq -r '.prompt // empty')
 PROMPT=$(printf '%s' "$PROMPT_ORIGINAL_CASE" | lower_text)
+# WP-484 (19.11, independent review): a background-task notification or a subagent
+# hand-back arrives as a prompt and can contain the close words; it is not the pilot's
+# command and must not arm the close intent. Same signatures as
+# pilot-witness-recorder.sh (leading whitespace/CR ignored, text that merely mentions
+# a tag mid-sentence is still the pilot's). No output, the hook stays silent.
+MACHINE_PROBE=${PROMPT_ORIGINAL_CASE#"${PROMPT_ORIGINAL_CASE%%[![:space:]]*}"}
+case "$MACHINE_PROBE" in
+  "[SYSTEM NOTIFICATION"*|"<task-notification"*|"<agent-message from="*) exit 0 ;;
+esac
 # WP-561 F61, pilot decisions 2D (16.11) and 17.11: the pilot's shorthands
 # count only as the whole message; a question mark makes it a question.
 # «СЗ» = close without the reflection question: expanded to the phrase the

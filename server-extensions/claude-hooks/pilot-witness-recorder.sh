@@ -29,9 +29,9 @@ PROMPT=$(printf '%s' "$INPUT" | jq -r '.prompt // empty' 2>/dev/null)
 
 # WP-484 (19.11, live case 18.11 x3): a background-task notification arrives as a
 # prompt and used to be recorded as if the pilot wrote it; the reflection step then
-# took it as the pilot's answer. Skip the two confirmed machine signatures (after
+# took it as the pilot's answer. Skip the confirmed machine signatures (three, see the case below) (after
 # leading whitespace/CR). Text that merely resembles them is still the pilot's.
-# Same pair is skipped on read in handlers/session-reflection-append.sh.
+# The same list is skipped on read in handlers/session-reflection-append.sh.
 PROMPT_PROBE=${PROMPT#"${PROMPT%%[![:space:]]*}"}
 case "$PROMPT_PROBE" in
   "[SYSTEM NOTIFICATION"*|"<task-notification"*|"<agent-message from="*) exit 0 ;;

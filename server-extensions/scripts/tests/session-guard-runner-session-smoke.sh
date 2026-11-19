@@ -49,6 +49,24 @@ grep -qx 'canonical_owner: week-review' "$SEM" || fail "canonical owner must sur
 grep -qx "canonical_repo: $GOV" "$SEM" || fail "owner authority must name the exact checkout"
 grep -qx "host: $(hostname)" "$SEM" || fail "owner host must be recorded"
 grep -q '^pid_start: .' "$SEM" || fail "PID start identity must be recorded for housekeeping"
+# WP-530 F160 step 2: the locale-independent identity is written next to the
+# legacy field, which keeps its exact old format for old readers.
+# shellcheck source=../lib/process-identity.sh
+. "$ROOT_DIR/scripts/lib/process-identity.sh"
+OWN_ID=$(process_identity $$)
+grep -qx "pid_start_id: $OWN_ID" "$SEM" || fail "pid_start_id must equal this process identity [$OWN_ID]: $(grep '^pid_start' "$SEM")"
+[ "$(process_identity_verdict "$OWN_ID" $$)" = match ] || fail "the recorded identity must match the live owner"
+LEGACY_START=$(LC_ALL=C ps -p $$ -o lstart= | sed 's/^ *//; s/ *$//')
+grep -qx "pid_start: $LEGACY_START" "$SEM" || fail "legacy pid_start must keep its old format"
+[ "$(grep -c '^pid_start' "$SEM")" -eq 2 ] || fail "exactly one pid_start and one pid_start_id expected"
+# A record written before F160 gains the field on the next renew, the pid unchanged.
+grep -v '^pid_start_id: ' "$SEM" >"$SEM.legacy" && mv "$SEM.legacy" "$SEM"
+# The guard resets OWNER_PID; an interactive owner is identified by CLAUDE_PID.
+CLAUDE_PID=$$ runner note-file "current/" --agent "$RUNNER" >/dev/null || fail "note-file on a legacy record must succeed"
+grep -qx "pid_start_id: $OWN_ID" "$SEM" || fail "renew must add pid_start_id to a legacy record with the same pid"
+grep -qx "pid_start: $LEGACY_START" "$SEM" || fail "renew must not touch the legacy pid_start"
+[ "$(grep -c '^pid_start_id: ' "$SEM")" -eq 1 ] || fail "renew must not duplicate pid_start_id"
+echo "OK: F160 pid_start_id written at open, legacy pid_start unchanged, legacy record upgraded on renew"
 runner note-file "current/" --agent "$RUNNER" >/dev/null || fail "note-file of a directory scope must succeed"
 grep -qx 'file: current/' "$SEM" || fail "the directory scope must be recorded in the semaphore"
 grep -q '^wp:' "$SEM" && fail "a housekeeping semaphore must carry no wp (the commit barrier would have to classify it)"
