@@ -49,7 +49,7 @@ gates_rationale: "операционный скилл; WP Gate применим 
 ## Шаг 2. Запустить проверку
 
 ```bash
-bash "$IWE_SCRIPTS/route-task.sh" --skill check-secret --args "$ARGUMENTS"
+bash "${IWE_SCRIPTS:-$HOME/IWE/scripts}/route-task.sh" --skill check-secret --args "$ARGUMENTS"
 ```
 
 Скрипт принимает либо путь либо текст. Возвращает:

@@ -2,7 +2,7 @@
 name: kimi-peer-writer
 description: Peer-сессия DP.SC.154 где Kimi = писатель, напарник — параметр `--peer` (default Claude). Запускается простой фразой. Включает ОРЗ Opening и Closing, turn-loop, эскалации, Decision Gate (зафиксировать vs реализовать → ревью → проверить → задеплоить), отложенную финализацию и верификацию.
 argument-hint: "<описание задачи> | --list | --interrupt <session_id> | --finalize <session_id>"
-version: 1.4.0
+version: 1.4.1
 layer: L1
 status: active
 browser_safe: false
@@ -376,9 +376,26 @@ ESCALATE_TO_USER: <причина> — если писатель игнорир�
 PEER_FILE="${SESSION_DIR}/$(printf '%02d' $TURN)-peer.md"
 echo "<промпт>" | IWE_PEER_PLAIN=0 bash "$HOME/IWE/${IWE_GOVERNANCE_REPO:-DS-strategy}/<ADAPTER>" \
   > "$PEER_FILE" 2> "${PEER_FILE%.md}.err"
+PEER_RC=$?   # captured before the .err block below, which resets $?
 ```
 
-Если файл пустой или exit ≠ 0 → сообщить пилоту: «<PEER_VENDOR> не ответил. Повторить или прервать?»
+**Файл ошибок напарника (`NN-peer.err`, РП-524 Ф7, 20.11).** Журнал сессий игнорирует `**/*.err` (`.gitignore` журнала, решение 10.09), поэтому stderr адаптера в историю не попадает. Сразу после вызова:
+1. Строку `INTEGRITY-WARNING:` (адаптер подозревает потерю целого сообщения в ответе) показать пилоту, реплику не считать полной (перезапросить ход или сверить с журналом сессии напарника) и перенести факт и текст предупреждения в свою следующую реплику или §5 отчёта: ссылка на `.err` потеряется.
+2. Пустой `.err` можно удалить, это необязательная уборка.
+3. `.err` никогда не передавать в `git add`/`git commit` явным путём; список файлов для коммита — по Шагу 4.5.
+
+```bash
+ERR_FILE="${PEER_FILE%.md}.err"
+if grep -q '^INTEGRITY-WARNING:' "$ERR_FILE" 2>/dev/null; then
+  echo "ЦЕЛОСТНОСТЬ: адаптер сообщил о возможной потере целого сообщения в ответе напарника." >&2
+  grep '^INTEGRITY-WARNING:' "$ERR_FILE" >&2
+fi
+[ -s "$ERR_FILE" ] || rm -f "$ERR_FILE"
+```
+
+Те же три правила — для файлов ошибок ревью (`review-NN.err`, Шаг 3.6.2) и проверки (`verify-01.err`, Шаг 3.6.4).
+
+Если файл пустой или `PEER_RC` ≠ 0 → сообщить пилоту: «<PEER_VENDOR> не ответил. Повторить или прервать?»
 
 ### 3.2 Показать пилоту
 
@@ -552,6 +569,13 @@ REVIEW_FILE="${SESSION_DIR}/review-$(printf '%02d' "$REVIEW_ITER").md"
 REVIEW_PROMPT_FILE="$HOME/IWE/.iwe-runtime/peer-prompts/<SESSION_ID>-review-$(printf '%02d' "$REVIEW_ITER").txt"
 IWE_PEER_PLAIN=1 bash "$HOME/IWE/${IWE_GOVERNANCE_REPO:-DS-strategy}/<ADAPTER>" \
   < "$REVIEW_PROMPT_FILE" > "$REVIEW_FILE" 2> "${REVIEW_FILE%.md}.err"
+REVIEW_RC=$?
+# .err rules of step 3.1 (WP-524 F7): surface INTEGRITY-WARNING, optional empty-file cleanup.
+grep '^INTEGRITY-WARNING:' "${REVIEW_FILE%.md}.err" >&2 2>/dev/null || :
+[ -s "${REVIEW_FILE%.md}.err" ] || rm -f "${REVIEW_FILE%.md}.err"
+# A failed adapter leaves an empty review; it must not read as "no findings".
+[ "$REVIEW_RC" -eq 0 ] && [ -s "$REVIEW_FILE" ] \
+  || { echo "ревью не получено (код адаптера $REVIEW_RC)" >&2; exit 1; }
 ```
 
 ### 3.6.3 Review Outcome
@@ -623,12 +647,16 @@ VERIFY_FILE="${SESSION_DIR}/verify-01.md"
 IWE_PEER_PLAIN=1 bash "$HOME/IWE/${IWE_GOVERNANCE_REPO:-DS-strategy}/<ADAPTER>" \
   < "$HOME/IWE/.iwe-runtime/peer-prompts/<SESSION_ID>-verify.txt" \
   > "$VERIFY_FILE" 2> "${VERIFY_FILE%.md}.err"
+VERIFY_RC=$?   # non-zero or empty $VERIFY_FILE: verdict NOT_VERIFIABLE, see below
+# .err rules of step 3.1 (WP-524 F7): surface INTEGRITY-WARNING, optional empty-file cleanup.
+grep '^INTEGRITY-WARNING:' "${VERIFY_FILE%.md}.err" >&2 2>/dev/null || :
+[ -s "${VERIFY_FILE%.md}.err" ] || rm -f "${VERIFY_FILE%.md}.err"
 python3 "$HOME/IWE/.claude/skills/verify/falsification_lint.py" verdict \
   --condition-file "$HOME/IWE/.iwe-runtime/peer-prompts/<SESSION_ID>-verify.condition.txt" \
   < "$VERIFY_FILE"
 ```
 
-Код 1: напарник вернул FAIL → исход FAIL (провал не понижается), нарушения оформления перечислить; иначе → исход NOT_VERIFIABLE «вердикт невалиден: <вывод программы>». Код 2 → NOT_VERIFIABLE «проверочная программа недоступна».
+`VERIFY_RC` ≠ 0 или пустой `$VERIFY_FILE` → исход NOT_VERIFIABLE «проверка не получена», вердикт программы не учитывать. Код 1: напарник вернул FAIL → исход FAIL (провал не понижается), нарушения оформления перечислить; иначе → исход NOT_VERIFIABLE «вердикт невалиден: <вывод программы>». Код 2 → NOT_VERIFIABLE «проверочная программа недоступна».
 
 **Результат (все пять исходов `/verify`, ни один не трактуется молча как другой):**
 - PASS → перейти к 3.6.5.
@@ -1061,7 +1089,7 @@ session_index_draft_write "$SESSION_ID" "$TODAY" "<задача ≤50>" \
 
 ### 4.4 Закрытие (ОРЗ — сессионный файл рядом с папкой сессии)
 
-**Выключатель пути закрытия (РП-561 Ф61 этап 2, решения пилота 15.11).** Включён, если `IWE_CLOSE_ROUTE_ENFORCE=1` или есть файл `$HOME/IWE/.iwe-runtime/close-route-enforce` (переменная файл не выключает). Выключен — закрытие ниже как раньше. Включён — короткого закрытия пир-сессии нет, и патч `close_path: peer-session` из шага 0а.0б от раннера не освобождает: сессия с изменениями закрывается обычным закрытием (раннер quick-close с итоговой проверкой, архивацией фаз и РП), журнал и ОРЗ-файл передаются раннеру в коммитах репозитория сессий, прямой коммит и `session-guard.sh close` после слов о закрытии не делать. Порядок тот же, что в навыке peer-conversation, Шаг 4.5, абзац «Сначала: включён ли выключатель». Сессия без изменений (без журнала) закрывается одним `session-guard.sh close`.
+**Выключатель пути закрытия (РП-561 Ф61 этап 2, решения пилота 15.11).** Включён, если `IWE_CLOSE_ROUTE_ENFORCE=1` или есть файл `$HOME/IWE/.iwe-runtime/close-route-enforce` (переменная файл не выключает). Выключен — закрытие ниже как раньше. Включён — короткого закрытия пир-сессии нет, и патч `close_path: peer-session` из шага 0а.0б от раннера не освобождает: сессия с изменениями закрывается обычным закрытием (раннер quick-close с итоговой проверкой, архивацией фаз и РП), ОРЗ-файл и файлы журнала передаются раннеру в коммитах репозитория сессий поштучно, списком из Шага 4.5 (только строки построения `PATHS` до цикла `git add`, без `git add`/`git commit`; не папкой: раннер делает `git add` переданных путей, и папка унесла бы изменённый отслеживаемый `.err`, РП-524 Ф7), прямой коммит и `session-guard.sh close` после слов о закрытии не делать. Порядок тот же, что в навыке peer-conversation, Шаг 4.5, абзац «Сначала: включён ли выключатель». Сессия без изменений (без журнала) закрывается одним `session-guard.sh close`.
 
 Slug-часть (без даты и номера): `SESSION_SLUG=$(echo "$SESSION_ID" | sed -E 's/^[0-9]{4}-[0-9]{2}-[0-9]{2}-[0-9]{2}-//')`
 
@@ -1162,8 +1190,41 @@ grep -qF "status: completed" "$DRAFT_FILE" \
 # коммитят в неё, а не в `main`, и `session-guard.sh close` не находит HEAD среди
 # предков origin/main (ветка `peer/2026-09-19-11-...` простояла с 19.09).
 # Коммитим в текущую ветку и публикуем ровно свои коммиты через шлюз (ниже).
-PATHS=("$MONTH/$DAY/$SESSION_ID/" "$MONTH/${TODAY}-${SESSION_SLUG}.md")
-git add "${PATHS[@]}"
+# WP-524 F7 (20.11): explicit session files, never the folder and never .err.
+# The journal ignores `**/*.err`; `git commit -- <folder>` would still take a
+# modified tracked .err along (2000+ such files predate the 10.09 rule).
+# Listing: untracked-but-not-ignored + changed tracked (deletions included,
+# --no-renames turns a rename into delete + add; --relative keeps paths
+# relative to $SESSIONS_DIR, which in a legacy install is the sessions/
+# subfolder of the governance repo, not a repo root). NUL read loop works on
+# macOS bash 3.2 (no mapfile).
+REL="$MONTH/$DAY/$SESSION_ID"
+PATHS=("$MONTH/${TODAY}-${SESSION_SLUG}.md")
+SKIPPED_ERR=()
+while IFS= read -r -d '' p; do
+  case "$p" in
+    *.err) SKIPPED_ERR+=("$p") ;;
+    *) PATHS+=("$p") ;;
+  esac
+done < <(
+  {
+    git ls-files -z --others --exclude-standard -- "$REL"
+    git diff -z --name-only --relative --no-renames HEAD -- "$REL"
+  } | sort -zu
+)
+[ "${#PATHS[@]}" -gt 1 ] || { echo "FAIL: в папке сессии $REL нет файлов для сохранения" >&2; exit 1; }
+# A modified tracked .err (re-closing an old session) keeps the journal copy
+# dirty: save it outside ~/IWE for analysis, then
+# `git restore --source=HEAD --staged --worktree -- <path>`.
+[ "${#SKIPPED_ERR[@]}" -eq 0 ] || printf 'WARN: изменённый отслеживаемый .err не сохраняется: %s\n' "${SKIPPED_ERR[@]}" >&2
+for P in "${PATHS[@]}"; do
+  if [ -e "$P" ]; then
+    git add -- "$P" || { echo "FAIL: не удалось добавить $P" >&2; exit 1; }
+  elif git ls-files --error-unmatch -- "$P" >/dev/null 2>&1; then
+    # Tracked file deleted on disk, deletion not staged yet.
+    git rm --cached --quiet -- "$P" || { echo "FAIL: не удалось снять $P с индекса" >&2; exit 1; }
+  fi   # deletion already staged: `git commit -- <path>` takes it
+done
 # Task text: written beforehand with a file-writing tool (not the shell) to
 # $HOME/IWE/.iwe-runtime/peer-prompts/<SESSION_ID>-task.txt — never inline it in quotes.
 TASK_FILE="$HOME/IWE/.iwe-runtime/peer-prompts/$SESSION_ID-task.txt"
@@ -1228,7 +1289,7 @@ done
 1. Извлечь месяц и день из id: `MONTH=$(echo "$session_id" | cut -c1-7)`, `DAY=$(echo "$session_id" | cut -c9-10)` → найти `$SESSIONS_DIR/$MONTH/$DAY/$session_id/meta.yaml` (MC-sessions, WP-526 Ф2).
 2. Обновить (Bash sed): `status: interrupted`, `end_time: <now>`, `turns_count: <число файлов>`.
 3. Обновить индекс-черновик (WP-537 Ф4, `session_index_draft_write`, см. Шаг 4.3): статус → `interrupted`, report → `—`.
-4. Commit + push внутри `$SESSIONS_DIR` (без `00-index.md` — см. Шаг 4.5).
+4. Commit + push внутри `$SESSIONS_DIR` (без `00-index.md`): `SESSION_ID="$session_id"`, из блока Шага 4.5 взять только перечисление (`REL`, цикл чтения, фильтр `.err`) с `PATHS=()` и порогом `-gt 0`; закрывающий ОРЗ-файл добавить, только если он есть на диске; проверки над блоком (`report.md`, ОРЗ-файл, `status: completed`) в этом режиме не применять.
 
 ---
 
@@ -1241,7 +1302,7 @@ done
 3. Выполнить **Шаг 4.2** (синтез report-draft.md через адаптер сессии: `scripts/<peer_cmd>.sh`, где `peer_cmd` читается из `meta.yaml` этой сессии — аргумента `--peer` при `--finalize` нет, Шаг 0а.2 не выполняется заново) с теми же инвариантами и fallback.
 4. Обновить `meta.yaml` (Bash sed): `status: completed`, `end_time: <now>`, `turns_count: <число файлов>`.
 5. Обновить индекс-черновик (WP-537 Ф4, `session_index_draft_write`, см. Шаг 4.3): статус → `completed`, report → ссылка.
-6. Commit + push внутри `$SESSIONS_DIR` (без `00-index.md` — см. Шаг 4.5).
+6. Commit + push внутри `$SESSIONS_DIR` (без `00-index.md`): `SESSION_ID="$session_id"`, из блока Шага 4.5 взять только перечисление (`REL`, цикл чтения, фильтр `.err`) с `PATHS=()` и порогом `-gt 0`; закрывающий ОРЗ-файл добавить, только если он есть на диске; проверки над блоком (`report.md`, ОРЗ-файл, `status: completed`) в этом режиме не применять.
 
 Используется для восстановления прерванных сессий без перезапуска turn-loop.
 

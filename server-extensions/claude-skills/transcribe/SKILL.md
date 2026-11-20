@@ -61,7 +61,7 @@ test -d ~/.local/share/mlx-whisper/mlx_models/large-v3
 MLX требует доступ к Metal/GPU. В Codex запустить **всю команду** с точечным `sandbox_permissions: require_escalated` и объяснением: «Разрешить локальному MLX Whisper использовать Apple Metal/GPU для транскрибации указанного файла?». Не запускать предварительный `import mlx_whisper` в обычной песочнице.
 
 ```bash
-bash "$IWE_SCRIPTS/route-task.sh" --skill transcribe --args "<путь_к_файлу>"
+bash "${IWE_SCRIPTS:-$HOME/IWE/scripts}/route-task.sh" --skill transcribe --args "<путь_к_файлу>"
 ```
 
 Если скрипт завершился с кодом `77`, запросить точечное разрешение и повторить всю команду один раз. Это отказ песочницы, а не признак сломанного пакета; переустановка не нужна.

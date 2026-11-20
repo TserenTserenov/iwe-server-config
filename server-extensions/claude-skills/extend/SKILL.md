@@ -42,8 +42,8 @@ gates_rationale: "операционный скилл; WP Gate применим 
 ### 2. Показать текущее состояние кастомизаций
 
 ```bash
-ls {{WORKSPACE_DIR}}/extensions/*.md 2>/dev/null || echo "(нет расширений)"
-cat {{WORKSPACE_DIR}}/params.yaml 2>/dev/null
+ls ${IWE_WORKSPACE:-$HOME/IWE}/extensions/*.md 2>/dev/null || echo "(нет расширений)"
+cat ${IWE_WORKSPACE:-$HOME/IWE}/params.yaml 2>/dev/null
 ```
 
 Сообщить:

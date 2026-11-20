@@ -2,7 +2,7 @@
 name: peer-conversation
 description: Многотуровый диалог писателя (Claude) с одним или несколькими напарниками (любой набор из kimi/codex/hermes/claude-headless/grok) по задаче пилота (DP.SC.154). Ведёт turn-loop (2 участника) или round-loop (3+, WP-509), обнаруживает CONSENSUS/ESCALATE, после консенсуса — Decision Gate (зафиксировать vs реализовать → ревью → проверить → задеплоить), синтезирует report.md через Agent tool.
 argument-hint: "<описание задачи> [--peer kimi|codex|hermes|claude|grok[,vendor2,...]] | --list | --interrupt <session_id> | --finalize <session_id>"
-version: 1.7.8
+version: 1.7.9
 layer: L1
 status: active
 browser_safe: false
@@ -1305,7 +1305,8 @@ Slug-часть (без даты, с номером — та же формула
 # `git -C` instead of a top-level `cd` (a PreToolUse hook blocks it); `-z` with a
 # NUL read loop works on macOS bash 3.2 (no mapfile). --no-renames lists a rename
 # as delete + add, so the deletion reaches the commit too; `diff HEAD` covers
-# staged and unstaged changes, deletions included.
+# staged and unstaged changes, deletions included. --relative: paths stay
+# relative to $SESSIONS_DIR even when it is a subfolder (legacy sessions/).
 REL="$MONTH/$DAY/$SESSION_ID"
 SESSION_PATHS=()
 SKIPPED_ERR=()
@@ -1317,7 +1318,7 @@ while IFS= read -r -d '' p; do
 done < <(
   {
     git -C "$SESSIONS_DIR" ls-files -z --others --exclude-standard -- "$REL"
-    git -C "$SESSIONS_DIR" diff -z --name-only --no-renames HEAD -- "$REL"
+    git -C "$SESSIONS_DIR" diff -z --name-only --relative --no-renames HEAD -- "$REL"
   } | sort -zu
 )
 [ "${#SESSION_PATHS[@]}" -gt 0 ] || { echo "в папке сессии $REL нет файлов для сохранения" >&2; exit 1; }

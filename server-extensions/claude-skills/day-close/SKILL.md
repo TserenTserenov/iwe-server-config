@@ -2,7 +2,7 @@
 name: day-close
 description: "Протокол закрытия дня (Day Close). Алиас для /run-protocol close day — симметрия с /day-open."
 argument-hint: ""
-version: 1.2.1
+version: 1.3.0
 layer: L1
 status: active
 triggers:
@@ -154,9 +154,44 @@ DC_CONTEXT=$(bash "$HOME/IWE/.iwe-runtime/day-close-interactive.sh" --context '<
 grep -oE "WP-[0-9]+" "${GOV_REPO_ROOT:?}/current/DayPlan $IWE_CLOSE_DATE.md" 2>/dev/null | sort -u | head -10
 ```
 
-Задать ОДНИМ сообщением (не тремя отдельными ходами), рефлексия по-прежнему обязательна (решение пилота 30.07, CONCEPT-night-cycle.md §22), приоритеты и часы — можно пропустить по отдельности:
+**Список объявленных бесед дня (РП-561 Ф78, протокол слотов РП-151 Ф27; окно сбора 17.11–01.12.2026).** Беседы дня по журналу объявлений ритуала — показать пилоту перед вопросами. Это неполный источник: отрезков времени, бесед без ритуала и ответов на ритуал в нём нет, полную таблицу протокола собирает РП-151:
+```bash
+DC_CONTEXT=$(bash "$HOME/IWE/.iwe-runtime/day-close-interactive.sh" --context '<токен из шага 0.5>') || exit 1; eval "$DC_CONTEXT"
+python3 - "$HOME/IWE/.iwe-runtime/intent-declarations" "$IWE_CLOSE_DATE" <<'PY'
+import datetime, json, pathlib, sys
+source = pathlib.Path(sys.argv[1])
+if not source.is_dir():
+    print(f"журнал объявлений недоступен ({source}) — список бесед неизвестен")
+    sys.exit(0)
+rows = []
+for path in source.glob("*.json"):
+    try:
+        rec = json.loads(path.read_text(encoding="utf-8"))
+        at = datetime.datetime.fromisoformat(str(rec["declared_at"]).replace("Z", "+00:00")).astimezone()
+    except (OSError, ValueError, KeyError, TypeError, AttributeError) as exc:
+        print(f"пропущена запись {path.name}: {exc}", file=sys.stderr)
+        continue
+    if at.date().isoformat() == sys.argv[2]:
+        ritual = rec.get("ritual")
+        text = ritual.get("text") if isinstance(ritual, dict) else None
+        rows.append((at.strftime("%H:%M"), str(rec.get("intent", "?")), str(rec.get("agent", "?")), str(text or "")[:70]))
+for row in sorted(rows):
+    print(" | ".join(row))
+print(f"бесед с объявленным ритуалом: {len(rows)}")
+PY
+```
+Ноль бесед или недоступный журнал не доказывают, что бесед не было: показать вывод как есть и задать вопросы всё равно. Список — подсказка для ответа, не итог: пилот подтверждает его или поправляет.
+
+**Фокус на завтра — предложение агента.** Предложить 1–3 пункта (РП или потребность) по таблице дня, плану дня и переносу; первый = важнее всего. **Если завтра понедельник** — пунктов не предлагать, спросить открыто «что завтра в фокусе?» (решение пилота 20.11, РП-151 Ф28). Вид выбора (`offered`/`open`) запомнить для записи.
+
+Задать ОДНИМ сообщением (не отдельными ходами), рефлексия по-прежнему обязательна (решение пилота 30.07, CONCEPT-night-cycle.md §22), остальное — можно пропустить по отдельности:
 - «Что сегодня сработало хорошо? Что не сработало, какой был затык?»
-- «1–3 приоритета на завтра (номера РП из списка выше или свои, первый = важнее всего) — или "пропустить"»
+- «Список бесед выше верен? Было ли, что внимание уходило, и вы возвращались сами?»
+- «Был ли сегодня серьёзный сбой — работа остановилась или день пришлось перепланировать? Если да: примерно когда и когда вернулись к работе»
+- «Продуктивное состояние сейчас по шкале 0–5»
+- (только если вчера на закрытии названа цель на сегодня) «Вчера вы назвали цель: уровень N для задачи X — вышли на него?»
+- «Фокус на завтра: предлагаю <1–3 пункта> — подтвердить, поправить или назвать своё» (в воскресенье — «что завтра в фокусе?»)
+- «Нужен ли завтра для какой-то задачи определённый уровень состояния? Если да: "уровень N для задачи X"»
 - «Часы саморазвития сегодня (0/0.5/1/2/3/4 или свой ответ) — или "пропустить"»
 
 Дождаться ОДНОГО ответа пилота на всё сразу (по пунктам или общей фразой — разобрать по смыслу, не требовать строгого формата). Пустой ответ на рефлексию — записать «нет ответа», не пропускать вопрос молча.
@@ -187,6 +222,26 @@ today:
 `last_updated` = завтрашняя дата (`python3 -c 'import datetime, os; print(datetime.date.fromisoformat(os.environ["IWE_CLOSE_DATE"]) + datetime.timedelta(days=1))'`). Добавить файл в список изменений для коммита на шаге 15 (если перезаписывался).
 
 **3. Часы саморазвития (WP-310 Ф13c) → подсказка боту, не файл.** Пропущено пилотом → пометить «не записано», не блокировать. Иначе — подсказать команду `/slot N` в @aist_pilot_me или @aist_me_bot (handler пишет slot_logged event с source='self_report_daily').
+
+**4. Сверка дня, состояние, сбой и фокус на завтра → ledger (РП-561 Ф77/Ф78, потребитель РП-151).** Одно событие `pilot_answer` с `subtype: slot_day_check`. Пропущенный ответ — `null` («нет данных»), не 0 и не «нет»; ответы пилота — дословно. Фокус на завтра из этого же ответа идёт и в `priorities.yaml` (п. 2), если в нём есть номера РП. JSON записать инструментом записи файлов (не через оболочку: в ответах кавычки и `$`) в `${TMPDIR:-/tmp}/day-close-slot-check-<дата>.json`:
+```json
+{"subtype": "slot_day_check", "for_date": "<IWE_CLOSE_DATE>",
+ "conversation_list": "confirmed|corrected|no_answer", "conversation_list_correction": null,
+ "attention_return": "<ответ дословно>",
+ "failure": {"occurred": "yes|no", "at": "HH:MM", "returned_at": "HH:MM", "note": "<дословно>"},
+ "state_evening": 3, "state_goal_result": null,
+ "focus_next": {"for_date": "<завтра>", "stage": "evening_preliminary", "choice": "offered|open", "offered": ["WP-N"],
+                "answer": "confirmed|corrected|own|no_answer", "items": ["WP-N"]},
+ "state_goal_next": {"level": 4, "task": "<X>"}}
+```
+Пропуск вопроса целиком — `null` у всего поля (`failure: null`, `attention_return: null`, `state_evening: null`): молчание не превращать в «нет». `focus_next` при пропуске остаётся объектом с `answer: no_answer` (предложенное сохраняется). `conversation_list: confirmed` — пилот подтвердил список объявленных бесед, не полную таблицу протокола. Фокус на завтра — вечерний, предварительный (`stage: evening_preliminary`): утреннее подтверждение он не заменяет. `answer`: `confirmed` — принял предложенное без изменений; `corrected` — поправил; `own` — назвал своё (при открытом вопросе — всегда `own`); голое «да» на открытый вопрос невозможно. Цель на завтра, предложенная агентом и принятая без изменений, — `null`: шкала управления засчитывает только цель человека (РП-151, паспорт 10.5).
+```bash
+DC_CONTEXT=$(bash "$HOME/IWE/.iwe-runtime/day-close-interactive.sh" --context '<токен из шага 0.5>') || exit 1; eval "$DC_CONTEXT"
+SLOT_FILE="${TMPDIR:-/tmp}/day-close-slot-check-$IWE_CLOSE_DATE.json"
+SLOT_JSON=$(python3 -c 'import json,sys; print(json.dumps(json.load(open(sys.argv[1], encoding="utf-8")), ensure_ascii=False))' "$SLOT_FILE") || exit 1
+bash ${GOV_REPO_ROOT:?}/scripts/ledger-append.sh day "$IWE_CLOSE_DATE" pilot_answer "$SLOT_JSON" day-close
+```
+Цель на сегодня для вопроса «вышли на него?» — поле `state_goal_next` вчерашнего события `slot_day_check` (журнал дня за вчера); не нашлось — вопрос не задавать, `state_goal_result: null`. Утренней отметки состояния в этом шаге нет: открытие дня идёт без разговора с пилотом (решение о месте утреннего вопроса — РП-561 Ф78).
 
 ### 3. «Ты свободен» [[gate]]
 
@@ -617,6 +672,7 @@ python3 $HOME/IWE/.claude/scripts/rule-classifier.py
 ## Чеклист Day Close
 
 - [ ] **Единый блок вопросов задан одним ходом (шаг 2, Часть А, WP-484 Ф36):** ретро (оба вопроса, ответ записан в ledger через `pilot_answer/preclose_retro`, пустой ответ — «нет ответа», не пропуск), приоритеты (`current/priorities.yaml` обновлён или пилот явно пропустил), часы саморазвития (подсказка `/slot` дана или пилот пропустил) — всё за один раунд-трип, не три отдельных
+- [ ] **Сверка дня записана (шаг 2 п.4, РП-561 Ф77/Ф78):** в журнале дня есть событие `pilot_answer` с `subtype: slot_day_check` за сегодня; пропущенные пилотом ответы — `null`, не 0. Пилоту показана таблица дня; фокус на завтра предложен (в воскресенье — открытый вопрос)
 - [ ] **«Ты свободен» сказано и записано в ledger (шаг 3)** — Часть Б идёт без пилота
 - [ ] **Git-lock взят перед началом работы (шаг 0.6, WP-484 Ф2):** `day-close-lock.sh acquire` вернул 0, день не был закрыт/не закрывался параллельно (финальный коммит `day-close: YYYY-MM-DD` на шаге 15 сам служит завершающей меткой — отдельного снятия лока не требуется)
 - [ ] Все изменения закоммичены и запушены (по всем репо)

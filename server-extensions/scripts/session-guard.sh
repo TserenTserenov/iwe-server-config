@@ -18,7 +18,11 @@
 #                                                      # пилота (WP-484 Ф301): нет ни карточки раннера, ни
 #                                                      # обязательства закрытия. Слово пишется в
 #                                                      # .iwe-runtime/pilot-release-audit.jsonl; проверки
-#                                                      # доставки те же, что у остальных путей закрытия
+#                                                      # доставки те же, что у остальных путей закрытия.
+#                                                      # Ф323: без кода снимает только отметку этого
+#                                                      # разговора или завершённого владельца; живую или
+#                                                      # недоказанную чужую — отказ с кодом 3 и кодом
+#                                                      # подтверждения, затем ... --pilot-release-code <код>
 #   close --housekeeping <reason> [--agent ...] [--expect-session-id <id>]  # закрыть housekeeping-сессию (с id: только если открыт именно этот запуск)
 #   close --housekeeping <reason> --prove-owner-dead   # закрыть, только если охранник сам доказал смерть владельца (WP-530 Ф160 шаг 3):
 #                                                      # вердикт process_identity_verdict по pid и pid_start_id записи, под замком перехода;
@@ -566,15 +570,15 @@ _close_path_clears_obligation() {  # <close_path value>
 # WP-484 Ф301: `close --pilot-release` is an exit by the pilot's word, so the word has to
 # outlive the command. One JSON line per release; a failed write refuses the release
 # (an unaudited exit is the thing this log exists to prevent).
-_record_pilot_release() {  # <slug> <agent> <wp> <word> [<close state the word was NOT applied in>]
+_record_pilot_release() {  # <slug> <agent> <wp> <word> [<close state the word was NOT applied in>] [<owner class>] [<mark session id>]
   local audit="$IWE_ROOT/.iwe-runtime/pilot-release-audit.jsonl"
   mkdir -p "$(dirname "$audit")" || return 1
-  python3 - "$audit" "$1" "$2" "$3" "$4" "${5:-}" <<'AUDIT_PY'
+  python3 - "$audit" "$1" "$2" "$3" "$4" "${5:-}" "${6:-}" "${7:-}" "${CLAUDE_CODE_SESSION_ID:-${CODEX_THREAD_ID:-}}" <<'AUDIT_PY'
 import json
 import sys
 import time
 
-audit, slug, agent, wp, word, held_in_state = sys.argv[1:]
+audit, slug, agent, wp, word, held_in_state, owner, session_id, caller = sys.argv[1:]
 record = {
     "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
     "slug": slug,
@@ -586,6 +590,14 @@ if held_in_state:
     # The word was heard but the staged delivery decides the close, not the word.
     record["applied"] = False
     record["held_in_state"] = held_in_state
+if owner:
+    # WP-484 Ф323: own / dead / confirmed_alive / confirmed_unproven, or refused_<class>;
+    # the mark's own id and the caller's conversation tie the line to one exact mark.
+    record["owner"] = owner
+    record["session_id"] = session_id
+    record["caller_conversation"] = caller
+    if owner.startswith("refused_"):
+        record["applied"] = False
 with open(audit, "a", encoding="utf-8") as handle:
     handle.write(json.dumps(record, ensure_ascii=False, separators=(",", ":")) + "\n")
 AUDIT_PY
@@ -2588,6 +2600,8 @@ PY
 }
 
 _cleanup_closed_session_projections() {  # <former .open> <agent> <session-id> [housekeeping reason]
+  # WP-484 Ф323: a pilot-release code belongs to this mark only; it goes with the mark.
+  rm -f "$(_pilot_release_challenge_file "$2" "$3")"
   python3 - "$1" "$2" "$3" "${4:-}" "$SESSION_DIR/current-$2.ptr" <<'PY'
 import os
 import stat
@@ -2982,20 +2996,138 @@ _owner_pid_start_id() {  # <pid>
 # different start) passes: `match`, `unknown`, a missing or ambiguous pid /
 # pid_start_id (a record that predates the field: an absent pid does not prove a
 # --resume'd owner is gone) all refuse. Never falls back to `ps -o lstart=`.
-# Prints the reason on stdout; rc 0 only for a proven death.
+# Prints the reason on stdout; rc 0 only for a proven death, rc 1 for a proven
+# live owner (`match`), rc 2 when neither is proven (WP-484 Ф323 tells them apart).
 _prove_recorded_owner_dead() {  # <semaphore file>
   local file="$1" rec_pid rec_id verdict
   rec_pid=$(_unique_record_field "$file" pid || true)
   rec_id=$(_unique_record_field "$file" pid_start_id || true)
-  [[ "$rec_pid" =~ ^[1-9][0-9]*$ ]] || { echo "в записи нет ровно одного числового pid"; return 1; }
-  [ -n "$rec_id" ] || { echo "в записи нет pid_start_id (запись старше этого поля): смерть владельца pid $rec_pid не доказана"; return 1; }
-  [ -r "$_SG_PROCESS_IDENTITY_LIB" ] || { echo "помощник process-identity.sh недоступен"; return 1; }
+  [[ "$rec_pid" =~ ^[1-9][0-9]*$ ]] || { echo "в записи нет ровно одного числового pid"; return 2; }
+  [ -n "$rec_id" ] || { echo "в записи нет pid_start_id (запись старше этого поля): смерть владельца pid $rec_pid не доказана"; return 2; }
+  [ -r "$_SG_PROCESS_IDENTITY_LIB" ] || { echo "помощник process-identity.sh недоступен"; return 2; }
   verdict=$( ( . "$_SG_PROCESS_IDENTITY_LIB" && process_identity_verdict "$rec_id" "$rec_pid" ) 2>/dev/null || true )
   case "$verdict" in
     dead) return 0 ;;
     match) echo "владелец pid $rec_pid жив (идентичность совпала)"; return 1 ;;
-    *) echo "вердикт «${verdict}» для pid ${rec_pid}: смерть не доказана"; return 1 ;;
+    *) echo "вердикт «${verdict}» для pid ${rec_pid}: смерть не доказана"; return 2 ;;
   esac
+}
+
+# WP-484 Ф323 (20.11, inbox I-27): on 19.11 one general pilot phrase released 15 marks of
+# several agents, four of them live sessions. A pilot word now releases by itself only what
+# the guard proves on its own: a mark opened by this very conversation, or one whose owner is
+# proven dead. A live or unprovable foreign mark needs a one-time code bound to that mark: the
+# agent shows the pilot what the mark is plus the code, and repeats the close with the code
+# the pilot gives back. Like closure-pending-sync, this forces a second explicit step per
+# mark; it does not prove who typed the code.
+PILOT_RELEASE_CODE_TTL_SECONDS=1800
+PILOT_RELEASE_CODE_MAX_ATTEMPTS=3
+
+# "Own" is decided from the caller's own native conversation id, not from the mark's agent:
+# peers started from a Claude conversation inherit CLAUDE_CODE_SESSION_ID, so a Kimi or Codex
+# child must not pass for its parent, nor the parent for the child. Agents without a native
+# conversation id (Kimi, Hermes, Grok) never own a mark this way.
+_pilot_release_caller_owns() {  # <semaphore> <record agent>
+  local native rec_harness
+  case "$2" in kimi*|hermes*|grok*) return 1 ;; esac
+  if [[ "$2" == codex* ]]; then
+    native="${CODEX_THREAD_ID:-}"
+  else
+    [ -z "${CODEX_THREAD_ID:-}" ] || return 1
+    native="${CLAUDE_CODE_SESSION_ID:-}"
+  fi
+  if [ -n "${IWE_AGENT:-}" ]; then
+    case " $(_agent_family "$2") " in *" $IWE_AGENT "*) ;; *) return 1 ;; esac
+  fi
+  [[ "$native" =~ ^[a-zA-Z0-9][a-zA-Z0-9._-]{0,255}$ ]] || return 1
+  rec_harness=$(_unique_record_field "$1" harness_session_id || true)
+  [ -n "$rec_harness" ] && [ "$rec_harness" = "$native" ]
+}
+
+# A dead pid alone does not prove the conversation is gone: a --resume'd conversation runs as
+# a new process and keeps the old pid until its next write (_refresh_owner_pid), and a record
+# from another host has another boot id. So "dead" also needs an expired lease and this host.
+_pilot_release_owner_class() {  # <semaphore> <agent>; prints own|dead|alive|unproven, reason on line 2
+  local sem="$1" reason rc=0 rec_host
+  if _pilot_release_caller_owns "$sem" "$2"; then
+    echo own; return 0
+  fi
+  reason=$(_prove_recorded_owner_dead "$sem") || rc=$?
+  if [ "$rc" = 0 ]; then
+    rec_host=$(_unique_record_field "$sem" host || true)
+    if [ -n "$rec_host" ] && [ "$rec_host" != "$(uname -n)" ]; then
+      rc=2; reason="отметка открыта на другом компьютере (${rec_host}), процесс владельца отсюда не проверить"
+    elif lease_valid "$sem"; then
+      rc=2; reason="процесс владельца завершён, но аренда отметки ещё действует: беседа могла быть возобновлена под новым процессом"
+    fi
+  fi
+  case "$rc" in
+    0) echo dead ;;
+    1) printf 'alive\n%s\n' "$reason" ;;
+    *) printf 'unproven\n%s\n' "$reason" ;;
+  esac
+}
+
+# One challenge per mark, keyed by its locked session id. Issuing again replaces the code;
+# a correct answer, an expired code or exhausted attempts remove it. The file is claimed by
+# rename first, so two concurrent answers cannot both consume one code.
+_pilot_release_challenge_file() {  # <agent> <session id>
+  printf '%s/.iwe-runtime/pilot-release-challenges/%s-%s.json\n' "$IWE_ROOT" "$1" "$2"
+}
+
+_pilot_release_issue_code() {  # <agent> <session id>; prints the new code
+  local file code tmp
+  file=$(_pilot_release_challenge_file "$1" "$2")
+  mkdir -p "$(dirname "$file")" || return 1
+  code=$(LC_ALL=C tr -dc '0-9' < /dev/urandom 2>/dev/null | head -c 6) || true
+  [[ "$code" =~ ^[0-9]{6}$ ]] || return 1
+  tmp=$(mktemp "$file.tmp.XXXXXX") || return 1
+  printf '{"code": "%s", "issued_at": %s, "attempts": 0}\n' "$code" "$(date +%s)" > "$tmp" \
+    && mv -f "$tmp" "$file" || { rm -f "$tmp"; return 1; }
+  printf '%s\n' "$code"
+}
+
+_pilot_release_check_code() {  # <agent> <session id> <answer>; rc 0 = accepted, reason on stdout otherwise
+  local file claimed
+  file=$(_pilot_release_challenge_file "$1" "$2")
+  claimed="$file.claim.$$"
+  mv "$file" "$claimed" 2>/dev/null \
+    || { echo "для этой отметки нет выданного кода (не выдавался, уже использован или истёк): вызови close --pilot-release без кода, чтобы получить новый"; return 1; }
+  python3 - "$claimed" "$file" "$3" "$(date +%s)" "$PILOT_RELEASE_CODE_TTL_SECONDS" "$PILOT_RELEASE_CODE_MAX_ATTEMPTS" <<'PRC_PY'
+import json
+import os
+import sys
+
+claimed, live, answer, now, ttl, max_attempts = sys.argv[1:]
+try:
+    with open(claimed, encoding="utf-8") as handle:
+        record = json.load(handle)
+    code, issued, attempts = str(record["code"]), int(record["issued_at"]), int(record["attempts"])
+except (OSError, ValueError, KeyError, TypeError) as exc:
+    os.remove(claimed)
+    print(f"запись кода повреждена ({exc}): вызови close --pilot-release без кода, чтобы получить новый")
+    raise SystemExit(1)
+if int(now) - issued > int(ttl):
+    os.remove(claimed)
+    print(f"код истёк (действует {ttl} с): вызови close --pilot-release без кода, чтобы получить новый")
+    raise SystemExit(1)
+if answer == code:
+    # Kept until the mark really closes (_cleanup_closed_session_projections removes it):
+    # a later refusal, e.g. unconfirmed delivery, must not burn the pilot's code.
+    os.replace(claimed, live)
+    raise SystemExit(0)
+attempts += 1
+if attempts >= int(max_attempts):
+    os.remove(claimed)
+    print(f"код не совпал, попытки исчерпаны ({attempts}/{max_attempts}): нужен новый код")
+    raise SystemExit(1)
+record["attempts"] = attempts
+with open(claimed, "w", encoding="utf-8") as handle:
+    json.dump(record, handle)
+os.replace(claimed, live)
+print(f"код не совпал (попытка {attempts}/{max_attempts})")
+raise SystemExit(1)
+PRC_PY
 }
 
 # WP-530 Ф61 (2026-09-25): `pid:` is written once, at `open`, and never again
@@ -4748,6 +4880,7 @@ CLEANUP_ORPHANS=0
 QUARANTINE_DEAD_INTERACTIVE=0
 FORCE_NO_REFLECTION=""
 PILOT_RELEASE=""   # WP-484 Ф301: pilot-worded exit for a live semaphore with no terminal proof
+PILOT_RELEASE_CODE=""   # WP-484 Ф323: pilot's code for one live or unprovable foreign mark
 PILOT_CLOSE_WORD=""   # WP-561 (18.11): the pilot's own closing word, required to close a peer-session
 CLOSE_EXPLAIN=0    # WP-561 Ф61: close --explain prints the fact-based close route, changes nothing
 CANONICAL_OWNER=""
@@ -4985,6 +5118,12 @@ while [[ $# -gt 0 ]]; do
         fail "--pilot-release требует непустое слово пилота как значение (например: --pilot-release \"закрой без Quick Close, работа опубликована\")" 1
       fi
       PILOT_RELEASE="$2"; shift 2 ;;
+    --pilot-release-code)
+      # WP-484 Ф323: the code the pilot gave back for one live or unprovable foreign mark.
+      if [[ $# -lt 2 || ! "$2" =~ ^[0-9]{6}$ ]]; then
+        fail "--pilot-release-code требует шестизначный код, который пилот вернул для этой отметки" 1
+      fi
+      PILOT_RELEASE_CODE="$2"; shift 2 ;;
     --pilot-close-word)
       # WP-561 (18.11): a peer-session closes only on the pilot's own closing word. An empty
       # or missing value is refused here, the phrase itself is checked in close.
@@ -5094,6 +5233,9 @@ if [ "$ONLY_OWN_HARNESS" = 1 ] && { [ "$CMD" != close ] || [ -z "$HOUSEKEEPING" 
 fi
 if [ "$PROVE_OWNER_DEAD" = 1 ] && { [ "$CMD" != close ] || [ -z "$HOUSEKEEPING" ]; }; then
   fail "--prove-owner-dead применяется только к close --housekeeping" 1
+fi
+if [ -n "$PILOT_RELEASE_CODE" ] && { [ "$CMD" != close ] || [ -z "$PILOT_RELEASE" ]; }; then
+  fail "--pilot-release-code применяется только вместе с close --pilot-release" 1
 fi
 
 if [ -n "$BASE_SHA" ] && [ "$ISOLATE_FLAG" != "1" ]; then
@@ -13336,6 +13478,7 @@ if [ "$CMD" = "close" ]; then
   if [ -n "${PILOT_RELEASE:-}" ] && [ "$CLOSE_RESUME_STATE" != "none" ]; then
     _record_pilot_release "$SLUG" "$AGENT" "${WP:-}" "$PILOT_RELEASE" "$CLOSE_RESUME_STATE" \
       || fail "close: слово пилота не удалось записать в журнал pilot-release-audit.jsonl; закрытие не выполнено" 7
+    [ -z "${PILOT_RELEASE_CODE:-}" ] || echo "Session CLOSE: код --pilot-release-code здесь не применяется: закрытие решает доставка (состояние: ${CLOSE_RESUME_STATE})" >&2
     echo "Session CLOSE: слово пилота принято и записано в журнал, но закрытие держит доставка (состояние: $CLOSE_RESUME_STATE): слово его не отменяет. Закрытие продолжается по подготовленному набору; чтобы снять отметку иначе — см. close --explain." >&2
   fi
   TASK_FROM_SEM=$(grep "^task: " "$SEM_FILE" | cut -d' ' -f2- || true)
@@ -13971,7 +14114,34 @@ print(json.dumps({"wp": sys.argv[1], "slug": sys.argv[2], "agent": sys.argv[3], 
   # предупреждение после закрытия (_warn_unpushed).
   # ${:-}: the select-close-cards smoke runs this function without the global defaults under set -u.
   if [ -z "$RUNNER_OK" ] && [ -n "${PILOT_RELEASE:-}" ]; then
-    _record_pilot_release "$SLUG" "$AGENT" "${WP:-}" "$PILOT_RELEASE" \
+    PR_OWNER_OUT=$(_pilot_release_owner_class "$SEM_FILE" "$AGENT")
+    PR_OWNER_CLASS=$(printf '%s\n' "$PR_OWNER_OUT" | sed -n 1p)
+    PR_OWNER_REASON=$(printf '%s\n' "$PR_OWNER_OUT" | sed -n 2p)
+    case "$PR_OWNER_CLASS" in
+      own|dead)
+        PR_AUDIT_OWNER="$PR_OWNER_CLASS"
+        PR_UNNEEDED_WHY="этого разговора"
+        [ "$PR_OWNER_CLASS" = own ] || PR_UNNEEDED_WHY="с доказанно завершённым владельцем"
+        [ -z "${PILOT_RELEASE_CODE:-}" ] \
+          || echo "Session CLOSE: код --pilot-release-code не понадобился: отметка ${PR_UNNEEDED_WHY}" >&2
+        ;;
+      *)
+        if [ -z "${PILOT_RELEASE_CODE:-}" ]; then
+          _record_pilot_release "$SLUG" "$AGENT" "${WP:-}" "$PILOT_RELEASE" "" "refused_${PR_OWNER_CLASS}" "$LOCKED_SESSION_ID" \
+            || fail "close: слово пилота не удалось записать в журнал pilot-release-audit.jsonl; закрытие не выполнено" 7
+          PR_CODE=$(_pilot_release_issue_code "$AGENT" "$LOCKED_SESSION_ID") \
+            || fail "close --pilot-release: код подтверждения не удалось выдать; отметка не снята" 7
+          PR_OWNER_WORDS="владелец жив"
+          [ "$PR_OWNER_CLASS" = alive ] || PR_OWNER_WORDS="завершение владельца не доказано"
+          OPENED_FROM_SEM=$(grep '^opened_at: ' "$SEM_FILE" | head -1 | cut -d' ' -f2- || true)
+          fail "close --pilot-release: отметка чужого разговора, ${PR_OWNER_WORDS} (${PR_OWNER_REASON}). Общее слово пилота снимает только отметки этого разговора и отметки завершённых владельцев (WP-484 Ф323); отметки Кими, Гермеса и Grok своим разговором не считаются никогда, им всегда нужен код. Отметка: агент ${AGENT}, ${WP:-РП не указан}, слаг ${SLUG}, задача «${TASK_FROM_SEM:-}», открыта ${OPENED_FROM_SEM:-?}. Покажи пилоту это описание и код ${PR_CODE}; снять можно только если пилот вернёт код: тот же вызов с --pilot-release-code <код от пилота> (действует ${PILOT_RELEASE_CODE_TTL_SECONDS} с, ${PILOT_RELEASE_CODE_MAX_ATTEMPTS} попытки, код подходит только к этой отметке). Код самому не подставлять." 3
+        fi
+        PR_CHECK_REASON=$(_pilot_release_check_code "$AGENT" "$LOCKED_SESSION_ID" "$PILOT_RELEASE_CODE") \
+          || fail "close --pilot-release-code: ${PR_CHECK_REASON}; отметка не снята" 3
+        PR_AUDIT_OWNER="confirmed_${PR_OWNER_CLASS}"
+        ;;
+    esac
+    _record_pilot_release "$SLUG" "$AGENT" "${WP:-}" "$PILOT_RELEASE" "" "$PR_AUDIT_OWNER" "$LOCKED_SESSION_ID" \
       || fail "close: слово пилота не удалось записать в журнал pilot-release-audit.jsonl; закрытие не выполнено" 7
     RUNNER_OK="pilot-release:$SLUG"
     TERMINAL_PROOF_MODE="sentinel"

@@ -54,7 +54,7 @@ triggers:
 Разделение: платформенное → `FMT-exocortex-template` → `update.sh`. Пользовательское → `extensions/` + `params.yaml`.
 
 **Автор (author_mode: true):** прямое редактирование L1 РАЗРЕШЕНО.  
-Delivery в FMT: `bash $IWE_SCRIPTS/{script|hook|skill}-promote.sh <файл> [--dry-run]`  
+Delivery в FMT: `bash ${IWE_SCRIPTS:-$HOME/IWE/scripts}/{script|hook|skill}-promote.sh <файл> [--dry-run]`  
 CLAUDE.md + ядро (protocol-*.md, .claude/rules/*.md): `bash $HOME/IWE/DS-ai-systems/setup/scripts/template-sync.sh` (sync / `--dry-run`; защищённый конвейер, отказывается перезаписывать файлы с чужими правками в FMT)
 
 ### Именование (плейсхолдеры)
