@@ -490,6 +490,10 @@ import sys
 GUARD_SOURCE = Path(sys.argv[1]).read_text()
 FIXTURES_ROOT = Path(sys.argv[2]).resolve()
 REAL_GIT = shutil.which("git")
+# Per-call limit for the extracted proof helper. The Mac delivery gate runs this
+# file under heavy load (781 s on 2026-11-20 vs 97 s alone), where a fixed 30 s
+# limit held session-guard.sh back although the code was fine (same class as #229).
+CALL_TIMEOUT = int(os.environ.get("IWE_TEST_CALL_TIMEOUT", "120"))
 
 
 def function(source, name, end_name=None):
@@ -595,7 +599,7 @@ class ClaimedRepositoryFallback(unittest.TestCase):
         result = subprocess.run([
             "bash", str(helper), str(self.mc), "sessions checkout", str(self.semaphore),
             self.mc_sha, "orz_sessions_dir", "governance_worktree", "", "",
-        ], env=environment, capture_output=True, text=True, timeout=30)
+        ], env=environment, capture_output=True, text=True, timeout=CALL_TIMEOUT)
         if not mutate_during_resolution:
             self.assertEqual(self.semaphore.read_bytes(), before)
         return result

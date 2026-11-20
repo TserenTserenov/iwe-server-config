@@ -342,9 +342,12 @@ open_b gate-close-slow
 BINTENTS="$IGDIR/$(basename "$BSEM").intents"
 printf '%s\n' 'intent-s1 fixture MC-sessions:s.md' > "$BINTENTS"
 START=$SECONDS
-(export STUB_SLEEP=20 INTENT_GATE_RESOLVE_BUDGET_SEC=2; bguard close --wp WP-484 --slug gate-close-slow --agent fixture >/dev/null 2>"$B/close9.err")
+# The stub sleeps 60 s; a close that waited for it would take >= 60 s. The 40 s
+# bound keeps that distinction with room for a loaded Mac delivery gate, where
+# the former 20/15 pair failed on 2026-11-20 although the batch was killed.
+(export STUB_SLEEP=60 INTENT_GATE_RESOLVE_BUDGET_SEC=2; bguard close --wp WP-484 --slug gate-close-slow --agent fixture >/dev/null 2>"$B/close9.err")
 check "close succeeds" 0 "$?"
-check "close not held by the slow batch" yes "$([ $((SECONDS - START)) -lt 15 ] && echo yes || echo no)"
+check "close not held by the slow batch" yes "$([ $((SECONDS - START)) -lt 40 ] && echo yes || echo no)"
 check "kept for retry as timeout" "intent-s1 fixture - 1 timeout" "$(cut -d" " -f1-5 "$BINTENTS.retry" 2>/dev/null)"
 check "no taken file left behind" 0 "$(ls "$IGDIR" | grep -c '\.closing\.' || true)"
 
