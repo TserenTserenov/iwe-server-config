@@ -259,14 +259,26 @@ in
           echo "Backup heartbeat: снимок сохранён, но адрес сигнала пуст — сигнал не отправлен" >&2
           exit 1
         fi
-        if ! ${pkgs.curl}/bin/curl \
-          --fail --silent --show-error \
+        # WP-545 F29 (20.11): `curl --fail` rejects only HTTP >= 400, so a 3xx answer
+        # passed as "accepted" although Better Stack does not count a redirected
+        # ping. Only an explicit 2xx status counts; the code is printed either way.
+        # --retry still covers timeouts and 408/429/5xx without --fail.
+        if ! http_code=$(${pkgs.curl}/bin/curl \
+          --silent --show-error \
           --max-time 10 --retry 3 --retry-delay 5 \
-          "$url" > /dev/null; then
-          echo "Backup heartbeat: снимок сохранён, но Better Stack не принял сигнал" >&2
+          --output /dev/null --write-out '%{http_code}' \
+          "$url"); then
+          echo "Backup heartbeat: снимок сохранён, но сигнал не доставлен (сетевая ошибка, HTTP ''${http_code:-нет})" >&2
           exit 1
         fi
-        echo "Backup heartbeat OK (все БД в норме, Better Stack принял сигнал)"
+        case "$http_code" in
+          2??) ;;
+          *)
+            echo "Backup heartbeat: снимок сохранён, но Better Stack ответил HTTP ''${http_code} вместо 2xx — сигнал не засчитан" >&2
+            exit 1
+            ;;
+        esac
+        echo "Backup heartbeat OK (все БД в норме, Better Stack принял сигнал, HTTP ''${http_code})"
       '';
     };
 
