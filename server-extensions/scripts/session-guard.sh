@@ -21,8 +21,8 @@
 #                                                      # доставки те же, что у остальных путей закрытия.
 #                                                      # Ф323: без кода снимает только отметку этого
 #                                                      # разговора или завершённого владельца; живую или
-#                                                      # недоказанную чужую — отказ с кодом 3 и кодом
-#                                                      # подтверждения, затем ... --pilot-release-code <код>
+#                                                      # недоказанную чужую — отказ с кодом 3 и строкой
+#                                                      # «снять <слаг> <код>», которую пилот пишет в беседе
 #   close --housekeeping <reason> [--agent ...] [--expect-session-id <id>]  # закрыть housekeeping-сессию (с id: только если открыт именно этот запуск)
 #   close --housekeeping <reason> --prove-owner-dead   # закрыть, только если охранник сам доказал смерть владельца (WP-530 Ф160 шаг 3):
 #                                                      # вердикт process_identity_verdict по pid и pid_start_id записи, под замком перехода;
@@ -3013,15 +3013,121 @@ _prove_recorded_owner_dead() {  # <semaphore file>
   esac
 }
 
+# Window of a pilot's word in the pilot-witness log (used by `heal` and close --pilot-release).
+HEAL_WORD_WINDOW_SEC=7200
+
+# 0 when the caller's conversation id owns a live `.open` semaphore on this
+# host other than the target (a real, registered session of its own).
+_heal_caller_has_live_open() {  # <caller harness id> <target semaphore>
+  local candidate pid host
+  for candidate in "$SESSION_DIR"/*.open; do
+    [ -f "$candidate" ] && [ ! -L "$candidate" ] || continue
+    [ "$candidate" != "$2" ] || continue
+    [ "$(_semaphore_last_field "$candidate" harness_session_id)" = "$1" ] || continue
+    host=$(_semaphore_last_field "$candidate" host)
+    [ -z "$host" ] || [ "$host" = "$(uname -n)" ] || continue
+    pid=$(_semaphore_last_field "$candidate" pid)
+    if [[ "$pid" =~ ^[1-9][0-9]*$ ]] && kill -0 "$pid" 2>/dev/null; then return 0; fi
+  done
+  return 1
+}
+
+# Honest limits (same register as witness-write-guard.sh). The pilot-witness
+# recorder logs EVERY UserPromptSubmit of EVERY Claude session as the pilot's
+# line, and witness-write-guard.sh only blocks a literal mention of the path in
+# the agent's own Bash/Write call. So an agent can start a headless child
+# (`claude -p "heal <slug> <code>"`, scripts/headless-runner.sh): the child's
+# hook records the prompt as a "pilot" line, and `CLAUDE_CODE_SESSION_ID=<child>
+# session-guard.sh heal ... --apply` would read it back; the same env guess
+# reads any other session's log. There is no privilege boundary between the
+# hook and an agent under the same unix user, so the check is a reflex against
+# casual self-approval, not a guarantee against a deliberate bypass. Three
+# cheap filters raise the price of that path (they do not remove it):
+#   - the line must not be the ONLY non-heal evidence of a conversation: the
+#     log needs an earlier record that is not a heal command (a headless child
+#     has exactly one, its own prompt);
+#   - the caller's conversation id must own a live `.open` semaphore of its own
+#     on this host (a registered session, not an anonymous id);
+#   - the witness file the word came from is written to the ledger and the
+#     registry, so a reviewer can see exactly which log was trusted.
+# The code binds the message to ONE target (slug + owner + open time) and to a
+# two-hour window; it is derived, not stored, because the dry run must leave no
+# trace -- so "newer than the dry run" is approximated by "inside the window".
+# The line must be the whole message (optionally prefixed with "подтверждаю"),
+# so a message that merely quotes agent output does not count. Only the Claude
+# hook writes witness logs: for Codex/Kimi the pilot's word cannot be proven.
+# Returns 0 proven, 1 not found, 2 the caller's conversation identity is
+# unknown, 3 unprovable for this agent, 4 the line is the only record,
+# 5 the caller has no live semaphore of its own.
+HEAL_WORD_TS=""
+HEAL_WORD_FILE=""
+_heal_pilot_word_proven() {  # <slug> <code now> <code previous> <target semaphore> [<verb>, default heal]
+  local native="${CLAUDE_CODE_SESSION_ID:-}" safe witness word_rc=0 witness_dir
+  if [ -z "$native" ]; then
+    if [ -n "${CODEX_THREAD_ID:-}" ] || { [ -n "${AGENT:-${IWE_AGENT:-}}" ] && [ "${AGENT:-${IWE_AGENT:-}}" != "claude-code" ]; }; then
+      return 3
+    fi
+    return 2
+  fi
+  [[ "$native" =~ ^[a-zA-Z0-9][a-zA-Z0-9._-]{0,255}$ ]] || return 2
+  safe=$(printf '%s' "$native" | tr -cd 'A-Za-z0-9._-')
+  witness_dir="$IWE_ROOT/.iwe-runtime/pilot-witness"
+  witness="$witness_dir/$safe.jsonl"
+  [ -s "$witness" ] || return 1
+  HEAL_WORD_TS=$(python3 - "$witness" "$1" "$2" "$3" "$HEAL_WORD_WINDOW_SEC" "${5:-heal}" <<'PY'
+import datetime as dt
+import json
+import re
+import sys
+
+path, slug, code_now, code_prev, window, verb = sys.argv[1:]
+heal_command = re.compile(r"(?:подтверждаю\s+)?" + re.escape(verb) + r"(?:\s|$)", re.IGNORECASE)
+pattern = re.compile(
+    r"(?:подтверждаю\s+)?" + re.escape(verb) + r"\s+" + re.escape(slug) + r"\s+(?:" + re.escape(code_now) + "|" + re.escape(code_prev) + ")",
+    re.IGNORECASE,
+)
+now = dt.datetime.now(dt.timezone.utc)
+records = []
+with open(path, encoding="utf-8") as stream:
+    for number, line in enumerate(stream, 1):
+        if not line.strip():
+            continue
+        try:
+            record = json.loads(line)
+            stamp = dt.datetime.strptime(record["ts"], "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=dt.timezone.utc)
+            text = str(record.get("text", "")).strip()
+        except (ValueError, KeyError, TypeError) as error:
+            print("heal: строка %d журнала реплик пилота не разобрана (%s), пропущена" % (number, error), file=sys.stderr)
+            continue
+        records.append((stamp, record["ts"], text))
+matched = [item for item in records if (now - item[0]).total_seconds() <= int(window) and pattern.fullmatch(item[2])]
+if not matched:
+    raise SystemExit(1)
+stamp, found, _ = max(matched, key=lambda item: item[0])
+if not any(other < stamp and not heal_command.match(text) for other, _, text in records):
+    print("%s: единственная реплика в журнале — сама эта команда; так выглядит дочерний headless-разговор, слово не принято" % verb, file=sys.stderr)
+    raise SystemExit(4)
+print(found)
+PY
+  ) || word_rc=$?
+  if [ "$word_rc" -ne 0 ]; then
+    [ "$word_rc" -eq 4 ] && return 4
+    return 1
+  fi
+  _heal_caller_has_live_open "$native" "$4" || return 5
+  HEAL_WORD_FILE=$(basename -- "$witness")
+  return 0
+}
+
 # WP-484 Ф323 (20.11, inbox I-27): on 19.11 one general pilot phrase released 15 marks of
 # several agents, four of them live sessions. A pilot word now releases by itself only what
 # the guard proves on its own: a mark opened by this very conversation, or one whose owner is
-# proven dead. A live or unprovable foreign mark needs a one-time code bound to that mark: the
-# agent shows the pilot what the mark is plus the code, and repeats the close with the code
-# the pilot gives back. Like closure-pending-sync, this forces a second explicit step per
-# mark; it does not prove who typed the code.
-PILOT_RELEASE_CODE_TTL_SECONDS=1800
-PILOT_RELEASE_CODE_MAX_ATTEMPTS=3
+# proven dead. A live or unprovable foreign mark needs a one-time code bound to that mark:
+# the pilot types "снять <slug> <code>" in the calling conversation, and the guard reads that
+# line from the pilot-witness log of that conversation (the same proof as `heal`,
+# _heal_pilot_word_proven), never from a CLI argument the agent could fill in itself.
+# Same honest limits as heal: a reflex against self-approval, not a privilege boundary.
+PILOT_RELEASE_CODE_TTL_SECONDS="$HEAL_WORD_WINDOW_SEC"
 
 # "Own" is decided from the caller's own native conversation id, not from the mark's agent:
 # peers started from a Claude conversation inherit CLAUDE_CODE_SESSION_ID, so a Kimi or Codex
@@ -3075,6 +3181,27 @@ _pilot_release_challenge_file() {  # <agent> <session id>
   printf '%s/.iwe-runtime/pilot-release-challenges/%s-%s.json\n' "$IWE_ROOT" "$1" "$2"
 }
 
+_pilot_release_current_code() {  # <agent> <session id>; prints the unexpired code, rc 1 if none
+  python3 - "$(_pilot_release_challenge_file "$1" "$2")" "$(date +%s)" "$PILOT_RELEASE_CODE_TTL_SECONDS" <<'PRC_PY'
+import json
+import sys
+
+path, now, ttl = sys.argv[1:]
+try:
+    with open(path, encoding="utf-8") as handle:
+        record = json.load(handle)
+    code, issued = str(record["code"]), int(record["issued_at"])
+except FileNotFoundError:
+    raise SystemExit(1)
+except (OSError, ValueError, KeyError, TypeError) as exc:
+    print(f"pilot-release: запись кода повреждена ({exc}), выдаю новый", file=sys.stderr)
+    raise SystemExit(1)
+if int(now) - issued > int(ttl) or len(code) != 6 or not code.isdigit():
+    raise SystemExit(1)
+print(code)
+PRC_PY
+}
+
 _pilot_release_issue_code() {  # <agent> <session id>; prints the new code
   local file code tmp
   file=$(_pilot_release_challenge_file "$1" "$2")
@@ -3082,53 +3209,11 @@ _pilot_release_issue_code() {  # <agent> <session id>; prints the new code
   code=$(LC_ALL=C tr -dc '0-9' < /dev/urandom 2>/dev/null | head -c 6) || true
   [[ "$code" =~ ^[0-9]{6}$ ]] || return 1
   tmp=$(mktemp "$file.tmp.XXXXXX") || return 1
-  printf '{"code": "%s", "issued_at": %s, "attempts": 0}\n' "$code" "$(date +%s)" > "$tmp" \
+  printf '{"code": "%s", "issued_at": %s}\n' "$code" "$(date +%s)" > "$tmp" \
     && mv -f "$tmp" "$file" || { rm -f "$tmp"; return 1; }
   printf '%s\n' "$code"
 }
 
-_pilot_release_check_code() {  # <agent> <session id> <answer>; rc 0 = accepted, reason on stdout otherwise
-  local file claimed
-  file=$(_pilot_release_challenge_file "$1" "$2")
-  claimed="$file.claim.$$"
-  mv "$file" "$claimed" 2>/dev/null \
-    || { echo "для этой отметки нет выданного кода (не выдавался, уже использован или истёк): вызови close --pilot-release без кода, чтобы получить новый"; return 1; }
-  python3 - "$claimed" "$file" "$3" "$(date +%s)" "$PILOT_RELEASE_CODE_TTL_SECONDS" "$PILOT_RELEASE_CODE_MAX_ATTEMPTS" <<'PRC_PY'
-import json
-import os
-import sys
-
-claimed, live, answer, now, ttl, max_attempts = sys.argv[1:]
-try:
-    with open(claimed, encoding="utf-8") as handle:
-        record = json.load(handle)
-    code, issued, attempts = str(record["code"]), int(record["issued_at"]), int(record["attempts"])
-except (OSError, ValueError, KeyError, TypeError) as exc:
-    os.remove(claimed)
-    print(f"запись кода повреждена ({exc}): вызови close --pilot-release без кода, чтобы получить новый")
-    raise SystemExit(1)
-if int(now) - issued > int(ttl):
-    os.remove(claimed)
-    print(f"код истёк (действует {ttl} с): вызови close --pilot-release без кода, чтобы получить новый")
-    raise SystemExit(1)
-if answer == code:
-    # Kept until the mark really closes (_cleanup_closed_session_projections removes it):
-    # a later refusal, e.g. unconfirmed delivery, must not burn the pilot's code.
-    os.replace(claimed, live)
-    raise SystemExit(0)
-attempts += 1
-if attempts >= int(max_attempts):
-    os.remove(claimed)
-    print(f"код не совпал, попытки исчерпаны ({attempts}/{max_attempts}): нужен новый код")
-    raise SystemExit(1)
-record["attempts"] = attempts
-with open(claimed, "w", encoding="utf-8") as handle:
-    json.dump(record, handle)
-os.replace(claimed, live)
-print(f"код не совпал (попытка {attempts}/{max_attempts})")
-raise SystemExit(1)
-PRC_PY
-}
 
 # WP-530 Ф61 (2026-09-25): `pid:` is written once, at `open`, and never again
 # -- a `--resume`d conversation runs under a brand-new OS process, but no code
@@ -4880,7 +4965,6 @@ CLEANUP_ORPHANS=0
 QUARANTINE_DEAD_INTERACTIVE=0
 FORCE_NO_REFLECTION=""
 PILOT_RELEASE=""   # WP-484 Ф301: pilot-worded exit for a live semaphore with no terminal proof
-PILOT_RELEASE_CODE=""   # WP-484 Ф323: pilot's code for one live or unprovable foreign mark
 PILOT_CLOSE_WORD=""   # WP-561 (18.11): the pilot's own closing word, required to close a peer-session
 CLOSE_EXPLAIN=0    # WP-561 Ф61: close --explain prints the fact-based close route, changes nothing
 CANONICAL_OWNER=""
@@ -5118,12 +5202,6 @@ while [[ $# -gt 0 ]]; do
         fail "--pilot-release требует непустое слово пилота как значение (например: --pilot-release \"закрой без Quick Close, работа опубликована\")" 1
       fi
       PILOT_RELEASE="$2"; shift 2 ;;
-    --pilot-release-code)
-      # WP-484 Ф323: the code the pilot gave back for one live or unprovable foreign mark.
-      if [[ $# -lt 2 || ! "$2" =~ ^[0-9]{6}$ ]]; then
-        fail "--pilot-release-code требует шестизначный код, который пилот вернул для этой отметки" 1
-      fi
-      PILOT_RELEASE_CODE="$2"; shift 2 ;;
     --pilot-close-word)
       # WP-561 (18.11): a peer-session closes only on the pilot's own closing word. An empty
       # or missing value is refused here, the phrase itself is checked in close.
@@ -5233,9 +5311,6 @@ if [ "$ONLY_OWN_HARNESS" = 1 ] && { [ "$CMD" != close ] || [ -z "$HOUSEKEEPING" 
 fi
 if [ "$PROVE_OWNER_DEAD" = 1 ] && { [ "$CMD" != close ] || [ -z "$HOUSEKEEPING" ]; }; then
   fail "--prove-owner-dead применяется только к close --housekeeping" 1
-fi
-if [ -n "$PILOT_RELEASE_CODE" ] && { [ "$CMD" != close ] || [ -z "$PILOT_RELEASE" ]; }; then
-  fail "--pilot-release-code применяется только вместе с close --pilot-release" 1
 fi
 
 if [ -n "$BASE_SHA" ] && [ "$ISOLATE_FLAG" != "1" ]; then
@@ -13478,7 +13553,6 @@ if [ "$CMD" = "close" ]; then
   if [ -n "${PILOT_RELEASE:-}" ] && [ "$CLOSE_RESUME_STATE" != "none" ]; then
     _record_pilot_release "$SLUG" "$AGENT" "${WP:-}" "$PILOT_RELEASE" "$CLOSE_RESUME_STATE" \
       || fail "close: слово пилота не удалось записать в журнал pilot-release-audit.jsonl; закрытие не выполнено" 7
-    [ -z "${PILOT_RELEASE_CODE:-}" ] || echo "Session CLOSE: код --pilot-release-code здесь не применяется: закрытие решает доставка (состояние: ${CLOSE_RESUME_STATE})" >&2
     echo "Session CLOSE: слово пилота принято и записано в журнал, но закрытие держит доставка (состояние: $CLOSE_RESUME_STATE): слово его не отменяет. Закрытие продолжается по подготовленному набору; чтобы снять отметку иначе — см. close --explain." >&2
   fi
   TASK_FROM_SEM=$(grep "^task: " "$SEM_FILE" | cut -d' ' -f2- || true)
@@ -14120,24 +14194,32 @@ print(json.dumps({"wp": sys.argv[1], "slug": sys.argv[2], "agent": sys.argv[3], 
     case "$PR_OWNER_CLASS" in
       own|dead)
         PR_AUDIT_OWNER="$PR_OWNER_CLASS"
-        PR_UNNEEDED_WHY="этого разговора"
-        [ "$PR_OWNER_CLASS" = own ] || PR_UNNEEDED_WHY="с доказанно завершённым владельцем"
-        [ -z "${PILOT_RELEASE_CODE:-}" ] \
-          || echo "Session CLOSE: код --pilot-release-code не понадобился: отметка ${PR_UNNEEDED_WHY}" >&2
         ;;
       *)
-        if [ -z "${PILOT_RELEASE_CODE:-}" ]; then
+        PR_CODE=$(_pilot_release_current_code "$AGENT" "$LOCKED_SESSION_ID") || PR_CODE=""
+        PR_WORD_RC=1
+        if [ -n "$PR_CODE" ]; then
+          PR_WORD_RC=0
+          _heal_pilot_word_proven "$SLUG" "$PR_CODE" "$PR_CODE" "$SEM_FILE" "снять" || PR_WORD_RC=$?
+        fi
+        if [ "$PR_WORD_RC" -ne 0 ]; then
+          case "$PR_WORD_RC" in
+            2) fail "close --pilot-release: чужую живую или непроверяемую отметку снимает только слово пилота в беседе, а у вызывающего разговора нет своей идентичности (CLAUDE_CODE_SESSION_ID): журнал реплик пилота не найти. Выход: открыть обычное окно Claude на этом хосте и выполнить close там" 3 ;;
+            3) fail "close --pilot-release: у этого вызова слово пилота недоказуемо: журнал реплик пилота ведёт только автоматическая проверка Claude, а вызов идёт не из беседы Claude (Codex, Kimi или без её номера). Выход: открыть обычное окно Claude на этом хосте и выполнить close там" 3 ;;
+            4) fail "close --pilot-release: строка «снять ${SLUG} ${PR_CODE}» — единственная реплика журнала этой беседы, так выглядит дочерний разговор; слово не принято" 3 ;;
+            5) fail "close --pilot-release: у вызывающего разговора нет своей живой отметки на этом хосте; сначала session-guard.sh open в этой беседе" 3 ;;
+          esac
           _record_pilot_release "$SLUG" "$AGENT" "${WP:-}" "$PILOT_RELEASE" "" "refused_${PR_OWNER_CLASS}" "$LOCKED_SESSION_ID" \
             || fail "close: слово пилота не удалось записать в журнал pilot-release-audit.jsonl; закрытие не выполнено" 7
-          PR_CODE=$(_pilot_release_issue_code "$AGENT" "$LOCKED_SESSION_ID") \
+          [ -n "$PR_CODE" ] || PR_CODE=$(_pilot_release_issue_code "$AGENT" "$LOCKED_SESSION_ID") \
             || fail "close --pilot-release: код подтверждения не удалось выдать; отметка не снята" 7
           PR_OWNER_WORDS="владелец жив"
           [ "$PR_OWNER_CLASS" = alive ] || PR_OWNER_WORDS="завершение владельца не доказано"
           OPENED_FROM_SEM=$(grep '^opened_at: ' "$SEM_FILE" | head -1 | cut -d' ' -f2- || true)
-          fail "close --pilot-release: отметка чужого разговора, ${PR_OWNER_WORDS} (${PR_OWNER_REASON}). Общее слово пилота снимает только отметки этого разговора и отметки завершённых владельцев (WP-484 Ф323); отметки Кими, Гермеса и Grok своим разговором не считаются никогда, им всегда нужен код. Отметка: агент ${AGENT}, ${WP:-РП не указан}, слаг ${SLUG}, задача «${TASK_FROM_SEM:-}», открыта ${OPENED_FROM_SEM:-?}. Покажи пилоту это описание и код ${PR_CODE}; снять можно только если пилот вернёт код: тот же вызов с --pilot-release-code <код от пилота> (действует ${PILOT_RELEASE_CODE_TTL_SECONDS} с, ${PILOT_RELEASE_CODE_MAX_ATTEMPTS} попытки, код подходит только к этой отметке). Код самому не подставлять." 3
+          fail "close --pilot-release: отметка чужого разговора, ${PR_OWNER_WORDS} (${PR_OWNER_REASON}). Общее слово пилота снимает только отметки этого разговора и отметки завершённых владельцев (WP-484 Ф323); отметки Кими, Гермеса и Grok своим разговором не считаются никогда. Отметка: агент ${AGENT}, ${WP:-РП не указан}, слаг ${SLUG}, задача «${TASK_FROM_SEM:-}», открыта ${OPENED_FROM_SEM:-?}. Покажи пилоту это описание и попроси его самого написать в этой беседе отдельным сообщением ровно строку:
+снять ${SLUG} ${PR_CODE}
+затем повтори этот же вызов close. Строку за пилота не писать: охранник ищет её в журнале реплик пилота этой беседы, не в аргументах (действует ${PILOT_RELEASE_CODE_TTL_SECONDS} с, подходит только к этой отметке)." 3
         fi
-        PR_CHECK_REASON=$(_pilot_release_check_code "$AGENT" "$LOCKED_SESSION_ID" "$PILOT_RELEASE_CODE") \
-          || fail "close --pilot-release-code: ${PR_CHECK_REASON}; отметка не снята" 3
         PR_AUDIT_OWNER="confirmed_${PR_OWNER_CLASS}"
         ;;
     esac
@@ -17615,7 +17697,6 @@ fi
 # (source `session-guard-heal`, channel `decision`), so the pilot does not have to wait
 # for the agent to relay it. The send is
 # best-effort and never changes the dry run's result or exit code.
-HEAL_WORD_WINDOW_SEC=7200
 # Length of the window that holds one message for the same session and state
 # (15.11, WP-568 Ф10: the hourly code in the claim key sent 7 copies a day).
 HEAL_NOTIFY_REPEAT_MIN=360
@@ -17736,108 +17817,9 @@ _heal_caller_ids() {
   done
 }
 
-# 0 when the caller's conversation id owns a live `.open` semaphore on this
-# host other than the target (a real, registered session of its own).
-_heal_caller_has_live_open() {  # <caller harness id> <target semaphore>
-  local candidate pid host
-  for candidate in "$SESSION_DIR"/*.open; do
-    [ -f "$candidate" ] && [ ! -L "$candidate" ] || continue
-    [ "$candidate" != "$2" ] || continue
-    [ "$(_semaphore_last_field "$candidate" harness_session_id)" = "$1" ] || continue
-    host=$(_semaphore_last_field "$candidate" host)
-    [ -z "$host" ] || [ "$host" = "$(uname -n)" ] || continue
-    pid=$(_semaphore_last_field "$candidate" pid)
-    if [[ "$pid" =~ ^[1-9][0-9]*$ ]] && kill -0 "$pid" 2>/dev/null; then return 0; fi
-  done
-  return 1
-}
-
-# Honest limits (same register as witness-write-guard.sh). The pilot-witness
-# recorder logs EVERY UserPromptSubmit of EVERY Claude session as the pilot's
-# line, and witness-write-guard.sh only blocks a literal mention of the path in
-# the agent's own Bash/Write call. So an agent can start a headless child
-# (`claude -p "heal <slug> <code>"`, scripts/headless-runner.sh): the child's
-# hook records the prompt as a "pilot" line, and `CLAUDE_CODE_SESSION_ID=<child>
-# session-guard.sh heal ... --apply` would read it back; the same env guess
-# reads any other session's log. There is no privilege boundary between the
-# hook and an agent under the same unix user, so the check is a reflex against
-# casual self-approval, not a guarantee against a deliberate bypass. Three
-# cheap filters raise the price of that path (they do not remove it):
-#   - the line must not be the ONLY non-heal evidence of a conversation: the
-#     log needs an earlier record that is not a heal command (a headless child
-#     has exactly one, its own prompt);
-#   - the caller's conversation id must own a live `.open` semaphore of its own
-#     on this host (a registered session, not an anonymous id);
-#   - the witness file the word came from is written to the ledger and the
-#     registry, so a reviewer can see exactly which log was trusted.
-# The code binds the message to ONE target (slug + owner + open time) and to a
-# two-hour window; it is derived, not stored, because the dry run must leave no
-# trace -- so "newer than the dry run" is approximated by "inside the window".
-# The line must be the whole message (optionally prefixed with "подтверждаю"),
-# so a message that merely quotes agent output does not count. Only the Claude
-# hook writes witness logs: for Codex/Kimi the pilot's word cannot be proven.
-# Returns 0 proven, 1 not found, 2 the caller's conversation identity is
-# unknown, 3 unprovable for this agent, 4 the line is the only record,
-# 5 the caller has no live semaphore of its own.
-HEAL_WORD_TS=""
-HEAL_WORD_FILE=""
-_heal_pilot_word_proven() {  # <slug> <code now> <code previous> <target semaphore>
-  local native="${CLAUDE_CODE_SESSION_ID:-}" safe witness word_rc=0 witness_dir
-  if [ -z "$native" ]; then
-    if [ -n "${CODEX_THREAD_ID:-}" ] || { [ -n "${AGENT:-${IWE_AGENT:-}}" ] && [ "${AGENT:-${IWE_AGENT:-}}" != "claude-code" ]; }; then
-      return 3
-    fi
-    return 2
-  fi
-  [[ "$native" =~ ^[a-zA-Z0-9][a-zA-Z0-9._-]{0,255}$ ]] || return 2
-  safe=$(printf '%s' "$native" | tr -cd 'A-Za-z0-9._-')
-  witness_dir="$IWE_ROOT/.iwe-runtime/pilot-witness"
-  witness="$witness_dir/$safe.jsonl"
-  [ -s "$witness" ] || return 1
-  HEAL_WORD_TS=$(python3 - "$witness" "$1" "$2" "$3" "$HEAL_WORD_WINDOW_SEC" <<'PY'
-import datetime as dt
-import json
-import re
-import sys
-
-path, slug, code_now, code_prev, window = sys.argv[1:]
-heal_command = re.compile(r"(?:подтверждаю\s+)?heal\b", re.IGNORECASE)
-pattern = re.compile(
-    r"(?:подтверждаю\s+)?heal\s+" + re.escape(slug) + r"\s+(?:" + re.escape(code_now) + "|" + re.escape(code_prev) + ")",
-    re.IGNORECASE,
-)
-now = dt.datetime.now(dt.timezone.utc)
-records = []
-with open(path, encoding="utf-8") as stream:
-    for number, line in enumerate(stream, 1):
-        if not line.strip():
-            continue
-        try:
-            record = json.loads(line)
-            stamp = dt.datetime.strptime(record["ts"], "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=dt.timezone.utc)
-            text = str(record.get("text", "")).strip()
-        except (ValueError, KeyError, TypeError) as error:
-            print("heal: строка %d журнала реплик пилота не разобрана (%s), пропущена" % (number, error), file=sys.stderr)
-            continue
-        records.append((stamp, record["ts"], text))
-matched = [item for item in records if (now - item[0]).total_seconds() <= int(window) and pattern.fullmatch(item[2])]
-if not matched:
-    raise SystemExit(1)
-stamp, found, _ = max(matched, key=lambda item: item[0])
-if not any(other < stamp and not heal_command.match(text) for other, _, text in records):
-    print("heal: единственная реплика в журнале — сама команда heal; так выглядит дочерний headless-разговор, слово не принято", file=sys.stderr)
-    raise SystemExit(4)
-print(found)
-PY
-  ) || word_rc=$?
-  if [ "$word_rc" -ne 0 ]; then
-    [ "$word_rc" -eq 4 ] && return 4
-    return 1
-  fi
-  _heal_caller_has_live_open "$native" "$4" || return 5
-  HEAL_WORD_FILE=$(basename -- "$witness")
-  return 0
-}
+# _heal_caller_has_live_open and _heal_pilot_word_proven are defined near the top of
+# this file (next to the WP-484 Ф323 pilot-release helpers): close --pilot-release runs
+# before this point of the script and uses the same proof.
 
 _heal_scan_cards() {  # <slug> <session_id> <harness id or -> <cards dir>...; read-only
   python3 - "$@" <<'PY'

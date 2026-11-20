@@ -18,15 +18,28 @@ PASS=0
 FAIL=0
 trap 'rm -rf "$TMP_DIR"' EXIT
 
+# A block the hook gives because its own clock ran out (40 s for the whole check, 35 s for each
+# released guard it runs alongside) says nothing about the command. On the loaded Mac delivery
+# gate (load ~20, 2026-11-20) 15 of these cases hit it although the whole file takes 43 s alone,
+# so such a case is run again; one that times out on every attempt still fails, as "timeout".
+TIMEOUT_ATTEMPTS=3
+timed_out() {
+  grep -qE 'не уложилась|итог «timeout»' "$1"
+}
+
 # expect $1=desc $2=want(block|ask|pass) $3=command_text
 expect() {
   local desc="$1" want="$2" cmd="$3" input got_exit got decision out_file="$TMP_DIR/out" err_file="$TMP_DIR/err"
   input=$(python3 -c 'import json,sys; print(json.dumps({"tool_input":{"command":sys.argv[1]},"cwd":sys.argv[2]}))' \
     "$cmd" "$WORKSPACE_ROOT")
-  printf '%s' "$input" | bash "$HOOK" >"$out_file" 2>"$err_file"
-  got_exit=$?
+  for _ in $(seq 1 "$TIMEOUT_ATTEMPTS"); do
+    printf '%s' "$input" | bash "$HOOK" >"$out_file" 2>"$err_file"
+    got_exit=$?
+    if [ "$got_exit" -ne 2 ] || ! timed_out "$err_file"; then break; fi
+  done
   decision=$(jq -r '.hookSpecificOutput.permissionDecision // empty' "$out_file" 2>/dev/null)
-  if [ "$got_exit" -eq 2 ]; then got="block"
+  if [ "$got_exit" -eq 2 ] && timed_out "$err_file"; then got="timeout($TIMEOUT_ATTEMPTS attempts)"
+  elif [ "$got_exit" -eq 2 ]; then got="block"
   elif [ "$got_exit" -eq 0 ] && [ "$decision" = "ask" ]; then got="ask"
   elif [ "$got_exit" -eq 0 ] && [ -z "$decision" ]; then got="pass"
   else got="unexpected(exit=$got_exit, decision=$decision)"; fi
@@ -213,11 +226,11 @@ expect "fd 0 closed before the here-string keeps the exemption" pass 'cat 0>&- <
 expect "here-string with stderr to /dev/null keeps the exemption" pass 'cat <<< x > notes.md 2>/dev/null'
 
 # === every input terminates: the new passes walk each line once ===
-# finishes $1=desc $2=seconds $3=python expression building the command: the hook must answer
-# (exit 0 or 2) within the limit. Python builds the text so a 200 KB command needs no shell variable.
-finishes() {
-  local desc="$1" limit="$2" expr="$3" verdict
-  verdict=$(python3 - "$HOOK" "$WORKSPACE_ROOT" "$limit" "$expr" <<'PYEOF'
+# answer_verdict $1=seconds $2=python expression building the command: prints "ok" when the hook
+# answers (exit 0 or 2) within the limit. Python builds the text so a 200 KB command needs no shell
+# variable.
+answer_verdict() {
+  python3 - "$HOOK" "$WORKSPACE_ROOT" "$1" "$2" <<'PYEOF'
 import json, subprocess, sys, time
 hook, root, limit, expr = sys.argv[1], sys.argv[2], float(sys.argv[3]), sys.argv[4]
 payload = json.dumps({"tool_input": {"command": eval(expr)}, "cwd": root})
@@ -229,13 +242,21 @@ except subprocess.TimeoutExpired:
 took = time.monotonic() - started
 print("ok" if proc.returncode in (0, 2) else f"exit {proc.returncode} after {took:.2f} s")
 PYEOF
-)
-  if [ "$verdict" = "ok" ]; then PASS=$((PASS+1)); else FAIL=$((FAIL+1)); echo "FAIL: $desc ($verdict)"; fi
 }
-# Short commands: the limit is the time of a plain `ls` on this machine plus 1 s (rc.14 red team,
-# F20: a hook call alone takes close to a second on a slow runner, so an absolute 1 s limit fired
-# without any slow parsing).
-BASELINE=$(python3 - "$HOOK" "$WORKSPACE_ROOT" <<'PYEOF'
+count_verdict() {
+  if [ "$2" = "ok" ]; then PASS=$((PASS+1)); else FAIL=$((FAIL+1)); echo "FAIL: $1 ($2)"; fi
+}
+# finishes $1=desc $2=seconds $3=python expression: the hook must answer within an absolute limit.
+finishes() {
+  count_verdict "$1" "$(answer_verdict "$2" "$3")"
+}
+# Short commands: the limit is the time of a plain `ls` on this machine plus a margin (rc.14 red
+# team, F20: a hook call alone takes close to a second on a slow runner, so an absolute 1 s limit
+# fired without any slow parsing). The plain call is timed right before each attempt: on the loaded
+# Mac delivery gate (2026-11-20) one taken at the start of the file was stale by the time of the
+# case ("pipe then redirect" took 15.47 s). A case gets two attempts; slow parsing fails both.
+baseline() {
+  python3 - "$HOOK" "$WORKSPACE_ROOT" <<'PYEOF'
 import json, subprocess, sys, time
 hook, root = sys.argv[1], sys.argv[2]
 best = None
@@ -246,22 +267,30 @@ for _ in range(2):
     best = took if best is None else min(best, took)
 print(f"{best:.2f}")
 PYEOF
-)
-SHORT_LIMIT=$(awk -v b="$BASELINE" 'BEGIN { printf "%.2f", b + 1.0 }')
-BRACE_LIMIT=$(awk -v b="$BASELINE" 'BEGIN { printf "%.2f", b + 2.0 }')
-finishes "semicolon then redirect" "$SHORT_LIMIT" '"ls ;> params.yaml"'
-finishes "pipe then redirect" "$SHORT_LIMIT" '"ls |> params.yaml"'
-finishes "chained odd operators" "$SHORT_LIMIT" '"ls ;>;>;> |>|> >|>| params.yaml"'
-finishes "odd operators in a comment" "$SHORT_LIMIT" '"ls # ;> |> << \x27 \"\nls ;> |> x"'
+}
+# finishes_near_baseline $1=desc $2=margin seconds over the plain call $3=python expression
+finishes_near_baseline() {
+  local desc="$1" margin="$2" expr="$3" limit verdict
+  for _ in 1 2; do
+    limit=$(awk -v b="$(baseline)" -v m="$margin" 'BEGIN { printf "%.2f", b + m }')
+    verdict=$(answer_verdict "$limit" "$expr")
+    [ "$verdict" = "ok" ] && break
+  done
+  count_verdict "$desc" "$verdict"
+}
+finishes_near_baseline "semicolon then redirect" 1.0 '"ls ;> params.yaml"'
+finishes_near_baseline "pipe then redirect" 1.0 '"ls |> params.yaml"'
+finishes_near_baseline "chained odd operators" 1.0 '"ls ;>;>;> |>|> >|>| params.yaml"'
+finishes_near_baseline "odd operators in a comment" 1.0 '"ls # ;> |> << \x27 \"\nls ;> |> x"'
 # 200 KB: the hook as a whole is not linear in every older pass (main takes a few seconds on
 # such text), so the limit here is a termination bound, not the 1.0 s budget of perf_cases.py.
 finishes "200 KB here-doc body with quotes and >" 30 '"cat > notes.md <<\x27EOF\x27\n" + ("a > b it\x27s # c\n" * 13000)[:200000] + "\nEOF"'
 finishes "200 KB of ;> |> after a quoted comment" 30 '"ls # don\x27t\n" + ("x ;> |> # a\x27 <<E " * 12000)[:200000]'
 
 # === WP-529 F275, rc.1 red team F1: 2^40 brace words — the cap answers at once ===
-finishes "40 brace groups after a protected write" "$BRACE_LIMIT" '"cat README.md > .claude/hooks/destructive-guard.sh || ls > x" + "{a,b}" * 40'
-finishes "40 brace groups into /tmp" "$BRACE_LIMIT" '"ls > /tmp/x" + "{a,b}" * 40'
-finishes "40 brace groups after tee" "$BRACE_LIMIT" '"echo a | tee x" + "{a,b}" * 40'
+finishes_near_baseline "40 brace groups after a protected write" 2.0 '"cat README.md > .claude/hooks/destructive-guard.sh || ls > x" + "{a,b}" * 40'
+finishes_near_baseline "40 brace groups into /tmp" 2.0 '"ls > /tmp/x" + "{a,b}" * 40'
+finishes_near_baseline "40 brace groups after tee" 2.0 '"echo a | tee x" + "{a,b}" * 40'
 B40=$(printf '{a,b}%.0s' $(seq 40))
 expect "40 brace groups into /tmp ask (unresolvable)" ask "ls > /tmp/x$B40"
 expect "40 brace groups after tee ask (unresolvable)" ask "echo a | tee x$B40"

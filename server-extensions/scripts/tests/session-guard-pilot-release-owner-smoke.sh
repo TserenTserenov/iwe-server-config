@@ -3,8 +3,10 @@
 # agents through `close --pilot-release`, four of them live sessions. A pilot word now
 # releases by itself only what the guard proves on its own: a mark of this very conversation
 # or one whose owner is proven dead. A live or unprovable foreign mark is refused with code 3
-# and a one-time code bound to that mark; it is released only by repeating the close with
-# --pilot-release-code and that code. Every outcome is written to pilot-release-audit.jsonl.
+# and a one-time code bound to that mark; it is released only when the pilot typed
+# "снять <slug> <code>" in the calling conversation, read from that conversation's
+# pilot-witness log (as for `heal`), never from a CLI argument. Every outcome is written to
+# pilot-release-audit.jsonl.
 
 set -euo pipefail
 # The pilot close word of peer sessions is covered by test_pilot_close_word.py.
@@ -36,6 +38,7 @@ unset CLAUDE_PID OWNER_PID CODEX_THREAD_ID
 SESSIONS="$TEST_ROOT/.iwe-runtime/sessions"
 AUDIT="$TEST_ROOT/.iwe-runtime/pilot-release-audit.jsonl"
 CHALLENGES="$TEST_ROOT/.iwe-runtime/pilot-release-challenges"
+WITNESS_DIR="$TEST_ROOT/.iwe-runtime/pilot-witness"
 WORD="разберись со всеми семафорами"
 
 PASS=0
@@ -51,6 +54,21 @@ check() {  # <name> <got> <expected>
 write_orz() {
   mkdir -p "$(dirname "$1")"
   printf -- '---\ndate: 2026-11-20\ntype: work\nwp: WP-484\nduration_h: 0.1\nartifacts: []\nagent: fixture\n---\n\n# Fixture\n\n## Главный инсайт\nf\n\n## Контекст\nf\n\n## Достигнуто\nf\n\n## Ключевые решения\nf\n' > "$1"
+}
+
+# A line of the pilot-witness log of one conversation, as the Claude hook writes it.
+write_witness() {  # <conversation> <epoch offset seconds> <text>
+  mkdir -p "$WITNESS_DIR"
+  python3 - "$WITNESS_DIR/$1.jsonl" "$2" "$3" <<'PY'
+import datetime as dt
+import json
+import sys
+
+path, offset, text = sys.argv[1:]
+stamp = (dt.datetime.now(dt.timezone.utc) + dt.timedelta(seconds=int(offset))).strftime("%Y-%m-%dT%H:%M:%SZ")
+with open(path, "a", encoding="utf-8") as stream:
+    stream.write(json.dumps({"ts": stamp, "session_id": "x", "text": text}, ensure_ascii=False) + "\n")
+PY
 }
 
 sem_of() { grep -l "^slug: $1\$" "$SESSIONS"/fixture-*.open 2>/dev/null || true; }
@@ -81,7 +99,7 @@ close_sem() {  # <conversation> <slug> [extra close args...]; prints the exit co
 
 state_of() { [ -n "$(sem_of "$1")" ] && echo open || echo closed; }
 last_owner() { tail -1 "$AUDIT" | python3 -c 'import json,sys; r=json.loads(sys.stdin.read()); print(r.get("owner",""), r.get("applied", True))'; }
-code_in_refusal() { grep -o 'код [0-9]\{6\}' "$CLOSE_ERR" | head -1 | cut -d' ' -f2; }
+code_in_refusal() { sed -n 's/^снять [^ ]* \([0-9]\{6\}\)$/\1/p' "$CLOSE_ERR" | head -1; }
 seen() { grep -q -- "$1" "$CLOSE_ERR" && echo yes || echo no; }
 sid_of() { sed -n 's/^session_id: //p' "$(sem_of "$1")" | head -1; }
 challenge_of() { echo "$CHALLENGES/fixture-$(sid_of "$1").json"; }
@@ -101,6 +119,11 @@ check "IWE_AGENT другого агента: отказ" "$(IWE_AGENT=kimi clos
 check "CODEX_THREAD_ID при чужой отметке Claude: отказ" "$(CODEX_THREAD_ID=codex-thread-1 close_sem convo-parent parent-mark --pilot-release "$WORD")" "3"
 check "отметка родителя осталась" "$(state_of parent-mark)" "open"
 
+# The caller conversation is a registered session of its own with a live owner, and the
+# pilot already wrote something ordinary in it (a lone release line looks like a headless child).
+open_sem convo-other caller-mark --owner-pid "$LIVE_PID"
+write_witness convo-other -60 "разберись со всеми отметками"
+
 echo "2. живую отметку чужого разговора общее слово не снимает"
 open_sem convo-live live-mark --owner-pid "$LIVE_PID"
 check "отказ с кодом 3" "$(close_sem convo-other live-mark --pilot-release "$WORD")" "3"
@@ -109,8 +132,10 @@ check "отказ называет живого владельца" "$(seen 'в�
 check "отказ описывает отметку (слаг, задача)" "$(seen 'слаг live-mark, задача «fixture live-mark»')" "yes"
 check "журнал: refused_alive, не применено" "$(last_owner)" "refused_alive False"
 LIVE_CODE=$(code_in_refusal)
-check "в отказе выдан шестизначный код" "$([ -n "$LIVE_CODE" ] && echo yes || echo no)" "yes"
+check "в отказе отдельная строка «снять live-mark <код>»" "$([ -n "$LIVE_CODE" ] && echo yes || echo no)" "yes"
 check "код записан под именем именно этой отметки" "$([ -f "$(challenge_of live-mark)" ] && echo yes || echo no)" "yes"
+check "код аргументом команды больше не принимается" "$(close_sem convo-other live-mark --pilot-release "$WORD" --pilot-release-code "$LIVE_CODE")" "1"
+check "отметка осталась" "$(state_of live-mark)" "open"
 
 echo "3. отметку без номера процесса (адаптеры Кими и Кодекса) общее слово не снимает"
 open_sem convo-kimi unproven-mark
@@ -120,37 +145,34 @@ check "отказ говорит, что завершение не доказа�
 check "журнал: refused_unproven" "$(last_owner)" "refused_unproven False"
 UNPROVEN_CODE=$(code_in_refusal)
 
-echo "4. код одной отметки не подходит к другой, неверный код считается попыткой"
-OTHER_CODE=$([ "$LIVE_CODE" = 111111 ] && echo 222222 || echo 111111)
-check "чужой код не снимает" "$(close_sem convo-other unproven-mark --pilot-release "$WORD" --pilot-release-code "$LIVE_CODE")" "3"
-check "отметка осталась" "$(state_of unproven-mark)" "open"
-check "неверный код живой отметки не снимает" "$(close_sem convo-other live-mark --pilot-release "$WORD" --pilot-release-code "$OTHER_CODE")" "3"
-check "отказ называет попытку" "$(seen 'попытка 1/3')" "yes"
+echo "4. строка пилота не той формы, не той отметки, не в той беседе или старая не снимает"
+write_witness convo-other -5 "пожалуйста снять live-mark $LIVE_CODE"
+write_witness convo-other -5 "снять unproven-mark $LIVE_CODE"
+write_witness convo-live -5 "снять live-mark $LIVE_CODE"
+write_witness convo-other -10800 "снять live-mark $LIVE_CODE"
+check "лишние слова, чужой код, чужая беседа, просроченная строка: отказ" "$(close_sem convo-other live-mark --pilot-release "$WORD")" "3"
+check "отметка осталась" "$(state_of live-mark)" "open"
+check "повторный отказ даёт тот же код (строка пилота остаётся годной)" "$(code_in_refusal)" "$LIVE_CODE"
 
-echo "4а. повторная выдача заменяет код, три неверных попытки сжигают его"
-close_sem convo-other parent-mark --pilot-release "$WORD" >/dev/null
-FIRST_PARENT_CODE=$(code_in_refusal)
-close_sem convo-other parent-mark --pilot-release "$WORD" >/dev/null
-SECOND_PARENT_CODE=$(code_in_refusal)
-if [ "$FIRST_PARENT_CODE" != "$SECOND_PARENT_CODE" ]; then
-  check "прежний код после повторной выдачи не действует" "$(close_sem convo-other parent-mark --pilot-release "$WORD" --pilot-release-code "$FIRST_PARENT_CODE")" "3"
-fi
-WRONG=$([ "$SECOND_PARENT_CODE" = 000000 ] && echo 999999 || echo 000000)
-close_sem convo-other parent-mark --pilot-release "$WORD" >/dev/null
-THIRD_PARENT_CODE=$(code_in_refusal)
-for _ in 1 2 3; do close_sem convo-other parent-mark --pilot-release "$WORD" --pilot-release-code "$WRONG" >/dev/null; done
-check "после трёх неверных попыток код сожжён" "$([ -f "$(challenge_of parent-mark)" ] && echo kept || echo burnt)" "burnt"
-check "сожжённый код не снимает" "$(close_sem convo-other parent-mark --pilot-release "$WORD" --pilot-release-code "$THIRD_PARENT_CODE")" "3"
-check "отметка родителя по-прежнему открыта" "$(state_of parent-mark)" "open"
+echo "4а. беседа без своей живой отметки не снимает даже по верной строке"
+write_witness convo-nomark -60 "обычная реплика"
+write_witness convo-nomark -5 "снять live-mark $LIVE_CODE"
+check "отказ с кодом 3" "$(close_sem convo-nomark live-mark --pilot-release "$WORD")" "3"
+check "отказ называет причину" "$(seen 'нет своей живой отметки')" "yes"
+check "отметка осталась" "$(state_of live-mark)" "open"
 
-echo "5. верный код снимает именно эту отметку, использованный код удаляется вместе с ней"
-check "живая отметка снята по коду пилота" "$(close_sem convo-other live-mark --pilot-release "$WORD" --pilot-release-code "$LIVE_CODE")" "0"
+echo "5. строка пилота в этой беседе снимает именно эту отметку, код удаляется вместе с ней"
+write_witness convo-other -3 "снять live-mark $LIVE_CODE"
+USED_CHALLENGES=("$(challenge_of live-mark)" "$(challenge_of unproven-mark)")
+cat "$CLOSE_ERR" >&2; check "живая отметка снята по строке пилота" "$(close_sem convo-other live-mark --pilot-release "$WORD")" "0"
 check "журнал: confirmed_alive" "$(last_owner)" "confirmed_alive True"
-check "непроверяемая отметка снята своим кодом" "$(close_sem convo-other unproven-mark --pilot-release "$WORD" --pilot-release-code "$UNPROVEN_CODE")" "0"
+check "непроверяемая отметка не снимается строкой другой отметки" "$(close_sem convo-other unproven-mark --pilot-release "$WORD")" "3"
+write_witness convo-other -2 "снять unproven-mark $UNPROVEN_CODE"
+check "непроверяемая отметка снята своей строкой" "$(close_sem convo-other unproven-mark --pilot-release "$WORD")" "0"
 check "журнал: confirmed_unproven" "$(last_owner)" "confirmed_unproven True"
-check "использованные коды удалены" "$(find "$CHALLENGES" -type f | wc -l | tr -d ' ')" "0"
+check "использованные коды удалены вместе с отметками" "$(for f in "${USED_CHALLENGES[@]}"; do [ -e "$f" ] && echo kept; done | wc -l | tr -d ' ')" "0"
 
-echo "6. процесс владельца завершён, но аренда действует (беседу могли возобновить): нужен код"
+echo "6. процесс владельца завершён, но аренда действует (беседу могли возобновить): нужна строка пилота"
 sleep 600 & DEAD_PID=$!
 open_sem convo-dead dead-mark --owner-pid "$DEAD_PID"
 kill "$DEAD_PID"; wait "$DEAD_PID" 2>/dev/null || true
@@ -158,36 +180,40 @@ check "отказ с кодом 3" "$(close_sem convo-other dead-mark --pilot-re
 check "отказ называет действующую аренду" "$(seen 'аренда отметки ещё действует')" "yes"
 check "журнал: refused_unproven" "$(last_owner)" "refused_unproven False"
 
-echo "6а. процесс завершён и аренда истекла: общее слово снимает без кода"
+echo "6а. процесс завершён и аренда истекла: общее слово снимает без строки пилота"
 DEAD_CHALLENGE=$(challenge_of dead-mark)
 check "код отказа шага 6 выдан" "$([ -f "$DEAD_CHALLENGE" ] && echo yes || echo no)" "yes"
 check "отметка завершённого владельца снята" "$(IWE_SESSION_LEASE_SEC=0 close_sem convo-other dead-mark --pilot-release "$WORD")" "0"
 check "журнал: owner=dead" "$(last_owner)" "dead True"
 check "выданный ранее код удалён вместе с отметкой" "$([ -e "$DEAD_CHALLENGE" ] && echo kept || echo gone)" "gone"
 
-echo "7. просроченный код не принимается"
+echo "7. просроченный код заменяется новым, строка пилота со старым кодом не снимает"
 open_sem convo-live2 expired-mark --owner-pid "$LIVE_PID"
 close_sem convo-other expired-mark --pilot-release "$WORD" >/dev/null
 EXPIRED_CODE=$(code_in_refusal)
-CHALLENGE=$(find "$CHALLENGES" -type f -name 'fixture-*.json' | head -1)
-python3 - "$CHALLENGE" <<'PY'
+python3 - "$(challenge_of expired-mark)" <<'PY'
 import json, sys
 path = sys.argv[1]
 with open(path, encoding="utf-8") as handle:
     record = json.load(handle)
-record["issued_at"] -= 3600
+record["issued_at"] -= 3 * 3600
 with open(path, "w", encoding="utf-8") as handle:
     json.dump(record, handle)
 PY
-check "просроченный код не снимает" "$(close_sem convo-other expired-mark --pilot-release "$WORD" --pilot-release-code "$EXPIRED_CODE")" "3"
-check "отказ говорит, что код истёк" "$(seen 'код истёк')" "yes"
+write_witness convo-other -1 "снять expired-mark $EXPIRED_CODE"
+check "строка с просроченным кодом не снимает" "$(close_sem convo-other expired-mark --pilot-release "$WORD")" "3"
+NEW_CODE=$(code_in_refusal)
+check "выдан новый код" "$([ -n "$NEW_CODE" ] && [ "$NEW_CODE" != "$EXPIRED_CODE" ] && echo yes || echo no)" "yes"
 check "отметка осталась" "$(state_of expired-mark)" "open"
 
-echo "8. код без слова пилота и код не того вида отклоняются, а не игнорируются"
-check "--pilot-release-code без --pilot-release: код 1" "$(close_sem convo-other expired-mark --pilot-release-code 123456)" "1"
-check "отказ называет причину" "$(seen 'применяется только вместе с close --pilot-release')" "yes"
-check "пятизначный код: код 1" "$(close_sem convo-other expired-mark --pilot-release "$WORD" --pilot-release-code 12345)" "1"
-check "отказ требует шестизначный код" "$(seen 'шестизначный код')" "yes"
+echo "8. вызывающий без своей идентичности беседы не может снять чужую живую отметку"
+write_witness convo-other -1 "снять expired-mark $NEW_CODE"
+RC_NOID=0
+env -u CLAUDE_CODE_SESSION_ID bash "$GUARD" close --wp WP-484 --slug expired-mark --agent fixture \
+  --pilot-release "$WORD" >/dev/null 2>"$CLOSE_ERR" || RC_NOID=$?
+check "без CLAUDE_CODE_SESSION_ID: отказ с кодом 3" "$RC_NOID" "3"
+check "отказ объясняет, где снимать" "$(seen 'открыть обычное окно Claude')" "yes"
+check "с идентичностью беседы та же строка снимает" "$(close_sem convo-other expired-mark --pilot-release "$WORD")" "0"
 
 echo
 echo "session-guard-pilot-release-owner-smoke: прошло $PASS, провалено $FAIL"
