@@ -2182,6 +2182,31 @@ in
       };
     };
 
+    # Notification Center availability canary (WP-568 F19 E0, DRR-f16:56): polls the
+    # program's /health on Railway every 5 minutes and reports to the service centre
+    # through notification-center-bridge.sh (source class state 5m).
+    systemd.services."iwe-notification-center-canary" = {
+      description = "WP-568 Notification Center canary — /health of the Railway program";
+      unitConfig   = commonUnitConfig;
+      serviceConfig = commonServiceConfig // {
+        ExecStart        = "${pkgs.bash}/bin/bash ${iwe}/DS-my-strategy/scripts/notification-center-canary.sh";
+        WorkingDirectory = "${iwe}/DS-my-strategy/scripts";
+        TimeoutSec       = 60;
+        SuccessExitStatus = "1";
+      };
+      path        = commonPath;
+      environment = commonEnv;
+    };
+
+    systemd.timers."iwe-notification-center-canary" = {
+      wantedBy    = [ "timers.target" ];
+      description = "WP-568 Notification Center canary — каждые 5 минут";
+      timerConfig = {
+        OnCalendar = "*:0/5";
+        Persistent = false;
+      };
+    };
+
     # =========================================================
     # 15. PREFETCH KNOWLEDGE SNAPSHOT — универсальные руководства для рендера (WP-149 B2)
     # =========================================================
