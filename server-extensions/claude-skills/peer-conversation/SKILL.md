@@ -2,7 +2,7 @@
 name: peer-conversation
 description: Многотуровый диалог писателя (Claude) с одним или несколькими напарниками (любой набор из kimi/codex/hermes/claude-headless/grok) по задаче пилота (DP.SC.154). Ведёт turn-loop (2 участника) или round-loop (3+, WP-509), обнаруживает CONSENSUS/ESCALATE, после консенсуса — Decision Gate (зафиксировать vs реализовать → ревью → проверить → задеплоить), синтезирует report.md через Agent tool.
 argument-hint: "<описание задачи> [--peer kimi|codex|hermes|claude|grok[,vendor2,...]] | --list | --interrupt <session_id> | --finalize <session_id>"
-version: 1.7.9
+version: 1.8.0
 layer: L1
 status: active
 browser_safe: false
@@ -29,7 +29,7 @@ gates_rationale: "операционный скилл не создаёт РП �
 Задача: $ARGUMENTS
 
 > **Архитектура:** я (Claude) = писатель всегда (Skill tool доступен только мне в этой сессии). Напарник(и) — параметр `--peer` (default `kimi`), список из одного или нескольких зарегистрированных вендоров (§0в). При 2+ напарниках (N>2 участников целиком) — расширение WP-509, см. §0в и §3р.
-> Каждый напарник вызывается через свой `<vendor>-peer-adapter.sh` напрямую — Bash tool, stdin pipe. Контракт одинаковый у всех: stdin = промпт, stdout = реплика, exit 0-7 (см. §0в). **Напарнику запрещено писать файлы своими инструментами внутри `SESSION_DIR`** — только stdout (гонка file-write vs stdout-capture портит журнал, найдено WP-509 2026-07-30).
+> Каждый напарник вызывается через свой `<vendor>-peer-adapter.sh` напрямую — Bash tool, stdin pipe. Общий контракт задаёт stdin, stdout и значения кодов 0–7, если адаптер их использует (§0в.1). **Напарнику запрещено писать файлы своими инструментами внутри `SESSION_DIR`** — только stdout (гонка file-write vs stdout-capture портит журнал, найдено WP-509 2026-07-30).
 > `list_peer_statuses` (Local Gateway) — координация файлов, **не** проверка доступности напарника CLI.
 > Gateway offline ≠ напарник недоступен.
 
@@ -52,7 +52,7 @@ gates_rationale: "операционный скилл не создаёт РП �
 
 Определить режим из `$ARGUMENTS`:
 
-- `--list` → прочитать ОПУБЛИКОВАННУЮ таблицу: `git -C "${IWE_SESSIONS_ROOT:-$HOME/IWE/MC-sessions}" fetch -q origin main && git -C "${IWE_SESSIONS_ROOT:-$HOME/IWE/MC-sessions}" show origin/main:00-index.md` (WP-526 Ф2; WP-484/585, 21.09: снапшотер публикует индекс из приватной копии и общий каталог не обновляет, поэтому файл в рабочем дереве может отставать на любое время; без сети читать `00-index.md` из рабочего дерева), вывести таблицу. Стоп.
+- `--list` → прочитать ОПУБЛИКОВАННУЮ таблицу: `git -C "$SESSIONS_DIR" fetch -q origin main && git -C "$SESSIONS_DIR" show origin/main:./00-index.md` (`SESSIONS_DIR` — тем же общим выбором папки журнала, что в Шаге 1) (WP-526 Ф2; WP-484/585, 21.09: снапшотер публикует индекс из приватной копии и общий каталог не обновляет, поэтому файл в рабочем дереве может отставать на любое время; без сети читать `00-index.md` из рабочего дерева), вывести таблицу. Стоп.
 - `--interrupt <id>` → перейти к **Шагу 5 (interrupt-режим)**. Стоп после.
 - `--finalize <id>` → перейти к **Шагу 6 (finalize-режим)**. Стоп после.
 - Иначе → новая сессия, продолжать к Шагу 0в.
@@ -81,23 +81,74 @@ gates_rationale: "операционный скилл не создаёт РП �
 
 Каждый элемент `PEER_VENDORS` валидировать отдельно. Неизвестный `PEER_VENDOR` в списке → СТОП **на этом элементе, не на всём списке**: сообщить пилоту, какой конкретно vendor не распознан («Напарник `<vendor>` не зарегистрирован. Известные: kimi, codex, hermes, claude, grok.»), предложить продолжить с оставшимися распознанными или прервать целиком. Добавление нового вендора — правка таблицы выше + написание `<vendor>-peer-adapter.sh` по контракту §0в.1.
 
-**§0в.1 Общий контракт адаптера** (для добавления нового вендора; актуализирован WP-516 Ф5, peer-session 2026-08-11-22-wp516-f5-contract-adapter):
+**§0в.1 Общий контракт адаптера** (для добавления нового вендора; WP-516 Ф4–Ф5). Общий контракт задаёт наблюдаемое поведение, а не командную строку конкретного CLI:
 
-*Транспорт (переносимая часть контракта):*
-- **stdin** = полный промпт хода (Bash pipe, не inline `echo` — inline попадает в командную строку и хук B7.7c может ложно заблокировать повторные вызовы). **Сохранность промпта:** адаптер передаёт stdin целиком либо отказывает ДО запуска с диагностикой (лимит транспорта + фактическая длина в stderr). Молчаливое усечение запрещено (дефект Ф4: hermes обрезал до 4000 без предупреждения).
-- **stdout** = одна реплика, frontmatter (открывающий и закрывающий маркер `---`) с первой непустой строки; служебные сообщения (баннеры CLI, session_id, прогресс) — только в stderr, адаптер обязан очищать stdout. Ответ без валидного frontmatter (нет открывающего `---` с первой непустой строки или нет закрывающего) = нарушение формата → exit `1` с диагностикой. Проверка frontmatter относится к peer-репликам turn-loop; служебные вызовы писателя (review/verify/synth), чей вывод — не peer-реплика, отключают её через `IWE_PEER_PLAIN=1` (это ручка слоя IWE-интеграции, не транспорта). Вызовы turn-loop обязаны явно передавать `IWE_PEER_PLAIN=0`, чтобы ручка не протекала из окружения писателя и не отключила проверку для peer-реплик.
-- **exit-коды:** `0` = OK, `1` = general error (включая нарушение формата реплики), `2` = content-filter/PII violation, `3` = PII hard block, `4` = add-dir error, `5` = уже идёт сессия (pidfile lock), `6` = auth failure, `7` = empty response after trimming. Обязательны только `0`/`1` (Шаг 3.1/3р.1 проверяет `exit ≠ 0` как «напарник не ответил»); коды 2-7 необязательны для нового адаптера, но при использовании — строго с этим смыслом, переопределение запрещено (дефект Ф4: claude-адаптер использовал 4/5 для auth/empty — исправлено на 6/7 в Ф5). Код `6` — транспортно наблюдаемая классификация, хотя конкретные способы аутентификации относятся к слою IWE-интеграции.
-- **Межвендорский whitelist флагов:** `-p`, `--model`, `--add-dir`. Любой другой флаг → немедленный exit `1` с перечнем известных (молчаливый игнор запрещён: создаёт ложное ощущение применённого режима). Адаптер, не поддерживающий межвендорский флаг (таблица §0в), отклоняет его с явной диагностикой «not supported», а не игнорирует. `--permission-mode` сознательно исключён: способен ослабить read-only гарантию sandbox и не имеет переносимой семантики; vendor-specific флаги (напр. `--session-id` у hermes) описываются в строке вендора таблицы §0в, не в межвендорском наборе.
-- **Sandbox-норма (read-only всегда):** peer не пишет файлы — ни в `SESSION_DIR`, ни в дерево писателя. Вызов без `--add-dir` НЕ экспонирует рабочее дерево писателя: корень sandbox = пустой временный каталог (или эквивалент у вендора). `--add-dir` = согласие показать контекст, не согласие на его изменение — режим read-only сохраняется и с `--add-dir` (дефект Ф5: codex без `--add-dir` получал `$PWD` писателя в режиме workspace-write). Kimi дополнительно получает временный `agent-file` с `tools: []`: он не видит Shell, файлы, web, MCP-инструменты или подагентов; `--add-dir` адаптер превращает в отфильтрованную inline-проекцию и не передаёт в CLI. Приёмочная проверка нормы = два слоя: конфигурационный тест (адаптер принудительно задаёт read-only и корень вне дерева писателя) + поведенческий write-probe (контролируемый запуск с явной инструкцией записи, проверка отсутствия маркер-файла). Вместе они подтверждают отсутствие записи в контролируемом сценарии при корректной конфигурации и НЕ являются доказательством абсолютной невозможности записи.
-- Для `claude` действует усиленный контракт WP-458: `--add-dir` запрещён, peer получает только минимальную текстовую проекцию в stdin и не имеет файловых или shell-инструментов.
+- **Запрос и ответ.** Адаптер читает весь stdin и передаёт модели его содержимое без молчаливого усечения; при лимите отказывает до вызова CLI с длиной запроса в stderr, без самого текста. В stdout при успехе — только одна реплика. Служебный баннер CLI, журнал и диагностика туда не попадают. Первая непустая строка peer-реплики — `---`, затем идёт закрывающий `---` и содержательное тело. Пустой после удаления пробелов ответ даёт код `1`; если адаптер реализует отдельную категорию `7`, она используется только для пустого ответа. Неверный frontmatter при непустом ответе даёт код `1`. Служебные вызовы писателя, которым не нужна peer-реплика, могут явно включить `IWE_PEER_PLAIN=1`; это исключение слоя интеграции, не режим обхода фильтрации.
+- **Аргументы.** Максимальный межвендорский набор — `-p`, `--model <имя>`, `--add-dir <каталог>`; таблица §0в ограничивает поддержку конкретного вендора. Неизвестный или неподдержанный флаг отвергается с диагностикой; имя чужой модели отображается в поддерживаемое или явно отвергается. `--permission-mode` исключён: у вендоров нет общей безопасной семантики, а выбор вызывающим процессом может ослабить режим только чтения. Для `claude` по WP-458 запрещён и `--add-dir`.
+- **Коды адаптера.** `0` — успешная реплика; `1` — общая ошибка, включая сбой/ненулевой код CLI, неверный формат, отказ CLI или превышение срока; `2` — ошибка или нарушение контентного фильтра; `3` — жёсткая блокировка PII; `4` — слишком большой `--add-dir`; `5` — уже идёт вызов с тем же ключом сессии; `6` — подтверждённая ошибка аутентификации; `7` — пустой ответ после очистки пробелов. Обязательны `0`/`1`; категории `2`–`7` необязательны, но при использовании имеют только указанный смысл. Сырые коды CLI в диапазоне `2`–`7` не проходят наружу без классификации. Шаги 3.1/3р.1 трактуют любой ненулевой код как отсутствие ответа напарника.
+- **Доступ и срок.** По умолчанию нет доступа к дереву писателя: текстовый режим отключает инструменты в фактической конфигурации CLI и запускается в пустом рабочем каталоге. Разрешённый `--add-dir` даёт только отфильтрованную копию каталога и режим только чтения; исходный путь не становится рабочим корнем. При любом файловом контексте PII-, `.agentignore`- и контентная фильтрация выполняется до CLI; отсутствие или отказ обязательного фильтра останавливает вызов. Текстовую проекцию для вендора без файлового доступа писатель готовит с учётом правил чувствительного содержимого; адаптер не обещает очистку произвольного stdin, если она в нём не реализована. Новый адаптер задаёт настраиваемый срок ожидания, при превышении возвращает код `1` и завершает всю группу процессов CLI, если CLI создаёт дочерние процессы. Также он определяет ключ защиты от параллельных вызовов одной сессии и проверяет занятость до CLI. Наличие этих механизмов у уже зарегистрированных вендоров проверяется отдельно.
+- **Граница интеграции IWE.** Выбор способа входа, статусы, журнал, проверка доступности и привязка к сессии относятся к IWE-интеграции. Поиск бинарного файла идёт через явную переменную, PATH и известные пути установки, если они есть. Для нового адаптера приёмочные проверки охватывают длинный запрос, неверный флаг/модель, баннер и пустой ответ CLI, срок с завершением группы процессов, коллизию, PII и оба режима доступа. Это требование к новому адаптеру, а не утверждение, что механизмы есть у всех зарегистрированных вендоров: их проверяют отдельно. Живой запрет записи подтверждается контролируемой попыткой вместе с проверкой конфигурации песочницы; отсутствие файла в одном опыте не доказывает абсолютную изоляцию.
 
-*Слой IWE-интеграции (обязателен для полноценного адаптера в IWE, не часть переносимого контракта):* статус-репортинг пилоту, журнал agent-sessions, требования аутентификации вендора, настраиваемый deadline и единая реакция на timeout, pidfile-lock с явным ключом сессии. Deadline обязан запускать CLI в отдельной группе процессов и при истечении срока завершать всю группу, включая потомков; иначе timeout launcher оставляет висящий дочерний процесс и раннер продолжает показываться активным. В stderr выводится короткая диагностика без текста промпта: vendor, код CLI, deadline, размеры stdout/stderr.
+**Минимальный скелет адаптера** (последний результат WP-516 Ф5). Это иллюстративная заготовка для `scripts/<vendor>-peer-adapter.sh`, а не готовый к запуску файл и не регистрация нового вендора. Она намеренно отказывает до вызова CLI, пока не реализованы фильтры, блокировка и песочница конкретного вендора; копирование само по себе не даёт права включать адаптер в таблицу §0в.
+
+```bash
+#!/usr/bin/env bash
+set -uo pipefail
+die() { printf 'ERROR: %s\n' "$1" >&2; exit "${2:-1}"; }
+tmp_root=$(mktemp -d) || die 'cannot create temporary directory'
+trap 'rm -rf -- "$tmp_root"' EXIT
+prompt_file="$tmp_root/prompt"
+reply_file="$tmp_root/reply"
+model=''
+add_dirs=()
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    -p) shift ;;
+    --model|--add-dir)
+      flag="$1"
+      [ "$#" -ge 2 ] && [ -n "$2" ] || die "$flag requires a value"
+      case "$2" in -*) die "$flag requires a value, got another flag" ;; esac
+      if [ "$flag" = --model ]; then model="$2"; else add_dirs+=("$2"); fi
+      shift 2 ;;
+    *) die "unknown or unsupported flag '$1'" ;;
+  esac
+done
+cat > "$prompt_file" || die 'cannot read complete stdin'
+[ -s "$prompt_file" ] || die 'empty prompt' 1
+
+# Реализовать для вендора и проверить ДО запуска CLI. Каждая заглушка
+# останавливает вызов: нельзя заменить её прямой передачей исходного каталога.
+filter_prompt_and_context() { die 'content and PII filters not implemented' 2; }
+acquire_session_lock() { die 'session lock not implemented' 1; }
+run_vendor_read_only_with_deadline() { die 'read-only CLI sandbox not implemented' 1; }
+filter_prompt_and_context "$prompt_file" "${add_dirs[@]}"
+acquire_session_lock "$model"
+run_vendor_read_only_with_deadline "$model" "$reply_file"
+
+grep -q '[^[:space:]]' "$reply_file" || die 'empty peer response' 7
+if [ "${IWE_PEER_PLAIN:-0}" != 1 ]; then
+  first_line=$(awk 'length { print; exit }' "$reply_file")
+  fences=$(grep -c '^---$' "$reply_file" || true)
+  [ "$first_line" = '---' ] && [ "$fences" -ge 2 ] || die 'missing peer frontmatter'
+  awk '/^---$/ { fences++; next } fences >= 2 && /[[:alnum:]]/ { body = 1 } END { exit !body }' \
+    "$reply_file" || die 'empty peer response body' 7
+fi
+cat "$reply_file" || die 'cannot emit peer response'
+```
 
 **PID владельца семафора.** Когда адаптер или планировщик открывает сессию через `session-guard.sh`, он передаёт `--owner-pid <PID>` только если это PID процесса, который действительно остаётся владельцем сессии до её штатного `close` (например, процесс планировщика, ожидающий CLI). PID временного Bash-подпроцесса `session-guard.sh` или короткого launcher-а передавать запрещено: он умирает сразу после `open`, и sweep ошибочно карантинирует живую сессию. Если достоверного PID нет, параметр не передаётся; семафор остаётся ambiguous и может быть только предупреждён, но не автоматически удалён. `session-guard.sh` принимает только числовой PID; явный параметр имеет приоритет над `CLAUDE_PID`.
 
 *Реестр вендоров (OwnerIntegrity):* таблица §0в выше — единый реестр. Writer-скиллы (peer-conversation, kimi-peer-writer) держат свои маппинги vendor→адаптер согласованными с ней для реально поддерживаемых вендоров (runtime-чтение чужого SKILL.md не требуется и не допускается); добавление вендора = правка реестра + затронутых writer-маппингов одним коммитом.
 
-Построить для каждого `vendor` в `PEER_VENDORS`: `ADAPTER_PATH[$vendor]="$HOME/IWE/${IWE_GOVERNANCE_REPO:-DS-strategy}/<адаптер из таблицы>"` и `PEER_AGENT_ID[$vendor]="<peer_agent из таблицы>"` (bash associative arrays; порядок вызова = порядок `PEER_VENDORS`). Используются везде ниже вместо хардкода `kimi-peer-adapter.sh`/`kimi-headless`.
+**Где искать адаптер.** Адаптеры и фильтры поставляются в папке программ шаблона (`${IWE_TEMPLATE:-${IWE_WORKSPACE:-$HOME/IWE}/FMT-exocortex-template}/scripts/`, issues #830, #1513). У автора шаблона их рабочие копии живут в репозитории управления; изменение исходника туда само не доставляется. Поэтому поиск идёт по цепочке: копия в репозитории управления, если она есть, иначе папка шаблона (одна строка на вендора):
+
+```bash
+ADAPTER_PATH[$vendor]="${IWE_WORKSPACE:-$HOME/IWE}/${IWE_GOVERNANCE_REPO:-DS-my-strategy}/<адаптер из таблицы>"
+[ -x "${ADAPTER_PATH[$vendor]}" ] || ADAPTER_PATH[$vendor]="${IWE_TEMPLATE:-${IWE_WORKSPACE:-$HOME/IWE}/FMT-exocortex-template}/<адаптер из таблицы>"
+echo "адаптер: ${ADAPTER_PATH[$vendor]}" >&2
+```
+
+и `PEER_AGENT_ID[$vendor]="<peer_agent из таблицы>"` (bash associative arrays; порядок вызова = порядок `PEER_VENDORS`). Используются везде ниже вместо хардкода `kimi-peer-adapter.sh`/`kimi-headless`.
 
 **§0в.2 Проверка доступности vendor'ов (capability-check, WP-509 Ф5).** После построения `ADAPTER_PATH`, до анонса напарников:
 
@@ -139,7 +190,7 @@ gates_rationale: "операционный скилл не создаёт РП �
 
 До поиска РП выполнить короткий маршрутизатор `memory/protocol-open.md`.
 
-Найти WP по задаче: прочитать `${IWE_GOVERNANCE_REPO:-DS-strategy}/WP-REGISTRY.md` (grep по ключевым словам) и `${IWE_GOVERNANCE_REPO:-DS-strategy}/current/WeekPlan W{N}.md`.
+Найти WP по задаче: прочитать `${IWE_GOVERNANCE_REPO:-DS-my-strategy}/WP-REGISTRY.md` (grep по ключевым словам) и `${IWE_GOVERNANCE_REPO:-DS-my-strategy}/current/WeekPlan W{N}.md`.
 
 После нахождения РП, до выбора фазы выполнить Sync Gate — тот же вызов и разбор exit-кодов, что в `memory/protocol-open.md` Шаг 3a (владелец правила свежести — РП-561 Ф24), а не словесная отсылка к нему (найдено 22.10, Ф224 — прежняя формулировка этого абзаца только описывала Sync Gate прозой, не вызывала его, и пир-сессии не получали выгоду от фикса Ф219 — цитаты report.md в выводе сборщика):
 
@@ -194,7 +245,7 @@ if verification_class in ("open-loop", "problem-framing"):
 
 **Trigger эскалации (лог, не блок):** если пилот 2 раза подряд выбирает агента вопреки подсказке — записать сигнал «routing-таблица устарела или классификация неверна» в `inbox/WP-383/routing-drift.log` (создать при первом срабатывании). Не блокировать выбор пилота.
 
-> Источник таблицы: `${IWE_GOVERNANCE_REPO:-DS-strategy}/inbox/WP-383/routing-design-v1.md §3`. Statefulness-пробел Kimi закрыт автопередачей git-diff в `kimi-peer-adapter.sh` (§8).
+> Источник таблицы: `${IWE_GOVERNANCE_REPO:-DS-my-strategy}/inbox/WP-383/routing-design-v1.md §3`. Statefulness-пробел Kimi закрыт автопередачей git-diff в `kimi-peer-adapter.sh` (§8).
 
 ---
 
@@ -205,7 +256,13 @@ Slug = первые 4 латинских слова из задачи строч
 Номер сессии выдаёт **скрипт, а не инлайновый bash** (WP-530, пир-сессия `2026-09-05-24` с Kimi). Прежняя формула `find | wc -l + 1` с последующим `mkdir -p` давала две ошибки: гонку (две сессии в узком окне получали один номер, `mkdir -p` не отказывает на существующем каталоге — и обе молча писали журнал в один каталог) и перевыдачу номера после любой уборки (`count+1` ≠ `max+1`). Живой прогон 12 одновременных писателей на старой формуле: 12 сессий, 6 уникальных номеров. Инлайновый цикл-retry в markdown эту гонку не закрывает — спецификацию исполняет LLM, и два разных агента исполнят её по-разному; закрыть можно только там, где код один и исполняется буквально.
 
 ```bash
-SESSIONS_DIR="${IWE_SESSIONS_ROOT:-$HOME/IWE/MC-sessions}"
+# Journal folder: the shared resolver used by session-guard.sh (explicit IWE_SESSIONS_ROOT,
+# then $IWE_WORKSPACE/MC-sessions, then the legacy sessions/ folder of the governance repo).
+IWE_COMMON="${IWE_SCRIPTS:-$HOME/IWE/scripts}/lib/common.sh"
+[ -f "$IWE_COMMON" ] || IWE_COMMON="${IWE_TEMPLATE:-${IWE_WORKSPACE:-$HOME/IWE}/FMT-exocortex-template}/scripts/lib/common.sh"
+. "$IWE_COMMON"
+SESSIONS_DIR=$(IWE_ROOT="${IWE_ROOT:-${IWE_WORKSPACE:-$HOME/IWE}}" iwe_sessions_dir) \
+  || { echo "папка журнала сессий не найдена (задан недоступный IWE_SESSIONS_ROOT?)" >&2; exit 1; }
 TODAY=$(date +%Y-%m-%d)
 MONTH=$(date +%Y-%m)
 DAY=$(date +%d)
@@ -214,17 +271,17 @@ mkdir -p "$DAY_DIR"
 # Порядок резолва: настроенный каталог скриптов, затем корневой чекаут. На
 # хостах, где IWE_SCRIPTS указывает на копию шаблона, она может отставать.
 RESERVE="${IWE_SCRIPTS:-$HOME/IWE/scripts}/session-dir-reserve.sh"
-[ -x "$RESERVE" ] || RESERVE="$HOME/IWE/scripts/session-dir-reserve.sh"
+[ -x "$RESERVE" ] || RESERVE="${IWE_TEMPLATE:-${IWE_WORKSPACE:-$HOME/IWE}/FMT-exocortex-template}/scripts/session-dir-reserve.sh"
 SESSION_ID=$(bash "$RESERVE" "$DAY_DIR" "$TODAY" "$SLUG") || { echo "резервация номера сессии не удалась (см. stderr выше)" >&2; exit 1; }
 SESSION_DIR="${DAY_DIR}/${SESSION_ID}"
 ```
 
 Скрипт отказал (exit ≠ 0) → СТОП, сообщить пилоту причину из stderr. Не подставлять номер вручную: ручная подстановка возвращает ровно ту гонку, ради которой скрипт и написан.
 
-**1.0 Session-guard open (WP-398, обязательно, ДО любых Write/Edit в сессии).** Синхронизирует пир-сессию с `session-guard.sh` Scope gate — без этого коммит на Шаге 4.5 будет заблокирован pre-commit хуком (mtime файлов сессии старше семафора). WP берётся из Шага 0б (найденный или «day-close»/«unknown», если РП не назначен). `--close-path peer-session` (WP-484 Ф118, 19.08) объявляет протокол закрытия заранее — без него `close-runner-gate.sh`/`close-gate-reminder.sh` требуют раннер закрытия дня для прямого коммита Шага 4.5.1, хотя это другой протокол (живой симптом, воспроизводившийся каждую сессию до этой фазы):
+**1.0 Session-guard open (WP-398, обязательно, ДО любых Write/Edit в сессии).** Синхронизирует пир-сессию с `session-guard.sh` Scope gate — без этого коммит на Шаге 4.5 будет заблокирован pre-commit хуком (mtime файлов сессии старше семафора). WP берётся из Шага 0б (найденный или «day-close»/«unknown», если РП не назначен). `--close-path peer-session` (WP-484 Ф118, 19.08) объявляет протокол закрытия заранее — без него проверки закрытия перед коммитом требуют раннер закрытия дня для прямого коммита Шага 4.5.1, хотя это другой протокол (живой симптом, воспроизводившийся каждую сессию до этой фазы):
 
 ```bash
-GOV_REPO_ROOT="$HOME/IWE/${IWE_GOVERNANCE_REPO:-DS-strategy}"
+GOV_REPO_ROOT="${IWE_WORKSPACE:-$HOME/IWE}/${IWE_GOVERNANCE_REPO:-DS-my-strategy}"
 OPEN_OUTPUT=$(cd "$GOV_REPO_ROOT" && IWE_AGENT=claude-code bash "${IWE_SCRIPTS:-$HOME/IWE/scripts}/session-guard.sh" open \
   --wp "<WP-NNN из Шага 0б>" --agent claude-code --close-path peer-session \
   --task "<задача одной строкой>" --slug "$SESSION_ID" 2>&1)
@@ -232,11 +289,11 @@ OPEN_STATUS=$?
 printf '%s\n' "$OPEN_OUTPUT"
 ```
 
-> **`cd "$GOV_REPO_ROOT" &&` перед вызовом — обязательно, не косметика (WP-484, найдено 14.09 вечером, пир-сессия `2026-09-14-13-wp484-close-proof-drift`, Claude+Kimi+Codex).** `session-guard.sh` резолвит и freeze-проверку (`frozen_checkout_match()`), и целевой репозиторий для `--isolate` (`ISOLATE_BASE_DIR`, `scripts/session-guard.sh:3387`) через `git rev-parse --show-toplevel` от РАБОЧЕЙ ДИРЕКТОРИИ ПРОЦЕССА, не от `GOV_REPO_ROOT` как значения переменной — так и задумано (WP-484 Ф104, 16.08): `--isolate` обязан снимать копию именно того репозитория, откуда его реально вызвали, не тихо подставлять канон вместо cwd (это была ОБРАТНАЯ ошибка Ф104, которую нельзя откатывать правкой самого скрипта). Раньше эта строка запускала `session-guard.sh` с cwd = каталог, откуда стартовала сама сессия (обычно `~/IWE`, корень) — при работе над `DS-my-strategy` это (а) молча гасило freeze-проверку (сверялся не тот repo, совпадения не находилось), и (б) при freeze-fallback `--isolate` ниже изолировал КОРЕНЬ (`iwe-local-config`), а не governance-репо, записывая эту чужую копию как `governance_worktree:` в семафор — живой инцидент этой же сессии, независимо повторённый в тот же вечер сессией РП-7 Ф147 (`lessons_session_guard_isolate_targets_root_repo_not_governance`).
+> **`cd "$GOV_REPO_ROOT" &&` перед вызовом — обязательно, не косметика (WP-484, найдено 14.09 вечером, пир-сессия `2026-09-14-13-wp484-close-proof-drift`, Claude+Kimi+Codex).** `session-guard.sh` резолвит и freeze-проверку (`frozen_checkout_match()`), и целевой репозиторий для `--isolate` (`ISOLATE_BASE_DIR`, `scripts/session-guard.sh:3387`) через `git rev-parse --show-toplevel` от РАБОЧЕЙ ДИРЕКТОРИИ ПРОЦЕССА, не от `GOV_REPO_ROOT` как значения переменной — так и задумано (WP-484 Ф104, 16.08): `--isolate` обязан снимать копию именно того репозитория, откуда его реально вызвали, не тихо подставлять канон вместо cwd (это была ОБРАТНАЯ ошибка Ф104, которую нельзя откатывать правкой самого скрипта). Раньше эта строка запускала `session-guard.sh` с cwd = каталог, откуда стартовала сама сессия (обычно `$HOME/IWE`, корень) — при работе над `DS-my-strategy` это (а) молча гасило freeze-проверку (сверялся не тот repo, совпадения не находилось), и (б) при freeze-fallback `--isolate` ниже изолировал КОРЕНЬ (`iwe-local-config`), а не governance-репо, записывая эту чужую копию как `governance_worktree:` в семафор — живой инцидент этой же сессии, независимо повторённый в тот же вечер сессией РП-7 Ф147 (`lessons_session_guard_isolate_targets_root_repo_not_governance`).
 
 
 
-> **Не хардкодить `~/IWE/scripts/session-guard.sh`.** Пир-сессия 2026-07-31-16-wp484-new-order-cutover сначала внесла такой хардкод по образцу `day-close/SKILL.md`, но холодный ревью нашёл: у обычного пользователя шаблона `setup.sh` НЕ копирует корневую `scripts/` — существует только каталог скриптов внутри шаблона, и `${IWE_SCRIPTS:-...}` резолвится именно туда намеренно (issue #266, commit `835d5ea` — тот же хардкод уже один раз чинили этим фоллбэком). Хардкод в `day-close/SKILL.md` — недокументированный долг, ждущий той же поломки при промоции, не образец для копирования. Для author-mode расхождение реальное (FMT-копия `session-guard.sh` отстаёт от корневой на фиксы WP-484 Нить1) — но лечится синком `template-sync.sh` (с отдельного разрешения пилота, S-33) или личной правкой `~/.iwe-paths`, не хардкодом в файле, который промотируется всем пользователям шаблона.
+> **Не хардкодить `$HOME/IWE/scripts/session-guard.sh`.** Пир-сессия 2026-07-31-16-wp484-new-order-cutover сначала внесла такой хардкод по образцу `day-close/SKILL.md`, но холодный ревью нашёл: у обычного пользователя шаблона `setup.sh` НЕ копирует корневую `scripts/` — существует только каталог скриптов внутри шаблона, и `${IWE_SCRIPTS:-...}` резолвится именно туда намеренно (issue #266, commit `835d5ea` — тот же хардкод уже один раз чинили этим фоллбэком). Хардкод в `day-close/SKILL.md` — недокументированный долг, ждущий той же поломки при промоции, не образец для копирования. Для author-mode расхождение реальное (FMT-копия `session-guard.sh` отстаёт от корневой на фиксы WP-484 Нить1) — но лечится синком `template-sync.sh` (с отдельного разрешения пилота, S-33) или личной правкой `~/.iwe-paths`, не хардкодом в файле, который промотируется всем пользователям шаблона.
 
 **Freeze-fallback (WP-484 Ф133, 24.08 — живой инцидент Ф132 п.3: freeze-гейт блокировал интерактивную пир-сессию без штатного пути закрыться).** `open` без `--isolate` — быстрый путь, достаточный вне freeze (большинство сессий). Если `OPEN_STATUS != 0` И `$OPEN_OUTPUT` содержит `под freeze` (`printf '%s\n' "$OPEN_OUTPUT" | grep -q 'под freeze'` — без here-string, см. пометку ниже) — canonical checkout заморожен (WP-520/WP-484 Ф104), сам гейт рекомендует `--isolate`, он для этого и существует (найдено этой же фазой — Класс 2, `--isolate` уже решает проблему, просто не был подключён здесь). Повторить с флагом:
 ```bash
@@ -244,7 +301,7 @@ ISOLATE_OUTPUT=$(cd "$GOV_REPO_ROOT" && IWE_AGENT=claude-code bash "${IWE_SCRIPT
   --wp "<WP-NNN из Шага 0б>" --agent claude-code --close-path peer-session \
   --task "<задача одной строкой>" --slug "$SESSION_ID" --isolate)
 ```
-> Тот же `cd "$GOV_REPO_ROOT" &&`, что и выше, и по той же причине: `--isolate` без него снимает копию каталога, откуда физически стартовала сессия (обычно корень `~/IWE`), а не governance-репо, для которого только что сработал freeze. `$GOV_REPO_ROOT` в этой точке — ещё канонический путь (переопределение на `worktree_path` идёт строкой ниже, после этого вызова).
+> Тот же `cd "$GOV_REPO_ROOT" &&`, что и выше, и по той же причине: `--isolate` без него снимает копию каталога, откуда физически стартовала сессия (обычно корень `$HOME/IWE`), а не governance-репо, для которого только что сработал freeze. `$GOV_REPO_ROOT` в этой точке — ещё канонический путь (переопределение на `worktree_path` идёт строкой ниже, после этого вызова).
 Успех → `$ISOLATE_OUTPUT` содержит строку JSON `{"worktree_path": "...", "branch": "...", "session_id": "..."}`. Извлечь `worktree_path` (`python3 -c 'import json,sys; print(json.loads(sys.argv[1])["worktree_path"])' "$(printf '%s\n' "$ISOLATE_OUTPUT" | grep -o '{.*}' | tail -1)"`) и переопределить корень репозитория на оставшуюся часть скилла:
 
 > **Без here-string `<<<"$VAR"` (WP-484 Ф161 / bug-2026-09-27-secret-guard-analyzer-fails-on-here-string, найдено живьём 27.09, пир-сессия 2026-09-27-09).** Анализатор стража секретов (`secret_patterns.py analyze-bash`) читает `<<<"$VAR"` как незакрытый heredoc и падает; хук трактует это как отказ самого стража и блокирует ВЕСЬ Bash-вызов с текстом «анализатор не отработал». Прежняя формулировка этого шага с `grep -o '{.*}' <<<"$ISOLATE_OUTPUT"` блокировала открытие изолированной сессии у любого писателя на хосте с этим стражем; `printf | grep` даёт тот же результат. Фикс анализатора — РП-544; сюда — не возвращать here-string и после него.
@@ -320,10 +377,31 @@ swap_history: []     # [{turn, from, to, reason}] — журнал SWAP_WRITER �
 
 **1.3 Записать открывающую запись в индекс-черновик** (WP-537 Ф4: `00-index.md` в MC-sessions (WP-526 Ф2) больше не пишется напрямую — session-index-snapshot.sh единственный писатель git-tracked файла, все остальные пишут в свой runtime-черновик, см. `scripts/lib/session-index-draft.sh`). Колонка «Агенты» — при `PEER_COUNT>=2` напарники соединяются через `+`:
 ```bash
-. "$GOV_REPO_ROOT/scripts/lib/session-index-draft.sh"
+IDX_LIB="$GOV_REPO_ROOT/scripts/lib/session-index-draft.sh"
+[ -f "$IDX_LIB" ] || IDX_LIB="${IWE_TEMPLATE:-${IWE_WORKSPACE:-$HOME/IWE}/FMT-exocortex-template}/scripts/lib/session-index-draft.sh"
+. "$IDX_LIB"
 session_index_draft_write "$SESSION_ID" "$TODAY" "<задача ≤50 симв>" \
   "claude-code / <PEER_VENDOR1>[+<PEER_VENDOR2>...]" "0" "0" "started" "—"
 ```
+
+Установка без переносчика черновиков в индекс (программы session-index-snapshot.sh в папке программ репозитория управления; так у пользователей шаблона) — черновик никто не перенесёт, поэтому ещё и вести `00-index.md` напрямую, как до WP-537 (файла нет → создать, issue #568; строку сессии заменить по `SESSION_ID` или вставить первой в таблицу):
+```bash
+if [ ! -f "${IWE_WORKSPACE:-$HOME/IWE}/${IWE_GOVERNANCE_REPO:-DS-my-strategy}/scripts/session-index-snapshot.sh" ]; then
+  IDX="$SESSIONS_DIR/00-index.md"
+  [ -f "$IDX" ] || printf '%s\n' '# Индекс пир-сессий' '' \
+    '| Дата | Сессия | Задача | Агенты | Ходы | Эскалации | Статус | Отчёт |' \
+    '|------|--------|--------|--------|------|-----------|--------|-------|' > "$IDX"
+  ROW="| $TODAY | $SESSION_ID | <задача ≤50 симв> | claude-code / <PEER_VENDOR1>[+<PEER_VENDOR2>...] | 0 | 0 | started | — |"
+  if grep -qF "| $SESSION_ID |" "$IDX"; then
+    ID="| $SESSION_ID |" ROW="$ROW" awk 'index($0, ENVIRON["ID"]) { print ENVIRON["ROW"]; next } { print }' "$IDX" > "$IDX.tmp"
+  else
+    ROW="$ROW" awk '{ print } /^\|------/ && !done { print ENVIRON["ROW"]; done = 1 }
+      END { if (!done) print ENVIRON["ROW"] }' "$IDX" > "$IDX.tmp"
+  fi
+  mv "$IDX.tmp" "$IDX"
+fi
+```
+В этом режиме `00-index.md` идёт в коммит сессии (Шаг 4.5) вместе с её файлами.
 
 ---
 
@@ -967,7 +1045,7 @@ Skill(
 
 ### 3.6.5 Deploy
 
-Для каждого репо в списке изменённых файлов. Сообщение коммита сначала записать инструментом записи файлов (не через оболочку) в `$HOME/IWE/.iwe-runtime/peer-prompts/<SESSION_ID>-commit-msg.txt`:
+Для каждого репо в списке изменённых файлов. Сообщение коммита сначала записать инструментом записи файлов (не через оболочку) в `${IWE_WORKSPACE:-$HOME/IWE}/.iwe-runtime/peer-prompts/<SESSION_ID>-commit-msg.txt`:
 
 ```text
 <type>(<scope>): <короткое описание>
@@ -985,7 +1063,7 @@ git status --short
 git add <specific files — НЕ git add . и НЕ git add -u>
 # Message text is written to a file with a file-writing tool, never inlined in
 # double quotes: backticks and $(...) in a description would be executed.
-git commit -F "$HOME/IWE/.iwe-runtime/peer-prompts/<SESSION_ID>-commit-msg.txt" -- <те же specific files>
+git commit -F "${IWE_WORKSPACE:-$HOME/IWE}/.iwe-runtime/peer-prompts/<SESSION_ID>-commit-msg.txt" -- <те же specific files>
 
 # WP-537: заявить свой коммит в семафоре сессии. Без этой строки закрытие
 # сессии проверяет «моя работа опубликована» по состоянию ВСЕЙ ветки, и один
@@ -998,7 +1076,7 @@ git commit -F "$HOME/IWE/.iwe-runtime/peer-prompts/<SESSION_ID>-commit-msg.txt" 
 # файлов, а из явной заявки (найдено холодным ревью этой же сессии).
 NC_ROOT=$(git -C <repo path> rev-parse --show-toplevel)
 NOTE_COMMIT="${IWE_SCRIPTS:-$HOME/IWE/scripts}/session-guard.sh"
-[ -x "$NOTE_COMMIT" ] || NOTE_COMMIT="$HOME/IWE/scripts/session-guard.sh"
+[ -x "$NOTE_COMMIT" ] || NOTE_COMMIT="${IWE_WORKSPACE:-$HOME/IWE}/scripts/session-guard.sh"
 if ! bash "$NOTE_COMMIT" note-commit "$(git -C "$NC_ROOT" rev-parse HEAD)" \
        --repo "$(basename "$NC_ROOT")" --agent claude-code --slug "$SESSION_ID"; then
   echo "WARN: коммит не заявлен в семафоре — закрытие сессии проверится по всей ветке" >&2
@@ -1009,8 +1087,7 @@ fi
 
 ```bash
 REPO_ROOT=$(git -C "<repo path>" rev-parse --show-toplevel)
-# shellcheck source=../../../../DS-my-strategy/scripts/lib/publish-gate.sh
-. "$HOME/IWE/DS-my-strategy/scripts/lib/publish-gate.sh"
+. "${IWE_WORKSPACE:-$HOME/IWE}/${IWE_GOVERNANCE_REPO:-DS-my-strategy}/scripts/lib/publish-gate.sh"
 SHA=$(git -C "$REPO_ROOT" rev-parse HEAD)
 # normal по умолчанию; high — ТОЛЬКО если пилот на Decision Gate (Шаг 3.5)
 # явно пометил реализацию как срочную (никакого отдельного CLI-флага —
@@ -1082,9 +1159,13 @@ DURATION_MIN=$(( (NOW_EPOCH - START_EPOCH) / 60 ))
 
 1. Показать пилоту краткий итог (2-3 строки, что сделали в этой пир-сессии — не пересказ turn-файлов, суть).
 2. Спросить: «Что в этой сессии стоит запомнить на будущее — не про саму задачу, а про то, как шла работа?» (дословно вопрос Ф18, `CONCEPT-night-cycle.md §18`).
-3. Записать ответ в дневной ledger:
+3. Записать ответ в дневной ledger (issue #409: скрипт есть не на каждой установке — не блокировать при отсутствии):
    ```bash
-   bash "$GOV_REPO_ROOT/scripts/ledger-append.sh" day "$(date +%F)" session_reflection "{\"wp\": \"<WP-NNN>\", \"answer\": <экранированный ответ>}" peer-conversation
+   if [ -f "$GOV_REPO_ROOT/scripts/ledger-append.sh" ]; then
+     bash "$GOV_REPO_ROOT/scripts/ledger-append.sh" day "$(date +%F)" session_reflection "{\"wp\": \"<WP-NNN>\", \"answer\": <экранированный ответ>}" peer-conversation
+   else
+     echo "ledger-append.sh недоступен на этой установке — рефлексия не записана в дневной ledger"
+   fi
    ```
 4. Перейти к **Шагу 3.8 (Close-Trigger Gate)** — рефлексия НЕ равна разрешению закрывать, это отдельная проверка.
 
@@ -1151,7 +1232,7 @@ note: синтез не выполнен (субагент недоступен 
 **При консенсусе (turn ≤ 10):**
 - Не переименовывать в `report.md`.
 - Спросить пилота: «Консенсус достигнут. Закрываем сессию или нужно дозакрытие?»
-- Если пилот говорит «закрываем» → переименовать `report-draft.md → report.md` (шаг 4.3) **и снять заявку на черновик** (хук Write заявил путь в семафоре сам, а файла больше нет, поэтому `session-guard.sh close` откажет «путь не найден ни в одном checkout», WP-484 21.09): `bash "${IWE_SCRIPTS:-$HOME/IWE/scripts}/session-guard.sh" note-file --forget "<путь черновика относительно репозитория сессий, как в семафоре>" --agent claude-code --slug "$SESSION_ID"`, затем `note-file` для `report.md`. Отказ команды значит, что путь ещё есть на диске, в HEAD, в индексе, в истории веток/reflog или в заявленном коммите: заявка законна, черновик не удалять. Ответ «неизвестный флаг: --forget» значит устаревшую копию охранника на этом хосте (корневой чекаут `~/IWE` отстаёт от `origin/main`): вызвать `session-guard.sh` из свежего checkout корневого репозитория (worktree от `origin/main`) абсолютным путём с `IWE_ROOT="$HOME/IWE"`, не править семафор руками.
+- Если пилот говорит «закрываем» → переименовать `report-draft.md → report.md` (шаг 4.3) **и снять заявку на черновик** (хук Write заявил путь в семафоре сам, а файла больше нет, поэтому `session-guard.sh close` откажет «путь не найден ни в одном checkout», WP-484 21.09): `bash "${IWE_SCRIPTS:-$HOME/IWE/scripts}/session-guard.sh" note-file --forget "<путь черновика относительно репозитория сессий, как в семафоре>" --agent claude-code --slug "$SESSION_ID"`, затем `note-file` для `report.md`. Отказ команды значит, что путь ещё есть на диске, в HEAD, в индексе, в истории веток/reflog или в заявленном коммите: заявка законна, черновик не удалять. Ответ «неизвестный флаг: --forget» значит устаревшую копию охранника на этом хосте (корневой чекаут `$HOME/IWE` отстаёт от `origin/main`): вызвать `session-guard.sh` из свежего checkout корневого репозитория (worktree от `origin/main`) абсолютным путём с `IWE_ROOT="${IWE_WORKSPACE:-$HOME/IWE}"`, не править семафор руками.
 - Если пилот запрашивает дозакрытие → продолжить turn-loop, а при финальном Close дописать `## Дополнение (turns N–M, <timestamp>)` в тот же `report-draft.md`, затем переименовать.
 
 **При дозакрытии:**
@@ -1280,11 +1361,32 @@ Omit если `implementation_pipeline: false` в meta.yaml.
 
 Тот же черновик, что Шаг 1.3 открыл — `opened_at` сохраняется, остальные поля заменяются целиком (колонка «Агенты» — та же `+`-склейка при PEER_COUNT>=2):
 ```bash
-. "$GOV_REPO_ROOT/scripts/lib/session-index-draft.sh"
+IDX_LIB="$GOV_REPO_ROOT/scripts/lib/session-index-draft.sh"
+[ -f "$IDX_LIB" ] || IDX_LIB="${IWE_TEMPLATE:-${IWE_WORKSPACE:-$HOME/IWE}/FMT-exocortex-template}/scripts/lib/session-index-draft.sh"
+. "$IDX_LIB"
 session_index_draft_write "$SESSION_ID" "$TODAY" "<задача ≤50>" \
   "claude-code / <PEER_VENDOR1>[+<PEER_VENDOR2>...]" "<TURNS/ROUNDS>" "<ESCALATIONS>" \
   "completed" "[report.md](<MONTH>/<DAY>/<SESSION_ID>/report.md)"
 ```
+
+Установка без переносчика черновиков в индекс (программы session-index-snapshot.sh в папке программ репозитория управления; так у пользователей шаблона) — черновик никто не перенесёт, поэтому ещё и вести `00-index.md` напрямую, как до WP-537 (файла нет → создать, issue #568; строку сессии заменить по `SESSION_ID` или вставить первой в таблицу):
+```bash
+if [ ! -f "${IWE_WORKSPACE:-$HOME/IWE}/${IWE_GOVERNANCE_REPO:-DS-my-strategy}/scripts/session-index-snapshot.sh" ]; then
+  IDX="$SESSIONS_DIR/00-index.md"
+  [ -f "$IDX" ] || printf '%s\n' '# Индекс пир-сессий' '' \
+    '| Дата | Сессия | Задача | Агенты | Ходы | Эскалации | Статус | Отчёт |' \
+    '|------|--------|--------|--------|------|-----------|--------|-------|' > "$IDX"
+  ROW="| $TODAY | $SESSION_ID | <задача ≤50> | claude-code / <PEER_VENDOR1>[+<PEER_VENDOR2>...] | <TURNS/ROUNDS> | <ESCALATIONS> | completed | [report.md](<MONTH>/<DAY>/<SESSION_ID>/report.md) |"
+  if grep -qF "| $SESSION_ID |" "$IDX"; then
+    ID="| $SESSION_ID |" ROW="$ROW" awk 'index($0, ENVIRON["ID"]) { print ENVIRON["ROW"]; next } { print }' "$IDX" > "$IDX.tmp"
+  else
+    ROW="$ROW" awk '{ print } /^\|------/ && !done { print ENVIRON["ROW"]; done = 1 }
+      END { if (!done) print ENVIRON["ROW"] }' "$IDX" > "$IDX.tmp"
+  fi
+  mv "$IDX.tmp" "$IDX"
+fi
+```
+В этом режиме `00-index.md` идёт в коммит сессии (Шаг 4.5) вместе с её файлами.
 
 ### 4.4 Закрытие (ОРЗ — сессионный файл рядом с папкой сессии)
 
@@ -1332,7 +1434,7 @@ done < <(
 
 ### 4.5 Commit + push
 
-**Сначала: включён ли выключатель пути закрытия (РП-561 Ф61 этап 2, решения пилота 15.11).** Проверить: `[ "${IWE_CLOSE_ROUTE_ENFORCE:-}" = 1 ] || [ -f "$HOME/IWE/.iwe-runtime/close-route-enforce" ]` (переменная файл не выключает; выключить на хосте = удалить файл). Выключен — шаги 4.5.0–4.5.4 ниже как раньше. **Включён — короткого закрытия пир-сессии нет:** любая сессия с изменениями, пир-сессия тоже, закрывается обычным закрытием, чтобы закрытые фазы и завершённый РП ушли в архив; объявление `--close-path peer-session` от раннера не освобождает ни `close`, ни хуки (`close-runner-gate.sh` после слов о закрытии не пропустит прямой коммит 4.5.1 до старта раннера, Stop-гейт требует закрытия раннером, у Кодекса — `quick_close_gate.py`). Порядок при включённом выключателе:
+**Сначала: включён ли выключатель пути закрытия (РП-561 Ф61 этап 2, решения пилота 15.11).** Проверить: `[ "${IWE_CLOSE_ROUTE_ENFORCE:-}" = 1 ] || [ -f "${IWE_WORKSPACE:-$HOME/IWE}/.iwe-runtime/close-route-enforce" ]` (переменная файл не выключает; выключить на хосте = удалить файл). Выключен — шаги 4.5.0–4.5.4 ниже как раньше. **Включён — короткого закрытия пир-сессии нет:** любая сессия с изменениями, пир-сессия тоже, закрывается обычным закрытием, чтобы закрытые фазы и завершённый РП ушли в архив; объявление `--close-path peer-session` от раннера не освобождает ни `close`, ни хуки (`close-runner-gate.sh` после слов о закрытии не пропустит прямой коммит 4.5.1 до старта раннера, Stop-гейт требует закрытия раннером, у Кодекса — `quick_close_gate.py`). Порядок при включённом выключателе:
 
 1. 4.5.0 — записать закрывающий ОРЗ-файл, как ниже.
 2. 4.5.0а — только пункты 1 и 1а (поле «Следующий шаг» и файл для сверки); пункт 2 (проверка опубликованной карточки) пропустить: публикация карточки до раннера заблокирована, а поле проверяют шаг раннера `wp-context-update` и итоговая проверка R23 (`handoff_next_step`). 4.5.0б — как ниже, без коммита.
@@ -1374,7 +1476,7 @@ session_id: $SESSION_ID
 EOF
 # The insight is free text (backticks, $(...), even a line "EOF"): written
 # beforehand with a file-writing tool to the path below, never through the shell.
-INSIGHT_FILE="$HOME/IWE/.iwe-runtime/peer-prompts/$SESSION_ID-insight.txt"
+INSIGHT_FILE="${IWE_WORKSPACE:-$HOME/IWE}/.iwe-runtime/peer-prompts/$SESSION_ID-insight.txt"
 test -s "$INSIGHT_FILE" || { echo "нет файла инсайта $INSIGHT_FILE — записать его инструментом записи файлов" >&2; exit 1; }
 cat "$INSIGHT_FILE" >> "$GUARD_ORZ"
 cat >> "$GUARD_ORZ" <<EOF
@@ -1404,7 +1506,12 @@ EOF
 2. Прогнать проверку (решение пилота 10.11, Ф285: проверяется опубликованная карточка; блокируют только `HANDOFF_AGENT_NEXT_MISSING`, `HANDOFF_AGENT_PHASE_MISSING`, `HANDOFF_UNKNOWN_PHASE` вне белого списка `machine/handoff-phase-allowlist.yaml`, остальные коды предупреждают; `session-guard.sh close` на Шаге 4.5.2 вызывает ту же проверку ещё раз и при блокирующем коде отказывает, семафор остаётся):
 
 ```bash
-bash "${IWE_SCRIPTS:-$HOME/IWE/scripts}/wp-handoff-peer-check.sh" --agent claude-code --slug "$SESSION_ID" || true
+HANDOFF_CHECK="${IWE_SCRIPTS:-$HOME/IWE/scripts}/wp-handoff-peer-check.sh"
+if [ -f "$HANDOFF_CHECK" ]; then
+  bash "$HANDOFF_CHECK" --agent claude-code --slug "$SESSION_ID" || true
+else
+  echo "проверки поля «Следующий шаг» на этой установке нет — пропущена" >&2
+fi
 ```
 
 Любой `HANDOFF_*` — отказ для самого писателя: поправить поле (и файл шага 1а), опубликовать карточку и повторить проверку, прежде чем идти к 4.5.1; блокирующий код без исправления не даст закрыть сессию на Шаге 4.5.2; не прошло — сказать пилоту об этом одной строкой в итоговом сообщении. Читатель на следующей сессии: `wp-handoff-show.sh WP-N` (его вызывает `declare-intent.sh`).
@@ -1412,7 +1519,12 @@ bash "${IWE_SCRIPTS:-$HOME/IWE/scripts}/wp-handoff-peer-check.sh" --agent claude
 **4.5.0б Снимок открытых фаз карточки (WP-484 Ф299, вход И-6 из РП-561).** Если сессия меняла статусы или разделы фаз карточки РП — до коммита обновить self-entry `handoff_snapshot` тем же скриптом, что `memory/protocol-close.md` §5 (без него гейт Ф42 на следующем открытии даёт ложное MISMATCH; живой случай РП-484 10.11: снимок 06.11, расхождение 16+5 фаз):
 
 ```bash
-python3 "${IWE_WORKSPACE:-$HOME/IWE}/scripts/wp-phase-snapshot-write.py" "<WP-NNN>" --governance-repo "$GOV_REPO_ROOT"
+SNAPSHOT_WRITER="${IWE_WORKSPACE:-$HOME/IWE}/scripts/wp-phase-snapshot-write.py"
+if [ -f "$SNAPSHOT_WRITER" ]; then
+  "$(bash "${IWE_SCRIPTS:-$HOME/IWE/scripts}/lib/find-python3.sh" --stdlib-only)" "$SNAPSHOT_WRITER" "<WP-NNN>" --governance-repo "$GOV_REPO_ROOT"
+else
+  echo "записи снимка фаз на этой установке нет — пропущена" >&2
+fi
 ```
 
 `--governance-repo "$GOV_REPO_ROOT"` обязателен под заморозкой: карточка правится в изолированной копии, без флага скрипт перепишет снимок в замороженной главной копии. Код 0 — записано или уже актуально; код 3 — проверка списка фаз не сошлась, скрипт отказался писать: руками не чинить, одна строка пилоту в итоговом сообщении. Карточка с изменённым снимком идёт в коммит 4.5.1 вместе с остальной правкой.
@@ -1437,6 +1549,8 @@ python3 "${IWE_WORKSPACE:-$HOME/IWE}/scripts/wp-phase-snapshot-write.py" "<WP-NN
 # The session folder itself is never passed (WP-524 F7): `git commit -- <dir>`
 # would take a modified tracked .err along.
 PATHS=("${SESSION_PATHS[@]}")
+# Install without the index snapshotter: the index is kept directly and goes in the commit.
+[ -f "${IWE_WORKSPACE:-$HOME/IWE}/${IWE_GOVERNANCE_REPO:-DS-my-strategy}/scripts/session-index-snapshot.sh" ] || PATHS+=("00-index.md")
 if [ -e "$GUARD_ORZ" ]; then
   PATHS=("${GUARD_ORZ#"$SESSIONS_DIR"/}" "${PATHS[@]}")
 else
@@ -1458,8 +1572,8 @@ for CLAIM in "${PATHS[@]}"; do
     || { echo "заявка файла $CLAIM не прошла" >&2; exit 1; }
 done
 # Task text: written beforehand with a file-writing tool (not the shell) to
-# $HOME/IWE/.iwe-runtime/peer-prompts/<SESSION_ID>-task.txt — never inline it in quotes.
-TASK_FILE="$HOME/IWE/.iwe-runtime/peer-prompts/$SESSION_ID-task.txt"
+# ${IWE_WORKSPACE:-$HOME/IWE}/.iwe-runtime/peer-prompts/<SESSION_ID>-task.txt — never inline it in quotes.
+TASK_FILE="${IWE_WORKSPACE:-$HOME/IWE}/.iwe-runtime/peer-prompts/$SESSION_ID-task.txt"
 test -s "$TASK_FILE" || { echo "нет файла задачи $TASK_FILE — записать его инструментом записи файлов" >&2; exit 1; }
 # Заявлять коммит только после УСПЕШНОГО коммита: при отказе HEAD чужой, и note-commit заявил бы
 # чужой коммит (РП-484 Ф257, 27.10) — после публикации такую заявку снимает только
@@ -1472,7 +1586,7 @@ OUR_SHAS=("$(git -C "$SESSIONS_DIR" rev-parse HEAD)")   # публикуем р�
 # явный `-C "$SESSIONS_DIR"` по той же причине (верхнеуровневый `cd` этот хук
 # блокирует, а implicit cwd после переписывания дал бы HEAD не того репозитория).
 NOTE_COMMIT="${IWE_SCRIPTS:-$HOME/IWE/scripts}/session-guard.sh"
-[ -x "$NOTE_COMMIT" ] || NOTE_COMMIT="$HOME/IWE/scripts/session-guard.sh"
+[ -x "$NOTE_COMMIT" ] || NOTE_COMMIT="${IWE_WORKSPACE:-$HOME/IWE}/scripts/session-guard.sh"
 if ! bash "$NOTE_COMMIT" note-commit "$(git -C "$SESSIONS_DIR" rev-parse HEAD)" \
        --repo "$(basename "$SESSIONS_DIR")" --agent claude-code --slug "$SESSION_ID"; then
   echo "WARN: коммит не заявлен в семафоре — закрытие сессии проверится по всей ветке" >&2
@@ -1483,7 +1597,9 @@ fi
 # догоняющий quick-close уже запушенной сессии не доказывает «всё на remote»
 # и падает в ручной обход. Отказ (грязное дерево и т.п.) не блокирует
 # закрытие — WARN и legacy-путь confirmed_clean_repos.
-bash "$HOME/IWE/${IWE_GOVERNANCE_REPO:-DS-strategy}/scripts/session-manifest-write.sh" "$(git -C "$SESSIONS_DIR" rev-parse --show-toplevel)" "$SESSION_ID" \
+MANIFEST_WRITER="${IWE_WORKSPACE:-$HOME/IWE}/${IWE_GOVERNANCE_REPO:-DS-my-strategy}/scripts/session-manifest-write.sh"
+[ -f "$MANIFEST_WRITER" ] || MANIFEST_WRITER="${IWE_TEMPLATE:-${IWE_WORKSPACE:-$HOME/IWE}/FMT-exocortex-template}/scripts/session-manifest-write.sh"
+bash "$MANIFEST_WRITER" "$(git -C "$SESSIONS_DIR" rev-parse --show-toplevel)" "$SESSION_ID" \
   || echo "WARN: attest-манифест не создан — догоняющее закрытие пойдёт legacy-путём"
 # attest-манифест — второй наш коммит (если он создан): порядок публикации «payload, затем манифест»
 [ "$(git -C "$SESSIONS_DIR" rev-parse HEAD)" = "${OUR_SHAS[0]}" ] || OUR_SHAS+=("$(git -C "$SESSIONS_DIR" rev-parse HEAD)")
@@ -1507,10 +1623,10 @@ git -C "$REPO_ROOT" fetch -q origin main
 # Служебный id охранника = имя файла семафора `claude-code-<id>.open`. Дата-слаг пир-сессии
 # ($SESSION_ID) им НЕ является: с слагом квитанция отказывала «нет открытой сессии claude-code-<слаг>»
 # (WP-539 Ф21 Б5, 15 отказов за 29.10). Ищем семафор по полю slug; ровно один, иначе стоп.
-if [ -f "$HOME/IWE/.iwe-runtime/sessions/claude-code-${SESSION_ID}.open" ]; then
+if [ -f "${IWE_WORKSPACE:-$HOME/IWE}/.iwe-runtime/sessions/claude-code-${SESSION_ID}.open" ]; then
     GUARD_SESSION_ID="$SESSION_ID"   # уже служебный id
 else
-    GUARD_SEM_MATCHES=$(grep -lxF "slug: ${SESSION_ID}" "$HOME"/IWE/.iwe-runtime/sessions/claude-code-*.open 2>/dev/null)
+    GUARD_SEM_MATCHES=$(grep -lxF "slug: ${SESSION_ID}" "${IWE_WORKSPACE:-$HOME/IWE}"/.iwe-runtime/sessions/claude-code-*.open 2>/dev/null)
     [ "$(printf '%s\n' "$GUARD_SEM_MATCHES" | grep -c .)" -eq 1 ] \
         || { echo "семафор сессии $SESSION_ID не найден или не единственный: $GUARD_SEM_MATCHES" >&2; exit 1; }
     GUARD_SESSION_ID=$(basename "$GUARD_SEM_MATCHES" .open)
@@ -1519,7 +1635,7 @@ fi
 for SHA in "${OUR_SHAS[@]}"; do
     # IWE_PUBLICATION_SESSION_ID обязателен: без него квитанция публикации (v2) не записывается
     # (в журнале пропусков «session=none»), и закрытие отказывает «lacks exact publication receipt».
-    IWE_AGENT=claude-code IWE_PUBLICATION_SESSION_ID="$GUARD_SESSION_ID" bash "$HOME/IWE/DS-my-strategy/scripts/ds-publish.sh" "$REPO_ROOT" high \
+    IWE_AGENT=claude-code IWE_PUBLICATION_SESSION_ID="$GUARD_SESSION_ID" bash "${IWE_WORKSPACE:-$HOME/IWE}/${IWE_GOVERNANCE_REPO:-DS-my-strategy}/scripts/ds-publish.sh" "$REPO_ROOT" high \
         --from-commit "$SHA" --exact-commit "$SHA" --reason "peer-session $SESSION_ID close" \
         || { echo "ds-publish --exact-commit не удался для $SHA — см. вывод шлюза" >&2; exit 1; }
 done
@@ -1537,8 +1653,15 @@ done
 # PILOT_CLOSE_WORD — дословная реплика пилота о закрытии из ЭТОГО чата («закрывай», «всё», ПСЗ, СЗ);
 # присвоить ее до вызова: PILOT_CLOSE_WORD='закрывай'. Слова пилота нет — не закрывать (Шаг 3.8):
 # охранник сессий (РП-561, 18.11) откажет сам. «Не закрывай», вопрос и подпись варианта не принимаются.
-if ! IWE_AGENT=claude-code bash "${IWE_SCRIPTS:-$HOME/IWE/scripts}/session-guard.sh" \
-    close --agent claude-code --slug "$SESSION_ID" --pilot-close-word "$PILOT_CLOSE_WORD"; then
+GUARD="${IWE_SCRIPTS:-$HOME/IWE/scripts}/session-guard.sh"
+if grep -q -- '--pilot-close-word' "$GUARD"; then
+  IWE_AGENT=claude-code bash "$GUARD" close --agent claude-code --slug "$SESSION_ID" --pilot-close-word "$PILOT_CLOSE_WORD"
+else
+  # Older guard copy (template install): no close-word flag yet; step 3.8 already required the pilot's word.
+  IWE_AGENT=claude-code bash "$GUARD" close --agent claude-code --slug "$SESSION_ID"
+fi
+CLOSE_RC=$?
+if [ "$CLOSE_RC" -ne 0 ]; then
   echo "Закрытие не подтверждено: разобрать причину отказа; шаги 4.5.3–4.5.4 пока не выполнять." >&2
   exit 1
 fi
@@ -1551,8 +1674,9 @@ fi
 Действие `cancel --action peer-session-close` (не `cancel-close`/`close-override` — те остаются только для явной команды пилота, поведение не менялось) — новое, узкое: очищает `armed` obligation тем же аудируемым (ledger `close_obligation`) путём, но **no-op при `state=="running"`**. Один долгий `$CLAUDE_CODE_SESSION_ID` может накрывать несколько РП подряд (`waiting`-шаг легитимно приостанавливает раннер и разрешает Stop, обязательство при этом остаётся `running`) — безусловная очистка здесь стёрла бы чужой ещё выполняющийся Quick Close другого РП той же сессии (cold-review нашёл эту дыру в первой версии фикса с `cancel-close`). Без `--force`: отказ ledger оставляет obligation на месте (fail-closed), шаг просто сообщает и не блокирует пилота — сильнее не нужно, следующий реальный Quick Close покажет проблему явно, если она не устранилась.
 
 ```bash
-if [ -n "${CLAUDE_CODE_SESSION_ID:-}" ]; then
-  python3 "$HOME/IWE/${IWE_GOVERNANCE_REPO:-DS-strategy}/scripts/close_obligation.py" cancel \
+CLOSE_OBLIGATION="${IWE_WORKSPACE:-$HOME/IWE}/${IWE_GOVERNANCE_REPO:-DS-my-strategy}/scripts/close_obligation.py"
+if [ -n "${CLAUDE_CODE_SESSION_ID:-}" ] && [ -f "$CLOSE_OBLIGATION" ]; then
+  "$(bash "${IWE_SCRIPTS:-$HOME/IWE/scripts}/lib/find-python3.sh")" "$CLOSE_OBLIGATION" cancel \
     --session-id "$CLAUDE_CODE_SESSION_ID" --action peer-session-close --actor peer-session-close \
     --reason "peer-session $SESSION_ID closed via direct commit (Шаг 4.5.1), no runner obligation applies" \
     2>&1 || echo "close_obligation cancel не прошёл — не блокирует пилота, следующий Quick Close покажет это явно, если проблема повторится"
@@ -1563,11 +1687,11 @@ fi
 
 > **Запуск только через bash и без пересказа (WP-484 Ф290, 05.11).** Блок ниже исполнять целиком в `bash` (сохранить в файл и `bash <файл>` или `bash -c '…'`), не в оболочке по умолчанию: в zsh `BASH_SOURCE` пуст, `ledger_read_yaml` ищет `ledger_path.py` от текущего каталога и возвращает пустой документ — так 05.11 сессия 06 получила ложную эскалацию «нет события session_closed», хотя оба события лежали в буфере журнала. Строки `ACCEPTANCE_ISSUES` переносить в эскалацию дословно: «журнал не удалось прочитать» и «нет события» — разные расхождения с разным разбором.
 
-> **Cold-review фиксы (та же сессия, до деплоя):** (1) дата journal-файла — локальное время, как `now_date()` в `session-guard.sh`, не `date -u` (UTC-вычисление ночью давало ложный «нет события», уже был класс инцидента «ночная сессия» в этом РП); (2) `git ls-remote` обёрнут в `timeout` (тот же риск зависания, из-за которого сам этот шаг не делает жёсткий блок); (3) journal-путь — канонический `$HOME/IWE/DS-my-strategy`, не `$GOV_REPO_ROOT` (в isolate/freeze-сценарии тот указывает на изолированную копию СОВСЕМ ДРУГОГО репозитория — `session-guard.sh` пишет ledger-событие всегда в канонический governance-репо через свой собственный `$IWE_ROOT/$GOV_REPO`, а не через переменную этого скилла); (4) значения в Python — через переменные окружения, не строковой интерполяцией в исходный код (slug формируется словесной инструкцией агенту, не санитируется регуляркой); (5) сам файл эскалации получает отдельный маленький коммит+push — без этого он остаётся незакоммиченным после единственного commit+push Шага 4.5.1 и никогда не публикуется, вопреки заявленному «эскалируется громко».
+> **Cold-review фиксы (та же сессия, до деплоя):** (1) дата journal-файла — локальное время, как `now_date()` в `session-guard.sh`, не `date -u` (UTC-вычисление ночью давало ложный «нет события», уже был класс инцидента «ночная сессия» в этом РП); (2) `git ls-remote` обёрнут в `timeout` (тот же риск зависания, из-за которого сам этот шаг не делает жёсткий блок); (3) journal-путь — канонический `${IWE_WORKSPACE:-$HOME/IWE}/DS-my-strategy`, не `$GOV_REPO_ROOT` (в isolate/freeze-сценарии тот указывает на изолированную копию СОВСЕМ ДРУГОГО репозитория — `session-guard.sh` пишет ledger-событие всегда в канонический governance-репо через свой собственный `$IWE_ROOT/$GOV_REPO`, а не через переменную этого скилла); (4) значения в Python — через переменные окружения, не строковой интерполяцией в исходный код (slug формируется словесной инструкцией агенту, не санитируется регуляркой); (5) сам файл эскалации получает отдельный маленький коммит+push — без этого он остаётся незакоммиченным после единственного commit+push Шага 4.5.1 и никогда не публикуется, вопреки заявленному «эскалируется громко».
 
 ```bash
 LEDGER_DAY=$(date +%Y-%m-%d)
-LEDGER_REPO="$HOME/IWE/${IWE_GOVERNANCE_REPO:-DS-strategy}"
+LEDGER_REPO="${IWE_WORKSPACE:-$HOME/IWE}/${IWE_GOVERNANCE_REPO:-DS-my-strategy}"
 . "$LEDGER_REPO/scripts/lib/ledger-path.sh"
 ACCEPTANCE_ISSUES=()
 
@@ -1642,7 +1766,7 @@ if [ "${#ACCEPTANCE_ISSUES[@]}" -gt 0 ]; then
   git -C "$SESSIONS_DIR" add "$ACCEPT_ESC_FILE" "$SESSION_DIR/meta.yaml"
   git -C "$SESSIONS_DIR" commit -m "fix(peer): $SESSION_ID — эскалация приёмки закрытия" \
     -- "$ACCEPT_ESC_FILE" "$SESSION_DIR/meta.yaml" 2>&1 || true
-  IWE_AGENT=claude-code bash "$HOME/IWE/DS-my-strategy/scripts/ds-publish.sh" "$SESSIONS_DIR" high \
+  IWE_AGENT=claude-code bash "${IWE_WORKSPACE:-$HOME/IWE}/${IWE_GOVERNANCE_REPO:-DS-my-strategy}/scripts/ds-publish.sh" "$SESSIONS_DIR" high \
     --from-commit "$(git -C "$SESSIONS_DIR" rev-parse HEAD)" --exact-commit "$(git -C "$SESSIONS_DIR" rev-parse HEAD)" \
     --reason "peer-session $SESSION_ID close: escalation" 2>&1 \
     || echo "⚠️  публикация эскалации не удалась — коммит существует локально, файл не тонет, но не на remote" >&2
@@ -1675,7 +1799,7 @@ fi
 1. Извлечь месяц и день из id: `MONTH=$(echo "$session_id" | cut -c1-7)`, `DAY=$(echo "$session_id" | cut -c9-10)` → найти `$SESSIONS_DIR/$MONTH/$DAY/$session_id/meta.yaml` (Шаг 1, WP-526 Ф2 — MC-sessions, не `sessions/` внутри governance-репо).
 2. Обновить (Bash sed): `status: interrupted`, `end_time: <now>`, `turns_count: <число файлов>`.
 3. Обновить индекс-черновик (WP-537 Ф4, `session_index_draft_write`, см. Шаг 4.3): статус → `interrupted`, report → `—`.
-4. Commit + push внутри `$SESSIONS_DIR` (без `00-index.md` — см. Шаг 4.5.1).
+4. Commit + push внутри `$SESSIONS_DIR`: список файлов — по §4.4а (явные файлы, без папки и без `.err`), коммит и публикация — по 4.5.1. На установке без переносчика черновиков в индекс (`[ -f "${IWE_WORKSPACE:-$HOME/IWE}/${IWE_GOVERNANCE_REPO:-DS-my-strategy}/scripts/session-index-snapshot.sh" ]` не выполняется) сначала обновить `00-index.md` тем же блоком, что в Шаге 4.3 (статус `interrupted`, report → `—`), и добавить `00-index.md` в список.
 
 ---
 
@@ -1688,7 +1812,7 @@ fi
 3. Выполнить **Шаг 4.2** (синтез report.md через Agent tool) с теми же инвариантами и fallback.
 4. Обновить `meta.yaml` (Bash sed): `status: completed`, `end_time: <now>`, `turns_count: <число файлов>`.
 5. Обновить индекс-черновик (WP-537 Ф4, `session_index_draft_write`, см. Шаг 4.3): статус → `completed`, report → ссылка.
-6. Commit + push внутри `$SESSIONS_DIR` (без `00-index.md` — см. Шаг 4.5.1).
+6. Commit + push внутри `$SESSIONS_DIR`: список файлов — по §4.4а (явные файлы, без папки и без `.err`), коммит и публикация — по 4.5.1. На установке без переносчика черновиков в индекс (`[ -f "${IWE_WORKSPACE:-$HOME/IWE}/${IWE_GOVERNANCE_REPO:-DS-my-strategy}/scripts/session-index-snapshot.sh" ]` не выполняется) сначала обновить `00-index.md` тем же блоком, что в Шаге 4.3 (статус `completed`, report → ссылка), и добавить `00-index.md` в список.
 
 Используется для восстановления прерванных сессий без перезапуска turn-loop.
 
@@ -1700,3 +1824,6 @@ fi
 «проверь отчёт сессии `<session_id>`»
 
 Запустить субагент (Sonnet, context isolation): прочитать все файлы сессии + report.md, сверить с инвариантами schema_version=1 (frontmatter, §4 непустой при agreed, verify-якоря).
+
+<!-- USER-SPACE -->
+<!-- /USER-SPACE -->

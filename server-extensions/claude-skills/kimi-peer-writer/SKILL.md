@@ -2,7 +2,7 @@
 name: kimi-peer-writer
 description: Peer-сессия DP.SC.154 где Kimi = писатель, напарник — параметр `--peer` (default Claude). Запускается простой фразой. Включает ОРЗ Opening и Closing, turn-loop, эскалации, Decision Gate (зафиксировать vs реализовать → ревью → проверить → задеплоить), отложенную финализацию и верификацию.
 argument-hint: "<описание задачи> | --list | --interrupt <session_id> | --finalize <session_id>"
-version: 1.4.1
+version: 1.4.2
 layer: L1
 status: active
 browser_safe: false
@@ -83,7 +83,7 @@ Peer-сессия DP.SC.154 где Kimi = писатель, напарник —
 
 Определить режим из `$ARGUMENTS`:
 
-- `--list` → прочитать `${IWE_SESSIONS_ROOT:-$HOME/IWE/MC-sessions}/00-index.md` (WP-526 Ф2), вывести таблицу. Стоп.
+- `--list` → прочитать `$SESSIONS_DIR/00-index.md` (WP-526 Ф2), вывести таблицу. Стоп. `SESSIONS_DIR` — тем же общим выбором папки журнала, что в Шаге 1.
 - `--interrupt <id>` → перейти к **Шагу 5 (interrupt-режим)**. Стоп после.
 - `--finalize <id>` → перейти к **Шагу 6 (finalize-режим)**. Стоп после.
 - Иначе → новая сессия, продолжать к Шагу 0б.
@@ -92,12 +92,12 @@ Peer-сессия DP.SC.154 где Kimi = писатель, напарник —
 
 ## Шаг 0а. Preflight Gate (WP-484 Ф33 item Г, обязательно ДО любых других действий)
 
-Та же проверка, что `~/.kimi-code/skills/session-open/SKILL.md` уже делает для standalone-сессий Kimi (Ф33, 31.07) — до этой правки у пир-сессий Kimi-писателя не было НИКАКОЙ проверки, что сессия открыта честно (тот же класс дыры, что Ф28: закрытие пир-сессии сочло «у пир-сессии свой протокол» достаточным основанием и обошло вопрос-рефлексию):
+Та же проверка, что `~/.kimi-code/skills/session-open/SKILL.md` уже делает для standalone-сессий Kimi (Ф33, 31.07) — до этой правки у пир-сессий Kimi-писателя не было НИКАКОЙ проверки, что сессия открыта честно (тот же класс дыры, что Ф28: закрытие пир-сессии сочло «у пир-сессии свой протокол» достаточным основанием и обошло вопрос-рефлексию). Скрипт поставляется шаблоном; звать по конвенции путей (#566 — фантомным был только хардкод `$HOME/IWE/scripts/...`, сам скрипт существует и входит в манифест):
 
 `PEER_WP` — номер РП ЭТОЙ пир-сессии (из задания пилота; если неизвестен — сначала Шаг 0б, потом этот шаг). Preflight без `--wp` берёт «самый свежий» семафор Kimi, и пир-сессия по другому РП молча пишет в рабочую копию чужой сессии (инцидент WP-561, 26.10: пир-сессия по РП-568/538 писала в изолят РП-561). С `--wp` семафор должен быть открыт именно под этот РП и быть единственным; иначе СТОП — открыть собственную сессию (`session-guard.sh open --wp "$PEER_WP" --agent kimi --isolate`) и работать из её каталога. Если отказ — «несколько семафоров на один РП» (рядом живёт другая сессия того же РП), добавь к вызову `--slug` или `--session-id` СВОЕЙ сессии, не снимай `--wp`.
 
 ```bash
-PREFLIGHT_OUT=$(bash "$HOME/IWE/scripts/kimi-standalone-preflight.sh" --wp "$PEER_WP")
+PREFLIGHT_OUT=$(bash "${IWE_SCRIPTS:-$HOME/IWE/scripts}/kimi-standalone-preflight.sh" --wp "$PEER_WP")
 PREFLIGHT_STATUS=$?
 printf '%s\n' "$PREFLIGHT_OUT"
 ```
@@ -109,7 +109,7 @@ printf '%s\n' "$PREFLIGHT_OUT"
 
 ## Шаг 0а.0б. Постфактум-исправление `close_path` (WP-561 Ф9, пир-сессия 2026-09-12-06 с Claude)
 
-`~/.kimi-code/skills/session-open/SKILL.md` (вне IWE-репозитория, не git) открывает семафор ДО того, как известно, что задание перерастёт в пир-сессию — пишет `close_path: unknown`, а не `close_path: peer-session`. `session-guard.sh close` и pre-commit хуки (`close-runner-gate.sh`, `close-gate-reminder.sh`) читают `close_path` заново с диска в момент своего вызова, не из снимка при `open` — значит значение можно безопасно исправить здесь, сразу после того, как стало понятно, что это пир-сессия писателя Kimi, и до первого коммита.
+`~/.kimi-code/skills/session-open/SKILL.md` (вне IWE-репозитория, не git) открывает семафор ДО того, как известно, что задание перерастёт в пир-сессию — пишет `close_path: unknown`, а не `close_path: peer-session`. `session-guard.sh close` и проверки перед коммитом читают `close_path` заново с диска в момент своего вызова, не из снимка при `open` — значит значение можно безопасно исправить здесь, сразу после того, как стало понятно, что это пир-сессия писателя Kimi, и до первого коммита.
 
 Точный семафор восстанавливаем из `MARKER:`-строки, которую preflight уже вывел на предыдущем шаге (без независимого `ls -t` — тот выбрал бы «самый свежий» файл, а не обязательно тот же, что признал валидным preflight):
 
@@ -147,8 +147,9 @@ fi
 Та же доставка, что `~/.kimi-code/skills/session-open/SKILL.md` шаг 1 делает для standalone-сессий Kimi — здесь нужна отдельно, т.к. `session-open` на пир-сессии не распространяется (см. его собственное «Scope: не peer-сессии»):
 
 ```bash
-python3 ~/IWE/DS-my-strategy/scripts/resolve-personality-by-host.py \
-  --registry ~/IWE/DS-my-strategy/current/"AI Personalities Registry.md" \
+[ ! -f "${IWE_WORKSPACE:-$HOME/IWE}/${IWE_GOVERNANCE_REPO:-DS-my-strategy}/scripts/resolve-personality-by-host.py" ] || \
+"$(bash "${IWE_SCRIPTS:-$HOME/IWE/scripts}/lib/find-python3.sh" --stdlib-only)" "${IWE_WORKSPACE:-$HOME/IWE}/${IWE_GOVERNANCE_REPO:-DS-my-strategy}/scripts/resolve-personality-by-host.py" \
+  --registry "${IWE_WORKSPACE:-$HOME/IWE}/${IWE_GOVERNANCE_REPO:-DS-my-strategy}/current/AI Personalities Registry.md" \
   --hostname "$(hostname)" --runtime-id kimi-code-local
 ```
 
@@ -188,9 +189,17 @@ python3 ~/IWE/DS-my-strategy/scripts/resolve-personality-by-host.py \
 
 Дальше по скиллу `$PEER_VENDOR` / `$PEER_AGENT_ID` / `$ADAPTER` / модель напарника подставляются из этой таблицы вместо прежних упоминаний Claude.
 
+**Где искать адаптер (`<ADAPTER_PATH>` ниже).** Адаптеры поставляются в папке программ шаблона (issues #830, #1513); у автора шаблона их рабочие копии живут в репозитории управления. Цепочка: копия в репозитории управления, если она есть, иначе папка шаблона. Вычислить один раз и подставлять готовый путь:
+
+```bash
+ADAPTER_PATH="${IWE_WORKSPACE:-$HOME/IWE}/${IWE_GOVERNANCE_REPO:-DS-my-strategy}/$ADAPTER"
+[ -x "$ADAPTER_PATH" ] || ADAPTER_PATH="${IWE_TEMPLATE:-${IWE_WORKSPACE:-$HOME/IWE}/FMT-exocortex-template}/$ADAPTER"
+echo "адаптер: ${ADAPTER_PATH}" >&2
+```
+
 ## Шаг 0б. Открытие (WP Gate — только для новой сессии)
 
-Найти WP по задаче: прочитать `${IWE_GOVERNANCE_REPO:-DS-strategy}/WP-REGISTRY.md` (grep по ключевым словам) и `${IWE_GOVERNANCE_REPO:-DS-strategy}/current/WeekPlan W{N}.md`.
+Найти WP по задаче: прочитать `${IWE_GOVERNANCE_REPO:-DS-my-strategy}/WP-REGISTRY.md` (grep по ключевым словам) и `${IWE_GOVERNANCE_REPO:-DS-strategy}/current/WeekPlan W{N}.md`.
 
 После нахождения РП, до выбора фазы выполнить Sync Gate — тот же вызов и разбор exit-кодов, что в `memory/protocol-open.md` Шаг 3a и в `peer-conversation/SKILL.md` §0б (РП-484 Ф224, 22.10 — эта секция до правки не вызывала Sync Gate вообще, не только словесно, а никак):
 
@@ -219,7 +228,13 @@ bash "${IWE_WORKSPACE:-$HOME/IWE}/.claude/scripts/wp-sync-bundle.sh" WP-N > /tmp
 ## Шаг 1. Инициализация
 
 ```bash
-SESSIONS_DIR="${IWE_SESSIONS_ROOT:-$HOME/IWE/MC-sessions}"
+# Journal folder: the shared resolver used by session-guard.sh (explicit IWE_SESSIONS_ROOT,
+# then $IWE_WORKSPACE/MC-sessions, then the legacy sessions/ folder of the governance repo).
+IWE_COMMON="${IWE_SCRIPTS:-$HOME/IWE/scripts}/lib/common.sh"
+[ -f "$IWE_COMMON" ] || IWE_COMMON="${IWE_TEMPLATE:-${IWE_WORKSPACE:-$HOME/IWE}/FMT-exocortex-template}/scripts/lib/common.sh"
+. "$IWE_COMMON"
+SESSIONS_DIR=$(IWE_ROOT="${IWE_ROOT:-${IWE_WORKSPACE:-$HOME/IWE}}" iwe_sessions_dir) \
+  || { echo "папка журнала сессий не найдена (задан недоступный IWE_SESSIONS_ROOT?)" >&2; exit 1; }
 TODAY=$(date +%Y-%m-%d)
 MONTH=$(date +%Y-%m)
 DAY=$(date +%d)
@@ -228,7 +243,7 @@ mkdir -p "$DAY_DIR"
 # Порядок резолва: настроенный каталог скриптов, затем корневой чекаут. На
 # хостах, где IWE_SCRIPTS указывает на копию шаблона, она может отставать.
 RESERVE="${IWE_SCRIPTS:-$HOME/IWE/scripts}/session-dir-reserve.sh"
-[ -x "$RESERVE" ] || RESERVE="$HOME/IWE/scripts/session-dir-reserve.sh"
+[ -x "$RESERVE" ] || RESERVE="${IWE_TEMPLATE:-${IWE_WORKSPACE:-$HOME/IWE}/FMT-exocortex-template}/scripts/session-dir-reserve.sh"
 SESSION_ID=$(bash "$RESERVE" "$DAY_DIR" "$TODAY" "$SLUG") || { echo "резервация номера сессии не удалась (см. stderr выше)" >&2; exit 1; }
 SESSION_DIR="${DAY_DIR}/${SESSION_ID}"
 ```
@@ -285,10 +300,31 @@ swap_history: []     # [{turn, from, to, reason}] — журнал SWAP_WRITER �
 
 **1.3 Записать открывающую запись в индекс-черновик** (WP-537 Ф4: `00-index.md` в MC-sessions (WP-526 Ф2) больше не пишется напрямую — session-index-snapshot.sh единственный писатель git-tracked файла, все остальные пишут в свой runtime-черновик, см. `scripts/lib/session-index-draft.sh`):
 ```bash
-. "$HOME/IWE/${IWE_GOVERNANCE_REPO:-DS-strategy}/scripts/lib/session-index-draft.sh"
+IDX_LIB="${IWE_WORKSPACE:-$HOME/IWE}/${IWE_GOVERNANCE_REPO:-DS-my-strategy}/scripts/lib/session-index-draft.sh"
+[ -f "$IDX_LIB" ] || IDX_LIB="${IWE_TEMPLATE:-${IWE_WORKSPACE:-$HOME/IWE}/FMT-exocortex-template}/scripts/lib/session-index-draft.sh"
+. "$IDX_LIB"
 session_index_draft_write "$SESSION_ID" "$TODAY" "<задача ≤50 симв>" \
   "kimi / <PEER_AGENT_ID>" "0" "0" "started" "—"
 ```
+
+Установка без переносчика черновиков в индекс (программы session-index-snapshot.sh в папке программ репозитория управления; так у пользователей шаблона) — черновик никто не перенесёт, поэтому ещё и вести `00-index.md` напрямую, как до WP-537 (файла нет → создать, issue #568; строку сессии заменить по `SESSION_ID` или вставить первой в таблицу):
+```bash
+if [ ! -f "${IWE_WORKSPACE:-$HOME/IWE}/${IWE_GOVERNANCE_REPO:-DS-my-strategy}/scripts/session-index-snapshot.sh" ]; then
+  IDX="$SESSIONS_DIR/00-index.md"
+  [ -f "$IDX" ] || printf '%s\n' '# Индекс пир-сессий' '' \
+    '| Дата | Сессия | Задача | Агенты | Ходы | Эскалации | Статус | Отчёт |' \
+    '|------|--------|--------|--------|------|-----------|--------|-------|' > "$IDX"
+  ROW="| $TODAY | $SESSION_ID | <задача ≤50 симв> | kimi / <PEER_AGENT_ID> | 0 | 0 | started | — |"
+  if grep -qF "| $SESSION_ID |" "$IDX"; then
+    ID="| $SESSION_ID |" ROW="$ROW" awk 'index($0, ENVIRON["ID"]) { print ENVIRON["ROW"]; next } { print }' "$IDX" > "$IDX.tmp"
+  else
+    ROW="$ROW" awk '{ print } /^\|------/ && !done { print ENVIRON["ROW"]; done = 1 }
+      END { if (!done) print ENVIRON["ROW"] }' "$IDX" > "$IDX.tmp"
+  fi
+  mv "$IDX.tmp" "$IDX"
+fi
+```
+В этом режиме `00-index.md` идёт в коммит сессии (Шаг 4.5) вместе с её файлами.
 
 ---
 
@@ -374,7 +410,7 @@ ESCALATE_TO_USER: <причина> — если писатель игнорир�
 Вызов напарника через Bash (адаптер — из таблицы Шага 0а.2):
 ```bash
 PEER_FILE="${SESSION_DIR}/$(printf '%02d' $TURN)-peer.md"
-echo "<промпт>" | IWE_PEER_PLAIN=0 bash "$HOME/IWE/${IWE_GOVERNANCE_REPO:-DS-strategy}/<ADAPTER>" \
+echo "<промпт>" | IWE_PEER_PLAIN=0 bash "<ADAPTER_PATH>" \
   > "$PEER_FILE" 2> "${PEER_FILE%.md}.err"
 PEER_RC=$?   # captured before the .err block below, which resets $?
 ```
@@ -531,7 +567,7 @@ Writer (Kimi) применяет изменения через Edit/Write. За�
 
 Вызов напарника как code reviewer через тот же адаптер что для turn-loop:
 
-Каталог для промптов создать один раз: `mkdir -p "$HOME/IWE/.iwe-runtime/peer-prompts"`. Промпт собирается **в файл инструментом записи файлов (WriteFile/Write), не через оболочку**: в диф и фрагменты кода попадают обратные кавычки, `$(...)` и строки `EOF`, которые в heredoc или в двойных кавычках выполнятся или оборвут текст. Путь файла: `$HOME/IWE/.iwe-runtime/peer-prompts/<SESSION_ID>-review-NN.txt`. Содержимое — шаблон ниже с подставленными значениями:
+Каталог для промптов создать один раз: `mkdir -p "${IWE_WORKSPACE:-$HOME/IWE}/.iwe-runtime/peer-prompts"`. Промпт собирается **в файл инструментом записи файлов (WriteFile/Write), не через оболочку**: в диф и фрагменты кода попадают обратные кавычки, `$(...)` и строки `EOF`, которые в heredoc или в двойных кавычках выполнятся или оборвут текст. Путь файла: `${IWE_WORKSPACE:-$HOME/IWE}/.iwe-runtime/peer-prompts/<SESSION_ID>-review-NN.txt`. Содержимое — шаблон ниже с подставленными значениями:
 
 ```text
 КРИТИЧНО: НЕ используй Write/Edit. Выводи markdown в stdout.
@@ -566,8 +602,8 @@ Cold-context code review результатов peer-сессии <SESSION_ID>.
 ```bash
 : "${REVIEW_ITER:=1}"
 REVIEW_FILE="${SESSION_DIR}/review-$(printf '%02d' "$REVIEW_ITER").md"
-REVIEW_PROMPT_FILE="$HOME/IWE/.iwe-runtime/peer-prompts/<SESSION_ID>-review-$(printf '%02d' "$REVIEW_ITER").txt"
-IWE_PEER_PLAIN=1 bash "$HOME/IWE/${IWE_GOVERNANCE_REPO:-DS-strategy}/<ADAPTER>" \
+REVIEW_PROMPT_FILE="${IWE_WORKSPACE:-$HOME/IWE}/.iwe-runtime/peer-prompts/<SESSION_ID>-review-$(printf '%02d' "$REVIEW_ITER").txt"
+IWE_PEER_PLAIN=1 bash "<ADAPTER_PATH>" \
   < "$REVIEW_PROMPT_FILE" > "$REVIEW_FILE" 2> "${REVIEW_FILE%.md}.err"
 REVIEW_RC=$?
 # .err rules of step 3.1 (WP-524 F7): surface INTEGRITY-WARNING, optional empty-file cleanup.
@@ -597,16 +633,17 @@ grep '^INTEGRITY-WARNING:' "${REVIEW_FILE%.md}.err" >&2 2>/dev/null || :
 
 Kimi-writer не имеет Skill tool, а напарник в этом вызове не имеет файловых инструментов и ничего не запускает: он оценивает переданный текст по правилам `/verify` (формат вердикта, условие опровержения). Исполняемые проверки (тесты, smoke) писатель запускает сам локально и вставляет их вывод в промпт как свидетельство.
 
-1. Условие опровержения — инструментом записи файлов в `$HOME/IWE/.iwe-runtime/peer-prompts/<SESSION_ID>-verify.condition.txt`, по одному условию на строку (для каждого инварианта — какое наблюдаемое его нарушило бы, с якорем: код в обратных кавычках, путь, строка, файл:N). Проверить:
+1. Условие опровержения — инструментом записи файлов в `${IWE_WORKSPACE:-$HOME/IWE}/.iwe-runtime/peer-prompts/<SESSION_ID>-verify.condition.txt`, по одному условию на строку (для каждого инварианта — какое наблюдаемое его нарушило бы, с якорем: код в обратных кавычках, путь, строка, файл:N). Проверить:
 
 ```bash
-python3 "$HOME/IWE/.claude/skills/verify/falsification_lint.py" condition \
-  < "$HOME/IWE/.iwe-runtime/peer-prompts/<SESSION_ID>-verify.condition.txt"
+[ -f "${IWE_WORKSPACE:-$HOME/IWE}/.claude/skills/verify/falsification_lint.py" ] || echo "программы проверки условий на этой установке нет — условие сверить по правилам /verify самому" >&2
+[ ! -f "${IWE_WORKSPACE:-$HOME/IWE}/.claude/skills/verify/falsification_lint.py" ] || "$(bash "${IWE_SCRIPTS:-$HOME/IWE/scripts}/lib/find-python3.sh" --stdlib-only)" "${IWE_WORKSPACE:-$HOME/IWE}/.claude/skills/verify/falsification_lint.py" condition \
+  < "${IWE_WORKSPACE:-$HOME/IWE}/.iwe-runtime/peer-prompts/<SESSION_ID>-verify.condition.txt"
 ```
 
-Код 1 → исход NOT_VERIFIABLE (условие не сформулировано), напарника не вызывать. Код 2 или программы нет → NOT_VERIFIABLE «проверочная программа недоступна».
+Код 1 → исход NOT_VERIFIABLE (условие не сформулировано), напарника не вызывать. Код 2 → NOT_VERIFIABLE «проверочная программа недоступна». Программы нет на установке (шаблон) → писатель сам сверяет условие с правилами `/verify` (у каждой строки свой якорь) и продолжает.
 
-2. Промпт — инструментом записи файлов в `$HOME/IWE/.iwe-runtime/peer-prompts/<SESSION_ID>-verify.txt`, не через оболочку:
+2. Промпт — инструментом записи файлов в `${IWE_WORKSPACE:-$HOME/IWE}/.iwe-runtime/peer-prompts/<SESSION_ID>-verify.txt`, не через оболочку:
 
 ```text
 КРИТИЧНО: НЕ используй Write/Edit. Весь твой ответ = один отчёт в stdout.
@@ -644,19 +681,23 @@ python3 "$HOME/IWE/.claude/skills/verify/falsification_lint.py" condition \
 
 ```bash
 VERIFY_FILE="${SESSION_DIR}/verify-01.md"
-IWE_PEER_PLAIN=1 bash "$HOME/IWE/${IWE_GOVERNANCE_REPO:-DS-strategy}/<ADAPTER>" \
-  < "$HOME/IWE/.iwe-runtime/peer-prompts/<SESSION_ID>-verify.txt" \
+IWE_PEER_PLAIN=1 bash "<ADAPTER_PATH>" \
+  < "${IWE_WORKSPACE:-$HOME/IWE}/.iwe-runtime/peer-prompts/<SESSION_ID>-verify.txt" \
   > "$VERIFY_FILE" 2> "${VERIFY_FILE%.md}.err"
-VERIFY_RC=$?   # non-zero or empty $VERIFY_FILE: verdict NOT_VERIFIABLE, see below
+VERIFY_RC=$?
 # .err rules of step 3.1 (WP-524 F7): surface INTEGRITY-WARNING, optional empty-file cleanup.
 grep '^INTEGRITY-WARNING:' "${VERIFY_FILE%.md}.err" >&2 2>/dev/null || :
 [ -s "${VERIFY_FILE%.md}.err" ] || rm -f "${VERIFY_FILE%.md}.err"
-python3 "$HOME/IWE/.claude/skills/verify/falsification_lint.py" verdict \
-  --condition-file "$HOME/IWE/.iwe-runtime/peer-prompts/<SESSION_ID>-verify.condition.txt" \
+# A failed adapter leaves no verdict: outcome NOT_VERIFIABLE, the verdict program is not run.
+[ "$VERIFY_RC" -eq 0 ] && [ -s "$VERIFY_FILE" ] \
+  || { echo "NOT_VERIFIABLE: проверка не получена (код адаптера $VERIFY_RC)" >&2; exit 1; }
+[ -f "${IWE_WORKSPACE:-$HOME/IWE}/.claude/skills/verify/falsification_lint.py" ] || echo "программы проверки вердикта на этой установке нет — исход прочитать из $VERIFY_FILE по правилам выше" >&2
+[ ! -f "${IWE_WORKSPACE:-$HOME/IWE}/.claude/skills/verify/falsification_lint.py" ] || "$(bash "${IWE_SCRIPTS:-$HOME/IWE/scripts}/lib/find-python3.sh" --stdlib-only)" "${IWE_WORKSPACE:-$HOME/IWE}/.claude/skills/verify/falsification_lint.py" verdict \
+  --condition-file "${IWE_WORKSPACE:-$HOME/IWE}/.iwe-runtime/peer-prompts/<SESSION_ID>-verify.condition.txt" \
   < "$VERIFY_FILE"
 ```
 
-`VERIFY_RC` ≠ 0 или пустой `$VERIFY_FILE` → исход NOT_VERIFIABLE «проверка не получена», вердикт программы не учитывать. Код 1: напарник вернул FAIL → исход FAIL (провал не понижается), нарушения оформления перечислить; иначе → исход NOT_VERIFIABLE «вердикт невалиден: <вывод программы>». Код 2 → NOT_VERIFIABLE «проверочная программа недоступна».
+`VERIFY_RC` ≠ 0 или пустой `$VERIFY_FILE` → блок останавливается до программы вердикта, исход NOT_VERIFIABLE «проверка не получена». Код 1: напарник вернул FAIL → исход FAIL (провал не понижается), нарушения оформления перечислить; иначе → исход NOT_VERIFIABLE «вердикт невалиден: <вывод программы>». Код 2 → NOT_VERIFIABLE «проверочная программа недоступна».
 
 **Результат (все пять исходов `/verify`, ни один не трактуется молча как другой):**
 - PASS → перейти к 3.6.5.
@@ -669,7 +710,7 @@ python3 "$HOME/IWE/.claude/skills/verify/falsification_lint.py" verdict \
 
 ### 3.6.5 Deploy
 
-Для каждого репо в списке изменённых файлов. Сообщение коммита сначала записать инструментом записи файлов (не через оболочку) в `$HOME/IWE/.iwe-runtime/peer-prompts/<SESSION_ID>-commit-msg.txt`:
+Для каждого репо в списке изменённых файлов. Сообщение коммита сначала записать инструментом записи файлов (не через оболочку) в `${IWE_WORKSPACE:-$HOME/IWE}/.iwe-runtime/peer-prompts/<SESSION_ID>-commit-msg.txt`:
 
 ```text
 <type>(<scope>): <короткое описание>
@@ -687,7 +728,7 @@ git status --short
 git add <specific files — НЕ git add . и НЕ git add -u>
 # Message text is written to a file with a file-writing tool, never inlined in
 # double quotes: backticks and $(...) in a description would be executed.
-git commit -F "$HOME/IWE/.iwe-runtime/peer-prompts/<SESSION_ID>-commit-msg.txt" -- <те же specific files>
+git commit -F "${IWE_WORKSPACE:-$HOME/IWE}/.iwe-runtime/peer-prompts/<SESSION_ID>-commit-msg.txt" -- <те же specific files>
 
 # WP-537: заявить свой коммит в семафоре сессии. Без этой строки закрытие
 # проверяет «моя работа опубликована» по состоянию ВСЕЙ ветки, и один
@@ -704,7 +745,7 @@ git commit -F "$HOME/IWE/.iwe-runtime/peer-prompts/<SESSION_ID>-commit-msg.txt" 
 # без флага `note-commit` не находит свой семафор и no-op'ится молча.
 NC_ROOT=$(git -C <repo path> rev-parse --show-toplevel)
 NOTE_COMMIT="${IWE_SCRIPTS:-$HOME/IWE/scripts}/session-guard.sh"
-[ -x "$NOTE_COMMIT" ] || NOTE_COMMIT="$HOME/IWE/scripts/session-guard.sh"
+[ -x "$NOTE_COMMIT" ] || NOTE_COMMIT="${IWE_WORKSPACE:-$HOME/IWE}/scripts/session-guard.sh"
 if ! bash "$NOTE_COMMIT" note-commit "$(git -C "$NC_ROOT" rev-parse HEAD)" \
        --repo "$(basename "$NC_ROOT")" --agent kimi --slug "$SESSION_ID"; then
   echo "WARN: коммит не заявлен в семафоре — закрытие сессии проверится по всей ветке" >&2
@@ -715,8 +756,7 @@ fi
 
 ```bash
 REPO_ROOT=$(git -C "<repo path>" rev-parse --show-toplevel)
-# shellcheck source=../../../../DS-my-strategy/scripts/lib/publish-gate.sh
-. "$HOME/IWE/DS-my-strategy/scripts/lib/publish-gate.sh"
+. "${IWE_WORKSPACE:-$HOME/IWE}/${IWE_GOVERNANCE_REPO:-DS-my-strategy}/scripts/lib/publish-gate.sh"
 SHA=$(git -C "$REPO_ROOT" rev-parse HEAD)
 # normal по умолчанию; high — ТОЛЬКО если пилот на Decision Gate (Шаг 3.5)
 # явно пометил реализацию как срочную.
@@ -782,9 +822,14 @@ DURATION_MIN=$(( (NOW_EPOCH - START_EPOCH) / 60 ))
 
 1. Показать пилоту краткий итог (2-3 строки, суть сессии, не пересказ turn-файлов).
 2. Спросить: «Что в этой сессии стоит запомнить на будущее — не про саму задачу, а про то, как шла работа?» (дословно Ф18, `CONCEPT-night-cycle.md §18`).
-3. Записать ответ:
+3. Записать ответ (issue #409: скрипт есть не на каждой установке — не блокировать при отсутствии):
    ```bash
-   bash ~/IWE/DS-my-strategy/scripts/ledger-append.sh day "$(date +%F)" session_reflection "{\"wp\": \"<WP-NNN>\", \"answer\": <экранированный ответ>}" kimi-peer-writer
+   LEDGER_SCRIPT="${IWE_WORKSPACE:-$HOME/IWE}/${IWE_GOVERNANCE_REPO:-DS-my-strategy}/scripts/ledger-append.sh"
+   if [ -f "$LEDGER_SCRIPT" ]; then
+     bash "$LEDGER_SCRIPT" day "$(date +%F)" session_reflection "{\"wp\": \"<WP-NNN>\", \"answer\": <экранированный ответ>}" kimi-peer-writer
+   else
+     echo "ledger-append.sh недоступен на этой установке — рефлексия не записана в дневной ledger"
+   fi
    ```
 4. Сказать пилоту: «Ты свободен, дальше закрываю сессию сам» — продолжить Шаг 4 без дальнейшего участия пилота.
 
@@ -971,8 +1016,15 @@ with tempfile.NamedTemporaryFile(mode='w', suffix='.txt', delete=False, encoding
     tmp_path = tmp.name
 
 report_file = os.path.join(session_dir, 'report-draft.md')
-gov_repo = os.environ.get('IWE_GOVERNANCE_REPO', 'DS-strategy')
-adapter = os.path.expanduser(f'~/IWE/{gov_repo}/scripts/' + meta.get('peer_cmd', 'claude-peer-adapter') + '.sh')  # адаптер сессии — из meta.yaml peer_cmd (WP-516 Ф5)
+gov_repo = os.environ.get('IWE_GOVERNANCE_REPO', 'DS-my-strategy')
+# Session adapter from meta.yaml peer_cmd (WP-516 F5): governance repo copy first,
+# else the template's scripts/ (issue #1513).
+workspace = os.environ.get('IWE_WORKSPACE') or os.path.join(os.path.expanduser('~'), 'IWE')
+adapter_name = meta.get('peer_cmd', 'claude-peer-adapter') + '.sh'
+adapter = os.path.join(workspace, gov_repo, 'scripts', adapter_name)
+if not os.access(adapter, os.X_OK):
+    template_dir = os.environ.get('IWE_TEMPLATE') or os.path.join(workspace, 'FMT-exocortex-template')
+    adapter = os.path.join(template_dir, 'scripts', adapter_name)
 
 # synth_prompt above already inlines the full transcript, meta.yaml fields and
 # _outcome.md into stdin — claude-peer-adapter.sh is a text-only reviewer by
@@ -1081,15 +1133,36 @@ extensions:
 
 Тот же черновик, что Шаг 1.3 открыл — `opened_at` сохраняется, остальные поля заменяются целиком:
 ```bash
-. "$HOME/IWE/${IWE_GOVERNANCE_REPO:-DS-strategy}/scripts/lib/session-index-draft.sh"
+IDX_LIB="${IWE_WORKSPACE:-$HOME/IWE}/${IWE_GOVERNANCE_REPO:-DS-my-strategy}/scripts/lib/session-index-draft.sh"
+[ -f "$IDX_LIB" ] || IDX_LIB="${IWE_TEMPLATE:-${IWE_WORKSPACE:-$HOME/IWE}/FMT-exocortex-template}/scripts/lib/session-index-draft.sh"
+. "$IDX_LIB"
 session_index_draft_write "$SESSION_ID" "$TODAY" "<задача ≤50>" \
   "kimi / <PEER_AGENT_ID>" "<TURNS>" "<ESCALATIONS>" \
   "completed" "[report.md](<MONTH>/<DAY>/<SESSION_ID>/report.md)"
 ```
 
+Установка без переносчика черновиков в индекс (программы session-index-snapshot.sh в папке программ репозитория управления; так у пользователей шаблона) — черновик никто не перенесёт, поэтому ещё и вести `00-index.md` напрямую, как до WP-537 (файла нет → создать, issue #568; строку сессии заменить по `SESSION_ID` или вставить первой в таблицу):
+```bash
+if [ ! -f "${IWE_WORKSPACE:-$HOME/IWE}/${IWE_GOVERNANCE_REPO:-DS-my-strategy}/scripts/session-index-snapshot.sh" ]; then
+  IDX="$SESSIONS_DIR/00-index.md"
+  [ -f "$IDX" ] || printf '%s\n' '# Индекс пир-сессий' '' \
+    '| Дата | Сессия | Задача | Агенты | Ходы | Эскалации | Статус | Отчёт |' \
+    '|------|--------|--------|--------|------|-----------|--------|-------|' > "$IDX"
+  ROW="| $TODAY | $SESSION_ID | <задача ≤50> | kimi / <PEER_AGENT_ID> | <TURNS> | <ESCALATIONS> | completed | [report.md](<MONTH>/<DAY>/<SESSION_ID>/report.md) |"
+  if grep -qF "| $SESSION_ID |" "$IDX"; then
+    ID="| $SESSION_ID |" ROW="$ROW" awk 'index($0, ENVIRON["ID"]) { print ENVIRON["ROW"]; next } { print }' "$IDX" > "$IDX.tmp"
+  else
+    ROW="$ROW" awk '{ print } /^\|------/ && !done { print ENVIRON["ROW"]; done = 1 }
+      END { if (!done) print ENVIRON["ROW"] }' "$IDX" > "$IDX.tmp"
+  fi
+  mv "$IDX.tmp" "$IDX"
+fi
+```
+В этом режиме `00-index.md` идёт в коммит сессии (Шаг 4.5) вместе с её файлами.
+
 ### 4.4 Закрытие (ОРЗ — сессионный файл рядом с папкой сессии)
 
-**Выключатель пути закрытия (РП-561 Ф61 этап 2, решения пилота 15.11).** Включён, если `IWE_CLOSE_ROUTE_ENFORCE=1` или есть файл `$HOME/IWE/.iwe-runtime/close-route-enforce` (переменная файл не выключает). Выключен — закрытие ниже как раньше. Включён — короткого закрытия пир-сессии нет, и патч `close_path: peer-session` из шага 0а.0б от раннера не освобождает: сессия с изменениями закрывается обычным закрытием (раннер quick-close с итоговой проверкой, архивацией фаз и РП), ОРЗ-файл и файлы журнала передаются раннеру в коммитах репозитория сессий поштучно, списком из Шага 4.5 (только строки построения `PATHS` до цикла `git add`, без `git add`/`git commit`; не папкой: раннер делает `git add` переданных путей, и папка унесла бы изменённый отслеживаемый `.err`, РП-524 Ф7), прямой коммит и `session-guard.sh close` после слов о закрытии не делать. Порядок тот же, что в навыке peer-conversation, Шаг 4.5, абзац «Сначала: включён ли выключатель». Сессия без изменений (без журнала) закрывается одним `session-guard.sh close`.
+**Выключатель пути закрытия (РП-561 Ф61 этап 2, решения пилота 15.11).** Включён, если `IWE_CLOSE_ROUTE_ENFORCE=1` или есть файл `${IWE_WORKSPACE:-$HOME/IWE}/.iwe-runtime/close-route-enforce` (переменная файл не выключает). Выключен — закрытие ниже как раньше. Включён — короткого закрытия пир-сессии нет, и патч `close_path: peer-session` из шага 0а.0б от раннера не освобождает: сессия с изменениями закрывается обычным закрытием (раннер quick-close с итоговой проверкой, архивацией фаз и РП), ОРЗ-файл и файлы журнала передаются раннеру в коммитах репозитория сессий поштучно, списком из Шага 4.5 (только строки построения `PATHS` до цикла `git add`, без `git add`/`git commit`; не папкой: раннер делает `git add` переданных путей, и папка унесла бы изменённый отслеживаемый `.err`, РП-524 Ф7), прямой коммит и `session-guard.sh close` после слов о закрытии не делать. Порядок тот же, что в навыке peer-conversation, Шаг 4.5, абзац «Сначала: включён ли выключатель». Сессия без изменений (без журнала) закрывается одним `session-guard.sh close`.
 
 Slug-часть (без даты и номера): `SESSION_SLUG=$(echo "$SESSION_ID" | sed -E 's/^[0-9]{4}-[0-9]{2}-[0-9]{2}-[0-9]{2}-//')`
 
@@ -1131,7 +1204,9 @@ wp: <WP-NNN или unknown>
 **Поле «Следующий шаг» карточки РП (WP-484 Ф257, M2/M6) — до коммита.** Этот скилл не вызывает `session-guard.sh close`, поэтому проверку поля, которую у Claude-писателя запускает `close`, здесь запускаешь сам. Сначала переписать на месте поле «Следующий шаг» в `## Осталось` карточки РП: метка ровно `**Следующий шаг:**` (без даты), одна строка на фазу, `ФN — первое действие`; фаза другого РП — только с номером РП (`РП-561 Ф46`); значение — по последнему решению пилота в этом чате; параллельные сессии того же РП — своя строка фазы заменяется, чужие остаются; не «продолжай по плану», не прежнее значение (формат — `protocol-close.md` § «Формат «Осталось»»). Затем закоммитить и опубликовать карточку (проверка смотрит опубликованную версию) и записать ровно тот же текст поля (свой следующий шаг для следующей сессии, как в отчёте; строку «Дальше» пилоту пишешь отдельно простыми словами по правилу 6 пака, РП-605 — с полем она не совпадает) — в `${IWE_ROOT:-$HOME/IWE}/.iwe-runtime/peer-prompts/$SESSION_ID-next-step.txt` (WP-484 Ф285, М1: без файла проверка даёт отказ `HANDOFF_AGENT_NEXT_MISSING`) и прогнать проверку (решение пилота 10.11, Ф285: проверяется опубликованная карточка; код 10 = блокирующий отказ — `HANDOFF_AGENT_NEXT_MISSING`, `HANDOFF_AGENT_PHASE_MISSING` или `HANDOFF_UNKNOWN_PHASE` вне белого списка `machine/handoff-phase-allowlist.yaml`; остальные коды предупреждают):
 
 ```bash
-bash "${IWE_SCRIPTS:-$HOME/IWE/scripts}/wp-handoff-peer-check.sh" --agent kimi --wp "$PEER_WP" \
+HANDOFF_CHECK="${IWE_SCRIPTS:-$HOME/IWE/scripts}/wp-handoff-peer-check.sh"
+[ -f "$HANDOFF_CHECK" ] || echo "проверки поля «Следующий шаг» на этой установке нет — пропущена" >&2
+[ ! -f "$HANDOFF_CHECK" ] || bash "$HANDOFF_CHECK" --agent kimi --wp "$PEER_WP" \
   --next-file "${IWE_ROOT:-$HOME/IWE}/.iwe-runtime/peer-prompts/$SESSION_ID-next-step.txt"
 HANDOFF_RC=$?
 # Only code 10 is a block; any other non-zero is a failure of the check itself, not a verdict.
@@ -1140,10 +1215,15 @@ HANDOFF_RC=$?
 
 Любой `HANDOFF_*` — отказ для самого писателя: поправить поле и файл, опубликовать карточку и повторить проверку до коммита; при коде 10 коммит сессии не делать, пока проверка не пройдёт (этот скилл не вызывает `session-guard.sh close`, поэтому стоп здесь — единственное место блока); не прошло — сказать пилоту одной строкой. Семафор Kimi ищется по номеру РП; два открытых семафора пир-сессии на один РП скрипт не угадывает, а пишет `SEMAPHORE_AMBIGUOUS` в журнал наблюдения.
 
-**Снимок открытых фаз карточки (WP-484 Ф299, вход И-6 из РП-561) — до коммита.** Если сессия меняла статусы или разделы фаз карточки РП — обновить self-entry `handoff_snapshot` тем же скриптом, что `memory/protocol-close.md` §5; иначе гейт Ф42 на следующем открытии даёт ложное MISMATCH. `--governance-repo` — каталог, где карточка реально правилась (изолированная копия под заморозкой, иначе `$HOME/IWE/${IWE_GOVERNANCE_REPO:-DS-strategy}`):
+**Снимок открытых фаз карточки (WP-484 Ф299, вход И-6 из РП-561) — до коммита.** Если сессия меняла статусы или разделы фаз карточки РП — обновить self-entry `handoff_snapshot` тем же скриптом, что `memory/protocol-close.md` §5; иначе гейт Ф42 на следующем открытии даёт ложное MISMATCH. `--governance-repo` — каталог, где карточка реально правилась (изолированная копия под заморозкой, иначе `${IWE_WORKSPACE:-$HOME/IWE}/${IWE_GOVERNANCE_REPO:-DS-my-strategy}`):
 
 ```bash
-python3 "${IWE_WORKSPACE:-$HOME/IWE}/scripts/wp-phase-snapshot-write.py" "$PEER_WP" --governance-repo "<каталог карточки>"
+SNAPSHOT_WRITER="${IWE_WORKSPACE:-$HOME/IWE}/scripts/wp-phase-snapshot-write.py"
+if [ -f "$SNAPSHOT_WRITER" ]; then
+  "$(bash "${IWE_SCRIPTS:-$HOME/IWE/scripts}/lib/find-python3.sh" --stdlib-only)" "$SNAPSHOT_WRITER" "$PEER_WP" --governance-repo "<каталог карточки>"
+else
+  echo "записи снимка фаз на этой установке нет — пропущена" >&2
+fi
 ```
 
 Код 0 — записано или уже актуально; код 3 — проверка списка фаз не сошлась, скрипт отказался писать: руками не чинить, одна строка пилоту.
@@ -1175,7 +1255,7 @@ for section in "## Главный инсайт" "## Контекст" "## Дос
 done
 # WP-537 Ф4: индекс-черновик, не 00-index.md — эта сессия больше не
 # пишет git-tracked файл напрямую (session-index-snapshot.sh единственный писатель).
-DRAFT_FILE="$HOME/IWE/.iwe-runtime/session-index-drafts/${SESSION_ID}.yaml"
+DRAFT_FILE="${IWE_WORKSPACE:-$HOME/IWE}/.iwe-runtime/session-index-drafts/${SESSION_ID}.yaml"
 test -f "$DRAFT_FILE" \
   || { echo "FAIL: индекс-черновик $DRAFT_FILE отсутствует — Шаг 4.3 не выполнен"; exit 1; }
 grep -qF "status: completed" "$DRAFT_FILE" \
@@ -1200,11 +1280,14 @@ grep -qF "status: completed" "$DRAFT_FILE" \
 # macOS bash 3.2 (no mapfile).
 REL="$MONTH/$DAY/$SESSION_ID"
 PATHS=("$MONTH/${TODAY}-${SESSION_SLUG}.md")
+# Install without the index snapshotter: the index is kept directly and goes in the commit.
+[ -f "${IWE_WORKSPACE:-$HOME/IWE}/${IWE_GOVERNANCE_REPO:-DS-my-strategy}/scripts/session-index-snapshot.sh" ] || PATHS+=("00-index.md")
 SKIPPED_ERR=()
+SESSION_FILES=0
 while IFS= read -r -d '' p; do
   case "$p" in
     *.err) SKIPPED_ERR+=("$p") ;;
-    *) PATHS+=("$p") ;;
+    *) PATHS+=("$p"); SESSION_FILES=$((SESSION_FILES + 1)) ;;
   esac
 done < <(
   {
@@ -1212,11 +1295,11 @@ done < <(
     git diff -z --name-only --relative --no-renames HEAD -- "$REL"
   } | sort -zu
 )
-[ "${#PATHS[@]}" -gt 1 ] || { echo "FAIL: в папке сессии $REL нет файлов для сохранения" >&2; exit 1; }
+[ "$SESSION_FILES" -gt 0 ] || { echo "FAIL: в папке сессии $REL нет файлов для сохранения" >&2; exit 1; }
 # A modified tracked .err (re-closing an old session) keeps the journal copy
-# dirty: save it outside ~/IWE for analysis, then
+# dirty: save it outside $HOME/IWE for analysis, then
 # `git restore --source=HEAD --staged --worktree -- <path>`.
-[ "${#SKIPPED_ERR[@]}" -eq 0 ] || printf 'WARN: изменённый отслеживаемый .err не сохраняется: %s\n' "${SKIPPED_ERR[@]}" >&2
+[ "${#SKIPPED_ERR[@]}" -eq 0 ] || printf 'WARN: .err в сохранение не идёт: %s\n' "${SKIPPED_ERR[@]}" >&2
 for P in "${PATHS[@]}"; do
   if [ -e "$P" ]; then
     git add -- "$P" || { echo "FAIL: не удалось добавить $P" >&2; exit 1; }
@@ -1226,8 +1309,8 @@ for P in "${PATHS[@]}"; do
   fi   # deletion already staged: `git commit -- <path>` takes it
 done
 # Task text: written beforehand with a file-writing tool (not the shell) to
-# $HOME/IWE/.iwe-runtime/peer-prompts/<SESSION_ID>-task.txt — never inline it in quotes.
-TASK_FILE="$HOME/IWE/.iwe-runtime/peer-prompts/$SESSION_ID-task.txt"
+# ${IWE_WORKSPACE:-$HOME/IWE}/.iwe-runtime/peer-prompts/<SESSION_ID>-task.txt — never inline it in quotes.
+TASK_FILE="${IWE_WORKSPACE:-$HOME/IWE}/.iwe-runtime/peer-prompts/$SESSION_ID-task.txt"
 test -s "$TASK_FILE" || { echo "нет файла задачи $TASK_FILE — записать его инструментом записи файлов" >&2; exit 1; }
 { printf 'feat(peer): %s (kimi-writer) — ' "$SESSION_ID"; cat "$TASK_FILE"; } | git commit -F - -- "${PATHS[@]}"
 OUR_SHAS=("$(git rev-parse HEAD)")   # публикуем ровно свои коммиты по одному
@@ -1238,7 +1321,9 @@ OUR_SHAS=("$(git rev-parse HEAD)")   # публикуем ровно свои к
 # remote» и падает в ручной обход. Отказ манифеста (грязное дерево канона и
 # т.п.) не блокирует закрытие — WARN и дальше без него (legacy-путь
 # confirmed_clean_repos остаётся).
-bash "$HOME/IWE/${IWE_GOVERNANCE_REPO:-DS-strategy}/scripts/session-manifest-write.sh" "$(git rev-parse --show-toplevel)" "$SESSION_ID" \
+MANIFEST_WRITER="${IWE_WORKSPACE:-$HOME/IWE}/${IWE_GOVERNANCE_REPO:-DS-my-strategy}/scripts/session-manifest-write.sh"
+[ -f "$MANIFEST_WRITER" ] || MANIFEST_WRITER="${IWE_TEMPLATE:-${IWE_WORKSPACE:-$HOME/IWE}/FMT-exocortex-template}/scripts/session-manifest-write.sh"
+bash "$MANIFEST_WRITER" "$(git rev-parse --show-toplevel)" "$SESSION_ID" \
   || echo "WARN: attest-манифест не создан — догоняющее закрытие этой сессии пойдёт legacy-путём"
 # attest-манифест — второй наш коммит (если создан): порядок публикации «payload, затем манифест»
 [ "$(git rev-parse HEAD)" = "${OUR_SHAS[0]}" ] || OUR_SHAS+=("$(git rev-parse HEAD)")
@@ -1256,10 +1341,10 @@ git -C "$REPO_ROOT" fetch -q origin main
 # ровно один. Семафор Kimi открывается снаружи, и его slug бывает номером РП, а не слагом сессии:
 # не нашли однозначно — публикуем без квитанции (как раньше), но громко предупреждаем, не стоп.
 # Без IWE_AGENT квитанция тоже не пишется — задаём его явно.
-if [ -f "$HOME/IWE/.iwe-runtime/sessions/kimi-${SESSION_ID}.open" ]; then
+if [ -f "${IWE_WORKSPACE:-$HOME/IWE}/.iwe-runtime/sessions/kimi-${SESSION_ID}.open" ]; then
   GUARD_SESSION_ID="$SESSION_ID"
 else
-  GUARD_SEM_MATCHES=$(grep -lxF "slug: ${SESSION_ID}" "$HOME"/IWE/.iwe-runtime/sessions/kimi-*.open 2>/dev/null)
+  GUARD_SEM_MATCHES=$(grep -lxF "slug: ${SESSION_ID}" "${IWE_WORKSPACE:-$HOME/IWE}"/.iwe-runtime/sessions/kimi-*.open 2>/dev/null)
   if [ "$(printf '%s\n' "$GUARD_SEM_MATCHES" | grep -c .)" -eq 1 ]; then
     GUARD_SESSION_ID=$(basename "$GUARD_SEM_MATCHES" .open)
     GUARD_SESSION_ID="${GUARD_SESSION_ID#kimi-}"
@@ -1270,7 +1355,7 @@ else
 fi
 for SHA in "${OUR_SHAS[@]}"; do
   # IWE_PUBLICATION_SESSION_ID обязателен: без него квитанция публикации (v2) не записывается
-  IWE_AGENT=kimi IWE_PUBLICATION_SESSION_ID="$GUARD_SESSION_ID" bash "$HOME/IWE/DS-my-strategy/scripts/ds-publish.sh" "$REPO_ROOT" high \
+  IWE_AGENT=kimi IWE_PUBLICATION_SESSION_ID="$GUARD_SESSION_ID" bash "${IWE_WORKSPACE:-$HOME/IWE}/${IWE_GOVERNANCE_REPO:-DS-my-strategy}/scripts/ds-publish.sh" "$REPO_ROOT" high \
     --from-commit "$SHA" --exact-commit "$SHA" --reason "peer-session $SESSION_ID close" \
     || { echo "ds-publish --exact-commit не удался для $SHA — см. вывод шлюза" >&2; exit 1; }
 done
@@ -1289,7 +1374,33 @@ done
 1. Извлечь месяц и день из id: `MONTH=$(echo "$session_id" | cut -c1-7)`, `DAY=$(echo "$session_id" | cut -c9-10)` → найти `$SESSIONS_DIR/$MONTH/$DAY/$session_id/meta.yaml` (MC-sessions, WP-526 Ф2).
 2. Обновить (Bash sed): `status: interrupted`, `end_time: <now>`, `turns_count: <число файлов>`.
 3. Обновить индекс-черновик (WP-537 Ф4, `session_index_draft_write`, см. Шаг 4.3): статус → `interrupted`, report → `—`.
-4. Commit + push внутри `$SESSIONS_DIR` (без `00-index.md`): `SESSION_ID="$session_id"`, из блока Шага 4.5 взять только перечисление (`REL`, цикл чтения, фильтр `.err`) с `PATHS=()` и порогом `-gt 0`; закрывающий ОРЗ-файл добавить, только если он есть на диске; проверки над блоком (`report.md`, ОРЗ-файл, `status: completed`) в этом режиме не применять.
+4. Commit + push внутри `$SESSIONS_DIR` (без `00-index.md`, без папки и без `.err`, РП-524 Ф7):
+   ```bash
+   # SESSIONS_DIR: the same journal-folder lines as step 1.
+   cd "$SESSIONS_DIR" || exit 1
+   SESSION_ID="$session_id"
+   REL="$MONTH/$DAY/$SESSION_ID"
+   PATHS=()
+   while IFS= read -r -d '' p; do
+     case "$p" in *.err) ;; *) PATHS+=("$p") ;; esac
+   done < <(
+     { git ls-files -z --others --exclude-standard -- "$REL"
+       git diff -z --name-only --relative --no-renames HEAD -- "$REL"; } | sort -zu
+   )
+   CLOSE_FILE="$MONTH/$(echo "$SESSION_ID" | cut -c1-10)-$(echo "$SESSION_ID" | sed -E 's/^[0-9]{4}-[0-9]{2}-[0-9]{2}-[0-9]{2}-//').md"
+   [ ! -e "$CLOSE_FILE" ] || PATHS+=("$CLOSE_FILE")
+   # Install without the index snapshotter: update 00-index.md with the step 4.3 block first.
+   [ -f "${IWE_WORKSPACE:-$HOME/IWE}/${IWE_GOVERNANCE_REPO:-DS-my-strategy}/scripts/session-index-snapshot.sh" ] || PATHS+=("00-index.md")
+   [ "${#PATHS[@]}" -gt 0 ] || { echo "в папке сессии $REL нет файлов для сохранения" >&2; exit 1; }
+   for P in "${PATHS[@]}"; do
+     if [ -e "$P" ]; then git add -- "$P" || exit 1
+     elif git ls-files --error-unmatch -- "$P" >/dev/null 2>&1; then git rm --cached --quiet -- "$P" || exit 1
+     fi
+   done
+   git commit -m "feat(peer): $SESSION_ID (kimi-writer) — <режим>" -- "${PATHS[@]}" || exit 1
+   OUR_SHAS=("$(git rev-parse HEAD)")
+   ```
+   Публикация — тем же циклом `ds-publish.sh --exact-commit`, что в Шаге 4.5 (`REPO_ROOT`, `GUARD_SESSION_ID` — так же, как там). Проверки над блоком 4.5 (`report.md`, закрывающий файл, `status: completed`) в этом режиме не применяются.
 
 ---
 
@@ -1302,7 +1413,33 @@ done
 3. Выполнить **Шаг 4.2** (синтез report-draft.md через адаптер сессии: `scripts/<peer_cmd>.sh`, где `peer_cmd` читается из `meta.yaml` этой сессии — аргумента `--peer` при `--finalize` нет, Шаг 0а.2 не выполняется заново) с теми же инвариантами и fallback.
 4. Обновить `meta.yaml` (Bash sed): `status: completed`, `end_time: <now>`, `turns_count: <число файлов>`.
 5. Обновить индекс-черновик (WP-537 Ф4, `session_index_draft_write`, см. Шаг 4.3): статус → `completed`, report → ссылка.
-6. Commit + push внутри `$SESSIONS_DIR` (без `00-index.md`): `SESSION_ID="$session_id"`, из блока Шага 4.5 взять только перечисление (`REL`, цикл чтения, фильтр `.err`) с `PATHS=()` и порогом `-gt 0`; закрывающий ОРЗ-файл добавить, только если он есть на диске; проверки над блоком (`report.md`, ОРЗ-файл, `status: completed`) в этом режиме не применять.
+6. Commit + push внутри `$SESSIONS_DIR` (без `00-index.md`, без папки и без `.err`, РП-524 Ф7):
+   ```bash
+   # SESSIONS_DIR: the same journal-folder lines as step 1.
+   cd "$SESSIONS_DIR" || exit 1
+   SESSION_ID="$session_id"
+   REL="$MONTH/$DAY/$SESSION_ID"
+   PATHS=()
+   while IFS= read -r -d '' p; do
+     case "$p" in *.err) ;; *) PATHS+=("$p") ;; esac
+   done < <(
+     { git ls-files -z --others --exclude-standard -- "$REL"
+       git diff -z --name-only --relative --no-renames HEAD -- "$REL"; } | sort -zu
+   )
+   CLOSE_FILE="$MONTH/$(echo "$SESSION_ID" | cut -c1-10)-$(echo "$SESSION_ID" | sed -E 's/^[0-9]{4}-[0-9]{2}-[0-9]{2}-[0-9]{2}-//').md"
+   [ ! -e "$CLOSE_FILE" ] || PATHS+=("$CLOSE_FILE")
+   # Install without the index snapshotter: update 00-index.md with the step 4.3 block first.
+   [ -f "${IWE_WORKSPACE:-$HOME/IWE}/${IWE_GOVERNANCE_REPO:-DS-my-strategy}/scripts/session-index-snapshot.sh" ] || PATHS+=("00-index.md")
+   [ "${#PATHS[@]}" -gt 0 ] || { echo "в папке сессии $REL нет файлов для сохранения" >&2; exit 1; }
+   for P in "${PATHS[@]}"; do
+     if [ -e "$P" ]; then git add -- "$P" || exit 1
+     elif git ls-files --error-unmatch -- "$P" >/dev/null 2>&1; then git rm --cached --quiet -- "$P" || exit 1
+     fi
+   done
+   git commit -m "feat(peer): $SESSION_ID (kimi-writer) — <режим>" -- "${PATHS[@]}" || exit 1
+   OUR_SHAS=("$(git rev-parse HEAD)")
+   ```
+   Публикация — тем же циклом `ds-publish.sh --exact-commit`, что в Шаге 4.5 (`REPO_ROOT`, `GUARD_SESSION_ID` — так же, как там). Проверки над блоком 4.5 (`report.md`, закрывающий файл, `status: completed`) в этом режиме не применяются.
 
 Используется для восстановления прерванных сессий без перезапуска turn-loop.
 
@@ -1314,3 +1451,6 @@ done
 «проверь отчёт сессии `<session_id>`»
 
 Запустить субагент (Sonnet, context isolation): прочитать все файлы сессии + report.md, сверить с инвариантами schema_version=1 (frontmatter, §4 непустой при agreed, verify-якоря).
+
+<!-- USER-SPACE -->
+<!-- /USER-SPACE -->

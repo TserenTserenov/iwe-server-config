@@ -215,6 +215,18 @@ check "без CLAUDE_CODE_SESSION_ID: отказ с кодом 3" "$RC_NOID" "3"
 check "отказ объясняет, где снимать" "$(seen 'открыть обычное окно Claude')" "yes"
 check "с идентичностью беседы та же строка снимает" "$(close_sem convo-other expired-mark --pilot-release "$WORD")" "0"
 
+echo "9. беседа, чью сессию сняли извне, получает при повторном открытии того же slug подсказку нового (РП-561 Ф75)"
+REOPEN_RC=0
+CLAUDE_CODE_SESSION_ID=convo-live bash "$GUARD" open --wp WP-484 --task "fixture again" \
+  --slug live-mark --agent fixture >/dev/null 2>"$CLOSE_ERR" || REOPEN_RC=$?
+check "повторное открытие того же slug отклонено" "$([ "$REOPEN_RC" -ne 0 ] && echo refused || echo opened)" "refused"
+check "отказ называет внешнее снятие и слово пилота" "$(seen "снята извне по слову пилота «${WORD}»")" "yes"
+check "отказ называет вызвавшую беседу" "$(seen 'вызвала беседа convo-other')" "yes"
+check "отказ подсказывает новый slug" "$(seen '--slug live-mark-r2')" "yes"
+CLAUDE_CODE_SESSION_ID=convo-live bash "$GUARD" open --wp WP-484 --task "fixture again" \
+  --slug live-mark-r2 --agent fixture >/dev/null 2>&1 || true
+check "сессия с подсказанным slug открылась" "$(state_of live-mark-r2)" "open"
+
 echo
 echo "session-guard-pilot-release-owner-smoke: прошло $PASS, провалено $FAIL"
 [ "$FAIL" -eq 0 ]

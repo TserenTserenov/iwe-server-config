@@ -40,11 +40,25 @@ STATE_DIR="${IWE_MORNING_CHECK_STATE_DIR:-$HOME/IWE/.claude/state}"
 mkdir -p "${STATE_DIR}" 2>/dev/null || silent
 mkdir "${STATE_DIR}/morning-check-${TODAY}" 2>/dev/null || silent
 
+GOV="${IWE_MORNING_CHECK_GOV_REPO:-${ROOT}/DS-my-strategy}"
+# Already answered in Telegram (morning-check-telegram.sh on tsekh-1; the poller writes
+# pilot_answer with wp 561 and channel telegram-reply): this conversation does not ask
+# again. Read from the last fetched origin snapshot, no network call from a prompt hook.
+answered_in_telegram() {
+  git -C "${GOV}" show "origin/main:machine/ledger/day/${TODAY:0:4}/${TODAY:5:2}/day-${TODAY}.yaml" 2>/dev/null \
+    | awk '
+        /^- ts:/ { if (kind && wp && tg) found = 1; kind = wp = tg = 0 }
+        /^  kind: pilot_answer$/ { kind = 1 }
+        /^    wp: .?561.?$/ { wp = 1 }
+        /^    channel: telegram-reply$/ { tg = 1 }
+        END { if (kind && wp && tg) found = 1; exit !found }'
+}
+answered_in_telegram && silent
+
 # Evening focus: day close writes tomorrow's WP items to priorities.yaml with
 # last_updated = tomorrow. Anything older is not last night's answer.
 # The shared checkout may lag behind the published close; the last fetched
 # origin snapshot is the fallback (no network call from a prompt hook).
-GOV="${IWE_MORNING_CHECK_GOV_REPO:-${ROOT}/DS-my-strategy}"
 PRIORITIES_TEXT=""
 if grep -q "^last_updated: \"${TODAY}\"" "${GOV}/current/priorities.yaml" 2>/dev/null; then
   PRIORITIES_TEXT=$(cat "${GOV}/current/priorities.yaml")
@@ -60,10 +74,10 @@ if [ -n "${PRIORITIES_TEXT}" ]; then
 fi
 EVENING_JSON=$(printf '%s' "${FOCUS}" | jq -R -c 'split(", ") | map(select(length > 0))')
 if [ -n "${FOCUS}" ]; then
-  FOCUS_LINE="Фокус на сегодня, названный вчера на закрытии дня: ${FOCUS}. Вопрос: «Фокус на сегодня — ${FOCUS}: подтвердить, поправить или назвать своё?»"
+  FOCUS_LINE="Выбор на сегодня, названный вчера на закрытии дня: ${FOCUS}. Вопрос: «Выбор на сегодня — ${FOCUS}: подтвердить, поправить или назвать своё?»"
   CHOICE="offered"
 else
-  FOCUS_LINE="Вчера вечером фокус на сегодня не записан (priorities.yaml не обновлён на ${TODAY}). Вопрос открытый: «Что сегодня в фокусе? 1–3 пункта — РП или потребность»."
+  FOCUS_LINE="Вчера вечером выбор на сегодня не записан (priorities.yaml не обновлён на ${TODAY}). Вопрос открытый: «Что сегодня в выборе? 1–3 пункта — РП или потребность»."
   CHOICE="open"
 fi
 
@@ -75,7 +89,7 @@ CTX="☀️ УТРЕННЯЯ СВЕРКА (РП-561 Ф78, протокол сл�
 {\"subtype\": \"morning_check\", \"for_date\": \"${TODAY}\", \"focus\": {\"stage\": \"morning\", \"choice\": \"${CHOICE}\", \"evening_items\": ${EVENING_JSON}, \"answer\": \"confirmed\", \"items\": [\"WP-561\"]}, \"state_morning\": 3}
 (образец: answer — confirmed, corrected или own; items — итоговые пункты пилота; state_morning — число 0–5 или null, если на этот вопрос пилот не ответил)
 затем: bash \"\$HOME/IWE/DS-my-strategy/scripts/ledger-append.sh\" day ${TODAY} pilot_answer \"\$(python3 -c 'import json,sys; print(json.dumps(json.load(open(sys.argv[1], encoding=\"utf-8\")), ensure_ascii=False))' \"\${TMPDIR:-/tmp}/morning-check-${TODAY}.json\")\" morning-check
-Пропущенный ответ — null («нет данных»), не 0; при открытом вопросе answer всегда own; голое «да» на предложенный фокус — confirmed. Пилот не ответил ни на один вопрос — событие не записывать."
+Пропущенный ответ — null («нет данных»), не 0; при открытом вопросе answer всегда own; голое «да» на предложенный выбор — confirmed. Блок называть «выбор на сегодня», не «фокус»: «фокус дня» утром показывает Визионер (РП-622), это другое (РП-561 И-19). Пилот не ответил ни на один вопрос — событие не записывать."
 
 jq -n --arg ctx "${CTX}" '{
   "hookSpecificOutput": {
