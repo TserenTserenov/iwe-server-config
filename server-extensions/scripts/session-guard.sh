@@ -2994,7 +2994,7 @@ _prove_recorded_owner_dead() {  # <semaphore file>
   case "$verdict" in
     dead) return 0 ;;
     match) echo "владелец pid $rec_pid жив (идентичность совпала)"; return 1 ;;
-    *) echo "вердикт «$verdict» для pid $rec_pid: смерть не доказана"; return 1 ;;
+    *) echo "вердикт «${verdict}» для pid ${rec_pid}: смерть не доказана"; return 1 ;;
   esac
 }
 

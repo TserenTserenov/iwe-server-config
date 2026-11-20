@@ -302,10 +302,14 @@ echo "B7. a lock held by a live process defers: the own intents stay for a later
 open_b gate-close-busy
 BINTENTS="$IGDIR/$(basename "$BSEM").intents"
 printf '%s\n' 'intent-l1 fixture MC-sessions:l.md' > "$BINTENTS"
-python3 -c 'import fcntl, sys, time; f = open(sys.argv[1], "a"); fcntl.flock(f, fcntl.LOCK_EX); print("held", flush=True); time.sleep(20)' \
+# The holder keeps the lock until it is killed after the close: a fixed 20 s hold
+# expired before a close on the loaded Mac delivery gate reached the lock
+# (2026-11-20), so the close took a free lock and the deferral was never tested.
+python3 -c 'import fcntl, sys, time; f = open(sys.argv[1], "a"); fcntl.flock(f, fcntl.LOCK_EX); print("held", flush=True); time.sleep(600)' \
   "$IGDIR/resolve.lock" > "$B/holder.out" &
 HOLDER=$!
-for _ in 1 2 3 4 5 6 7 8 9 10; do grep -q held "$B/holder.out" 2>/dev/null && break; sleep 0.3; done
+for _ in $(seq 1 100); do grep -q held "$B/holder.out" 2>/dev/null && break; sleep 0.3; done
+check "lock holder started" yes "$(grep -q held "$B/holder.out" 2>/dev/null && echo yes || echo no)"
 : > "$GATE_LOG"
 (export INTENT_GATE_LOCK_WAIT_SEC=1; bguard close --wp WP-484 --slug gate-close-busy --agent fixture >/dev/null 2>"$B/close7.err")
 check "close succeeds" 0 "$?"
@@ -342,12 +346,13 @@ open_b gate-close-slow
 BINTENTS="$IGDIR/$(basename "$BSEM").intents"
 printf '%s\n' 'intent-s1 fixture MC-sessions:s.md' > "$BINTENTS"
 START=$SECONDS
-# The stub sleeps 60 s; a close that waited for it would take >= 60 s. The 40 s
-# bound keeps that distinction with room for a loaded Mac delivery gate, where
-# the former 20/15 pair failed on 2026-11-20 although the batch was killed.
-(export STUB_SLEEP=60 INTENT_GATE_RESOLVE_BUDGET_SEC=2; bguard close --wp WP-484 --slug gate-close-slow --agent fixture >/dev/null 2>"$B/close9.err")
+# The stub sleeps 300 s; a close that waited for it would take >= 300 s. The
+# 150 s bound keeps that distinction with room for the loaded Mac delivery gate
+# (load ~20), where both 20/15 and 60/40 failed on 2026-11-20 although the batch
+# was killed by the budget.
+(export STUB_SLEEP=300 INTENT_GATE_RESOLVE_BUDGET_SEC=2; bguard close --wp WP-484 --slug gate-close-slow --agent fixture >/dev/null 2>"$B/close9.err")
 check "close succeeds" 0 "$?"
-check "close not held by the slow batch" yes "$([ $((SECONDS - START)) -lt 40 ] && echo yes || echo no)"
+check "close not held by the slow batch" yes "$([ $((SECONDS - START)) -lt 150 ] && echo yes || echo no)"
 check "kept for retry as timeout" "intent-s1 fixture - 1 timeout" "$(cut -d" " -f1-5 "$BINTENTS.retry" 2>/dev/null)"
 check "no taken file left behind" 0 "$(ls "$IGDIR" | grep -c '\.closing\.' || true)"
 

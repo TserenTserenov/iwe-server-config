@@ -2,7 +2,7 @@
 name: peer-conversation
 description: Многотуровый диалог писателя (Claude) с одним или несколькими напарниками (любой набор из kimi/codex/hermes/claude-headless/grok) по задаче пилота (DP.SC.154). Ведёт turn-loop (2 участника) или round-loop (3+, WP-509), обнаруживает CONSENSUS/ESCALATE, после консенсуса — Decision Gate (зафиксировать vs реализовать → ревью → проверить → задеплоить), синтезирует report.md через Agent tool.
 argument-hint: "<описание задачи> [--peer kimi|codex|hermes|claude|grok[,vendor2,...]] | --list | --interrupt <session_id> | --finalize <session_id>"
-version: 1.7.7
+version: 1.7.8
 layer: L1
 status: active
 browser_safe: false
@@ -502,14 +502,20 @@ if grep -q '^INTEGRITY-WARNING:' "${PEER_FILE%.md}.err" 2>/dev/null; then
   grep '^INTEGRITY-WARNING:' "${PEER_FILE%.md}.err" >&2
   # Показать пилоту и не принимать реплику как полную: перезапросить ход
   # либо сверить с журналом сессии напарника (scripts/kimi-final-text.py).
+  # The session journal never keeps .err (`**/*.err` in its .gitignore, WP-524 F7):
+  # copy the fact and the warning text into the writer's next reply or report §5,
+  # a link to the .err file alone is lost.
 fi
 # Same rule as in the round-loop below: an empty .err is noise, not evidence
-# (WP-481 F13).
+# (WP-481 F13). Optional tidy-up (WP-524 F7): if Claude Code's safety check
+# refuses this rm (e.g. inside a bash function with variables), skip it, the
+# journal ignores .err anyway. Never note-file a .err and never pass one to
+# `git add` by explicit path: the journal refuses ignored paths (see §4.4а).
 [ -s "${PEER_FILE%.md}.err" ] || rm -f "${PEER_FILE%.md}.err"
 # Пустой $PEER_FILE (адаптер отказал без вывода, напр. известный класс
 # bug-2026-10-05-grok-peer-adapter-empty-response-exit-1.md) нечего заявлять
-# и нечего коммитить — удаляем сразу, чтобы более поздний коммит всей папки
-# сессии (Шаг 4.5.1) не подхватил его молча мимо scope gate. `--forget` на
+# и нечего коммитить — удаляем сразу, чтобы список файлов сессии (§4.4а,
+# `git ls-files --others`) не подхватил его молча мимо scope gate. `--forget` на
 # путь, который ещё не заявлен (обычный случай), безопасно отказывает кодом 1
 # без побочных эффектов — тот же путь мог быть заявлен ПРЕДЫДУЩЕЙ попыткой
 # этого же раунда (3р.1а допускает повторный вызов одного peer с тем же
@@ -699,17 +705,23 @@ if grep -q '^INTEGRITY-WARNING:' "${PEER_FILE%.md}.err" 2>/dev/null; then
   grep '^INTEGRITY-WARNING:' "${PEER_FILE%.md}.err" >&2
   # Показать пилоту и не принимать реплику как полную: перезапросить ход
   # либо сверить с журналом сессии напарника (scripts/kimi-final-text.py).
+  # The session journal never keeps .err (`**/*.err` in its .gitignore, WP-524 F7):
+  # copy the fact and the warning text into the writer's next reply or report §5,
+  # a link to the .err file alone is lost.
 fi
 # Keep the stderr file only when the adapter actually wrote to it. An empty
 # .err carries no diagnostics and just adds noise to the session folder
 # (WP-481 F13: 232 .err files in one week, 115 of them empty). Placed after
 # STATUS is captured so the cleanup cannot clobber the adapter's exit code.
+# Optional tidy-up (WP-524 F7): if Claude Code's safety check refuses this rm,
+# skip it. Never note-file a .err and never pass one to `git add` by explicit
+# path: the journal ignores `**/*.err` and refuses such paths (see §4.4а).
 [ -s "${PEER_FILE%.md}.err" ] || rm -f "${PEER_FILE%.md}.err"
 rm -f "$PROMPT_FILE"
 # Пустой $PEER_FILE (адаптер отказал без вывода, напр.
 # bug-2026-10-05-grok-peer-adapter-empty-response-exit-1.md) нечего заявлять
-# и нечего коммитить — удаляем сразу, чтобы более поздний коммит всей папки
-# сессии (Шаг 4.5.1) не подхватил его молча мимо scope gate. `--forget` на
+# и нечего коммитить — удаляем сразу, чтобы список файлов сессии (§4.4а,
+# `git ls-files --others`) не подхватил его молча мимо scope gate. `--forget` на
 # ещё не заявленный путь (обычный случай) безопасно отказывает кодом 1 без
 # побочных эффектов — тот же путь мог быть заявлен ПРЕДЫДУЩЕЙ попыткой этого
 # же раунда (3р.1а допускает повторный вызов peer с тем же $PEER_FILE).
@@ -1282,14 +1294,49 @@ Slug-часть (без даты, с номером — та же формула
 
 Целевой путь (используется здесь и на Шаге 4.5.0, WP-526 Ф2): `<MC-sessions>/<MONTH>/<TODAY>-<SESSION_SLUG>.md` — плоский Quick Close файл под месячной папкой внутри `$SESSIONS_DIR` (Шаг 1), без DD/ (DD/ — только для peer-session-папок). Тот же путь, что `session-guard.sh` уже создал (или создаст) как свой ORZ-скаффолд на Шаге 1.0 — содержимое пишется один раз, на Шаге 4.5.0.
 
+### 4.4а Список файлов сессии для заявки и коммита (WP-524 Ф7, 20.11)
+
+> **Почему отдельно.** Журнал сессий игнорирует `**/*.err` (`.gitignore` журнала, решение 10.09), а шаги 3.1/3р.1 оставляют непустой stderr адаптера рядом с репликой. Когда список файлов составляли перечислением папки сессии, `.err` попадал в заявку или явным путём в `git add`, и сохранение отказывало целиком (18.11, сессия `2026-11-18-21`: «paths are ignored»; 20.11, сессия `2026-11-20-10`: заявленный `.err` не сохраняется, снять заявку нельзя, пока файл на диске). Раннер закрытия папку сам не перебирает: он берёт пути у писателя (`commit-push.sh`, `commits[].paths`). Поэтому список строит писатель, одним способом для заявки (§4.5 п.3 и 4.5.1), для раннера (§4.5 п.4) и для коммита (4.5.1).
+
+Правило: `.err` никогда не заявляется (`note-file`) и не передаётся в `git add`, `git commit` или раннеру явным путём, ни новый игнорируемый, ни старый отслеживаемый (в журнале их больше двух тысяч, до правила 10.09). Единственное исключение — отслеживаемый `.err`, который уже заявлен по ошибке (последний абзац ниже). Перечислять папку сессии целиком (`ls`, `find`, glob) для списка запрещено.
+
+```bash
+# Paths relative to the root of the journal copy the commit goes to.
+# `git -C` instead of a top-level `cd` (a PreToolUse hook blocks it); `-z` with a
+# NUL read loop works on macOS bash 3.2 (no mapfile). --no-renames lists a rename
+# as delete + add, so the deletion reaches the commit too; `diff HEAD` covers
+# staged and unstaged changes, deletions included.
+REL="$MONTH/$DAY/$SESSION_ID"
+SESSION_PATHS=()
+SKIPPED_ERR=()
+while IFS= read -r -d '' p; do
+  case "$p" in
+    *.err) SKIPPED_ERR+=("$p") ;;
+    *) SESSION_PATHS+=("$p") ;;
+  esac
+done < <(
+  {
+    git -C "$SESSIONS_DIR" ls-files -z --others --exclude-standard -- "$REL"
+    git -C "$SESSIONS_DIR" diff -z --name-only --no-renames HEAD -- "$REL"
+  } | sort -zu
+)
+[ "${#SESSION_PATHS[@]}" -gt 0 ] || { echo "в папке сессии $REL нет файлов для сохранения" >&2; exit 1; }
+```
+
+`SKIPPED_ERR` содержит только изменённые **отслеживаемые** `.err` (новые игнорируемые `--exclude-standard` уже отсёк). Пустой массив — обычный случай. Непустой бывает при дозакрытии старой сессии: изменённый отслеживаемый `.err` оставляет копию журнала грязной, и закрытие в отдельной копии откажет. Выход: скопировать файл за пределы рабочей папки IWE (например в scratchpad) для разбора и вернуть отслеживаемую версию: `git -C "$SESSIONS_DIR" restore --source=HEAD --staged --worktree -- <путь>`.
+
+**Если `.err` уже заявлен по ошибке** (старый порядок, ручная заявка). Новый игнорируемый `.err`: перенести файл за пределы рабочей папки IWE → `session-guard.sh note-file --forget <путь>` → вернуть файл на место; охранник снимает заявку только когда пути нет на диске. Отслеживаемый `.err` так снять нельзя: путь есть в HEAD и истории, охранник заявку оставит. Такой файл сохранить вместе с сессией: добавить его путь к `SESSION_PATHS` (отслеживаемый путь git принимает явным путём, правило игнорирования на него не действует) и в отчёте одной строкой отметить, почему `.err` попал в коммит.
+
+Предупреждение о целостности (`INTEGRITY-WARNING:`) из `.err` в историю само не попадёт: писатель переносит факт и текст предупреждения в свою реплику или §5 отчёта (шаги 3.1/3р.1).
+
 ### 4.5 Commit + push
 
 **Сначала: включён ли выключатель пути закрытия (РП-561 Ф61 этап 2, решения пилота 15.11).** Проверить: `[ "${IWE_CLOSE_ROUTE_ENFORCE:-}" = 1 ] || [ -f "$HOME/IWE/.iwe-runtime/close-route-enforce" ]` (переменная файл не выключает; выключить на хосте = удалить файл). Выключен — шаги 4.5.0–4.5.4 ниже как раньше. **Включён — короткого закрытия пир-сессии нет:** любая сессия с изменениями, пир-сессия тоже, закрывается обычным закрытием, чтобы закрытые фазы и завершённый РП ушли в архив; объявление `--close-path peer-session` от раннера не освобождает ни `close`, ни хуки (`close-runner-gate.sh` после слов о закрытии не пропустит прямой коммит 4.5.1 до старта раннера, Stop-гейт требует закрытия раннером, у Кодекса — `quick_close_gate.py`). Порядок при включённом выключателе:
 
 1. 4.5.0 — записать закрывающий ОРЗ-файл, как ниже.
 2. 4.5.0а — только пункты 1 и 1а (поле «Следующий шаг» и файл для сверки); пункт 2 (проверка опубликованной карточки) пропустить: публикация карточки до раннера заблокирована, а поле проверяют шаг раннера `wp-context-update` и итоговая проверка R23 (`handoff_next_step`). 4.5.0б — как ниже, без коммита.
-3. Заявить файлы сессии изнутри репозитория сессий тем же циклом `note-file`, что в 4.5.1 (ОРЗ-файл и файлы папки журнала `$MONTH/$DAY/$SESSION_ID/`), но без `git commit`: раннер откажет коммиту незаявленного пути.
-4. `/run-protocol close` той же сессии: раннеру передать в коммитах репозитория сессий папку журнала и ОРЗ-файл, в коммитах DS — карточку РП. Раннер сам делает коммит и публикацию, архивацию, итоговую проверку R23 и в конце вызывает `close`.
+3. Составить список файлов сессии по §4.4а, собрать из него `PATHS` первыми строками блока 4.5.1 (до цикла `git add`) и заявить их изнутри репозитория сессий циклом `note-file` из 4.5.1, но без `git add` и `git commit`: раннер откажет коммиту незаявленного пути. Файлы `.err` в список не входят.
+4. `/run-protocol close` той же сессии: раннеру передать в коммитах репозитория сессий ОРЗ-файл и пути `SESSION_PATHS` поштучно (не папку журнала целиком: раннер делает `git add` переданных путей, и папка унесла бы изменённый отслеживаемый `.err`), в коммитах DS — карточку РП. Раннер сам делает коммит и публикацию, архивацию, итоговую проверку R23 и в конце вызывает `close`.
 5. Шаги 4.5.1–4.5.4 не выполнять. Рефлексию шага 3.7 второй раз не задавать, если раннер спросит её сам.
 
 Сессия без изменений (доказано в отдельной копии, журнала пир-сессии нет) закрывается одним `session-guard.sh close ... --pilot-close-word "<слово пилота>"`: он снимает отметку и обязательство закрытия. Что выберет программа, видно заранее: `session-guard.sh close --explain --agent claude-code --slug "$SESSION_ID"`.
@@ -1347,7 +1394,7 @@ cat >> "$GUARD_ORZ" <<EOF
 EOF
 ```
 
-Если запись упала (директория недоступна, диск полон) — не блокировать финализацию: сообщить пилоту одной строкой и продолжить, Шаг 4.5.1 подхватит `$GUARD_ORZ` в PATHS независимо от результата.
+Если запись упала (директория недоступна, диск полон) — не блокировать финализацию: сообщить пилоту одной строкой и продолжить; Шаг 4.5.1 возьмёт `$GUARD_ORZ` в PATHS, только если файл есть на диске, иначе коммит пойдёт без него с предупреждением.
 
 **4.5.0а Поле «Следующий шаг» карточки РП (WP-484 Ф257, M2/M6).** Пир-сессия закрывается мимо раннера Quick Close, поэтому поле, с которого начнётся следующая сессия, обновляет писатель сам, ДО коммита:
 
@@ -1375,7 +1422,8 @@ python3 "${IWE_WORKSPACE:-$HOME/IWE}/scripts/wp-phase-snapshot-write.py" "<WP-NN
 # WP-526 Ф2: коммит и push сессии идут в MC-sessions, не в $GOV_REPO_ROOT —
 # session-manifest-write.sh живёт в DS-my-strategy (обычный скрипт), но
 # работает НАД репозиторием MC-sessions (первый аргумент — $WORKTREE).
-cd "$SESSIONS_DIR"
+# No top-level `cd` (a PreToolUse hook blocks it): git runs with -C, the guard in a
+# subshell, because it takes the claim's repository from its working directory.
 # pathspec после `--`: commit ТОЛЬКО файлы сессии, не подметаем чужое
 # pre-staged из общего индекса (mis-attribution, см. 2026-06-20-39).
 # $GUARD_ORZ (Шаг 4.5.0) — тот же путь, что "$TODAY-$SESSION_SLUG.md" (Шаг 4.4),
@@ -1384,13 +1432,28 @@ cd "$SESSIONS_DIR"
 # только в свой runtime-черновик (Шаги 1.3/4.3), не в git-tracked файл —
 # коммитить его отсюда означало бы подхватывать чужие параллельные правки
 # того же общего файла, ровно тот класс бага, который черновик закрывает.
-PATHS=("$MONTH/$DAY/$SESSION_ID/" "$GUARD_ORZ")
-git add "${PATHS[@]}"
+# SESSION_PATHS comes from §4.4а: explicit files, no .err, deletions included.
+# The session folder itself is never passed (WP-524 F7): `git commit -- <dir>`
+# would take a modified tracked .err along.
+PATHS=("${SESSION_PATHS[@]}")
+if [ -e "$GUARD_ORZ" ]; then
+  PATHS=("${GUARD_ORZ#"$SESSIONS_DIR"/}" "${PATHS[@]}")
+else
+  echo "WARN: ОРЗ-файл $GUARD_ORZ не записан (Шаг 4.5.0) — коммит без него" >&2
+fi
+for P in "${PATHS[@]}"; do
+  if [ -e "$SESSIONS_DIR/$P" ]; then
+    git -C "$SESSIONS_DIR" add -- "$P" || { echo "не удалось добавить $P" >&2; exit 1; }
+  elif git -C "$SESSIONS_DIR" ls-files --error-unmatch -- "$P" >/dev/null 2>&1; then
+    # Tracked file deleted on disk, deletion not staged yet.
+    git -C "$SESSIONS_DIR" rm --cached --quiet -- "$P" || { echo "не удалось снять $P с индекса" >&2; exit 1; }
+  fi   # deletion already staged: nothing to do, `git commit -- <path>` takes it
+done
 # Заявка файлов ИЗНУТРИ репозитория сессий (РП-484 Ф257, 28.10): охранник берёт репозиторий
 # заявки из текущего каталога; заявка из корня IWE записывается за корневым репозиторием,
-# и закрытие отказывает «commit changes an unclaimed sessions path». Здесь cwd уже $SESSIONS_DIR.
-for CLAIM in "$GUARD_ORZ" $(git diff --cached --name-only -- "$MONTH/$DAY/$SESSION_ID/"); do
-  bash "${IWE_SCRIPTS:-$HOME/IWE/scripts}/session-guard.sh" note-file "${CLAIM#"$SESSIONS_DIR"/}" --wp "<WP-NNN>" --slug "$SESSION_ID" --agent claude-code \
+# и закрытие отказывает «commit changes an unclaimed sessions path».
+for CLAIM in "${PATHS[@]}"; do
+  (cd "$SESSIONS_DIR" && bash "${IWE_SCRIPTS:-$HOME/IWE/scripts}/session-guard.sh" note-file "$CLAIM" --wp "<WP-NNN>" --slug "$SESSION_ID" --agent claude-code) \
     || { echo "заявка файла $CLAIM не прошла" >&2; exit 1; }
 done
 # Task text: written beforehand with a file-writing tool (not the shell) to
@@ -1400,7 +1463,7 @@ test -s "$TASK_FILE" || { echo "нет файла задачи $TASK_FILE — з
 # Заявлять коммит только после УСПЕШНОГО коммита: при отказе HEAD чужой, и note-commit заявил бы
 # чужой коммит (РП-484 Ф257, 27.10) — после публикации такую заявку снимает только
 # `note-commit --forget` для коммита, не пересекающегося с файлами сессии.
-{ printf 'feat(peer): %s — ' "$SESSION_ID"; cat "$TASK_FILE"; } | git commit -F - -- "${PATHS[@]}" \
+{ printf 'feat(peer): %s — ' "$SESSION_ID"; cat "$TASK_FILE"; } | git -C "$SESSIONS_DIR" commit -F - -- "${PATHS[@]}" \
   || { echo "коммит сессии отклонён — note-commit НЕ вызывать, разобрать причину" >&2; exit 1; }
 OUR_SHAS=("$(git -C "$SESSIONS_DIR" rev-parse HEAD)")   # публикуем ровно свои коммиты по одному, см. блок публикации ниже
 
@@ -1419,7 +1482,7 @@ fi
 # догоняющий quick-close уже запушенной сессии не доказывает «всё на remote»
 # и падает в ручной обход. Отказ (грязное дерево и т.п.) не блокирует
 # закрытие — WARN и legacy-путь confirmed_clean_repos.
-bash "$HOME/IWE/${IWE_GOVERNANCE_REPO:-DS-strategy}/scripts/session-manifest-write.sh" "$(git rev-parse --show-toplevel)" "$SESSION_ID" \
+bash "$HOME/IWE/${IWE_GOVERNANCE_REPO:-DS-strategy}/scripts/session-manifest-write.sh" "$(git -C "$SESSIONS_DIR" rev-parse --show-toplevel)" "$SESSION_ID" \
   || echo "WARN: attest-манифест не создан — догоняющее закрытие пойдёт legacy-путём"
 # attest-манифест — второй наш коммит (если он создан): порядок публикации «payload, затем манифест»
 [ "$(git -C "$SESSIONS_DIR" rev-parse HEAD)" = "${OUR_SHAS[0]}" ] || OUR_SHAS+=("$(git -C "$SESSIONS_DIR" rev-parse HEAD)")
@@ -1438,7 +1501,7 @@ bash "${IWE_SCRIPTS:-$HOME/IWE/scripts}/session-guard.sh" note-publication "$PUB
 **Публикация репозитория сессий (`MC-sessions`): только свои коммиты, по одному, через шлюз с `--exact-commit`; НИКОГДА `git push` текущей ветки** (WP-484 21.09, пир-сессия 2026-09-21-08). Общий checkout `MC-sessions` может стоять НЕ на `main` (найдено 21.09: чужая ветка `peer/2026-09-19-11-...` с 19.09, её создал шаг 4.5 скилла kimi-peer-writer через `git checkout -b`). Тогда `push_branch` кладёт коммиты в чужую ветку и они не попадают в `main`, а `ds-publish.sh --from-commit <sha>` БЕЗ `--exact-commit <sha>` переносит весь диапазон `origin/main..<sha>` (14 чужих коммитов, конфликт в `00-index.md`). `--exact-commit` принимает аргумент (SHA) и переносит ровно один коммит от свежего `origin/main`; повтор идемпотентен (уже опубликованный patch-эквивалент пропускается). Зависимые коммиты (payload, затем attest-манифест) доставляются НЕ атомарно: при сбое между ними повторить цикл, он безопасен. Манифест сверяет по patch-id, а не по SHA, поэтому перенос cherry-pick'ом ему не мешает.
 
 ```bash
-REPO_ROOT=$(git rev-parse --show-toplevel)
+REPO_ROOT=$(git -C "$SESSIONS_DIR" rev-parse --show-toplevel)
 git -C "$REPO_ROOT" fetch -q origin main
 # Служебный id охранника = имя файла семафора `claude-code-<id>.open`. Дата-слаг пир-сессии
 # ($SESSION_ID) им НЕ является: с слагом квитанция отказывала «нет открытой сессии claude-code-<слаг>»

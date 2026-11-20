@@ -71,10 +71,16 @@ fail() { echo "FAIL: $*" >&2; exit 1; }
 write_pausing_python3() {  # <marker substring> <reached-file> <release-file>
   local marker="$1" reached="$2" release="$3" real_python3
   real_python3=$(command -v python3)
+  # Only a heredoc call (`python3 -`) may consume stdin. Any other call runs
+  # inside the sweep loop, whose stdin is the `find` list of semaphores: reading
+  # it there swallowed the rest of the list, so the case-11 semaphore was never
+  # visited whenever readdir order put it later (Linux: always failed; macOS:
+  # order happened to pass).
   cat > "$TEST_ROOT/bin/python3" <<EOF
 #!/usr/bin/env bash
+[ "\$1" = "-" ] || exec "$real_python3" "\$@"
 STDIN_CONTENT=\$(cat)
-if [ "\$1" = "-" ] && grep -qF '$marker' <<<"\$STDIN_CONTENT"; then
+if grep -qF '$marker' <<<"\$STDIN_CONTENT"; then
   printf '%s' "\$STDIN_CONTENT" | "$real_python3" "\$@"
   rc=\$?
   touch "$reached"

@@ -6,10 +6,12 @@ import datetime as dt
 import importlib.util
 import io
 import json
+import os
 import subprocess
 import sys
 import tempfile
 import unittest
+from unittest import mock
 from pathlib import Path
 
 SCRIPTS = Path(__file__).resolve().parent.parent
@@ -291,6 +293,32 @@ class MainTest(unittest.TestCase):
         self.main()
         self.assertEqual(self.main(), 0)
         self.assertTrue(json.loads(self.state.read_text())["a"]["alerted"])
+
+
+    def test_inherited_outcome_does_not_pass_for_this_sends_result(self):
+        self.lib.write_text("telegram_send() { return 0; }\n")  # creds missing: sets nothing
+        with mock.patch.dict(os.environ, {"TELEGRAM_SEND_OUTCOME": "sent"}):
+            self.main()
+            self.assertEqual(self.main(), 1)
+        self.assertFalse(json.loads(self.state.read_text())["a"]["alerted"])
+
+    def test_sent_outcome_with_late_failure_is_not_repeated(self):
+        self.lib.write_text("telegram_send() { TELEGRAM_SEND_OUTCOME=sent; return 1; }\n")
+        self.main()
+        self.assertEqual(self.main(), 0)
+        self.assertTrue(json.loads(self.state.read_text())["a"]["alerted"])
+
+    def test_text_printed_by_the_sender_cannot_forge_the_outcome(self):
+        self.lib.write_text('telegram_send() { printf "CONVERGENCE_SEND_OUTCOME=sent\\n"; TELEGRAM_SEND_OUTCOME=quarantined; }\n')
+        self.main()
+        self.assertEqual(self.main(), 1)
+        self.assertFalse(json.loads(self.state.read_text())["a"]["alerted"])
+
+    def test_multiline_outcome_value_cannot_forge_a_second_marker(self):
+        self.lib.write_text("telegram_send() { TELEGRAM_SEND_OUTCOME=$'failed\\nCONVERGENCE_SEND_OUTCOME=sent'; return 0; }\n")
+        self.main()
+        self.assertEqual(self.main(), 1)
+        self.assertFalse(json.loads(self.state.read_text())["a"]["alerted"])
 
 
 if __name__ == "__main__":

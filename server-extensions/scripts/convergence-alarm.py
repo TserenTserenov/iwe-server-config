@@ -189,24 +189,33 @@ def send_telegram(lib, text):
     # The gate identifies a sender by TELEGRAM_SOURCE_ID, else by the basename of $0.
     # With neither, $0 was "_" and the digest quarantined a real alarm as
     # "вне реестра: _" (WP-484 F313, 18.11).
-    env = {**os.environ, "TELEGRAM_SOURCE_ID": TELEGRAM_SOURCE_ID}
+    # An outcome inherited from our own environment must not pass for this send's result.
+    env = {key: value for key, value in os.environ.items() if key != "TELEGRAM_SEND_OUTCOME"}
+    env["TELEGRAM_SOURCE_ID"] = TELEGRAM_SOURCE_ID
     # telegram_send exits 0 for a quarantined message too; what really happened is in
-    # TELEGRAM_SEND_OUTCOME (WP-538 Ф7). Only "sent" (and "deferred": a trusted channel that
-    # delivers later) counts as delivered, so a quarantined alarm stays unsent and is retried
-    # instead of being logged as sent for three days (WP-484 Ф316, 19.11).
-    script = '. "$1" && telegram_send "$2" && printf "\\n%s%s\\n" "' + OUTCOME_MARKER + '" "${TELEGRAM_SEND_OUTCOME:-}"'
+    # TELEGRAM_SEND_OUTCOME (WP-538 Ф7). Only "sent" (and "deferred": the message is queued into the
+    # digest, the channel's own delivery guarantee) counts as delivered, so a quarantined alarm
+    # stays unsent and is retried instead of being logged as sent for three days (WP-484 Ф316, 19.11).
+    # The marker is printed whatever the exit code was: a send that went out and then failed late
+    # must not be repeated every 15 minutes. Newlines are stripped from the value so it cannot
+    # forge a second marker line.
+    script = ('. "$1"; unset TELEGRAM_SEND_OUTCOME; telegram_send "$2"; rc=$?; '
+              'printf "\\n%s%s\\n" "' + OUTCOME_MARKER + '" "$(printf %s "${TELEGRAM_SEND_OUTCOME:-}" | tr -d "\\n\\r")"; exit $rc')
     proc = subprocess.run(["bash", "-c", script, Path(__file__).name, str(lib), text],
                           capture_output=True, text=True, timeout=60, env=env, check=False)
-    if proc.returncode != 0:
-        print(f"convergence-alarm: telegram_send failed: {proc.stderr.strip()[-300:]}", file=sys.stderr)
-        return False
     outcome = next((line[len(OUTCOME_MARKER):] for line in reversed(proc.stdout.splitlines())
                     if line.startswith(OUTCOME_MARKER)), "")
-    if outcome not in DELIVERED_OUTCOMES:
+    if outcome in DELIVERED_OUTCOMES:
+        if proc.returncode != 0:
+            print(f"convergence-alarm: telegram_send exited {proc.returncode} after outcome {outcome}; counted as delivered",
+                  file=sys.stderr)
+        return True
+    if proc.returncode != 0:
+        print(f"convergence-alarm: telegram_send failed: {proc.stderr.strip()[-300:]}", file=sys.stderr)
+    else:
         print(f"convergence-alarm: message not delivered (outcome: {outcome or 'none'}) - episode stays unsent",
               file=sys.stderr)
-        return False
-    return True
+    return False
 
 
 def load_state(path):
