@@ -71,6 +71,21 @@ OUT=$(close_proving) || fail "reused pid must be proven dead and closed, got: $O
 open_hk "$LIVE_PID"
 sed "s|^pid_start_id: .*|pid_start_id: garbage|" "$SEM" > "$SEM.tmp" && mv "$SEM.tmp" "$SEM"
 expect_refused "malformed pid_start_id"
+OUT=$(close_proving 2>&1 || true)
+printf '%s' "$OUT" | grep -q 'вердикт «unknown» для pid' || fail "an unknown verdict must be named in the refusal: $OUT"
+OUT=$( cd "$GOV" && LC_ALL=en_US.UTF-8 PATH="$TEST_ROOT/bin:$PATH" bash "$GUARD" close --housekeeping hk-dead --agent claude-code --expect-session-id "$(sid)" --prove-owner-dead 2>&1 || true )
+printf '%s' "$OUT" | grep -q 'вердикт «unknown» для pid' || fail "the reason must be intact under a UTF-8 locale: $OUT"
+
+# 4b. Duplicated fields are ambiguous: refused, never read as "the first one".
+open_hk "$LIVE_PID"
+printf 'pid: 1\n' >> "$SEM"
+expect_refused "duplicated pid"
+open_hk "$LIVE_PID"
+# The second copy names a DEAD identity (same pid, other start): a reader that takes the last
+# (or first) occurrence would close a live owner; the ambiguous record must be refused instead.
+DUP_ID=$(sed -n 's/^pid_start_id: //p' "$SEM" | head -1)
+printf 'pid_start_id: %s:%s\n' "${DUP_ID%:*}" "$(( ${DUP_ID##*:} + 1 ))" >> "$SEM"
+expect_refused "duplicated pid_start_id"
 
 # 5. The owner is gone: pid absent -> dead -> closed.
 sleep 300 & DEAD_PID=$!
