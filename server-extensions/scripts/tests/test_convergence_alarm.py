@@ -164,8 +164,10 @@ class MainTest(unittest.TestCase):
             {"repo_id": "a", "class": "reader", "checkouts": [{"host": "mac", "path": "a"}],
              "decision_owner": {"ref": "p", "scope": "repo"}, "thresholds": {"behind_observed_for_min": 0}}]}))
         self.sent = base / "sent.txt"
-        self.lib = base / "telegram.sh"
-        self.lib.write_text(f'telegram_send() {{ printf "%s\\n--\\n" "$1" >> "{self.sent}"; TELEGRAM_SEND_OUTCOME=sent; }}\n')
+        self.notify = base / "iwe-notify"
+        self.secrets = base / "tg-bots"
+        self.secrets.write_text("export TELEGRAM_BOT_TOKEN=t TELEGRAM_CHAT_ID=c\n")
+        self.fake_notify(f'printf "%s\\n--\\n" "$5" >> "{self.sent}"; echo "iwe-notify: outcome=direct-sent"')
         self.state = base / "state.json"
         self.log = base / "reader.log"
         self.log.write_text("[2026-11-13 12:00:00] [reader-copies-sync] a: BLOCKED свои коммиты\n")
@@ -175,10 +177,15 @@ class MainTest(unittest.TestCase):
     def tearDown(self):
         self.tmp.cleanup()
 
+    def fake_notify(self, body):
+        """A stand-in for scripts/iwe-notify: `body` runs with the caller's arguments $1..$5."""
+        self.notify.write_text("#!/bin/bash\n" + body + "\n")
+        self.notify.chmod(0o755)
+
     def main(self):
         argv = ["convergence-alarm.py", "--root", str(self.root), "--registry", str(self.registry),
                 "--host", "mac", "--state", str(self.state), "--reader-log", str(self.log),
-                "--telegram-lib", str(self.lib), "--quiet-from", str(self.quiet[0]), "--quiet-to", str(self.quiet[1])]
+                "--notify", str(self.notify), "--secrets", str(self.secrets), "--quiet-from", str(self.quiet[0]), "--quiet-to", str(self.quiet[1])]
         old = sys.argv
         sys.argv = argv
         try:
@@ -197,20 +204,49 @@ class MainTest(unittest.TestCase):
         self.assertEqual(self.main(), 0)  # no repeat for the same episode
         self.assertEqual(self.sent.read_text().count("⚠️"), 1)
 
-    def test_send_names_its_source_for_the_telegram_gate(self):
-        # WP-484 F313: without a source id the gate saw $0 = "_" and the digest
-        # quarantined a real alarm as "вне реестра: _".
-        caller = self.tmp.name + "/caller.txt"
-        self.lib.write_text(f'telegram_send() {{ printf "%s|%s\\n" "$(basename -- "$0")" "${{TELEGRAM_SOURCE_ID:-}}" >> "{caller}"; TELEGRAM_SEND_OUTCOME=sent; }}\n')
+    def test_send_goes_direct_with_its_source_and_the_bot_keys(self):
+        # WP-484 F316 item 1: the alarm never goes through the strategy repo's gateway, whose sender list
+        # was stale exactly when the alarm mattered; the keys come from the secrets file.
+        calls = Path(self.tmp.name) / "calls.txt"
+        self.fake_notify(f'printf "%s|%s|%s|%s|%s\\n" "$1" "$2" "$3" "$4" "${{TELEGRAM_BOT_TOKEN:-}}" >> "{calls}"; '
+                         'echo "iwe-notify: outcome=direct-sent"')
         self.main()
         self.main()
-        self.assertEqual(Path(caller).read_text().strip(), "convergence-alarm.py|convergence-alarm")
+        self.assertEqual(calls.read_text().strip(), "--direct|--source|convergence-alarm|--|t")
+
+    def test_keys_assigned_without_export_still_reach_notify(self):
+        # Cold review 20.11: `. file` then `exec` hands over only exported variables; under launchd
+        # nothing else exports the keys, so an alarm would be "not-sent" forever.
+        calls = Path(self.tmp.name) / "calls.txt"
+        self.secrets.write_text("TELEGRAM_BOT_TOKEN=t\nTELEGRAM_CHAT_ID=c\n")
+        self.fake_notify(f'printf "%s|%s\\n" "${{TELEGRAM_BOT_TOKEN:-}}" "${{TELEGRAM_CHAT_ID:-}}" >> "{calls}"; '
+                         'echo "iwe-notify: outcome=direct-sent"')
+        clean = {k: v for k, v in os.environ.items() if not k.startswith("TELEGRAM_")}
+        with mock.patch.dict(os.environ, clean, clear=True):
+            self.main()
+            self.assertEqual(self.main(), 0)
+        self.assertEqual(calls.read_text().strip(), "t|c")
+
+    def test_secrets_file_cannot_change_the_arguments(self):
+        calls = Path(self.tmp.name) / "calls.txt"
+        self.secrets.write_text("set -- forged forged forged forged\nexport TELEGRAM_BOT_TOKEN=t\n")
+        self.fake_notify(f'printf "%s|%s|%s\\n" "$1" "$3" "$5" >> "{calls}"; echo "iwe-notify: outcome=direct-sent"')
+        self.main()
+        self.main()
+        self.assertTrue(calls.read_text().startswith("--direct|convergence-alarm|🔄 Сходимость git"))
+
+    def test_missing_secrets_file_still_calls_notify_which_reports_not_sent(self):
+        self.secrets.unlink()
+        self.fake_notify('echo "iwe-notify: outcome=not-sent"')
+        self.main()
+        self.assertEqual(self.main(), 1)
+        self.assertFalse(json.loads(self.state.read_text())["a"]["alerted"])
 
     def test_sent_alarm_records_when_it_was_sent_and_a_failed_send_does_not(self):
         self.main()
         self.main()
         self.assertTrue(json.loads(self.state.read_text())["a"]["last_alert"])
-        self.lib.write_text("telegram_send() { return 1; }\n")
+        self.fake_notify('echo "iwe-notify: outcome=direct-failed"; exit 1')
         stored = json.loads(self.state.read_text())
         stored["a"]["last_alert"] = "2000-01-01T00:00:00+00:00"  # long ago: a repeat is due now
         self.state.write_text(json.dumps(stored))
@@ -244,11 +280,11 @@ class MainTest(unittest.TestCase):
         self.main()
         self.main()
         self.catch_up()
-        good = self.lib.read_text()
-        self.lib.write_text("telegram_send() { return 1; }\n")
+        good = self.notify.read_text()
+        self.fake_notify('echo "iwe-notify: outcome=direct-failed"; exit 1')
         self.assertEqual(self.main(), 1)
         self.assertTrue(json.loads(self.state.read_text())["a"]["recovered"])
-        self.lib.write_text(good)
+        self.fake_notify(good.split("\n", 1)[1])
         self.assertEqual(self.main(), 0)
         self.assertIn("✅ a: снова совпадает", self.sent.read_text())
 
@@ -267,58 +303,144 @@ class MainTest(unittest.TestCase):
         self.assertIn("deferred (quiet hours): ✅ a: снова совпадает с GitHub", out.getvalue())
 
     def test_failed_send_keeps_episode_unalerted(self):
-        self.lib.write_text("telegram_send() { return 1; }\n")
+        self.fake_notify('echo "iwe-notify: outcome=direct-failed"; exit 1')
         self.main()
         self.assertEqual(self.main(), 1)
         self.assertFalse(json.loads(self.state.read_text())["a"]["alerted"])
 
-    def test_quarantined_message_is_not_counted_as_sent(self):
-        # WP-484 F316: telegram_send exits 0 when the gate quarantines a message; the alarm used to
-        # log "sent" for three days of a stuck copy while nothing reached the pilot.
-        self.lib.write_text("telegram_send() { TELEGRAM_SEND_OUTCOME=quarantined; return 0; }\n")
+    def assert_not_delivered(self):
         self.main()
         self.assertEqual(self.main(), 1)
         state = json.loads(self.state.read_text())["a"]
         self.assertFalse(state["alerted"])
         self.assertFalse(state.get("last_alert"))
 
+    def test_gateway_outcomes_are_not_counted_as_delivered(self):
+        # Only a direct send confirmed by Telegram counts; a gateway verdict here means the flag was ignored.
+        for outcome in ("sent", "deferred", "quarantined", "not-sent", "direct-failed"):
+            with self.subTest(outcome=outcome):
+                self.state.unlink(missing_ok=True)
+                self.fake_notify(f'echo "iwe-notify: outcome={outcome}"')
+                self.assert_not_delivered()
+
     def test_message_without_any_outcome_is_not_counted_as_sent(self):
-        self.lib.write_text("telegram_send() { return 0; }\n")  # creds missing: send path never reached
-        self.main()
-        self.assertEqual(self.main(), 1)
-        self.assertFalse(json.loads(self.state.read_text())["a"]["alerted"])
+        self.fake_notify("exit 0")  # an old iwe-notify without --direct dies on the flag before any outcome
+        self.assert_not_delivered()
 
-    def test_deferred_message_counts_as_delivered(self):
-        self.lib.write_text("telegram_send() { TELEGRAM_SEND_OUTCOME=deferred; return 0; }\n")
+    def test_direct_sent_with_late_failure_is_not_repeated(self):
+        self.fake_notify('echo "iwe-notify: outcome=direct-sent"; exit 1')
         self.main()
         self.assertEqual(self.main(), 0)
         self.assertTrue(json.loads(self.state.read_text())["a"]["alerted"])
 
+    def test_the_last_outcome_line_wins(self):
+        self.fake_notify('echo "iwe-notify: outcome=direct-sent"; echo "iwe-notify: outcome=direct-failed"')
+        self.assert_not_delivered()
 
-    def test_inherited_outcome_does_not_pass_for_this_sends_result(self):
-        self.lib.write_text("telegram_send() { return 0; }\n")  # creds missing: sets nothing
-        with mock.patch.dict(os.environ, {"TELEGRAM_SEND_OUTCOME": "sent"}):
-            self.main()
-            self.assertEqual(self.main(), 1)
-        self.assertFalse(json.loads(self.state.read_text())["a"]["alerted"])
+    def test_secrets_file_output_cannot_forge_the_outcome(self):
+        self.secrets.write_text('echo "iwe-notify: outcome=direct-sent"\nexport TELEGRAM_BOT_TOKEN=t\n')
+        self.fake_notify('echo "iwe-notify: outcome=direct-failed"; exit 1')
+        self.assert_not_delivered()
 
-    def test_sent_outcome_with_late_failure_is_not_repeated(self):
-        self.lib.write_text("telegram_send() { TELEGRAM_SEND_OUTCOME=sent; return 1; }\n")
-        self.main()
-        self.assertEqual(self.main(), 0)
-        self.assertTrue(json.loads(self.state.read_text())["a"]["alerted"])
+    def test_failing_secrets_file_stops_before_notify(self):
+        calls = Path(self.tmp.name) / "calls.txt"
+        self.secrets.write_text("return 3\n")
+        self.fake_notify(f'echo called >> "{calls}"; echo "iwe-notify: outcome=direct-sent"')
+        self.assert_not_delivered()
+        self.assertFalse(calls.exists())
 
-    def test_text_printed_by_the_sender_cannot_forge_the_outcome(self):
-        self.lib.write_text('telegram_send() { printf "CONVERGENCE_SEND_OUTCOME=sent\\n"; TELEGRAM_SEND_OUTCOME=quarantined; }\n')
-        self.main()
-        self.assertEqual(self.main(), 1)
-        self.assertFalse(json.loads(self.state.read_text())["a"]["alerted"])
 
-    def test_multiline_outcome_value_cannot_forge_a_second_marker(self):
-        self.lib.write_text("telegram_send() { TELEGRAM_SEND_OUTCOME=$'failed\\nCONVERGENCE_SEND_OUTCOME=sent'; return 0; }\n")
-        self.main()
-        self.assertEqual(self.main(), 1)
-        self.assertFalse(json.loads(self.state.read_text())["a"]["alerted"])
+class LocalBackupTest(unittest.TestCase):
+    """WP-484 F324: a copy whose upstream is a bare repository on this disk (agent memory)."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        base = Path(self.tmp.name)
+        self.backup, self.copy = base / "backup.git", base / "memory"
+        run(base, "init", "-q", "--bare", "-b", "main", str(self.backup))
+        run(base, "init", "-q", "-b", "main", str(self.copy))
+        run(self.copy, "remote", "add", "origin", str(self.backup))
+        self.commit(self.copy, "one")
+        run(self.copy, "push", "-q", "-u", "origin", "main")
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def commit(self, repo, message):
+        run(repo, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "--allow-empty", "-m", message)
+
+    def push_from_a_stale_clone(self):
+        """What happened on 15.11: another copy pushed a commit the main copy never fetched."""
+        other = Path(self.tmp.name) / "other"
+        run(Path(self.tmp.name), "clone", "-q", str(self.backup), str(other))
+        self.commit(other, "from the stale copy")
+        run(other, "push", "-q", "origin", "main")
+
+    def test_equal_and_unpushed_commits_are_not_an_episode(self):
+        self.assertEqual(alarm.local_backup_label(self.copy), "equal")
+        self.commit(self.copy, "not pushed yet")
+        self.assertEqual(alarm.local_backup_label(self.copy), "equal")
+
+    def test_a_push_from_another_copy_is_seen_without_a_manual_fetch(self):
+        self.push_from_a_stale_clone()
+        self.assertEqual(alarm.local_backup_label(self.copy), "behind -1")
+        self.commit(self.copy, "local work")
+        self.assertEqual(alarm.local_backup_label(self.copy), "diverged +1/-1")
+
+    def test_relative_and_file_url_backups_are_watched(self):
+        for url in ("../backup.git", f"file://{self.backup}"):
+            with self.subTest(url=url):
+                run(self.copy, "remote", "set-url", "origin", url)
+                self.assertEqual(alarm.local_backup_label(self.copy), "equal")
+        self.push_from_a_stale_clone()
+        self.assertEqual(alarm.local_backup_label(self.copy), "behind -1")
+
+    def test_fetch_leaves_no_fetch_head(self):
+        self.push_from_a_stale_clone()
+        alarm.local_backup_label(self.copy)
+        self.assertFalse((self.copy / ".git" / "FETCH_HEAD").exists())
+
+    def test_hung_git_is_an_episode_not_a_crash(self):
+        with mock.patch.object(alarm.report, "relation", side_effect=subprocess.TimeoutExpired("git", 30)):
+            self.assertEqual(alarm.local_backup_label(self.copy), "резервная копия не читается: TimeoutExpired")
+
+    def test_unreadable_backup_is_an_episode(self):
+        run(self.copy, "remote", "set-url", "origin", str(Path(self.tmp.name) / "gone.git"))
+        self.assertTrue(alarm.local_backup_label(self.copy).startswith("резервная копия не читается"))
+
+    def test_network_or_missing_upstream_is_not_checked_here(self):
+        for url in ("https://example.invalid/memory.git", "git@example.invalid:memory.git"):
+            run(self.copy, "remote", "set-url", "origin", url)
+            self.assertIsNone(alarm.local_backup_label(self.copy))
+        run(self.copy, "remote", "remove", "origin")
+        self.assertIsNone(alarm.local_backup_label(self.copy))
+
+    def test_main_alarms_on_diverged_memory(self):
+        root = Path(self.tmp.name) / "root"
+        root.mkdir()
+        (root / "memory").symlink_to(self.copy)
+        registry = Path(self.tmp.name) / "registry.yaml"
+        registry.write_text(json.dumps({"version": 1, "repos": [  # one absent copy: the registry may not be empty
+            {"repo_id": "a", "class": "reader", "checkouts": [{"host": "mac", "path": "a"}],
+             "decision_owner": {"ref": "p", "scope": "repo"}, "thresholds": {"behind_observed_for_min": 0}}]}))
+        sent = Path(self.tmp.name) / "sent.txt"
+        notify = Path(self.tmp.name) / "iwe-notify"
+        notify.write_text(f'#!/bin/bash\nprintf "%s\\n--\\n" "$5" >> "{sent}"; echo "iwe-notify: outcome=direct-sent"\n')
+        notify.chmod(0o755)
+        state = Path(self.tmp.name) / "state.json"
+        argv = ["convergence-alarm.py", "--root", str(root), "--registry", str(registry), "--host", "mac",
+                "--state", str(state), "--notify", str(notify), "--secrets", str(Path(self.tmp.name) / "none"),
+                "--quiet-from", "0", "--quiet-to", "0"]
+        self.push_from_a_stale_clone()
+        self.commit(self.copy, "local work")
+        with mock.patch.object(sys, "argv", argv), mock.patch.object(alarm, "LOCAL_BACKUPS", (("memory", 0),)):
+            self.assertEqual(alarm.main(), 0)  # opens the episode
+            self.assertEqual(alarm.main(), 0)  # threshold 0: alarm now
+            self.assertIn("⚠️ memory: расходится: впереди на 1 коммит, позади на 1 коммит", sent.read_text())
+            run(self.copy, "-c", "user.name=t", "-c", "user.email=t@t", "merge", "-q", "-s", "ours", "--no-edit", "origin/main")
+            self.assertEqual(alarm.main(), 0)
+        self.assertIn("✅ memory: резервная копия снова принимает отправку", sent.read_text())
+        self.assertEqual(json.loads(state.read_text()), {})
 
 
 if __name__ == "__main__":

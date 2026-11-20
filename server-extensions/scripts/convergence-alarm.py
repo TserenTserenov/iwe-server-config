@@ -16,6 +16,15 @@ Contract:
     alarmed copy is back. Both stay in the state until actually sent: quiet hours (default 23-08
     local; equal hours = none) and a failed send defer them to the next run.
   * WHY: the last line the reader mover wrote about that copy, when there is one.
+  * LOCAL BACKUPS (WP-484 F324, 20.11): a repository whose upstream is a bare repository on this disk
+    (agent memory -> .iwe-runtime/backups/memory.git) is not on GitHub, so it is not in the registry and
+    no broker fetches it. Memory and its backup diverged on 15.11 and stayed so for five days without a
+    word. Such a copy is fetched here (local path only, never the network); `ahead` is its normal state
+    (pushes are manual), only behind/diverged/unreachable open an episode.
+  * HOW IT IS SENT (WP-484 F316 item 1, 20.11): straight to Telegram through the root `iwe-notify --direct`
+    with the bot keys from the secrets file, never through the gateway of the strategy repository. The
+    alarm is about copies falling behind, the strategy repository among them; its gateway and sender
+    list were stale exactly when the alarm mattered (16-19.11: the alarms went to quarantine).
 Exit code: 0 on success, 1 when the registry is broken or a message could not be sent (the episode
 stays unsent and is retried on the next run).
 """
@@ -42,6 +51,9 @@ READER_LOG_TAIL = 400
 FETCH_STALE_MIN = 120  # the broker runs every few minutes; two hours without a confirmed fetch is broken
 AHEAD_GRACE_MIN = 120  # a session commit normally reaches GitHub within minutes
 REPEAT_MIN = 360  # an alarmed episode that lasts is repeated this often (6 h), only after a message was really sent
+# (path relative to the root, threshold in minutes) of copies whose upstream is a local bare repository.
+LOCAL_BACKUPS = (("memory", 60),)
+LOCAL_FETCH_TIMEOUT = 60
 
 
 def now_local():
@@ -86,6 +98,63 @@ def assess(relation, fetched, threshold, now):
     return "equal", threshold
 
 
+def local_backup_path(repo, url):
+    """Filesystem path of a local `origin` URL, or None for a network URL (scheme:// or host:path)."""
+    if url.startswith("file://"):
+        return Path(url[len("file://"):])
+    if "://" in url:
+        return None
+    path = Path(url).expanduser()
+    if path.is_absolute():
+        return path
+    if ":" in url.split("/", 1)[0]:
+        return None  # scp-like host:path
+    return Path(repo) / path  # git resolves a relative URL against the repository
+
+
+def run_git(repo, what, *args):
+    """(returncode, stdout) of `git -C repo *args`, or (None, reason) when git hung or could not start.
+    `what` names the call in messages."""
+    try:
+        proc = subprocess.run(["git", "-C", str(repo), *args], capture_output=True, text=True,
+                              timeout=LOCAL_FETCH_TIMEOUT, check=False)
+    except subprocess.TimeoutExpired:
+        return None, f"git {what} дольше {LOCAL_FETCH_TIMEOUT} с"
+    except OSError as exc:
+        return None, f"git {what}: {exc.__class__.__name__}"
+    if proc.returncode != 0 and proc.stderr.strip():
+        print(f"convergence-alarm: {repo}: git {what}: {proc.stderr.strip()[-300:]}", file=sys.stderr)
+    return proc.returncode, proc.stdout
+
+
+def local_backup_label(repo):
+    """Relation label of a copy to its bare backup on this disk, or None when the copy has no such backup.
+
+    The backup is fetched here: it is a local path, nothing else updates the remote-tracking ref. The fetch
+    touches only refs/remotes/origin/* and objects; it writes no FETCH_HEAD and runs no auto maintenance,
+    because agents commit to this repository all day. `ahead` (commits not pushed yet) is the normal state
+    and counts as `equal`; a copy that cannot push any more (behind or diverged) or a backup that cannot be
+    read is an episode."""
+    rc, out = run_git(repo, "remote", "remote", "get-url", "origin")
+    if rc == 2:
+        return None  # no remote "origin": no backup configured
+    if rc != 0:
+        return f"резервная копия не читается: git remote {out if rc is None else f'код {rc}'}"
+    url = out.strip()
+    if local_backup_path(repo, url) is None:
+        print(f"convergence-alarm: {repo}: origin {url} is not a local path, backup check skipped", file=sys.stderr)
+        return None
+    rc, out = run_git(repo, "fetch", "-c", "maintenance.auto=false", "-c", "gc.auto=0",
+                      "fetch", "-q", "--no-write-fetch-head", "origin")
+    if rc != 0:
+        return f"резервная копия не читается: git fetch {out if rc is None else f'код {rc}'}"
+    try:
+        relation, _, _ = report.relation(repo)
+    except (subprocess.SubprocessError, OSError) as exc:
+        return f"резервная копия не читается: {exc.__class__.__name__}"
+    return "equal" if relation.startswith("ahead") else relation
+
+
 def plural_commits(n):
     """'1 коммит', '2 коммита', '5 коммитов' (Russian plural of the number that follows 'на')."""
     if n % 10 == 1 and n % 100 != 11:
@@ -126,7 +195,11 @@ def alarm_text(path, label, minutes, threshold, kind_since, repeat):
     return f"⚠️ {path}: {body}" + (" — повторное сообщение, эпизод не закрыт" if repeat else "")
 
 
-def step(state, path, label, threshold, now):
+RECOVERED_GITHUB = "снова совпадает с GitHub"
+RECOVERED_BACKUP = "резервная копия снова принимает отправку"
+
+
+def step(state, path, label, threshold, now, recovered=RECOVERED_GITHUB):
     """Advance one copy's episode; return the message to send for it, or None.
 
     A recovery of an alarmed episode stays in the state (recovered=True) until main() has sent it.
@@ -140,7 +213,7 @@ def step(state, path, label, threshold, now):
             del state[path]
             return None
         episode["recovered"] = True
-        return f"✅ {path}: снова совпадает с GitHub"
+        return f"✅ {path}: {recovered}"
     if not episode:
         state[path] = {"since": now.isoformat(), "relation": label, "alerted": False}
         return None
@@ -181,40 +254,39 @@ def log_messages(now, outcome, pending):
 
 
 TELEGRAM_SOURCE_ID = "convergence-alarm"
-OUTCOME_MARKER = "CONVERGENCE_SEND_OUTCOME="
-DELIVERED_OUTCOMES = {"sent", "deferred"}
+OUTCOME_PREFIX = "iwe-notify: outcome="
+DELIVERED_OUTCOME = "direct-sent"
 
 
-def send_telegram(lib, text):
-    # The gate identifies a sender by TELEGRAM_SOURCE_ID, else by the basename of $0.
-    # With neither, $0 was "_" and the digest quarantined a real alarm as
-    # "вне реестра: _" (WP-484 F313, 18.11).
-    # An outcome inherited from our own environment must not pass for this send's result.
-    env = {key: value for key, value in os.environ.items() if key != "TELEGRAM_SEND_OUTCOME"}
-    env["TELEGRAM_SOURCE_ID"] = TELEGRAM_SOURCE_ID
-    # telegram_send exits 0 for a quarantined message too; what really happened is in
-    # TELEGRAM_SEND_OUTCOME (WP-538 Ф7). Only "sent" (and "deferred": the message is queued into the
-    # digest, the channel's own delivery guarantee) counts as delivered, so a quarantined alarm
-    # stays unsent and is retried instead of being logged as sent for three days (WP-484 Ф316, 19.11).
-    # The marker is printed whatever the exit code was: a send that went out and then failed late
-    # must not be repeated every 15 minutes. Newlines are stripped from the value so it cannot
-    # forge a second marker line.
-    script = ('. "$1"; unset TELEGRAM_SEND_OUTCOME; telegram_send "$2"; rc=$?; '
-              'printf "\\n%s%s\\n" "' + OUTCOME_MARKER + '" "$(printf %s "${TELEGRAM_SEND_OUTCOME:-}" | tr -d "\\n\\r")"; exit $rc')
-    proc = subprocess.run(["bash", "-c", script, Path(__file__).name, str(lib), text],
-                          capture_output=True, text=True, timeout=60, env=env, check=False)
-    outcome = next((line[len(OUTCOME_MARKER):] for line in reversed(proc.stdout.splitlines())
-                    if line.startswith(OUTCOME_MARKER)), "")
-    if outcome in DELIVERED_OUTCOMES:
+def send_telegram(notify, secrets, text):
+    """Send `text` with `iwe-notify --direct`, the bot keys sourced from `secrets`; True when delivered.
+
+    Only `direct-sent` (Telegram answered ok:true) counts: not-sent (no keys), direct-failed or no
+    outcome line at all keep the episode unsent, retried on the next run. The secrets file is sourced
+    with its stdout sent to stderr, so nothing but iwe-notify can print an outcome line; the last such
+    line wins. A send that went out and then failed late (outcome direct-sent, non-zero exit) is
+    delivered and must not be repeated every 15 minutes."""
+    # set -a: a secrets file that assigns without `export` still hands the keys to iwe-notify (a new
+    # process); the arguments are copied first, so `set --` or `shift` in that file cannot change them.
+    script = ('secrets=$1 notify=$2 source_id=$3 text=$4; '
+              'if [ -f "$secrets" ]; then set -a; . "$secrets" >&2 || exit 1; set +a; fi; '
+              'exec "$notify" --direct --source "$source_id" -- "$text"')
+    try:
+        proc = subprocess.run(["bash", "-c", script, Path(__file__).name, str(secrets), str(notify),
+                               TELEGRAM_SOURCE_ID, text],
+                              capture_output=True, text=True, timeout=60, check=False)
+    except subprocess.TimeoutExpired:
+        print("convergence-alarm: iwe-notify did not finish in 60 s - episode stays unsent", file=sys.stderr)
+        return False
+    outcome = next((line[len(OUTCOME_PREFIX):] for line in reversed(proc.stdout.splitlines())
+                    if line.startswith(OUTCOME_PREFIX)), "")
+    if outcome == DELIVERED_OUTCOME:
         if proc.returncode != 0:
-            print(f"convergence-alarm: telegram_send exited {proc.returncode} after outcome {outcome}; counted as delivered",
+            print(f"convergence-alarm: iwe-notify exited {proc.returncode} after outcome {outcome}; counted as delivered",
                   file=sys.stderr)
         return True
-    if proc.returncode != 0:
-        print(f"convergence-alarm: telegram_send failed: {proc.stderr.strip()[-300:]}", file=sys.stderr)
-    else:
-        print(f"convergence-alarm: message not delivered (outcome: {outcome or 'none'}) - episode stays unsent",
-              file=sys.stderr)
+    print(f"convergence-alarm: message not delivered (outcome: {outcome or 'none'}, exit {proc.returncode}): "
+          f"{proc.stderr.strip()[-300:]} - episode stays unsent", file=sys.stderr)
     return False
 
 
@@ -244,8 +316,9 @@ def main():
     parser.add_argument("--state", default=None, help="default: <root>/.iwe-runtime/convergence-alarm.json")
     parser.add_argument("--reader-log", default=None,
                         help="default: <root>/DS-my-strategy/logs/reader-copies-sync.log")
-    parser.add_argument("--telegram-lib", default=None,
-                        help="default: <root>/DS-my-strategy/scripts/lib/telegram.sh")
+    parser.add_argument("--notify", default=str(SCRIPTS / "iwe-notify"))
+    parser.add_argument("--secrets", default=os.environ.get("TG_SECRETS_FILE") or str(Path.home() / ".secrets" / "tg-bots"),
+                        help="sourceable file exporting TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID")
     parser.add_argument("--quiet-from", type=int, default=23)
     parser.add_argument("--quiet-to", type=int, default=8)
     parser.add_argument("--dry-run", action="store_true", help="print messages, do not send or save state")
@@ -259,7 +332,6 @@ def main():
     host = args.host or repo_registry.host_id()
     state_path = args.state or root / ".iwe-runtime" / "convergence-alarm.json"
     reader_log = args.reader_log or root / "DS-my-strategy" / "logs" / "reader-copies-sync.log"
-    telegram_lib = args.telegram_lib or root / "DS-my-strategy" / "scripts" / "lib" / "telegram.sh"
 
     state = load_state(state_path)
     now = now_local()
@@ -275,6 +347,16 @@ def main():
         if text:
             reason = last_reader_line(reader_log, path) if label != "equal" else ""
             pending.append((path, text + (f"\nперемотка: {reason}" if reason else "")))
+    for path, threshold in LOCAL_BACKUPS:
+        repo = root / path
+        if not (repo / ".git").exists():
+            continue
+        label = local_backup_label(repo)
+        if label is None:
+            continue
+        text = step(state, path, label, threshold, now, recovered=RECOVERED_BACKUP)
+        if text:
+            pending.append((path, text))
 
     if not pending:
         status = 0
@@ -284,7 +366,7 @@ def main():
     elif in_quiet_hours(now, args.quiet_from, args.quiet_to):
         log_messages(now, "deferred (quiet hours)", pending)
         status = 0
-    elif send_telegram(telegram_lib, "🔄 Сходимость git, Мак\n\n" + "\n\n".join(t for _, t in pending)):
+    elif send_telegram(args.notify, args.secrets, "🔄 Сходимость git, Мак\n\n" + "\n\n".join(t for _, t in pending)):
         for path, _ in pending:
             if state.get(path, {}).get("recovered"):
                 del state[path]

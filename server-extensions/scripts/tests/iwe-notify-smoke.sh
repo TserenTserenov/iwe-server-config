@@ -168,6 +168,26 @@ outcome_case "нет шлюза и ключей" not-sent TELEGRAM_BOT_TOKEN= IW
 
 outcome_case "шлюз упал после подтверждения Telegram" sent GATEWAY_STAGE=sent GATEWAY_RC=1 IWE_ROOT="$WORK/iwe"
 
+# --direct (WP-484 F316): the gateway is present and working, yet it is not
+# called at all; one direct send, one row with reason direct-requested.
+# direct_case <label> <expected outcome> <expected row outcome> <env...>
+direct_case() {
+  local label="$1" want="$2" row="$3" out; shift 3
+  reset
+  out="$(env "$@" GATEWAY_RC=0 IWE_ROOT="$WORK/iwe" "$NOTIFY" --direct --source s-test "текст" 2>/dev/null)"
+  [ "$out" = "iwe-notify: outcome=$want" ] && [ "$(count "$GATEWAY_CALLS")" = 0 ] \
+    && awk -F'\t' -v r="$row" '$2=="s-test" && $3=="direct-requested" && $4==r' "$LOG" | grep -q . \
+    && ok "--direct, $label: шлюз не вызван, исход «${want}», строка direct-requested" \
+    || bad "--direct, $label" "stdout=$out gateway=$(count "$GATEWAY_CALLS") log=$(cat "$LOG" 2>&1)"
+}
+direct_case "Telegram принял" direct-sent sent
+direct_case "Telegram отклонил" direct-failed failed CURL_RC=22
+reset
+out="$(TELEGRAM_BOT_TOKEN='' GATEWAY_RC=0 IWE_ROOT="$WORK/iwe" "$NOTIFY" --direct --source s-test "текст" 2>/dev/null)"
+[ "$out" = "iwe-notify: outcome=not-sent" ] && [ "$(count "$GATEWAY_CALLS")" = 0 ] && [ "$(count "$CURL_CALLS")" = 0 ] \
+  && ok "--direct без ключей: шлюз не вызван, исход «not-sent»" \
+  || bad "--direct без ключей" "stdout=$out gateway=$(count "$GATEWAY_CALLS") curl=$(count "$CURL_CALLS")"
+
 # macOS system bash 3.2 (launchd jobs): an empty array under set -u must not
 # stop the direct send (review 08.11). Skipped where /bin/bash is not 3.x.
 if [ -x /bin/bash ] && /bin/bash -c '[ "${BASH_VERSINFO[0]}" -lt 4 ]'; then

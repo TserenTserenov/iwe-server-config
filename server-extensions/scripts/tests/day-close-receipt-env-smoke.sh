@@ -27,10 +27,12 @@ exit "${STUB_RC:-0}"
 STUB
 chmod +x "$T/scripts/session-guard.sh"
 
-run_block() {  # <stub rc>; prints "ENV=<array>" then stderr on the next lines
+run_block() {  # <stub rc> [agent]; prints "ENV=<array>" then stderr on the next lines
   (
     cd "$T/DS-my-strategy" || exit 9
     export IWE_ROOT="$T/root" IWE_SCRIPTS="$T/scripts" STUB_LOG="$T/log" STUB_RC="$1"
+    # The skill takes the closing agent from the prepared day-close context (step 0.5).
+    export DAY_CLOSE_NATIVE_RUNTIME="${2:-claude-code}"
     # shellcheck disable=SC2034  # read by the extracted skill block
     DC_SHA="$SHA"
     # shellcheck disable=SC2034  # the step names its repository instead of a top-level cd (WP-484 Ф298)
@@ -54,6 +56,17 @@ expect "claimed" "$OUT" "ENV=IWE_AGENT=claude-code IWE_PUBLICATION_SESSION_ID=ho
 expect "claimed" "$OUT" "WARN" no
 LOG=$(cat "$T/log")
 expect "claimed: note-commit args" "$LOG" "note-commit $SHA --repo DS-my-strategy --agent claude-code --slug day-close|agent=claude-code" yes
+
+# 1b. Any agent may close the day (WP-484 F325): Kimi claims under its own semaphore and name.
+: > "$T/root/.iwe-runtime/sessions/kimi-housekeeping-day-close.open"
+: > "$T/log"
+OUT=$(run_block 0 kimi)
+expect "kimi claimed" "$OUT" "ENV=IWE_AGENT=kimi IWE_PUBLICATION_SESSION_ID=housekeeping-day-close" yes
+expect "kimi note-commit args" "$(cat "$T/log")" "--agent kimi --slug day-close|agent=kimi" yes
+rm -f "$T/root/.iwe-runtime/sessions/kimi-housekeeping-day-close.open"
+: > "$T/log"
+OUT=$(run_block 0 kimi)
+expect "kimi without its own semaphore" "$OUT" "WARN: коммит дня не заявлен" yes
 
 # 2. Semaphore present, claim refused: no env, loud warning (the failure is not masked).
 : > "$T/log"
@@ -86,7 +99,7 @@ exit "${STUB_RC:-0}"
 STUB
 git -C "$T/DS-my-strategy" worktree add -q -b iso "$T/iso-copy"
 : > "$T/log"
-OUT=$(cd "$T/iso-copy" && G="$T/iso-copy" IWE_ROOT="$T/root" IWE_SCRIPTS="$T/scripts" STUB_LOG="$T/log" STUB_RC=0 DC_SHA="$SHA" \
+OUT=$(cd "$T/iso-copy" && DAY_CLOSE_NATIVE_RUNTIME=claude-code G="$T/iso-copy" IWE_ROOT="$T/root" IWE_SCRIPTS="$T/scripts" STUB_LOG="$T/log" STUB_RC=0 DC_SHA="$SHA" \
   bash -c "$BLOCK"$'\n'"echo ENV=\${DC_RECEIPT_ENV[*]:-}" 2>&1)
 expect "worktree" "$OUT" "ENV=IWE_AGENT=claude-code IWE_PUBLICATION_SESSION_ID=housekeeping-day-close" yes
 expect "worktree repo name" "$(cat "$T/log")" "--repo DS-my-strategy " yes
@@ -96,7 +109,7 @@ mkdir -p "$T/rootrepo/.iwe-runtime/sessions"
 git -C "$T/rootrepo" init -q -b main
 git -C "$T/rootrepo" -c user.email=t@example.test -c user.name=t commit -q --allow-empty -m x
 : > "$T/log"
-OUT=$(cd "$T/rootrepo" && G="$T/rootrepo" IWE_ROOT="$T/rootrepo" IWE_SCRIPTS="$T/scripts" STUB_LOG="$T/log" STUB_RC=0 DC_SHA="$SHA" \
+OUT=$(cd "$T/rootrepo" && DAY_CLOSE_NATIVE_RUNTIME=claude-code G="$T/rootrepo" IWE_ROOT="$T/rootrepo" IWE_SCRIPTS="$T/scripts" STUB_LOG="$T/log" STUB_RC=0 DC_SHA="$SHA" \
   bash -c "$BLOCK"$'\n'"echo ENV=\${DC_RECEIPT_ENV[*]:-}" 2>&1)
 expect "root repo name" "$(cat "$T/log")" "--repo iwe-root " yes
 

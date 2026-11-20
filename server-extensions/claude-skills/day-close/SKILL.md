@@ -60,13 +60,22 @@ printf '%s\n' "$TARGET_REAL"
 ```
 Писать ровно в выведенный `TARGET_REAL` (не в исходный путь). Проверка не прошла (пусто, канон, символическая ссылка на канон, цель вне копии) → СТОП, ничего не писать, сообщить пилоту. Граница правила: оно защищает от ошибки агента (пустая переменная, путь от канона, ссылка), а не от замены каталога другим процессом между проверкой и записью и не от жёсткой ссылки на файл канона; такую гарантию даст только записывающий механизм с проверкой при открытии файла (по образцу `wp-context-guarded-edit` для карточек РП) — отдельная работа, не часть этого правила. Дальше в шагах «`$GOV_REPO_ROOT/...`» значит этот проверенный абсолютный путь; путь вида `DS-my-strategy/...` без корня копии в общий каталог не использовать.
 
-**Граница мостика (РП-561 Ф32).** Записи своего запуска Claude Code идут через `IWE_LEDGER_WRITE_DIR` во внешнюю очередь, а чтение старой истории пока использует `IWE_LEDGER_DIR`. Закреплённый помощник связывает родной идентификатор с очередью; перед завершением `--finish` требует подтверждение публикации её стабильного снимка. Поздние хуки той же сессии сохраняют привязку и отдельно публикуют свои записи. Маршрут только для своего запуска; остальные производители и читатели не объявлены перенесёнными. `$IWE_OPEN_SESSIONS_LOG` указывает на снимок открытых сессий в изолированной копии; `day-close.sh` пишет `exocortex/` и `current/sessions-today.md` туда же. Успешный `--finish` сохраняет эти выходы в `.iwe-runtime/day-close-backups/` вне удаляемых рабочих копий и обновляет указатель последнего завершённого снимка. Штатное восстановление без явного пути читает этот снимок; после отказа или отмены можно проверить сохранённую копию: `bash ~/IWE/FMT-exocortex-template/scripts/restore-from-exocortex.sh "$DAY_CLOSE_WORKTREE" --dry-run`.
+**Граница мостика (РП-561 Ф32).** Записи своего запуска закрытия дня идут через `IWE_LEDGER_WRITE_DIR` во внешнюю очередь, а чтение старой истории пока использует `IWE_LEDGER_DIR`. Закреплённый помощник связывает родной идентификатор с очередью; перед завершением `--finish` требует подтверждение публикации её стабильного снимка. Поздние хуки той же сессии сохраняют привязку и отдельно публикуют свои записи. Маршрут только для своего запуска; остальные производители и читатели не объявлены перенесёнными. `$IWE_OPEN_SESSIONS_LOG` указывает на снимок открытых сессий в изолированной копии; `day-close.sh` пишет `exocortex/` и `current/sessions-today.md` туда же. Успешный `--finish` сохраняет эти выходы в `.iwe-runtime/day-close-backups/` вне удаляемых рабочих копий и обновляет указатель последнего завершённого снимка. Штатное восстановление без явного пути читает этот снимок; после отказа или отмены можно проверить сохранённую копию: `bash ~/IWE/FMT-exocortex-template/scripts/restore-from-exocortex.sh "$DAY_CLOSE_WORKTREE" --dry-run`.
 
 **Владение запуском.** После успешного `--prepare` сохранить токен из вывода как неизменяемое значение этой сессии. Во всех командах ниже вместо `<токен из шага 0.5>` подставлять именно его, не перечитывать новый токен из общего файла. `--context` проверяет владельца, ветку и принадлежность копии репозиторию; только затем возвращает окружение. В новом Bash-вызове сначала выполнить этот префикс, в том числе перед одиночными командами из текста. При отказе остановить затронутый шаг. Для Edit/Write использовать корень из последней успешной проверки и проверить владение непосредственно перед записью. Дата `$IWE_CLOSE_DATE` фиксируется при подготовке и не меняется после полуночи.
 
+**Кто закрывает день (WP-484 Ф325, решение пилота 20.11: закрытие дня может вести любой агент).** Агент подставляет своё имя вместо `<имя агента>`: `claude-code`, `codex`, `kimi`, `hermes` или `grok`. Claude Code и Codex берут номер беседы из своего окружения. У Кими, Гермеса и Грока его нет: агент передаёт номер своей открытой сессии (`IWE_SESSION_ID`, тот же порядок, что при закрытии сессии в `memory/protocol-close.md`), а без открытой сессии команда создаёт номер сама. Номер нужен только при подготовке; дальше владение подтверждает токен. Дальнейшие шаги берут имя агента из подготовленного окружения (`$DAY_CLOSE_NATIVE_RUNTIME`), заново его не подставлять.
+
 ```bash
 bash ~/IWE/scripts/day-close-step-log.sh start 0.5
-[ -n "${CLAUDE_CODE_SESSION_ID:-}" ] || { echo 'STOP: родной session_id Claude Code не передан в shell'; exit 1; }
+DC_AGENT='<имя агента>'
+case "$DC_AGENT" in
+  claude-code) [ -n "${CLAUDE_CODE_SESSION_ID:-}" ] || { echo 'STOP: номер беседы Claude Code не передан в shell'; exit 1; } ;;
+  codex) [ -n "${CODEX_THREAD_ID:-}" ] || { echo 'STOP: номер беседы Codex не передан в shell'; exit 1; } ;;
+  kimi|hermes|grok) export IWE_SESSION_ID="${IWE_SESSION_ID:-$(python3 -c 'import uuid; print(uuid.uuid4())')}" || exit 1 ;;
+  *) echo "STOP: неизвестный агент закрытия дня: ${DC_AGENT}"; exit 1 ;;
+esac
+export IWE_AGENT="$DC_AGENT"
 DCI=$(mktemp) || exit 1
 if ! git -C "$HOME/IWE/DS-my-strategy" fetch -q origin main ||
    ! git -C "$HOME/IWE/DS-my-strategy" show origin/main:scripts/day-close-isolated.sh > "$DCI" ||
@@ -83,7 +92,7 @@ rm -f "$DCI"
 DC_CONTEXT=$(bash "$HOME/IWE/.iwe-runtime/day-close-interactive.sh" --context '<токен из шага 0.5>') || exit 1; eval "$DC_CONTEXT"
 # Subshell, not a top-level cd (WP-484 Ф298, И-10 п.4: destructive-guard blocks it); the
 # guard takes the repository from its working directory.
-(cd "$GOV_REPO_ROOT" && IWE_AGENT=claude-code bash "${IWE_SCRIPTS:-$HOME/IWE/scripts}/session-guard.sh" open --housekeeping day-close --agent claude-code) || exit 1
+(cd "$GOV_REPO_ROOT" && IWE_AGENT="$DAY_CLOSE_NATIVE_RUNTIME" bash "${IWE_SCRIPTS:-$HOME/IWE/scripts}/session-guard.sh" open --housekeeping day-close --agent "$DAY_CLOSE_NATIVE_RUNTIME") || exit 1
 bash ~/IWE/scripts/day-close-step-log.sh end 0.5
 ```
 
@@ -566,8 +575,8 @@ DC_FILES=(<каждый свой изменённый файл явным отн
 # WP-484 Ф298 (вход И-10 п.1): заявить файлы за housekeeping-сессией закрытия дня, иначе
 # проверка границ сессии отклоняет коммит новых файлов («вне scope активных сессий»).
 for DC_FILE in "${DC_FILES[@]}"; do
-  (cd "$G" && IWE_AGENT=claude-code bash "${IWE_SCRIPTS:-$HOME/IWE/scripts}/session-guard.sh" note-file "$DC_FILE" \
-    --agent claude-code --slug day-close) || echo "WARN: note-file $DC_FILE не прошёл — коммит может упереться в проверку границ" >&2
+  (cd "$G" && IWE_AGENT="$DAY_CLOSE_NATIVE_RUNTIME" bash "${IWE_SCRIPTS:-$HOME/IWE/scripts}/session-guard.sh" note-file "$DC_FILE" \
+    --agent "$DAY_CLOSE_NATIVE_RUNTIME" --slug day-close) || echo "WARN: note-file $DC_FILE не прошёл — коммит может упереться в проверку границ" >&2
 done
 ```
 
@@ -594,22 +603,24 @@ DC_STATUS=$(git -C "$G" status --porcelain) || exit 1
 # process-runner мог создать отдельный коммит RUN, один DC_SHA его не покрывает.
 bash "$DAY_CLOSE_WRAPPER" --context "$DAY_CLOSE_LOCK_TOKEN" >/dev/null || exit 1
 # BEGIN-RECEIPT-ENV (WP-539 Ф21 Б5; извлекается scripts/tests/day-close-receipt-env-smoke.sh)
-# Квитанция публикации (v2) пишется только при заданных агенте и номере сессии. Интерактивный
-# Claude Code переменную IWE_AGENT не несёт, поэтому без этого блока квитанция терялась
-# («нет привязанного агента»). Номер сессии = суффикс файла housekeeping-семафора, открытого
-# выше (claude-code-housekeeping-day-close.open → housekeeping-day-close). Квитанция отказывает,
+# Квитанция публикации (v2) пишется только при заданных агенте и номере сессии. Агент закрытия
+# берётся из подготовленного окружения ($DAY_CLOSE_NATIVE_RUNTIME, шаг 0.5): интерактивный запуск
+# IWE_AGENT не несёт, и без этого блока квитанция терялась («нет привязанного агента»). Номер
+# сессии = суффикс файла housekeeping-семафора, открытого выше (<агент>-housekeeping-day-close.open
+# → housekeeping-day-close). Квитанция отказывает,
 # если у сессии нет заявленных коммитов для репозитория, поэтому сначала заявляем DC_SHA (по слагу).
 DC_GUARD="${IWE_SCRIPTS:-$HOME/IWE/scripts}/session-guard.sh"
-DC_SEM="${IWE_ROOT:-$HOME/IWE}/.iwe-runtime/sessions/claude-code-housekeeping-day-close.open"
+DC_AGENT="${DAY_CLOSE_NATIVE_RUNTIME:?}"
+DC_SEM="${IWE_ROOT:-$HOME/IWE}/.iwe-runtime/sessions/${DC_AGENT}-housekeeping-day-close.open"
 DC_RECEIPT_ENV=()
 DC_COMMON=$(git -C "$G" rev-parse --path-format=absolute --git-common-dir 2>/dev/null) || DC_COMMON=""
 DC_REPO_NAME=$(basename "$(dirname "$DC_COMMON")")
 # Имя корневого репозитория считается так же, как в isolate-push.sh (record_publication_receipts).
 [ "$(dirname "$DC_COMMON")" != "$(cd "${IWE_ROOT:-$HOME/IWE}" 2>/dev/null && pwd -P)" ] || DC_REPO_NAME=iwe-root
 if [ -f "$DC_GUARD" ] && [ -f "$DC_SEM" ] && [ -n "$DC_COMMON" ] \
-    && IWE_AGENT=claude-code bash "$DC_GUARD" note-commit "$DC_SHA" --repo "$DC_REPO_NAME" \
-         --agent claude-code --slug day-close; then
-  DC_RECEIPT_ENV=(IWE_AGENT=claude-code IWE_PUBLICATION_SESSION_ID=housekeeping-day-close)
+    && IWE_AGENT="$DC_AGENT" bash "$DC_GUARD" note-commit "$DC_SHA" --repo "$DC_REPO_NAME" \
+         --agent "$DC_AGENT" --slug day-close; then
+  DC_RECEIPT_ENV=("IWE_AGENT=$DC_AGENT" IWE_PUBLICATION_SESSION_ID=housekeeping-day-close)
 else
   echo "WARN: коммит дня не заявлен (нет охранника сессий, housekeeping-семафора или заявка отклонена) — публикация пойдёт без квитанции v2" >&2
 fi
@@ -630,7 +641,7 @@ fi
 # Передать R23 сохранённые дату, номер недели, DC_SHA и точный входной срез
 # DC_PUBLISHED_REVISION. Поиск коммита по заголовку доказательством не является.
 echo "DC_SHA=$DC_SHA DC_PUBLISHED_REVISION=$DC_PUBLISHED_REVISION"
-(cd "$G" && bash "${IWE_SCRIPTS:-$HOME/IWE/scripts}/session-guard.sh" close --housekeeping day-close --agent claude-code) || exit 1
+(cd "$G" && bash "${IWE_SCRIPTS:-$HOME/IWE/scripts}/session-guard.sh" close --housekeeping day-close --agent "$DAY_CLOSE_NATIVE_RUNTIME") || exit 1
 ```
 
 **15г. Завершение** — отдельный вызов с увеличенным лимитом времени (до 5 мин): `--finish` подтверждает стабильный срез внешней очереди журнала и при гонке с другой публикацией повторяет её до трёх раз (WP-484 Ф298, И-10 п.5), поэтому может идти дольше двух минут. Отказ оставляет замок и данные; повторять только этот вызов, не 15в:

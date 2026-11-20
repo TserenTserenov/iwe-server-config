@@ -2178,6 +2178,8 @@ _runtime_harness_session_id() {  # <agent>; guard UUID and harness UUID are dist
 
 _open_native_identity_available() {  # admission lock held; no adoption of another guard ID
   python3 - "$SESSION_DIR" "$AGENT" "$1" "$2" "$WP" "${SLUG:-$WP}" "${IWE_SESSION_ID:-}" <<'PY_NATIVE'
+import datetime
+import json
 import os
 from pathlib import Path
 import re
@@ -2187,6 +2189,51 @@ import sys
 root, agent, native, host, wp, slug, requested = sys.argv[1:]
 if not native:
     raise SystemExit(0)
+
+
+def pilot_release_record(session):
+    """Last applied `close --pilot-release` line for this mark (WP-484 F301/F323), or None."""
+    audit = Path(root).parent / "pilot-release-audit.jsonl"
+    found = None
+    try:
+        lines = audit.read_text(encoding="utf-8").splitlines()
+    except FileNotFoundError:
+        return None
+    except (OSError, UnicodeError) as error:
+        print("open: журнал снятий не прочитан (" + str(error) + "), подсказка без него", file=sys.stderr)
+        return None
+    for line in lines:
+        try:
+            record = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(record, dict) and record.get("session_id") == session and record.get("applied", True) is not False:
+            found = record
+    return found
+
+
+def closed_work_reason(path, values, session, recorded_wp):
+    """WP-561 F75: a chat whose session was released from outside continues with a new slug.
+
+    The release is known from the audit line of `close --pilot-release` (time, word, calling
+    conversation) or, for records older than its owner field, from the marker's terminal
+    reference "pilot-release:<slug>". Any other close is the chat's own: its work continues in
+    a new chat (style pack rule 6.5)."""
+    record = pilot_release_record(session)
+    marked = [v for v in values("close_delivery_terminal_reference") if v.startswith("pilot-release:")]
+    if record is None and not marked:
+        return ("эта работа native-сессии уже закрыта; session_id=" + session
+                + "; закрытую беседой работу продолжают в новой беседе (пак стиля, правило 6.5)")
+    if record is not None:
+        how = ("по слову пилота «" + str(record.get("word", "")) + "», " + str(record.get("timestamp", "время не записано"))
+               + ", вызвала беседа " + (str(record.get("caller_conversation") or "") or "не записана"))
+    else:
+        when = datetime.datetime.fromtimestamp(path.stat().st_mtime, datetime.timezone.utc).strftime("%Y-%m-%dT%H:%MZ")
+        how = "по слову пилота (" + marked[0] + "), около " + when + ", слово и вызвавшая беседа не записаны"
+    return ("сессия этой беседы на " + recorded_wp + " со slug '" + slug + "' снята извне " + how
+            + "; продолжение здесь — только после ответа пилота «продолжить», новой сессией с другим slug: "
+            + "open --wp " + recorded_wp + " --slug " + slug + "-r2 "
+            + "(протокол закрытия, «Сессию беседы сняли извне», РП-561 Ф75); session_id=" + session)
 
 
 def refuse(path, reason):
@@ -2303,7 +2350,7 @@ try:
         if path.name != recorded_agent + "-" + session + suffix:
             refuse(path, "session_id не совпадает с именем записи")
         if suffix == ".open.closed":
-            refuse(path, "эта работа native-сессии уже закрыта; session_id=" + session)
+            refuse(path, closed_work_reason(path, values, session, recorded_wp))
         if not requested or session != requested:
             refuse(path, "эта работа native-сессии уже открыта; повтори с session_id=" + session)
         # The exact-ID path still has to pass _open_reentry_matches below.
