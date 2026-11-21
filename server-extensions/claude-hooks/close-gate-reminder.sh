@@ -51,17 +51,37 @@ esac
 # (CLAUDE.md section 9). It must not arm the close: the check comes first and
 # may stop the close. Only the skip of the reflection question is recorded
 # (the PSZ branch below); the agent starts the close itself after the check.
+# WP-561 F81 (21.11): the shorthand also counts as the last word after an
+# instruction ("вноси и доделай и потом ПСЗ"); the shared filter
+# a12-unsolicited-close.py --shorthand decides (quotes, negations, questions,
+# the 600-char paste limit). A filter failure falls back to the whole-message
+# check below (the behaviour before F81).
+# A trailing «СЗ» arms the close in warn mode: the instruction before it may need
+# commits and questions to the pilot, which block mode would stop; the Stop gate
+# still reminds about the close.
 PSZ_SHORTHAND=false
-if printf '%s' "$PROMPT" | grep -qxE '[[:space:][:punct:]]*(п)?сз[[:space:][:punct:]]*' \
-    && ! printf '%s' "$PROMPT" | grep -q '?'; then
-  if printf '%s' "$PROMPT" | grep -q 'псз'; then
-    PSZ_SHORTHAND=true
-    PROMPT_ORIGINAL_CASE="без рефлексии"
-  else
-    PROMPT_ORIGINAL_CASE="закрывай без рефлексии"
+SZ_TRAILING=false
+PSZ_FORM=""
+SHORTHAND=""
+SHORTHAND_FILTER="${BASH_SOURCE[0]%/*}/a12-unsolicited-close.py"
+if ! SHORTHAND=$(printf '%s' "$PROMPT_ORIGINAL_CASE" | python3 "$SHORTHAND_FILTER" --shorthand 2>/dev/null); then
+  SHORTHAND=""
+  if printf '%s' "$PROMPT" | grep -qxE '[[:space:][:punct:]]*(п)?сз[[:space:][:punct:]]*' \
+      && ! printf '%s' "$PROMPT" | grep -q '?'; then
+    if printf '%s' "$PROMPT" | grep -q 'псз'; then SHORTHAND="psz whole"; else SHORTHAND="sz whole"; fi
   fi
-  PROMPT="$PROMPT_ORIGINAL_CASE"
 fi
+case "$SHORTHAND" in
+  "psz "*)
+    PSZ_SHORTHAND=true
+    PSZ_FORM="${SHORTHAND#psz }"
+    PROMPT_ORIGINAL_CASE="без рефлексии" ;;
+  "sz whole") PROMPT_ORIGINAL_CASE="закрывай без рефлексии" ;;
+  "sz trailing")
+    SZ_TRAILING=true
+    PROMPT_ORIGINAL_CASE="без рефлексии" ;;
+esac
+[ -n "$SHORTHAND" ] && PROMPT="$PROMPT_ORIGINAL_CASE"
 SESSION_ID=$(printf '%s' "$INPUT" | jq -r '.session_id // empty' 2>/dev/null)
 # Fallback + exact-reject (WP-484 Ф148, cold-context review 31.08, peer-session
 # 2026-08-31-40-close-runner-gate-session): this hook (UserPromptSubmit) writes
@@ -198,9 +218,8 @@ if [ -n "$DAY_CLOSE_TEXT" ]; then
 fi
 
 # Session Close (точный intent) → mode=block; широкая эвристика → mode=warn
-_arm_and_sentinel() {
+_arm_obligation() {
   local mode="$1"
-  local broad="$2"
   # WP-484 (peer-session 2026-08-31-43-close-obligation-orphan-recovery,
   # consensus with Codex): SESSION_ID falls into the "unknown" bucket
   # (resolution block above) only when BOTH the payload and
@@ -232,6 +251,14 @@ _arm_and_sentinel() {
       exit 0
     fi
   fi
+}
+
+# The sentinel makes close-runner-gate.sh hold direct git commit/push until the
+# runner starts (it lets them through only when it can read mode=warn).
+_arm_and_sentinel() {
+  local mode="$1"
+  local broad="$2"
+  _arm_obligation "$mode"
   mkdir -p "$SENTINEL_DIR" 2>/dev/null
   printf '{"session_id":"%s","created_at":"%s"}' \
     "$SESSION_ID" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
@@ -453,7 +480,9 @@ fi
 if [ "$PSZ_SHORTHAND" = true ]; then
   _record_close_intent '[Рр]ефлекси[ия]'
   rm -f "$SENTINEL_DIR/$SESSION_ID.flag" 2>/dev/null
-  jq -n --arg ctx "«ПСЗ» (CLAUDE.md §9): 1) сначала проверь результат сессии субагентом; 2) нашёл проблему — остановись и доложи пилоту, не заливай и не закрывай; 3) проверка прошла — закрывай через Skill run-protocol close. Пропуск вопроса о рефлексии уже записан по слову пилота, вопрос задан не будет. Закрытие пока не взведено: Stop-гейт не требует его до твоего запуска." \
+  PSZ_ORDER_PREFIX=""
+  [ "$PSZ_FORM" = trailing ] && PSZ_ORDER_PREFIX="0) «ПСЗ» стоит в конце поручения пилота: сначала выполни само поручение из этого сообщения; "
+  jq -n --arg ctx "«ПСЗ» (CLAUDE.md §9): ${PSZ_ORDER_PREFIX}1) сначала проверь результат сессии субагентом; 2) нашёл проблему — остановись и доложи пилоту, не заливай и не закрывай; 3) проверка прошла — закрывай через Skill run-protocol close. Пропуск вопроса о рефлексии уже записан по слову пилота, вопрос задан не будет. Закрытие пока не взведено: Stop-гейт не требует его до твоего запуска." \
     '{additionalContext: $ctx}'
   exit 0
 fi
@@ -487,6 +516,22 @@ if [ -n "$CLOSE_PATH_MATCH" ] && grep -q '^close_path: peer-session$' "$CLOSE_PA
     _consume_pending_reflection
   fi
   echo '{"additionalContext": "Сессия объявлена как пир-сессия (close_path=peer-session) — закрытие идёт по её собственному протоколу (DP.SC.154 Шаг 3.8/4.5), не через /run-protocol close. Этот гейт не вмешивается."}'
+  exit 0
+fi
+
+# A trailing «СЗ» (see the top of this file): record the skip of the reflection
+# question and arm the close in warn mode without the sentinel, so the
+# instruction before «СЗ» can still commit and ask the pilot; Stop reminds.
+if [ "$SZ_TRAILING" = true ]; then
+  _record_close_intent '[Рр]ефлекси[ия]'
+  # An earlier exact close command already armed block mode: keep it and its
+  # sentinel, a later trailing «СЗ» must not soften it (cold review 21.11).
+  if ! _obligation_available || [ "$(_run_obligation mode --session-id "$SESSION_ID")" != block ]; then
+    _arm_obligation warn
+    rm -f "$SENTINEL_DIR/$SESSION_ID.flag" 2>/dev/null
+  fi
+  jq -n --arg ctx "«СЗ» в конце поручения (CLAUDE.md §9): сначала выполни поручение из этого сообщения, затем залей изменения сессии и закрывай через Skill run-protocol close. Пропуск вопроса о рефлексии уже записан по слову пилота, вопрос задан не будет. Закрытие взведено в режиме напоминания: коммиты по поручению не блокируются, при остановке без закрытия Stop-гейт напомнит; если для поручения нужен ответ пилота — спроси его." \
+    '{additionalContext: $ctx}'
   exit 0
 fi
 

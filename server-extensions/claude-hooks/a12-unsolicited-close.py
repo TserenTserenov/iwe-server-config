@@ -12,6 +12,7 @@ Usage: a12-unsolicited-close.py <transcript.jsonl>
        a12-unsolicited-close.py --prompt-intends-close   (prompt on stdin, prints yes|no)
        a12-unsolicited-close.py --valid-prefix <regex>   (prompt on stdin, prints offset of the first command match)
        a12-unsolicited-close.py --mask-quotes            (prompt on stdin, prints it with quoted spans blanked)
+       a12-unsolicited-close.py --shorthand              (prompt on stdin, prints "psz|sz whole|trailing" or "")
 """
 import json
 import re
@@ -75,6 +76,36 @@ QUOTED_SPAN_RE = re.compile(r"«[^»]*»|\"[^\"]*\"|`[^`]*`|```.*?```", re.DOTAL
 # timestamp format is pasted content, not something the pilot typed as prose.
 LOG_LINE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}\s*\|.*$", re.MULTILINE)
 PASTE_PREFIX_LIMIT = 600  # same threshold as close-gate-reminder.sh
+
+# The pilot's shorthands (CLAUDE.md section 9): «ПСЗ» = check with a subagent, push,
+# close without reflection; «СЗ» = push and close without reflection.
+# WP-561 F81 (21.11, live case on Tsekh: "вноси и долелай и потом ПСЗ" was missed
+# because only the whole message counted, pilot decision 17.11). Two forms:
+#   whole    -- the message is the shorthand alone;
+#   trailing -- the shorthand is the last word after an instruction and follows a
+#               boundary: start, punctuation or a connective ("и потом ПСЗ",
+#               "доделай. СЗ"). A verb right before it ("ты не понял ПСЗ") is a
+#               mention, not a command.
+SHORTHAND_WHOLE_RE = re.compile(r"^\W*(п?сз)\W*$", re.IGNORECASE)
+SHORTHAND_TRAILING_RE = re.compile(
+    r"(?:^|[.,;:!—–\n-]|(?<!\w)(?:и|а|потом|затем|далее|после\s+этого|в\s+конце))"
+    r"\s*(п?сз)(?!\w)\W*(?:(?:пожалуйста|спасибо)\W*)?$",
+    re.IGNORECASE,
+)
+# A negation or a question word in the clause right before the shorthand makes it
+# a complaint or a refusal, also across a comma: "ты опять не понял, ПСЗ",
+# "сделай без ПСЗ", "не — ПСЗ", "вместо ПСЗ". Checked on the text before the
+# shorthand with the boundary punctuation stripped. A missed command only brings
+# back the reflection question; a false hit would skip it without the pilot's word.
+SHORTHAND_CLAUSE_NEGATION_RE = re.compile(
+    r"(?<!\w)(?:не|нет|без|вместо|почему|зачем)(?!\w)[^.!?;:\n]{0,30}$", re.IGNORECASE
+)
+# Another shorthand earlier in the same sentence means both are being named, not
+# ordered: "объясни разницу между СЗ и ПСЗ", "ПСЗ, СЗ" (cold review 21.11).
+SHORTHAND_NAMED_IN_CLAUSE_RE = re.compile(r"(?<!\w)п?сз(?!\w)[^.!?;\n]*$", re.IGNORECASE)
+# Known trade-off (cold review 21.11): a complaint without a negation word
+# ("ты опять ошибся, ПСЗ", "я же просил: ПСЗ") counts as the command; the pilot
+# writes the shorthand after a complaint to mean "fix it and ПСЗ" as well.
 
 
 def _rows(path):
@@ -176,6 +207,32 @@ def pilot_intends_to_close(text, paste_limit=PASTE_PREFIX_LIMIT):
     return next(valid_trigger_starts(text, paste_limit=paste_limit), None) is not None
 
 
+def pilot_shorthand(text, paste_limit=PASTE_PREFIX_LIMIT):
+    """Return (kind, form): kind "psz"|"sz", form "whole"|"trailing"; ("", "") if none.
+
+    Quoted spans are masked first; any question mark makes the message a question.
+    A trailing shorthand after more than `paste_limit` characters is treated like a
+    close word buried in pasted text: not a command (same 600 as the close words).
+    """
+    # The whole-message form is checked before masking: «ПСЗ» typed in quotes as
+    # the only content counted before F81 and still does.
+    whole = None if "?" in text else SHORTHAND_WHOLE_RE.match(text)
+    if whole:
+        return ("psz" if whole.group(1).lower() == "псз" else "sz"), "whole"
+    stripped = mask_quoted_spans(text)
+    if "?" in stripped:
+        return "", ""
+    trailing = SHORTHAND_TRAILING_RE.search(stripped)
+    if not trailing:
+        return "", ""
+    if paste_limit is not None and trailing.start(1) > paste_limit:
+        return "", ""
+    clause = stripped[:trailing.start(1)].rstrip(" \t\n.,;:!—–-")
+    if SHORTHAND_CLAUSE_NEGATION_RE.search(clause) or SHORTHAND_NAMED_IN_CLAUSE_RE.search(clause):
+        return "", ""
+    return ("psz" if trailing.group(1).lower() == "псз" else "sz"), "trailing"
+
+
 def detect(path):
     rows = list(_rows(path))
     line = final_assistant_line(rows)
@@ -201,6 +258,13 @@ if __name__ == "__main__":
         # Prompt on stdin -> the same prompt with quoted spans blanked out. The reminder hook
         # runs its cancel phrases on this text: a cancel phrase inside a quote is a mention.
         sys.stdout.write(mask_quoted_spans(sys.stdin.buffer.read().decode("utf-8", errors="replace")))
+        sys.exit(0)
+    if len(sys.argv) == 2 and sys.argv[1] == "--shorthand":
+        # Prompt on stdin -> "<kind> <form>" ("psz trailing") or an empty line.
+        # Any failure exits non-zero; the reminder hook then falls back to its own
+        # whole-message check (the behaviour before WP-561 F81).
+        kind, form = pilot_shorthand(sys.stdin.buffer.read().decode("utf-8", errors="replace"))
+        print(f"{kind} {form}" if kind else "")
         sys.exit(0)
     if len(sys.argv) == 3 and sys.argv[1] == "--valid-prefix":
         # Offset of the first VALID occurrence of the given regex (a command, not a

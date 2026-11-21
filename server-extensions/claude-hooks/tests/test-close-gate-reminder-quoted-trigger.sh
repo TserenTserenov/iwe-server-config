@@ -303,6 +303,77 @@ class QuotedTriggerTests(unittest.TestCase):
                 self.reset_state()
                 self.assert_not_armed(prompt)
 
+    # --- WP-561 F81 (pilot 21.11): the shorthand as the last word after an instruction ---
+    def test_psz_after_an_instruction_records_skip_without_arming(self):
+        # Live case 21.11 (tsekh-1): "вноси и долелай и потом ПСЗ" asked the reflection question.
+        for prompt in ("вноси и долелай и потом ПСЗ", "доделай тесты, ПСЗ, пожалуйста",
+                       "сделай правку и ПСЗ 🚀", "когда закончишь — псз"):
+            with self.subTest(prompt=prompt):
+                self.reset_state()
+                out = self.run_hook(prompt)
+                self.assertIn("сначала выполни само поручение", out["additionalContext"])
+                self.assertIn("субагентом", out["additionalContext"])
+                self.assertFalse(self.obligation.exists(), "trailing ПСЗ armed the obligation")
+                self.assertFalse(self.sentinel.exists(), "trailing ПСЗ wrote the commit sentinel")
+                self.assertTrue(json.loads(self.intent.read_text())["skip_reflection"], prompt)
+
+    def test_whole_psz_has_no_instruction_hint(self):
+        out = self.run_hook("ПСЗ")
+        self.assertNotIn("сначала выполни само поручение", out["additionalContext"])
+
+    def test_sz_after_an_instruction_arms_warn_without_sentinel(self):
+        # Codex/Kimi 21.11: a trailing «СЗ» is a close order (Stop must remind), but the
+        # instruction before it may commit and ask the pilot, so no block and no sentinel.
+        for prompt in ("доделай. СЗ", "вноси правку и потом СЗ", "закончи проверку, сз!"):
+            with self.subTest(prompt=prompt):
+                self.reset_state()
+                self.run_hook(prompt)
+                self.assertTrue(json.loads(self.intent.read_text())["skip_reflection"], prompt)
+                self.assertFalse(self.sentinel.exists(), "trailing СЗ wrote the commit sentinel")
+                if self.PEER:
+                    self.assertFalse(self.obligation.exists(), "peer close must not arm an obligation")
+                else:
+                    self.assertEqual(json.loads(self.obligation.read_text())["mode"], "warn", prompt)
+
+    def test_trailing_sz_keeps_an_earlier_block_close(self):
+        # Cold review 21.11: "закрывай" armed block; a later "доделай, СЗ" must not soften it.
+        if self.PEER:
+            self.skipTest("peer close arms no obligation")
+        self.run_hook("закрывай")
+        self.assertEqual(json.loads(self.obligation.read_text())["mode"], "block")
+        self.run_hook("доделай, СЗ")
+        self.assertEqual(json.loads(self.obligation.read_text())["mode"], "block")
+        self.assertTrue(self.sentinel.exists(), "trailing СЗ removed the block sentinel")
+        self.assertTrue(json.loads(self.intent.read_text())["skip_reflection"])
+
+    def test_trailing_shorthand_in_complaints_negations_quotes_does_nothing(self):
+        for prompt in ("ты опять не понял ПСЗ", "ты опять не понял, ПСЗ", "сделай X без ПСЗ",
+                       "не — ПСЗ", "сделай вместо ПСЗ", "он написал «доделай и ПСЗ»",
+                       "СЗ, а потом сделай X", "расшифруй ПСЗ", "доделай и потом СЗ?",
+                       "объясни разницу между СЗ и ПСЗ", "объясни разницу между ПСЗ и СЗ",
+                       "ПСЗ, СЗ", "напиши тест для СЗ и ПСЗ",
+                       "ж" * 601 + " и потом ПСЗ", "ж" * 601 + ". СЗ"):
+            with self.subTest(prompt=prompt[-40:]):
+                self.reset_state()
+                self.assert_not_armed(prompt)
+
+    def shorthand(self, prompt):
+        result = subprocess.run([sys.executable, FILTER, "--shorthand"], input=prompt,
+                                text=True, capture_output=True, timeout=15)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        return result.stdout.strip()
+
+    def test_cli_shorthand_kind_and_form(self):
+        self.assertEqual(self.shorthand("ПСЗ"), "psz whole")
+        self.assertEqual(self.shorthand("СЗ!"), "sz whole")
+        self.assertEqual(self.shorthand("вноси и долелай и потом ПСЗ"), "psz trailing")
+        self.assertEqual(self.shorthand("доделай. СЗ"), "sz trailing")
+        self.assertEqual(self.shorthand("ж" * 590 + " и ПСЗ"), "psz trailing")
+        self.assertEqual(self.shorthand("доделай\nПСЗ"), "psz trailing")
+        self.assertEqual(self.shorthand("«ПСЗ»"), "psz whole")
+        self.assertEqual(self.shorthand("ты опять не понял, ПСЗ"), "")
+        self.assertEqual(self.shorthand("Я же сказал ПСЗ, а значит без рефлексии?"), "")
+
     # --- the CLI contract itself, incl. the shared 600-character boundary ---
     def cli_answer(self, prompt):
         result = subprocess.run([sys.executable, FILTER, "--prompt-intends-close"], input=prompt,
