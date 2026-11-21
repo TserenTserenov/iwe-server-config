@@ -46,6 +46,10 @@ EOF
 cat > "$REPO/scripts/isolate-push.sh" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
+if [ "${IWE_TEST_PUSH_FAIL:-0}" = 1 ]; then
+  echo "injected push failure" >&2
+  exit 1
+fi
 git -C "$1" push -q origin HEAD:"$2"
 EOF
 chmod +x "$REPO/scripts/process-runner.py" "$REPO/scripts/ledger-append.sh" "$REPO/scripts/isolate-push.sh"
@@ -215,5 +219,29 @@ record "$R" no-code-changes "declared-no-code-changes:s"; [ "$(_record_obligatio
 record "$R" unknown "/runs/RUN-quick-close-s.md"; if _record_obligation_clear_action "$R" >/dev/null; then fail "a runner close of an undeclared session must not clear the obligation"; fi
 record "$R" peer-session "/runs/RUN-quick-close-s.md"; [ "$(_record_obligation_clear_action "$R")" = peer-session-close ] || fail "a declared peer close still clears with peer-session-close"
 ok "снятие обязательства пир-сессии: по объявлению и по замороженному снятию пустой сессии"
+
+echo "6. полный close со старой отметкой при включённом выключателе"
+open_session enf-legacy peer-session
+commit_in_copy scripts/legacy.sh
+IWE_TEST_PUSH_FAIL=1 real_close enf-legacy "$TEST_ROOT/c-legacy-prepare.err" "закрывай"
+[ -e "$SEM" ] || fail "the injected push failure must leave the session open"
+grep -q '^close_delivery_prepare_digest: ' "$SEM" \
+  || { cat "$SEM" >&2; fail "the first attempt must reach prepared before push"; }
+grep -q '^close_delivery_terminal_reference: declared-peer-session:' "$SEM" \
+  || { cat "$SEM" >&2; fail "the first attempt must freeze the legacy route"; }
+LEGACY_ATTEMPT=$(sed -n 's/^close_attempt_id: //p' "$SEM")
+LEGACY_PREPARE=$(sed -n 's/^close_delivery_prepare_digest: //p' "$SEM")
+[ -n "$LEGACY_ATTEMPT" ] || fail "prepared state must have an attempt id"
+unset IWE_TEST_PUSH_FAIL
+IWE_CLOSE_ROUTE_ENFORCE=1 real_close enf-legacy "$TEST_ROOT/c-legacy.err" "закрывай"
+[ ! -e "$SEM" ] || { cat "$TEST_ROOT/c-legacy.err" >&2; fail "a legacy prepared close must finish under its original rules"; }
+has "$TEST_ROOT/c-legacy.err" "продолжаю exact staged transition (prepared)" "the second close must resume the prepared transition"
+has "$TEST_ROOT/c-legacy.err" "исполнение по фактам включено (WP-561 Ф61 этап 2): legacy" "the full close must report the frozen legacy route"
+grep -q "^close_attempt_id: $LEGACY_ATTEMPT$" "$SEM.closed" \
+  || fail "resume must keep the prepared attempt id"
+grep -q "^close_delivery_prepare_digest: $LEGACY_PREPARE$" "$SEM.closed" \
+  || fail "resume must keep the prepared digest"
+lacks "$TEST_ROOT/c-legacy.err" "нет terminal RUN-quick-close-enf-legacy" "the new switch must not demand a runner for an old close"
+ok "сквозное закрытие: старая отметка сохраняет прежний путь при включённом выключателе"
 
 echo "PASS=$PASS: session-guard close route execution (WP-561 Ф61 stage 2)"
