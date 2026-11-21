@@ -1463,15 +1463,21 @@ in
     # =========================================================
     # 10. PROFILER (daily) — recalculate_derived.py
     # =========================================================
-    # Запускает R28 Профилировщик (AISYS.018) ежедневно в 04:30 МСК.
+    # Запускает R28 Профилировщик (AISYS.018) ежедневно в ночной цепочке профиля (10z).
     # Читает 2_collected из digital_twins → пишет 3_derived в:
     #   - indicators.calculated_profile (F2 dual-write, всегда)
     #   - event-gateway → projection-worker (F1.A, если EVENT_GATEWAY_URL задан)
+    # 3_4_qualification берёт из журнала learning.stage_transitions (мост v6), поэтому
+    # идёт ПОСЛЕ stage-evaluator и engagement-collector — иначе видит их результаты
+    # только на следующий день (WP-602 И-13, 21.11). Свой таймер снят: старт — от 10z.
     # Зависимости: ~/.secrets/neon (INDICATORS_DIRECT, LEARNING_DIRECT, EVENT_GATEWAY_URL)
     # Связь: WP-253 Ф9.6, system.yaml AISYS.018
 
     systemd.services."iwe-profiler" = {
-      description = "IWE — Профилировщик (recalculate_derived, 04:30 МСК)";
+      description = "IWE — Профилировщик (recalculate_derived, ночная цепочка 04:35 МСК)";
+      # Ordering only (no Requires): a failed stage-evaluator or collector does not
+      # cancel the profiler, it recalculates from the freshest data available.
+      after = [ "iwe-stage-evaluator.service" "iwe-engagement-collector.service" ];
       unitConfig   = commonUnitConfig;
       serviceConfig = commonServiceConfig // {
         ExecStart  = "${pkgs.bash}/bin/bash ${iwe}/DS-IT-systems/DS-ai-systems/synchronizer/scripts/recalculate.sh";
@@ -1481,26 +1487,17 @@ in
       environment = commonEnv;
     };
 
-    systemd.timers."iwe-profiler" = {
-      wantedBy    = [ "timers.target" ];
-      description = "IWE Профилировщик — ежедн 04:30 МСК";
-      timerConfig = {
-        OnCalendar = "*-*-* 04:30:00 Europe/Moscow";
-        Persistent = true;  # catch-up если сервер был недоступен
-      };
-    };
-
     # =========================================================
     # 10b. STAGE EVALUATOR — SR.001-SR.004 transitions (WP-253 Блок 2 Ф2.4)
     # =========================================================
-    # Запускается после profiler в 04:35 МСК. Читает learning.domain_event +
+    # Первый шаг ночной цепочки профиля (10z, 04:35 МСК). Читает learning.domain_event +
     # learning.w_reflections для opt-in пилотов, INSERT'ит learning.stage_transitions
     # при изменении ступени мастерства (FORM.089 §5).
     # Env vars (требуются в /etc/iwe/env): LEARNING_URL (или DATABASE_URL_STAGE_EVALUATOR).
     # see DP.SC.020, B7.3.6 privacy spec, миграции 109/110/111.
 
     systemd.services."iwe-stage-evaluator" = {
-      description = "IWE — Stage Evaluator (FORM.089 §5, 04:35 МСК)";
+      description = "IWE — Stage Evaluator (FORM.089 §5, ночная цепочка 04:35 МСК)";
       unitConfig  = commonUnitConfig;
       serviceConfig = commonServiceConfig // {
         ExecStartPre = verifiedSyncPre "DS-IT-systems/activity-hub" "main" "activity-hub";
@@ -1511,13 +1508,39 @@ in
       path = commonPath;
       environment = commonEnv;
     };
+    # Свой таймер снят 21.11 (WP-602 И-13): старт — от ночной цепочки профиля (10z).
 
-    systemd.timers."iwe-stage-evaluator" = {
+    # =========================================================
+    # 10z. NIGHT PROFILE CHAIN — stage-evaluator → engagement-collector → profiler
+    # =========================================================
+    # WP-602 И-13 (21.11, peer session 2026-11-21-17, Claude + Kimi + Codex): before this
+    # the profiler fired at 04:30, ahead of the stage evaluator (04:35) and the collector
+    # (04:40), so it always computed from the previous night's 2_collected and stage
+    # journal. A clock shift does not guarantee completion (TimeoutSec 420-600), so the
+    # order is enforced by unit ordering: one timer starts this oneshot, which pulls in
+    # the three jobs; collector is ordered after stage-evaluator (the old 04:35 → 04:40
+    # order), profiler after both. Wants (not Requires): a failure in one step does not
+    # cancel the next; each unit still raises its own OnFailure alert.
+    # 04:35, not 04:30: keeps stage-evaluator's verified-sync clear of the scheduler git
+    # lock (iwe-scheduler fires 04:30 server time, = MSK in summer; same reason as before). Manual `systemctl start` of a single
+    # unit runs only that unit — ordering applies only when the jobs are queued together.
+
+    systemd.services."iwe-night-profile" = {
+      description = "IWE — ночная цепочка профиля (ступень → сборщик → Профилировщик)";
+      wants = [ "iwe-stage-evaluator.service" "iwe-engagement-collector.service" "iwe-profiler.service" ];
+      after = [ "iwe-profiler.service" ];
+      serviceConfig = {
+        Type      = "oneshot";
+        ExecStart = "${pkgs.coreutils}/bin/true";
+      };
+    };
+
+    systemd.timers."iwe-night-profile" = {
       wantedBy    = [ "timers.target" ];
-      description = "Stage Evaluator — ежедн 04:35 МСК (после profiler)";
+      description = "Ночная цепочка профиля — ежедн 04:35 МСК";
       timerConfig = {
         OnCalendar = "*-*-* 04:35:00 Europe/Moscow";
-        Persistent = true;
+        Persistent = true;  # catch-up если сервер был недоступен
       };
     };
 
@@ -1581,8 +1604,8 @@ in
         # .iwe-git-ops.lock по несколько минут (30s grace на каждый), из-за чего
         # verifiedSyncPre для этого юнита не успевал взять лок и падал в stale
         # (пир-сессия 2026-09-11-22-bot-alerts-tsekh1, инцидент 11.09 23:01).
-        # Тот же приём уже применён к iwe-stage-evaluator (04:35, после
-        # scheduler/profiler в 04:30) — здесь просто тот же сдвиг для 23:00.
+        # Тот же приём уже применён к ночной цепочке профиля (04:35 МСК, после
+        # scheduler 04:30 по времени сервера, летом = МСК) — здесь тот же сдвиг для 23:00.
         # Явный TZ → детерминированно МСК круглый год.
         # Без него systemd использует Europe/Helsinki: летом EEST=MSK, зимой EET=MSK-1h.
         OnCalendar = "*-*-* 23:05:00 Europe/Moscow";
@@ -1594,7 +1617,8 @@ in
     # 4. OVERNIGHT AUDITOR — R24 Аудитор безопасности (daily B7.4)
     # =========================================================
     # Запускает VR.R.002 Аудитор в headless-режиме.
-    # 04:45 МСК — после strategist morning (04:00) и profiler (04:30).
+    # 04:45 МСК — после strategist morning (04:00); ночная цепочка профиля (04:35) обычно
+    # заканчивается к 04:41, данных профиля аудитор не читает.
     # Таймер: ежедневно, Persistent=true.
 
     systemd.services."iwe-overnight-auditor" = {
@@ -1870,7 +1894,7 @@ in
     # Заменяет отключённый _dt_sync_engagement бота (aist_bot_newarchitecture,
     # закомментирован в core/scheduler.py с конца апреля 2026 после переезда на Railway).
     # Два таймера, один ExecStart (флаг различает режим):
-    #   - iwe-engagement-collector: ежедневно 04:40 МСК (после stage-evaluator 04:35),
+    #   - iwe-engagement-collector: ежедневно в ночной цепочке профиля (10z, после stage-evaluator),
     #     windowed-recompute (7d/30d/90d) для всех согласившихся пользователей.
     #   - iwe-engagement-collector-full: еженедельно (вс 05:15 МСК), + флаг --full-history —
     #     пересчёт *_count_total для новых групп (2_9_agency/2_10_worldview/2_11_impact).
@@ -1882,7 +1906,8 @@ in
     # see inbox/WP-463/WP-463.md, peer-session 2026-07-04-08-wp463-f2-implementation
 
     systemd.services."iwe-engagement-collector" = {
-      description = "IWE — Engagement Collector, windowed (WP-463 Ф2, 04:40 МСК)";
+      description = "IWE — Engagement Collector, windowed (WP-463 Ф2, ночная цепочка 04:35 МСК)";
+      after = [ "iwe-stage-evaluator.service" ];  # old 04:35 → 04:40 order, now by ordering (10z)
       unitConfig  = commonUnitConfig;
       serviceConfig = commonServiceConfig // {
         ExecStart  = "${pythonForIWE}/bin/python3 ${iwe}/DS-IT-systems/activity-hub/runner.py engagement-collector";
@@ -1893,14 +1918,7 @@ in
       environment = commonEnv;
     };
 
-    systemd.timers."iwe-engagement-collector" = {
-      wantedBy    = [ "timers.target" ];
-      description = "Engagement Collector windowed — ежедн 04:40 МСК (после stage-evaluator)";
-      timerConfig = {
-        OnCalendar = "*-*-* 04:40:00 Europe/Moscow";
-        Persistent = true;
-      };
-    };
+    # Свой таймер снят 21.11 (WP-602 И-13): старт — от ночной цепочки профиля (10z).
 
     systemd.services."iwe-engagement-collector-full" = {
       description = "IWE — Engagement Collector, full-history (WP-463 Ф2, воскр 05:15 МСК)";

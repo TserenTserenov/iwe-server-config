@@ -33,7 +33,7 @@
 | `~/IWE/PACK-digital-platform/.../08-service-clauses/DP.SC.019-autonomous-cloud-runtime.md` | Pack-обещание сервиса |
 | `~/IWE/aist_bot_newarchitecture` | Бот @aist_me_bot, расширяемый IWE-командами в Ф5 |
 | `~/IWE/DS-IT-systems/activity-hub` | sync-iwe (GitHub+WakaTime → Neon) — `iwe-activity-hub-sync.timer` (23:05 МСК) |
-| `~/IWE/DS-IT-systems/DS-ai-systems/profiler` | recalculate_derived (R28) — `iwe-profiler.timer` (04:30 МСК) |
+| `~/IWE/DS-IT-systems/DS-ai-systems/profiler` | recalculate_derived (R28) — ночная цепочка `iwe-night-profile.timer` (04:35 МСК: ступень → сборщик → Профилировщик) |
 | `~/IWE/FMT-exocortex-template` | В Q3-Q4 при PMF — извлечение шаблона из `modules/` |
 
 ## Антипаттерны
