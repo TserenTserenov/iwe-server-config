@@ -79,4 +79,40 @@ inbox add --to WP-7 --from "РП-3000" --pointer "p" --summary "ещё" >/dev/nu
 check "pending: два РП" "2" "$(inbox pending | wc -l | tr -d ' ')"
 check "pending --rev HEAD: незакоммиченный WP-7 не виден" "WP-8" "$(inbox pending --rev HEAD | cut -f1)"
 
+# 9. check-text (WP-503 Phase 110): 0 nothing new, 1 new entries, 2 unparseable header.
+ct() { local rc=0; bash "$SCRIPT" check-text >/dev/null 2>&1 || rc=$?; echo "$rc"; }
+check "check-text: есть «новое» → код 1" "1" "$(ct < "$REPO/inbox/WP-7/INBOX.md")"
+check "check-text: заголовки «новое» в stdout" "## И-4" "$(bash "$SCRIPT" check-text < "$REPO/inbox/WP-7/INBOX.md" 2>/dev/null | cut -d' ' -f1,2 || true)"
+check "check-text: всё учтено → код 0" "0" "$(printf '## И-1 · 2026-11-03 · из РП-5 · учтено\nУчтено: x\n' | ct)"
+check "check-text: пустой ящик → код 0" "0" "$(printf '' | ct)"
+check "check-text: заголовок поправлен руками → код 2" "2" "$(printf '## И-1 · 2026-11-03 · из РП-5 · разобрано 13.11\n' | ct)"
+check "check-text: битый байт в тексте не скрывает следующее «новое» (UTF-8 локаль)" "1" \
+  "$(printf '## И-1 · 2026-11-03 · из РП-5 · учтено\nВыжимка: \xd0\n## И-2 · 2026-11-04 · из РП-6 · новое\n' | LC_ALL=en_US.UTF-8 ct)"
+mkdir -p "$REPO/inbox/WP-6"
+printf '## И-1 · 2026-11-03 · из РП-5 · учтено\nВыжимка: \xd0\n## И-2 · 2026-11-04 · из РП-6 · новое\n' > "$REPO/inbox/WP-6/INBOX.md"
+check "list --all: битый байт не обрывает список (UTF-8 локаль)" "2" \
+  "$(LC_ALL=en_US.UTF-8 inbox list --wp 6 --all | grep -c -E '^## И-')"
+rm -rf "$REPO/inbox/WP-6"
+check "check-text --wp: текст отказа называет РП и два исхода" "2" \
+  "$(bash "$SCRIPT" check-text --wp WP-7 < "$REPO/inbox/WP-7/INBOX.md" 2>&1 >/dev/null | grep -cE 'РП-7 нельзя переносить в архив|согласие пилота на «учтено»')"
+
+# 10. archive-done-wp.sh refuses a WP with «новое» entries before touching anything,
+# even with IWE_ARCHIVE_ALLOW_PENDING=1, and archives it once every entry is processed.
+# A private copy of both scripts: no session-guard.sh next to them, no host state touched.
+TOOLS=$(mktemp -d "${TMPDIR:-/tmp}/wp-inbox-tools.XXXXXX")
+trap 'rm -rf "$REPO" "$TOOLS"' EXIT
+cp "$SCRIPT" "$(dirname "$SCRIPT")/archive-done-wp.sh" "$TOOLS/"
+printf -- '---\nwp: 7\nstatus: in_progress\n---\n' > "$REPO/inbox/WP-7/WP-7.md"
+mkdir -p "$REPO/archive/wp-contexts"
+git -C "$REPO" -c user.email=t@example.invalid -c user.name=t add -A
+git -C "$REPO" -c user.email=t@example.invalid -c user.name=t commit -qm wp7
+archive() { local rc=0; IWE_GOVERNANCE_REPO_PATH="$REPO" "$@" bash "$TOOLS/archive-done-wp.sh" 7 "$REPO" >/dev/null 2>&1 || rc=$?; echo "$rc"; }
+check "архивация при «новое»: код 1" "1" "$(archive env)"
+check "архивация при «новое»: папка осталась в inbox" "yes" "$([[ -d "$REPO/inbox/WP-7" ]] && echo yes || echo no)"
+check "архивация при «новое»: карточка не тронута" "status: in_progress" "$(grep '^status:' "$REPO/inbox/WP-7/WP-7.md")"
+check "IWE_ARCHIVE_ALLOW_PENDING=1 не обходит ящик: код 1" "1" "$(archive env IWE_ARCHIVE_ALLOW_PENDING=1)"
+inbox mark --wp 7 --id 4 --by "перенесено в «Осталось» (тест)" >/dev/null
+check "после разбора: архивация прошла" "0" "$(archive env)"
+check "после разбора: папка в архиве" "yes" "$([[ -f "$REPO/archive/wp-contexts/WP-7/INBOX.md" ]] && echo yes || echo no)"
+
 exit "$fail"

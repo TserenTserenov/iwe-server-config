@@ -12,6 +12,11 @@
 #   wp-inbox.sh digest --wp WP-N               fingerprint of «новое» entries (empty if none)
 #   wp-inbox.sh mark   --wp WP-N --id K --by "<who/what processed it>"   «новое» → «учтено», idempotent
 #   wp-inbox.sh pending                        every WP with «новое» entries, oldest first: «WP-N<TAB>count<TAB>oldest date»
+#   wp-inbox.sh check-text [--wp WP-N]         mailbox text on stdin; prints the «новое» headers
+#                                              (with --wp also the refusal text on stderr)
+#                                              (WP-503 Phase 110: archive scripts and git hooks refuse to
+#                                              archive a WP while this finds any). Exit 0 none · 1 found ·
+#                                              2 unreadable input or an entry header it cannot parse.
 # Common flag: --repo DIR (default $IWE_WORKSPACE/$IWE_GOVERNANCE_REPO).
 # Read commands (list, count, digest, pending) also take --rev REF: read the
 # mailbox as committed at REF (e.g. origin/main after a fetch) instead of the
@@ -84,10 +89,54 @@ box_text() {
   fi
 }
 
-# Entries with status $2 of WP number $1 as one stream: header plus body up to the next header.
-entries_with_status() {
-  box_text "$1" | awk -v want="$2" '/^## И-[0-9]+ · / { p = ($0 ~ (" · " want "$")) } p'
+# The one place that knows the entry header format. Reads mailbox text on stdin
+# and prints the entries with status $1: header plus body up to the next header.
+# Byte matching (LC_ALL=C): under a UTF-8 locale macOS awk aborts on an invalid
+# byte and drops every entry after it; the patterns are literal UTF-8 bytes.
+filter_status() {
+  LC_ALL=C awk -v want="$1" '/^## И-[0-9]+ · / { p = ($0 ~ (" · " want "$")) } p'
 }
+
+# Entries with status $2 of WP number $1 as one stream.
+entries_with_status() {
+  box_text "$1" | filter_status "$2"
+}
+
+# check-text: mailbox text on stdin. A header that ends in neither status is
+# reported as unparseable (exit 2): an unknown status must not pass as "no new entries".
+# With --wp N the refusal to archive is explained on stderr; every caller
+# (archive scripts, git hooks) relays this one text.
+check_text() {
+  local who="${wp:+РП-$(normalize_wp "$wp")}"
+  who="${who:-РП}"
+  local text bad entries fresh
+  text=$(cat) || die "не удалось прочитать текст ящика из stdin" 2
+  bad=$(printf '%s\n' "$text" | LC_ALL=C grep -E '^## И-' | LC_ALL=C grep -vE '^## И-[0-9]+ · [0-9]{4}-[0-9]{2}-[0-9]{2} · .* · (новое|учтено)$' || true)
+  if [[ -n "$bad" ]]; then
+    printf 'wp-inbox: %s нельзя переносить в архив: в ящике заголовок записи без статуса «новое» или «учтено»:\n%s\n' "$who" "$bad" >&2
+    printf '   Статус записи меняет только wp-inbox.sh mark; заголовок правили руками. Верните заголовок к виду «## И-K · дата · из … · новое» и разберите запись.\n' >&2
+    exit 2
+  fi
+  entries=$(printf '%s\n' "$text" | filter_status "новое") || die "разбор текста ящика не удался" 2
+  fresh=$(printf '%s\n' "$entries" | LC_ALL=C grep -E '^## И-[0-9]+ · ' || true)
+  [[ -z "$fresh" ]] && exit 0
+  printf '%s\n' "$fresh"
+  if [[ -n "$wp" ]]; then
+    {
+      printf 'wp-inbox: %s нельзя переносить в архив: в ящике входящих %s записей «новое» (заголовки выше).\n' "$who" "$(printf '%s\n' "$fresh" | grep -c .)"
+      printf '   Пройти проверку можно только двумя способами (решение пилота, РП-503 Ф110):\n'
+      printf '   1) перенести выжимку и указатель записи в «Осталось» карточки;\n'
+      printf '   2) получить согласие пилота на «учтено».\n'
+      printf '   Затем: wp-inbox.sh mark --wp %s --id K --by "<перенесено в «Осталось» | учтено с согласия пилота: как>".\n' "$(normalize_wp "$wp")"
+      printf '   Пока решения нет, РП остаётся в работе: закрывается сессия, а не РП.\n'
+    } >&2
+  fi
+  exit 1
+}
+
+if [[ "$cmd" == "check-text" ]]; then
+  check_text
+fi
 
 if [[ "$cmd" == "pending" ]]; then
   if [[ -n "$rev" ]]; then
@@ -146,7 +195,7 @@ case "$cmd" in
     ;;
   list)
     if [[ "$all" -eq 1 ]]; then
-      box_text "$n" | awk '/^## И-[0-9]+ · /{p=1} p'
+      box_text "$n" | LC_ALL=C awk '/^## И-[0-9]+ · /{p=1} p'
     else
       entries_with_status "$n" "новое"
     fi

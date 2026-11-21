@@ -87,6 +87,23 @@ else
   MOVE_DST="archive/wp-contexts/$FILENAME"
 fi
 
+# WP-503 Phase 110: a WP with «новое» entries in its inbound mailbox is not
+# archived. Checked before anything below writes or removes a file (the stub
+# cleanup further down deletes), and independently of IWE_ARCHIVE_ALLOW_PENDING.
+INBOX_BOX="$WP_DIR/INBOX.md"
+if [[ "$MODE" == "folder" && -f "$INBOX_BOX" ]]; then
+  INBOX_TOOL="$SCRIPT_DIR/wp-inbox.sh"
+  if [[ ! -f "$INBOX_TOOL" ]]; then
+    echo "❌ WP-${WP_NUM}: у РП есть ящик входящих, но рядом нет wp-inbox.sh ($INBOX_TOOL) — проверить ящик нельзя, не архивирую" >&2
+    exit 1
+  fi
+  bash "$INBOX_TOOL" check-text --wp "$WP_NUM" < "$INBOX_BOX" >&2
+  INBOX_RC=$?
+  if [[ "$INBOX_RC" -ne 0 ]]; then
+    exit 1
+  fi
+fi
+
 echo "📦 Архивирую WP-${WP_NUM} ($MODE): $FILENAME"
 
 # Проверка полноты переноса (warn-not-block) — WP-5, 2026-07-10
