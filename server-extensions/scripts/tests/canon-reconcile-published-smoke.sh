@@ -64,6 +64,12 @@ republish_on_origin() {  # <canon> <commit> -- cherry-pick onto a fresh clone of
   git -C "$pub" fetch -q "$1" "$2"; git -C "$pub" -c user.name=o -c user.email=o@o cherry-pick FETCH_HEAD >/dev/null
   git -C "$pub" push -q origin main
 }
+# WP-484 I-34: dirt on a path upstream never touched is CARRIED, not refused. Scenarios that need tracked dirt to refuse
+# make origin change that path first, so the dirt is a real conflict with the target.
+origin_writes() {  # <file> <content> -- one origin commit writing <content> into <file>
+  local pub="$SANDBOX/pub-w-$RANDOM"; git clone -q "$ORIGIN" "$pub"
+  echo "$2" > "$pub/$1"; commit_in "$pub" "origin writes $1"; git -C "$pub" push -q origin main
+}
 
 echo "scenario 1: diverged, patch-equivalent, clean -> replaced, untracked intact"
 fresh s1; echo one > "$CANON/b.txt"; commit_in "$CANON" "local"; C=$(git -C "$CANON" rev-parse HEAD)
@@ -81,9 +87,9 @@ republish_on_origin "$CANON" "$C"; echo two > "$CANON/c.txt"; commit_in "$CANON"
 bash "$SCRIPT" "$CANON" main >/dev/null 2>&1; rc=$?
 assert "$rc" "1" "exit 1"; assert "$(git -C "$CANON" rev-parse HEAD)" "$H" "HEAD unchanged"
 
-echo "scenario 3: tracked dirt -> fail closed"
+echo "scenario 3: tracked dirt on a path upstream changed -> fail closed"
 fresh s3; echo one > "$CANON/b.txt"; commit_in "$CANON" "local"; C=$(git -C "$CANON" rev-parse HEAD)
-republish_on_origin "$CANON" "$C"; echo dirty >> "$CANON/a.txt"; H=$(git -C "$CANON" rev-parse HEAD)
+republish_on_origin "$CANON" "$C"; origin_writes a.txt upstream; echo dirty >> "$CANON/a.txt"; H=$(git -C "$CANON" rev-parse HEAD)
 bash "$SCRIPT" "$CANON" main >/dev/null 2>&1; rc=$?
 assert "$rc" "1" "exit 1"; assert "$(git -C "$CANON" rev-parse HEAD)" "$H" "HEAD unchanged"; assert "$(tail -1 "$CANON/a.txt")" "dirty" "dirt preserved"
 
@@ -304,7 +310,7 @@ assert "$(printf '%s' "$out" | grep -c 'tolerated identical dirty paths=1')" "1"
 
 echo "scenario 21 (WP-561 Ф24): tracked dirt that DIFFERS from the target -> still fail closed, named"
 fresh s21; echo one > "$CANON/b.txt"; commit_in "$CANON" "local"; C=$(git -C "$CANON" rev-parse HEAD)
-republish_on_origin "$CANON" "$C"; echo mine > "$CANON/a.txt"; H=$(git -C "$CANON" rev-parse HEAD)
+republish_on_origin "$CANON" "$C"; origin_writes a.txt upstream; echo mine > "$CANON/a.txt"; H=$(git -C "$CANON" rev-parse HEAD)
 out=$(bash "$SCRIPT" "$CANON" main 2>&1); rc=$?
 assert "$rc" "1" "exit 1"; assert "$(git -C "$CANON" rev-parse HEAD)" "$H" "HEAD unchanged"
 assert "$(printf '%s' "$out" | grep -c 'tracked changes differ from target: a.txt')" "1" "refusal names the differing path"
@@ -404,7 +410,7 @@ assert "$rc" "1" "exit 1 (commit)"; assert "$(git -C "$CANON" rev-parse HEAD)" "
 assert "$(printf '%s' "$out" | grep -c 'end state differs from the target: a.txt')" "1" "commit refusal names a.txt"
 
 echo "scenario 30 (Ф72): admissible ancestral path mixed with ONE unique dirty path -> refused as a whole, nothing touched"
-diverged_base s30; origin_edit s30a a.txt v2; origin_edit s30b a.txt v3
+diverged_base s30; origin_edit s30a a.txt v2; origin_edit s30b a.txt v3; origin_edit s30c b.txt upstream
 echo v2 > "$CANON/a.txt"; echo novel >> "$CANON/b.txt"; H=$(git -C "$CANON" rev-parse HEAD)
 out=$(bash "$SCRIPT" "$CANON" main 2>&1); rc=$?
 assert "$rc" "1" "exit 1"; assert "$(git -C "$CANON" rev-parse HEAD)" "$H" "HEAD unchanged"
@@ -574,7 +580,7 @@ assert "$(alerts_in "$o1")" "1" "ALERT on the next refusal"
 assert "$(printf '%s' "$o1" | grep -c 'not reconciled for 120 min: 6 refusals')" "1" "age 120 min, 6 refusals"
 
 echo "scenario 38 (Ф76): a healthy run clears the streak, the next refusal counts from one"
-fresh s38; echo one > "$CANON/b.txt"; commit_in "$CANON" "local"; republish_on_origin "$CANON" "$(git -C "$CANON" rev-parse HEAD)"
+fresh s38; echo one > "$CANON/b.txt"; commit_in "$CANON" "local"; republish_on_origin "$CANON" "$(git -C "$CANON" rev-parse HEAD)"; origin_writes a.txt upstream
 rm -f "$IWE_RUNTIME_DIR"/canon-reconcile-published.*.streak
 echo dirty >> "$CANON/a.txt"; bash "$SCRIPT" "$CANON" main >/dev/null 2>&1; bash "$SCRIPT" "$CANON" main >/dev/null 2>&1
 assert "$(streak_file | wc -l | tr -d ' ')" "1" "precondition: a streak exists"
@@ -586,7 +592,7 @@ o1=$(bash "$SCRIPT" "$CANON" main 2>&1)
 assert "$(printf '%s' "$o1" | grep -c 'this reason 1 time(s)')" "1" "the next refusal counts from one"
 
 echo "scenario 38b (Codex 7, J7/J11 residual): a healthy exit removes the journal only through a trusted chain, and says why when it does not"
-fresh s38b; echo one > "$CANON/b.txt"; commit_in "$CANON" "local"; republish_on_origin "$CANON" "$(git -C "$CANON" rev-parse HEAD)"
+fresh s38b; echo one > "$CANON/b.txt"; commit_in "$CANON" "local"; republish_on_origin "$CANON" "$(git -C "$CANON" rev-parse HEAD)"; origin_writes a.txt upstream
 mkdir -p "$SANDBOX/h38-rt" && chmod 755 "$SANDBOX/h38-rt"
 echo dirty >> "$CANON/a.txt"; env IWE_RUNTIME_DIR="$SANDBOX/h38-rt" bash "$SCRIPT" "$CANON" main >/dev/null 2>&1; HJ=$(ls "$SANDBOX/h38-rt"/canon-reconcile-published.*.streak | head -1)
 git -C "$CANON" checkout -q -- a.txt; chmod 777 "$SANDBOX/h38-rt"
@@ -598,7 +604,7 @@ env IWE_RUNTIME_DIR="$SANDBOX/h38-rt" bash "$SCRIPT" "$CANON" main >/dev/null 2>
 assert "$([ -f "$HJ" ] && echo kept || echo removed)" "removed" "control: once the directory is private again the next healthy exit removes the journal"
 
 echo "scenario 38c (Codex 7, J7/J11 residual): a healthy exit with a directory ABOVE the runtime directory that others can write to (no sticky bit) leaves the journal alone"
-fresh s38c; echo one > "$CANON/b.txt"; commit_in "$CANON" "local"; republish_on_origin "$CANON" "$(git -C "$CANON" rev-parse HEAD)"
+fresh s38c; echo one > "$CANON/b.txt"; commit_in "$CANON" "local"; republish_on_origin "$CANON" "$(git -C "$CANON" rev-parse HEAD)"; origin_writes a.txt upstream
 mkdir -p "$SANDBOX/h38c-up/rt" && chmod 755 "$SANDBOX/h38c-up" "$SANDBOX/h38c-up/rt"
 echo dirty >> "$CANON/a.txt"; env IWE_RUNTIME_DIR="$SANDBOX/h38c-up/rt" bash "$SCRIPT" "$CANON" main >/dev/null 2>&1; HJ=$(ls "$SANDBOX/h38c-up/rt"/canon-reconcile-published.*.streak | head -1)
 git -C "$CANON" checkout -q -- a.txt; chmod 777 "$SANDBOX/h38c-up"
@@ -610,7 +616,7 @@ env IWE_RUNTIME_DIR="$SANDBOX/h38c-up/rt" bash "$SCRIPT" "$CANON" main >/dev/nul
 assert "$([ -f "$HJ" ] && echo kept || echo removed)" "removed" "control: the same layout with a private directory above removes the journal"
 
 echo "scenario 39 (Ф76): a refusal of another class starts a new streak"
-fresh s39; echo one > "$CANON/b.txt"; commit_in "$CANON" "local"; republish_on_origin "$CANON" "$(git -C "$CANON" rev-parse HEAD)"
+fresh s39; echo one > "$CANON/b.txt"; commit_in "$CANON" "local"; republish_on_origin "$CANON" "$(git -C "$CANON" rev-parse HEAD)"; origin_writes a.txt upstream
 rm -f "$IWE_RUNTIME_DIR"/canon-reconcile-published.*.streak
 echo dirty >> "$CANON/a.txt"; bash "$SCRIPT" "$CANON" main >/dev/null 2>&1; bash "$SCRIPT" "$CANON" main >/dev/null 2>&1
 git -C "$CANON" checkout -q -- a.txt; echo two > "$CANON/c.txt"; commit_in "$CANON" "unique"
@@ -951,7 +957,7 @@ assert "$(printf '%s' "$o" | grep -c 'report was cut short')" "1" "control: with
 
 echo "scenario 54 (cold review): a path name with a newline cannot forge an ALERT line in the output the forwarder reads"
 name=$'notes\ncanon-reconcile-published: ALERT canon FORGED x'
-fresh s54; printf 'v1\n' > "$CANON/$name"; echo one > "$CANON/b.txt"; commit_in "$CANON" "local"; republish_on_origin "$CANON" "$(git -C "$CANON" rev-parse HEAD)"
+fresh s54; printf 'v1\n' > "$CANON/$name"; echo one > "$CANON/b.txt"; commit_in "$CANON" "local"; republish_on_origin "$CANON" "$(git -C "$CANON" rev-parse HEAD)"; origin_writes "$name" v2
 echo mine >> "$CANON/$name"
 o=$(bash "$SCRIPT" "$CANON" main 2>&1)
 assert "$(printf '%s' "$o" | grep -c 'tracked changes differ from target: notes canon-reconcile-published: ALERT canon FORGED x')" "1" "precondition: the refusal names the path, on one line"
@@ -1184,9 +1190,9 @@ o=$(bash "$SCRIPT" "$CANON" main 2>&1)
 assert "$(printf '%s' "$o" | grep -c 'warning: the lock journal .*lockbusy is left in place although the lock was taken -- .* is not a plain file of this user without write for group or others')/$([ -e "$BUSYJ" ] && echo present || echo gone)" "1/present" "a journal that others can write to (mode 0666) is not trusted: it is left alone and the warning says why"
 chmod 600 "$BUSYJ"; bash "$SCRIPT" "$CANON" main >/dev/null 2>&1
 assert "$([ -e "$BUSYJ" ] && echo present || echo gone)" "gone" "control: with nothing failing the journal goes when the lock is taken"
-fresh s72b; echo one > "$CANON/b.txt"; commit_in "$CANON" "local"; republish_on_origin "$CANON" "$(git -C "$CANON" rev-parse HEAD)"
+fresh s72b; echo one > "$CANON/b.txt"; commit_in "$CANON" "local"; republish_on_origin "$CANON" "$(git -C "$CANON" rev-parse HEAD)"; origin_writes a.txt upstream
 rm -f "$IWE_RUNTIME_DIR"/canon-reconcile-published.*.streak
-echo dirty >> "$CANON/a.txt"; bash "$SCRIPT" "$CANON" main >/dev/null 2>&1; MAINJ=$(streak_file)
+echo dirty >> "$CANON/a.txt"; o72=$(bash "$SCRIPT" "$CANON" main 2>&1); MAINJ=$(streak_file); [ -s "$MAINJ" ] || printf "  debug 72b: %s\n" "$o72"
 assert "$([ -s "$MAINJ" ] && echo journal)" "journal" "precondition: a refusal made the refusal journal"
 git -C "$CANON" checkout -q -- a.txt
 o=$(env PATH="$FAKEBIN:$PATH" FAIL_RM_SERIES=streak bash "$SCRIPT" "$CANON" main 2>&1); rc=$?
@@ -1482,6 +1488,158 @@ republish_on_origin "$CANON" "$C"; WT98="$SANDBOX/s98-wt"; git -C "$CANON" workt
 bash "$SCRIPT" "$CANON" main >/dev/null 2>&1; rc=$?
 assert "$rc" "1" "exit 1"; assert "$(git -C "$CANON" rev-parse HEAD)" "$C" "HEAD unchanged"; assert "$(git -C "$CANON" rev-parse main)" "$B98" "branch main untouched"
 assert "$(git -C "$WT98" status --porcelain | wc -l | tr -d ' ')" "0" "the linked worktree is clean (no false staged revert)"
+
+# --- WP-484 I-34: dirt on a path upstream never touched is carried across the swap, not refused ---
+perm_of() { stat -c %a -- "$1" 2>/dev/null || stat -f %Lp -- "$1"; }
+carry_manifests() { ls "$IWE_RUNTIME_DIR"/canon-reconcile-published.*.carry.* 2>/dev/null | wc -l | tr -d ' '; }
+# the incident shape of 20.11: a local edit of a nested card that neither HEAD nor origin changed (CRLF, no final newline, private permissions)
+carried_base() {  # <name> -- diverged canon (local commit republished) with a tracked nested card; sets CANON, CARD
+  fresh "$1"; CARD="2026-11/2026-11-19-WP-601-01a1f293.md"; mkdir -p "$CANON/2026-11"; echo card-v1 > "$CANON/$CARD"; commit_in "$CANON" "card"; git -C "$CANON" push -q origin main
+  echo one > "$CANON/b.txt"; commit_in "$CANON" "local"; republish_on_origin "$CANON" "$(git -C "$CANON" rev-parse HEAD)"
+}
+
+echo "scenario 99 (I-34 a): dirty path upstream never changed -> replaced, the edit is kept byte-for-byte with its permissions"
+carried_base s99; origin_writes later.txt upstream
+printf 'card-v1\r\nlocal edit, no final newline' > "$CANON/$CARD"; chmod 600 "$CANON/$CARD"; cp -p "$CANON/$CARD" "$SANDBOX/s99-before"
+echo keep > "$CANON/note.tmp"; rm -f "$IWE_RUNTIME_DIR"/canon-reconcile-published.*.carry.*
+git -C "$CANON" fetch -q origin
+assert "$(git -C "$CANON" rev-parse "HEAD:$CARD")" "$(git -C "$CANON" rev-parse "origin/main:$CARD")" "precondition: HEAD and origin hold the same card blob"
+out=$(bash "$SCRIPT" "$CANON" main 2>&1); rc=$?
+git -C "$CANON" fetch -q origin
+assert "$rc" "0" "exit 0"; assert "$(git -C "$CANON" rev-parse HEAD)" "$(git -C "$CANON" rev-parse origin/main)" "HEAD == origin/main"
+assert "$(cmp -s "$SANDBOX/s99-before" "$CANON/$CARD" && echo same || echo differs)" "same" "the local edit is byte-for-byte what it was"
+assert "$(perm_of "$CANON/$CARD")" "600" "its permissions are kept"
+assert "$(git -C "$CANON" status --porcelain --untracked-files=no)" " M $CARD" "the card is the only dirty tracked path, still modified"
+assert "$(cat "$CANON/later.txt")" "upstream" "upstream's new file is materialised"; assert "$(cat "$CANON/note.tmp")" "keep" "untracked file kept"
+assert "$(printf '%s' "$out" | grep -c 'carried_dirty=1 ')" "1" "the report counts the carried path"
+assert "$(tail -1 "$IWE_RUNTIME_DIR/canon-reconcile-published.log" | grep -c ' replaced .* carried_dirty=1$')" "1" "the log line counts it too"
+assert "$(carry_manifests)/$(git -C "$CANON" for-each-ref refs/canon-reconcile-carry/ | wc -l | tr -d ' ')" "0/0" "the carry manifest and its ref are removed after a checked success"
+
+echo "scenario 100 (I-34 b): dirty path that upstream DID change -> refused as before, HEAD and the edit untouched"
+carried_base s100; origin_writes "$CARD" card-v2
+echo mine >> "$CANON/$CARD"; cp -p "$CANON/$CARD" "$SANDBOX/s100-before"; H=$(git -C "$CANON" rev-parse HEAD)
+out=$(bash "$SCRIPT" "$CANON" main 2>&1); rc=$?
+assert "$rc" "1" "exit 1"; assert "$(git -C "$CANON" rev-parse HEAD)" "$H" "HEAD unchanged"
+assert "$(cmp -s "$SANDBOX/s100-before" "$CANON/$CARD" && echo same || echo differs)" "same" "the edit is untouched"
+assert "$(printf '%s' "$out" | grep -c "tracked changes differ from target: $CARD")" "1" "the refusal names the conflicting path"
+assert "$(carry_manifests)" "0" "a refusal leaves no carry manifest behind"
+
+echo "scenario 101 (I-34 c): mixed -- carried edit, carried exec bit, tolerated identical dirt and upstream changes elsewhere -> replaced, each path right"
+carried_base s101; echo tool > "$CANON/tool.sh"; commit_in "$CANON" "tool"; republish_on_origin "$CANON" "$(git -C "$CANON" rev-parse HEAD)"
+origin_writes a.txt upstream-a; origin_writes new.txt upstream-new
+echo "local card" > "$CANON/$CARD"; chmod +x "$CANON/tool.sh"; echo upstream-a > "$CANON/a.txt"; cp -p "$CANON/$CARD" "$SANDBOX/s101-before"
+out=$(bash "$SCRIPT" "$CANON" main 2>&1); rc=$?
+git -C "$CANON" fetch -q origin
+assert "$rc" "0" "exit 0"; assert "$(git -C "$CANON" rev-parse HEAD)" "$(git -C "$CANON" rev-parse origin/main)" "HEAD == origin/main"
+assert "$(cmp -s "$SANDBOX/s101-before" "$CANON/$CARD" && echo same || echo differs)" "same" "the carried edit is kept"
+assert "$([ -x "$CANON/tool.sh" ] && echo exec)" "exec" "the carried exec bit is kept"
+assert "$(cat "$CANON/a.txt")/$(cat "$CANON/new.txt")" "upstream-a/upstream-new" "upstream's changes are on disk"
+assert "$(git -C "$CANON" status --porcelain --untracked-files=no | LC_ALL=C sort | tr '\n' '|')" " M $CARD| M tool.sh|" "only the two carried paths are dirty"
+assert "$(printf '%s' "$out" | grep -c 'tolerated identical dirty paths=1;.*carried_dirty=2 ')" "1" "the report counts the tolerated and the carried paths"
+
+echo "scenario 102 (I-34 d): tracked path deleted locally, upstream never changed it -> replaced, the path stays deleted (its emptied directory too)"
+carried_base s102; origin_writes later.txt upstream
+rm -rf "$CANON/2026-11"
+out=$(bash "$SCRIPT" "$CANON" main 2>&1); rc=$?
+git -C "$CANON" fetch -q origin
+assert "$rc" "0" "exit 0"; assert "$(git -C "$CANON" rev-parse HEAD)" "$(git -C "$CANON" rev-parse origin/main)" "HEAD == origin/main"
+assert "$(test -e "$CANON/$CARD" && echo present || echo absent)/$(test -e "$CANON/2026-11" && echo present || echo absent)" "absent/absent" "the card and its directory stay deleted"
+assert "$(git -C "$CANON" status --porcelain --untracked-files=no)" " D $CARD" "git sees the local deletion"
+assert "$(printf '%s' "$out" | grep -c 'carried_dirty=1 ')" "1" "the deletion is counted as carried"
+
+echo "scenario 103 (I-34): a carried path next to ONE conflicting path -> refused as a whole, nothing advanced, both edits intact"
+carried_base s103; origin_writes a.txt upstream-a
+echo "local card" > "$CANON/$CARD"; echo mine > "$CANON/a.txt"; H=$(git -C "$CANON" rev-parse HEAD)
+out=$(bash "$SCRIPT" "$CANON" main 2>&1); rc=$?
+assert "$rc" "1" "exit 1"; assert "$(git -C "$CANON" rev-parse HEAD)" "$H" "HEAD unchanged"
+assert "$(cat "$CANON/$CARD")/$(cat "$CANON/a.txt")" "local card/mine" "both edits intact"
+assert "$(printf '%s' "$out" | grep -c 'tracked changes differ from target: a.txt')" "1" "the refusal names only the conflicting path"
+
+echo "scenario 104 (I-34): putting a carried path back fails after the swap -> post-check FAILED, loud; the saved object survives gc; every later run refuses until --restore-carry puts the edit back"
+carried_base s104; origin_writes later.txt upstream
+printf 'precious local edit\n' > "$CANON/$CARD"; cp -p "$CANON/$CARD" "$SANDBOX/s104-before"; rm -f "$IWE_RUNTIME_DIR"/canon-reconcile-published.*.carry.*
+FAILBIN="$SANDBOX/s104-bin"; mkdir -p "$FAILBIN"
+printf '#!/usr/bin/env bash\n[ "${1:-}" = cat-file ] && [ "${2:-}" = blob ] && exit 1\nexec %q "$@"\n' "$(command -v git)" > "$FAILBIN/git"; chmod +x "$FAILBIN/git"
+out=$(PATH="$FAILBIN:$PATH" bash "$SCRIPT" "$CANON" main 2>&1); rc=$?
+assert "$rc" "1" "exit 1"; assert "$(printf '%s' "$out" | grep -c "post-check FAILED after the ref was replaced -- carried dirty path(s) not put back: $CARD; carried dirty paths are saved in ")" "1" "the failure is loud and names the path and the manifest"
+assert "$(carry_manifests)" "1" "the manifest is kept"
+M104=$(ls "$IWE_RUNTIME_DIR"/canon-reconcile-published.*.carry.* | head -1); RAW104=$(grep '^file ' "$M104" | awk '{print $2}'); REF104=$(sed -n 's/^# ref: //p' "$M104")
+assert "$(git -C "$CANON" for-each-ref --format='%(refname)' refs/canon-reconcile-carry/ | wc -l | tr -d ' ')" "1" "a ref under refs/canon-reconcile-carry/ holds the saved objects"
+git -C "$CANON" -c gc.reflogExpire=now -c gc.reflogExpireUnreachable=now gc -q --prune=now
+assert "$(git -C "$CANON" cat-file blob "$RAW104" | cmp -s - "$SANDBOX/s104-before" && echo same || echo differs)" "same" "after gc --prune=now the saved object still holds the edit byte-for-byte"
+assert "$(tail -1 "$IWE_RUNTIME_DIR/canon-reconcile-published.log" | grep -c ' post-check-failed ')" "1" "the failure is logged"
+H104=$(git -C "$CANON" rev-parse HEAD)
+out=$(bash "$SCRIPT" "$CANON" main 2>&1); rc=$?
+assert "$rc" "1" "second run: exit 1, not the early 'already at' exit"
+assert "$(printf '%s' "$out" | grep -F "refused -- carried dirty paths of an earlier run were not put back: manifest " | grep -F "/$(basename "$M104"), saved objects under $REF104 -- put them back with: " | grep -cF -- "--restore-carry ")" "1" "second run names the manifest, the ref and the restore subcommand"   # the script names the physical path (/private/var on macOS)
+assert "$(git -C "$CANON" rev-parse HEAD)" "$H104" "second run changed nothing"
+# the restore fails (the card's directory cannot be written): nothing of the saved copy may go
+chmod 555 "$CANON/2026-11"
+out=$(bash "$SCRIPT" --restore-carry "$CANON" "$M104" 2>&1); rc=$?
+chmod 755 "$CANON/2026-11"
+assert "$rc/$([ -f "$M104" ] && echo manifest)/$(git -C "$CANON" rev-parse -q --verify "$REF104" >/dev/null && echo ref)" "1/manifest/ref" "a failed restore keeps the manifest and the ref"
+assert "$(printf '%s' "$out" | grep -c 'not put back:')" "1" "and says which path was not put back"
+# a later edit of the path is never overwritten by the restore
+echo "edited after the failure" > "$CANON/$CARD"
+out=$(bash "$SCRIPT" --restore-carry "$CANON" "$M104" 2>&1); rc=$?
+assert "$rc/$(cat "$CANON/$CARD")/$([ -f "$M104" ] && echo manifest)" "1/edited after the failure/manifest" "a path changed since the failure is not overwritten; manifest kept"
+git -C "$CANON" checkout -q -- "$CARD"
+out=$(bash "$SCRIPT" --restore-carry "$CANON" "$M104" 2>&1); rc=$?
+assert "$rc" "0" "the restore subcommand succeeds"
+assert "$(cmp -s "$SANDBOX/s104-before" "$CANON/$CARD" && echo same || echo differs)/$(perm_of "$CANON/$CARD")" "same/$(perm_of "$SANDBOX/s104-before")" "the edit is back byte-for-byte, with its permissions"
+assert "$([ -e "$M104" ] && echo manifest || echo no-manifest)/$(git -C "$CANON" for-each-ref refs/canon-reconcile-carry/ | wc -l | tr -d ' ')" "no-manifest/0" "after a verified restore the ref and the manifest are gone"
+out=$(bash "$SCRIPT" "$CANON" main 2>&1); rc=$?
+assert "$rc/$(printf '%s' "$out" | grep -c 'already at')" "0/1" "the next run is healthy again"
+
+echo "scenario 105 (I-34, Codex review): a dirty SYMLINK upstream never changed is not carried -> refused as before, its target (ending in a newline) intact"
+carried_base s105; ln -s a.txt "$CANON/lnk"; commit_in "$CANON" "tracked link"; republish_on_origin "$CANON" "$(git -C "$CANON" rev-parse HEAD)"; origin_writes later.txt upstream
+python3 -c 'import os,sys; p=sys.argv[1]; os.remove(p); os.symlink("target\n", p)' "$CANON/lnk"
+H=$(git -C "$CANON" rev-parse HEAD)
+out=$(bash "$SCRIPT" "$CANON" main 2>&1); rc=$?
+assert "$rc" "1" "exit 1"; assert "$(git -C "$CANON" rev-parse HEAD)" "$H" "HEAD unchanged"
+assert "$(python3 -c 'import os,sys; print(repr(os.readlink(sys.argv[1])))' "$CANON/lnk")" "'target\\n'" "the link target, trailing newline included, is intact"
+assert "$(printf '%s' "$out" | grep -c 'tracked changes differ from target: lnk')" "1" "the refusal names the link"
+assert "$(carry_manifests)/$(git -C "$CANON" for-each-ref refs/canon-reconcile-carry/ | wc -l | tr -d ' ')" "0/0" "nothing was saved for it"
+
+echo "scenario 106 (I-34, Codex review): permissions of a carried file change after it was saved -> refused before the swap, the change is not reverted"
+carried_base s106; origin_writes later.txt upstream
+printf 'local edit\n' > "$CANON/$CARD"; chmod 600 "$CANON/$CARD"; H=$(git -C "$CANON" rev-parse HEAD)
+CHMODBIN="$SANDBOX/s106-bin"; mkdir -p "$CHMODBIN"
+printf '#!/usr/bin/env bash\nif [ "${1:-}" = hash-object ] && [ "${2:-}" = -w ]; then %q "$@"; rc=$?; chmod 644 "${!#}"; exit $rc; fi\nexec %q "$@"\n' "$(command -v git)" "$(command -v git)" > "$CHMODBIN/git"; chmod +x "$CHMODBIN/git"
+out=$(PATH="$CHMODBIN:$PATH" bash "$SCRIPT" "$CANON" main 2>&1); rc=$?
+assert "$rc" "1" "exit 1"; assert "$(git -C "$CANON" rev-parse HEAD)" "$H" "HEAD unchanged"
+assert "$(printf '%s' "$out" | grep -c "carried path(s) changed after they were saved (bytes, permissions or type): $CARD")" "1" "the refusal names the carried path"
+assert "$(perm_of "$CANON/$CARD")/$(cat "$CANON/$CARD")" "644/local edit" "the concurrent permission change is kept, the bytes too"
+assert "$(carry_manifests)/$(git -C "$CANON" for-each-ref refs/canon-reconcile-carry/ | wc -l | tr -d ' ')" "0/0" "the refusal drops this run's manifest and ref"
+
+carry_key() { printf '%s\n%s\n' "$(cd "$1" && pwd -P)" main | cksum | cut -d' ' -f1; }   # the script's STREAK_KEY of a canon on main
+
+echo "scenario 107 (I-34, Codex re-review): a manifest whose write was interrupted (*.tmp, no end marker) and its ref do not block: removed with a warning, the run goes on"
+carried_base s107; origin_writes later.txt upstream
+K107=$(carry_key "$CANON"); RT107=$(cd "$IWE_RUNTIME_DIR" && pwd -P)
+printf '# canon-reconcile-published carry manifest\n# repo: x\n# ref: refs/canon-reconcile-carry/%s/19990101T000000Z.1.1\nfile 00' "$K107" > "$RT107/canon-reconcile-published.$K107.carry.19990101T000000Z.1.1.tmp"
+git -C "$CANON" update-ref "refs/canon-reconcile-carry/$K107/19990101T000000Z.1.1" HEAD
+printf '# canon-reconcile-published carry manifest\n# ref: refs/canon-reconcile-carry/%s/19990101T000001Z.1.1\n' "$K107" > "$RT107/canon-reconcile-published.$K107.carry.19990101T000001Z.1.1"   # complete name, but no end marker and no ref
+out=$(bash "$SCRIPT" "$CANON" main 2>&1); rc=$?
+git -C "$CANON" fetch -q origin
+assert "$rc" "0" "exit 0: the leftovers do not block"; assert "$(git -C "$CANON" rev-parse HEAD)" "$(git -C "$CANON" rev-parse origin/main)" "HEAD == origin/main"
+assert "$(printf '%s' "$out" | grep -c 'removed an interrupted carry manifest')/$(printf '%s' "$out" | grep -c 'no ref holds objects for it')" "1/1" "both leftovers are reported"
+assert "$(carry_manifests)/$(git -C "$CANON" for-each-ref refs/canon-reconcile-carry/ | wc -l | tr -d ' ')" "0/0" "both leftovers and the stray ref are gone"
+
+echo "scenario 108 (I-34, Codex re-review): a run killed after its manifest was complete but before its swap -> the next run sees nothing is owed, cleans up and carries the edit"
+carried_base s108; origin_writes later.txt upstream
+printf 'local edit 108\n' > "$CANON/$CARD"; cp -p "$CANON/$CARD" "$SANDBOX/s108-before"; H=$(git -C "$CANON" rev-parse HEAD)
+KILLBIN="$SANDBOX/s108-bin"; mkdir -p "$KILLBIN"
+printf '#!/usr/bin/env bash\nif [ "${1:-}" = update-ref ] && [ "${2:-}" = -m ]; then kill -9 "$PPID"; exit 1; fi\nexec %q "$@"\n' "$(command -v git)" > "$KILLBIN/git"; chmod +x "$KILLBIN/git"
+( PATH="$KILLBIN:$PATH" bash "$SCRIPT" "$CANON" main; : ) >/dev/null 2>&1   # the subshell keeps the "Killed" job notice out of the output
+assert "$(git -C "$CANON" rev-parse HEAD)/$(carry_manifests)/$(git -C "$CANON" for-each-ref refs/canon-reconcile-carry/ | wc -l | tr -d ' ')" "$H/1/1" "precondition: killed before the swap, the complete manifest and its ref are left"
+rm -rf "$(git -C "$CANON" rev-parse --absolute-git-dir)/dirty-guard.lock"   # the killed run could not release its lock (the takeover rule is not under test here)
+out=$(bash "$SCRIPT" "$CANON" main 2>&1); rc=$?
+git -C "$CANON" fetch -q origin
+assert "$rc" "0" "exit 0"; assert "$(git -C "$CANON" rev-parse HEAD)" "$(git -C "$CANON" rev-parse origin/main)" "HEAD == origin/main"
+assert "$(printf '%s' "$out" | grep -c 'already in its saved state')" "1" "the leftover is reported as owing nothing"
+assert "$(cmp -s "$SANDBOX/s108-before" "$CANON/$CARD" && echo same || echo differs)" "same" "the edit is carried by this run"
+assert "$(carry_manifests)/$(git -C "$CANON" for-each-ref refs/canon-reconcile-carry/ | wc -l | tr -d ' ')" "0/0" "no manifest or ref is left"
 
 [ "$fails" = 0 ] || { echo "FAIL: $fails assertion(s)"; exit 1; }
 # WP-484 F274: with the ledger scenarios skipped the run is partially verified, not a full pass.
