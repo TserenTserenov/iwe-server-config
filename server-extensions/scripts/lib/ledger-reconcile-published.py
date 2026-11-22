@@ -328,6 +328,18 @@ def reconcile_locked(target, branch, head, snapshots, mirrors, deletions, origin
         raise
 
 
+def require_clean_server_only(path):
+    """A changed path outside the journal grammar may only pass the transaction when this
+    checkout holds nothing of its own there: no tracked, untracked or ignored entry."""
+    if git("status", "--porcelain=v1", "-z", "--untracked-files=all", "--ignored", "--", path).stdout:
+        raise Refused(f"unsupported changed ledger path: {path}")
+    parent = Path(path).parent
+    while str(parent) not in ("", "."):
+        if parent.is_symlink():
+            raise Refused(f"symlink parent: {path}")
+        parent = parent.parent
+
+
 def apply(target, branch, commit_lock):
     # fd 8 is inherited from tsekh1-git-sync; inode identity binds it to the
     # expected mutation lock. Re-locking the same open description is nonblocking.
@@ -346,7 +358,12 @@ def apply(target, branch, commit_lock):
         lock_paths = set(snapshots) | {os.fsdecode(p) for p in changed.split(b"\0") if p}
         for path in sorted(lock_paths):
             if not LEDGER_PATH.fullmatch(path):
-                raise Refused(f"unsupported changed ledger path: {path}")
+                # Server-only files next to the journals (plan/, plan/boundary/known-ids-*.txt,
+                # written by the nightly Day Open) have no append lock and no local writer.
+                # A clean one is the fast-forward's job; refusing it stalled the Mac copy after
+                # every night (WP-484 F327, 22.11). Local dirt on such a path is still refused.
+                require_clean_server_only(path)
+                continue
             if Path(path).exists():
                 regular_path(path)
             elif Path(path).parent.resolve() != (Path.cwd() / path).parent:

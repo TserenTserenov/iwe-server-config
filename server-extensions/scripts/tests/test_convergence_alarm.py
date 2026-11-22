@@ -28,6 +28,29 @@ def minutes(n):
 
 
 class StepTest(unittest.TestCase):
+    def test_sync_refusal_of_this_episode_is_named_with_an_action(self):
+        # WP-484 F327: the strategy copy alarm must say why the sync service refuses and what to do.
+        with tempfile.TemporaryDirectory() as tmp:
+            log = Path(tmp) / "sync.err.log"
+            log.write_text("ledger-publish: ok\n"
+                           "dirty-ff-admission: dirty-overlap: чужие правки на путях, которые меняет перемотка: a.md\n"
+                           "mac-canon-sync-backstop: publisher=0 sync=1 observer=0\n")
+            since = dt.datetime.now().astimezone() - dt.timedelta(hours=1)
+            reason = alarm.last_sync_refusal(log, since)
+            self.assertIn("dirty-overlap: чужие правки", reason)
+            self.assertIn("опубликовать или сохранить", alarm.sync_action(reason))
+            self.assertIn("проверь копию Мака",
+                          alarm.sync_action("ledger-reconcile: refused: unsupported changed ledger path: x"))
+
+    def test_sync_refusal_older_than_the_episode_is_not_reported(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            log = Path(tmp) / "sync.err.log"
+            log.write_text("ledger-reconcile: refused: old cause\n")
+            os.utime(log, (0, 0))
+            since = dt.datetime.now().astimezone() - dt.timedelta(minutes=5)
+            self.assertEqual(alarm.last_sync_refusal(log, since), "")
+            self.assertEqual(alarm.last_sync_refusal(Path(tmp) / "missing.log", since), "")
+
     def test_lag_alarms_once_after_threshold_then_recovers(self):
         state = {}
         self.assertIsNone(alarm.step(state, "x", "behind -3", 30, minutes(0)))

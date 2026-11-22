@@ -304,5 +304,25 @@ expect "<< inside \${…} gives cat no here-doc input" ask 'cat ${x:-<<ls} > par
 x
 ls'
 
+# === WP-7 F316 (22.11): a variable assigned a temporary path in the same call is temporary ===
+expect "mktemp variable (pilot screenshot 22.11)" pass 'I=/home/tseren/IWE; R=$I/DS-my-strategy; F=$(mktemp); git -C $R show origin/main:a.yaml > $F; sed -n 1,5p $F'
+expect "scratchpad variable with a sub-path (pilot screenshot 21.11)" pass 'S=/tmp/claude-1000/x/scratchpad; R=/home/tseren/IWE/DS-my-strategy; git -C $R show origin/main:inbox/a.md > $S/w.md'
+expect "braced variable" pass 'F=$(mktemp); git show HEAD:a > ${F}'
+expect "mktemp -d directory" pass 'D=$(mktemp -d); grep x a > $D/o.txt'
+expect "variable built on a temporary variable" pass 'T=$(mktemp -d); S=$T/sub; git show HEAD:a > $S/o'
+expect "TMPDIR based variable" pass 'F=$TMPDIR/o.txt; git show HEAD:a > $F'
+expect "variable in a working path still asks" ask 'R=/home/tseren/IWE/DS-my-strategy; git show HEAD:a > $R/WeekPlan.md'
+expect "variable with a relative name still asks" ask 'F=params.yaml; grep zzzqqq README.md > $F'
+expect "variable without an assignment still asks" ask 'grep zzzqqq README.md > $F'
+expect "mktemp with a template in the working tree still asks" ask 'F=$(mktemp params.XXXX); grep zzzqqq README.md > $F'
+expect "mktemp -p into a working directory still asks" ask 'F=$(mktemp -p /home/tseren/IWE/DS-my-strategy); grep zzzqqq README.md > $F'
+expect "reassigned to a working file still asks" ask 'F=$(mktemp); F=params.yaml; grep zzzqqq README.md > $F'
+expect "appended to a working path still asks" ask 'F=$(mktemp); F+=/../params.yaml; grep zzzqqq README.md > $F'
+expect "read rebinds the variable, still asks" ask 'F=$(mktemp); read F < x; grep zzzqqq README.md > $F'
+expect "for loop rebinds the variable, still asks" ask 'F=$(mktemp); for F in params.yaml; do echo; done; grep zzzqqq README.md > $F'
+expect "parent-directory escape under a temporary variable still asks" ask 'F=$(mktemp -d); grep zzzqqq README.md > $F/../../params.yaml'
+expect "eval hides assignments, still asks" ask 'F=$(mktemp); eval "F=params.yaml"; grep zzzqqq README.md > $F'
+expect "temporary variable still cannot reach a protected file" block 'F=$(mktemp); ls > .claude/hooks/destructive-guard.sh'
+
 echo "reader-overwrite: $PASS passed, $FAIL failed"
 [ "$FAIL" -eq 0 ]

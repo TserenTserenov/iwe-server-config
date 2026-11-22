@@ -16,6 +16,9 @@ Contract:
     alarmed copy is back. Both stay in the state until actually sent: quiet hours (default 23-08
     local; equal hours = none) and a failed send defer them to the next run.
   * WHY: the last line the reader mover wrote about that copy, when there is one.
+    The strategy copy is not moved by the reader mover but by the hourly Mac sync service; for it the
+    WHY is that service's last refusal written during the episode, plus one line of what to do
+    (WP-484 F327, 22.11: the alarm said only "behind by 340 commits" and nobody could act on it).
   * LOCAL BACKUPS (WP-484 F324, 20.11): a repository whose upstream is a bare repository on this disk
     (agent memory -> .iwe-runtime/backups/memory.git) is not on GitHub, so it is not in the registry and
     no broker fetches it. Memory and its backup diverged on 15.11 and stayed so for five days without a
@@ -81,6 +84,41 @@ def last_reader_line(log_path, path):
     for line in reversed(lines):
         if marker in line:
             return line.split(marker, 1)[1]
+    return ""
+
+
+# Copies moved by a sync service of their own instead of the reader mover: copy -> its error log.
+SYNC_LOGS = {"DS-my-strategy": "DS-my-strategy/logs/mac-canon-sync-backstop.err.log"}
+SYNC_REFUSAL_MARKERS = ("refused:", "dirty-overlap:", "ignored-overlap:", "proven fast-forward failed")
+SYNC_REASON_MAX = 300
+SYNC_ACTIONS = (
+    ("dirty-overlap:", "что сделать: незакоммиченные правки на путях, которые меняет сервер — опубликовать или сохранить их, затем копия догонит сама"),
+    ("ignored-overlap:", "что сделать: скрытый файл на пути сервера — сверить с версией сервера и убрать из папки, если совпадает"),
+    ("refused:", "что сделать: отказ проверки перемотки — разобрать строку выше в беседе («проверь копию Мака»)"),
+)
+
+
+def last_sync_refusal(log_path, since):
+    """Last refusal line the sync service wrote during this episode, or ''. A log untouched since the
+    episode began says nothing about it, so an old line is never reported as the current cause."""
+    log_path = Path(log_path)
+    try:
+        if since is not None and dt.datetime.fromtimestamp(log_path.stat().st_mtime).astimezone() < since:
+            return ""
+        lines = log_path.read_text(encoding="utf-8", errors="replace").splitlines()[-READER_LOG_TAIL:]
+    except OSError:
+        return ""
+    for line in reversed(lines):
+        if any(marker in line for marker in SYNC_REFUSAL_MARKERS):
+            return " ".join(line.split())[:SYNC_REASON_MAX]
+    return ""
+
+
+def sync_action(reason):
+    """One deterministic line of what to do for a sync refusal, or ''."""
+    for marker, action in SYNC_ACTIONS:
+        if marker in reason:
+            return action
     return ""
 
 
@@ -346,6 +384,12 @@ def main():
         text = step(state, path, label, limit, now)
         if text:
             reason = last_reader_line(reader_log, path) if label != "equal" else ""
+            if not reason and label != "equal" and path in SYNC_LOGS:
+                since = state.get(path, {}).get("since")
+                since = dt.datetime.fromisoformat(since).astimezone() if since else None
+                reason = last_sync_refusal(root / SYNC_LOGS[path], since)
+                if reason and sync_action(reason):
+                    reason += "\n" + sync_action(reason)
             pending.append((path, text + (f"\nперемотка: {reason}" if reason else "")))
     for path, threshold in LOCAL_BACKUPS:
         repo = root / path
