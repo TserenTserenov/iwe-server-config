@@ -19,6 +19,7 @@ to the registry: new entries are decided by the pilot.
 
 Every call appends one line to the consultation log (CONCEPT_KIND_LOG, default
 ~/.claude/logs/concept-kind.log): time, agent, registry hash, mode, query, outcome, claimed kind.
+Accepted Artifactor clarifications also record the checked title in an optional eighth field.
 Agent: --agent, else IWE_AGENT / STYLE_AGENT, else "unknown".
 
 Always exits 0 on a valid call: this is a nudge, never a gate.
@@ -205,17 +206,24 @@ def resolve_claim(data: dict, name: str) -> dict | None:
 
 
 def log(
-    agent: str, digest: str, mode: str, query: str, outcome: str, claim: str
+    agent: str, digest: str, mode: str, query: str, outcome: str, claim: str,
+    *, title: str | None = None,
 ) -> None:
     try:
         LOG.parent.mkdir(parents=True, exist_ok=True)
         stamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")  # noqa: UP017 -- hooks may run macOS python3 3.9
         fields = [stamp, agent, digest, mode, query[:120], outcome, claim or "-"]
+        if title is not None:
+            fields.append(title)
         line = "\t".join(" ".join(f.split()) for f in fields)
         with LOG.open("a", encoding="utf-8", errors="replace") as fh:
             fh.write(line + "\n")
     except OSError as err:
         print(f"concept-kind: журнал не записан ({err})", file=sys.stderr)
+
+
+def log_gate(digest: str, query: str, outcome: str, claim: str, title: str) -> None:
+    log("artifactor", digest, "gate", query, outcome, claim, title=title)
 
 
 def describe_kind(kind: dict) -> str:

@@ -76,6 +76,13 @@ else
 fi
 
 echo
+echo "## Уточнения названий РП за семь дней"
+DECISION_LOG="${CONCEPT_KIND_LOG:-$HOME/.claude/logs/concept-kind.log}"
+if ! python3 "$(dirname "${BASH_SOURCE[0]}")/lib/weekly_artifactor_decisions.py" "$DECISION_LOG"; then
+  echo "  Разбор названий пропущен: не удалось сформировать отчёт."
+fi
+
+echo
 echo "## Реестр"
 if [ -f "$REGISTRY" ]; then
   python3 - "$REGISTRY" <<'PY'

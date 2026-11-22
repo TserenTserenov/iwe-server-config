@@ -12,6 +12,8 @@ import os
 import re
 import subprocess
 import sys
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
 
 import pytest
 
@@ -20,6 +22,7 @@ ARTIFACTOR = os.path.join(SCRIPTS, "artifactor.py")
 
 sys.path.insert(0, SCRIPTS)
 import artifactor as af  # noqa: E402 — путь добавлен строкой выше
+from lib.weekly_artifactor_decisions import report  # noqa: E402
 
 
 def run_artifactor(text, env_extra=None):
@@ -617,3 +620,108 @@ def test_close_kind_by_name_boundaries(word, found):
     assert (kind is not None) is found
     if found:
         assert kind["id"] == "description"
+
+
+def test_weekly_report_preserves_titles_from_real_artifactor_log(tmp_path, capsys):
+    log_path = tmp_path / "ck.log"
+    for title in ("Реестр и журнал событий", "Реестр или описание"):
+        rc, out = check_registry_cli(
+            tmp_path, title, "episteme",
+            extra=("--ai-kind", "document", "--ai-answer", "носитель описания",
+                   "--pilot-decision", "название одобрено"),
+        )
+        assert rc == 0, out
+    report(log_path, datetime.now(timezone.utc))
+    out = capsys.readouterr().out
+    assert "Реестр и журнал событий — 1" in out
+    assert "Реестр или описание — 1" in out
+    assert "реестр — 2" not in out
+
+
+@pytest.mark.parametrize("title,extra", [
+    ("Платформа обучения", ()),
+    ("Реестр и журнал", ("--ai-kind", "document", "--ai-answer", "носитель описания",
+                        "--pilot-decision", "название одобрено")),
+])
+def test_gate_accepts_legacy_logging_utility(tmp_path, title, extra):
+    legacy = tmp_path / "legacy"
+    legacy.mkdir()
+    utility = Path(SCRIPTS) / "concept-kind.py"
+    text = utility.read_text()
+    start = text.index("def log_gate(")
+    end = text.index("def describe_kind(", start)
+    text = text[:start] + text[end:]
+    text = text.replace("    *, title: str | None = None,\n", "")
+    text = text.replace("        if title is not None:\n            fields.append(title)\n", "")
+    (legacy / "concept-kind.py").write_text(text)
+    (legacy / "artifactor.py").write_text(Path(ARTIFACTOR).read_text())
+    registry = tmp_path / "registry.yaml"
+    registry.write_text(MINI_REGISTRY)
+    result_file = tmp_path / "result.json"
+    result_file.write_text(json.dumps({
+        "artifact": title, "result_type": "system" if not extra else "episteme",
+    }))
+    env = dict(os.environ, CONCEPT_KINDS_REGISTRY=str(registry),
+               CONCEPT_KIND_LOG=str(tmp_path / "ck.log"))
+    result = subprocess.run([sys.executable, str(legacy / "artifactor.py"),
+                             "--check-registry", str(result_file), *extra],
+                            capture_output=True, text=True, env=env, check=False)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert result.stdout.startswith("REGISTRY_OK")
+    assert len((tmp_path / "ck.log").read_text().rstrip().split("\t")) == 7
+
+
+def test_weekly_report_accepts_legacy_rows_and_respects_time_window(tmp_path, capsys):
+    now = datetime(2026, 11, 22, 7, tzinfo=timezone.utc)
+    rows = [
+        (now, "artifactor", "gate", "термин", "miss->0", "Термин один"),
+        (now - timedelta(days=7), "artifactor", "gate", "термин", "modifier->0", "Термин один"),
+        (now, "artifactor", "gate", "сервер", "ambiguous->0", None),
+        (now + timedelta(seconds=1), "artifactor", "gate", "будущее", "miss->0", "Будущее"),
+        (now - timedelta(days=7, seconds=1), "artifactor", "gate", "старое", "miss->0", "Старое"),
+        (now, "artifactor", "gate", "отказ", "miss->4", "Отказ"),
+        (now, "artifactor", "gate", "ожидание", "ambiguous->5", "Ожидание"),
+        (now, "artifactor", "gate", "реестр", "hit->0", None),
+        (now, "codex", "lookup", "другое", "miss->0", "Другое"),
+    ]
+    log_path = tmp_path / "ck.log"
+    with log_path.open("w") as log_file:
+        log_file.write("malformed row\n")
+        for stamp, agent, mode, head, outcome, title in rows:
+            fields = [stamp.strftime("%Y-%m-%dT%H:%M:%SZ"), agent, "hash", mode,
+                      head, outcome, "document"]
+            if title is not None:
+                fields.append(title)
+            log_file.write("\t".join(fields) + "\n")
+    report(log_path, now)
+    assert capsys.readouterr().out.splitlines() == [
+        "  Проверенные названия РП (число успешных проверок):",
+        "    Термин один — 2",
+        "  Старые записи: сохранилось только первое слово названия (число успешных проверок):",
+        "    сервер — 1",
+    ]
+
+
+@pytest.mark.parametrize("path_kind", ["missing", "directory"])
+def test_unavailable_weekly_log_does_not_fail_weekly_checks(tmp_path, path_kind):
+    # Run the normal weekly entry point with the four unrelated checks satisfied.
+    root = tmp_path / "iwe"
+    for directory in ("scripts", ".claude/hooks/tests", "DS-ecosystem-development/0.OPS/scripts"):
+        (root / directory).mkdir(parents=True)
+    (root / "scripts/build-concept-kinds-tsv.py").write_text("pass\n")
+    (root / "DS-ecosystem-development/0.OPS/scripts/registry-catalog.py").write_text("pass\n")
+    for name in ("test-response-clarity-hook.sh", "test-concept-kinds.sh", "test-style-entries.sh"):
+        (root / ".claude/hooks/tests" / name).write_text("exit 0\n")
+    log_path = tmp_path / "unavailable"
+    if path_kind == "directory":
+        log_path.mkdir()
+    registry = tmp_path / "registry.yaml"
+    registry.write_text(MINI_REGISTRY)
+    env = dict(os.environ, IWE_ROOT=str(root), CONCEPT_KIND_LOG=str(log_path),
+               CONCEPT_KINDS_REGISTRY=str(registry), STYLE_LOG=str(tmp_path / "no-style-log"))
+    result = subprocess.run(["bash", str(Path(SCRIPTS) / "style-registry-weekly-check.sh")],
+                            text=True, capture_output=True, env=env, check=False)
+    assert result.returncode == 0, result.stdout + result.stderr
+    expected = "ещё не создан" if path_kind == "missing" else "не удалось прочитать"
+    assert expected in result.stdout
+    assert "все проверки пройдены" in result.stdout

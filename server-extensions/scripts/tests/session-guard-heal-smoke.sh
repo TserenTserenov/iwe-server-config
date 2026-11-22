@@ -327,7 +327,7 @@ grep -q 'session-guard.sh heal live-1' <<<"$OUT" || fail "missing-identity refus
 # 5. Witness lines that must NOT count.
 write_caller_semaphore caller-1
 write_witness caller-1 -20 "разберись с зависшей сессией live-1"              # an ordinary earlier pilot message
-write_witness caller-1 -10 "пожалуйста heal live-1 $CODE"                 # extra words: not the whole message
+write_witness caller-1 -10 "heal live-1 $CODE?"                          # a question is not a word (WP-561 Ф82)
 write_witness caller-1 -10800 "heal live-1 $CODE"                          # outside the two-hour window
 write_witness caller-1 -10 "heal other-slug $CODE"                         # another target
 write_witness caller-1 -10 "heal live-1 000000"                            # wrong code
@@ -431,12 +431,7 @@ grep -q 'нет ни одной другой реплики' <<<"$OUT" || fail "
 grep -q 'session-guard.sh heal live-3 --apply' <<<"$OUT" || fail "single-record refusal must name the command to repeat: $OUT"
 [ -f "$SESSION_DIR/claude-code-live-3.open" ] || fail "semaphore moved on a single-record log"
 write_witness caller-4 -20 "обычная реплика"
-write_witness caller-4 -5 "heal live-3 $CODE"          # a good log, but caller-4 owns no live semaphore
-if OUT=$(sg CLAUDE_CODE_SESSION_ID=caller-4 -- heal live-3 --apply --reason r); then fail "a caller without a live semaphore healed"; fi
-grep -q 'нет собственного живого семафора' <<<"$OUT" || fail "no-semaphore refusal unclear: $OUT"
-grep -q 'session-guard.sh open --wp' <<<"$OUT" && grep -q -- '--close-path no-code-changes' <<<"$OUT" \
-  || fail "no-semaphore refusal must name the open command of a light healing session: $OUT"
-grep -q 'session-guard.sh heal live-3 --apply' <<<"$OUT" || fail "no-semaphore refusal must name the heal command to repeat: $OUT"
+write_witness caller-4 -5 "heal live-3 $CODE"          # a good log; caller-4 owns no semaphore (healed at the end of 14)
 write_caller_semaphore caller-5                         # owns a semaphore but has no log of its own: caller-4's log must not count
 if OUT=$(sg CLAUDE_CODE_SESSION_ID=caller-5 -- heal live-3 --apply --reason r); then fail "another conversation's log was accepted"; fi
 grep -q 'слова пилота нет' <<<"$OUT" || fail "foreign-log refusal unclear: $OUT"
@@ -446,6 +441,40 @@ grep -q 'недоказуемо' <<<"$OUT" || fail "Codex refusal unclear: $OUT"
 if OUT=$(sg IWE_AGENT=codex -- heal live-3 --apply --reason r); then fail "codex agent healed on a word"; fi
 grep -q 'недоказуемо' <<<"$OUT" || fail "codex-agent refusal unclear: $OUT"
 [ -f "$SESSION_DIR/claude-code-live-3.open" ] || fail "semaphore moved by a refused heal"
+# WP-561 Ф82 п.3: healing is a service action -- a caller with no semaphore of its own heals
+# on the pilot's word and no semaphore is opened for it.
+OUT=$(sg CLAUDE_CODE_SESSION_ID=caller-4 -- heal live-3 --apply --reason r) || fail "a caller without a semaphore of its own was refused: $OUT"
+[ -f "$SESSION_DIR/claude-code-live-3.open.orphaned-pilot-healed" ] || fail "live-3 not quarantined by caller-4: $OUT"
+[ -z "$(grep -l '^harness_session_id: caller-4$' "$SESSION_DIR"/*.open 2>/dev/null || true)" ] || fail "heal opened a semaphore for the caller"
+
+# 14a. WP-561 Ф82 п.4: the word inside a sentence, several sessions in one message
+#      (list form), the code typed in upper case; no own semaphore needed.
+write_semaphore live-4 "$$" "$HOST"; OUT=$(sg -- heal live-4); CODE4=$(code_from "$OUT" live-4)
+write_semaphore live-5 "$$" "$HOST"; OUT=$(sg -- heal live-5); CODE5=$(code_from "$OUT" live-5)
+write_witness caller-7 -20 "посмотри, что зависло"
+write_witness caller-7 -5 "вылечи сессии live-4 и live-5; коды $(printf '%s' "$CODE4" | tr 'a-f' 'A-F') и $CODE5, спасибо"
+sg CLAUDE_CODE_SESSION_ID=caller-7 -- heal live-4 --apply --reason r >/dev/null || fail "first of two pairs in one message was refused"
+sg CLAUDE_CODE_SESSION_ID=caller-7 -- heal live-5 --apply --reason r >/dev/null || fail "second of two pairs in one message was refused"
+[ ! -e "$SESSION_DIR/claude-code-live-4.open" ] && [ ! -e "$SESSION_DIR/claude-code-live-5.open" ] || fail "two-pair message did not heal both"
+
+# 14b. Ambiguous pairing is refused with a clear reason: two slugs, one code; a pair plus an extra code.
+write_semaphore live-6 "$$" "$HOST"; OUT=$(sg -- heal live-6); CODE6=$(code_from "$OUT" live-6)
+write_semaphore live-7 "$$" "$HOST"
+write_witness caller-8 -20 "обычная реплика"
+write_witness caller-8 -5 "вылечи live-6 и live-7, код $CODE6"
+if OUT=$(sg CLAUDE_CODE_SESSION_ID=caller-8 -- heal live-6 --apply --reason r); then fail "two slugs with one code healed"; fi
+grep -q 'не сопоставляются однозначно' <<<"$OUT" || fail "ambiguity refusal unclear: $OUT"
+write_witness caller-8 -3 "heal live-6 $CODE6 000000"
+if OUT=$(sg CLAUDE_CODE_SESSION_ID=caller-8 -- heal live-6 --apply --reason r); then fail "a pair plus an extra code healed"; fi
+grep -q 'не сопоставляются однозначно' <<<"$OUT" || fail "pair-plus-code refusal unclear: $OUT"
+[ -f "$SESSION_DIR/claude-code-live-6.open" ] || fail "semaphore moved on an ambiguous word"
+# A newer clean pair settles it.
+write_witness caller-8 -1 "heal live-6 $CODE6"
+sg CLAUDE_CODE_SESSION_ID=caller-8 -- heal live-6 --apply --reason r >/dev/null || fail "a clean pair after an ambiguous one was refused"
+# A headless child (the word is its only record) stays refused without a semaphore too.
+write_witness caller-9 -5 "вылечи live-7 $(code_from "$(sg -- heal live-7)" live-7)"
+if OUT=$(sg CLAUDE_CODE_SESSION_ID=caller-9 -- heal live-7 --apply --reason r); then fail "a single-record log healed"; fi
+grep -q 'нет ни одной другой реплики' <<<"$OUT" || fail "child refusal unclear: $OUT"
 
 # 15. After a pilot-word heal the SAME fixed name opens again (the pilot-healed
 #     quarantine is terminal evidence, like the dead-interactive one); an

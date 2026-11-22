@@ -335,7 +335,15 @@ def registry_verdict(ck, data, digest, name, result_type, compatible, ai):
         code, text = ai_verdict(known, head, outcome, why, result_type, compatible, ai)
         if code == 0 and outcome == "modifier":
             text += f" ⚠ {why}"  # a warning, not a refusal: the AI's answer decides
-    ck.log("artifactor", digest, "gate", head, f"{outcome}->{code}", ai.get("kind") or result_type)
+    # Keep the title when a clarification was accepted. The head alone cannot
+    # distinguish decisions about coordinated titles such as "A and B" and "A or C".
+    log_gate = getattr(ck, "log_gate", None)
+    claim = ai.get("kind") or result_type
+    if code == 0 and outcome != "hit" and log_gate is not None:
+        log_gate(digest, head, f"{outcome}->{code}", claim, name)
+    else:
+        # The template can receive artifactor.py before its logging utility.
+        ck.log("artifactor", digest, "gate", head, f"{outcome}->{code}", claim)
     return code, text
 
 

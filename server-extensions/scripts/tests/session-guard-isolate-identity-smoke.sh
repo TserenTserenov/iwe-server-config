@@ -155,6 +155,32 @@ grep -q 'физическую идентичность' "$TEST_ROOT/e.err" \
   || { cat "$TEST_ROOT/e.err" >&2; fail_test "E: refusal did not mention physical identity"; }
 echo "PASS: E -- isolating an unrelated repo (no inbox/) without --force is refused"
 
+# E2: WP-561 Ф82 п.C (live case 21.11): the refusal used to end with "повтори с
+# --force", and agents asked the pilot for --force although the same command from
+# the governance repo worked. It must name that exact command first, and the
+# command must pass the identity check when run as printed.
+RERUN_E=$(grep '^(cd ' "$TEST_ROOT/e.err" | head -1)
+case "$RERUN_E" in
+  "(cd $GOV_E && bash $GUARD open --task fixture --agent fixture --isolate --wp WP-999 --slug e-"*")") ;;
+  *) cat "$TEST_ROOT/e.err" >&2; fail_test "E2: refusal does not name the same command run from the governance repo: '$RERUN_E'" ;;
+esac
+grep -q 'без --force' "$TEST_ROOT/e.err" || fail_test "E2: refusal does not say the remedy needs no --force"
+if grep -q 'повтори с --force\.$' "$TEST_ROOT/e.err"; then fail_test "E2: --force is still offered as the remedy"; fi
+GOV_E_ORIGIN="$TEST_ROOT/gov-e-origin.git"
+git init -q --bare -b main "$GOV_E_ORIGIN"
+git -C "$GOV_E" remote add origin "$GOV_E_ORIGIN"
+mkdir -p "$GOV_E/inbox/WP-999"
+printf 'card\n' > "$GOV_E/inbox/WP-999/WP-999.md"
+git -C "$GOV_E" add inbox/WP-999/WP-999.md
+git -C "$GOV_E" commit -qm card >/dev/null
+git -C "$GOV_E" push -q origin main
+OUT_E2=$(IWE_ROOT="$E_ROOT" IWE_GOVERNANCE_REPO=gov IWE_AGENT=fixture IWE_SESSIONS_ROOT="$E_ROOT/sessions" \
+  IWE_FROZEN_CANONICAL_PATH="" CLAUDE_CODE_SESSION_ID="identity-smoke-$RANDOM" \
+  bash -c "$RERUN_E" 2>"$TEST_ROOT/e2.err") \
+  || { cat "$TEST_ROOT/e2.err" >&2; fail_test "E2: the printed command failed"; }
+grep -q '"worktree_path": "' <<<"$OUT_E2" || fail_test "E2: the printed command opened no isolated worktree: $OUT_E2"
+echo "PASS: E2 -- the refusal names the working command from the governance repo, not --force"
+
 # F: WP-530 Ф91б (2026-10-19, live incident closing РП-385). `open` always
 # requires --wp (enforced earlier, unconditionally outside --housekeeping),
 # so the identity-mismatch branch below never sees an empty $WP in practice

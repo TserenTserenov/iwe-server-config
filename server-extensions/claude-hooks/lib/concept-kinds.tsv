@@ -7,6 +7,7 @@ system	бот
 system	шлюз
 system	человек
 system	пилот
+system	людей
 system	молоток
 system	молотк
 system	компьютер
@@ -55,8 +56,10 @@ role_kind	рол[ьиеюя](?![а-яё])
 capability	скилл
 capability	способност
 collection	список
+collection	списки
 collection	набор
 collection	перечен
+collection	перечня
 collection	совокупност
 ambiguous	функци
 ambiguous	контекст
@@ -115,6 +118,11 @@ collection	библиотек[а-яё]+ метод
 method	индексаци
 method	поиск
 method	отдач
+ambiguous	mcp
+description	стандарт([а-яё]+)? mcp
+description	код(а|у|ом|е)? сервер
+system	сервер([а-яё]+)? open mcp
+description	карточк[а-яё]+ метод
 method	рабоч[а-яё]+ процесс
 method	процесс(а|у|ом|е)? разработки
 method	инженерн[а-яё]+ процесс

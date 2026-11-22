@@ -145,21 +145,62 @@ check "отказ говорит, что завершение не доказа�
 check "журнал: refused_unproven" "$(last_owner)" "refused_unproven False"
 UNPROVEN_CODE=$(code_in_refusal)
 
-echo "4. строка пилота не той формы, не той отметки, не в той беседе или старая не снимает"
-write_witness convo-other -5 "пожалуйста снять live-mark $LIVE_CODE"
+echo "4. реплика-вопрос, чужой код, чужая беседа или старая строка не снимают"
+write_witness convo-other -5 "снять live-mark $LIVE_CODE?"
 write_witness convo-other -5 "снять unproven-mark $LIVE_CODE"
 write_witness convo-live -5 "снять live-mark $LIVE_CODE"
 write_witness convo-other -10800 "снять live-mark $LIVE_CODE"
-check "лишние слова, чужой код, чужая беседа, просроченная строка: отказ" "$(close_sem convo-other live-mark --pilot-release "$WORD")" "3"
+check "вопрос, чужой код, чужая беседа, просроченная строка: отказ" "$(close_sem convo-other live-mark --pilot-release "$WORD")" "3"
+check "отказ называет непринятую реплику" "$(seen 'не принята: это вопрос')" "yes"
 check "отметка осталась" "$(state_of live-mark)" "open"
 check "повторный отказ даёт тот же код (строка пилота остаётся годной)" "$(code_in_refusal)" "$LIVE_CODE"
 
-echo "4а. беседа без своей живой отметки не снимает даже по верной строке"
+# WP-561 Ф82: the helper conversation needs no mark of its own and opens none; the agent
+# never retypes the word (its --pilot-release text is ignored), the guard finds the word in
+# the pilot's own replies, inside a sentence, several pairs per message.
+nomark_sems() { grep -l '^harness_session_id: convo-nomark$' "$SESSIONS"/*.open 2>/dev/null | wc -l | tr -d ' '; }
 write_witness convo-nomark -60 "обычная реплика"
-write_witness convo-nomark -5 "снять live-mark $LIVE_CODE"
-check "отказ с кодом 3" "$(close_sem convo-nomark live-mark --pilot-release "$WORD")" "3"
-check "отказ называет причину" "$(seen 'нет своей живой отметки')" "yes"
-check "отметка осталась" "$(state_of live-mark)" "open"
+
+echo "4а. беседа без своей отметки снимает по слову пилота внутри фразы; текст агента не учитывается"
+open_sem convo-live3 nomark-target --owner-pid "$LIVE_PID"
+check "первый вызов без текста: отказ с кодом" "$(close_sem convo-nomark nomark-target --pilot-release)" "3"
+check "отказ не требует своей отметки" "$(seen 'своя отметка у этой беседы не нужна')" "yes"
+NOMARK_CODE=$(code_in_refusal)
+write_witness convo-nomark -5 "закрой, пожалуйста, отметку nomark-target, код $NOMARK_CODE"
+check "снята по реплике пилота при неверном тексте агента" "$(close_sem convo-nomark nomark-target --pilot-release "снять nomark-target 000000")" "0"
+check "журнал: слово — реплика пилота" "$(tail -1 "$AUDIT" | python3 -c 'import json,sys; print(json.loads(sys.stdin.read())["word"])')" "закрой, пожалуйста, отметку nomark-target, код $NOMARK_CODE"
+check "журнал: текст агента отдельно, не доказательство" "$(tail -1 "$AUDIT" | python3 -c 'import json,sys; print(json.loads(sys.stdin.read()).get("agent_text_not_proof",""))')" "снять nomark-target 000000"
+check "у помогающей беседы отметка не открыта" "$(nomark_sems)" "0"
+
+echo "4б. две пары в одном сообщении снимают обе отметки"
+open_sem convo-live4 pair-a --owner-pid "$LIVE_PID"
+open_sem convo-live5 pair-b --owner-pid "$LIVE_PID"
+close_sem convo-nomark pair-a --pilot-release >/dev/null; CODE_A=$(code_in_refusal)
+close_sem convo-nomark pair-b --pilot-release >/dev/null; CODE_B=$(code_in_refusal)
+write_witness convo-nomark -4 "закрой отметки pair-a и pair-b; коды $CODE_A и $CODE_B"
+check "первая из двух снята" "$(close_sem convo-nomark pair-a --pilot-release)" "0"
+check "вторая из двух снята" "$(close_sem convo-nomark pair-b --pilot-release)" "0"
+
+echo "4в. неоднозначное сопоставление слагов и кодов — отказ с понятной причиной"
+open_sem convo-live6 amb-a --owner-pid "$LIVE_PID"
+open_sem convo-live7 amb-b --owner-pid "$LIVE_PID"
+close_sem convo-nomark amb-a --pilot-release >/dev/null; CODE_AMB=$(code_in_refusal)
+write_witness convo-nomark -3 "закрой amb-a и amb-b, код $CODE_AMB"
+check "два слага и один код: отказ" "$(close_sem convo-nomark amb-a --pilot-release)" "3"
+check "отказ называет неоднозначность" "$(seen 'не сопоставляются однозначно')" "yes"
+check "отметка осталась" "$(state_of amb-a)" "open"
+
+echo "4г. без слова пилота беседа без отметки не снимает"
+write_witness convo-fresh -60 "обычная реплика"
+check "нет слова: отказ" "$(close_sem convo-fresh amb-b --pilot-release "снять amb-b 123456")" "3"
+check "отметка осталась" "$(state_of amb-b)" "open"
+
+echo "4д. дочерний разговор (слово — его единственная реплика) не снимает"
+close_sem convo-fresh amb-b --pilot-release >/dev/null; CODE_AMB_B=$(code_in_refusal)
+write_witness convo-child -2 "снять amb-b $CODE_AMB_B"
+check "дочерний разговор: отказ" "$(close_sem convo-child amb-b --pilot-release)" "3"
+check "отказ называет дочерний разговор" "$(seen 'так выглядит дочерний разговор')" "yes"
+check "отметка осталась" "$(state_of amb-b)" "open"
 
 echo "5. строка пилота в этой беседе снимает именно эту отметку, код удаляется вместе с ней"
 write_witness convo-other -3 "снять live-mark $LIVE_CODE"
@@ -220,7 +261,7 @@ REOPEN_RC=0
 CLAUDE_CODE_SESSION_ID=convo-live bash "$GUARD" open --wp WP-484 --task "fixture again" \
   --slug live-mark --agent fixture >/dev/null 2>"$CLOSE_ERR" || REOPEN_RC=$?
 check "повторное открытие того же slug отклонено" "$([ "$REOPEN_RC" -ne 0 ] && echo refused || echo opened)" "refused"
-check "отказ называет внешнее снятие и слово пилота" "$(seen "снята извне по слову пилота «${WORD}»")" "yes"
+check "отказ называет внешнее снятие и реплику пилота" "$(seen "снята извне по слову пилота «снять live-mark ${LIVE_CODE}»")" "yes"
 check "отказ называет вызвавшую беседу" "$(seen 'вызвала беседа convo-other')" "yes"
 check "отказ подсказывает новый slug" "$(seen '--slug live-mark-r2')" "yes"
 CLAUDE_CODE_SESSION_ID=convo-live bash "$GUARD" open --wp WP-484 --task "fixture again" \
