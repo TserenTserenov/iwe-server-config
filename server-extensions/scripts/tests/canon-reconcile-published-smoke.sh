@@ -59,15 +59,17 @@ fresh() {  # <name> -- bare origin + canonical clone with one base commit; sets 
 }
 commit_in() { git -C "$1" add -A; git -C "$1" -c user.name=t -c user.email=t@t commit -qm "$2"; }
 # origin gets the same patch republished under a new SHA (what isolate-push does)
+# Clone directories come from mktemp, not $RANDOM: ~80 calls over 0..32767 collide in about one
+# run of ten, the clone then fails and the old clone pushes to an earlier scenario's origin (CI 22.11, scenario 81).
 republish_on_origin() {  # <canon> <commit> -- cherry-pick onto a fresh clone of origin and push
-  local pub="$SANDBOX/pub-$RANDOM"; git clone -q "$ORIGIN" "$pub"
+  local pub; pub=$(mktemp -d "$SANDBOX/pub-XXXXXX"); git clone -q "$ORIGIN" "$pub"
   git -C "$pub" fetch -q "$1" "$2"; git -C "$pub" -c user.name=o -c user.email=o@o cherry-pick FETCH_HEAD >/dev/null
   git -C "$pub" push -q origin main
 }
 # WP-484 I-34: dirt on a path upstream never touched is CARRIED, not refused. Scenarios that need tracked dirt to refuse
 # make origin change that path first, so the dirt is a real conflict with the target.
 origin_writes() {  # <file> <content> -- one origin commit writing <content> into <file>
-  local pub="$SANDBOX/pub-w-$RANDOM"; git clone -q "$ORIGIN" "$pub"
+  local pub; pub=$(mktemp -d "$SANDBOX/pub-w-XXXXXX"); git clone -q "$ORIGIN" "$pub"
   echo "$2" > "$pub/$1"; commit_in "$pub" "origin writes $1"; git -C "$pub" push -q origin main
 }
 
@@ -354,7 +356,7 @@ assert "$(test -e "$CANON/b.txt" && echo present || echo absent)" "absent" "b.tx
 
 # --- WP-530 Ф72: ANCESTRAL_PATH criterion -------------------------------------
 origin_edit() {  # <tag> <file> <content> -- one commit on origin editing <file> (removing it when content is __RM__)
-  local pub="$SANDBOX/pub-$1-$RANDOM"; git clone -q "$ORIGIN" "$pub"
+  local pub; pub=$(mktemp -d "$SANDBOX/pub-$1-XXXXXX"); git clone -q "$ORIGIN" "$pub"
   if [ "$3" = "__RM__" ]; then git -C "$pub" rm -q "$2"; else echo "$3" > "$pub/$2"; fi
   commit_in "$pub" "origin $1 $2"; git -C "$pub" push -q origin main
 }
@@ -428,7 +430,7 @@ assert "$(printf '%s' "$out" | grep -c 'staged changes present in index: a.txt')
 # --- WP-530 Ф72 cold review: gitlinks and pathspec magic never count as ancestral ---
 GL1=1111111111111111111111111111111111111111; GL2=2222222222222222222222222222222222222222
 origin_gitlink() {  # <tag> <path> <sha> [extra-file] -- one origin commit pointing <path> at gitlink <sha> (replacing whatever was there)
-  local pub="$SANDBOX/pub-$1-$RANDOM"; git clone -q "$ORIGIN" "$pub"
+  local pub; pub=$(mktemp -d "$SANDBOX/pub-$1-XXXXXX"); git clone -q "$ORIGIN" "$pub"
   git -C "$pub" rm -q --cached --ignore-unmatch "$2"; rm -rf "${pub:?}/$2"
   git -C "$pub" update-index --add --cacheinfo "160000,$3,$2"
   if [ -n "${4:-}" ]; then echo extra > "$pub/$4"; git -C "$pub" add "$4"; fi

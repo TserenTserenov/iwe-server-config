@@ -119,6 +119,12 @@
 #                                      # guard accepts, one token per line; a caller passes a newer
 #                                      # flag only when its token is listed (an older guard exits
 #                                      # non-zero here, which means "none")
+#   note-commit <sha> --auto-claim --repo <name> [--agent ...] [--session-id ...]
+#                                      # WP-484 I-34 (4): заявка без явного note-commit, только
+#                                      # для коммита полной цепочки base..вершина своей
+#                                      # изолированной копии, не слияния, все пути заявлены;
+#                                      # печатает "AUTO-CLAIMED <sha>" или
+#                                      # "AUTO-CLAIM-REFUSED <условие>: <подробности>"
 #   note-commit --forget <sha> [--repo <name>] [--agent ...]
 #                                      # WP-7 Ф209: снять заявку на коммит, если она не входит в
 #                                      # source/expected набор текущего PREPARE и ещё не имеет
@@ -195,7 +201,7 @@ set -euo pipefail
 # Tsekh and the close stopped twice; callers now ask first. Add a token here in
 # the same commit that adds the flag.
 if [ "${1:-}" = "capabilities" ]; then
-  printf '%s\n' note-commit-source-checkout note-commit-promote-intent
+  printf '%s\n' note-commit-source-checkout note-commit-promote-intent note-commit-auto-claim
   exit 0
 fi
 
@@ -3117,8 +3123,8 @@ HEAL_WORD_WINDOW_SEC=7200
 #     dashes at the ends of a word are dropped;
 #   - a SLUG word equals, ignoring case, the target slug or the slug of any
 #     semaphore of this host (open or quarantined); a CODE word is exactly six
-#     characters 0-9a-f, ignoring case; every other word is ignored, so the verb
-#     («снять», «heal», «подтверждаю») and free text around it are optional;
+#     characters 0-9a-f, ignoring case; other words are free text, except the
+#     release verbs and stop words below;
 #   - pair form: a SLUG word directly followed by a CODE word
 #     («снять WP-561 878230 и heal x 1a2b3c»);
 #   - list form: no SLUG is directly followed by a CODE, and the message has as
@@ -3127,11 +3133,23 @@ HEAL_WORD_WINDOW_SEC=7200
 #   - anything else (pairs plus extra codes, unequal lists, one slug with two
 #     different codes) is ambiguous: refused for every slug it names, the pilot
 #     writes the pairs again;
-#   - a message that pairs the target with a valid code is still not a word when
-#     it looks like a question (has «?»), a refusal (a separate word не / нет /
-#     отмена / no / not), a quote of guard output (session-guard, «Покажи пилоту»,
-#     «Слово пилота:», «Скопируйте строку», «Что делать:») or is longer than 400
-#     characters; machine notifications are skipped as in the recorder.
+#   - a message that pairs the target with a valid code is a word only with an
+#     explicit release verb in the SAME sentence as that slug and code (Fable
+#     review 22.11: «подожди с wp561-f61 878230» released the mark). Verbs, as
+#     separate words: снять сними снимай снимите снимаю, закрой закрыть закройте
+#     закрывай закрывайте, отпусти отпустить отпустите, убери, вылечи вылечить
+#     вылечите, heal release,
+#     подтверждаю. Sentences end at . ! … followed by a space, or a line break;
+#     «;» and «,» do not end one, so «закрой отметки A и B; коды X и Y» passes;
+#   - it is still not a word when it looks like a question (has «?»), a refusal
+#     or a request to wait (a separate word не / нет / отмена / no / not /
+#     подожди / подождите / погоди / оставь / оставьте / стоп / позже / потом /
+#     рано / держи / ли / stop /
+#     wait / later; «не надо» is caught by «не»), a quote of guard output
+#     (session-guard, «Покажи пилоту», «Слово пилота:», «Скопируйте строку»,
+#     «Что делать:») or is longer than 400 characters; machine notifications are
+#     skipped as in the recorder.
+#   - among messages with the same second, the later line of the log is newer.
 #   - the latest message inside the window that names the target decides: an
 #     older word does not outvote a newer ambiguous or rejected one.
 # Only the Claude hook writes witness logs: for Codex/Kimi the pilot's word cannot
@@ -3167,7 +3185,13 @@ import sys
 path, slug, code_now, code_prev, window, verb, session_dir = sys.argv[1:]
 MACHINE_PREFIXES = ("[SYSTEM NOTIFICATION", "<task-notification", "<agent-message from=")
 QUOTE_MARKERS = ("session-guard", "покажи пилоту", "строку за пилота", "слово пилота:", "скопируйте строку", "что делать:")
-NEGATIONS = {"не", "нет", "отмена", "отменить", "no", "not", "don't", "dont"}
+NEGATIONS = {"не", "нет", "отмена", "отменить", "no", "not", "don't", "dont",
+             "подожди", "подождите", "погоди", "погодите", "оставь", "оставьте",
+             "стоп", "позже", "потом", "рано", "держи", "ли", "stop", "wait", "later"}
+RELEASE_VERBS = {"снять", "сними", "снимай", "снимите", "снимаю", "закрой", "закрыть", "закройте",
+                 "закрывай", "закрывайте", "отпусти", "отпустить", "отпустите", "убери",
+                 "вылечи", "вылечить", "вылечите", "heal", "release", "подтверждаю"}
+SENTENCE_END = re.compile(r"(?<=[.!…])\s+|\n+")
 MAX_LENGTH = 400
 CODE = re.compile(r"[0-9a-f]{6}")
 SEPARATORS = re.compile(r"[\s,;:!?()\[\]{}«»\"'“”„]+")
@@ -3240,8 +3264,17 @@ def rejection(text, message_words):
     if "?" in text:
         return "это вопрос"
     if NEGATIONS & set(message_words):
-        return "в ней есть отрицание"
+        return "в ней есть отрицание или просьба подождать"
     return ""
+
+
+def verb_with_pair(text, code):
+    """True when one sentence holds a release verb, the target slug and its code."""
+    for sentence in SENTENCE_END.split(text):
+        sentence_words = set(words(sentence))
+        if RELEASE_VERBS & sentence_words and target in sentence_words and code in sentence_words:
+            return True
+    return False
 
 
 now = dt.datetime.now(dt.timezone.utc)
@@ -3259,10 +3292,12 @@ with open(path, encoding="utf-8") as stream:
             continue
         if not text or text.startswith(MACHINE_PREFIXES):
             continue
-        records.append((stamp, record["ts"], text))
+        records.append((stamp, number, record["ts"], text))
 
 verdict, why, found = "none", "", None
-for stamp, ts, text in sorted(records, key=lambda item: item[0], reverse=True):
+# Newest first; two messages within one second keep log order (the later line
+# is newer) -- sorting by the second alone let an older line win (WP-561 F82, CI 22.11).
+for stamp, _, ts, text in sorted(records, key=lambda item: (item[0], item[1]), reverse=True):
     if (now - stamp).total_seconds() > int(window):
         break
     message_words = words(text)
@@ -3282,6 +3317,8 @@ for stamp, ts, text in sorted(records, key=lambda item: item[0], reverse=True):
         why = "в реплике пилота %s у слага %s не действующий код" % (ts, slug)
         break
     reason = rejection(text, message_words)
+    if not reason and not verb_with_pair(text, next(iter(codes))):
+        reason = "нет глагола снятия (снять, закрой, отпусти, heal...) в одном предложении с парой"
     if reason:
         why = "реплика пилота %s с верным кодом не принята: %s" % (ts, reason)
         break
@@ -3303,7 +3340,7 @@ def is_word_for_target(other_text):
 
 
 if not any(other < stamp and not VERB_START.match(other_text) and not is_word_for_target(other_text)
-           for other, _, other_text in records):
+           for other, _, _, other_text in records):
     print("единственная реплика в журнале — само слово; так выглядит дочерний headless-разговор")
     raise SystemExit(4)
 print(ts)
@@ -5189,6 +5226,8 @@ SOURCE_CHECKOUT_ARG=""
 BRANCH_ARG=""
 PROMOTE_INTENT_ARG=""
 INTENT_MODE="promote"   # promote | abandon (note-commit --abandon-intent)
+# WP-484 I-34 (4): note-commit --auto-claim <sha>; see _auto_claim_commit_chain.
+AUTO_CLAIM_FLAG=0
 UNFREEZE_REASON=""
 ISOLATE_FLAG=0
 ABANDON_PREPARED=0
@@ -5335,6 +5374,7 @@ while [[ $# -gt 0 ]]; do
     --force-wp-elsewhere) FORCE_WP_ELSEWHERE_FLAG=1; shift ;;
     --forget) FORGET_FLAG=1; shift ;;
     --forget-unprovable) FORGET_UNPROVABLE_FLAG=1; shift ;;
+    --auto-claim) AUTO_CLAIM_FLAG=1; shift ;;
     --paths-from0)
       if [[ $# -lt 2 || -z "$2" ]]; then
         fail "--paths-from0 требует непустое значение (файл с путями, разделёнными NUL)" 1
@@ -6245,6 +6285,7 @@ if [ "$CMD" = "open" ]; then
   # that block unchanged, this flag is the only thing that routes around it.
   ISOLATED_WORKTREE_PATH=""
   ISOLATED_WORKTREE_BRANCH=""
+  ISOLATED_WORKTREE_BASE=""
   if [ "$ISOLATE_FLAG" = "1" ]; then
     [ -n "$SLUG" ] && validate_isolate_slug "$SLUG"
 
@@ -6709,6 +6750,10 @@ $isolate_status_code $isolate_status_path"
     # different governance worktrees and fail before publication.
     ISOLATED_WORKTREE_PATH=$(realpath "$ISOLATED_WORKTREE_PATH" 2>/dev/null) \
       || fail "--isolate: созданный worktree не удалось канонизировать" 1
+    # WP-484 I-34 (4): the commit the copy starts from, recorded once in a new
+    # semaphore (re-entry keeps the old one). note-commit --auto-claim only
+    # accepts commits of the chain from this base to the copy's branch tip.
+    ISOLATED_WORKTREE_BASE=$(git -C "$ISOLATED_WORKTREE_PATH" rev-parse --verify -q 'HEAD^{commit}' 2>/dev/null || true)
 
     # WP-526 Ф2: no more per-worktree ORZ_ISOLATE_OVERRIDE assignment here
     # (was "$ISOLATED_WORKTREE_PATH/sessions"). The untracked-ORZ-blocks-a-
@@ -6951,6 +6996,8 @@ $isolate_status_code $isolate_status_path"
     echo "governance_worktree: ${ISOLATED_WORKTREE_PATH:-$CURRENT_REPO_DIR}"
     [ -n "$ISOLATED_WORKTREE_PATH" ] && echo "isolated_worktree: $ISOLATED_WORKTREE_PATH"
     [ -n "$ISOLATED_WORKTREE_BRANCH" ] && echo "isolated_branch: $ISOLATED_WORKTREE_BRANCH"
+    [ -n "$ISOLATED_WORKTREE_BRANCH" ] && [ -n "$ISOLATED_WORKTREE_BASE" ] \
+      && echo "isolated_base: $ISOLATED_WORKTREE_BASE"
     echo "orz_file: $ORZ_BASENAME"
     echo "orz_sessions_dir: $ORZ_SESSIONS_DIR"
     if [ -n "$BASELINE_CARD_OID" ]; then
@@ -15592,7 +15639,341 @@ fi
 # --promote-intent turns a durable commit intent into a claim through
 # _promote_commit_intent (defined above) -- the ONLY such path, in the guard by
 # design: publication scripts must never self-declare ownership.
+# --- note-commit --auto-claim (WP-484 I-34 (4), WP-561 Ф82; Claude+Kimi+Codex) ---
+#
+# 21.11 a quick close was refused three times with no-owned-commit-evidence for
+# commits the agent itself had made in its own isolated copy and simply forgot
+# to declare with note-commit. Presence in the copy alone is NOT proof of
+# authorship, so the guard (the only claim writer, see --promote-intent) claims
+# a commit on its own only when ALL of these hold, read from the semaphore and
+# git under the session transition lock the caller already holds:
+#   1. the semaphore names an isolated copy (isolated_worktree + isolated_branch)
+#      that is a registered worktree of THIS repository on exactly that branch;
+#   2. a base recorded at open: `isolated_base:` (written by open), otherwise the
+#      branch's own creation entry in its reflog ("branch: Created from ...");
+#      base is an ancestor of the branch tip;
+#   3. the commit is in the chain base..tip (an ancestor of the tip, not of base);
+#   4. it is not a merge and not a root commit (exactly one parent);
+#   5. authorship evidence (Fable review 22.11): conditions 1-3 are topology
+#      only -- `merge --ff-only <neighbour>`, `reset --hard <foreign>` or a
+#      rebase onto a foreign branch bring a neighbour's unpublished commits into
+#      base..tip without this session writing them. So the commit must appear in
+#      the copy's OWN HEAD reflog (a linked worktree keeps its own logs/HEAD;
+#      when that file is missing `git reflog show HEAD` silently falls back to
+#      the shared branch log, so the file is checked first and its absence is
+#      a refusal) under an entry that CREATED it: `commit`, `commit (amend)`,
+#      `commit (initial)`, `cherry-pick` (not `cherry-pick: fast-forward`),
+#      `revert`, or a rebase / pull --rebase step
+#      `(pick|reword|edit|fixup|squash|continue)`. Entries that only MOVE HEAD
+#      onto an existing commit do not count: `merge ...: Fast-forward`,
+#      `reset:`, `checkout:`, `rebase (start)`, and `rebase (finish)` -- the
+#      latter carries the foreign tip when a rebase onto a neighbour branch
+#      fast-forwards (verified on git 2.54). Its committer date is also not
+#      earlier than the semaphore's opened_at;
+#   6. every path it touches is claimed by this session for this repository
+#      (file_v2 record, a directory claim covers what is under it) or is the
+#      session's own report (orz_file in orz_sessions_dir);
+#   7. every earlier commit of the chain (base..commit, minus what the upstream
+#      ref -- origin/HEAD, else origin/main -- already has; with neither, the
+#      chain is bounded by base only, which is stricter) is already claimed or
+#      passes 4-6 itself -- no unknown commit before it. Such earlier commits
+#      are claimed in the same transition.
+# Anything else is refused with the failed condition named:
+#   "AUTO-CLAIM-REFUSED <condition>: <details>", exit 1, nothing written.
+#   Details (paths, git stderr, reflog subjects) are printed with non-printable
+#   characters escaped, so a crafted file name cannot forge a status line.
+# Success writes the ordinary 4-field claim (same (repo,sha) dedup as plain
+# note-commit) plus a `commit_auto:` record marking it automatic, and prints
+# "AUTO-CLAIMED <sha>" per new claim, or "ALREADY-CLAIMED <sha>" for the target.
+_auto_claim_commit_chain() {  # <semaphore> <repo-dir> <repo-name> <full-sha>
+  python3 - "$@" <<'PY'
+import json
+import os
+import re
+import stat
+import subprocess
+import sys
+import tempfile
+from datetime import datetime, timezone
+from pathlib import Path
+
+sem, repo_dir, repo_name, target = sys.argv[1:5]
+SHA_RE = re.compile(r"[0-9a-f]{40}|[0-9a-f]{64}")
+# Reflog subjects of entries that create a new commit object (see condition 5).
+CREATING_RE = re.compile(
+    r"(?:commit|commit \(amend\)|commit \(initial\)|cherry-pick|revert): .*"
+    r"|(?:rebase|rebase -i|pull .*) \((?:pick|reword|edit|fixup|squash|continue)\): .*")
+
+
+def printable(text):
+    # One verdict line: escape every non-printable character (newline, CR, ESC,
+    # U+2028...) so file names or git stderr cannot add a forged status line.
+    return "".join(ch if ch.isprintable() else "\\u%04x" % ord(ch) for ch in str(text))
+
+
+def refuse(condition, details):
+    print("AUTO-CLAIM-REFUSED " + condition + ": " + printable(details))
+    sys.exit(1)
+
+
+def status(word, sha):
+    if not SHA_RE.fullmatch(sha):
+        refuse("git-error", "не SHA коммита: " + sha)
+    print(word + " " + sha)
+
+
+def git(*args, check=True):
+    proc = subprocess.run(["git", "-C", repo_dir, *args], capture_output=True, text=True)
+    if check and proc.returncode != 0:
+        refuse("git-error", "git " + " ".join(args[:3]) + ": " + proc.stderr.strip()[:200])
+    return proc
+
+
+def is_ancestor(older, newer):
+    return git("merge-base", "--is-ancestor", older, newer, check=False).returncode == 0
+
+
+def real(path):
+    return os.path.realpath(path)
+
+
+fd = os.open(sem, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+try:
+    info = os.fstat(fd)
+    current = os.lstat(sem)
+    if (not stat.S_ISREG(info.st_mode) or info.st_uid != os.geteuid()
+            or info.st_nlink != 1 or info.st_size <= 0 or info.st_size > 1024 * 1024
+            or stat.S_ISLNK(current.st_mode)
+            or (current.st_dev, current.st_ino) != (info.st_dev, info.st_ino)):
+        refuse("semaphore-unsafe", "небезопасная запись семафора")
+    raw = b""
+    while True:
+        chunk = os.read(fd, 65536)
+        if not chunk:
+            break
+        raw += chunk
+finally:
+    os.close(fd)
+if len(raw) != info.st_size or b"\0" in raw or not raw.endswith(b"\n"):
+    refuse("semaphore-unsafe", "повреждённая запись семафора")
+lines = raw.decode("utf-8").split("\n")
+
+fields = {}
+for line in lines:
+    key, sep, value = line.partition(": ")
+    if sep and key in ("isolated_worktree", "isolated_branch", "isolated_base",
+                       "orz_file", "orz_sessions_dir", "opened_at"):
+        fields.setdefault(key, set()).add(value.strip())
+for key, values in fields.items():
+    if len(values) != 1:
+        refuse("semaphore-ambiguous", "поле " + key + " записано несколько раз с разными значениями")
+
+
+def field(key):
+    return next(iter(fields.get(key, {""})))
+
+
+worktree, branch = field("isolated_worktree"), field("isolated_branch")
+if not worktree or not branch:
+    refuse("no-isolated-copy", "в семафоре нет isolated_worktree/isolated_branch -- автозаявка только для своей изолированной копии")
+common = real(git("rev-parse", "--path-format=absolute", "--git-common-dir").stdout.strip())
+
+# 1. The copy is a registered worktree of this repository on exactly its branch.
+registered = None
+entry_path = None
+for line in git("worktree", "list", "--porcelain").stdout.splitlines():
+    if line.startswith("worktree "):
+        entry_path = real(line[len("worktree "):])
+    elif line.startswith("branch ") and entry_path == real(worktree):
+        registered = line[len("branch "):]
+if registered is None:
+    refuse("isolated-copy-not-registered", "копия " + worktree + " не зарегистрирована как worktree этого репозитория")
+if registered != "refs/heads/" + branch:
+    refuse("isolated-copy-not-registered", "копия " + worktree + " стоит на " + registered + ", в семафоре " + branch)
+tip = git("rev-parse", "--verify", "refs/heads/" + branch + "^{commit}").stdout.strip()
+
+# 2. Base recorded at open.
+base = field("isolated_base")
+base_source = "isolated_base"
+if base:
+    if not re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", base) \
+            or git("cat-file", "-e", base + "^{commit}", check=False).returncode != 0:
+        refuse("no-recorded-base", "isolated_base " + base + " не коммит этого репозитория")
+else:
+    reflog = git("reflog", "show", "--format=%H %gs", "refs/heads/" + branch, check=False)
+    entries = [line for line in reflog.stdout.splitlines() if line.strip()]
+    first = entries[-1].split(" ", 1) if entries else []
+    if reflog.returncode != 0 or len(first) != 2 or not first[1].startswith("branch: Created from"):
+        refuse("no-recorded-base", "в семафоре нет isolated_base, а журнал ссылок ветки " + branch + " не хранит её создания")
+    base, base_source = first[0], "reflog"
+if not is_ancestor(base, tip):
+    refuse("base-not-in-chain", "база " + base[:12] + " (" + base_source + ") не предок вершины " + branch)
+
+# 3. The commit belongs to the chain base..tip.
+if not is_ancestor(target, tip) or is_ancestor(target, base):
+    refuse("not-in-session-chain", "коммит " + target[:12] + " не входит в цепочку " + base[:12] + ".." + branch)
+
+claimed = set()
+for line in lines:
+    if line.startswith("commit: "):
+        parts = line[len("commit: "):].split()
+        if len(parts) in (2, 4) and parts[0] == repo_name:
+            claimed.add(parts[1])
+if target in claimed:
+    status("ALREADY-CLAIMED", target)
+    sys.exit(0)
+
+# 5. Authorship evidence: the copy's own HEAD reflog and the open time.
+try:
+    opened_at = int(datetime.strptime(field("opened_at"), "%Y-%m-%dT%H:%M:%SZ")
+                    .replace(tzinfo=timezone.utc).timestamp())
+except ValueError:
+    refuse("no-authorship-evidence", "в семафоре нет корректного opened_at -- не с чем сравнить дату коммита")
+
+
+def wt_git(*args):
+    proc = subprocess.run(["git", "-C", worktree, *args], capture_output=True, text=True)
+    if proc.returncode != 0:
+        refuse("no-head-reflog", "git " + " ".join(args[:3]) + " в копии " + worktree + ": " + proc.stderr.strip()[:200])
+    return proc.stdout
+
+
+head_log = wt_git("rev-parse", "--path-format=absolute", "--git-path", "logs/HEAD").strip()
+if not os.path.isfile(head_log) or os.path.getsize(head_log) == 0:
+    refuse("no-head-reflog", "у копии " + worktree + " нет журнала ссылок HEAD (" + head_log + ") -- авторство не доказать")
+reflog_subjects = {}
+for line in wt_git("reflog", "show", "HEAD", "--format=%H %gs").splitlines():
+    sha, _, subject = line.partition(" ")
+    reflog_subjects.setdefault(sha, []).append(subject)
+
+
+def authorship_problem(sha):
+    subjects = reflog_subjects.get(sha, [])
+    if not any(CREATING_RE.fullmatch(s) and s != "cherry-pick: fast-forward" for s in subjects):
+        how = ("только через «" + subjects[-1] + "»") if subjects else "его там нет"
+        return ("no-authorship-evidence", "коммит " + sha[:12] + " не создан в копии: в журнале HEAD копии "
+                + how + " -- перенос чужого коммита (merge --ff-only, reset, rebase на чужую ветку) не доказывает авторства")
+    committed = int(git("log", "-1", "--format=%ct", sha).stdout.strip())
+    if committed < opened_at:
+        return ("committed-before-open", "дата коммиттера " + sha[:12] + " раньше открытия сессии (" + field("opened_at") + ")")
+    return None
+
+
+scope = []
+for line in lines:
+    if line.startswith("file_v2: "):
+        try:
+            record = json.loads(line[len("file_v2: "):])
+        except ValueError:
+            continue
+        if isinstance(record, dict) and record.get("repo") == common and isinstance(record.get("path"), str):
+            scope.append(record["path"])
+orz_file, orz_dir = field("orz_file"), field("orz_sessions_dir")
+if orz_file and orz_dir and os.path.isdir(orz_dir):
+    proc = subprocess.run(["git", "-C", orz_dir, "rev-parse", "--path-format=absolute",
+                           "--git-common-dir", "--show-prefix"], capture_output=True, text=True)
+    out = proc.stdout.split("\n")
+    if proc.returncode == 0 and len(out) >= 2 and real(out[0]) == common:
+        scope.append(out[1] + orz_file)
+
+
+def in_scope(path):
+    return any(path == claim or (claim.endswith("/") and path.startswith(claim)) for claim in scope)
+
+
+def violation(sha):
+    parents = git("rev-list", "--parents", "-n", "1", sha).stdout.split()[1:]
+    if not parents:
+        return "root-commit", "коммит " + sha[:12] + " -- корневой (без родителя)"
+    if len(parents) != 1:
+        return "merge-commit", "коммит " + sha[:12] + " -- слияние (родителей: " + str(len(parents)) + ")"
+    problem = authorship_problem(sha)
+    if problem is not None:
+        return problem
+    names = git("diff-tree", "--no-commit-id", "--name-only", "-r", "-z", sha).stdout.split("\0")
+    outside = [name for name in names if name and not in_scope(name)]
+    if outside:
+        return "unclaimed-path", "коммит " + sha[:12] + " трогает незаявленный путь " + outside[0]
+    return None
+
+
+# 7. The chain up to and including the target, oldest first; what the upstream
+# ref already holds is published, not unknown. No upstream ref -> base only
+# bounds the chain (more commits checked, never fewer), said on stderr.
+upstream_ref = git("symbolic-ref", "-q", "refs/remotes/origin/HEAD", check=False).stdout.strip() \
+    or "refs/remotes/origin/main"
+upstream = git("rev-parse", "--verify", "-q", upstream_ref + "^{commit}", check=False).stdout.strip()
+if not upstream:
+    print("note-commit --auto-claim: нет " + printable(upstream_ref) + " -- цепочка проверяется от базы целиком",
+          file=sys.stderr)
+exclude = ["^" + base] + (["^" + upstream] if upstream else [])
+chain = [sha for sha in git("rev-list", "--reverse", "--topo-order", target, *exclude).stdout.split() if sha]
+if not chain or chain[-1] != target:
+    refuse("not-in-session-chain", "коммит " + target[:12] + " не найден в цепочке после базы")
+# The target's own conditions (4-6) are named first, then what precedes it.
+problem = violation(target)
+if problem is not None:
+    refuse(*problem)
+new = []
+for sha in chain:
+    if sha in claimed:
+        continue
+    problem = violation(sha) if sha != target else None
+    if problem is not None:
+        refuse("unknown-commit-before", "перед " + target[:12] + " в цепочке незаявленный коммит, не проходящий автозаявку (" + problem[0] + "): " + problem[1])
+    new.append(sha)
+
+for checked in (worktree, branch):
+    if re.search(r"\s", checked):
+        refuse("semaphore-unsafe", "пробел в " + checked + " -- строка заявки разбивается по пробелам")
+now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+kept = []
+for line in lines:
+    if line.startswith("commit: "):
+        parts = line[len("commit: "):].split()
+        if len(parts) in (2, 4) and parts[0] == repo_name and parts[1] in new:
+            continue
+    kept.append(line)
+if kept and kept[-1] == "":
+    kept.pop()
+for sha in new:
+    kept.append("commit: " + " ".join((repo_name, sha, real(worktree), branch)))
+    kept.append("commit_auto: " + json.dumps({"at": now, "base": base, "base_source": base_source,
+                                              "branch": branch, "repo": repo_name,
+                                              "rule": "own-isolated-chain", "sha": sha}, sort_keys=True))
+candidate = "\n".join(kept).encode("utf-8") + b"\n"
+sem_dir = os.path.dirname(os.path.abspath(sem))
+mode = os.stat(sem).st_mode & 0o7777
+fd2, tmp = tempfile.mkstemp(dir=sem_dir, prefix=".note-commit-")
+try:
+    with os.fdopen(fd2, "wb") as handle:
+        handle.write(candidate)
+        handle.flush()
+        os.fchmod(handle.fileno(), mode)
+        os.fsync(handle.fileno())
+    if Path(sem).read_bytes() != raw:
+        refuse("semaphore-changed", "семафор изменился во время проверки, повтори")
+    os.replace(tmp, sem)
+finally:
+    if os.path.exists(tmp):
+        os.unlink(tmp)
+dir_fd = os.open(sem_dir, os.O_RDONLY)
+try:
+    os.fsync(dir_fd)
+finally:
+    os.close(dir_fd)
+for sha in new:
+    status("AUTO-CLAIMED", sha)
+PY
+}
+
 if [ "$CMD" = "note-commit" ]; then
+  if [ "$AUTO_CLAIM_FLAG" = "1" ]; then
+    [ "$FORGET_FLAG" != "1" ] && [ "$FORGET_UNPROVABLE_FLAG" != "1" ] && [ -z "$PROMOTE_INTENT_ARG" ] \
+      && [ -z "$SOURCE_CHECKOUT_ARG" ] && [ -z "$BRANCH_ARG" ] \
+      || fail "note-commit --auto-claim не сочетается с --forget/--forget-unprovable/--promote-intent/--source-checkout/--branch (копия и ветка берутся из семафора)" 1
+    [ -n "$REPO_ARG" ] || fail "note-commit --auto-claim требует --repo" 1
+  fi
   # Cold review (22.10, Ф198-А): the two flags are not alternatives of the
   # same intent (one named SHA vs. a self-discovered batch) -- silently
   # letting the batch branch win when both are passed would ignore the
@@ -15976,6 +16357,10 @@ PY
   # the repo grows, and the reader resolves it long after this session is gone.
   NC_FULL_SHA=$(git -C "$NC_REPO_DIR" rev-parse --verify --quiet "${COMMIT_SHA}^{commit}" 2>/dev/null) \
     || fail "note-commit: '$COMMIT_SHA' не резолвится в коммит репозитория '$NC_REPO_NAME'" 1
+  if [ "$AUTO_CLAIM_FLAG" = "1" ]; then
+    _auto_claim_commit_chain "$SEM_FILE" "$NC_REPO_DIR" "$NC_REPO_NAME" "$NC_FULL_SHA" || exit 1
+    exit 0
+  fi
   NC_ENTRY="commit: $NC_REPO_NAME $NC_FULL_SHA"
   if [ "$FORGET_FLAG" = "1" ]; then
     # Only the target claim must lack independent publish proof: exclude

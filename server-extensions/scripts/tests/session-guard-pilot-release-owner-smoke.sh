@@ -57,15 +57,15 @@ write_orz() {
 }
 
 # A line of the pilot-witness log of one conversation, as the Claude hook writes it.
-write_witness() {  # <conversation> <epoch offset seconds> <text>
+write_witness() {  # <conversation> <epoch offset seconds> <text>; WITNESS_TS=<ts> pins the stamp
   mkdir -p "$WITNESS_DIR"
-  python3 - "$WITNESS_DIR/$1.jsonl" "$2" "$3" <<'PY'
+  python3 - "$WITNESS_DIR/$1.jsonl" "$2" "$3" "${WITNESS_TS:-}" <<'PY'
 import datetime as dt
 import json
 import sys
 
-path, offset, text = sys.argv[1:]
-stamp = (dt.datetime.now(dt.timezone.utc) + dt.timedelta(seconds=int(offset))).strftime("%Y-%m-%dT%H:%M:%SZ")
+path, offset, text, pinned = sys.argv[1:]
+stamp = pinned or (dt.datetime.now(dt.timezone.utc) + dt.timedelta(seconds=int(offset))).strftime("%Y-%m-%dT%H:%M:%SZ")
 with open(path, "a", encoding="utf-8") as stream:
     stream.write(json.dumps({"ts": stamp, "session_id": "x", "text": text}, ensure_ascii=False) + "\n")
 PY
@@ -190,6 +190,29 @@ check "два слага и один код: отказ" "$(close_sem convo-noma
 check "отказ называет неоднозначность" "$(seen 'не сопоставляются однозначно')" "yes"
 check "отметка осталась" "$(state_of amb-a)" "open"
 
+echo "4в1. пара слаг+код без явного глагола снятия или с просьбой подождать не снимает (WP-561 Ф82 ревью)"
+open_sem convo-live8 verb-mark --owner-pid "$LIVE_PID"
+close_sem convo-nomark verb-mark --pilot-release >/dev/null; VERB_CODE=$(code_in_refusal)
+write_witness convo-nomark -1 "подожди с verb-mark $VERB_CODE"
+check "«подожди с …»: отказ" "$(close_sem convo-nomark verb-mark --pilot-release)" "3"
+check "отказ называет просьбу подождать" "$(seen 'не принята: в ней есть отрицание или просьба подождать')" "yes"
+write_witness convo-nomark -1 "оставь verb-mark $VERB_CODE, позже"
+check "«оставь …, позже»: отказ" "$(close_sem convo-nomark verb-mark --pilot-release)" "3"
+write_witness convo-nomark -1 "verb-mark $VERB_CODE"
+check "голая пара без глагола: отказ" "$(close_sem convo-nomark verb-mark --pilot-release)" "3"
+check "отказ называет отсутствие глагола" "$(seen 'нет глагола снятия')" "yes"
+write_witness convo-nomark -1 "Закрой. Про verb-mark $VERB_CODE потом поговорим"
+check "глагол в другом предложении: отказ" "$(close_sem convo-nomark verb-mark --pilot-release)" "3"
+write_witness convo-nomark -1 "сними потом verb-mark $VERB_CODE"
+check "«сними потом …»: отказ" "$(close_sem convo-nomark verb-mark --pilot-release)" "3"
+check "отметка осталась" "$(state_of verb-mark)" "open"
+write_witness convo-nomark -1 "отпусти verb-mark $VERB_CODE"
+check "«отпусти <слаг> <код>» снимает" "$(close_sem convo-nomark verb-mark --pilot-release)" "0"
+open_sem convo-live8b verb-mark2 --owner-pid "$LIVE_PID"
+close_sem convo-nomark verb-mark2 --pilot-release >/dev/null; VERB_CODE2=$(code_in_refusal)
+write_witness convo-nomark -1 "закрывай verb-mark2 $VERB_CODE2"
+check "«закрывай <слаг> <код>» снимает (привычное слово пилота)" "$(close_sem convo-nomark verb-mark2 --pilot-release)" "0"
+
 echo "4г. без слова пилота беседа без отметки не снимает"
 write_witness convo-fresh -60 "обычная реплика"
 check "нет слова: отказ" "$(close_sem convo-fresh amb-b --pilot-release "снять amb-b 123456")" "3"
@@ -241,14 +264,17 @@ record["issued_at"] -= 3 * 3600
 with open(path, "w", encoding="utf-8") as handle:
     json.dump(record, handle)
 PY
-write_witness convo-other -1 "снять expired-mark $EXPIRED_CODE"
+# Both lines of steps 7 and 8 carry the same second: the later line of the log is the
+# newer one (CI 22.11 failed when the older line with the expired code won the tie).
+SAME_SECOND=$(date -u -v-1S +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u -d '-1 second' +%Y-%m-%dT%H:%M:%SZ)
+WITNESS_TS="$SAME_SECOND" write_witness convo-other -1 "снять expired-mark $EXPIRED_CODE"
 check "строка с просроченным кодом не снимает" "$(close_sem convo-other expired-mark --pilot-release "$WORD")" "3"
 NEW_CODE=$(code_in_refusal)
 check "выдан новый код" "$([ -n "$NEW_CODE" ] && [ "$NEW_CODE" != "$EXPIRED_CODE" ] && echo yes || echo no)" "yes"
 check "отметка осталась" "$(state_of expired-mark)" "open"
 
 echo "8. вызывающий без своей идентичности беседы не может снять чужую живую отметку"
-write_witness convo-other -1 "снять expired-mark $NEW_CODE"
+WITNESS_TS="$SAME_SECOND" write_witness convo-other -1 "снять expired-mark $NEW_CODE"
 RC_NOID=0
 env -u CLAUDE_CODE_SESSION_ID bash "$GUARD" close --wp WP-484 --slug expired-mark --agent fixture \
   --pilot-release "$WORD" >/dev/null 2>"$CLOSE_ERR" || RC_NOID=$?
