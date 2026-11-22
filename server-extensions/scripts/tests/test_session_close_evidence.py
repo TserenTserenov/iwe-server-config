@@ -97,6 +97,25 @@ class SessionCloseEvidenceTest(unittest.TestCase):
         (self.gov / "inbox/WP-484.md").write_text("Unpublished\n")
         self.refused()
 
+    def test_stale_checkout_refusal_names_checkout_and_lag(self) -> None:
+        # A linked worktree of the governance repo trails the remote and carries its own commit
+        # on the owned path: the refusal must say which checkout it is and how far behind.
+        stale = self.base / "stale-worktree"
+        git(self.gov, "worktree", "add", "-q", "--detach", str(stale), "HEAD")
+        git(stale, "config", "user.name", "Test")
+        git(stale, "config", "user.email", "test@example.invalid")
+        (stale / "inbox/WP-484.md").write_text("diverged local copy\n")
+        git(stale, "commit", "-q", "-am", "local divergence")
+        self.publish(self.gov, "inbox/other.md", "server moved on\n")
+        self.sem.write_text(self.sem.read_text().replace(
+            f"governance_worktree: {self.gov}", f"governance_worktree: {stale}"))
+        with self.assertRaises((proof.ProofError, ValueError, OSError)) as ctx:
+            self.verify()
+        message = str(ctx.exception)
+        self.assertIn("owned path differs from published content", message)
+        self.assertIn(str(stale), message)
+        self.assertIn("commits behind published main", message)
+
     def test_staged_owned_file_blocks(self) -> None:
         (self.gov / "inbox/WP-484.md").write_text("Unpublished\n")
         git(self.gov, "add", "inbox/WP-484.md")

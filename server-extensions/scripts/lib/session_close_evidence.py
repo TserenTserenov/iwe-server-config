@@ -142,6 +142,18 @@ def require_clean_path(checkout: Path, path: str, actual: dict | None,
             "uncommitted owned path: " + path)
 
 
+def lag_note(checkout: Path, remote: str) -> str:
+    """Name the checkout and how far it trails the published tip, so a stalled copy is not
+    mistaken for a broken session or a broken sync service (WP-484 F327, 22.11: a session
+    read this refusal as "the sync service is dead" while the copy was held by two dirty files)."""
+    raw = proof.git(checkout, "rev-list", "--count", f"HEAD..{remote}", allowed=(0, 128)).decode().strip()
+    behind = int(raw) if raw.isdigit() else None
+    if behind:
+        return (f" (checkout {checkout} is {behind} commits behind published main: "
+                "advance that copy, then close again)")
+    return f" (checkout {checkout})"
+
+
 def verify_paths(repo: Path, checkouts: set[Path], paths: set[str], remote: str,
                  published: dict[str, list[tuple[str, dict | None]]]) -> dict:
     algorithm = proof.git(repo, "rev-parse", "--show-object-format").decode().strip()
@@ -154,7 +166,8 @@ def verify_paths(repo: Path, checkouts: set[Path], paths: set[str], remote: str,
             actual = scope.local_entry(checkout, path, algorithm)
             require_clean_path(checkout, path, actual, remote_entries[path])
             require(actual == expected or actual == remote_entries[path],
-                    "owned path differs from published content: " + path)
+                    "owned path differs from published content: " + path
+                    + lag_note(checkout, remote))
             snapshots[(checkout, path)] = (actual, remote_entries[path])
     return snapshots
 
