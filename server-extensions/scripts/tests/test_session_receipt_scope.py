@@ -187,6 +187,112 @@ class SessionReceiptScopeTest(unittest.TestCase):
         with self.assertRaises(receipts.ProofError):
             self.verify()
 
+    # --- owned deletions (draft report renamed to report.md, WP-484, 22.11) ---
+
+    DRAFT = "2026-10/02/session/report-draft.md"
+    REPORT = "2026-10/02/session/report.md"
+
+    def publish_on_remote(self, writes: dict[str, str | None], message: str) -> str:
+        """Commit `writes` (None deletes) in the second clone, push, fetch; return the sha."""
+        for path, text in writes.items():
+            target = self.second / path
+            if text is None:
+                git(self.second, "rm", "-q", "--", path)
+            else:
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_text(text)
+                git(self.second, "add", "--", path)
+        git(self.second, "commit", "-m", message)
+        sha = git(self.second, "rev-parse", "HEAD")
+        git(self.second, "push", "origin", "HEAD:main")
+        git(self.repo, "fetch", "origin", "main")
+        return sha
+
+    def claim(self, paths: list[str], commits: list[str]) -> None:
+        own_repo = str(self.repo / ".git")
+        lines = [f"file: {path}\nfile_v2: " + json.dumps({"path": path, "repo": own_repo}) + "\n"
+                 for path in paths]
+        self.sem.write_text(self.sem.read_text() + "".join(lines) +
+                            "".join(f"commit: MC-sessions {sha}\n" for sha in commits))
+        # Receipts are recorded against the published tip; replayed sources
+        # find their anchors in its history.
+        receipts.record(self.repo, self.sem, "MC-sessions", git(self.repo, "rev-parse", "origin/main"))
+
+    def test_own_draft_deleted_by_later_commit_is_accepted(self) -> None:
+        created = self.publish_on_remote({self.DRAFT: "draft\n"}, "draft report")
+        renamed = self.publish_on_remote({self.DRAFT: None, self.REPORT: "final\n"}, "rename draft")
+        self.claim([self.DRAFT, self.REPORT], [created, renamed])
+        self.verify()
+        (self.repo / self.DRAFT).parent.mkdir(parents=True, exist_ok=True)
+        (self.repo / self.DRAFT).write_text("left on disk\n")
+        with self.assertRaisesRegex(receipts.ProofError, "local owned path is dirty"):
+            self.verify()
+
+    def test_replayed_draft_then_deletion_on_published_copy_is_accepted(self) -> None:
+        # The draft is committed in the shared checkout and published by
+        # cherry-pick; the checkout is then realigned to origin/main and the
+        # deletion is committed on top. The two sources are unordered, their
+        # anchors are not.
+        target = self.repo / self.DRAFT
+        target.parent.mkdir(parents=True)
+        target.write_text("draft\n")
+        git(self.repo, "add", "--", self.DRAFT)
+        git(self.repo, "commit", "-m", "draft report")
+        created = git(self.repo, "rev-parse", "HEAD")
+        git(self.second, "pull", "-q", "origin", "main")
+        git(self.second, "fetch", str(self.repo), "HEAD")
+        git(self.second, "cherry-pick", created)
+        git(self.second, "push", "origin", "HEAD:main")
+        git(self.repo, "fetch", "origin", "main")
+        git(self.repo, "reset", "-q", "--hard", "origin/main")
+        git(self.repo, "rm", "-q", "--", self.DRAFT)
+        git(self.repo, "commit", "-m", "drop draft")
+        removed = git(self.repo, "rev-parse", "HEAD")
+        git(self.repo, "push", "origin", "HEAD:main")
+        git(self.repo, "fetch", "origin", "main")
+        self.assertFalse(receipts.ancestor(self.repo, created, removed))
+        self.claim([self.DRAFT], [created, removed])
+        self.verify()
+
+    def test_own_file_deleted_and_recreated_compares_content(self) -> None:
+        created = self.publish_on_remote({self.DRAFT: "draft\n"}, "draft report")
+        removed = self.publish_on_remote({self.DRAFT: None}, "drop draft")
+        again = self.publish_on_remote({self.DRAFT: "second draft\n"}, "draft again")
+        self.claim([self.DRAFT], [created, removed, again])
+        self.verify()
+        self.publish_on_remote({self.DRAFT: "foreign edit\n"}, "foreign edit")
+        with self.assertRaisesRegex(receipts.ProofError, "current remote differs"):
+            self.verify()
+
+    def test_deleting_session_document_is_refused(self) -> None:
+        removed = self.publish_on_remote({self.orz: None}, "delete session document")
+        self.claim([], [removed])
+        with self.assertRaisesRegex(receipts.ProofError, "unsupported published deletion"):
+            self.verify()
+
+    def test_deleting_own_report_is_refused_in_any_case(self) -> None:
+        upper = self.REPORT.replace("report.md", "Report.md")
+        created = self.publish_on_remote({upper: "final\n"}, "report")
+        removed = self.publish_on_remote({upper: None}, "delete report")
+        self.claim([upper], [created, removed])
+        with self.assertRaisesRegex(receipts.ProofError, "unsupported published deletion"):
+            self.verify()
+
+    def test_deleting_file_that_existed_before_session_is_refused(self) -> None:
+        self.publish_on_remote({"shared.md": "someone else's\n"}, "foreign file")
+        removed = self.publish_on_remote({"shared.md": None}, "delete foreign file")
+        self.claim(["shared.md"], [removed])
+        with self.assertRaisesRegex(receipts.ProofError, "existed before this session"):
+            self.verify()
+
+    def test_deleted_file_restored_on_remote_is_refused(self) -> None:
+        created = self.publish_on_remote({self.DRAFT: "draft\n"}, "draft report")
+        removed = self.publish_on_remote({self.DRAFT: None}, "drop draft")
+        self.claim([self.DRAFT], [created, removed])
+        self.publish_on_remote({self.DRAFT: "restored by someone\n"}, "foreign restore")
+        with self.assertRaisesRegex(receipts.ProofError, "current remote differs"):
+            self.verify()
+
 
 class EmptyGovernanceScopeTest(unittest.TestCase):
     def setUp(self) -> None:

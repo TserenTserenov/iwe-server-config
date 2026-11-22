@@ -24,6 +24,40 @@ def require(condition: bool, message: str) -> None:
         raise proof.ProofError(message)
 
 
+REGULAR_MODES = {"100644", "100755"}
+# A session may delete its own scratch files (report-draft.md renamed to
+# report.md), never the documents that prove the session itself.
+UNDELETABLE_NAMES = {"report.md"}
+
+
+def regular_entry(entry: object) -> bool:
+    return (isinstance(entry, dict) and set(entry) == {"kind", "mode", "oid"}
+            and entry["kind"] == "blob" and entry["mode"] in REGULAR_MODES)
+
+
+def deletable_path(path: str, orz: str) -> bool:
+    # Lower-case: the Mac disk is case-insensitive, Report.md is report.md there.
+    return path != orz and path.rsplit("/", 1)[-1].lower() not in UNDELETABLE_NAMES
+
+
+def born_in_session(repo: Path, path: str, commits: list[str]) -> bool:
+    """True when the earliest owned commit touching `path` found it absent.
+
+    Guards deletion acceptance: a session may only remove a file it created,
+    not a file that existed before it (someone else's or an earlier session's).
+    Pass publication anchors when known: a replayed source and a later commit
+    made on top of the published copy are ordered only by their anchors.
+    """
+    earliest = [commit for commit in set(commits)
+                if not any(other != commit and proof.ancestor(repo, other, commit)
+                           for other in commits)]
+    require(len(earliest) == 1, "owned commits touching a deleted path are unordered: " + path)
+    line = proof.git(repo, "rev-list", "--parents", "-n", "1", earliest[0]).decode().split()
+    if len(line) == 1:
+        return True
+    return proof.entries(repo, line[1], [path])[0]["entry"] is None
+
+
 def exact_path(value: object) -> bool:
     return (isinstance(value, str) and bool(value) and not value.startswith(("/", ":"))
             and all(part not in ("", ".", "..") for part in value.split("/"))
@@ -143,7 +177,9 @@ def verify_scope(semaphore: Path, repo: Path, remote: str) -> None:
     name = repo.name
     sources = proof.claims(raw, name, repo)
     require(0 < len(sources) <= 128, "missing or excessive owned commits")
-    published: dict[str, list[tuple[str, dict]]] = {}
+    published: dict[str, list[tuple[str, dict | None]]] = {}
+    touching: dict[str, list[str]] = {}
+    deleted: set[str] = set()
     for source in sources:
         require(proof.verify(repo, semaphore, name, source, remote),
                 "claimed commit lacks exact publication receipt")
@@ -154,13 +190,24 @@ def verify_scope(semaphore: Path, repo: Path, remote: str) -> None:
         rows = receipt.get("published_paths")
         require(isinstance(rows, list) and {row.get("path") for row in rows if isinstance(row, dict)} == changed
                 and len(rows) == len(changed), "receipt paths differ from source")
+        source_rows = {row.get("path"): row.get("entry")
+                       for row in receipt.get("source_paths") or [] if isinstance(row, dict)}
         for row in rows:
-            entry = row.get("entry")
-            require(isinstance(entry, dict) and set(entry) == {"kind", "mode", "oid"}
-                    and entry["kind"] == "blob" and entry["mode"] in {"100644", "100755"},
-                    "unsupported published file")
-            published.setdefault(row["path"], []).append((anchor, entry))
+            path, entry = row["path"], row.get("entry")
+            if entry is None:
+                # Deleted in the source commit itself, not lost while replaying it.
+                require(path in source_rows and source_rows[path] is None
+                        and deletable_path(path, orz),
+                        "unsupported published deletion: " + path)
+                deleted.add(path)
+            else:
+                require(regular_entry(entry), "unsupported published file")
+            published.setdefault(path, []).append((anchor, entry))
+            touching.setdefault(path, []).append(anchor)
     require(set(published) == own, "file claims and published commits differ")
+    for path in deleted:
+        require(born_in_session(repo, path, touching[path]),
+                "deleted path existed before this session: " + path)
     local_snapshots: dict[str, dict | None] = {}
     for path, candidates in published.items():
         expected = latest_entry(repo, candidates)
@@ -310,11 +357,16 @@ def require_recovery_session(raw: bytes, repo: Path, workspace: Path) -> tuple[P
     return common, orz
 
 
-def require_publishable_entries(repo: Path, commit: str, paths: list[str]) -> None:
-    """Reject deletions, symlinks, submodules and modes verify_scope cannot accept."""
+def require_publishable_entries(repo: Path, commit: str, paths: list[str],
+                                deletions: set[str]) -> None:
+    """Reject symlinks, submodules, modes and deletions verify_scope cannot accept.
+
+    `deletions` are the paths the source commit itself removes and the session
+    may remove; verify_scope later checks that the session created them.
+    """
     for row in proof.entries(repo, commit, paths):
         entry = row["entry"]
-        require(entry is not None and entry["kind"] == "blob" and entry["mode"] in {"100644", "100755"},
+        require(regular_entry(entry) or (entry is None and row["path"] in deletions),
                 "коммит содержит удаление, симлинк, сабмодуль или недопустимый режим: " + row["path"])
 
 
@@ -340,6 +392,15 @@ def record_prepared_recovery(semaphore: Path, repo: Path, published: str,
     lines: list[str] = []
     recorded: list[str] = []
     unproven: list[str] = []
+    # Local source order is enough here; verify_scope re-checks by anchors.
+    touching: dict[str, list[str]] = {}
+    for source in sources:
+        try:
+            changed = proof.changed_paths(repo, source)
+        except proof.ProofError:
+            continue  # empty or merge commit: the loop below handles it as before
+        for path in changed:
+            touching.setdefault(path, []).append(source)
     for source in sources:
         if receipt_rows(raw, SESSIONS_NAME, source):
             require(proof.verify(repo, semaphore, SESSIONS_NAME, source, remote),
@@ -355,8 +416,11 @@ def record_prepared_recovery(semaphore: Path, repo: Path, published: str,
             continue
         paths = proof.changed_paths(repo, source)
         require(set(paths) <= own, "коммит меняет путь вне собственных файлов сессии: " + source)
-        require_publishable_entries(repo, source, paths)
-        require_publishable_entries(repo, anchor, paths)
+        deletions = {row["path"] for row in proof.entries(repo, source, paths)
+                     if row["entry"] is None and deletable_path(row["path"], orz)
+                     and born_in_session(repo, row["path"], touching.get(row["path"], []))}
+        require_publishable_entries(repo, source, paths, deletions)
+        require_publishable_entries(repo, anchor, paths, deletions)
         evidence = proof.receipt(repo, raw, SESSIONS_NAME, source, anchor, proof.MAIN_REF)
         lines.append(proof.PREFIX + json.dumps(evidence, sort_keys=True, separators=(",", ":")))
         recorded.append(source)

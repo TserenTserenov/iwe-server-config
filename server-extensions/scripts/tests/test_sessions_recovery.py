@@ -281,6 +281,27 @@ class PreparedRecoveryTest(RecoveryFixture):
         self.assertIn("удаление, симлинк", result.stderr)
         self.assertEqual(self.receipt_lines(), [])
 
+    def test_g_own_draft_removal(self) -> None:
+        draft = "2026-10/02/session/report-draft.md"
+        created = self.local_commit({ORZ: "report v2\n", draft: "draft\n"})
+        removed = self.local_commit({draft: None})
+        self.put(self.second, "advance.txt", "remote advance\n")
+        git(self.second, "add", "--", "advance.txt")
+        git(self.second, "commit", "-m", "remote advance")
+        git(self.second, "fetch", str(self.repo), "HEAD")
+        git(self.second, "cherry-pick", created)
+        created_published = git(self.second, "rev-parse", "HEAD")
+        git(self.second, "cherry-pick", removed)
+        git(self.second, "push", "origin", "HEAD:main")
+        git(self.repo, "fetch", "--quiet", "origin", "+refs/heads/main:refs/remotes/origin/main")
+        self.write_semaphore([created, removed], [draft])
+        # One published commit per call: the creation first, then the deletion.
+        self.assertNotEqual(self.guard(sha=created_published).returncode, 0)
+        self.assertEqual(len(self.receipt_lines()), 1)
+        result = self.guard(sha=git(self.second, "rev-parse", "HEAD"))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(len(self.receipt_lines()), 2)
+
     def test_h_digest_and_claims_stay_unchanged(self) -> None:
         self.prepare_standard()
         before = self.sem.read_text()
