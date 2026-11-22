@@ -96,20 +96,25 @@ class RecoveryFixture(unittest.TestCase):
         git(self.repo, "fetch", "--quiet", "origin", "+refs/heads/main:refs/remotes/origin/main")
         return git(self.second, "rev-parse", "HEAD")
 
-    def write_semaphore(self, sources: list[str], own: list[str], frozen: list[str] | None = None) -> None:
+    def write_semaphore(self, sources: list[str], own: list[str], frozen: list[str] | None = None,
+                        source_head: str | None = None, worktree: Path | None = None,
+                        common_dir: Path | None = None, isolated: Path | None = None) -> None:
         commits = [f"MC-sessions {sha}" for sha in sources]
         frozen_claims = sorted(set(commits)) if frozen is None else frozen
         source_commits: list[str] = []
+        source_head = source_head or "b" * 40
+        worktree = worktree or self.base / "DS-prod"
+        common_dir = common_dir or worktree / ".git"
         fields = {
             "close_delivery_version": "isolate-push/v2",
             "close_attempt_id": "5f1c2b3a-4d5e-4f60-8a7b-9c0d1e2f3a4b",
             "close_delivery_session_id": SESSION_ID,
-            "close_delivery_worktree": str(self.base / "DS-prod"),
-            "close_delivery_common_dir": str(self.base / "DS-prod" / ".git"),
+            "close_delivery_worktree": str(worktree),
+            "close_delivery_common_dir": str(common_dir),
             "close_delivery_origin": "github.com/example/DS-prod",
             "close_delivery_target_ref": "refs/heads/main",
             "close_delivery_source_base": "a" * 40,
-            "close_delivery_source_head": "b" * 40,
+            "close_delivery_source_head": source_head,
             "close_delivery_source_commits": json.dumps(source_commits, separators=(",", ":")),
             "close_delivery_source_commits_digest": hashlib.sha256(
                 json.dumps(source_commits, separators=(",", ":")).encode()).hexdigest(),
@@ -147,6 +152,8 @@ class RecoveryFixture(unittest.TestCase):
                 "guard_schema: 1", "close_path: peer-session",
                 f"orz_sessions_dir: {self.repo}", f"orz_file: {ORZ}",
                 f"governance_worktree: {self.gov}"]
+        if isolated is not None:
+            head.append(f"isolated_worktree: {isolated}")
         head += [f"{key}: {value}" for key, value in fields.items()]
         body = [f"file: {ORZ}", "file: inbox/open-sessions.log"]
         for path in own:
@@ -292,6 +299,56 @@ class PreparedRecoveryTest(RecoveryFixture):
         self.assertIn("добавлено: " + self.source, result.stdout)
         self.assertIn("осталось недоказанным: " + extra, result.stdout)
         self.assertEqual(len(self.receipt_lines()), 1)
+
+    def test_abandon_prepared_allows_empty_source_commit_list(self) -> None:
+        self.put(self.repo, ORZ, """---
+date: 2026-10-02
+type: peer-session
+agent: claude-code
+duration_h: 1
+artifacts: []
+wp: WP-7
+---
+
+## Главный инсайт
+
+Проверка завершена.
+
+## Контекст
+
+Тестовая сессия.
+
+## Достигнуто
+
+Изменения опубликованы.
+
+## Ключевые решения
+
+Нет.
+""")
+        git(self.repo, "add", "--", ORZ)
+        self.source = self.local_commit({NOTE: "note v2\n"})
+        self.published = self.publish_by_cherry_pick(self.source)
+        self.write_semaphore([self.source], [NOTE], source_head=self.published,
+                             worktree=self.repo, common_dir=self.base / "MC-main" / ".git",
+                             isolated=self.repo)
+        git(self.repo, "reset", "--hard", "origin/main")
+        os.rename(self.repo, self.base / "MC-main")
+        subprocess.run(["git", "-C", str(self.base / "MC-main"), "worktree", "add",
+                        "--detach", str(self.repo), "main"], check=True, capture_output=True)
+        os.symlink(SCRIPTS, self.base / "scripts")
+        env = {**os.environ, "IWE_ROOT": str(self.base), "IWE_GOVERNANCE_REPO": "DS-gov",
+               "IWE_AGENT": "claude-code", "IWE_SESSIONS_ROOT": str(self.repo)}
+        result = subprocess.run([
+            "bash", str(GUARD), "close", "--wp", "WP-7", "--slug", "f269",
+            "--agent", "claude-code", "--session-id", SESSION_ID,
+            "--abandon-prepared", "--i-understand-loss-risk",
+            "--source-commit", self.published,
+            "--pilot-close-word", "СЗ без рефлексии",
+        ], env=env, capture_output=True, text=True, timeout=120)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("close_publish_proof=manual-abandon-attestation/v1",
+                      result.stdout + result.stderr)
 
 
 if __name__ == "__main__":

@@ -10518,6 +10518,8 @@ recorded = json.loads(sys.argv[1])
 supplied = sys.argv[2:]
 if not isinstance(recorded, list) or len(supplied) != len(set(supplied)):
     raise SystemExit(1)
+if not recorded and supplied:
+    raise SystemExit(0)
 raise SystemExit(0 if sorted(c.lower() for c in recorded) == sorted(c.lower() for c in supplied) else 1)
 PY
 }
