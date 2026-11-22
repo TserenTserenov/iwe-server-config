@@ -104,6 +104,7 @@ DG_LEGACY_TMP=
 DG_LEGACY_PIDS=()
 DG_NEW_ASKED=0
 DG_LEGACY_BYPASS=0
+DG_TEMP_VARS=
 dg_legacy_cleanup() {
   local pid n
   for pid in ${DG_LEGACY_PIDS[@]+"${DG_LEGACY_PIDS[@]}"}; do
@@ -118,6 +119,26 @@ dg_legacy_cleanup() {
   rmdir "$DG_LEGACY_TMP/bin" 2>/dev/null || true
   rmdir "$DG_LEGACY_TMP" 2>/dev/null || true
   DG_LEGACY_TMP=
+}
+# The released guards ask about `> $F` after a reader without knowing that $F is a temporary file
+# (WP-7 F316, 22.11). Their question is dropped only when this guard asked nothing and the one
+# target they name is `$NAME` or `$NAME/sub` of a variable this guard found to be temporary in this
+# very call; every other ask of theirs, and every block, stays.
+dg_legacy_temp_exempt() {
+  local reason t v
+  [ -n "$DG_TEMP_VARS" ] || return 1
+  reason=$(jq -r -s 'if length == 1 then (.[0].hookSpecificOutput.permissionDecisionReason // "") else "" end' "$1" 2>/dev/null) || return 1
+  case "$reason" in
+    "перенаправление «>» после читающей команды перезапишет файл ("*) ;;
+    *) return 1 ;;
+  esac
+  t=${reason#*файл (}
+  t=${t%%) —*}
+  [[ "$t" =~ ^\$(\{([A-Za-z_][A-Za-z0-9_]*)\}|([A-Za-z_][A-Za-z0-9_]*))(/[^\$\`]*)?$ ]] || return 1
+  v=${BASH_REMATCH[2]:-${BASH_REMATCH[3]}}
+  case "$t" in */../*|*/..) return 1 ;; esac
+  case " $DG_TEMP_VARS " in *" $v "*) return 0 ;; esac
+  return 1
 }
 # Called when this guard allows or asks: every released guard must have answered allow, ask or
 # block; a block wins, an ask is asked, anything else blocks.
@@ -136,7 +157,7 @@ dg_legacy_verdict() {
         if [ -s "$base.out" ]; then
           jq -e -s 'length > 0 and all(.[]; (.hookSpecificOutput.permissionDecision? // "") == "ask")' "$base.out" >/dev/null 2>&1 \
             || { dg_legacy_cleanup; fail_check "прежняя проверка $n: неожиданный ответ"; }
-          asked="$base.out"
+          dg_legacy_temp_exempt "$base.out" || asked="$base.out"
         fi ;;
       2) cat "$base.err" >&2 2>/dev/null || true; dg_legacy_cleanup; exit 2 ;;
       *) dg_legacy_cleanup; fail_check "прежняя проверка $n, итог «${rc:-нет}»" ;;
@@ -2759,11 +2780,60 @@ esac
 # too. Left out on purpose: `python3 -c '…'` and the pre-approved `bash <script>` calls run code
 # that can write any file by itself, so asking about their `>` would close nothing; the other
 # allow rules are exact commands, which a `> file` suffix no longer matches.
-READER_OVERWRITE=$(printf '%s\n' "$WRITE_TARGETS" | awk -F'\t' '
+# Temporary-file variables (WP-7 F316, 22.11): `F=$(mktemp); git show X > $F` and `S=/tmp/…; … > $S/a.md`
+# asked a question although the target is a temporary file: the rule above knows only literal temporary
+# paths, and a bare `$F` looks like a working file. A variable counts as temporary only when EVERY
+# assignment to it in this same call (a shell does not keep variables between calls) is a temporary
+# path (/tmp, /var/folders, $TMPDIR), `$(mktemp …)` without a template outside them or -p/--tmpdir,
+# or another temporary variable plus a path; no `for`, `read`, `+=` or `eval` may rebind it.
+# `R=$I/DS-my-strategy`, `F=params.yaml` and a variable with no assignment stay questions.
+TEMP_VARS_PL='
+  use strict; use warnings;
+  my $text = do { local $/; <STDIN> };
+  exit 0 if $text =~ /\beval\b/;
+  my (%vals, %bad);
+  while ($text =~ /(?:^|[\s;&|(])([A-Za-z_][A-Za-z0-9_]*)(\+?)=("[^"]*"|\x27[^\x27]*\x27|\$\([^)]*\)|[^\s;&|()]*)/g) {
+    $bad{$1} = 1 if $2 ne q{};
+    push @{$vals{$1}}, $3;
+  }
+  for my $n (keys %vals) {
+    $bad{$n} = 1 if $text =~ /\bfor\s+\Q$n\E\b/ || $text =~ /\b(?:read|mapfile|readarray|getopts)\b[^;&|\n]*\b\Q$n\E\b/ || $text =~ /printf\s+-v\s+\Q$n\E\b/;
+  }
+  my %temp;
+  my $tmp_root = qr{(?:/tmp|/private/tmp|/var/folders|/private/var/folders)/};
+  my $is_temp = sub {
+    my $v = shift;
+    $v =~ s/^"(.*)"$/$1/s;
+    return 0 if $v =~ m{(?:^|/)\.\.(?:/|$)};
+    return 1 if $v =~ m{^$tmp_root[^\$`]*$};
+    return 1 if $v =~ m{^\$(?:TMPDIR|\{TMPDIR\})/[^\$`]*$};
+    return 1 if $v =~ m{^\$\(\s*mktemp(?:\s+-[dtq]+)*(?:\s+$tmp_root[^\s)\$`]*)?\s*\)$};
+    if ($v =~ m{^\$(?:([A-Za-z_][A-Za-z0-9_]*)|\{([A-Za-z_][A-Za-z0-9_]*)\})(?:/[^\$`]*)?$}) {
+      my $r = defined $1 ? $1 : $2;
+      return $temp{$r} ? 1 : 0;
+    }
+    return 0;
+  };
+  for (1 .. 4) {
+    for my $n (keys %vals) {
+      next if $bad{$n} || $temp{$n};
+      $temp{$n} = 1 unless grep { !$is_temp->($_) } @{$vals{$n}};
+    }
+  }
+  print join(q{ }, sort keys %temp), "\n";
+'
+TEMP_VARS=$(printf '%s' "$CMD_EXEC" | perl -e "$TEMP_VARS_PL") || fail_check "perl, временные переменные"
+DG_TEMP_VARS="$TEMP_VARS"
+READER_OVERWRITE=$(printf '%s\n' "$WRITE_TARGETS" | awk -F'\t' -v tv="$TEMP_VARS" '
   $2 == "T" && $4 != "H" && $1 ~ /^(ls|cat|head|tail|wc|grep|egrep|fgrep|rg|find|diff|git (status|log|diff|show|branch|remote|pull|push|restore)|gh issue)$/ {
     t = $3
     if (t ~ /^(\/tmp\/|\/private\/tmp\/|\/var\/folders\/|\/private\/var\/folders\/|\$TMPDIR\/|\$\{TMPDIR\}\/|\$\{TMPDIR:-[^}]*\}\/)/ && t !~ /\/\.\.(\/|$)/) next
     if (t ~ /^\/dev\/(null|stdout|stderr|tty|fd\/[0-9]+)$/) next
+    if (match(t, /^\$(\{[A-Za-z_][A-Za-z0-9_]*\}|[A-Za-z_][A-Za-z0-9_]*)/) && t !~ /\/\.\.(\/|$)/) {
+      v = substr(t, 2, RLENGTH - 1); gsub(/[{}]/, "", v)
+      rest = substr(t, RLENGTH + 1)
+      if (rest ~ /^(\/[^$`]*)?$/ && (" " tv " ") ~ (" " v " ")) next
+    }
     print t
   }')
 if [ -n "$READER_OVERWRITE" ]; then
