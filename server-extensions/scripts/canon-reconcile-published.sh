@@ -27,6 +27,16 @@
 #              under the journal lock ledger-append.sh uses (wait <= 30 s), every
 #              event on disk is already on the target (whole-event comparison by
 #              ledger-event-diff.py), else refused naming the events (ts, kind) ·
+#              any other dirty regular file whose entry upstream left alone
+#              (same blob entry in the old head and in the target; never a
+#              symlink) is CARRIED: its local state (bytes, permissions, or its
+#              local deletion) is saved as git objects held by a ref under
+#              refs/canon-reconcile-carry/ plus a manifest in the runtime dir
+#              before the swap and put back after the reset, as `git merge
+#              --ff-only` would leave it (WP-484 I-34: one such edit froze the
+#              canon for 1.5 days on 20.11); a complete manifest left by a failed
+#              restore makes every later run refuse until `--restore-carry`
+#              has put the paths back (an interrupted, partial one is removed) ·
 #              every local-only commit patch-equivalent to the target (`git
 #              cherry` has no `+`) OR content-superseded (every path it touched
 #              has the same tree entry in HEAD and target; no local merge
@@ -37,7 +47,8 @@
 #              and file-vs-directory clashes count too (cold review 11.09).
 #   action     `git update-ref` with compare-and-swap on the old head, then
 #              `git reset --hard` so index and tracked tree follow the ref.
-#   postcheck  HEAD == pinned · tracked tree clean · the set of untracked paths
+#   postcheck  HEAD == pinned · index clean and the tracked tree clean apart from
+#              the carried paths, each back in its saved state · the set of untracked paths
 #              (mode, hash, path) is unchanged apart from paths the target now
 #              tracks -- a changed hash, a missing path or a NEW path means
 #              someone wrote during the window: reported, never called success.
@@ -88,10 +99,17 @@ export GIT_GRAFT_FILE=/dev/null/iwe-no-grafts
 # Every pathspec here is a literal path name, never a glob or ":(magic)" (WP-530 F72 review).
 export GIT_LITERAL_PATHSPECS=1
 
-usage() { echo "usage: canon-reconcile-published.sh <repo-path> <branch> [<pinned-oid>]" >&2; exit 2; }
+usage() { echo "usage: canon-reconcile-published.sh <repo-path> <branch> [<pinned-oid>]" >&2; echo "       canon-reconcile-published.sh --restore-carry <repo-path> <carry-manifest>   (puts back what a failed run saved)" >&2; exit 2; }
 [ $# -ge 2 ] || usage
-REPO="$1"; BRANCH="$2"; PINNED_ARG="${3:-}"
-SCRIPT_DIR="${BASH_SOURCE[0]}"; case "$SCRIPT_DIR" in */*) SCRIPT_DIR="${SCRIPT_DIR%/*}" ;; *) SCRIPT_DIR=. ;; esac; case "$SCRIPT_DIR" in /*) ;; *) SCRIPT_DIR="./$SCRIPT_DIR" ;; esac; SCRIPT_DIR=$(cd "$SCRIPT_DIR" >/dev/null 2>&1 && pwd && printf x); SCRIPT_DIR="${SCRIPT_DIR%x}"; SCRIPT_DIR="${SCRIPT_DIR%$'\n'}"   # computed before the cd below, without dirname (a minimal PATH has none) and without CDPATH; the marker x keeps a newline at the end of a directory name: the lock library is found next to this script
+MODE=reconcile; CARRY_RESTORE_MANIFEST=""
+if [ "$1" = "--restore-carry" ]; then
+  [ $# -eq 3 ] || usage
+  MODE=restore; REPO="$2"; BRANCH="--restore-carry"; PINNED_ARG=""
+  case "$3" in /*) CARRY_RESTORE_MANIFEST="$3" ;; *) CARRY_RESTORE_MANIFEST="$PWD/$3" ;; esac   # resolved before the cd below
+else
+  REPO="$1"; BRANCH="$2"; PINNED_ARG="${3:-}"
+fi
+SCRIPT_DIR="${BASH_SOURCE[0]}"; case "$SCRIPT_DIR" in */*) SCRIPT_DIR="${SCRIPT_DIR%/*}" ;; *) SCRIPT_DIR=. ;; esac; case "$SCRIPT_DIR" in /*) ;; *) SCRIPT_DIR="./$SCRIPT_DIR" ;; esac; SCRIPT_DIR=$(cd "$SCRIPT_DIR" >/dev/null 2>&1 && pwd && printf x); SCRIPT_DIR="${SCRIPT_DIR%x}"; SCRIPT_DIR="${SCRIPT_DIR%$'\n'}"; SELF="${SCRIPT_DIR%/}/${BASH_SOURCE[0]##*/}"   # computed before the cd below, without dirname (a minimal PATH has none) and without CDPATH; the marker x keeps a newline at the end of a directory name: the lock library is found next to this script
 cd "$REPO" 2>/dev/null || { echo "canon-reconcile-published: cannot cd to $REPO" >&2; exit 2; }
 git rev-parse --is-inside-work-tree >/dev/null 2>&1 || { echo "canon-reconcile-published: $REPO is not a git repo" >&2; exit 2; }
 GIT_DIR=$(git rev-parse --git-dir && printf x); GIT_DIR="${GIT_DIR%x}"; GIT_DIR="${GIT_DIR%$'\n'}"   # the marker x keeps a newline at the end of the name (the lock is made where the guard says)
@@ -170,7 +188,12 @@ ALERT_AFTER_SEC=$(num_or_default "${CANON_RECONCILE_ALERT_AFTER_SEC:-}" 3600)
 ALERT_REPEAT_SEC=$(num_or_default "${CANON_RECONCILE_ALERT_REPEAT_SEC:-}" 14400)
 ALERT_MIN_COUNT=$(num_or_default "${CANON_RECONCILE_ALERT_MIN_COUNT:-}" 3)
 TMP_FILES=()
-cleanup() { rm -f "${TMP_FILES[@]+"${TMP_FILES[@]}"}"; }
+CARRY_DISCARD=""; CARRY_REF_DISCARD=""   # the carry manifest and its ref while they may still be dropped (a refusal before the swap); emptied at the swap, so a failure after it keeps both
+cleanup() {
+  rm -f "${TMP_FILES[@]+"${TMP_FILES[@]}"}"
+  [ -z "$CARRY_DISCARD" ] || rm -f "$CARRY_DISCARD"
+  [ -z "$CARRY_REF_DISCARD" ] || git update-ref -d "$CARRY_REF_DISCARD" 2>/dev/null || :
+}
 trap cleanup EXIT
 
 # Live append-only ledger journals (machine/ledger/**/*.yaml), step 2 below. The journal lock is the one
@@ -432,6 +455,122 @@ fail_after_swap() {  # <reason> -- the ref is already replaced; say so honestly
   exit 1
 }
 
+# --- carried dirty paths (WP-484 I-34): the part the recovery path needs, defined before any work starts ---------------------
+# A carry is saved by carry_save (step 4 below): the raw bytes as git objects, a records blob (NUL-separated: kind, permissions,
+# blob, highest directory that was gone too, path) and a parentless commit holding both under refs/canon-reconcile-carry/<key>/<stamp>,
+# so gc cannot drop them; and a manifest in the runtime directory naming that ref, written under a temporary name (*.tmp) and
+# renamed into place only when it is complete (its last line is CARRY_END_MARK). The rename happens BEFORE the swap, so a *.tmp
+# left over always belongs to a run that died before its swap: its edit never left the working tree, and the leftover is removed.
+# A complete manifest left over means a restore may be owed: every later run refuses (carry_leftover_check) until
+# `canon-reconcile-published.sh --restore-carry <repo> <manifest>` has put the paths back, verified them, and only then removed
+# the ref and the manifest (the ref first: a ref whose removal failed is still named by the manifest that stays).
+CARRY_END_MARK="# end of carry manifest"
+CARRY_PATHS=(); CARRY_SEEN=(); CARRY_KIND=(); CARRY_RAW=(); CARRY_PERM=(); CARRY_GONE=(); CARRY_SIG=""; CARRY_MANIFEST=""; CARRY_REF=""; CARRY_ERR=""
+file_perm() { stat -c %a -- "$1" 2>/dev/null || stat -f %Lp -- "$1" 2>/dev/null; }   # GNU first: BSD stat rejects -c, while GNU stat -f would print file-system data
+carry_warn() { echo "canon-reconcile-published: warning: $1" >&2; log_line warning "$1"; }
+carry_check_one() {  # <index> -- 0 when the carried path is exactly in its saved state: still deleted, or a regular file with the saved bytes and permissions
+  local p="${CARRY_PATHS[$1]}"
+  if [ "${CARRY_KIND[$1]}" = deleted ]; then [ ! -e "$p" ] && [ ! -L "$p" ]; return; fi
+  [ -f "$p" ] && [ ! -L "$p" ] && [ "$(file_perm "$p")" = "${CARRY_PERM[$1]}" ] && [ "$(git hash-object --no-filters -- "$p")" = "${CARRY_RAW[$1]}" ]
+}
+carry_unchanged() {  # 0 when every carried path is in its saved state; CARRY_ERR names those that are not
+  local i
+  CARRY_ERR=""
+  for i in "${!CARRY_PATHS[@]}"; do carry_check_one "$i" || CARRY_ERR="$CARRY_ERR ${CARRY_PATHS[$i]}"; done
+  [ -z "$CARRY_ERR" ]
+}
+carry_restore() {  # puts every carried path back; 0 = all back exactly, 1 = CARRY_ERR names those that are not
+  local i p d t
+  CARRY_ERR=""
+  for i in "${!CARRY_PATHS[@]}"; do
+    p="${CARRY_PATHS[$i]}"
+    case "${CARRY_KIND[$i]}" in
+      deleted)
+        rm -f -- "$p" 2>/dev/null
+        if [ -n "${CARRY_GONE[$i]}" ]; then   # only the directories that were gone before, and only while they are empty
+          d=$(dirname "$p")
+          while rmdir -- "$d" 2>/dev/null && [ "$d" != "${CARRY_GONE[$i]}" ]; do d=$(dirname "$d"); done
+        fi ;;
+      file)   # written beside the path and renamed over it: a failure leaves the path as it was (what the reset wrote), never half-written
+        t="$(dirname "$p")/.canon-reconcile-carry.$$.$RANDOM"
+        if ! { ( umask 077; set -C; git cat-file blob "${CARRY_RAW[$i]}" > "$t" ) 2>/dev/null && chmod "${CARRY_PERM[$i]}" "$t" 2>/dev/null && mv -f -- "$t" "$p" 2>/dev/null; }; then
+          rm -f -- "$t" 2>/dev/null
+        fi ;;
+    esac
+    carry_check_one "$i" || CARRY_ERR="$CARRY_ERR $p"
+  done
+  [ -z "$CARRY_ERR" ]
+}
+carry_drop() {  # <ref> <manifest> -- removes the ref FIRST, then the manifest; 1 with a warning when either stays
+  if ! git update-ref -d "$1" 2>/dev/null; then carry_warn "the ref $1 cannot be removed; the manifest $2 stays and names it"; return 1; fi
+  if ! rm -f -- "$2" 2>/dev/null || [ -e "$2" ]; then carry_warn "the ref $1 is removed, but the manifest $2 cannot be: remove it by hand"; return 1; fi
+}
+carry_load() {  # <manifest> -- fills the CARRY_* arrays and CARRY_REF from a COMPLETE manifest and the records its ref holds; 1 with CARRY_ERR when it cannot
+  local m="$1" kind perm raw gone p
+  CARRY_PATHS=(); CARRY_KIND=(); CARRY_PERM=(); CARRY_RAW=(); CARRY_GONE=(); CARRY_ERR=""; CARRY_REF=""
+  [ "$(tail -n 1 "$m" 2>/dev/null)" = "$CARRY_END_MARK" ] || { CARRY_ERR="the manifest is incomplete (no end marker)"; return 1; }
+  CARRY_REF=$(sed -n 's/^# ref: //p' "$m" 2>/dev/null | head -1)
+  case "$CARRY_REF" in refs/canon-reconcile-carry/*) ;; *) CARRY_ERR="the manifest names no carry ref"; return 1 ;; esac
+  git rev-parse -q --verify "$CARRY_REF^{commit}" >/dev/null 2>&1 || { CARRY_ERR="its ref $CARRY_REF is gone"; return 1; }
+  while IFS= read -r -d '' kind && IFS= read -r -d '' perm && IFS= read -r -d '' raw && IFS= read -r -d '' gone && IFS= read -r -d '' p; do
+    case "$p" in ""|/*|..|../*|*/..|*/../*) CARRY_ERR="a record of $CARRY_REF names an unsafe path"; return 1 ;; esac
+    case "$kind" in
+      deleted) ;;
+      file)
+        if ! { printf '%s' "$perm" | grep -Eq '^[0-7]{3,4}$' && printf '%s' "$raw" | grep -Eq '^[0-9a-f]{40,64}$'; }; then
+          CARRY_ERR="a record of $CARRY_REF is damaged ($p)"; return 1
+        fi ;;
+      *) CARRY_ERR="a record of $CARRY_REF has an unknown kind"; return 1 ;;
+    esac
+    CARRY_PATHS+=("$p"); CARRY_KIND+=("$kind"); CARRY_PERM+=("$perm"); CARRY_RAW+=("$raw"); CARRY_GONE+=("$gone")
+  done < <(git cat-file blob "$CARRY_REF:records" 2>/dev/null)
+  [ "${#CARRY_PATHS[@]}" -gt 0 ] || { CARRY_ERR="its ref $CARRY_REF holds no readable records"; return 1; }
+}
+carry_restore_mode() {  # --restore-carry: puts the paths of one manifest back and verifies them; only then removes the ref and the manifest. Never returns.
+  local m="$CARRY_RESTORE_MANIFEST" i blocked=""
+  carry_load "$m" || { echo "canon-reconcile-published: --restore-carry: $m cannot be used: $CARRY_ERR -- nothing was changed" >&2; exit 1; }
+  [ "$(sed -n 's/^# repo: //p' "$m" | head -1)" = "$(oneline "$REPO_TOP")" ] \
+    || { echo "canon-reconcile-published: --restore-carry: $m belongs to another repository than $REPO_TOP -- nothing was changed" >&2; exit 1; }
+  for i in "${!CARRY_PATHS[@]}"; do
+    carry_check_one "$i" && continue   # already in its saved state
+    # anything but the state the reset left (clean against HEAD) is a later edit, which a restore must not overwrite
+    [ -z "$(git status --porcelain --untracked-files=no -- "${CARRY_PATHS[$i]}" 2>/dev/null)" ] || blocked="$blocked ${CARRY_PATHS[$i]}"
+  done
+  [ -z "$blocked" ] || { echo "canon-reconcile-published: --restore-carry: path(s) changed since the failed run, not overwritten:$blocked -- nothing was changed; the ref $CARRY_REF and the manifest stay" >&2; exit 1; }
+  carry_restore || { echo "canon-reconcile-published: --restore-carry: not put back:$CARRY_ERR -- the ref $CARRY_REF and the manifest $m stay" >&2; log_line carry-restore-failed "$m:$CARRY_ERR"; exit 1; }
+  carry_drop "$CARRY_REF" "$m" || exit 1
+  echo "canon-reconcile-published: --restore-carry: ${#CARRY_PATHS[@]} path(s) put back and verified; ref $CARRY_REF and manifest removed"
+  log_line carry-restored "$m"
+  exit 0
+}
+carry_leftover_check() {  # before any work: a carry manifest left over by an earlier run of THIS canon and branch
+  local m stamp ref
+  for m in "$RUNTIME_PHYS/canon-reconcile-published.$STREAK_KEY.carry."*; do
+    [ -e "$m" ] || [ -L "$m" ] || continue
+    stamp="${m##*.carry.}"; stamp="${stamp%.tmp}"; ref="refs/canon-reconcile-carry/$STREAK_KEY/$stamp"
+    case "$m" in
+      *.tmp)   # written by a run that died before the rename, so before its swap: its edit never left the working tree
+        git update-ref -d "$ref" 2>/dev/null || :
+        rm -f -- "$m"
+        carry_warn "removed an interrupted carry manifest $m and its ref $ref, if any: the run that wrote it died before its swap"
+        continue ;;
+    esac
+    if carry_load "$m"; then
+      if carry_unchanged; then   # every path is in its saved state already (the run died after the rename but before its swap, or the paths were put back by hand)
+        carry_drop "$CARRY_REF" "$m" || refuse "carry manifest $m cannot be cleaned up although nothing is owed (see the warning above)"
+        carry_warn "removed carry manifest $m and its ref: every path it names is already in its saved state"
+        continue
+      fi
+      refuse "carried dirty paths of an earlier run were not put back: manifest $m, saved objects under $CARRY_REF -- put them back with: $(printf '%q --restore-carry %q %q' "$SELF" "$REPO_TOP" "$m")"
+    fi
+    if git rev-parse -q --verify "$ref^{commit}" >/dev/null 2>&1; then
+      refuse "carry manifest $m cannot be used ($CARRY_ERR) while the ref $ref still holds saved objects -- inspect by hand: git ls-tree $ref; git cat-file blob $ref:records"
+    fi
+    rm -f -- "$m"
+    carry_warn "removed carry manifest $m: $CARRY_ERR, and no ref holds objects for it -- nothing could be restored from it"
+  done
+}
+
 if [ -d "$GIT_DIR/rebase-merge" ] || [ -d "$GIT_DIR/rebase-apply" ] || [ -f "$GIT_DIR/MERGE_HEAD" ] || [ -f "$GIT_DIR/CHERRY_PICK_HEAD" ]; then
   refuse "repo is mid-rebase/merge/cherry-pick"
 fi
@@ -440,7 +579,9 @@ CURRENT_BRANCH=$(git rev-parse --abbrev-ref HEAD 2>/dev/null)
 # `git checkout origin/main` stopped this guard and the reader mover for a day). A linked worktree (git dir != common
 # dir) is detached by design and keeps the old refusal.
 DETACHED=0
-if [ "$CURRENT_BRANCH" = "HEAD" ] && [ "$(git rev-parse --git-common-dir 2>/dev/null)" = "$GIT_DIR" ]; then
+if [ "$MODE" = restore ]; then
+  :   # the restore subcommand touches only the paths its manifest names, on whatever branch is checked out
+elif [ "$CURRENT_BRANCH" = "HEAD" ] && [ "$(git rev-parse --git-common-dir 2>/dev/null)" = "$GIT_DIR" ]; then
   DETACHED=1
 else
   [ "$CURRENT_BRANCH" = "$BRANCH" ] || refuse "checked-out branch is not the expected one: '$CURRENT_BRANCH' instead of '$BRANCH'"
@@ -476,12 +617,17 @@ trap 'cleanup || :; ledger_locks_release; dglock_release' EXIT  # set BEFORE the
 rc=0; dglock_acquire "$GIT_DIR" canon-reconcile-published || rc=$?
 case "$rc" in
   0) ;;
-  1) busy_report "$DGLOCK_REASON"; exit 0 ;;
+  1) [ "$MODE" != restore ] || { echo "canon-reconcile-published: --restore-carry: the repository lock is held ($DGLOCK_REASON) -- nothing was changed, retry" >&2; exit 1; }
+     busy_report "$DGLOCK_REASON"; exit 0 ;;
   *) refuse "$DGLOCK_REASON" ;;   # 2: the lock directory was made but its owner record could not be written; 3: misuse of the library (the reason says which)
 esac
 if [ -e "$RUNTIME_PHYS/$BUSY_NAME" ] || [ -L "$RUNTIME_PHYS/$BUSY_NAME" ]; then   # the lock is ours: a series of skips because it was held has ended (looked for first: a run without such a series asks the runtime directory nothing)
   end_series "$RUNTIME_PHYS/$BUSY_NAME" "the lock journal" "although the lock was taken"
 fi
+
+# 0. a carry left over by an earlier run (see carry_leftover_check); the restore subcommand ends here.
+[ "$MODE" != restore ] || carry_restore_mode
+carry_leftover_check
 
 # 1. no live canonical writer (strict, Codex round 3). Isolated sessions never
 #    touch this tree; only semaphores without isolated_worktree count.
@@ -696,8 +842,34 @@ ledger_dirty_ok() {  # <path> -- 0 = every event on disk is in the target (journ
   LEDGER_REFUSAL="ledger events not yet published: $p has $n event(s) that are not on the target (ts kind):$lines (the file is untouched; the publisher will carry them, retry after that)"
   return 1
 }
-classify_dirty() {  # tolerated / ancestral / ledger counts and DIRTY_BLOCKING / LEDGER_REFUSAL, computed afresh
+# CARRIED criterion (WP-484 I-34, 21.11): a dirty path upstream never touched (the same blob entry in OLD_HEAD and in the
+# target) is not a conflict -- `git merge --ff-only` would keep the local edit. The swap below is a reset, which would
+# destroy it, so its local state is saved before the swap (carry_save) and put back after the reset (carry_restore).
+# Checked after the rules above, which already make the reset lose nothing: a path identical to the target, an ancestral
+# version, and the live ledger journals (they keep their own lock-based rule; a carried journal could lose an event a
+# writer appends between the save and the restore). Only shapes that can be restored exactly are carried: a regular
+# file, tracked as one and still one on disk (or its local deletion), under real directories, with its exact-case name on
+# disk. Symlinks are never carried (Codex cold review of I-34: a link target read through the shell loses trailing
+# newlines, so neither its save nor the check of its restore can be exact); a dirty symlink keeps blocking.
+carry_shape_ok() {  # <path> <disk entry> -- 0 when upstream left <path> alone and its local state can be put back exactly
+  local p="$1" on_disk="$2" o_entry d
+  case "$p" in machine/ledger/*.yaml) return 1 ;; esac
+  case "${on_disk%% *}" in ""|100644|100755) ;; *) return 1 ;; esac
+  [ ! -L "$p" ] || return 1
+  o_entry=$(git ls-tree "$OLD_HEAD" -- "$p" | awk 'NR==1{print $1" "$2" "$3}')
+  case "$o_entry" in "100644 blob "*|"100755 blob "*) ;; *) return 1 ;; esac
+  [ "$o_entry" = "$(git ls-tree "$PINNED" -- "$p" | awk 'NR==1{print $1" "$2" "$3}')" ] || return 1
+  d=$(dirname "$p")
+  while [ "$d" != "." ]; do   # every directory above: real, or (for a local deletion) absent -- never a link or a file the reset would replace
+    if [ -L "$d" ] || { [ -e "$d" ] && [ ! -d "$d" ]; }; then return 1; fi
+    d=$(dirname "$d")
+  done
+  # shellcheck disable=SC2010  # literal, exact-case name match by design (APFS case folding), as in step 4
+  [ -z "$on_disk" ] || ls -a "$(dirname "$p")" 2>/dev/null | grep -qFx "$(basename "$p")"
+}
+classify_dirty() {  # tolerated / ancestral / ledger / carried counts and DIRTY_BLOCKING / LEDGER_REFUSAL, computed afresh
   DIRTY_BLOCKING=""; DIRTY_TOLERATED=0; DIRTY_ANCESTRAL=0; DIRTY_LEDGER=0; LEDGER_REFUSAL=""
+  DIRTY_CARRIED=0; CARRY_PATHS=(); CARRY_SEEN=()
   while IFS= read -r -d '' p; do
     [ -n "$p" ] || continue
     t_entry=$(git ls-tree "$PINNED" -- "$p" | awk 'NR==1{print $1" "$3}')
@@ -713,6 +885,9 @@ classify_dirty() {  # tolerated / ancestral / ledger counts and DIRTY_BLOCKING /
             continue ;;
         esac ;;
     esac
+    if carry_shape_ok "$p" "$on_disk"; then
+      DIRTY_CARRIED=$((DIRTY_CARRIED+1)); CARRY_PATHS+=("$p"); CARRY_SEEN+=("$on_disk"); continue
+    fi
     DIRTY_BLOCKING="$DIRTY_BLOCKING $p"
   done < <(git diff --name-only -z 2>/dev/null)
 }
@@ -807,6 +982,85 @@ if [ "$(dirty_signature)" != "$DIRTY_SIG_BEFORE" ]; then
   DIRTY_SIG_BEFORE=$(dirty_signature)
   [ "$(dirty_signature)" = "$DIRTY_SIG_BEFORE" ] || refuse "tracked tree changed during preflight"
 fi
+# Carried paths (see carry_shape_ok and the carry block near the top): their local state is saved BEFORE the swap, so a
+# failure after it can never lose the edit. A reset followed by a restore was chosen over a two-tree `read-tree -m -u` (which
+# would carry the edits itself): read-tree refuses the dirt the rules above tolerate (identical, ancestral, ledger) and untracked
+# files that equal what it would write, so it would change the behaviour this script already proves safe; the reset keeps it,
+# and only the carried paths are put back after it.
+fsync_best_effort() { command -v python3 >/dev/null 2>&1 && python3 -I -c 'import os,sys; fd=os.open(sys.argv[1], os.O_RDONLY); os.fsync(fd); os.close(fd)' "$1" 2>/dev/null; return 0; }
+carry_save() {  # saves the local state of every carried path; refuses (nothing changed yet) when it cannot. Not to be called in a subshell: refuse must end the script
+  local i p seen kind raw perm gone d rec="" sig="" entries="" recfile recblob stamp tree commit name tmp
+  CARRY_KIND=(); CARRY_RAW=(); CARRY_PERM=(); CARRY_GONE=(); CARRY_SIG=""; CARRY_MANIFEST=""; CARRY_REF=""   # whatever a leftover check loaded is not this run's
+  [ "${#CARRY_PATHS[@]}" -gt 0 ] || return 0
+  recfile=$(mktemp); TMP_FILES+=("$recfile")
+  for i in "${!CARRY_PATHS[@]}"; do
+    p="${CARRY_PATHS[$i]}"; seen="${CARRY_SEEN[$i]}"; raw=""; perm=""; gone=""
+    [ "$(disk_entry "$p")" = "$seen" ] || refuse "tracked tree changed during preflight: a carried path changed: $p"
+    if [ -z "$seen" ]; then
+      kind="deleted"
+      d=$(dirname "$p")
+      while [ "$d" != "." ] && [ ! -e "$d" ] && [ ! -L "$d" ]; do gone="$d"; d=$(dirname "$d"); done   # the highest directory that is gone too: removed again after the reset recreates it
+      rec="$rec$(printf 'deleted - - %q' "$p")"$'\n'
+    else
+      [ -f "$p" ] && [ ! -L "$p" ] || refuse "tracked tree changed during preflight: carried path $p is no longer a regular file"
+      kind="file"
+      perm=$(file_perm "$p")   # read BEFORE the bytes: a change of either after this point is caught by carry_unchanged right before the swap
+      printf '%s' "$perm" | grep -Eq '^[0-7]{3,4}$' || refuse "carried dirty path cannot be saved: the permissions of $p cannot be read"
+      raw=$(git hash-object -w --no-filters -- "$p")
+      printf '%s' "$raw" | grep -Eq '^[0-9a-f]{40,64}$' || refuse "carried dirty path cannot be saved: git hash-object -w failed for $p"
+      entries="$entries$(printf '100644 blob %s\t%s' "$raw" "$i")"$'\n'
+      rec="$rec$(printf 'file %s %s %q' "$raw" "$perm" "$p")"$'\n'
+    fi
+    printf '%s\0%s\0%s\0%s\0%s\0' "$kind" "${perm:--}" "${raw:--}" "$gone" "$p" >> "$recfile" || refuse "carried dirty paths cannot be saved: cannot write the records"
+    CARRY_KIND+=("$kind"); CARRY_RAW+=("$raw"); CARRY_PERM+=("$perm"); CARRY_GONE+=("$gone")
+    sig="$sig$(printf '%s\t%s' "$p" "$seen")"$'\n'
+  done
+  CARRY_SIG=$(printf '%s' "$sig" | LC_ALL=C sort)   # the shape of dirty_signature: what the tracked tree must show after the restore
+  if [ -n "${RUNTIME_REL:-}" ]; then   # inside the repository the manifest must be ignored like the log, or it would change the untracked set
+    GIT_LITERAL_PATHSPECS=0 git check-ignore -q -- "$RUNTIME_REL/canon-reconcile-published.$STREAK_KEY.carry.x" 2>/dev/null \
+      || refuse "carried dirty paths cannot be saved: the runtime dir lies inside the repository and a carry manifest there would not be ignored"
+  fi
+  runtime_chain_ok || refuse "carried dirty paths cannot be saved: $STREAK_WHY"
+  stamp="$(date -u +%Y%m%dT%H%M%SZ).$$.$RANDOM"
+  CARRY_REF="refs/canon-reconcile-carry/$STREAK_KEY/$stamp"
+  name="$RUNTIME_PHYS/canon-reconcile-published.$STREAK_KEY.carry.$stamp"; tmp="$name.tmp"
+  # A commit, not a ref to a tree or a blob: `git log --all` and other readers of all refs expect commits.
+  if ! { recblob=$(git hash-object -w -- "$recfile" 2>/dev/null) \
+    && tree=$( { printf '%s' "$entries"; printf '100644 blob %s\trecords\n' "$recblob"; } | git mktree 2>/dev/null) \
+    && commit=$(printf 'canon-reconcile-published: carried dirty paths saved before %s -> %s\n' "$OLD_HEAD" "$PINNED" \
+         | GIT_AUTHOR_NAME=canon-reconcile-published GIT_AUTHOR_EMAIL=canon-reconcile-published@localhost \
+           GIT_COMMITTER_NAME=canon-reconcile-published GIT_COMMITTER_EMAIL=canon-reconcile-published@localhost \
+           git commit-tree --no-gpg-sign "$tree" 2>/dev/null); }; then
+    refuse "carried dirty paths cannot be saved: the saved objects cannot be put into a commit"
+  fi
+  # 1. the whole manifest under a temporary name; a run that dies before the rename leaves a *.tmp, removed by the next run
+  CARRY_DISCARD="$tmp"
+  ( umask 077; set -C
+    { printf '# canon-reconcile-published carry manifest\n'
+      printf '# repo: %s\n' "$(oneline "$REPO_TOP")"
+      printf '# branch: %s\n' "$(oneline "$BRANCH")"
+      printf '# swap: %s -> %s\n' "$OLD_HEAD" "$PINNED"
+      printf '# ref: %s\n' "$CARRY_REF"
+      printf '# to put every path back (each is checked first; type, permissions and bytes are verified; only then are the ref and this file removed):\n'
+      printf '#   %s\n' "$(printf '%q --restore-carry %q %q' "$SELF" "$REPO_TOP" "$name")"
+      printf '# records, for reading only (the restore reads them from the ref): <file|deleted> <raw blob> <permissions> <path, shell-quoted>\n'
+      printf '%s' "$rec"
+      printf '%s\n' "$CARRY_END_MARK"; } > "$tmp" ) 2>/dev/null || refuse "carried dirty paths cannot be saved: cannot write the manifest $tmp"
+  fsync_best_effort "$tmp"
+  # 2. the ref that keeps the objects from gc
+  git update-ref "$CARRY_REF" "$commit" "" 2>/dev/null || refuse "carried dirty paths cannot be saved: the saved objects cannot be kept under $CARRY_REF"
+  CARRY_REF_DISCARD="$CARRY_REF"
+  # 3. the complete manifest appears under its own name in one step (rename), still before the swap
+  mv -f -- "$tmp" "$name" 2>/dev/null || refuse "carried dirty paths cannot be saved: cannot rename the manifest into place: $name"
+  CARRY_MANIFEST="$name"; CARRY_DISCARD="$name"   # dropped by the exit trap while a refusal can still come; kept from the swap on
+}
+carry_forget() {  # every carried path is back and checked: the ref and the manifest have done their job (the objects are left to gc)
+  carry_drop "$CARRY_REF" "$CARRY_MANIFEST" || :   # a failure is warned about; the next run then cleans up or refuses, see carry_leftover_check
+  CARRY_NOTE=""
+}
+carry_save
+[ "$(dirty_signature)" = "$DIRTY_SIG_BEFORE" ] || refuse "tracked tree changed during preflight"   # again: the save itself took time
+
 LIVE_WRITERS=$(live_canonical_writers)
 [ -z "$LIVE_WRITERS" ] || refuse "live canonical writer(s) appeared during preflight:$LIVE_WRITERS"
 
@@ -818,15 +1072,27 @@ if [ "$DETACHED" = 1 ]; then   # detached: the branch is compared with its own o
 else
   CAS_OLD="$OLD_HEAD"
 fi
+# The last look before the irreversible step: bytes, permissions and type of every carried path are what carry_save saved
+# (the dirty signature above sees only git's mode and hash, so a permission change would otherwise be reverted unseen).
+carry_unchanged || refuse "tracked tree changed during preflight: carried path(s) changed after they were saved (bytes, permissions or type):$CARRY_ERR"
 git update-ref -m "canon-reconcile-published: $OLD_HEAD -> $PINNED" "refs/heads/$BRANCH" "$PINNED" "$CAS_OLD"; CAS_RC=$?
 [ "$CAS_RC" -eq 0 ] || refuse "compare-and-swap on refs/heads/$BRANCH lost (HEAD moved)"
 [ "$CAS_RC" -eq 0 ] || exit 1   # a SEPARATE top-level command: reached only when the report above died halfway (see refuse()), so the reset below never runs after a lost swap
-if [ "$DETACHED" = 1 ]; then git symbolic-ref HEAD "refs/heads/$BRANCH" || fail_after_swap "could not attach HEAD to $BRANCH"; fi
-git reset --hard --quiet || fail_after_swap "git reset --hard failed -- index/tree need manual sync to $PINNED"
+CARRY_DISCARD=""; CARRY_REF_DISCARD=""   # the branch ref is replaced: from here on the carry manifest and its ref are evidence and stay on any failure
+CARRY_NOTE=""; [ -z "$CARRY_MANIFEST" ] || CARRY_NOTE="; carried dirty paths are saved in $CARRY_MANIFEST (objects kept under $CARRY_REF; every later run refuses until they are put back with: $(printf '%q --restore-carry %q %q' "$SELF" "$REPO_TOP" "$CARRY_MANIFEST"))"
+if [ "$DETACHED" = 1 ]; then git symbolic-ref HEAD "refs/heads/$BRANCH" || fail_after_swap "could not attach HEAD to $BRANCH$CARRY_NOTE"; fi
+RESET_RC=0; git reset --hard --quiet || RESET_RC=$?
+# The carried paths go back even when the reset failed: whatever it managed to write over them must not stay there.
+if [ "$DIRTY_CARRIED" -gt 0 ]; then
+  carry_restore || fail_after_swap "carried dirty path(s) not put back:$CARRY_ERR$CARRY_NOTE$([ "$RESET_RC" -eq 0 ] || printf '; git reset --hard failed too')"
+  carry_forget
+fi
+[ "$RESET_RC" -eq 0 ] || fail_after_swap "git reset --hard failed -- index/tree need manual sync to $PINNED$CARRY_NOTE"
 
 # 6. post-check.
-[ "$(git rev-parse HEAD)" = "$PINNED" ] || fail_after_swap "HEAD is not the pinned oid"
-[ -z "$(git status --porcelain --untracked-files=no)" ] || fail_after_swap "tracked tree not clean"
+[ "$(git rev-parse HEAD)" = "$PINNED" ] || fail_after_swap "HEAD is not the pinned oid$CARRY_NOTE"
+[ -z "$(git diff --cached --name-only -z 2>/dev/null)" ] || fail_after_swap "index not clean$CARRY_NOTE"
+[ "$(dirty_signature)" = "$CARRY_SIG" ] || fail_after_swap "tracked tree not clean apart from the carried paths$CARRY_NOTE"
 ledger_locks_release   # the journals were rewritten with the target's version; writers may append again
 UNTRACKED_AFTER=$(mktemp); TMP_FILES+=("$UNTRACKED_AFTER"); untracked_inventory > "$UNTRACKED_AFTER"
 # expected after-set = before-set minus paths the target now tracks (proven identical in 4)
@@ -837,9 +1103,9 @@ while IFS= read -r line; do
   [ "$t" = "${line% "$p"}" ] || printf '%s\n' "$line"
 done < "$UNTRACKED_BEFORE" > "$EXPECTED"
 DIFF=$(diff "$EXPECTED" "$UNTRACKED_AFTER" | grep '^[<>]' | head -3)
-[ -z "$DIFF" ] || fail_after_swap "untracked set changed during the operation (< expected / > actual): $(printf '%s' "$DIFF" | tr '\n' ';')"
+[ -z "$DIFF" ] || fail_after_swap "untracked set changed during the operation (< expected / > actual): $(printf '%s' "$DIFF" | tr '\n' ';')$CARRY_NOTE"
 
-echo "canon-reconcile-published: $REPO refs/heads/$BRANCH ${OLD_HEAD:0:12} -> ${PINNED:0:12} (dropped commits: patch-equivalent or content-superseded=$CONTENT_SUPERSEDED; tolerated identical dirty paths=$DIRTY_TOLERATED; ancestral-path dirty=$DIRTY_ANCESTRAL commit-paths=$COMMIT_ANCESTRAL; ledger journals with all events on target=$DIRTY_LEDGER; untracked intact)"
-log_line replaced "$OLD_HEAD -> $PINNED content_superseded=$CONTENT_SUPERSEDED dirty_tolerated=$DIRTY_TOLERATED ancestral_dirty=$DIRTY_ANCESTRAL ancestral_commit_paths=$COMMIT_ANCESTRAL ledger_dirty=$DIRTY_LEDGER"
+echo "canon-reconcile-published: $REPO refs/heads/$BRANCH ${OLD_HEAD:0:12} -> ${PINNED:0:12} (dropped commits: patch-equivalent or content-superseded=$CONTENT_SUPERSEDED; tolerated identical dirty paths=$DIRTY_TOLERATED; ancestral-path dirty=$DIRTY_ANCESTRAL commit-paths=$COMMIT_ANCESTRAL; ledger journals with all events on target=$DIRTY_LEDGER; carried_dirty=$DIRTY_CARRIED (upstream left them alone, local state kept); untracked intact)"
+log_line replaced "$OLD_HEAD -> $PINNED content_superseded=$CONTENT_SUPERSEDED dirty_tolerated=$DIRTY_TOLERATED ancestral_dirty=$DIRTY_ANCESTRAL ancestral_commit_paths=$COMMIT_ANCESTRAL ledger_dirty=$DIRTY_LEDGER carried_dirty=$DIRTY_CARRIED"
 healthy
 exit 0
