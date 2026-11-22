@@ -84,6 +84,34 @@ class ServerOnlyLedgerPaths(unittest.TestCase):
         # No tail of the old journal is left behind for the next tick to trip over.
         self.assertEqual(git(self.repo, "status", "--porcelain", "--untracked-files=all"), "")
 
+    def test_hidden_copy_equal_to_the_target_does_not_stop_the_merge(self) -> None:
+        # A runner card the Mac wrote and hid in .git/info/exclude, later published unchanged.
+        card = "inbox/agent/tasks/RUN-quick-close-x.md"
+        self.write(self.repo, ".git/info/exclude", "inbox/agent/tasks/RUN-*.md\n")
+        self.write(self.repo, card, "run card\n")
+        self.write(self.origin, card, "run card\n")
+        self.upstream = self.commit("publish the runner card")
+        git(self.repo, "fetch", "-q", "origin", "main")
+        result = self.apply()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(git(self.repo, "rev-parse", "HEAD"), self.upstream)
+        self.assertEqual((self.repo / card).read_text(), "run card\n")
+        self.assertIn("equal to the target replaced by the merge", result.stdout)
+        self.assertEqual(list((self.repo / ".git").glob("identical-before-ff-*")), [])
+
+    def test_hidden_copy_that_differs_still_stops_the_merge_and_stays(self) -> None:
+        card = "inbox/agent/tasks/RUN-quick-close-y.md"
+        self.write(self.repo, ".git/info/exclude", "inbox/agent/tasks/RUN-*.md\n")
+        self.write(self.repo, card, "local draft\n")
+        self.write(self.origin, card, "published card\n")
+        self.upstream = self.commit("publish a different runner card")
+        git(self.repo, "fetch", "-q", "origin", "main")
+        head = git(self.repo, "rev-parse", "HEAD")
+        result = self.apply()
+        self.assertEqual(result.returncode, 1, result.stdout)
+        self.assertEqual(git(self.repo, "rev-parse", "HEAD"), head)
+        self.assertEqual((self.repo / card).read_text(), "local draft\n")
+
     def test_local_file_on_a_server_only_path_is_still_refused(self) -> None:
         self.write(self.repo, BOUNDARY, "written on the Mac\n")
         head = git(self.repo, "rev-parse", "HEAD")

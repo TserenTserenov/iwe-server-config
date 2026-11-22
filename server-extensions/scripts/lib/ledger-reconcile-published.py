@@ -294,6 +294,49 @@ def rollback_owned(head, original_index, expected_index, snapshots, written, bac
     shutil.rmtree(backup)
 
 
+def identical_untracked(head, target):
+    """Paths the fast-forward adds that already sit on disk, untracked or ignored, as an exact
+    copy of the target blob. `git merge` refuses to overwrite them although the result would be
+    the same bytes; an earlier runner card hidden by .git/info/exclude stopped the Mac copy this
+    way three times (WP-484 F327, 19.11 and 22.11). A copy that differs in any byte or mode is
+    not returned, so it keeps refusing the merge as before."""
+    found = {}
+    raw = git("diff-tree", "-r", "-z", "--no-renames", "--diff-filter=A", head, target).stdout
+    items = [os.fsdecode(item) for item in raw.split(b"\0") if item]
+    for meta, path in zip(items[0::2], items[1::2]):
+        mode, blob = meta.lstrip(":").split(" ")[1], meta.split(" ")[3]
+        if mode not in ("100644", "100755") or Path(path).is_symlink() or not Path(path).is_file():
+            continue
+        if git("ls-files", "-z", "--", path).stdout:
+            continue  # tracked or staged: not this case
+        content = git("cat-file", "blob", blob).stdout
+        if file_matches(path, content, int(mode[-3:], 8)):
+            found[path] = (content, int(mode[-3:], 8))
+    return found
+
+
+def set_aside(git_dir, files):
+    """Move the exact copies out of the merge's way; returns the aside directory or None."""
+    if not files:
+        return None
+    aside = Path(tempfile.mkdtemp(prefix="identical-before-ff-", dir=git_dir))
+    for index, path in enumerate(sorted(files)):
+        os.replace(path, aside / str(index))
+    return aside
+
+
+def put_back(aside, files):
+    """Return set-aside copies after a failed merge, never over a file that appeared meanwhile."""
+    if aside is None:
+        return
+    for index, path in enumerate(sorted(files)):
+        if not Path(path).exists():
+            Path(path).parent.mkdir(parents=True, exist_ok=True)
+            os.replace(aside / str(index), path)
+    if not any(aside.iterdir()):
+        aside.rmdir()
+
+
 def reconcile_locked(target, branch, head, snapshots, mirrors, deletions, original_index, git_dir):
     backup = save_recovery(git_dir, head, target, original_index, snapshots)
     published_files = {p: (published, mode) for p, (_, published, mode) in snapshots.items()}
@@ -313,8 +356,24 @@ def reconcile_locked(target, branch, head, snapshots, mirrors, deletions, origin
         # under the same locks, but do not touch history or ORIG_HEAD again.
         if head != target:
             # No autostash, no silent overwrite of an ignored file on a
-            # fast-forward path (WP-530 Ф150, Fable review 14.11).
-            git("merge", "--ff-only", "--no-autostash", "--no-overwrite-ignore", target)
+            # fast-forward path (WP-530 Ф150, Fable review 14.11). Only exact
+            # copies of what the merge writes are moved aside first (F327).
+            identical = identical_untracked(head, target)
+            aside = set_aside(git_dir, identical)
+            try:
+                git("merge", "--ff-only", "--no-autostash", "--no-overwrite-ignore", target)
+            except BaseException:
+                put_back(aside, identical)
+                raise
+            try:
+                verify_files(identical, "after fast-forward over an identical untracked copy")
+            except Refused as exc:
+                # Never lose a set-aside copy silently: name where it is kept.
+                raise Refused(f"{exc}; set-aside copies kept in {aside}") from exc
+            if aside is not None:
+                shutil.rmtree(aside)
+                print(f"ledger-reconcile: {len(identical)} untracked copy(ies) equal to the target replaced by the merge: "
+                      + ", ".join(sorted(identical)))
         reached_branch = git("symbolic-ref", "--short", "HEAD").stdout.strip().decode()
         if oid("HEAD") != target or reached_branch != branch:
             raise Refused("fast-forward did not reach the pinned branch tip")
