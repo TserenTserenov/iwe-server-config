@@ -107,6 +107,10 @@ printf '## A.7 - Strict Distinction\n\n#### A.7:5.6 - Formal inclusion\n\n### A.
 registry "" >"$TMP/fpf-ok.yaml"; printf '# cites A.7:5.6\n' >>"$TMP/fpf-ok.yaml"
 registry "" >"$TMP/fpf-bad.yaml"; printf '# cites A.7:99.99\n' >>"$TMP/fpf-bad.yaml"
 check "--check-fpf accepts an existing section" bash -c 'CONCEPT_KINDS_REGISTRY="$1" FPF_SPEC="$2" python3 "$3" --check-fpf >/dev/null 2>&1' _ "$TMP/fpf-ok.yaml" "$TMP/spec.md" "$ROOT/scripts/build-concept-kinds-tsv.py"
+registry "" >"$TMP/fpf-pack.yaml"; printf '# cites A.7:5.6 and pack distinction DP.D.386\n' >>"$TMP/fpf-pack.yaml"
+check "--check-fpf ignores a pack ID (DP.D.386)" bash -c 'CONCEPT_KINDS_REGISTRY="$1" FPF_SPEC="$2" python3 "$3" --check-fpf >/dev/null 2>&1' _ "$TMP/fpf-pack.yaml" "$TMP/spec.md" "$ROOT/scripts/build-concept-kinds-tsv.py"
+registry "" >"$TMP/fpf-bare.yaml"; printf '# cites D.386\n' >>"$TMP/fpf-bare.yaml"
+check "--check-fpf still rejects a bare missing pattern (D.386)" bash -c '! CONCEPT_KINDS_REGISTRY="$1" FPF_SPEC="$2" python3 "$3" --check-fpf >/dev/null 2>&1' _ "$TMP/fpf-bare.yaml" "$TMP/spec.md" "$ROOT/scripts/build-concept-kinds-tsv.py"
 check "--check-fpf rejects a section that does not exist" bash -c '! CONCEPT_KINDS_REGISTRY="$1" FPF_SPEC="$2" python3 "$3" --check-fpf >/dev/null 2>&1' _ "$TMP/fpf-bad.yaml" "$TMP/spec.md" "$ROOT/scripts/build-concept-kinds-tsv.py"
 
 build "$TMP/r1.yaml" "$TMP/d.tsv"

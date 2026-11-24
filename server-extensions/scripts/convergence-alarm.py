@@ -34,6 +34,7 @@ stays unsent and is retried on the next run).
 
 import argparse
 import datetime as dt
+import hashlib
 import importlib.util
 import json
 import os
@@ -51,6 +52,7 @@ _spec.loader.exec_module(report)
 
 WATCHED_CLASSES = ("canon", "reader")
 READER_LOG_TAIL = 400
+LOG_HEAD_BYTES = 4096  # first bytes of the sync log that identify one file across rotation
 FETCH_STALE_MIN = 120  # the broker runs every few minutes; two hours without a confirmed fetch is broken
 AHEAD_GRACE_MIN = 120  # a session commit normally reaches GitHub within minutes
 REPEAT_MIN = 360  # an alarmed episode that lasts is repeated this often (6 h), only after a message was really sent
@@ -87,6 +89,37 @@ def last_reader_line(log_path, path):
     return ""
 
 
+# What to do for a known reader-mover refusal: (prefix of the BLOCKED reason, action line).
+READER_ACTIONS = (
+    ("незакоммиченные правки", "что сделать: посмотреть эти правки в копии; опубликовать их или осознанно "
+                               "отменить, после этого копия догонит сервер сама"),
+    ("свои коммиты", "что сделать: опубликовать коммиты этой копии или разобрать, откуда они взялись"),
+    ("ветка ", "что сделать: если работа на этой ветке закончена, вернуть копию на основную ветку"),
+)
+
+
+def reader_reason(outcome):
+    """The reader mover's last outcome for a copy that is off its upstream, in words, plus what to do.
+
+    The mover logs 'current', 'moved N', 'SKIP ...' or 'BLOCKED <reason>' (scripts/reader-copies-sync.py);
+    until 24.11 the alarm pasted that line raw ("перемотка: BLOCKED незакоммиченные правки (1)", WP-568)."""
+    if not outcome:
+        return ""
+    kind, _, rest = outcome.partition(" ")
+    if kind == "BLOCKED":
+        action = next((a for prefix, a in READER_ACTIONS if rest.startswith(prefix)), "")
+        return f"копия не перематывается: {rest}" + (f"\n{action}" if action else "")
+    if kind == "SKIP":
+        return f"перемотка отложена: {rest}"
+    if kind == "current":
+        # The mover saw the copy at its upstream, the alarm sees it off: the two disagree, say so.
+        return "журнал перемотки считает копию совпадающей с сервером, а сверка видит расхождение"
+    if kind == "moved":
+        how_far = f" ({rest})" if rest else ""
+        return f"копию только что перемотали{how_far}, сверка догонит на следующем проходе"
+    return f"последняя запись журнала перемотки: {outcome}"
+
+
 # Copies moved by a sync service of their own instead of the reader mover: copy -> its error log.
 SYNC_LOGS = {"DS-my-strategy": "DS-my-strategy/logs/mac-canon-sync-backstop.err.log"}
 SYNC_REFUSAL_MARKERS = ("refused:", "dirty-overlap:", "ignored-overlap:", "proven fast-forward failed")
@@ -98,14 +131,49 @@ SYNC_ACTIONS = (
 )
 
 
-def last_sync_refusal(log_path, since):
-    """Last refusal line the sync service wrote during this episode, or ''. A log untouched since the
-    episode began says nothing about it, so an old line is never reported as the current cause."""
+def _head_digest(stream, length):
+    stream.seek(0)
+    return hashlib.sha256(stream.read(length)).hexdigest()
+
+
+def log_bookmark(log_path):
+    """Where the sync log stood when an episode began: its size, its file identity and a digest of its
+    first bytes. The log has no timestamps, so this is the only way to tell this episode's lines apart."""
+    try:
+        with Path(log_path).open("rb") as stream:
+            stat = os.fstat(stream.fileno())
+            head_len = min(stat.st_size, LOG_HEAD_BYTES)
+            return {"offset": stat.st_size, "ino": stat.st_ino,
+                    "head_len": head_len, "head": _head_digest(stream, head_len)}
+    except OSError:
+        return {"offset": 0}
+
+
+def _same_log(stream, size, bookmark):
+    """True while the file is the one the bookmark was taken on and has only grown since: same inode,
+    not shorter, same first bytes. A rotated log (renamed away, or truncated and rewritten) fails one
+    of these even after it regrows past the old size."""
+    offset = bookmark.get("offset", 0)
+    if not 0 <= offset <= size:
+        return False
+    if "ino" in bookmark and bookmark["ino"] != os.fstat(stream.fileno()).st_ino:
+        return False
+    if "head" in bookmark and _head_digest(stream, bookmark.get("head_len", 0)) != bookmark["head"]:
+        return False
+    return True
+
+
+def last_sync_refusal(log_path, bookmark):
+    """Last refusal line the sync service wrote after the episode's bookmark (see log_bookmark), or ''.
+    The log carries no timestamps and gains lines on every run, so a file time proves nothing; only
+    the bytes written after the bookmark belong to this episode. A rotated log is read from its start."""
     log_path = Path(log_path)
     try:
-        if since is not None and dt.datetime.fromtimestamp(log_path.stat().st_mtime).astimezone() < since:
-            return ""
-        lines = log_path.read_text(encoding="utf-8", errors="replace").splitlines()[-READER_LOG_TAIL:]
+        with log_path.open("rb") as stream:
+            size = os.fstat(stream.fileno()).st_size
+            start = bookmark.get("offset", 0) if _same_log(stream, size, bookmark) else 0
+            stream.seek(start)
+            lines = stream.read().decode("utf-8", errors="replace").splitlines()[-READER_LOG_TAIL:]
     except OSError:
         return ""
     for line in reversed(lines):
@@ -382,15 +450,15 @@ def main():
         relation, upstream, _ = report.relation(repo)
         label, limit = assess(relation, fetch_times.get((repo, upstream)), threshold, now)
         text = step(state, path, label, limit, now)
+        if path in SYNC_LOGS and path in state and "sync_log_bookmark" not in state[path]:
+            state[path]["sync_log_bookmark"] = log_bookmark(root / SYNC_LOGS[path])
         if text:
-            reason = last_reader_line(reader_log, path) if label != "equal" else ""
+            reason = reader_reason(last_reader_line(reader_log, path)) if label != "equal" else ""
             if not reason and label != "equal" and path in SYNC_LOGS:
-                since = state.get(path, {}).get("since")
-                since = dt.datetime.fromisoformat(since).astimezone() if since else None
-                reason = last_sync_refusal(root / SYNC_LOGS[path], since)
-                if reason and sync_action(reason):
-                    reason += "\n" + sync_action(reason)
-            pending.append((path, text + (f"\nперемотка: {reason}" if reason else "")))
+                refusal = last_sync_refusal(root / SYNC_LOGS[path], state[path].get("sync_log_bookmark", {"offset": 0}))
+                if refusal:
+                    reason = f"перемотка: {refusal}" + (f"\n{sync_action(refusal)}" if sync_action(refusal) else "")
+            pending.append((path, text + (f"\n{reason}" if reason else "")))
     for path, threshold in LOCAL_BACKUPS:
         repo = root / path
         if not (repo / ".git").exists():

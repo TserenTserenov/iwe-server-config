@@ -180,3 +180,33 @@ def test_check_text_allows_steps_of_methods_and_system_parts():
         "| Состав | Что делает |\n|---|---|\n| сборка руководств | собирает |\n"
     )
     assert ck.check_text(DATA, text) == []
+
+
+def test_rows_mixed_list_is_reported_with_both_kinds():
+    text = "Кто работает:\n- Сервер Open MCP\n- Инструкция для ИИ\n- Человек\n"
+    warnings = ck.row_warnings(DATA, text)
+    assert len(warnings) == 1
+    assert "«Сервер Open MCP» — система" in warnings[0]
+    assert "«Инструкция для ИИ» — не система" in warnings[0]
+
+
+def test_rows_declared_system_column_rejects_a_description():
+    text = "| Физический объект | Выполняет |\n|---|---|\n| Человек | рассказчик |\n| — Промпт оценщика | оценку |\n"
+    warnings = ck.row_warnings(DATA, text)
+    assert len(warnings) == 1
+    assert warnings[0].startswith("колонка «Физический объект» — система")
+    assert "«Промпт оценщика» — не система" in warnings[0]
+
+
+def test_rows_document_titles_and_statements_are_not_judged():
+    text = (
+        "| Документ | Статус |\n|---|---|\n| Методика тестирования | черновик |\n"
+        "| Описание концепции | черновик |\n| Сервер Open MCP: описание | готово |\n\n"
+        "- **План обрезается** при переполнении.\n- **Агент не может назвать план устаревшим.**\n"
+    )
+    assert ck.row_warnings(DATA, text) == []
+
+
+def test_check_text_includes_row_warnings():
+    text = "- Сервер Open MCP\n- Инструкция для ИИ\n"
+    assert any("в одном ряду разные роды" in w for w in ck.check_text(DATA, text))

@@ -10,6 +10,8 @@ set -uo pipefail
 
 HOOKS="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 HOOK="$HOOKS/inject-communication-style.sh"
+# The hooks run under a fake HOME; keep the real user site-packages (PyYAML for the rows hint).
+export PYTHONUSERBASE="${PYTHONUSERBASE:-$(python3 -m site --user-base)}"
 TMP=$(mktemp -d)
 trap 'rm -rf "$TMP"' EXIT
 
@@ -204,6 +206,20 @@ make_transcript jargown "$JARGON" "Почему в боевом IWE маршру
 out=$(run_hook jargown "Почему в боевом IWE маршрутизатор до сих пор не работает, что с корнем?")
 check "words the pilot used himself are not reported" \
   "$(printf '%s' "$out" | grep -q 'изолированной копии' && ! printf '%s' "$out" | grep -q 'боевом' && echo yes || echo no)" "$out"
+
+# --- Rows hint (WP-608, 23.11, base rule 8: one kind per row) ---
+ROWS=$'Кто работает:\n- Сервер Open MCP\n- Инструкция для ИИ\n\nДальше: вы: проверить.'
+make_transcript rows "$ROWS" "да"
+out=$(run_hook rows "да")
+check "rows hint names the mixed kinds, even after a short prompt" \
+  "$(printf '%s' "$out" | grep -q 'ряд смешивал роды' && printf '%s' "$out" | grep -q 'Сервер Open MCP' && echo yes || echo no)" "$out"
+check "rows hint is logged in its own file" \
+  "$(grep -qE '\| rows \| 1 \| ' "$TMP/rows/home/.claude/logs/style-rows-hints.log" 2>/dev/null && echo yes || echo no)" \
+  "$(cat "$TMP/rows/home/.claude/logs/"*.log 2>/dev/null)"
+make_transcript rowsok "$CLEAN" "да"
+out=$(run_hook rowsok "да")
+check "no rows hint for an answer without mixed rows" \
+  "$(printf '%s' "$out" | grep -q 'ряд смешивал роды' && echo no || echo yes)" "$out"
 
 echo "---"
 echo "passed: $PASS, failed: $FAIL"

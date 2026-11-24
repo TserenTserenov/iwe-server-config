@@ -27,7 +27,7 @@ EOF
 chmod +x "${WORK}/notify-stub.sh"
 
 export IWE_HYGIENE_TMP_ROOT="${ROOT}" IWE_HYGIENE_STATE_DIR="${STATE}" IWE_HYGIENE_NOTIFY="${WORK}/notify-stub.sh"
-export IWE_HYGIENE_SWAP_MB=100 IWE_HYGIENE_DISK_FREE_GB=100 IWE_HYGIENE_FORCE_HOUR=12
+export IWE_HYGIENE_SWAP_MB=100 IWE_HYGIENE_DISK_FREE_GB=100 IWE_HYGIENE_SESSIONS=1 IWE_HYGIENE_FORCE_HOUR=12
 
 # a live process that mentions the id of "old-running" in its command line
 bash -c 'sleep 30; :' old-running &

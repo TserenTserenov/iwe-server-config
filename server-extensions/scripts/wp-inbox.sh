@@ -7,6 +7,11 @@
 #
 # Usage:
 #   wp-inbox.sh add    --to WP-N --from "<WP or session>" --pointer "<path/link to full text>" --summary "<summary>"
+#                      [--delivery-id ID]   Postman delivery id (WP-418 F10): an entry with the same id
+#                      already in the box is not written again; the dedup check and the append run under
+#                      one lock (kept in the checkout's git dir), so within one checkout the id is
+#                      atomic with the effect; copies on different hosts may repeat it until they sync.
+#                      stdout: «И-N записана в …» (new) or «И-N уже записана (доставка ID) в …» (duplicate).
 #   wp-inbox.sh list   --wp WP-N [--all]       «новое» entries (with --all also «учтено»)
 #   wp-inbox.sh count  --wp WP-N               number of «новое» entries
 #   wp-inbox.sh digest --wp WP-N               fingerprint of «новое» entries (empty if none)
@@ -52,7 +57,7 @@ cmd="${1:-}"
 [[ -n "$cmd" ]] || die "команда не указана (add|list|count|digest|mark|pending)"
 shift
 
-to="" wp="" from="" pointer="" summary="" id="" by="" rev="" all=0
+to="" wp="" from="" pointer="" summary="" id="" by="" rev="" all=0 delivery_id=""
 repo="${IWE_WORKSPACE:-$HOME/IWE}/${IWE_GOVERNANCE_REPO:-DS-my-strategy}"
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -63,6 +68,7 @@ while [[ $# -gt 0 ]]; do
     --summary) summary="${2:-}"; shift 2 ;;
     --id) id="${2:-}"; shift 2 ;;
     --by) by="${2:-}"; shift 2 ;;
+    --delivery-id) delivery_id="${2:-}"; shift 2 ;;
     --repo) repo="${2:-}"; shift 2 ;;
     --rev) rev="${2:-}"; shift 2 ;;
     --all) all=1; shift ;;
@@ -166,18 +172,39 @@ box="$dir/INBOX.md"
 case "$cmd" in
   add)
     [[ -n "$from" && -n "$pointer" && -n "$summary" ]] || die "add требует --from, --pointer и --summary"
+    if [[ -n "$delivery_id" ]]; then
+      [[ "$delivery_id" =~ ^[A-Za-z0-9._:-]{1,80}$ ]] || die "идентификатор доставки: только латиница, цифры и . _ : -, до 80 знаков"
+    fi
     if [[ ! -f "$card" ]]; then
       echo "wp-inbox: у РП-$n нет карточки $card (закрыт или не заведён) — запись не создана; для закрытого РП используйте $repo/inbox/backlog-with-triggers.md" >&2
       exit 1
     fi
-    lock="${TMPDIR:-/tmp}/wp-inbox-$n.lock"
+    # The lock belongs to the checkout, not to TMPDIR (WP-418 F10): writers with
+    # different TMPDIR over one checkout must exclude each other. Inside the git
+    # dir it is never committed; outside git it sits next to the mailbox. The
+    # holder's PID is kept inside: a lock whose holder is gone (killed past its
+    # EXIT trap) is removed, a lock without a PID is removed after 60 s.
+    lock=$(git -C "$repo" rev-parse --git-path "wp-inbox-$n.lock" 2>/dev/null) || lock="$dir/.INBOX.lock"
+    [[ "$lock" = /* ]] || lock="$repo/$lock"
     tries=0
     until mkdir "$lock" 2>/dev/null; do
+      holder=$(cat "$lock/pid" 2>/dev/null || true)
+      if [[ -n "$holder" ]] && ! kill -0 "$holder" 2>/dev/null \
+         || [[ -z "$holder" && -n "$(find "$lock" -maxdepth 0 -mmin +1 2>/dev/null)" ]]; then
+        # Re-read just before removing: never drop a lock a new holder took meanwhile.
+        if [[ "$(cat "$lock/pid" 2>/dev/null || true)" == "$holder" ]]; then
+          echo "wp-inbox: снимаю брошенную блокировку ящика РП-$n${holder:+ (процесс ${holder} завершён)}" >&2
+          rm -f "$lock/pid"
+          rmdir "$lock" 2>/dev/null || true
+          continue
+        fi
+      fi
       tries=$((tries + 1))
       [[ $tries -le 50 ]] || die "ящик РП-$n занят другой записью более 5 с" 1
       sleep 0.1
     done
-    trap 'rmdir "$lock" 2>/dev/null || true' EXIT
+    echo "$$" > "$lock/pid"
+    trap 'rm -f "$lock/pid"; rmdir "$lock" 2>/dev/null || true' EXIT
     last=0
     if [[ -f "$box" ]]; then
       last=$(grep -E '^## И-[0-9]+ · ' "$box" | sed -E 's/^## И-([0-9]+) · .*/\1/' | sort -n | tail -1 || true)
@@ -185,11 +212,22 @@ case "$cmd" in
     else
       printf '# Входящие РП-%s\n\n> Только дописывание. Статус записи меняет скрипт wp-inbox.sh (mark), не правка текста.\n' "$n" > "$box"
     fi
+    if [[ -n "$delivery_id" && -f "$box" ]]; then
+      # A «Доставка:» line above the first header (hand edit) has no entry number and is ignored.
+      dup=$(LC_ALL=C awk -v want="Доставка: $delivery_id" '
+        /^## И-[0-9]+ · / { n = $2; sub(/^И-/, "", n) }
+        $0 == want { print n; exit }' "$box")
+      if [[ -n "$dup" ]]; then
+        echo "И-$dup уже записана (доставка $delivery_id) в $box"
+        exit 0
+      fi
+    fi
     next=$((last + 1))
     {
       printf '\n## И-%s · %s · из %s · новое\n' "$next" "$(date +%Y-%m-%d)" "$(one_line "$from")"
       printf 'Указатель: %s\n' "$(one_line "$pointer")"
       printf 'Выжимка: %s\n' "$(one_line "$summary")"
+      [[ -z "$delivery_id" ]] || printf 'Доставка: %s\n' "$delivery_id"
     } >> "$box"
     echo "И-$next записана в $box"
     ;;

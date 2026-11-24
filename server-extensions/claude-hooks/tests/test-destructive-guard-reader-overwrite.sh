@@ -324,5 +324,23 @@ expect "parent-directory escape under a temporary variable still asks" ask 'F=$(
 expect "eval hides assignments, still asks" ask 'F=$(mktemp); eval "F=params.yaml"; grep zzzqqq README.md > $F'
 expect "temporary variable still cannot reach a protected file" block 'F=$(mktemp); ls > .claude/hooks/destructive-guard.sh'
 
+# === WP-7 F316 (22.11): after a quoted substitution, the `>` of a regex class is not a redirection ===
+expect "regex class [<>] in a quoted substitution (pilot screenshot 22.11)" pass 'git show HEAD:a > /tmp/s/cmp.txt 2>/dev/null; echo "x: $(echo a | grep -c '"'"'^[<>]'"'"')"'
+expect "same with a temporary variable path" pass 'T=/tmp/s; for r in a b; do git show HEAD:$r > $T/cmp.txt 2>/dev/null; echo "$r: $(diff $T/a $T/cmp.txt | grep -c '"'"'^[<>]'"'"')"; done'
+expect "regex class [^>]" pass 'echo "x: $(echo a | grep -c '"'"'[^>]x'"'"')"'
+expect "real redirect after a quoted substitution still asks" ask 'echo "$(echo '"'"'a'"'"')"; echo hi > params.yaml'
+expect "variable without a temporary assignment after a quoted substitution still asks" ask 'echo "$(echo '"'"'a'"'"')"; echo hi > $F'
+expect "redirect into a variable of a working path after a quoted substitution still asks" ask 'R=/home/tseren/IWE/DS-my-strategy; echo "$(echo '"'"'a'"'"')"; echo hi > $R/WeekPlan.md'
+expect "temporary variable after a quoted substitution" pass 'F=$(mktemp); echo "$(echo '"'"'a'"'"')"; echo hi > $F'
+expect "plain >] after a quoted substitution still asks" ask 'echo "$(echo '"'"'a'"'"')"; echo hi >]'
+
+# === WP-7 F316 (23.11): after a quoted substitution, a lone ` => ` / ` -> ` arrow is message text ===
+expect "arrow => in a message after a quoted substitution (pilot screenshot 23.11)" pass 'for m in a b; do r=$(echo "ok" | codex exec -m $m - 2>&1 | grep -E "x|y" | head -1); echo "$m => ${r:-OK?}"; done'
+expect "arrow -> in a message after a quoted substitution" pass 'r=$(echo "ok" | grep -E "x|y" | head -1); echo "a -> $r"'
+expect "real redirect next to an arrow message still asks" ask 'r=$(echo "ok" | grep -E "x|y"); echo "a => $r"; echo hi > params.yaml'
+expect "arrow glued to the word is a real redirect and still asks" ask 'r=$(echo "ok" | grep -E "x|y"); echo a=>params.yaml'
+expect "arrow without a space after it is a real redirect and still asks" ask 'r=$(echo "ok" | grep -E "x|y"); echo a =>params.yaml'
+expect "arrow message cannot reach a protective file" block 'r=$(echo "ok" | grep -E "x|y"); echo "a => $r"; echo hi > .claude/hooks/destructive-guard.sh'
+
 echo "reader-overwrite: $PASS passed, $FAIL failed"
 [ "$FAIL" -eq 0 ]

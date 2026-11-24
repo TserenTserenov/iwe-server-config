@@ -325,6 +325,46 @@ def set_aside(git_dir, files):
     return aside
 
 
+def _drop_if_unchanged(copy, content, mode):
+    """Unlink `copy` only while it holds exactly `content` with `mode`. The file stays open across the
+    check and the unlink, so a write that lands in between is seen through the same descriptor and the
+    bytes are put back. Returns True when the copy is gone."""
+    try:
+        fd = os.open(copy, os.O_RDONLY | os.O_NOFOLLOW)
+    except OSError:
+        return False
+    with os.fdopen(fd, "rb") as stream:
+        before = os.fstat(stream.fileno())
+        if not stat.S_ISREG(before.st_mode) or (before.st_mode & 0o777) != mode or stream.read() != content:
+            return False
+        os.unlink(copy)
+        after = os.fstat(stream.fileno())
+        if (after.st_size, after.st_mtime_ns) == (before.st_size, before.st_mtime_ns):
+            return True
+        stream.seek(0)
+        changed = stream.read()
+    with open(copy, "xb") as restored:
+        restored.write(changed)
+    os.chmod(copy, after.st_mode & 0o777)
+    return False
+
+
+def drop_verified_aside(aside, files):
+    """Delete only the set-aside copies that still equal the recorded bytes and mode.
+    Returns (dropped paths, kept paths); the directory is removed only when it ends up empty, so a
+    file that appeared there meanwhile is never deleted with it."""
+    dropped, kept = [], []
+    for index, path in enumerate(sorted(files)):
+        content, mode = files[path]
+        (dropped if _drop_if_unchanged(aside / str(index), content, mode) else kept).append(path)
+    if not kept:
+        try:
+            aside.rmdir()
+        except OSError as exc:
+            print(f"ledger-reconcile: WARN set-aside directory {aside} not removed: {exc}", file=sys.stderr)
+    return dropped, kept
+
+
 def put_back(aside, files):
     """Return set-aside copies after a failed merge, never over a file that appeared meanwhile."""
     if aside is None:
@@ -371,9 +411,14 @@ def reconcile_locked(target, branch, head, snapshots, mirrors, deletions, origin
                 # Never lose a set-aside copy silently: name where it is kept.
                 raise Refused(f"{exc}; set-aside copies kept in {aside}") from exc
             if aside is not None:
-                shutil.rmtree(aside)
-                print(f"ledger-reconcile: {len(identical)} untracked copy(ies) equal to the target replaced by the merge: "
-                      + ", ".join(sorted(identical)))
+                dropped, kept = drop_verified_aside(aside, identical)
+                if dropped:
+                    print(f"ledger-reconcile: {len(dropped)} untracked copy(ies) equal to the target replaced by the merge: "
+                          + ", ".join(dropped))
+                if kept:
+                    # A writer changed the copy after it was checked: its bytes are not ours to delete.
+                    print(f"ledger-reconcile: WARN changed set-aside copy(ies) kept in {aside}: " + ", ".join(kept),
+                          file=sys.stderr)
         reached_branch = git("symbolic-ref", "--short", "HEAD").stdout.strip().decode()
         if oid("HEAD") != target or reached_branch != branch:
             raise Refused("fast-forward did not reach the pinned branch tip")

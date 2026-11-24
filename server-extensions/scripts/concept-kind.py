@@ -12,7 +12,11 @@ Usage:
                                                    names a kind or a registry term, and on
                                                    part-of claims ("входит в", "часть",
                                                    "состоит из", table columns «Модуль»)
-                                                   whose part is not a system
+                                                   whose part is not a system, and on rows
+                                                   (one list, the first table column) that
+                                                   mix kinds
+  concept-kind.py check-rows <file|->              only the row warnings, one per line
+                                                   (machine output for the style hook)
 
 A miss means "kind not established". It is not a draft entry and not a reason to add the word
 to the registry: new entries are decided by the pilot.
@@ -446,6 +450,168 @@ def part_claims(data: dict, text: str) -> list[str]:
     return [w for w in warnings if w]
 
 
+# Rows (base style rule 8, pilot decision 23.11.2026, WP-608): the items of one list and the
+# first column of one table name objects of one kind and one partition. Three groups are
+# told apart: systems (physical objects), roles (functional parts) and everything else
+# (descriptions, documents, methods, work...). Titles of documents name their content, so a
+# column declared «Документ» or «Описание» is not judged.
+ROW_GROUP_NAMES = {
+    "system": "система (физический объект)",
+    "role_kind": "функциональная часть (роль)",
+    "other": "не система",
+}
+TITLE_KINDS = frozenset(["document", "description"])
+MAX_ROW_HEAD_WORDS = 6
+LIST_ITEM_RE = re.compile(r"^(?P<indent>\s*)(?:[-*+]|\d+[.)])\s+(?P<body>\S.*)$")
+BOLD_LEAD_RE = re.compile(r"^\*\*(?P<head>[^*]+)\*\*")
+HEAD_END_RE = re.compile(r"[.:;—–(]|\s-\s")
+# A head with a verb or a short participle is a statement ("План обрезается", "Карточка
+# обновлена"), not a name of an object: such items are not judged.
+SHORT_PARTICIPLE_RE = re.compile(r"(?:[ая]н|[её]н|[иы]т)[аоы]?$")
+# Agent nouns built on a stem of another kind ("прогонщик" on "прогон") name a doer: when the
+# registry knows only the stem's kind, the kind of the doer is not established.
+AGENT_NOUN_RE = re.compile(r"(?:щик|чик|тель|тор)[а-яё]{0,3}$")
+# A cell or an item may open with a dash that marks a sub-row ("— Тестировщик").
+LEADING_MARK_RE = re.compile(r"^[\s—–•-]+")
+# Column headers that declare the partition of the column.
+HEADER_KIND_RE = (
+    (re.compile(r"^(?:физическ\S*\s+объект|модул|систем)", re.IGNORECASE), "system"),
+    (re.compile(r"^(?:функциональн\S*\s+част|функци|рол[ьи])", re.IGNORECASE), "role_kind"),
+)
+
+
+def row_head(item: str) -> str | None:
+    """Head phrase of a list item or a cell: its bold lead or text up to the first mark."""
+    item = LEADING_MARK_RE.sub("", item.strip())
+    m = BOLD_LEAD_RE.match(item)
+    head = m.group("head") if m else HEAD_END_RE.split(item, maxsplit=1)[0]
+    head = PAREN_RE.sub(" ", head).replace("*", " ").strip().rstrip(".")
+    words = subject_words(head)
+    if not words or len(words) > MAX_ROW_HEAD_WORDS:
+        return None
+    if any(VERB_END_RE.search(w.lower()) or SHORT_PARTICIPLE_RE.search(w.lower()) for w in words[1:]):
+        return None
+    return head
+
+
+def head_kind(data: dict, head: str) -> str | None:
+    """Single definite kind of the head phrase, or None when unknown or ambiguous."""
+    terms = phrase_terms(data, head)
+    if not terms:
+        word = head_noun(head)
+        if word:
+            # "ИИ-агент": the noun is the last part of a hyphenated word
+            terms = term_kind(data, word) or term_kind(data, word.split("-")[-1])
+            if AGENT_NOUN_RE.search(word.lower()):
+                terms = [t for t in terms if t["kind"] in ("system", "role_kind")]
+    kinds = {t["kind"] for t in terms} - {"ambiguous"}
+    return kinds.pop() if len(kinds) == 1 else None
+
+
+def header_kind(data: dict, header: str) -> str | None:
+    """Kind a table column header declares: a partition name, a kind name or a registry term."""
+    header = header.replace("*", " ").strip()
+    for regex, kind in HEADER_KIND_RE:
+        if regex.match(header):
+            return kind
+    words = subject_words(header)
+    by_name = kind_by_name(data, words[0]) if words else None
+    return by_name["id"] if by_name else head_kind(data, header)
+
+
+def row_group(kind: str) -> str:
+    return kind if kind in ("system", "role_kind") else "other"
+
+
+def list_rows(text: str) -> list[list[str]]:
+    """Items of each list, one row per list level; a plain line at the top level ends the list."""
+    rows: list[list[str]] = []
+    open_rows: dict[int, list[str]] = {}
+    for line in text.splitlines():
+        m = LIST_ITEM_RE.match(line)
+        if m:
+            indent = len(m.group("indent"))
+            for deeper in [i for i in open_rows if i > indent]:
+                rows.append(open_rows.pop(deeper))
+            open_rows.setdefault(indent, []).append(m.group("body"))
+        elif line.strip() and not line.startswith((" ", "\t")):
+            rows += open_rows.values()
+            open_rows = {}
+    return rows + list(open_rows.values())
+
+
+def table_rows(text: str) -> list[tuple[str, list[str]]]:
+    """First-column cells of each table with the header of that column."""
+    rows: list[tuple[str, list[str]]] = []
+    header: str | None = None
+    cells: list[str] = []
+    for line in text.splitlines() + [""]:
+        if not line.lstrip().startswith("|"):
+            if header is not None:
+                rows.append((header, cells))
+            header, cells = None, []
+            continue
+        first = line.strip().strip("|").split("|")[0].strip()
+        if re.fullmatch(r":?-{3,}:?", first):
+            continue
+        if header is None:
+            header = first
+        else:
+            cells.append(first)
+    return rows
+
+
+def mixed_row_warning(data: dict, items: list[str], where: str) -> str | None:
+    found: dict[str, str] = {}
+    for item in items:
+        head = row_head(item)
+        kind = head_kind(data, head) if head else None
+        if kind:
+            found.setdefault(row_group(kind), head)
+    if len(found) < 2:
+        return None
+    named = "; ".join(f"«{head}» — {ROW_GROUP_NAMES[g]}" for g, head in found.items())
+    return (
+        f"{where}: в одном ряду разные роды ({named}). В ряду один род и одно разбиение: "
+        "функциональные части отдельно от физических объектов, описания отдельно от систем; "
+        "связь между ними — отдельной колонкой «кто выполняет»."
+    )
+
+
+def declared_row_warning(data: dict, header: str, cells: list[str]) -> str | None:
+    """A column whose header names a system or a role holds only that group."""
+    declared = header_kind(data, header)
+    if declared is None:
+        return None
+    group = row_group(declared)
+    for cell in cells:
+        head = row_head(cell)
+        kind = head_kind(data, head) if head else None
+        if kind and row_group(kind) != group:
+            return (
+                f"колонка «{header}» — {ROW_GROUP_NAMES[group]}, а «{head}» — "
+                f"{ROW_GROUP_NAMES[row_group(kind)]}. В одном ряду один род; "
+                "связь между ними — отдельной колонкой."
+            )
+    return None
+
+
+def row_warnings(data: dict, text: str) -> list[str]:
+    """Warnings for lists and table columns that mix kinds (rule 8: one kind per row)."""
+    text = QUOTE_RE.sub(" ", CODE_RE.sub(" ", text))
+    text = "\n".join(line for line in text.splitlines() if not line.lstrip().startswith(">"))
+    warnings = [mixed_row_warning(data, items, "список") for items in list_rows(text)]
+    for header, cells in table_rows(text):
+        declared = header_kind(data, header)
+        if declared in TITLE_KINDS:
+            continue
+        if declared is not None:
+            warnings.append(declared_row_warning(data, header, cells))
+        else:
+            warnings.append(mixed_row_warning(data, cells, "первая колонка таблицы"))
+    return [w for w in warnings if w]
+
+
 def check_text(data: dict, text: str) -> list[str]:
     kinds = kind_index(data)
     warnings: list[str] = discouraged_words(data, text)
@@ -479,7 +645,7 @@ def check_text(data: dict, text: str) -> list[str]:
                 f"{claim}: по реестру подлежащее — {describe_kind(x_kind)} "
                 f"Утверждается — {describe_kind(y_kind)}"
             )
-    return warnings + part_claims(data, text)
+    return warnings + part_claims(data, text) + row_warnings(data, text)
 
 
 def main() -> int:
@@ -496,6 +662,8 @@ def main() -> int:
     p_lookup.add_argument("--claim")
     p_check = sub.add_parser("check-text")
     p_check.add_argument("path")
+    p_rows = sub.add_parser("check-rows")
+    p_rows.add_argument("path")
     args = parser.parse_args()
 
     try:
@@ -517,6 +685,13 @@ def main() -> int:
         )
     except OSError as err:
         print(f"concept-kind: пропуск (файл не прочитан: {err})", file=sys.stderr)
+        return 0
+    if args.mode == "check-rows":
+        # Machine output for the style hook: one warning per line, nothing when clean.
+        warnings = row_warnings(data, text)
+        if warnings:
+            print("\n".join(warnings))
+        log(args.agent, digest, "check-rows", args.path, f"warnings={len(warnings)}", "")
         return 0
     warnings = check_text(data, text)
     for line in warnings:

@@ -165,9 +165,11 @@ def verify_paths(repo: Path, checkouts: set[Path], paths: set[str], remote: str,
         for checkout in checkouts:
             actual = scope.local_entry(checkout, path, algorithm)
             require_clean_path(checkout, path, actual, remote_entries[path])
-            require(actual == expected or actual == remote_entries[path],
-                    "owned path differs from published content: " + path
-                    + lag_note(checkout, remote))
+            if not (actual == expected or actual == remote_entries[path]):
+                # The diagnostic git call runs only on the failure path: a slow or failing
+                # rev-list must never turn a valid close into a refusal.
+                require(False, "owned path differs from published content: " + path
+                        + lag_note(checkout, remote))
             snapshots[(checkout, path)] = (actual, remote_entries[path])
     return snapshots
 

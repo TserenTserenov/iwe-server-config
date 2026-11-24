@@ -115,4 +115,18 @@ inbox mark --wp 7 --id 4 --by "перенесено в «Осталось» (т�
 check "после разбора: архивация прошла" "0" "$(archive env)"
 check "после разбора: папка в архиве" "yes" "$([[ -f "$REPO/archive/wp-contexts/WP-7/INBOX.md" ]] && echo yes || echo no)"
 
+# 11. Delivery id (WP-418 F10): the same id is written once; the entry carries it.
+mkdir -p "$REPO/inbox/WP-9"; printf -- '---\nwp: 9\n---\n' > "$REPO/inbox/WP-9/WP-9.md"
+out1=$(inbox add --to WP-9 --from "РП-418" --pointer "p" --summary "s" --delivery-id "d-abc")
+out2=$(inbox add --to WP-9 --from "РП-418" --pointer "p" --summary "s" --delivery-id "d-abc")
+check "доставка: первая запись И-1" "yes" "$([[ "$out1" == "И-1 записана в"* ]] && echo yes || echo no)"
+check "доставка: повтор не пишет вторую запись" "yes" "$([[ "$out2" == "И-1 уже записана (доставка d-abc) в"* ]] && echo yes || echo no)"
+check "доставка: в ящике одна запись" "1" "$(grep -c -E '^## И-' "$REPO/inbox/WP-9/INBOX.md")"
+check "доставка: запись несёт идентификатор" "1" "$(grep -c -x 'Доставка: d-abc' "$REPO/inbox/WP-9/INBOX.md")"
+inbox add --to WP-9 --from "РП-418" --pointer "p" --summary "s" --delivery-id "d-xyz" >/dev/null
+check "доставка: другой идентификатор — новая запись" "2" "$(grep -c -E '^## И-' "$REPO/inbox/WP-9/INBOX.md")"
+rc=0; inbox add --to WP-9 --from "x" --pointer "p" --summary "s" --delivery-id 'bad id;rm' >/dev/null 2>&1 || rc=$?
+check "доставка: недопустимый идентификатор — код 2" "2" "$rc"
+check "доставка: ящик с идентификаторами проходит check-text" "1" "$(rc=0; bash "$SCRIPT" check-text < "$REPO/inbox/WP-9/INBOX.md" >/dev/null 2>&1 || rc=$?; echo $rc)"
+
 exit "$fail"

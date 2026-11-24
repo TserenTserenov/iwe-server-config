@@ -28,6 +28,11 @@
 #                                                      # грамматика у _heal_pilot_word_proven); текст
 #                                                      # флага не доказательство; своя отметка у
 #                                                      # вызывающей беседы не нужна
+#   close ... --pilot-receipt                         # WP-561 Ф82 шаг 2: то же для чужой отметки, но доказательство -
+#                                                      # подписанная квитанция Telegram: первый вызов шлёт пилоту
+#                                                      # кнопки «Снять / Не трогать», повтор после нажатия проверяет
+#                                                      # подпись по опубликованному ключу и снимает; работает для
+#                                                      # Claude, Кими и Кодекса; с Мака - через SSH на tsekh-1
 #   close --housekeeping <reason> [--agent ...] [--expect-session-id <id>]  # закрыть housekeeping-сессию (с id: только если открыт именно этот запуск)
 #   close --housekeeping <reason> --prove-owner-dead   # закрыть, только если охранник сам доказал смерть владельца (WP-530 Ф160 шаг 3):
 #                                                      # вердикт process_identity_verdict по pid и pid_start_id записи, под замком перехода;
@@ -593,6 +598,83 @@ _close_path_clears_obligation() {  # <close_path value>
 # WP-484 Ф301: `close --pilot-release` is an exit by the pilot's word, so the word has to
 # outlive the command. One JSON line per release; a failed write refuses the release
 # (an unaudited exit is the thing this log exists to prevent).
+# WP-561 Ф82 step 2 (22.11): the pilot's decision as a signed Telegram receipt. The claims,
+# the bot and the signing key live on the poller's host (tsekh-1); a guard elsewhere reaches
+# them over the SSH access the Mac already uses (day-close.sh). Trust does not depend on
+# that transport: the receipt is verified HERE against the key published on origin/main,
+# bound to this mark's immutable identity and consumed once on this host.
+RELEASE_RECEIPT_HOST="${IWE_RELEASE_RECEIPT_HOST:-tsekh-1}"
+
+_release_receipt_door() {  # <request|fetch ...>; stdin goes through (the mark text)
+  local door="scripts/release-receipt.sh"
+  [[ "$GOV_REPO" =~ ^[A-Za-z0-9._-]+$ ]] \
+    || fail "close --pilot-receipt: имя репозитория стратегии не годится для вызова по SSH: ${GOV_REPO}" 7
+  if [ "$(hostname -s)" = "$RELEASE_RECEIPT_HOST" ]; then
+    bash "$IWE_ROOT/$GOV_REPO/$door" "$@"
+  else
+    # Arguments are validated by the caller: a host-name pattern and a 32-hex claim id.
+    ssh -o BatchMode=yes -o ConnectTimeout=10 -o ServerAliveInterval=5 -o ServerAliveCountMax=2 \
+      "$RELEASE_RECEIPT_HOST" "bash ~/IWE/${GOV_REPO}/$door $*"
+  fi
+}
+
+_json_field() {  # <json> <field>; empty for anything that is not a JSON object with the field
+  python3 -c '
+import json, sys
+try:
+    value = json.loads(sys.argv[1])
+except ValueError:
+    value = None
+print(value.get(sys.argv[2]) or "" if isinstance(value, dict) else "")' "$1" "$2"
+}
+
+# Sets PR_RECEIPT_CLAIM on success; otherwise fails with what the pilot has to do (exit 3)
+# or why the receipt path itself is broken (exit 7). The mark is never released here.
+_pilot_receipt_proven() {  # <semaphore>
+  local sem="$1" host gov fresh="" attempt status_json status claim bundle receipt verdict verifier
+  host=$(hostname -s)
+  [[ "$host" =~ ^[A-Za-z0-9][A-Za-z0-9.-]{0,62}$ ]] \
+    || fail "close --pilot-receipt: имя этого хоста не годится для заявки: ${host}" 7
+  gov="$IWE_ROOT/$GOV_REPO"
+  for attempt in 1 2; do
+    status_json=$(_release_receipt_door request --host "$host" $fresh < "$sem") \
+      || fail "close --pilot-receipt: заявку пилоту отправить не удалось (хост квитанций ${RELEASE_RECEIPT_HOST}); отметка не снята. Запасной путь - слово пилота через --pilot-release" 7
+    status=$(_json_field "$status_json" status)
+    claim=$(_json_field "$status_json" claim_id)
+    [[ "$claim" =~ ^[0-9a-f]{32}$ ]] \
+      || fail "close --pilot-receipt: хост квитанций ответил непонятно (${status:-без статуса}); отметка не снята" 7
+    case "$status" in
+      sent) fail "close --pilot-receipt: пилоту в Telegram (@aisystant_statusbot) отправлено сообщение «Снять отметку сессии?» с кнопками «Снять» и «Не трогать» (агент ${AGENT}, слаг ${SLUG}, хост ${host}; действует до $(_json_field "$status_json" expires_at) UTC). Скажи пилоту нажать кнопку и после нажатия повтори этот же вызов close. Слово за пилота не писать" 3 ;;
+      waiting) fail "close --pilot-receipt: сообщение пилоту уже отправлено, нажатия пока нет (действует до $(_json_field "$status_json" expires_at) UTC); повтори этот же вызов close после нажатия «Снять»" 3 ;;
+      kept) fail "close --pilot-receipt: пилот нажал «Не трогать» ($(_json_field "$status_json" decided_at)); отметку не снимаю и до $(_json_field "$status_json" expires_at) UTC заново не спрашиваю" 3 ;;
+      decided) ;;
+      *) fail "close --pilot-receipt: неизвестный ответ хоста квитанций: ${status:-пусто}; отметка не снята" 7 ;;
+    esac
+    # The key and the verifier come from origin/main, never from the editable working copy;
+    # a stale fetch only delays, a failed one is not fatal here.
+    git -C "$gov" fetch -q origin main 2>/dev/null || true
+    verifier="$IWE_ROOT/.iwe-runtime/release-receipts/release_receipt.origin-main.py"
+    mkdir -p "$(dirname "$verifier")"
+    git -C "$gov" show refs/remotes/origin/main:scripts/lib/release_receipt.py > "$verifier" \
+      || fail "close --pilot-receipt: в опубликованной версии репозитория стратегии нет программы квитанции; отметка не снята" 7
+    bundle=$(_release_receipt_door fetch --claim "$claim" </dev/null) \
+      || fail "close --pilot-receipt: подписанную квитанцию ${claim} получить не удалось; отметка не снята" 7
+    receipt=$(printf '%s' "$bundle" | python3 "$verifier" store --dir "$IWE_ROOT/.iwe-runtime/release-receipts") \
+      || fail "close --pilot-receipt: квитанцию ${claim} не удалось сохранить на этом хосте; отметка не снята" 7
+    if verdict=$(python3 "$verifier" verify --receipt "$receipt" --semaphore "$sem" \
+        --governance-repo "$gov" --host "$host" --consume 2>&1); then
+      PR_RECEIPT_CLAIM="$claim"
+      return 0
+    fi
+    # A receipt used up by an earlier close that did not finish: ask the pilot once more.
+    case "$verdict" in
+      *"already used"*) [ -z "$fresh" ] && { fresh="--fresh"; continue; } ;;
+    esac
+    fail "close --pilot-receipt: квитанция ${claim} не прошла проверку (${verdict}); отметка не снята" 3
+  done
+  fail "close --pilot-receipt: повторная заявка не получилась; отметка не снята" 7
+}
+
 _record_pilot_release() {  # <slug> <agent> <wp> <word> [<close state the word was NOT applied in>] [<owner class>] [<mark session id>] [<agent text>]
   local audit="$IWE_ROOT/.iwe-runtime/pilot-release-audit.jsonl"
   mkdir -p "$(dirname "$audit")" || return 1
@@ -5205,6 +5287,7 @@ QUARANTINE_DEAD_INTERACTIVE=0
 FORCE_NO_REFLECTION=""
 PILOT_RELEASE=""   # WP-484 Ф301: pilot-worded exit for a live semaphore with no terminal proof
 PILOT_RELEASE_NO_TEXT="(без текста агента)"
+PILOT_RECEIPT=0    # WP-561 Ф82 step 2: prove a foreign release by the pilot's Telegram receipt
 PILOT_CLOSE_WORD=""   # WP-561 (18.11): the pilot's own closing word, required to close a peer-session
 CLOSE_EXPLAIN=0    # WP-561 Ф61: close --explain prints the fact-based close route, changes nothing
 CANONICAL_OWNER=""
@@ -5450,6 +5533,11 @@ while [[ $# -gt 0 ]]; do
       else
         PILOT_RELEASE="$2"; shift 2
       fi ;;
+    --pilot-receipt)
+      # WP-561 Ф82 step 2: same exit as --pilot-release, the proof is a signed receipt.
+      PILOT_RECEIPT=1
+      [ -n "$PILOT_RELEASE" ] || PILOT_RELEASE="$PILOT_RELEASE_NO_TEXT"
+      shift ;;
     --pilot-close-word)
       # WP-561 (18.11): a peer-session closes only on the pilot's own closing word. An empty
       # or missing value is refused here, the phrase itself is checked in close.
@@ -11703,6 +11791,44 @@ _prepared_source_identity_matches() {  # <semaphore> <worktree>
   fi
 }
 
+# WP-561 (22.11, peer-session 2026-11-22-06): a retry refused with the bare
+# "PREPARED source/head/scope/terminal snapshot changed" left the agent unable
+# to tell a transient change from a permanent one (live case: Kimi dropped a
+# wrong note-commit claim after PREPARED; claims never match again). Name the
+# first diverging component and, for a permanent one, the audited way out.
+# Prints only component names and field names, never claim or commit content.
+_prepared_source_identity_explain() {  # <semaphore> <worktree>
+  local semaphore="$1" worktree="$2" field actual
+  [ -d "$worktree" ] && [ ! -L "$worktree" ] || {
+    echo "PREPARED: рабочей копии снимка нет ($worktree) — повтор не поможет; выход: close --abandon-prepared по списку close_delivery_source_commits из отметки" >&2; return 0; }
+  for field in close_delivery_source_head close_delivery_common_dir close_delivery_source_base \
+      close_delivery_source_commits close_delivery_claimed_commits close_delivery_terminal_kind \
+      close_delivery_terminal_reference close_delivery_terminal_sha256 close_delivery_origin \
+      close_delivery_target_ref; do
+    _unique_record_field "$semaphore" "$field" >/dev/null || {
+      echo "PREPARED: поле $field в отметке отсутствует или повторяется — снимок повреждён" >&2; return 0; }
+  done
+  actual=$(git -C "$worktree" rev-parse --git-common-dir 2>/dev/null || true)
+  case "$actual" in /*) ;; *) actual="$worktree/$actual" ;; esac
+  actual=$( (cd "$actual" 2>/dev/null && pwd -P) || true)
+  [ "$actual" = "$(_unique_record_field "$semaphore" close_delivery_common_dir)" ] || {
+    echo "PREPARED: разошлось хранилище копии (common-dir)" >&2; return 0; }
+  actual=$(normalize_remote_url "$(git -C "$worktree" remote get-url origin 2>/dev/null || true)")
+  [ "$actual" = "$(_unique_record_field "$semaphore" close_delivery_origin)" ] || {
+    echo "PREPARED: разошёлся адрес сервера (origin)" >&2; return 0; }
+  [ "$(_unique_record_field "$semaphore" close_delivery_target_ref)" = "refs/heads/main" ] || {
+    echo "PREPARED: целевая ветка снимка не refs/heads/main" >&2; return 0; }
+  actual=$(_isolated_source_commits_json "$worktree" \
+    "$(_unique_record_field "$semaphore" close_delivery_source_base)" \
+    "$(_unique_record_field "$semaphore" close_delivery_source_head)" || true)
+  [ "$actual" = "$(_unique_record_field "$semaphore" close_delivery_source_commits)" ] || {
+    echo "PREPARED: разошёлся набор исходных коммитов (close_delivery_source_commits)" >&2; return 0; }
+  actual=$(_session_commit_claims_json "$semaphore" || true)
+  [ "$actual" = "$(_unique_record_field "$semaphore" close_delivery_claimed_commits)" ] || {
+    echo "PREPARED: заявки на коммиты (note-commit) изменились после подготовки — повтор не пройдёт никогда; выход: проверить, что коммиты close_delivery_source_commits из отметки на сервере, затем close --abandon-prepared --i-understand-loss-risk --source-commit <каждый SHA из close_delivery_source_commits>" >&2; return 0; }
+  echo "PREPARED: разошёлся снимок итоговой записи (terminal: карточка или маркер раннера)" >&2
+}
+
 _commit_hot_file_merge_has_publish_proof() {  # <repo> <linear source commit> <fresh remote OID>
   # WP-530 Ф61 G5 tail (23.10, live case WP-600): _commit_current_tree_has_publish_proof
   # requires the path byte-exact on origin now, which a hot file (edited by
@@ -11807,7 +11933,8 @@ _range_commits_have_publish_proof() {  # <worktree> <fresh remote OID> <excluded
 _prepared_worktree_removal_proof() {  # <semaphore> <worktree>: a copy that left its PREPARED snapshot holds only delivered work
   local semaphore="$1" worktree="$2" remote head branch tip
   _prepared_source_identity_matches "$semaphore" "$worktree" || {
-    echo "Session CLOSE: PREPARED identity (repo/range/claims/terminal) не совпадает" >&2; return 1; }
+    echo "Session CLOSE: PREPARED identity (repo/range/claims/terminal) не совпадает" >&2
+    _prepared_source_identity_explain "$semaphore" "$worktree"; return 1; }
   [ -n "$(_prepared_worktree_status_sha "$semaphore" "$worktree" || true)" ] || {
     echo "Session CLOSE: рабочая копия не чиста (изменённые, неотслеживаемые или игнорируемые файлы) или её состояние не читается" >&2; return 1; }
   timeout 10 git -C "$worktree" fetch --quiet origin \
@@ -12819,7 +12946,8 @@ _close_delivery_and_transition() {
         echo "⚠️  session-guard: PREPARED-снимок закрыт ВРУЧНУЮ (--abandon-prepared), без криптографического proof доставки. Коммиты: ${ABANDON_SOURCE_COMMITS[*]}. close_publish_proof=manual-abandon-attestation/v1 в семафоре — постоянный видимый в аудите след." >&2
       else
         _prepared_source_identity_matches "$SEM_FILE" "$CLOSING_WORKTREE" \
-          || fail "close retry: PREPARED source/head/scope/terminal snapshot изменился; push запрещён" 7
+          || { _prepared_source_identity_explain "$SEM_FILE" "$CLOSING_WORKTREE"
+               fail "close retry: PREPARED source/head/scope/terminal snapshot изменился; push запрещён" 7; }
         # WP-530 Ф61 G5: a copy that moved away from its PREPARED snapshot
         # (live case WP-600: reset to origin/main and reused for other work)
         # is never pushed from. Its frozen set can only be proven already
@@ -14464,6 +14592,12 @@ print(json.dumps({"wp": sys.argv[1], "slug": sys.argv[2], "agent": sys.argv[3], 
         PR_AUDIT_OWNER="$PR_OWNER_CLASS"
         ;;
       *)
+        if [ "$PILOT_RECEIPT" -eq 1 ]; then
+          PR_RECEIPT_CLAIM=""
+          _pilot_receipt_proven "$SEM_FILE"
+          PR_AUDIT_OWNER="receipt_${PR_OWNER_CLASS}"
+          PR_FOUND_WORD="квитанция Telegram ${PR_RECEIPT_CLAIM}"
+        else
         PR_CODE=$(_pilot_release_current_code "$AGENT" "$LOCKED_SESSION_ID") || PR_CODE=""
         PR_WORD_RC=1
         # WP-561 Ф82: the word comes only from the pilot's own messages; the text of
@@ -14474,8 +14608,8 @@ print(json.dumps({"wp": sys.argv[1], "slug": sys.argv[2], "agent": sys.argv[3], 
         fi
         if [ "$PR_WORD_RC" -ne 0 ]; then
           case "$PR_WORD_RC" in
-            2) fail "close --pilot-release: чужую живую или непроверяемую отметку снимает только слово пилота в беседе, а у вызывающего разговора нет своей идентичности (CLAUDE_CODE_SESSION_ID): журнал реплик пилота не найти. Выход: открыть обычное окно Claude на этом хосте и выполнить close там" 3 ;;
-            3) fail "close --pilot-release: у этого вызова слово пилота недоказуемо: журнал реплик пилота ведёт только автоматическая проверка Claude, а вызов идёт не из беседы Claude (Codex, Kimi или без её номера). Выход: открыть обычное окно Claude на этом хосте и выполнить close там" 3 ;;
+            2) fail "close --pilot-release: чужую живую или непроверяемую отметку снимает только слово пилота в беседе, а у вызывающего разговора нет своей идентичности (CLAUDE_CODE_SESSION_ID): журнал реплик пилота не найти. Выход: повторить вызов с --pilot-receipt (кнопки пилоту в Telegram) или открыть обычное окно Claude на этом хосте и выполнить close там" 3 ;;
+            3) fail "close --pilot-release: у этого вызова слово пилота недоказуемо: журнал реплик пилота ведёт только автоматическая проверка Claude, а вызов идёт не из беседы Claude (Codex, Kimi или без её номера). Выход: повторить вызов с --pilot-receipt (кнопки пилоту в Telegram) или открыть обычное окно Claude на этом хосте и выполнить close там" 3 ;;
             4) fail "close --pilot-release: реплика пилота «снять ${SLUG} ${PR_CODE}» — единственная реплика журнала этой беседы, так выглядит дочерний разговор; слово не принято" 3 ;;
           esac
           PR_WORD_WHY=""
@@ -14492,10 +14626,11 @@ print(json.dumps({"wp": sys.argv[1], "slug": sys.argv[2], "agent": sys.argv[3], 
           OPENED_FROM_SEM=$(grep '^opened_at: ' "$SEM_FILE" | head -1 | cut -d' ' -f2- || true)
           fail "close --pilot-release: отметка чужого разговора, ${PR_OWNER_WORDS} (${PR_OWNER_REASON}). Общее слово пилота снимает только отметки этого разговора и отметки завершённых владельцев (WP-484 Ф323); отметки Кими, Гермеса и Grok своим разговором не считаются никогда.${PR_WORD_WHY} Отметка: агент ${AGENT}, ${WP:-РП не указан}, слаг ${SLUG}, задача «${TASK_FROM_SEM:-}», открыта ${OPENED_FROM_SEM:-?}. Покажи пилоту это описание и попроси его самого написать в этой беседе строку:
 снять ${SLUG} ${PR_CODE}
-затем повтори этот же вызов close (текст после --pilot-release не нужен и не учитывается). Строку за пилота не писать и не передавать аргументом: охранник ищет её сам в репликах пилота этой беседы; своя отметка у этой беседы не нужна. Пилот может написать её внутри фразы и назвать в одном сообщении несколько отметок парами «снять <слаг> <код>» или списком «отметки <слаг1> и <слаг2>; коды <код1> и <код2>» (действует ${PILOT_RELEASE_CODE_TTL_SECONDS} с, код подходит только к этой отметке)." 3
+затем повтори этот же вызов close (текст после --pilot-release не нужен и не учитывается). Другой путь без строки в беседе - повторить вызов с --pilot-receipt: пилот получит кнопки в Telegram. Строку за пилота не писать и не передавать аргументом: охранник ищет её сам в репликах пилота этой беседы; своя отметка у этой беседы не нужна. Пилот может написать её внутри фразы и назвать в одном сообщении несколько отметок парами «снять <слаг> <код>» или списком «отметки <слаг1> и <слаг2>; коды <код1> и <код2>» (действует ${PILOT_RELEASE_CODE_TTL_SECONDS} с, код подходит только к этой отметке)." 3
         fi
         PR_AUDIT_OWNER="confirmed_${PR_OWNER_CLASS}"
         PR_FOUND_WORD="$HEAL_WORD_TEXT"
+        fi
         ;;
     esac
     # WP-561 Ф82: a confirmed release records the pilot's own line as the word; the

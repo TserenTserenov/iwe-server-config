@@ -17,7 +17,7 @@
 #
 # Env overrides (used by the smoke test): IWE_HYGIENE_TMP_ROOT, IWE_HYGIENE_STATE_DIR,
 # IWE_HYGIENE_NOTIFY (command printing instead of sending), IWE_HYGIENE_SWAP_MB,
-# IWE_HYGIENE_DISK_FREE_GB, IWE_HYGIENE_FORCE_HOUR.
+# IWE_HYGIENE_DISK_FREE_GB, IWE_HYGIENE_SESSIONS, IWE_HYGIENE_FORCE_HOUR.
 set -u
 
 IWE_WORKSPACE="${IWE_WORKSPACE:-${HOME}/IWE}"
@@ -52,6 +52,7 @@ disk_free_gb() {
 }
 
 sessions_count() {
+  if [ -n "${IWE_HYGIENE_SESSIONS:-}" ]; then echo "${IWE_HYGIENE_SESSIONS}"; return; fi
   pgrep -f 'native-binary/claude' 2>/dev/null | wc -l | tr -d ' '
 }
 

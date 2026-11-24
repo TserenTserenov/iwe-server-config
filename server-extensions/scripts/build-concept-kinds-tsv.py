@@ -39,7 +39,8 @@ MD = Path(os.environ.get("CONCEPT_KINDS_MD", REGISTRY.with_suffix(".md")))
 STEM_RE = re.compile(r"^[а-яёa-z0-9 \[\]()?|\-!+]+$")
 STATUSES = {"pilot", "pack", "fpf", "draft"}
 # FPF pattern references written in the registry: A.7:5.6, C.3.2, E.10, A.15.1, B.1.5, A.6.P ...
-FPF_REF_RE = re.compile(r"\b([A-H]\.\d+(?:\.\d+)*(?:\.[A-Z]+)?)(?::(\d+(?:\.\d+)*[a-z]?))?(?![\w.])")
+# Not after "X." — a pack ID such as DP.D.386 ends in "D.386", which is not an FPF pattern.
+FPF_REF_RE = re.compile(r"(?<![\w.])([A-H]\.\d+(?:\.\d+)*(?:\.[A-Z]+)?)(?::(\d+(?:\.\d+)*[a-z]?))?(?![\w.])")
 
 
 def load_registry() -> dict:

@@ -28,6 +28,8 @@ description	пак[аиеу]?(?![а-яё])
 description	принцип
 description	различени
 description	знани
+description	эпистем
+description	спецификаци
 description	памят
 description	обещани
 document	файл
@@ -61,6 +63,11 @@ collection	набор
 collection	перечен
 collection	перечня
 collection	совокупност
+work_role	предписани
+work_role	вход(а|у|ом|е|ы|ов|ам|ами|ах)?(?![а-яё])
+work_role	выход(а|у|ом|е|ы|ов|ам|ами|ах)?(?![а-яё])
+work_role	ресурс
+work_role	предмет(а|у|ом|е)? работ
 ambiguous	функци
 ambiguous	контекст
 ambiguous	результат
@@ -73,6 +80,8 @@ ambiguous	конвейер
 ambiguous	сесси
 ambiguous	закрыти
 ambiguous	открыти
+ambiguous	данны(е|х|м|ми)(?![а-яё])
+ambiguous	информаци
 ambiguous	модел[ьиею]
 system	платформ
 system	модул
@@ -121,8 +130,20 @@ method	отдач
 ambiguous	mcp
 description	стандарт([а-яё]+)? mcp
 description	код(а|у|ом|е)? сервер
+description	исходн[а-яё]+ код
+description	инструкци[а-яё]+ сервер
 system	сервер([а-яё]+)? open mcp
 description	карточк[а-яё]+ метод
+role_kind	суфл[её]р
+role_kind	ведущ[а-яё]+ по метод
+role_kind	тестировщик
+role_kind	оценщик
+role_kind	испытател
+role_kind	уч[её]тчик
+role_kind	распорядител[а-яё]+ прогон
+role_kind	хранител
+role_kind	рассказчик
+role_kind	инициатор
 method	рабоч[а-яё]+ процесс
 method	процесс(а|у|ом|е)? разработки
 method	инженерн[а-яё]+ процесс
