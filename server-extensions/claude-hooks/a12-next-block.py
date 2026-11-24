@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """A12-next-block detector (РП-605 Ф1, 22.10.2026).
 
-Four independent warn-only signals about the mandatory "Дальше:" line (A12,
+Five independent warn-only signals about the mandatory "Дальше:" line (A12,
 pack `communication-style-base.md` rule 6), one per output line so a caller
 can tell "no signal" from "detector found nothing to say" by line count:
 
@@ -13,6 +13,9 @@ can tell "no signal" from "detector found nothing to say" by line count:
   A12_NEXT_PLACE_THIS_CHAT     the line names this very chat as the place
                                ("вы, в этом чате: ...") and no other place
                                (added 01.11.2026, pilot permission).
+  A12_NEXT_I_NO_WAKE           the line starts with "я" but the transcript holds no
+                               unfinished background task and no wake-up alarm
+                               (added 24.11.2026, pilot permission, journal mode).
 
 The former A12_NEXT_NO_PILOT_ADDRESSEE signal was removed in РП-605 Ф6
 (23.10.2026): rule 6 now asks "who and when takes the next step", and a line
@@ -27,6 +30,7 @@ rather than a plain `import` statement.
 Usage: a12-next-block.py <transcript.jsonl>
 """
 import importlib.util
+import json
 import os
 import re
 import sys
@@ -155,28 +159,99 @@ def shown_before_guard_feedback(rows):
     return any(NEXT_LINE_RE.match(ln) for ln in lines[-3:])
 
 
+# A12_NEXT_I_NO_WAKE (РП-605 Ф7, 24.11.2026, решение пилота, journal mode first):
+# "Дальше: я ..." promises the agent's own step, but nothing in the transcript will
+# wake the agent: no background task started and not yet finished, no alarm. Measured
+# 21-24.11 on 161 "я" lines: 150 honest ones all had a pending task or alarm, 7 of 7
+# empty promises had none (a lexical check caught only 2 of the 7). A promise resting
+# on a task from an EARLIER turn is honest (30 of 150), so the whole transcript is
+# scanned, not only the current turn. Warn-only until the journal shows no false hits.
+I_LINE_RE = re.compile(r"^я(?=[\s,:\-—])", re.IGNORECASE)
+TASK_STARTED_RE = re.compile(
+    r"agentId:\s*(\w+)|resumedAgentId\W+(\w+)|Resuming agent\s+(\w+)"
+    r"|running in background with ID:\s*(\w+)"
+    r"|moved to the background \(ID:\s*(\w+)\)"
+    r"|Monitor started \(task\s+(\w+)"
+)
+TASK_DONE_RE = re.compile(r"<task-id>(\w+)</task-id>|agent-message from=\\?\"(\w+)")
+ALARM_TOOLS = ("ScheduleWakeup", "CronCreate")
+
+
+def _ids(regex, text):
+    # First 7 characters only: a resumed agent is announced with a short id
+    # ("Resuming agent a0f5052") and finishes under the full one.
+    return {g[:7] for m in regex.finditer(text) for g in m.groups() if g}
+
+
+def _tool_result_text(row):
+    """Text of tool_result blocks of a user record (where start markers live)."""
+    content = _a12._content(row)
+    if not isinstance(content, list):
+        return ""
+    return json.dumps(
+        [b.get("content") for b in content if isinstance(b, dict) and b.get("type") == "tool_result"],
+        ensure_ascii=False,
+    )
+
+
+def has_wake_source(rows):
+    """True if a started background task is not finished, or a wake-up alarm is set."""
+    # Records are replayed in order, so a resumed agent (same id started again after it
+    # finished) counts as pending again: the last event of each id wins.
+    pending = set()
+    humans = [i for i, r in enumerate(rows) if _a12._human_text(r) is not None]
+    alarm_from = humans[-2] if len(humans) >= 2 else 0
+    for i, row in enumerate(rows):
+        if _a12._role(row) == "user":
+            pending |= _ids(TASK_STARTED_RE, _tool_result_text(row))
+        if _a12._role(row) in ("user", "attachment") or "attachment" in row:
+            pending -= _ids(TASK_DONE_RE, json.dumps(row, ensure_ascii=False))
+        if i >= alarm_from and _a12._role(row) == "assistant":
+            content = _a12._content(row)
+            if isinstance(content, list) and any(
+                isinstance(b, dict) and b.get("type") == "tool_use" and b.get("name") in ALARM_TOOLS
+                for b in content
+            ):
+                return True
+    return bool(pending)
+
+
+def i_without_wake_line(next_line, rows):
+    """The "Дальше:" text if it promises the agent's own step and nothing will wake it."""
+    if I_LINE_RE.match(next_line) and not has_wake_source(rows):
+        return next_line
+    return None
+
+
 def detect(path):
-    """Returns (missing, empty_content_line, unnamed_launcher_line, this_chat_line)."""
+    """Returns (missing, empty_content_line, unnamed_launcher_line, this_chat_line, i_no_wake_line)."""
     # Rule 6 covers replies to the pilot only. A peer's turn in a peer
     # session is addressed to the writer, so no signal applies there
     # (style-check-text.sh sets STYLE_CONTEXT=peer for peer adapters).
     if os.environ.get("STYLE_CONTEXT") == "peer":
-        return False, None, None, None
+        return False, None, None, None, None
     rows = list(_a12._rows(path))
     tail = final_assistant_lines(rows)
     next_line = next((m.group(1) for ln in tail if (m := NEXT_LINE_RE.match(ln))), None)
     if next_line is None:
-        return not shown_before_guard_feedback(rows), None, None, None
+        return not shown_before_guard_feedback(rows), None, None, None, None
     if not LETTER_RE.search(next_line):
-        return False, next_line, None, None
-    return False, None, unnamed_launcher_line(next_line), this_chat_place_line(next_line)
+        return False, next_line, None, None, None
+    return (
+        False,
+        None,
+        unnamed_launcher_line(next_line),
+        this_chat_place_line(next_line),
+        i_without_wake_line(next_line, rows),
+    )
 
 
 if __name__ == "__main__":
     if len(sys.argv) != 2:
         sys.exit("usage: a12-next-block.py <transcript.jsonl>")
-    missing, empty_content_line, unnamed_line, this_chat_line = detect(sys.argv[1])
+    missing, empty_content_line, unnamed_line, this_chat_line, no_wake_line = detect(sys.argv[1])
     print("MISSING" if missing else "")
     print(empty_content_line or "")
     print(unnamed_line or "")
     print(this_chat_line or "")
+    print(no_wake_line or "")
