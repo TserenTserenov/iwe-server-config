@@ -18997,7 +18997,14 @@ current_checkout = os.path.realpath(git_checkout.stdout.strip())
 current_agent = os.environ.get('QUARANTINE_AGENT', '')
 current_harness = os.environ.get('QUARANTINE_HARNESS_SESSION_ID', '')
 
-def claimed_scope(text):
+warned_claims = set()
+
+
+def claimed_scope(text, source=""):
+    # WP-484 Ф331: a claimed path that is absolute, holds "..", or is empty can never equal a
+    # staged path (git lists staged paths relative to the repository, without "..").
+    # Refusing the whole commit over it blocked every agent on one foreign malformed mark
+    # (24.11, mark of a Codex session). Such an entry is skipped with one warning naming it.
     lines = text.splitlines()
     scope = []
     for index, line in enumerate(lines):
@@ -19013,10 +19020,17 @@ def claimed_scope(text):
             if os.path.realpath(entry['repo']) != current_repo:
                 continue
         scope.append(value)
+    usable = []
     for value in scope:
         if not value or value.startswith('/') or '..' in value.split('/') or '\n' in value:
-            raise ValueError('unsafe scope')
-    return scope
+            if (source, value) not in warned_claims:
+                warned_claims.add((source, value))
+                print("предупреждение: заявка файла %r в отметке %s не относится к хранилищу "
+                      "(путь абсолютный, пустой или с '..'); она не может пересечься с индексом, пропущена. "
+                      "Владельцу отметки: заявлять путь относительно хранилища" % (value, source), file=sys.stderr)
+            continue
+        usable.append(value)
+    return usable
 
 def intersects(staged, scope):
     return any(path == entry or (entry.endswith('/') and path.startswith(entry))
@@ -19139,7 +19153,7 @@ active_wps = set()
 for path in active_paths:
     try:
         text = snapshot(path)
-        if staged and not intersects(staged, claimed_scope(text)):
+        if staged and not intersects(staged, claimed_scope(text, path)):
             continue
         housekeeping_lines = [line for line in text.splitlines() if line.startswith("housekeeping:")]
         if housekeeping_lines:
@@ -19254,7 +19268,7 @@ for path in sorted(paths):
         if own_checkout or own_harness:
             print("quarantined owner cannot commit: " + path, file=sys.stderr)
             raise SystemExit(1)
-        if not intersects(staged, claimed_scope(text)):
+        if not intersects(staged, claimed_scope(text, path)):
             continue
         agent = unique(text, "agent")
         session = unique(text, "session_id")
@@ -19279,7 +19293,7 @@ for path in sorted(paths):
                 raise ValueError("bad recovery id")
             if not re.fullmatch(r"[0-9a-f]{64}", unique(text, "recovery_terminal_sha256")):
                 raise ValueError("bad terminal digest")
-        scope = claimed_scope(text)
+        scope = claimed_scope(text, path)
     except (OSError, UnicodeError, ValueError):
         print("malformed frozen/pending quarantine blocks commit: " + path, file=sys.stderr)
         raise SystemExit(2)

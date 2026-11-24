@@ -165,6 +165,23 @@ class ActiveSemaphoreWpTest(BarrierHarness):
         bad = self.write_active('week-review-w39', path='other.txt', name='codex-other.open')
         self.assertEqual(self.run_barrier(active='%s\n%s' % (valid, bad)), 0)
 
+    def test_unusable_claim_of_foreign_mark_is_skipped_with_a_warning_and_does_not_block(self):
+        # WP-484 Ф331: an absolute path in a foreign mark can never meet a staged path.
+        foreign = self.sessions / 'codex-foreign.open'
+        foreign.write_text('agent: codex\nsession_id: foreign\nwp: WP-601\n'
+                           'file: /Users/someone/audio.txt\nfile: ../up.txt\nfile: other.txt\n')
+        self.assertEqual(self.run_barrier(active='%s\n%s' % (self.active, foreign)), 0)
+        self.assertIn('/Users/someone/audio.txt', self.stderr)
+        self.assertIn('codex-foreign.open', self.stderr)
+        self.assertNotIn('область семафора неизвестна', self.stderr)
+
+    def test_unusable_claim_does_not_hide_a_real_overlap_with_a_bad_wp(self):
+        foreign = self.sessions / 'codex-foreign.open'
+        foreign.write_text('agent: codex\nsession_id: foreign\nwp: week-review-w39\n'
+                           'file: /Users/someone/audio.txt\nfile: own.txt\n')
+        self.assertEqual(self.run_barrier(active=str(foreign)), 2)
+        self.assertIn("wp: 'week-review-w39'", self.stderr)
+
     def test_unreadable_active_semaphore_blocks_with_scope_unknown_reason(self):
         self.active.write_text('')
         self.assertEqual(self.run_barrier(), 2)
