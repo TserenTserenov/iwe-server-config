@@ -182,6 +182,16 @@ class ActiveSemaphoreWpTest(BarrierHarness):
         self.assertEqual(self.run_barrier(active=str(foreign)), 2)
         self.assertIn("wp: 'week-review-w39'", self.stderr)
 
+    def test_unparsable_foreign_mark_refusal_names_its_owner_and_the_exact_cure(self):
+        # WP-484 F331 step 3: no placeholder <slug>, no guessing whose mark blocks the commit.
+        foreign = self.sessions / 'codex-foreign.open'
+        foreign.write_text('agent: codex\nsession_id: foreign\nwp: WP-601\nslug: WP-601\n'
+                           'file: own.txt\nfile_v2: {broken\n')
+        self.assertEqual(self.run_barrier(active=str(foreign)), 2)
+        self.assertIn('владелец: агент codex, сессия WP-601', self.stderr)
+        self.assertIn('session-guard.sh heal WP-601', self.stderr)
+        self.assertNotIn('heal <slug>', self.stderr)
+
     def test_unreadable_active_semaphore_blocks_with_scope_unknown_reason(self):
         self.active.write_text('')
         self.assertEqual(self.run_barrier(), 2)

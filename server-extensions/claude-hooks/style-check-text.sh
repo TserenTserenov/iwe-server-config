@@ -61,10 +61,11 @@ fi
 if [ "${STYLE_WRAPPER_EMIT:-0}" = "1" ]; then
   # Return mode (РП-388 Ф21): the caller is an agent's own end-of-reply hook and
   # forwards the block decision back to the agent so it rewrites the reply. The
-  # blocking switch is turned on here, once, for every non-Claude agent; peer
+  # A14 does not block here until a re-measure reaches precision 0.7 (РП-388 Ф32, pilot decision 24.11:
+  # measured 0.23-0.37 on 24.11); the other rules keep blocking. The blocking switch is turned on here, once, for every non-Claude agent; peer
   # adapters (no EMIT) stay log-only. The core prints {} when nothing blocks.
   printf '{"transcript_path":"%s","session_id":"style-check-%s"}' "$TMP_TRANSCRIPT" "$AGENT_NAME" \
-    | STYLE_AGENT="$AGENT_NAME" STYLE_CONTEXT="$CONTEXT" STYLE_ENFORCE_BLOCK=1 STYLE_BLOCK_A14=1 \
+    | STYLE_AGENT="$AGENT_NAME" STYLE_CONTEXT="$CONTEXT" STYLE_ENFORCE_BLOCK=1 STYLE_BLOCK_A14=0 \
       bash "$HOOK" 2>/dev/null || true
   exit 0
 fi

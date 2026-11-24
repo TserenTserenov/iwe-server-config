@@ -52,6 +52,7 @@ _spec.loader.exec_module(report)
 
 WATCHED_CLASSES = ("canon", "reader")
 READER_LOG_TAIL = 400
+READER_LOG_FRESH_MIN = 30  # the mover runs every few minutes and logs each pass for a copy off its upstream
 LOG_HEAD_BYTES = 4096  # first bytes of the sync log that identify one file across rotation
 FETCH_STALE_MIN = 120  # the broker runs every few minutes; two hours without a confirmed fetch is broken
 AHEAD_GRACE_MIN = 120  # a session commit normally reaches GitHub within minutes
@@ -77,46 +78,54 @@ def watched(registry, host):
 
 
 def last_reader_line(log_path, path):
-    """Last line the reader mover wrote about `path` ('<path>: <outcome>'), or ''."""
+    """(time, outcome) of the last line the reader mover wrote about `path`, or (None, '').
+
+    Lines look like '[YYYY-MM-DD HH:MM:SS] [reader-copies-sync] <path>: <outcome>' in local time."""
     try:
         lines = Path(log_path).read_text(encoding="utf-8", errors="replace").splitlines()[-READER_LOG_TAIL:]
     except OSError:
-        return ""
+        return None, ""
     marker = f"] {path}: "
     for line in reversed(lines):
         if marker in line:
-            return line.split(marker, 1)[1]
-    return ""
+            try:
+                stamp = dt.datetime.strptime(line[1:20], "%Y-%m-%d %H:%M:%S").astimezone()
+            except ValueError:
+                stamp = None
+            return stamp, line.split(marker, 1)[1]
+    return None, ""
 
 
-# What to do for a known reader-mover refusal: (prefix of the BLOCKED reason, action line).
+# What to do for a known reader-mover refusal: (fragment of the BLOCKED reason, action line).
 READER_ACTIONS = (
     ("незакоммиченные правки", "что сделать: посмотреть эти правки в копии; опубликовать их или осознанно "
                                "отменить, после этого копия догонит сервер сама"),
     ("свои коммиты", "что сделать: опубликовать коммиты этой копии или разобрать, откуда они взялись"),
-    ("ветка ", "что сделать: если работа на этой ветке закончена, вернуть копию на основную ветку"),
+    # 'ветка X вместо main'; not the transient 'ветка или HEAD сменились во время проверки'.
+    (" вместо ", "что сделать: если работа на этой ветке закончена, вернуть копию на основную ветку"),
 )
 
 
-def reader_reason(outcome):
+def reader_reason(stamp, outcome, now):
     """The reader mover's last outcome for a copy that is off its upstream, in words, plus what to do.
 
-    The mover logs 'current', 'moved N', 'SKIP ...' or 'BLOCKED <reason>' (scripts/reader-copies-sync.py);
-    until 24.11 the alarm pasted that line raw ("перемотка: BLOCKED незакоммиченные правки (1)", WP-568)."""
+    The mover logs 'moved N', 'SKIP ...' or 'BLOCKED <reason>' (scripts/reader-copies-sync.py); until 24.11
+    the alarm pasted that line raw (WP-568). A line older than READER_LOG_FRESH_MIN describes a past state,
+    so it is not interpreted: the mover writes each pass for a copy off its upstream, silence is the news."""
     if not outcome:
         return ""
+    if stamp is None or (now - stamp).total_seconds() > READER_LOG_FRESH_MIN * 60:
+        since = f" с {stamp:%d.%m %H:%M}" if stamp else ""
+        return f"журнал перемотки об этой копии молчит{since}: перемотка, похоже, не запускается"
     kind, _, rest = outcome.partition(" ")
     if kind == "BLOCKED":
-        action = next((a for prefix, a in READER_ACTIONS if rest.startswith(prefix)), "")
+        action = next((a for fragment, a in READER_ACTIONS if fragment in rest), "")
         return f"копия не перематывается: {rest}" + (f"\n{action}" if action else "")
     if kind == "SKIP":
         return f"перемотка отложена: {rest}"
-    if kind == "current":
-        # The mover saw the copy at its upstream, the alarm sees it off: the two disagree, say so.
-        return "журнал перемотки считает копию совпадающей с сервером, а сверка видит расхождение"
     if kind == "moved":
-        how_far = f" ({rest})" if rest else ""
-        return f"копию только что перемотали{how_far}, сверка догонит на следующем проходе"
+        how_far = f": {rest}" if rest else ""
+        return f"копию только что перемотали{how_far}; сверка догонит на следующем проходе"
     return f"последняя запись журнала перемотки: {outcome}"
 
 
@@ -453,7 +462,7 @@ def main():
         if path in SYNC_LOGS and path in state and "sync_log_bookmark" not in state[path]:
             state[path]["sync_log_bookmark"] = log_bookmark(root / SYNC_LOGS[path])
         if text:
-            reason = reader_reason(last_reader_line(reader_log, path)) if label != "equal" else ""
+            reason = reader_reason(*last_reader_line(reader_log, path), now) if label != "equal" else ""
             if not reason and label != "equal" and path in SYNC_LOGS:
                 refusal = last_sync_refusal(root / SYNC_LOGS[path], state[path].get("sync_log_bookmark", {"offset": 0}))
                 if refusal:

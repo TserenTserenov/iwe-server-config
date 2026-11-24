@@ -221,7 +221,8 @@ class MainTest(unittest.TestCase):
         self.fake_notify(f'printf "%s\\n--\\n" "$5" >> "{self.sent}"; echo "iwe-notify: outcome=direct-sent"')
         self.state = base / "state.json"
         self.log = base / "reader.log"
-        self.log.write_text("[2026-11-13 12:00:00] [reader-copies-sync] a: BLOCKED свои коммиты\n")
+        fresh = dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        self.log.write_text(f"[{fresh}] [reader-copies-sync] a: BLOCKED свои коммиты\n")
         self.quiet = (0, 0)  # no quiet hours
         self.copy_dir = copy_dir
 
@@ -499,21 +500,45 @@ class LocalBackupTest(unittest.TestCase):
 class ReaderReasonTest(unittest.TestCase):
     """The mover's log line reaches the pilot in words, never as the raw BLOCKED/SKIP token (WP-568, 24.11)."""
 
+    def setUp(self):
+        self.now = dt.datetime.now().astimezone()
+
+    def reason(self, outcome, minutes_ago=1):
+        return alarm.reader_reason(self.now - dt.timedelta(minutes=minutes_ago), outcome, self.now)
+
     def test_uncommitted_edits_get_words_and_an_action(self):
-        text = alarm.reader_reason("BLOCKED незакоммиченные правки (1)")
+        text = self.reason("BLOCKED незакоммиченные правки (1)")
         self.assertEqual(text.splitlines()[0], "копия не перематывается: незакоммиченные правки (1)")
         self.assertIn("опубликовать их или осознанно отменить", text)
 
-    def test_unknown_blocked_reason_keeps_the_reason_without_an_action(self):
-        self.assertEqual(alarm.reader_reason("BLOCKED не читается ветка"), "копия не перематывается: не читается ветка")
+    def test_unknown_block_has_no_action(self):
+        self.assertEqual(self.reason("BLOCKED не читается ветка"), "копия не перематывается: не читается ветка")
 
-    def test_skip_current_moved_and_unknown(self):
-        self.assertEqual(alarm.reader_reason("SKIP другой запуск держит замок"), "перемотка отложена: другой запуск держит замок")
-        self.assertIn("сверка видит расхождение", alarm.reader_reason("current"))
-        self.assertIn("перемотали (2)", alarm.reader_reason("moved 2"))
-        self.assertIn("перемотали, сверка", alarm.reader_reason("moved"))
-        self.assertEqual(alarm.reader_reason("absent (optional)"), "последняя запись журнала перемотки: absent (optional)")
-        self.assertEqual(alarm.reader_reason(""), "")
+    def test_branch_advice_only_for_a_wrong_branch(self):
+        self.assertIn("вернуть копию на основную ветку", self.reason("BLOCKED ветка wp-1 вместо main"))
+        self.assertNotIn("вернуть копию", self.reason("BLOCKED ветка или HEAD сменились во время проверки"))
+
+    def test_skip_moved_and_unknown(self):
+        self.assertEqual(self.reason("SKIP другой запуск держит замок"), "перемотка отложена: другой запуск держит замок")
+        self.assertIn("перемотали: 2 (одинаковые копии: 1);", self.reason("moved 2 (одинаковые копии: 1)"))
+        self.assertIn("перемотали; сверка", self.reason("moved"))
+        self.assertEqual(self.reason("absent (optional)"), "последняя запись журнала перемотки: absent (optional)")
+        self.assertEqual(self.reason(""), "")
+
+    def test_old_line_is_reported_as_silence_not_as_current_state(self):
+        old = self.now - dt.timedelta(hours=20)
+        text = alarm.reader_reason(old, "moved 2", self.now)
+        self.assertEqual(text, f"журнал перемотки об этой копии молчит с {old:%d.%m %H:%M}: перемотка, похоже, не запускается")
+        self.assertNotIn("только что", text)
+
+    def test_last_reader_line_reads_the_time(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            log = Path(tmp) / "reader.log"
+            log.write_text("[2026-11-23 22:50:01] [reader-copies-sync] a: moved 1\n"
+                           "[2026-11-23 22:55:02] [reader-copies-sync] b: BLOCKED свои коммиты\n")
+            stamp, outcome = alarm.last_reader_line(log, "a")
+            self.assertEqual((stamp.strftime("%Y-%m-%d %H:%M:%S"), outcome), ("2026-11-23 22:50:01", "moved 1"))
+            self.assertEqual(alarm.last_reader_line(log, "c"), (None, ""))
 
 
 if __name__ == "__main__":

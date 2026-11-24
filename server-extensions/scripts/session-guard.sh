@@ -442,6 +442,23 @@ validate_open_wp() {  # <wp> -- exit 2 unless it is WP-<n> or a sentinel, exact 
   fail "open: --wp '$wp' недопустим. Допустимо: WP-<число> (например WP-561) или ${SG_WP_SENTINELS// /, } (точное написание). Для недельной или нередакторской сессии возьми РП, к которому относится находка; открытие и закрытие сессий: починка действующего — WP-484, новый функционал — WP-561; канон и публикация — WP-530." 2
 }
 
+validate_open_files() {  # <csv> -- exit 2 on a claimed path that can never meet a staged path
+  # WP-484 Ф331: note-file already refuses such a path; `open --files` wrote it verbatim, and one
+  # absolute path in a mark made the commit barrier refuse every agent's commit (24.11).
+  local csv="$1" entry
+  [ -n "$csv" ] || return 0
+  local -a entries
+  IFS=',' read -ra entries <<< "$csv"
+  for entry in "${entries[@]}"; do
+    entry="$(printf '%s' "$entry" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
+    case "$entry" in
+      /*|..|../*|*/..|*/../*)
+        fail "open: --files '$entry' указывает вне хранилища (путь абсолютный или с '..'): он не может совпасть с файлом коммита, а охранник предупреждает об этом всех. Передай путь от корня хранилища (например inbox/WP-484/WP-484.md) или заяви файл позже через note-file." 2
+        ;;
+    esac
+  done
+}
+
 # A tiny read-only API: reject every extra argument before the shared parser.
 if [ "$CMD" = "owner-status" ]; then
   if [[ $# -eq 2 ]]; then
@@ -6167,6 +6184,7 @@ if [ "$CMD" = "open" ]; then
 
   [ -z "$WP" ] && fail "--wp обязателен для open" 2
   validate_open_wp "$WP"
+  validate_open_files "$FILES"
 
   # WP-530 Ф90 (peer-session 2026-10-06-10, Claude+Kimi+Codex): an interactive
   # Claude/Codex record without its conversation identity can never be told
@@ -19151,6 +19169,7 @@ def refuse_unclassifiable(path, reason, remedy):
 
 active_wps = set()
 for path in active_paths:
+    text = ""
     try:
         text = snapshot(path)
         if staged and not intersects(staged, claimed_scope(text, path)):
@@ -19241,12 +19260,20 @@ for path in active_paths:
             "убери этот семафор (session-guard.sh heal <slug> — сухой прогон по умолчанию; либо audit --cleanup-orphans "
             "--quarantine-dead-interactive), затем повтори коммит")
     except (OSError, UnicodeError, ValueError) as exc:
+        # WP-484 F331 step 3: name whose mark it is and the exact cure, not a placeholder.
+        try:
+            owner = unique(text, "agent", optional=True)
+            slug = unique(text, "slug", optional=True)
+        except ValueError:
+            owner = slug = ""
+        who = " (владелец: агент %s, сессия %s)" % (owner or "?", slug or "?") if (owner or slug) else ""
+        cure = "session-guard.sh heal %s" % slug if slug else "session-guard.sh heal <slug>"
         refuse_unclassifiable(
             path,
-            "область семафора неизвестна (файл нечитаем или повреждён: %s); доказать, что он не пересекается "
-            "с индексом, нельзя, поэтому коммит блокируется" % exc,
-            "разобрать или убрать этот семафор (session-guard.sh heal <slug> — сухой прогон по умолчанию; либо audit --cleanup-orphans "
-            "--quarantine-dead-interactive), затем повторить коммит")
+            "область семафора неизвестна (файл нечитаем или повреждён: %s)%s; доказать, что он не пересекается "
+            "с индексом, нельзя, поэтому коммит блокируется" % (exc, who),
+            "разобрать или убрать этот семафор (%s — сухой прогон по умолчанию; либо audit --cleanup-orphans "
+            "--quarantine-dead-interactive), затем повторить коммит" % cure)
 
 
 paths = set(glob.glob(os.path.join(directory, "*.open.orphaned-scheduled-drained")))

@@ -148,7 +148,7 @@ echo "$TIMESTAMP | $AGENT" >> "$CHECKS_LOG" 2>/dev/null || true
 # кириллическую букву пополам, строка журнала перестаёт быть UTF-8 и любой
 # строгий читатель (`a14-acceptance.py replay`) падает (РП-388 Ф21, 30.10).
 redact() {
-  printf '%s' "$1" | tr '\n' ' ' | perl -CSD -pe 's/^(.{100}).*/$1/' \
+  printf '%s' "$1" | tr '\n' ' ' | perl -CSD -pe 's/^(.{240}).*/$1/' \
     | sed -E 's/(gh[pousr]_|sk-|xox[baprs]-|AKIA)[A-Za-z0-9_-]+/<REDACTED>/g; s/[A-Za-z0-9_-]{32,}/<REDACTED>/g; s/[a-f0-9]{16,}/<REDACTED>/g; s/\|/¦/g'
 }
 
@@ -386,6 +386,10 @@ A14_MATCH=$(printf '%s\n' "$RESPONSE" | perl -0777 -CSD -Mutf8 -ne '
     my $hdr_verb = $h =~ /$b(состо[ия]т\s+из|входят|включа(ет|ют)(?![а-яё])|в\s+(ней|нём|него|неё)\s+(есть|работают|собран\S*)|соединены|к\s+(нему|ней)\s+добавлен)/i;
     my $hdr_noun = $h =~ /:\s*\**\s*$/
       && $h =~ /$b(компонент|элемент|сло[яёе]в?(?![а-яё])|состав(?![а-яё])|составн\S*\s+част)/i;
+    # a verb-only header introduces a list only when the line ends with ":" or is a short intro line (<=120 chars: "состоит из следующего.") (РП-388 Ф32,
+    # 24.11: 17 of 17 B1 hits in the 57-row sample were a verb inside a long paragraph line and an
+    # unrelated list item right after it, all false on full texts)
+    $hdr_verb = 0 if $hdr_verb && $h !~ /:\s*\**\s*$/ && length($h) > 120;
     next unless $hdr_verb || $hdr_noun;
     next if $h =~ /(^|\s)не\s+(входи|входя|явля|состо)/i;
     # a header whose SUBJECT (first word) is a description/method ("Промпт ... несколько слоёв:")
@@ -436,8 +440,22 @@ A14_MATCH=$(printf '%s\n' "$RESPONSE" | perl -0777 -CSD -Mutf8 -ne '
   my $state_desc = qr/$b(описани|запис|снимк|снимок|слепок|значени|данн|сведени|информаци|отч[её]т)\S*\s+(об?\s+)?состояни/i;
   my $stored = qr/$b(состояни)\S*(\s+[а-яё-]+){0,2}\s+(лежит|лежат|хранится|хранятся|хранят|находится|находятся|записан[оаы]?|сохран[её]н[оаы]?|сохраняется)\s+в\s+(?!(обработк|ожидани|процесс|работ|разработк|стади|фаз|режим|норм|поряд|статус))/i;
   for my $s (split /(?<=[.!?;:])\s+|\n+/) {
-    (my $t = $s) =~ s/(^|\s)не\s+(входи\S*|входя\S*|состо\S*\s+из|явля\S*\s+частью|част\S*)(\s+в\s+состав\S*)?/$1/gi;
+    # (4) "в состав системы не входят": the negation sits after the part phrase (cut before the generic "не входят" strip)
+    (my $t = $s) =~ s/$b(?:в\s+состав\S*(?:\s+\S+){0,2}?\s+не\s+входя\S*)//gi;
+    $t =~ s/(^|\s)не\s+(входи\S*|входя\S*|состо\S*\s+из|явля\S*\s+частью|част\S*)(\s+в\s+состав\S*)?/$1/gi;
+    # РП-388 Ф32 (pilot decision 24.11): membership in a list, plan or stage of work is not a part-whole
+    # claim about a system. Cut the verb, so the rest of the sentence is still judged.
+    # (1) a collection noun and its entry: "список фаз включает Ф1", "сборка включает правку", "критерий включает отметку"
+    $t =~ s/$b((?:список|перечен|набор|сборк|критери|словар|реестр|план|таблиц|снимок|снимк)\S*(?:\s+[^\s,;]+){0,4}?)\s+(?:включа(?:ет|ют)|входи[тл]\S*|входят)(?![а-яё])/$1/gi;
+    # (2) "входит в список / план / работу / закрытие": membership in a list or a stage of work
+    $t =~ s/$b(?:входи[тл]\S*|входят|входить)(?:\s+ли)?(?:\s+[а-яё]+)?\s+(?:в|во)\s+(?:список|перечен|словар|план|набор|реестр|работ|закрыти|обязанност|очеред)\S*//gi;
+    # (2b) the motion verb "входить" after an infinitive-style lead: "зовёт входить в сервер" means to log in
+    $t =~ s/$b(?:зов[её]т|звать|нужно|надо|можно|чтобы|просит|просить)\s+входить\S*//gi;
+    # (3) a clipped relative clause from the journal: "известно, которое включает ожидание"
+    $t =~ s/$b(?:которы\S*|котор\S+)\s+включа(?:ет|ют)(?![а-яё])//gi;
     my $t0 = $t;  # before heads are cut: the ambiguity warning must still see them
+    # the verb "записан/записано/записывать" is not the noun "запись" (РП-388 Ф32: "записано в реестре как система")
+    $t =~ s/$b(записан\S*|записыва\S*|записа[лтв]\S*)//gi;
     # a part verb right after a system head stays visible: "в IWE входят протоколы" is a violation,
     # "в IWE входят только агенты" is not (IWE is a system by the pilot decision of 31.10)
     $t =~ s/$syshead\s+(?!$part)\S+//g;
@@ -477,6 +495,9 @@ A14_MATCH=$(printf '%s\n' "$RESPONSE" | perl -0777 -CSD -Mutf8 -ne '
     # system at a moment) — false positive of the 30.10 run, answer 6; with a dependent word
     # before the dash ("состояние здоровья — это система") it still fires.
     my $n = $t;
+    # a place after a preposition is not the thing called a system: "записано в реестре как система",
+    # "в паке как система не выведен" (РП-388 Ф32, lines 14-16 of the 57-row sample)
+    $n =~ s/$b(в|во|на|из|по)\s+\S+(\s+\S+)?(?=\s+как\s+систем)//gi;
     $n = "" if $n =~ /$b(нельзя|не\s+(стоит|надо|нужно|следует|можно|как|явля\S*|назыв\S*|назва\S*|счита\S*|рассматрива\S*))/i;
     # cut the phrase, not the sentence: "состояние — это система, а процесс — это система" must
     # still fire on its second half (cold review, 30.10)
@@ -494,7 +515,7 @@ A14_MATCH=$(printf '%s\n' "$RESPONSE" | perl -0777 -CSD -Mutf8 -ne '
     # "описание состояния — это набор значений" is the form rule 8 prescribes: cut the description phrase
     # before the type check (false positive of the 31.10 acceptance run, answer 6; both graders: clean)
     (my $t1 = $t0) =~ s/$state_desc\S*//g;
-    if ($t1 =~ /$b(состояни|систем|агент|метод|работ)\S*(\s+[а-яё-]+){0,4}$dash\s*(это\s+)?(набор|совокупност|множеств|комплекс|сочетани|список|профиль)/i
+    if ($t1 =~ /$b(состояни|систем|агент|метод(?!ов)|работ)\S*(\s+[а-яё-]+){0,4}$dash\s*(это\s+)?(набор|совокупност|множеств|комплекс|сочетани|список|профиль)/i
         # "агент" must be the head: "промпт агента — это инструкция" is the right form (Kimi 10, 31.10), so
         # a letter and a space before it (a possessor noun) rules the rule out
         || $t1 =~ /(?<![а-яё]\s)$b(агент)\S*(\s+[а-яё-]+){0,2}$dash\s*(это\s+)?(модел|промпт|инструкци)/i

@@ -16,8 +16,8 @@ resolve prints one JSON object: kind, delivery, address_kind (path|store),
         closed-address rule fired); exit 1 if no kind matches the name or the
         book is invalid.
 
-Environment: IWE_WORKSPACE (default ~/IWE), IWE_GOVERNANCE_REPO (default
-DS-my-strategy) fill {governance_repo}.
+Environment: IWE_WORKSPACE (default ~/IWE) and IWE_GOVERNANCE_REPO (the
+governance repository folder) fill {governance_repo}.
 """
 import argparse
 import json
