@@ -166,15 +166,31 @@ def shown_before_guard_feedback(rows):
 # empty promises had none (a lexical check caught only 2 of the 7). A promise resting
 # on a task from an EARLIER turn is honest (30 of 150), so the whole transcript is
 # scanned, not only the current turn. Warn-only until the journal shows no false hits.
-I_LINE_RE = re.compile(r"^я(?=[\s,:\-—])", re.IGNORECASE)
-TASK_STARTED_RE = re.compile(
-    r"agentId:\s*(\w+)|resumedAgentId\W+(\w+)|Resuming agent\s+(\w+)"
-    r"|running in background with ID:\s*(\w+)"
-    r"|moved to the background \(ID:\s*(\w+)\)"
-    r"|Monitor started \(task\s+(\w+)"
+I_LINE_RE = re.compile(
+    r"^(?:\d+[.)]\s*)?\**я\**(?=[\s,:\-—])|;\s*\d+[.)]\s*\**я\**(?=[\s,:\-—])", re.IGNORECASE
 )
-TASK_DONE_RE = re.compile(r"<task-id>(\w+)</task-id>|agent-message from=\\?\"(\w+)")
-ALARM_TOOLS = ("ScheduleWakeup", "CronCreate")
+# Start markers are trusted only in the result of the tool that really starts a task:
+# the same text inside a Read/grep result (a test file, a transcript) is not a task.
+AGENT_START_RE = re.compile(r"agentId:\s*(\w+)|resumedAgentId\W+(\w+)|Resuming agent\s+(\w+)")
+BASH_START_RE = re.compile(r"running in background with ID:\s*(\w+)|moved to the background \(ID:\s*(\w+)\)")
+MONITOR_START_RE = re.compile(r"Monitor started \(task\s+(\w+)")
+START_BY_TOOL = (
+    (("Agent", "Task", "SendMessage"), AGENT_START_RE),
+    (("Bash",), BASH_START_RE),
+    (("Monitor",), MONITOR_START_RE),
+)
+# A task ends with a notification that carries a final status (a Monitor sends one
+# notification per event, without a status, while it keeps running), with the
+# "Monitor expired" event, or with the result of TaskStop. One notification may list
+# several task ids (summary of abandoned tasks after a session resume).
+NOTIFICATION_RE = re.compile(r"<task-notification>(.*?)</task-notification>", re.DOTALL)
+TASK_ID_RE = re.compile(r"<task-id>([^<\s]+)</task-id>")
+FINAL_STATUS_RE = re.compile(r"<status>(?:completed|failed|killed|stopped|cancelled)</status>")
+MONITOR_EXPIRED_RE = re.compile(r"Monitor expired")
+STOPPED_RE = re.compile(r"Successfully stopped task:\s*(\w+)")
+WAKEUP_TOOL = "ScheduleWakeup"
+CRON_TOOL = "CronCreate"
+CRON_DELETE_TOOL = "CronDelete"
 
 
 def _ids(regex, text):
@@ -183,15 +199,35 @@ def _ids(regex, text):
     return {g[:7] for m in regex.finditer(text) for g in m.groups() if g}
 
 
-def _tool_result_text(row):
-    """Text of tool_result blocks of a user record (where start markers live)."""
+def _done_ids(text):
+    done = _ids(STOPPED_RE, text)
+    for m in NOTIFICATION_RE.finditer(text):
+        body = m.group(1)
+        if FINAL_STATUS_RE.search(body) or MONITOR_EXPIRED_RE.search(body):
+            done |= {i[:7] for i in TASK_ID_RE.findall(body)}
+    return done
+
+
+def _blocks(row, kind):
     content = _a12._content(row)
     if not isinstance(content, list):
-        return ""
-    return json.dumps(
-        [b.get("content") for b in content if isinstance(b, dict) and b.get("type") == "tool_result"],
-        ensure_ascii=False,
-    )
+        return []
+    return [b for b in content if isinstance(b, dict) and b.get("type") == kind]
+
+
+def _started_ids(row, tool_names):
+    """Ids of background tasks started by the tool results of a user record."""
+    result = row.get("toolUseResult")
+    foreground = isinstance(result, dict) and result.get("status") == "completed"
+    found = set()
+    for block in _blocks(row, "tool_result"):
+        name = tool_names.get(block.get("tool_use_id"))
+        text = json.dumps(block.get("content"), ensure_ascii=False)
+        for tools, regex in START_BY_TOOL:
+            # A helper that finished in the foreground leaves no notification to wait for.
+            if name in tools and not (regex is AGENT_START_RE and foreground):
+                found |= _ids(regex, text)
+    return found
 
 
 def has_wake_source(rows):
@@ -199,26 +235,34 @@ def has_wake_source(rows):
     # Records are replayed in order, so a resumed agent (same id started again after it
     # finished) counts as pending again: the last event of each id wins.
     pending = set()
+    tool_names = {}
     humans = [i for i, r in enumerate(rows) if _a12._human_text(r) is not None]
     alarm_from = humans[-2] if len(humans) >= 2 else 0
+    cron_alive = False
+    wakeup_set = False
     for i, row in enumerate(rows):
-        if _a12._role(row) == "user":
-            pending |= _ids(TASK_STARTED_RE, _tool_result_text(row))
-        if _a12._role(row) in ("user", "attachment") or "attachment" in row:
-            pending -= _ids(TASK_DONE_RE, json.dumps(row, ensure_ascii=False))
-        if i >= alarm_from and _a12._role(row) == "assistant":
-            content = _a12._content(row)
-            if isinstance(content, list) and any(
-                isinstance(b, dict) and b.get("type") == "tool_use" and b.get("name") in ALARM_TOOLS
-                for b in content
-            ):
-                return True
-    return bool(pending)
+        role = _a12._role(row)
+        if role == "assistant":
+            for block in _blocks(row, "tool_use"):
+                tool_names[block.get("id")] = block.get("name")
+                name = block.get("name")
+                recurring = (block.get("input") or {}).get("recurring", True)
+                if name == CRON_TOOL and recurring is not False:
+                    cron_alive = True  # a repeating job keeps waking the agent in later turns too
+                elif name == CRON_DELETE_TOOL:
+                    cron_alive = False
+                elif name in (WAKEUP_TOOL, CRON_TOOL) and i >= alarm_from:
+                    wakeup_set = True
+        if role == "user":
+            pending |= _started_ids(row, tool_names)
+        if role in ("user", "attachment") or "attachment" in row:
+            pending -= _done_ids(json.dumps(row, ensure_ascii=False))
+    return bool(pending) or cron_alive or wakeup_set
 
 
 def i_without_wake_line(next_line, rows):
     """The "Дальше:" text if it promises the agent's own step and nothing will wake it."""
-    if I_LINE_RE.match(next_line) and not has_wake_source(rows):
+    if I_LINE_RE.search(next_line) and not has_wake_source(rows):
         return next_line
     return None
 
