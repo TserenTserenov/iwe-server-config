@@ -19,6 +19,7 @@ case "${FAKE_AGENT_SCENARIO:?}" in
   rename-out) mkdir -p other; git mv allowed/existing.md other/existing.md; decide; result success false ;;
   agent-commit) printf 'x\n' > allowed/c.md; git add allowed/c.md; git -c user.name=t -c user.email=t@t commit -qm agent; decide; result success false ;;
   extra-in-wp-launch) decide; printf 'x\n' > .wp-launch/other.txt; printf 'x\n' > allowed/a.md; result success false ;;
+  ignored-inside) printf 'x\n' > allowed/result.log; decide; result success false ;;
   ignored-outside) printf 'x\n' > allowed/ok.md; mkdir -p other; printf 'x\n' > other/trace.log; decide; result success false ;;
   nested-repo) mkdir -p allowed/sub && git init -q allowed/sub; decide; result success false ;;
   hook-refuses) printf 'x\n' > allowed/refuse-me.md; decide; result success false ;;

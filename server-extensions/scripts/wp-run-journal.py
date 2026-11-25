@@ -29,6 +29,9 @@ Exit codes: 0 ok; 2 usage, schema or lease error (nothing written);
 4 journal integrity broken (hash chain or sequence).
 
 Test clock: WP_RUN_JOURNAL_NOW (ISO-8601 UTC) overrides the current time.
+Session marks: taking a lease writes $IWE_WP_MANAGER_STATE/sessions/<holder>.json
+(default ~/.iwe-runtime/wp-manager); run-completed and run-stopped remove it.
+The hooks wp-manager-answer-box.py and wp-manager-guard.py read these marks.
 """
 from __future__ import annotations
 
@@ -46,7 +49,14 @@ EVENTS = "events.jsonl"
 LEASE = "lease.json"
 LOCK = ".lock"
 ANSWER_BOX = "protected/pilot-answers.jsonl"
+PILOT_MESSAGES = "protected/pilot-messages.jsonl"
 CARDS = "cards"
+
+
+def session_marker_dir() -> Path:
+    """Where the program marks sessions that run a Manager (read by the hooks)."""
+    return Path(os.environ.get("IWE_WP_MANAGER_STATE")
+                or Path.home() / ".iwe-runtime" / "wp-manager") / "sessions"
 
 RIGHT_ORDER = {"auto": 0, "confirm": 1, "pilot-only": 2}
 # Default rights table, F2 section 2 (accepted by the pilot 25.11.2026).
@@ -80,10 +90,11 @@ REQUIRED = {
     "letter-received": ["from_wp", "chain"],
     "pilot-intervention": ["text_ref"],
 }
-# Types the Manager may ask to append. pilot-answered comes only from the answer
-# box (ingest-answers); run-created and lease-taken only from their commands;
-# right-refused only from the program itself.
-MANAGER_TYPES = set(REQUIRED) - {"run-created", "lease-taken", "pilot-answered", "right-refused"}
+# Types the Manager may ask to append. pilot-answered and pilot-intervention come
+# only from the hook-filled boxes (ingest-answers); run-created and lease-taken
+# only from their commands; right-refused only from the program itself.
+MANAGER_TYPES = set(REQUIRED) - {"run-created", "lease-taken", "pilot-answered", "right-refused",
+                                  "pilot-intervention"}
 
 # Allowed phase transitions (F4 section 4 + revision 2 section 3).
 TRANSITIONS = {
@@ -390,6 +401,11 @@ def check_transition(state: State, p: dict) -> None:
             raise Refused(f"{phase} has no passing verdict for its current attempt (P4)")
     if target == "accepted-unconfirmed" and not p.get("unconfirmed"):
         raise Invalid("accepted-unconfirmed needs the unconfirmed decision id")
+    if current == "awaiting-decision" and target == "accepted":
+        settled = [d for d in state.decisions.values() if d.get("phase") == phase
+                   and (d["status"] == "confirmed" or (d["status"] == "decided" and d["right"] == "auto"))]
+        if not settled:
+            raise Refused(f"{phase} waits for a decision; record it (confirmed by the pilot) first")
     if current == "accepted-unconfirmed" and target == "accepted":
         decision = state.decisions.get(state.unconfirmed.get(phase, ""), {})
         if decision.get("status") != "confirmed":
@@ -460,6 +476,11 @@ def validate(run_dir: Path, state: State, etype: str, p: dict) -> None:
         check_letter(state, p)
     elif etype == "pilot-requested":
         check_request(run_dir, p)
+    elif etype == "run-completed":
+        open_phases = sorted(name for name, status in state.status.items()
+                             if status not in ("accepted", "cancelled"))
+        if open_phases:
+            raise Invalid(f"run-completed: phases {open_phases} are not accepted; use run-stopped")
 
 
 # ---------------------------------------------------------------- lease
@@ -490,7 +511,17 @@ def take_lease(run_dir: Path, events: list[dict], holder: str, ttl_min: int) -> 
     if not renew:
         write_event(run_dir, events, "lease-taken", {"holder": holder, "epoch": epoch},
                     "program", epoch, None)
+    atomic_write(session_marker_dir() / f"{holder}.json",
+                 json.dumps({"run_dir": str(run_dir.resolve()), "epoch": epoch}))
     return epoch
+
+
+def release_session_marks(run_dir: Path) -> None:
+    """A closed run no longer turns its sessions into Manager sessions."""
+    target = str(run_dir.resolve())
+    for mark in session_marker_dir().glob("*.json"):
+        if json.loads(mark.read_text(encoding="utf-8")).get("run_dir") == target:
+            mark.unlink()
 
 
 # ---------------------------------------------------------------- commands
@@ -542,7 +573,10 @@ def append_checked(run_dir: Path, epoch: int, etype: str, payload: dict,
                         {"attempted_type": etype, "attempted": payload, "why": str(refusal)},
                         "program", epoch, caused_by)
             raise
-        return write_event(run_dir, events, etype, payload, actor, epoch, caused_by)
+        event = write_event(run_dir, events, etype, payload, actor, epoch, caused_by)
+        if etype in ("run-completed", "run-stopped"):
+            release_session_marks(run_dir)
+        return event
 
 
 def cmd_append(args) -> int:
@@ -557,22 +591,32 @@ def cmd_append(args) -> int:
     return 0
 
 
+def read_jsonl(path: Path) -> list[dict]:
+    if not path.exists():
+        return []
+    return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
+
+
+def ingest_interventions(run_dir: Path, events: list[dict], epoch: int) -> int:
+    """Pilot messages that answer nothing: one pilot-intervention event each (H-358, number 2)."""
+    seen = sum(1 for e in events if e["type"] == "pilot-intervention")
+    fresh = read_jsonl(run_dir / PILOT_MESSAGES)[seen:]
+    for message in fresh:
+        write_event(run_dir, events, "pilot-intervention", {"text_ref": message["text_ref"]},
+                    "pilot", epoch, None)
+    return len(fresh)
+
+
 def cmd_ingest_answers(args) -> int:
-    """Turn pilot messages captured by the answer-box hook into pilot-answered events."""
+    """Turn pilot messages captured by the answer-box hook into journal events."""
     run_dir = Path(args.run_dir)
-    box = run_dir / ANSWER_BOX
-    if not box.exists():
-        print(json.dumps({"ingested": []}))
-        return 0
     ingested, refused = [], []
     with run_lock(run_dir):
         events = load_events(run_dir)
         check_epoch(run_dir, args.epoch)
+        interventions = ingest_interventions(run_dir, events, args.epoch)
         state = State(events)
-        for line in box.read_text(encoding="utf-8").splitlines():
-            if not line.strip():
-                continue
-            answer = json.loads(line)
+        for answer in read_jsonl(run_dir / ANSWER_BOX):
             rid = answer.get("request_id")
             if rid in state.answers or rid not in state.requests:
                 continue
@@ -589,7 +633,7 @@ def cmd_ingest_answers(args) -> int:
             write_event(run_dir, events, "pilot-answered", payload, "pilot", args.epoch, None)
             state.apply(events[-1])
             ingested.append(rid)
-    print(json.dumps({"ingested": ingested, "refused": refused}))
+    print(json.dumps({"ingested": ingested, "refused": refused, "interventions": interventions}))
     return 0
 
 

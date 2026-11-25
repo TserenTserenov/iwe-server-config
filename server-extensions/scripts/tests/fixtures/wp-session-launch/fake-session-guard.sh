@@ -5,7 +5,7 @@
 # --isolate + machine-publish-only + owner pid + IWE_SESSION_ID; note-file needs
 # --paths-from0 + --repo-root and every path to exist on disk or in HEAD;
 # machine-close refuses a dirty copy (tracked or untracked changes).
-# FAKE_GUARD_STATE (dir) is required; FAKE_CLOSE_MODE: ok | fail | publish-then-fail | hang.
+# FAKE_GUARD_STATE (dir) is required; FAKE_CLOSE_MODE: ok | fail | publish-then-fail | hang | publish-then-hang.
 set -euo pipefail
 state="${FAKE_GUARD_STATE:?}"
 cmd="$1"; shift
@@ -58,6 +58,7 @@ case "$cmd" in
       fail) exit 7 ;;
       publish-then-fail) git -C "$wt" push -q origin HEAD:main; exit 7 ;;
       hang) sleep 300 ;;
+      publish-then-hang) git -C "$wt" push -q origin HEAD:main; sleep 300 ;;
     esac
     if [ "$(git -C "$wt" rev-list --count origin/main..HEAD)" != 0 ]; then
       git -C "$wt" push -q origin HEAD:main

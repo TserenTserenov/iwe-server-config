@@ -32,7 +32,19 @@ It is NOT a process sandbox: Claude Code's acceptEdits mode let the agent
 write a file outside the copy. The agent runs with the copy's own
 .claude/settings.json; the hooks of ~/IWE/.claude are not assumed to apply.
 Paths the commit hooks execute (.githooks, scripts, .claude, git config
-files) can never be allowed, so the agent cannot change code run at commit.
+files at any depth) can never be allowed, so the agent cannot publish a change
+to code run at commit. Every new ignored file refuses the attempt: it would
+never be published, so a result written there would be lost silently.
+
+Delivery target of v0 is origin/main. WP-626 revision 2 expects a run branch
+(run/<run_id>) instead; until that mode exists the launcher is not used with
+the WP Manager (WP-530 F161).
+
+Signals: SIGTERM, SIGHUP and SIGINT stop the agent and release the session.
+During machine-close and the publication check a signal is only recorded
+(stopped_by_signal) — stopping the guard mid-publication would leave the
+outcome unknown. A final manifest with session_open: true means: run
+retry_close; the exit code is then never 0.
 
 The manifest (manifest.json in the attempt directory) is rewritten atomically
 through a uniquely named temporary file next to it; readers read only
@@ -72,9 +84,10 @@ SEMAPHORE_AGENT = "claude-code"
 DECISIONS_DIR = ".wp-launch"
 DECISIONS_REL = f"{DECISIONS_DIR}/decisions.json"
 DECISIONS_MAX_BYTES = 256 * 1024
-# Top-level paths the commit hooks run or read, plus git's own: never publishable.
-FORBIDDEN_TOP = {".git", DECISIONS_DIR, ".githooks", "scripts", ".claude", ".github",
-                 ".gitattributes", ".gitmodules", ".gitignore"}
+# Top-level paths the commit hooks run or read: never publishable.
+FORBIDDEN_TOP = {DECISIONS_DIR, ".githooks", "scripts", ".claude", ".github"}
+# Git's own files: never publishable at any depth.
+FORBIDDEN_ANY = {".git", ".gitattributes", ".gitmodules", ".gitignore"}
 SAFE_TOKEN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
 MODEL_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,63}$")
 WP_ID = re.compile(r"^WP-[1-9][0-9]*$")
@@ -117,10 +130,39 @@ class Stopped(Exception):
     """The launcher received SIGTERM, SIGHUP or SIGINT."""
 
 
-def on_signal(signum: int, _frame) -> None:
-    for sig in (signal.SIGTERM, signal.SIGHUP, signal.SIGINT):
-        signal.signal(sig, signal.SIG_IGN)  # let the cleanup below finish
-    raise Stopped(f"запускатель получил сигнал {signal.Signals(signum).name}")
+class SignalGate:
+    """Raises Stopped on a signal, except inside deferred(): there it only records it."""
+
+    def __init__(self):
+        self.deferring = False
+        self.received: str | None = None
+
+    def handle(self, signum: int, _frame) -> None:
+        name = signal.Signals(signum).name
+        if self.deferring:
+            self.received = self.received or name
+            return
+        for sig in (signal.SIGTERM, signal.SIGHUP, signal.SIGINT):
+            signal.signal(sig, signal.SIG_IGN)  # let the cleanup below finish
+        raise Stopped(f"запускатель получил сигнал {name}")
+
+    def deferred(self, manifest: "Manifest"):
+        gate = self
+
+        class _Deferred:
+            def __enter__(self):
+                gate.deferring = True
+
+            def __exit__(self, *_exc):
+                gate.deferring = False
+                if gate.received:
+                    manifest.stage(stopped_by_signal=gate.received)
+                return False
+
+        return _Deferred()
+
+
+SIGNALS = SignalGate()
 
 
 def now_iso() -> str:
@@ -188,7 +230,8 @@ class Seams:
 
 # --- package -----------------------------------------------------------------
 
-def normalize_allowed(raw: object) -> str:
+def normalize_path(raw: object, *, publishable: bool) -> str:
+    """Normalize a package path; publishable paths must not touch hook-run or git files."""
     if not isinstance(raw, str) or not raw.strip():
         raise LaunchError("launcher-failed", "launcher", f"путь пакета пуст: {raw!r}")
     path = raw.strip().replace("\\", "/")
@@ -197,10 +240,14 @@ def normalize_allowed(raw: object) -> str:
     parts = [p for p in path.split("/") if p]
     if path.startswith("/") or not parts or any(p in (".", "..") for p in parts):
         raise LaunchError("launcher-failed", "launcher", f"недопустимый путь пакета {raw!r}")
-    if parts[0] in FORBIDDEN_TOP:
+    if publishable and forbidden(parts):
         raise LaunchError("launcher-failed", "launcher",
                           f"путь {raw!r} запрещён: его исполняют или читают проверки коммита")
     return "/".join(parts)
+
+
+def forbidden(parts: list[str]) -> bool:
+    return parts[0] in FORBIDDEN_TOP or any(p in FORBIDDEN_ANY for p in parts)
 
 
 def path_allowed(path: str, allowed: list[str]) -> bool:
@@ -235,8 +282,8 @@ def validate_package(pkg: dict, iwe_root: Path) -> dict:
     return {
         "repo_dir": repo_dir,
         "governance": governance,
-        "allowed": sorted({normalize_allowed(a) for a in allowed}),
-        "inputs": [normalize_allowed(i) for i in inputs],
+        "allowed": sorted({normalize_path(a, publishable=True) for a in allowed}),
+        "inputs": [normalize_path(i, publishable=False) for i in inputs],
     }
 
 
@@ -468,7 +515,7 @@ def take_decisions(worktree: Path, attempt_dir: Path) -> tuple[object, str | Non
 def unsafe_path(worktree: Path, path: str) -> str | None:
     """Reason to refuse publishing `path`, or None. Symlinks and submodules are out of v0."""
     parts = path.split("/")
-    if parts[0] in FORBIDDEN_TOP or any(p in ("", ".", "..") for p in parts):
+    if forbidden(parts) or any(p in ("", ".", "..") for p in parts):
         return "служебный или неоднозначный путь"
     current = worktree
     for part in parts:
@@ -483,8 +530,7 @@ def unsafe_path(worktree: Path, path: str) -> str | None:
 def refusals(worktree: Path, paths: list[str], new_ignored: set[str], allowed: list[str]) -> list[str]:
     found = [f"{p} ({why})" for p in paths
              if (why := "вне allowed_paths" if not path_allowed(p, allowed) else unsafe_path(worktree, p))]
-    found += [f"{p} (новый игнорируемый файл вне allowed_paths)"
-              for p in sorted(new_ignored) if not path_allowed(p.rstrip("/"), allowed)]
+    found += [f"{p} (новый игнорируемый файл: он не публикуется)" for p in sorted(new_ignored)]
     return found
 
 
@@ -553,7 +599,7 @@ def commit_violations(worktree: Path, base: str, commit: str, allowed: list[str]
     for meta, path in zip(raw[0::2], raw[1::2]):
         if not meta:
             continue
-        if not path_allowed(path, allowed) or path.split("/")[0] in FORBIDDEN_TOP:
+        if not path_allowed(path, allowed) or forbidden(path.split("/")):
             problems.append(f"{path} (вне allowed_paths)")
         elif meta.split()[1] in ("120000", "160000"):
             problems.append(f"{path} (ссылка или подмодуль)")
@@ -618,11 +664,12 @@ def patch_id(repo_dir: Path, sha: str) -> str | None:
 def deliver(ctx: dict, commit: str, artifacts: list[dict], manifest: Manifest) -> str:
     """One machine-close, never repeated here: a lost answer may hide a done publication."""
     manifest.stage("closing", close_attempted=True)
-    rc_close, detail = machine_close(ctx)
-    if rc_close == 0:
-        manifest.stage("closed", session_open=False)
-    publication = check_publication(ctx, commit, artifacts)
-    manifest.stage("verified", publication=publication)
+    with SIGNALS.deferred(manifest):  # stopping the guard mid-publication hides the outcome
+        rc_close, detail = machine_close(ctx)
+        if rc_close == 0:
+            manifest.stage("closed", session_open=False)
+        publication = check_publication(ctx, commit, artifacts)
+        manifest.stage("verified", publication=publication)
     state = publication["state"]
     if state == "unknown" or (rc_close == 124 and state == "absent"):
         raise LaunchError("delivery-unknown", "delivery",
@@ -686,7 +733,8 @@ def release_unpublished(ctx: dict, worktree: Path | None, manifest: Manifest) ->
         manifest.stage(needs_reconcile=True, reconcile_reason=f"сброс копии не удался: {exc}")
         return
     manifest.stage(close_attempted=True)
-    rc, detail = machine_close(ctx)
+    with SIGNALS.deferred(manifest):
+        rc, detail = machine_close(ctx)
     if rc == 0:
         manifest.stage(session_open=False)
     else:
@@ -723,6 +771,8 @@ def work(ctx: dict, pkg: dict, checked: dict, worktree: Path, manifest: Manifest
     changes = changed_paths(worktree)
     paths = [p for _, p in changes]
     new_ignored = ignored_paths(worktree) - ignored_before
+    if new_ignored:
+        (attempt_dir / "rejected-ignored.txt").write_text("\n".join(sorted(new_ignored)) + "\n", encoding="utf-8")
     manifest.stage("collected", decisions=decisions, decisions_note=decisions_note,
                    changes_present=bool(paths),
                    agent_commits=git(worktree, "rev-list", f"{base}..{head}").stdout.split())
@@ -759,8 +809,8 @@ def work(ctx: dict, pkg: dict, checked: dict, worktree: Path, manifest: Manifest
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Запустить одну рабочую сессию по пакету задания")
     parser.add_argument("--package", required=True, type=Path, help="JSON-пакет задания от Менеджера РП")
-    parser.add_argument("--runtime-dir", required=True, type=Path,
-                        help="каталог попыток; общий каталог по умолчанию в v0 не выбран")
+    parser.add_argument("--runtime-dir", type=Path,
+                        help="каталог попыток (по умолчанию $IWE_ROOT/.iwe-runtime/wp-launch)")
     parser.add_argument("--test-mode", action="store_true", help="разрешить тестовые подмены (только сценарии)")
     return parser.parse_args()
 
@@ -778,7 +828,8 @@ def main() -> int:
         print("wp-session-launch: пакет без корректных wp (WP-N) и attempt_id (латиница, цифры, ._-)",
               file=sys.stderr)
         return EXIT_LAUNCHER
-    attempt_dir = args.runtime_dir / wp / attempt
+    runtime_dir = (args.runtime_dir or iwe_root / ".iwe-runtime" / "wp-launch").expanduser().resolve()
+    attempt_dir = runtime_dir / wp / attempt
     attempt_dir.parent.mkdir(parents=True, exist_ok=True)
     try:
         attempt_dir.mkdir()
@@ -796,18 +847,25 @@ def main() -> int:
     manifest.stage("created")
     (attempt_dir / "package.json").write_text(json.dumps(pkg, ensure_ascii=False, indent=2), encoding="utf-8")
     for sig in (signal.SIGTERM, signal.SIGHUP, signal.SIGINT):
-        signal.signal(sig, on_signal)
+        signal.signal(sig, SIGNALS.handle)
     try:
         status, source, detail = run(pkg, iwe_root, attempt_dir, manifest, Seams(args.test_mode, iwe_root)), None, None
     except LaunchError as exc:
         status, source, detail = exc.status, exc.source, exc.detail
     except Stopped as exc:
         status, source, detail = "launcher-failed", "launcher", str(exc)
+        if manifest.data.get("commit") and manifest.data.get("close_attempted") \
+                and not manifest.data.get("publication"):
+            status, source = "delivery-unknown", "delivery"
     except Exception as exc:  # the manifest must still say what happened
         status, source, detail = "launcher-failed", "launcher", f"{type(exc).__name__}: {exc}"
+    code = STATUS_EXIT[status]
+    if code == EXIT_OK and manifest.data.get("session_open"):
+        code = EXIT_DELIVERY  # the session is still open: retry_close is owed
+    manifest.data["exit_code"] = code
     manifest.finish(status, source, detail)
-    print(json.dumps({"status": status, "manifest": str(manifest.path)}, ensure_ascii=False))
-    return STATUS_EXIT[status]
+    print(json.dumps({"status": status, "exit_code": code, "manifest": str(manifest.path)}, ensure_ascii=False))
+    return code
 
 
 if __name__ == "__main__":

@@ -174,6 +174,41 @@ check "sigterm: перечень окончательный" "$(ok is "$(field f
 check "sigterm: сессия снята" "$(ok is "$(close_calls)/$(field session_open)" "1/False")" "close=$(close_calls) open=$(field session_open)"
 check "sigterm: агент остановлен" "$(ok pid_gone "$(field agent_pid)")" "агент $(field agent_pid) жив"
 
+# A new ignored file inside allowed_paths refuses the attempt (it would never be published).
+refused a26 ignored-inside rejected-paths 3
+check "ignored-inside: список игнорируемых сохранён" "$(ok grep -q 'allowed/result.log' "$RUNTIME/WP-568/a26/rejected-ignored.txt")" "нет rejected-ignored.txt"
+
+# No changes, but the release close fails: never exit 0 while the session is open.
+FAKE_CLOSE_MODE=fail launch a27 nothing
+check "no-changes-close-fail: код 5" "$(ok is "$RC" 5)" "код $RC"
+check "no-changes-close-fail: сессия открыта в перечне" "$(ok is "$(field session_open)/$(field exit_code)" "True/5")" "open=$(field session_open) exit=$(field exit_code)"
+
+# SIGTERM while machine-close publishes: the signal is only recorded, the outcome is checked.
+package a28
+FAKE_CLOSE_MODE=publish-then-hang IWE_LAUNCH_TEST_CLOSE_TIMEOUT_SEC=3 FAKE_AGENT_SCENARIO=write-allowed \
+  "$PY" "$LAUNCHER" --test-mode --package "$TMP/pkg-a28.json" --runtime-dir "$RUNTIME" > "$TMP/out-a28" 2> "$TMP/err-a28" &
+LPID=$!
+MAN="$RUNTIME/WP-568/a28/manifest.json"
+for _ in $(seq 1 100); do [ "$(field stage 2>/dev/null)" = closing ] && break; sleep 0.2; done
+sleep 1
+kill -TERM "$LPID"; wait "$LPID"; RC=$?
+STATUS=$(field status)
+expect sigterm-during-close published-close-failed 5
+check "sigterm-during-close: публикация установлена" "$(ok is "$(field publication.state)" confirmed)" "$(field publication)"
+check "sigterm-during-close: сигнал записан" "$(ok is "$(field stopped_by_signal)" SIGTERM)" "stopped_by_signal=$(field stopped_by_signal)"
+
+# A relative --runtime-dir works (it is resolved before any git call).
+package a29
+(cd "$TMP" && FAKE_AGENT_SCENARIO=write-allowed "$PY" "$LAUNCHER" --test-mode --package "$TMP/pkg-a29.json" --runtime-dir rel-runtime >/dev/null 2>&1); RC=$?
+MAN="$TMP/rel-runtime/WP-568/a29/manifest.json"; STATUS=$(field status)
+expect relative-runtime-dir delivered 0
+
+# Without --runtime-dir the attempts live under $IWE_ROOT/.iwe-runtime/wp-launch.
+package a30
+FAKE_AGENT_SCENARIO=nothing "$PY" "$LAUNCHER" --test-mode --package "$TMP/pkg-a30.json" >/dev/null 2>&1; RC=$?
+MAN="$IWE_ROOT/.iwe-runtime/wp-launch/WP-568/a30/manifest.json"; STATUS=$(field status)
+expect default-runtime-dir no-changes 0
+
 # Package refusals.
 MAN="$RUNTIME/WP-568/a1/manifest.json"
 sum=$(shasum "$MAN")
@@ -185,6 +220,8 @@ expect bad-contract launcher-failed 2
 check "bad-contract: сессия не открывалась" "$(ok is "$(field session_id)" None)" "session_id=$(field session_id)"
 launch a23 write-allowed wp-launch/v1 .githooks
 expect forbidden-prefix launcher-failed 2
+launch a23b write-allowed wp-launch/v1 allowed/sub/.gitattributes
+expect forbidden-git-file-deep launcher-failed 2
 launch a24 write-allowed wp-launch/v1 allowed/ $'smoke\nLaunch-Attempt: forged'
 expect forged-trailer launcher-failed 2
 "$PY" - > "$TMP/pkg-evil.json" <<'PY'

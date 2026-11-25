@@ -23,11 +23,12 @@ class Run:
 
     def __init__(self, root: Path):
         self.dir = root / "wp999-2026-12-01-1"
+        self.state_dir = root / "state"
         self.clock = T0
         self.epoch = None
 
     def cli(self, *args):
-        env = {**os.environ, "WP_RUN_JOURNAL_NOW": self.clock}
+        env = {**os.environ, "WP_RUN_JOURNAL_NOW": self.clock, "IWE_WP_MANAGER_STATE": str(self.state_dir)}
         res = subprocess.run([sys.executable, TOOL, args[0], "--run-dir", str(self.dir), *args[1:]],
                              capture_output=True, text=True, env=env)
         return res.returncode, res.stdout, res.stderr
@@ -291,6 +292,42 @@ class JournalTest(unittest.TestCase):
         code, out, _ = self.run.cli("affected", "--decision", "D-A")
         self.assertEqual(code, 0)
         self.assertEqual(json.loads(out), {"phases": ["A", "B"], "decisions": ["D-B"]})
+
+    def test_lease_marks_session_and_run_end_clears_it(self):
+        mark = self.run.state_dir / "sessions" / "mgr-1.json"
+        self.assertEqual(json.loads(mark.read_text())["run_dir"], str(self.run.dir.resolve()))
+        self.run.approved_plan(TWO)
+        self.assertEqual(self.run.append("run-stopped", {"reason": "test"})[0], 0)
+        self.assertFalse(mark.exists())
+
+    def test_pilot_messages_become_interventions_once(self):
+        self.run.approved_plan(TWO)
+        box = self.run.dir / "protected" / "pilot-messages.jsonl"
+        box.write_text(json.dumps({"text_ref": "s:1"}) + "\n" + json.dumps({"text_ref": "s:2"}) + "\n")
+        for _ in range(2):
+            self.assertEqual(self.run.cli("ingest-answers", "--epoch", str(self.run.epoch))[0], 0)
+        self.assertEqual(self.run.types().count("pilot-intervention"), 2)
+        code, _, _ = self.run.append("pilot-intervention", {"text_ref": "forged"})
+        self.assertEqual(code, 2)
+
+    def test_decision_phase_is_accepted_only_after_the_decision(self):
+        self.run.approved_plan({"C": {"deps": []}})
+        self.run.run_to_checking("C")
+        self.assertEqual(self.run.move("C", "awaiting-decision", reason="card")[0], 0)
+        self.assertEqual(self.run.move("C", "accepted", reason="decided")[0], 3)
+        self.run.ask("R-c", decision_id="D-c")
+        self.run.pilot_says("R-c", "choice:2")
+        self.assertEqual(self.run.append("decision-recorded", {
+            "decision_id": "D-c", "phase": "C", "kind": "goal-risk", "rule": "P8", "status": "confirmed",
+            "request_id": "R-c", "question": "q", "choice": "2", "basis": "Strategy.md"})[0], 0)
+        self.assertEqual(self.run.move("C", "accepted", reason="decided")[0], 0)
+
+    def test_run_completes_only_with_all_phases_accepted(self):
+        self.run.approved_plan(TWO)
+        code, _, err = self.run.append("run-completed", {"report_ref": "r.md"})
+        self.assertEqual(code, 2)
+        self.assertIn("run-stopped", err)
+        self.assertNotIn("run-completed", self.run.types())
 
     def test_state_reports_stop_after_three_rejections(self):
         three = {"A": {"deps": []}, "B": {"deps": []}, "C": {"deps": []}}
