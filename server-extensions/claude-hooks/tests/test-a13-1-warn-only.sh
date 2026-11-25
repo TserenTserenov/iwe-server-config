@@ -34,7 +34,8 @@ with open(sys.argv[1], "w", encoding="utf-8") as fh:
         fh.write(json.dumps(r, ensure_ascii=False) + "\n")
 PY
   printf '{"transcript_path":"%s","session_id":"%s"}' "$TMP/$id/t.jsonl" "$id" \
-    | env HOME="$TMP/$id/home" CLAUDE_PROJECT_DIR="$TMP/$id/proj" STYLE_ENFORCE_BLOCK=1 bash "$HOOK" 2>/dev/null
+    | env HOME="$TMP/$id/home" CLAUDE_PROJECT_DIR="$TMP/$id/proj" STYLE_ENFORCE_BLOCK=1 \
+      STYLE_AGENT="${RUN_AGENT:-claude-code}" bash "$HOOK" 2>/dev/null
 }
 
 # Only A13.1: a file name in backticks with no Russian gloss on its left.
@@ -46,11 +47,21 @@ check "A13.1 is still written to the log" \
 check "A13.1 alone does not block" \
   "$([ "$(printf '%s' "$out" | jq -r '.decision // empty')" != block ] && echo yes || echo no)" "$out"
 
-# A10 together with A13.1: still blocks, and the reason no longer names A13.1.
+# A10 together with A13.1 for Claude Code: no block since WP-605 (25.11.2026), the remark
+# goes to the next turn and names A10 only (A13.1 stays warn-only).
 A10_AND_A13=$'Итог.\n\nPASS\n\n`meta.yaml`\n\nДальше: жду ответа.'
 out=$(run_reply a10 "$A10_AND_A13")
+remark="$TMP/a10/proj/.claude/state/next-turn-remarks-a10"
+check "A10 for Claude does not block" \
+  "$([ "$(printf '%s' "$out" | jq -r '.decision // empty')" != block ] && echo yes || echo no)" "$out"
+check "A10 for Claude is deferred to the next turn, naming A10 and not A13.1" \
+  "$([ -f "$remark" ] && grep -q 'правила: A10 )' "$remark" && ! grep -q 'A13.1 )' "$remark" && echo yes || echo no)" \
+  "$(cat "$remark" 2>/dev/null)"
+
+# The same reply from Kimi still blocks: its wrapper has no next-turn channel (WP-592 F6).
+out=$(RUN_AGENT=kimi run_reply a10kimi "$A10_AND_A13")
 reason=$(printf '%s' "$out" | jq -r '.reason // empty')
-check "A10 still blocks" \
+check "A10 still blocks for Kimi" \
   "$([ "$(printf '%s' "$out" | jq -r '.decision // empty')" = block ] && echo yes || echo no)" "$out"
 check "block reason names A10 and not A13.1" \
   "$([[ "$reason" == *"правила: A10"* && "$reason" != *"правила: A10 A13.1"* && "$reason" != *"правила: A13.1"* ]] && echo yes || echo no)" "$reason"

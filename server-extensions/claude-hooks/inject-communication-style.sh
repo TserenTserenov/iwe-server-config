@@ -90,6 +90,18 @@ if [ "${IWE_STYLE_NEXT_TURN_HINT:-1}" != "0" ] && [ -n "$TRANSCRIPT_PATH" ]; the
     2>>"$HOME/.claude/logs/style-next-turn-hints.err" || echo "")
 fi
 
+# Remarks deferred by Stop hooks of the previous turn (lib/next-turn-remark.sh, WP-605,
+# 25.11.2026): delivered once, here, instead of a block that made a second visible message.
+# Independent of IWE_STYLE_NEXT_TURN_HINT: the Stop hook already decided not to block.
+# They go into the prefix with A0, which every exit below keeps: the rotation drops the
+# suffix on overflow, and the file is already deleted once taken (Fable review 25.11).
+# shellcheck source=lib/next-turn-remark.sh
+if . "$HOOK_DIR/lib/next-turn-remark.sh" 2>/dev/null; then
+  DEFERRED_REMARKS=$(next_turn_remark_take "$STATE_DIR" "$SESSION_ID")
+  [ -n "$DEFERRED_REMARKS" ] && A0_LINE=$(join_parts "$A0_LINE" "Замечания автоматических проверок к прошлому ответу (пилот их не видит):
+$DEFERRED_REMARKS")
+fi
+
 # Контент: диспетчер реестра (если доступен) → файл-снимок s0-core.md → пропуск.
 # Диспетчер: WP-412 Ф6 (тонкий хук с каскадом L0+L1+author). Путь к нему через PROJECT_DIR.
 # Файл-снимок: WP-412 Ф11 (FMT-fallback, самодостаточен). Путь через BASH_SOURCE — работает в env -i.

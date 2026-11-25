@@ -88,6 +88,20 @@ if [ -n "$FIRST_EX" ] && [ "$FIRST_EX" != "null" ]; then
   REASON="${REASON} Пример: «${FIRST_EX}»."
 fi
 
-jq -nc --arg r "$REASON" '{decision: "block", reason: $r}'
+# Only an exact "no access" phrase blocks (WP-605, 25.11.2026): the goal is a fix in the same
+# turn, before the pilot goes to do it by hand. A broad proximity match (detector group C,
+# strict_count 0) produced false blocks and a second visible message, so it goes to the
+# next turn instead. A detector without strict_count (older copy) keeps the block.
+STRICT_COUNT=$(echo "$DETECTOR_OUT" | jq -r '.payload.strict_count // empty' 2>/dev/null)
+if [ "$STRICT_COUNT" = "0" ]; then
+  # shellcheck source=lib/next-turn-remark.sh
+  if . "$(dirname "${BASH_SOURCE[0]}")/lib/next-turn-remark.sh" 2>/dev/null \
+    && next_turn_remark_add "${CLAUDE_PROJECT_DIR:-$IWE_ROOT}/.claude/state" "$SESSION_ID" "${REASON} Пилоту об этом замечании не пиши: если доступ не проверен — проверь и сделай; если проверен — в ответе назови, какая проверка дала отказ."; then
+    echo '{}'
+    exit 0
+  fi
+fi
+
+jq -nc --arg r "${REASON} Пилоту о замечании не пиши: проверь и сделай или назови, какая проверка дала отказ." '{decision: "block", reason: $r}'
 
 exit 0

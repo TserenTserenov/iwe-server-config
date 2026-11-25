@@ -23,7 +23,13 @@ import sys
 CLOSE_PROPOSAL_RE = re.compile(
     r"закрывай|закрываем\s+(?:эту\s+|данную\s+)?(?:сессию|разговор)"
     r"|закрыть\s+(?:эту\s+|данную\s+)?(?:сессию|разговор)"
-    r"|закрыти[ея]\s+сессии|триггер\w*\s+закрыти|можно\s+закрывать",
+    r"|закрыти[ея]\s+сессии|триггер\w*\s+закрыти|можно\s+закрывать"
+    # Asking for the publish word or the pilot's shorthands (WP-605, 25.11.2026: 81 of 514
+    # turns asked for «закрывай/заливай/ПСЗ/СЗ»; pack rule 6.5 forbids both). Quoted and
+    # after an ask verb only: "поручение «ПСЗ» выполнено" or a rule naming «заливай» is a
+    # report, not an ask (Fable review 25.11).
+    r"|(?:сказать|скажите|скажи|написать|напишите|напиши|ответить|ответьте|ответь)"
+    r"\s+«\s*(?:заливай|запуши|псз|сз)\s*[»,.!]",
     re.IGNORECASE,
 )
 
@@ -238,7 +244,11 @@ def detect(path):
     line = final_assistant_line(rows)
     if not line or not CLOSE_PROPOSAL_RE.search(line):
         return ""
-    if pilot_intends_to_close(last_human_message(rows)):
+    human = last_human_message(rows)
+    # The pilot's own «ПСЗ»/«СЗ» is a close word too (CLAUDE.md section 9): an agent line
+    # that answers it is not unsolicited (WP-605, 25.11.2026). Only here, not in
+    # --prompt-intends-close, whose caller arms the close obligation with its own rules.
+    if pilot_intends_to_close(human) or pilot_shorthand(human)[0]:
         return ""
     return line
 

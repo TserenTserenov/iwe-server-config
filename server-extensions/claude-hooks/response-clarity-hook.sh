@@ -563,6 +563,15 @@ A12_CLOSE_MATCH=$(python3 "$(dirname "${BASH_SOURCE[0]}")/a12-unsolicited-close.
 # Пишем строку лога напрямую, не через log_violation: кандидат не нарушение, он не должен
 # наращивать счётчик сессии и «3+ нарушений». Хвост строки, а не голова: триггер обычно в конце.
 [ -n "$A12_CLOSE_MATCH" ] && echo "$TIMESTAMP | $AGENT | A12_UNSOLICITED_CLOSE_CANDIDATE | close-proposed-without-pilot-intent | $(redact "${A12_CLOSE_MATCH: -100}")" >> "$LOG_FILE" 2>/dev/null || true
+# Claude Code also gets it as a next-turn remark (WP-605, 25.11.2026): pack rule 6.5 now
+# forbids offering to close or putting publication of requested work on the pilot, and a
+# journal nobody reads did not change behaviour (85 candidates in the week 18-25.11).
+if [ -n "$A12_CLOSE_MATCH" ] && [ "$AGENT" = "claude-code" ] && [ "${IWE_STYLE_DEFER_REMARK:-1}" != "0" ]; then
+  # shellcheck source=lib/next-turn-remark.sh
+  . "$(dirname "${BASH_SOURCE[0]}")/lib/next-turn-remark.sh" 2>/dev/null \
+    && next_turn_remark_add "$COUNT_DIR" "$SESSION_ID" "Похоже, прошлая строка «Дальше:» просила пилота закрыть сессию или залить, хотя он об этом не просил (пак, правила 6.4-6.5); если это не так, не обращай внимания. Пилоту об этом не пиши. Пока в поручении этой беседы есть доступный шаг — делай его; закрытие не предлагай." \
+    || true
+fi
 
 # --- A12_NEXT_MISSING / A12_NEXT_EMPTY_CONTENT (РП-605 Ф1/Ф5/Ф6) ---
 # Наличие и непустота строки «Дальше:» (A12, пак правило 6) — не её ясность
@@ -808,6 +817,21 @@ if [ -z "$A12_NEXT_MISSING_LINE" ] && [ -z "$A12_NEXT_FAILED" ]; then
 else
   NEXT_NOTE="В показанном сообщении строки «Дальше:» не было: ровно одна строка «Дальше: …» в конце этого ответа."
   HAD_NEXT_LINE=no
+fi
+# Claude Code gets the remark on its next turn instead of a block (WP-605, 25.11.2026,
+# pilot's permission): a block after the answer is shown only produced a second
+# visible message. Kimi and Codex keep the block: their wrappers (style-check-text.sh)
+# have no next-turn channel yet, moving them is WP-592 F6. If the remark cannot be
+# stored, fall through to the block so the remark is not lost.
+if [ "${STYLE_ENFORCE_BLOCK:-0}" = "1" ] && [ -n "$BLOCKABLE" ] && [ "$STYLE_CONTEXT" != "peer" ] \
+  && [ "$AGENT" = "claude-code" ] && [ "${IWE_STYLE_DEFER_REMARK:-1}" != "0" ]; then
+  # shellcheck source=lib/next-turn-remark.sh
+  if . "$(dirname "${BASH_SOURCE[0]}")/lib/next-turn-remark.sh" 2>/dev/null \
+    && next_turn_remark_add "$COUNT_DIR" "$SESSION_ID" "Прошлый ответ нарушил стиль (правила:${BLOCKABLE} ), замечание уже в журнале. Пилоту о нём не пиши и прошлый ответ не повторяй; в этом ответе соблюдай: A1 голое имя файла не подлежащее; A10 без голых маркеров (exit/PASS); A7.1 журнал процесса в чат не идёт, якоря (коммит, ссылка) идут; A14 «входит в / состоит из» только о системах.${ESC_NOTE}"; then
+    echo "$TIMESTAMP | $AGENT | STYLE_REMARK_DEFERRED | next-turn |${BLOCKABLE}" >> "$LOG_FILE" 2>/dev/null || true
+    echo '{}'
+    exit 0
+  fi
 fi
 if [ "${STYLE_ENFORCE_BLOCK:-0}" = "1" ] && [ -n "$BLOCKABLE" ] && [ "$STYLE_CONTEXT" != "peer" ]; then
   REASON="Стиль нарушен (правила:${BLOCKABLE} ). НЕ повторяй и не пересказывай предыдущий ответ целиком — пилот его уже видел (найдено 22.10, РП-388 Ф19: буквальное прочтение прежней формулировки давало полный повтор ответа дважды подряд). Нарушение уже записано в журнал стража, поэтому никаких пометок о нём не пиши: ни строки коррекции, ни слов «исправляю», «было → стало», ни разбора ошибки (WP-388 Ф24: пилоту эта строка не нужна). Если в прежнем ответе была финальная часть с выводом или следующим шагом, напиши ТОЛЬКО её, переписанную по правилам ниже; остальной текст не повторяй. ${NEXT_NOTE} Если финальной части не было, напиши одно-два предложения: то, что пилоту нужно знать из прежнего ответа, уже без нарушения. Правила: A1 голое имя файла не подлежащее; A10 без голых маркеров (exit/PASS), номер коммита рядом с русской фразой — адрес, он допустим; A7.1 журнал процесса (дефекты, пути к служебным отчётам, цепочки команд) в чат не идёт — даже под <details>, он в report.md; якоря (коммит, путь в репозитории, ссылка) идут; A13.1 имя из кода (функция, переменная, параметр, тип ошибки) без русского пояснения — опиши по-русски, что оно делает (например: «команда снятия заявок (note-commit --forget-unprovable)» без обратных кавычек) или убери; A14 «входит в / состоит из / делится на части» только о системах — об описании, документе, методе, состоянии говори глаголами («описывает», «хранит», «работает по»), в одном перечислении один род.${ESC_NOTE}"

@@ -417,7 +417,20 @@ fi
 # --- Шаг 4: формировать итоговое решение ---
 # Всегда объединяем с контекстом обязательства, если он есть. Если protocol fired,
 # возвращаем decision:block; если obligation дал warn/note, добавляем additionalContext.
+# The missing task list is a next-turn remark, not a block (WP-605, 25.11.2026): the list
+# cannot be made retroactively, a block only produced a second visible message (same
+# reasoning as ritual-shown-detector.sh, 13.10). If the remark cannot be stored, the
+# block below stays. The close obligation (step above) keeps blocking.
+DEFERRED=""
 if [ "$FIRED" = "1" ]; then
+  # shellcheck source=lib/next-turn-remark.sh
+  if . "${BASH_SOURCE[0]%/*}/lib/next-turn-remark.sh" 2>/dev/null \
+    && next_turn_remark_add "${CLAUDE_PROJECT_DIR:-$HOME/IWE}/.claude/state" "$SESSION_ID" \
+      "Скилл '${PROTOCOL_SKILL}' шёл без таск-листа (нужно ≥${THRESHOLD} задач, найдено ${LIST_MAX}). Пилоту об этом не пиши; при следующем запуске протокола сначала создай таск-лист с его шагами."; then
+    DEFERRED=1
+  fi
+fi
+if [ "$FIRED" = "1" ] && [ -z "$DEFERRED" ]; then
   PROTOCOL_REASON="⚠️ PROTOCOL-STOP-GATE [warn]: Скилл '$PROTOCOL_SKILL' был вызван, но таск-лист с ≥$THRESHOLD задачами (TodoWrite/TaskCreate или «Шаг N из M») не найден (найдено: $LIST_MAX). Протокол требует таск-лист ДО начала исполнения. Действие: создай таск-лист с шагами скилла и пройди протокол заново. (gate_log: $GATE_LOG)"
   if [ -n "$OBLIGATION_CTX" ]; then
     jq -nc \
