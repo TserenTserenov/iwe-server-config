@@ -1,13 +1,17 @@
 #!/usr/bin/env python3
-# claude-hook: false — Kimi Stop hook wired in ~/.kimi/config.toml, not in settings.json;
-# see check-orphan-hooks.sh.
+# claude-hook: false — Kimi Stop hook wired in ~/.kimi/config.toml and
+# ~/.kimi-code/config.toml, not in settings.json; see check-orphan-hooks.sh.
 """Kimi Stop hook: route the just-finished reply through the shared style check
 (РП-388 Ф21).
 
 Kimi's Stop payload carries no reply text (only hook_event_name, session_id,
-cwd, stop_hook_active), so the text is read from the session journal
-~/.kimi/sessions/<workspace>/<session_id>/context.jsonl: the text blocks of the
-last assistant message. The check itself is the shared core behind
+cwd, stop_hook_active), so the text is read from the session journal: the text
+blocks of the last assistant message. Two homes, one hook (WP-592 F6, 25.11):
+  - Kimi CLI from a terminal: ~/.kimi/sessions/<workspace>/<session_id>/context.jsonl,
+    one message per row;
+  - Kimi Code in VS Code: $KIMI_CODE_HOME (default ~/.kimi-code)/sessions/
+    <wd_...>/<session_id>/agents/main/wire.jsonl, the message wrapped in an
+    "agent.message.appended" event; session_id equals the folder name. The check itself is the shared core behind
 style-check-text.sh -- this file is the Kimi-side thin entry, not a third
 reimplementation (same shape as .codex/hooks/style_check_stop.py).
 
@@ -27,7 +31,33 @@ import tempfile
 
 WRAPPER = os.path.expanduser("~/IWE/.claude/hooks/style-check-text.sh")
 ORTHO = os.path.expanduser("~/IWE/.claude/hooks/ortho-check.py")
-SESSIONS = os.path.expanduser("~/.kimi/sessions")
+CLI_SESSIONS = os.path.expanduser("~/.kimi/sessions")
+CODE_SESSIONS = os.path.join(os.environ.get("KIMI_CODE_HOME") or os.path.expanduser("~/.kimi-code"), "sessions")
+# Kimi Code journal events that carry a whole chat message under row["message"]["message"].
+CODE_MESSAGE_EVENTS = ("agent.message.appended", "context.append_message")
+
+
+def find_journal(session_id: str) -> str:
+    """Journal of this session in either Kimi home, or "" if there is none."""
+    for pattern in (
+        os.path.join(CLI_SESSIONS, "*", session_id, "context.jsonl"),
+        os.path.join(CODE_SESSIONS, "*", session_id, "agents", "main", "wire.jsonl"),
+    ):
+        found = glob.glob(pattern)
+        if found:
+            return found[0]
+    return ""
+
+
+def _message(row: dict) -> dict:
+    """The chat message of a journal row: the row itself (CLI) or the wrapped one (Kimi Code)."""
+    if row.get("type") in CODE_MESSAGE_EVENTS:
+        outer = row.get("message")
+        inner = outer.get("message") if isinstance(outer, dict) else None
+        if isinstance(inner, dict):
+            return inner
+        return outer if isinstance(outer, dict) else {}
+    return row
 
 
 def last_assistant_text(journal_path: str) -> str:
@@ -40,6 +70,9 @@ def last_assistant_text(journal_path: str) -> str:
                 row = json.loads(line)
             except ValueError:
                 continue
+            if not isinstance(row, dict):
+                continue
+            row = _message(row)
             if row.get("role") != "assistant":
                 continue
             content = row.get("content")
@@ -67,10 +100,10 @@ def main() -> int:
     session_id = str(payload.get("session_id") or "")
     if not session_id or "/" in session_id or not os.access(WRAPPER, os.X_OK):
         return 0
-    journals = glob.glob(os.path.join(SESSIONS, "*", session_id, "context.jsonl"))
-    if not journals:
+    journal = find_journal(session_id)
+    if not journal:
         return 0
-    text = last_assistant_text(journals[0])
+    text = last_assistant_text(journal)
     if not text:
         return 0
 

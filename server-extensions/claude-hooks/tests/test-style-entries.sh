@@ -12,6 +12,8 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 TMP=$(mktemp -d)
 trap 'rm -rf "$TMP"' EXIT
 mkdir -p "$TMP/.kimi/sessions/ws/sess" "$TMP/.claude"
+CODE_SID="session_0f1e2d3c-aaaa-bbbb-cccc-000000000001"
+mkdir -p "$TMP/.kimi-code/sessions/wd_iwe_ab12/$CODE_SID/agents/main"
 ln -s "$ROOT" "$TMP/IWE"
 
 PASS=0; FAIL=0
@@ -37,6 +39,26 @@ kimi_hook() {  # kimi_hook <stop_hook_active>
   printf '{"hook_event_name":"Stop","session_id":"sess","stop_hook_active":%s}' "$1" \
     | HOME="$TMP" python3 -I "$ROOT/.claude/hooks/kimi-style-stop.py" 2>"$TMP/stderr"
 }
+kimi_code_journal() {  # kimi_code_journal <assistant text>: Kimi Code (VS Code) wire.jsonl
+  TEXT="$1" python3 -I - "$TMP/.kimi-code/sessions/wd_iwe_ab12/$CODE_SID/agents/main/wire.jsonl" <<'PY'
+import json, os, sys
+def appended(role, content):
+    return {"type": "agent.message.appended", "kind": "event",
+            "message": {"message": {"role": role, "content": content}, "meta": {}}}
+rows = [{"type": "metadata", "protocol_version": "1.5"},
+        appended("user", [{"type": "text", "text": "q"}]),
+        {"type": "context.append_loop_event", "event": {"type": "content.part",
+         "part": {"type": "text", "text": "noise that is not a message"}}},
+        appended("assistant", [{"type": "think", "think": "x"}, {"type": "text", "text": os.environ["TEXT"]}]),
+        # a later tool-call-only message carries no text and must not hide the reply
+        appended("assistant", [{"type": "think", "think": "y"}])]
+open(sys.argv[1], "w").write("\n".join(json.dumps(r, ensure_ascii=False) for r in rows) + "\n")
+PY
+}
+kimi_code_hook() {  # kimi_code_hook <stop_hook_active>: payload as Kimi Code sends it (snake_case)
+  printf '{"hook_event_name":"Stop","session_id":"%s","cwd":"/w","stop_hook_active":%s,"client_type":"vscode"}' "$CODE_SID" "$1" \
+    | HOME="$TMP" KIMI_CODE_HOME= python3 -I "$ROOT/.claude/hooks/kimi-style-stop.py" 2>"$TMP/stderr"
+}
 codex_hook() {  # codex_hook <reply> <stop_hook_active>
   REPLY_TEXT="$1" ACTIVE="$2" python3 -I -c '
 import json, os
@@ -58,6 +80,22 @@ printf '{"hook_event_name":"Stop","session_id":"missing","stop_hook_active":fals
   | HOME="$TMP" python3 -I "$ROOT/.claude/hooks/kimi-style-stop.py"; rc=$?
 check "kimi: unknown session fails open" test "$rc" -eq 0
 
+kimi_code_journal "$BAD"
+kimi_code_hook false; rc=$?
+check "kimi code: bad reply exits 2" test "$rc" -eq 2
+check "kimi code: stderr carries the reason" grep -q "Стиль нарушен" "$TMP/stderr"
+kimi_code_hook true; rc=$?
+check "kimi code: loop guard (stop_hook_active) exits 0" test "$rc" -eq 0
+kimi_code_journal "$GOOD"
+kimi_code_hook false; rc=$?
+check "kimi code: clean reply exits 0" test "$rc" -eq 0
+mkdir -p "$TMP/alt-code-home/sessions/wd_x_1/$CODE_SID/agents/main"
+cp "$TMP/.kimi-code/sessions/wd_iwe_ab12/$CODE_SID/agents/main/wire.jsonl" "$TMP/alt-code-home/sessions/wd_x_1/$CODE_SID/agents/main/"
+kimi_code_journal "$BAD"
+printf '{"hook_event_name":"Stop","session_id":"%s","stop_hook_active":false}' "$CODE_SID" \
+  | HOME="$TMP" KIMI_CODE_HOME="$TMP/alt-code-home" python3 -I "$ROOT/.claude/hooks/kimi-style-stop.py" 2>/dev/null; rc=$?
+check "kimi code: KIMI_CODE_HOME wins over ~/.kimi-code (clean copy there)" test "$rc" -eq 0
+
 out=$(codex_hook "$BAD" false)
 check "codex: bad reply returns block" grep -q '"decision": "block"' <<<"$out"
 out=$(codex_hook "$BAD" true)
@@ -70,12 +108,13 @@ A14_BAD='ИИ-агент — это система. В ней есть:
 - **Модель** — понимает запрос.
 - **Память** — хранит сведения.
 - **Правила** — задают границы.'
+# A14 blocking for Kimi and Codex is off since 24.11 (pilot decision, WP-388:
+# STYLE_BLOCK_A14=0 until a re-measure shows precision >= 0.7): logged, not blocked.
 kimi_journal "$A14_BAD"
 kimi_hook false; rc=$?
-check "kimi: A14 composition list exits 2" test "$rc" -eq 2
-check "kimi: A14 named in the reason" grep -q "A14" "$TMP/stderr"
+check "kimi: A14 composition list does not block (A14 blocking off)" test "$rc" -eq 0
 out=$(codex_hook "$A14_BAD" false)
-check "codex: A14 composition list returns block" grep -q '"decision": "block"' <<<"$out"
+check "codex: A14 composition list does not block (A14 blocking off)" test "$out" = "{}"
 
 # Claude path: no flag, so A14 stays warn-only (the core prints an empty object).
 printf '{"transcript_path":"%s","session_id":"claude-a14"}' "$TMP/t.jsonl" >"$TMP/claude-in.json"
