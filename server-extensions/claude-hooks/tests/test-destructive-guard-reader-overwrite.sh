@@ -342,5 +342,14 @@ expect "arrow glued to the word is a real redirect and still asks" ask 'r=$(echo
 expect "arrow without a space after it is a real redirect and still asks" ask 'r=$(echo "ok" | grep -E "x|y"); echo a =>params.yaml'
 expect "arrow message cannot reach a protective file" block 'r=$(echo "ok" | grep -E "x|y"); echo "a => $r"; echo hi > .claude/hooks/destructive-guard.sh'
 
+# === WP-7 F316 (25.11): variable inside the file name, `>=` comparison, <name@host> address ===
+expect "temporary variable with a second variable inside the file name" pass 'P=/tmp/s; for a in x y; do echo "$(echo '"'"'q'"'"')"; echo hi > $P/p2b-$a.md; done'
+expect "second variable as a whole path component still asks" ask 'P=/tmp/s; echo "$(echo '"'"'q'"'"')"; echo hi > $P/$a/y.md'
+expect "command substitution inside the file name still asks" ask 'P=/tmp/s; echo "$(echo '"'"'q'"'"')"; echo hi > $P/a$(echo b).md'
+expect "awk >= comparison after a quoted substitution" pass 'echo "$(echo '"'"'q'"'"')"; awk '"'"'$1>="2026-10-26"'"'"' F'
+expect "shell n>=2 comparison inside awk" pass 'echo "$(echo '"'"'q'"'"')"; awk '"'"'BEGIN{n=0} /^---$/{n++; next} n>=2'"'"' F'
+expect "address <name@host> closes a commit message" pass 'echo "$(echo '"'"'q'"'"')"; echo '"'"'{"m":"x <n@a.com>"}]}'"'"''
+expect "real redirect after an address still asks" ask 'echo "$(echo '"'"'q'"'"')"; echo "<n@a.com>" ; echo hi > params.yaml'
+
 echo "reader-overwrite: $PASS passed, $FAIL failed"
 [ "$FAIL" -eq 0 ]

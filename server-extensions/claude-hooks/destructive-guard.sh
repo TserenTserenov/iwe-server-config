@@ -141,12 +141,21 @@ dg_legacy_temp_exempt() {
       # The target they name stands right after a lone ` => ` / ` -> ` arrow of a message
       # (`echo "$m => $r"`, WP-7 F316, 23.11); this guard reads the same arrow as text, and asks
       # itself when a real redirect is there.
-      [ -n "$t" ] && { [[ "${CMD:-}" == *" => $t"* ]] || [[ "${CMD:-}" == *" -> $t"* ]]; } && return 0 ;;
+      [ -n "$t" ] && { [[ "${CMD:-}" == *" => $t"* ]] || [[ "${CMD:-}" == *" -> $t"* ]]; } && return 0
+      # The target they name stands right after a `>=` comparison or after the closing `>` of an
+      # address `<name@host>` (WP-7 F316, 25.11); the text is compared with its quotes removed.
+      if [ -n "$t" ]; then
+        local plain esc
+        plain=${CMD:-}; plain=${plain//[\"\'\\]/}
+        esc=$(printf '%s' "$t" | sed 's/[][\.*^$(){}?+|\/]/\\&/g')
+        case "$t" in "="*) [[ "$plain" == *">$t"* ]] && return 0 ;; esac
+        [[ "$plain" =~ @[^[:space:]\<\>]*\>$esc ]] && return 0
+      fi ;;
     *) return 1 ;;
   esac
-  [[ "$t" =~ ^\$(\{([A-Za-z_][A-Za-z0-9_]*)\}|([A-Za-z_][A-Za-z0-9_]*))(/[^\$\`]*)?$ ]] || return 1
+  [[ "$t" =~ ^\$(\{([A-Za-z_][A-Za-z0-9_]*)\}|([A-Za-z_][A-Za-z0-9_]*))(/[^\`]*)?$ ]] || return 1
   v=${BASH_REMATCH[2]:-${BASH_REMATCH[3]}}
-  case "$t" in */../*|*/..) return 1 ;; esac
+  case "$t" in */../*|*/..|*/\$*|*\$\(*|*\$) return 1 ;; esac
   case " $DG_TEMP_VARS " in *" $v "*) return 0 ;; esac
   return 1
 }
@@ -2788,6 +2797,10 @@ COMMENT_TAIL_PL="$TEXT_TARGETS_SUB"'
       # real `cmd => file` here; nobody writes that, and the protective-file block does not depend on
       # this ask (it reads the targets above and the literal fallback below).
       next if $op eq q{>} && substr($l, 0, $at) =~ /[ \t][=-]$/ && substr($l, $at + 1, 1) =~ /^[ \t]$/;
+      # `awk \x27$1>="2026-10-26"\x27`, `n>=2`: a comparison, not a redirection; and the closing `>` of an
+      # address such as `Co-Authored-By: Name <name@host>` in a commit message (WP-7 F316, 25.11).
+      next if $op !~ /&/ && substr($l, $at + length($op), 1) eq q{=};
+      next if $op eq q{>} && substr($l, 0, $at) =~ /<[^\s<>]*\@[^\s<>]*$/;
       next if $op =~ /&$/ && $op !~ /^&/ && $t =~ /^(?:\d+|-)$/;   # 2>&1, >&2, >&- copy a descriptor
       push @found, $t;
     }
@@ -2804,7 +2817,7 @@ COMMENT_TAIL_PL="$TEXT_TARGETS_SUB"'
       next if $t =~ m{^/dev/(null|stdout|stderr|tty|fd/\d+)$};
       next if $t =~ m{^(/tmp/|/private/tmp/|/var/folders/|/private/var/folders/|\$TMPDIR/|\$\{TMPDIR\}/)} && $t !~ m{/\.\.(/|$)};
       # A variable this call set to a temporary path (TEMP_VARS_PL below): same exemption.
-      if ($t =~ m{^\$(?:\{([A-Za-z_][A-Za-z0-9_]*)\}|([A-Za-z_][A-Za-z0-9_]*))(/[^\$`]*)?$} && $t !~ m{/\.\.(/|$)}) {
+      if ($t =~ m{^\$(?:\{([A-Za-z_][A-Za-z0-9_]*)\}|([A-Za-z_][A-Za-z0-9_]*))(/(?:[^\$`]|(?<=[^/])\$(?!\(|\z))*)?$} && $t !~ m{/\.\.(/|$)}) {
         my $v = defined $1 ? $1 : $2;
         next if grep { $_ eq $v } split / /, ($ENV{DG_TEMPV} // q{});
       }
@@ -2857,7 +2870,7 @@ READER_OVERWRITE=$(printf '%s\n' "$WRITE_TARGETS" | awk -F'\t' -v tv="$TEMP_VARS
     if (match(t, /^\$(\{[A-Za-z_][A-Za-z0-9_]*\}|[A-Za-z_][A-Za-z0-9_]*)/) && t !~ /\/\.\.(\/|$)/) {
       v = substr(t, 2, RLENGTH - 1); gsub(/[{}]/, "", v)
       rest = substr(t, RLENGTH + 1)
-      if (rest ~ /^(\/[^$`]*)?$/ && (" " tv " ") ~ (" " v " ")) next
+      if (rest ~ /^(\/[^`]*)?$/ && rest !~ /\/\$/ && rest !~ /\$\(/ && rest !~ /\$$/ && (" " tv " ") ~ (" " v " ")) next
     }
     print t
   }')
