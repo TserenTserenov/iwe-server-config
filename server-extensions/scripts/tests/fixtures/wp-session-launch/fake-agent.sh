@@ -7,6 +7,8 @@ decide() {
   printf '[{"id": "d1", "kind": "И", "question": "q", "options": ["a"], "choice": "a", "basis": "rule", "right": "auto", "depends_on": []}]\n' \
     > .wp-launch/decisions.json
 }
+# Another session moving the run branch while this agent works (smoke sets the command).
+[ -z "${FAKE_AGENT_AFTER:-}" ] || trap 'bash -c "$FAKE_AGENT_AFTER"' EXIT
 result() { printf '{"type": "result", "subtype": "%s", "is_error": %s, "num_turns": 3, "result": "fake summary"}\n' "$1" "$2"; }
 case "${FAKE_AGENT_SCENARIO:?}" in
   write-allowed) printf 'new\n' > allowed/new.md; printf 'changed\n' >> allowed/existing.md; decide; result success false ;;

@@ -30,6 +30,8 @@ printf '#!/bin/sh\ngit diff --cached --name-only | grep -q "^allowed/refuse-me.m
 chmod +x "$REPO/.githooks/pre-commit"
 git -C "$REPO" config core.hooksPath .githooks
 git -C "$REPO" add allowed other .gitignore .githooks && git -C "$REPO" commit -qm seed && git -C "$REPO" push -q origin main
+# Run branches as the WP Manager creates them (from main at run creation).
+for run in test-1 moved-1 conflict-1; do git -C "$REPO" push -q origin "main:refs/heads/run/$run"; done
 
 PASS=0 FAIL=0
 check() {  # check <name> <0 = ok> <detail>
@@ -47,6 +49,36 @@ print(json.dumps({"contract_version": sys.argv[2], "wp": "WP-568", "phase_id": "
                   "launched_by": sys.argv[4]}))
 PY
 }
+package_run() {  # package_run <attempt> <delivery_target> <run_key>
+  "$PY" - "$1" "$2" "$3" > "$TMP/pkg-$1.json" <<'PY'
+import json, sys
+print(json.dumps({"contract_version": "wp-launch/v1", "wp": "WP-568", "phase_id": "Ф25",
+                  "attempt_id": sys.argv[1], "repo": "DS-my-strategy", "agent": "claude", "model": "sonnet",
+                  "timeout_min": 5, "max_turns": 10, "prompt": "сделай фазу", "allowed_paths": ["allowed/"],
+                  "launched_by": "smoke", "delivery_target": sys.argv[2], "run_key": sys.argv[3]}))
+PY
+}
+launch_run() {  # launch_run <attempt> <scenario> <delivery_target> <run_key> -> RC, STATUS, MAN
+  package_run "$1" "$3" "$4"
+  FAKE_AGENT_SCENARIO="$2" "$PY" "$LAUNCHER" --test-mode --package "$TMP/pkg-$1.json" --runtime-dir "$RUNTIME" \
+    > "$TMP/out-$1" 2> "$TMP/err-$1"
+  RC=$?
+  MAN="$RUNTIME/WP-568/$1/manifest.json"
+  STATUS=$("$PY" -c 'import json,sys; m=json.load(open(sys.argv[1])); print(m["status"] if m.get("final") else "NOT-FINAL")' "$MAN" 2>/dev/null || echo NO-MANIFEST)
+}
+branch_has() { git -C "$REPO" fetch -q origin "refs/heads/$1" && git -C "$REPO" cat-file -e "FETCH_HEAD:$2" 2>/dev/null; }
+branch_lacks() { ! branch_has "$1" "$2"; }
+# mover.sh <run> <path> <content>: another session commits to the run branch (own clone, own index).
+cat > "$TMP/mover.sh" <<MOVER
+#!/usr/bin/env bash
+set -euo pipefail
+d=\$(mktemp -d)
+git clone -q --branch "run/\$1" "$TMP/origin.git" "\$d/c"
+mkdir -p "\$(dirname "\$d/c/\$2")" && printf '%s\\n' "\$3" > "\$d/c/\$2"
+git -C "\$d/c" add -- "\$2" && git -C "\$d/c" commit -qm "move \$1" && git -C "\$d/c" push -q origin "HEAD:refs/heads/run/\$1"
+rm -rf "\$d"
+MOVER
+chmod +x "$TMP/mover.sh"
 launch() {  # launch <attempt> <scenario> [contract] [allowed] [launched_by] -> RC, STATUS, MAN
   package "$1" "${3:-wp-launch/v1}" "${4:-allowed/}" "${5:-smoke}"
   FAKE_AGENT_SCENARIO="$2" "$PY" "$LAUNCHER" --test-mode --package "$TMP/pkg-$1.json" --runtime-dir "$RUNTIME" \
@@ -62,7 +94,11 @@ origin_has() { git -C "$REPO" fetch -q origin main && git -C "$REPO" cat-file -e
 origin_lacks() { ! origin_has "$1"; }
 origin_head() { git -C "$REPO" fetch -q origin main && git -C "$REPO" rev-parse origin/main; }
 close_calls() { local f; f="$FAKE_GUARD_STATE/$(field session_id).close-calls"; if [ -f "$f" ]; then wc -l < "$f" | tr -d ' '; else echo 0; fi; }
-copy_at_base() { local wt; wt=$(field worktree_path); [ -z "$(git -C "$wt" status --porcelain --untracked-files=all)" ] && [ "$(git -C "$wt" rev-parse HEAD)" = "$(field isolated_base)" ]; }
+copy_at_base() {  # the copy is clean at the point it is released from (release_base, else isolated_base)
+  local wt base; wt=$(field worktree_path); base=$(field release_base)
+  [ "$base" != None ] || base=$(field isolated_base)
+  [ -z "$(git -C "$wt" status --porcelain --untracked-files=all)" ] && [ "$(git -C "$wt" rev-parse HEAD)" = "$base" ]
+}
 pid_gone() { ! kill -0 "$1" 2>/dev/null; }
 expect() {  # expect <name> <status> <rc>
   check "$1: статус" "$(ok is "$STATUS" "$2")" "ждали $2, получили $STATUS: $(field failure_detail)"
@@ -87,6 +123,8 @@ check "delivered: отпечаток входа" "$(ok json_check 'm["inputs"][0
 check "delivered: pid агента в перечне" "$(ok json_check 'm["agent_pid"] > 0')" "agent_pid"
 check "delivered: метки попытки в коммите" "$(ok is "$(git -C "$REPO" log -1 --format='%(trailers:key=Launch-WP,valueonly)' origin/main | head -1)" WP-568)" "нет Launch-WP"
 check "delivered: один machine-close, сессия закрыта" "$(ok is "$(close_calls)/$(field session_open)" "1/False")" "close=$(close_calls)"
+check "delivered: заготовка отчёта вынесена из журнала" "$(ok is "$(ls "$FAKE_GUARD_STATE/journal/scaffold-$(field session_id).md" 2>/dev/null)/$(field orz_scaffold.moved)" "/True")" "$(field orz_scaffold)"
+check "delivered: заготовка в папке попытки" "$(ok test -f "$RUNTIME/WP-568/a1/orz-scaffold.md")" "нет orz-scaffold.md"
 check "delivered: пакетная заявка двух путей" "$(ok is "$(wc -l < "$FAKE_GUARD_STATE/$(field session_id).notes" | tr -d ' ')" 2)" "note-file"
 
 # Odd names: spaces, Cyrillic and a literal '*' are published as exactly these files.
@@ -106,6 +144,7 @@ launch a3 nothing
 expect no-changes no-changes 0
 check "no-changes: origin не тронут" "$(ok is "$(origin_head)" "$before")" "origin сдвинулся"
 check "no-changes: сессия закрыта" "$(ok is "$(field session_open)" False)" "session_open=$(field session_open)"
+check "no-changes: заготовка вынесена" "$(ok is "$(field orz_scaffold.moved)" True)" "$(field orz_scaffold)"
 
 # Refused attempts: nothing published, patch kept, copy reset, session released once.
 refused() {  # refused <attempt> <scenario> <status> <rc>
@@ -148,6 +187,7 @@ check "tamper-git: origin не тронут" "$(ok is "$(origin_head)" "$before"
 FAKE_CLOSE_MODE=fail launch a18 write-allowed
 expect close-fail committed-not-published 5
 check "close-fail: без автоповтора" "$(ok is "$(close_calls)" 1)" "вызовов $(close_calls)"
+check "close-fail: заготовка не тронута, пока сессия открыта" "$(ok test -f "$FAKE_GUARD_STATE/journal/scaffold-$(field session_id).md")" "заготовку унесли"
 check "close-fail: публикации нет" "$(ok is "$(field publication.state)" absent)" "$(field publication)"
 
 # Close publishes, then fails -> published-close-failed.
@@ -208,6 +248,72 @@ package a30
 FAKE_AGENT_SCENARIO=nothing "$PY" "$LAUNCHER" --test-mode --package "$TMP/pkg-a30.json" >/dev/null 2>&1; RC=$?
 MAN="$IWE_ROOT/.iwe-runtime/wp-launch/WP-568/a30/manifest.json"; STATUS=$(field status)
 expect default-runtime-dir no-changes 0
+
+# Run branch delivery (WP-626 revision 2): the attempt lands on run/<run_id>, main is untouched.
+before=$(origin_head)
+launch_run r1 write-allowed run/test-1 'test-1#3'
+expect run-delivered delivered 0
+check "run-delivered: файл в ветке прогона" "$(ok branch_has run/test-1 allowed/new.md)" "нет в run/test-1"
+check "run-delivered: главная ветка не тронута" "$(ok is "$(origin_head)" "$before")" "main сдвинулась"
+git -C "$REPO" fetch -q origin refs/heads/run/test-1
+check "run-delivered: метка Run-Event" "$(ok is "$(git -C "$REPO" log -1 --format='%(trailers:key=Run-Event,valueonly)' FETCH_HEAD | head -1)" 'test-1#3')" "нет Run-Event"
+check "run-delivered: подтверждено в ветке прогона" "$(ok is "$(field publication.state)/$(field publication.branch)" "confirmed/run/test-1")" "$(field publication)"
+check "run-delivered: копия у базы" "$(ok copy_at_base)" "копия не у базы"
+check "run-delivered: сессия снята одним закрытием" "$(ok is "$(close_calls)/$(field session_open)" "1/False")" "close=$(close_calls) open=$(field session_open)"
+check "run-delivered: undelivered.patch убран" "$(ok is "$(ls "$RUNTIME/WP-568/r1/undelivered.patch" 2>/dev/null)" "")" "patch остался"
+
+# The run branch moved while the agent worked: the attempt is replayed on top, nothing is lost.
+FAKE_AGENT_AFTER="$TMP/mover.sh moved-1 other/moved.md other" launch_run r2 write-allowed run/moved-1 'moved-1#1'
+expect run-moved delivered 0
+check "run-moved: чужой коммит ветки сохранён" "$(ok branch_has run/moved-1 other/moved.md)" "пропал other/moved.md"
+check "run-moved: попытка поверх" "$(ok branch_has run/moved-1 allowed/new.md)" "нет allowed/new.md"
+
+# No run branch: refused before any session (the Manager creates the branch, never the launcher).
+before=$(origin_head)
+launch_run r3 write-allowed run/absent-1 'absent-1#1'
+expect run-missing launcher-failed 2
+check "run-missing: сессия не открывалась" "$(ok is "$(field worktree_path)" None)" "worktree=$(field worktree_path)"
+check "run-missing: главная не тронута" "$(ok is "$(origin_head)" "$before")" "main сдвинулась"
+
+# A conflicting commit lands on the run branch while the agent works: no push, patch kept, session released.
+FAKE_AGENT_AFTER="$TMP/mover.sh conflict-1 allowed/existing.md run-change" launch_run r4 write-allowed run/conflict-1 'conflict-1#2'
+expect run-conflict committed-not-published 5
+check "run-conflict: причина — конфликт" "$(ok grep -q 'конфликт' <<<"$(field failure_detail)")" "$(field failure_detail)"
+check "run-conflict: ветка прогона не тронута" "$(ok branch_lacks run/conflict-1 allowed/new.md)" "попытка попала в ветку"
+check "run-conflict: патч сохранён" "$(ok grep -q 'Launch-Attempt: r4' "$RUNTIME/WP-568/r4/undelivered.patch")" "нет undelivered.patch"
+check "run-conflict: главная не тронута" "$(ok origin_lacks allowed/run-only.md)" "main получила файл прогона"
+check "run-conflict: копия у базы" "$(ok copy_at_base)" "копия не у базы"
+check "run-conflict: сессия снята" "$(ok is "$(field session_open)" False)" "open=$(field session_open)"
+
+# Earlier phase results live only on the run branch: the copy starts there, main never receives them.
+"$TMP/mover.sh" test-1 allowed/run-only.md "earlier phase"
+before=$(origin_head)
+launch_run r7 write-allowed run/test-1 'test-1#4'
+expect run-earlier-phase delivered 0
+check "run-earlier-phase: копия начиналась с ветки прогона" "$(ok is "$(git -C "$REPO" cat-file -e "$(field isolated_base):allowed/run-only.md" && echo yes)" yes)" "база не ветка прогона"
+check "run-earlier-phase: главная не получила файлы прогона" "$(ok is "$(origin_head)" "$before")" "main сдвинулась"
+check "run-earlier-phase: копия возвращена к точке ответвления" "$(ok copy_at_base)" "копия не у release_base"
+
+# open answers without the copy: a run copy is never closed blind (it sits on the run tip, not on main).
+before=$(origin_head)
+FAKE_OPEN_NO_JSON=1 launch_run r8 write-allowed run/test-1 'test-1#5'
+expect run-open-no-json launcher-failed 2
+check "run-open-no-json: нужна сверка" "$(ok is "$(field needs_reconcile)" True)" "needs_reconcile=$(field needs_reconcile)"
+check "run-open-no-json: закрытие не вызывалось" "$(ok is "$(close_calls)" 0)" "close=$(close_calls)"
+check "run-open-no-json: главная не получила фазы прогона" "$(ok is "$(origin_head)" "$before")" "main сдвинулась"
+check "run-open-no-json: точка ответвления записана до открытия" "$(ok is "$(field release_base | wc -c | tr -d ' ')" 41)" "release_base=$(field release_base)"
+
+# run_key of another run, or a run_key without a run target: refused before any session.
+launch_run r5 write-allowed run/test-1 'other-1#3'
+expect run-key-mismatch launcher-failed 2
+check "run-key-mismatch: сессия не открывалась" "$(ok is "$(field session_id)" None)" "session_id=$(field session_id)"
+launch_run r6 write-allowed main 'test-1#3'
+expect run-key-without-run launcher-failed 2
+
+# A scaffold someone filled in is left in the journal.
+FAKE_SCAFFOLD_TOUCH=1 launch a31 nothing
+expect scaffold-touched no-changes 0
+check "scaffold-touched: заготовка не унесена" "$(ok is "$(field orz_scaffold.moved)" False)" "$(field orz_scaffold)"
 
 # Package refusals.
 MAN="$RUNTIME/WP-568/a1/manifest.json"

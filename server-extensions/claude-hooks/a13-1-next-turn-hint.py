@@ -14,6 +14,13 @@ A13.1 hint it is not skipped for short prompts: «да» / «заливай» ar
 turns that follow a "Дальше:" line. The signal itself is logged by
 response-clarity-hook.sh, so no extra log here.
 
+A fourth hint (WP-608, 23.11, pilot's word): a list or a table column of the
+previous answer that mixes kinds — systems with functional parts, systems with
+descriptions (base rule 8: one kind and one partition per row). The judgement
+is the registry check of scripts/concept-kind.py (check-rows); its own log is
+~/.claude/logs/style-rows-hints.log. Not skipped for short prompts: a table
+usually ends a long report that «да» answers.
+
 A third hint (РП-388 Ф39, 03.11, pilot's word): inner IWE words of pack rule 9
 («корень», «канон», «боевой»…) in the previous answer that the pilot has not
 used himself. It is a separate signal from A13.1 with its own log
@@ -44,6 +51,18 @@ except Exception as exc:  # the place hint is optional: a missing or broken a12 
     print(f"a13-1-next-turn-hint: place hint disabled, cannot load a12-next-block.py: {exc!r}", file=sys.stderr)
     _a12_next = None
 
+# The row check lives with the registry tools in <root>/scripts; a missing script, PyYAML or
+# registry disables only this hint.
+try:
+    _CK_SPEC = importlib.util.spec_from_file_location(
+        "concept_kind", Path(__file__).resolve().parents[2] / "scripts" / "concept-kind.py")
+    _ck = importlib.util.module_from_spec(_CK_SPEC)
+    _CK_SPEC.loader.exec_module(_ck)
+    _CK_DATA, _ = _ck.load()
+except (Exception, SystemExit) as exc:  # concept-kind.py exits 0 on import when PyYAML is absent
+    print(f"a13-1-next-turn-hint: rows hint disabled, registry check unavailable: {exc!r}", file=sys.stderr)
+    _ck = None
+
 # Prompts that get no hint (cold review by Fable, 01.11, point 7): a short
 # reply or a question is not a turn that needs prose. Acknowledgements
 # («да», «заливай», «псз») are all shorter than the threshold.
@@ -67,6 +86,25 @@ JARGON_HINT = ("Подсказка по стилю (правило A0 и пра�
                "ответе были слова внутренней кухни IWE: {words}. В этом ответе переводи их простыми понятными "
                "словами (словарь — пак, правило 9), если пилот сам не употребляет их в этом "
                "разговоре. Прошлый ответ не исправлять и не упоминать.")
+
+
+ROWS_HINT = ("Подсказка по стилю (правило 8 пака, пилот её не видит): в прошлом ответе ряд "
+             "смешивал роды: {row} В этом ответе в одном ряду (строки одного списка, первая колонка "
+             "таблицы) один род и одно разбиение: функциональные части отдельно от физических "
+             "объектов, описания и документы отдельно от систем; связь между ними — отдельной "
+             "колонкой «кто выполняет»; в заголовке колонки назови род. Прошлый ответ не исправлять "
+             "и не упоминать.")
+
+
+def mixed_rows(answer):
+    """Row warnings of the registry check for the answer; [] when the check is unavailable."""
+    if _ck is None or not answer:
+        return []
+    try:
+        return _ck.row_warnings(_CK_DATA, answer)
+    except Exception as exc:  # a malformed registry entry must not take the other hints down
+        print(f"a13-1-next-turn-hint: rows check failed: {exc!r}", file=sys.stderr)
+        return []
 
 
 def wants_hint(prompt):
@@ -159,6 +197,13 @@ def main(argv):
         hints.append(JARGON_HINT.format(words=", ".join(words)))
     if place_line(answer):
         hints.append(PLACE_HINT)
+    rows = mixed_rows(strip_fences(answer))
+    if rows:
+        try:
+            log_hint(os.environ.get("SESSION_ID", "unknown"), rows, name="style-rows-hints.log")
+        except OSError as exc:
+            print(f"style-next-turn-hint: rows log write failed: {exc}", file=sys.stderr)
+        hints.append(ROWS_HINT.format(row=rows[0]))
     if hints:
         print("\n".join(hints))
     return 0

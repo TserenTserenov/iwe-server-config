@@ -208,14 +208,25 @@ check "words the pilot used himself are not reported" \
   "$(printf '%s' "$out" | grep -q 'изолированной копии' && ! printf '%s' "$out" | grep -q 'боевом' && echo yes || echo no)" "$out"
 
 # --- Rows hint (WP-608, 23.11, base rule 8: one kind per row) ---
-ROWS=$'Кто работает:\n- Сервер Open MCP\n- Инструкция для ИИ\n\nДальше: вы: проверить.'
-make_transcript rows "$ROWS" "да"
-out=$(run_hook rows "да")
-check "rows hint names the mixed kinds, even after a short prompt" \
-  "$(printf '%s' "$out" | grep -q 'ряд смешивал роды' && printf '%s' "$out" | grep -q 'Сервер Open MCP' && echo yes || echo no)" "$out"
-check "rows hint is logged in its own file" \
-  "$(grep -qE '\| rows \| 1 \| ' "$TMP/rows/home/.claude/logs/style-rows-hints.log" 2>/dev/null && echo yes || echo no)" \
-  "$(cat "$TMP/rows/home/.claude/logs/"*.log 2>/dev/null)"
+# The row check reads the concept registry of the PACK-digital-platform repo, which the root repo
+# does not track: a clean clone (the sync gate's snapshot) has none, and the hook then turns this
+# hint off by design. Without the registry the two positive checks cannot be verified -> exit 77.
+ROOT_DIR="$(cd "$HOOKS/../.." && pwd)"
+REGISTRY="${CONCEPT_KINDS_REGISTRY-$ROOT_DIR/PACK-digital-platform/pack/digital-platform/concept-kinds-registry.yaml}"
+NOT_VERIFIED=0
+if [ -f "$REGISTRY" ]; then
+  ROWS=$'Кто работает:\n- Сервер Open MCP\n- Инструкция для ИИ\n\nДальше: вы: проверить.'
+  make_transcript rows "$ROWS" "да"
+  out=$(run_hook rows "да")
+  check "rows hint names the mixed kinds, even after a short prompt" \
+    "$(printf '%s' "$out" | grep -q 'ряд смешивал роды' && printf '%s' "$out" | grep -q 'Сервер Open MCP' && echo yes || echo no)" "$out"
+  check "rows hint is logged in its own file" \
+    "$(grep -qE '\| rows \| 1 \| ' "$TMP/rows/home/.claude/logs/style-rows-hints.log" 2>/dev/null && echo yes || echo no)" \
+    "$(cat "$TMP/rows/home/.claude/logs/"*.log 2>/dev/null)"
+else
+  NOT_VERIFIED=1
+  echo "NOT VERIFIED rows hint: concept registry not found at $REGISTRY"
+fi
 make_transcript rowsok "$CLEAN" "да"
 out=$(run_hook rowsok "да")
 check "no rows hint for an answer without mixed rows" \
@@ -223,4 +234,5 @@ check "no rows hint for an answer without mixed rows" \
 
 echo "---"
 echo "passed: $PASS, failed: $FAIL"
-[ "$FAIL" -eq 0 ]
+[ "$FAIL" -eq 0 ] || exit 1
+[ "$NOT_VERIFIED" -eq 0 ] || exit 77

@@ -36,9 +36,23 @@ files at any depth) can never be allowed, so the agent cannot publish a change
 to code run at commit. Every new ignored file refuses the attempt: it would
 never be published, so a result written there would be lost silently.
 
-Delivery target of v0 is origin/main. WP-626 revision 2 expects a run branch
-(run/<run_id>) instead; until that mode exists the launcher is not used with
-the WP Manager (WP-530 F161).
+Delivery target: package field delivery_target, "main" by default (one
+machine-close publishes to origin/main) or "run/<run_id>" for the WP Manager
+(WP-626 revision 2; answer to WP-530 И-6, 25.11). The run branch is created by
+the Manager; the copy starts at its tip (--base-sha), so the agent sees the
+results of earlier phases. The launcher only catches the branch up: its
+commit is pushed there without force, replayed on the moved branch and
+pushed again if another session got there first (three tries). Nothing
+reaches main: session-guard publishes the copy's commits not in origin/main,
+so before the release the copy is reset to the point where the run branch
+left main (release_base) and the session closes with nothing to publish. A run delivery
+requires run_key "<run_id>#<seq>" (seq = the phase-assigned event of this
+attempt in the run journal); it goes into the commit as "Run-Event:". The
+replayed commit is kept as undelivered.patch when the push did not land.
+
+session-guard open leaves an empty report scaffold in the sessions journal.
+A machine session never fills it, so once the session is closed the launcher
+moves it, if still untouched, into the attempt directory (orz-scaffold.md).
 
 Signals: SIGTERM, SIGHUP and SIGINT stop the agent and release the session.
 During machine-close and the publication check a signal is only recorded
@@ -49,7 +63,8 @@ retry_close; the exit code is then never 0.
 The manifest (manifest.json in the attempt directory) is rewritten atomically
 through a uniquely named temporary file next to it; readers read only
 manifest.json. `final: true` appears only in the last write. An attempt
-directory without a manifest is an unfinished registration; final:false with
+directory without a manifest is an unfinished registration; session_maybe_open
+without session_open means the launcher stopped inside open; final:false with
 no live launcher (check host + launcher_pid + started_at) means "unknown,
 reconcile first", never "start a duplicate". needs_reconcile: true means the
 launcher refused to touch the session (copy identity changed, reset failed).
@@ -88,9 +103,14 @@ DECISIONS_MAX_BYTES = 256 * 1024
 FORBIDDEN_TOP = {DECISIONS_DIR, ".githooks", "scripts", ".claude", ".github"}
 # Git's own files: never publishable at any depth.
 FORBIDDEN_ANY = {".git", ".gitattributes", ".gitmodules", ".gitignore"}
+SCAFFOLD_LINE = re.compile(r"^ORZ scaffold создан: (?P<path>/.+\.md)$", re.M)
 SAFE_TOKEN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
 MODEL_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,63}$")
 WP_ID = re.compile(r"^WP-[1-9][0-9]*$")
+RUN_ID = r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}"
+RUN_TARGET = re.compile(rf"^run/(?P<run>{RUN_ID})$")
+RUN_KEY = re.compile(rf"^(?P<run>{RUN_ID})#[1-9][0-9]*$")
+RUN_PUSH_TRIES = 3
 ONE_LINE = re.compile(r"^[^\x00-\x1f\x7f]{1,200}$")
 TIMEOUT_MIN_MAX = 180  # below the session lease (4 h) with room for open, commit and close
 CLOSE_TIMEOUT_S = 900
@@ -279,7 +299,19 @@ def validate_package(pkg: dict, iwe_root: Path) -> dict:
     need(isinstance(allowed, list) and allowed, "allowed_paths: непустой список")
     inputs = pkg.get("inputs", [])
     need(isinstance(inputs, list), "inputs: список путей")
+    target = pkg.get("delivery_target", "main")
+    run_target = RUN_TARGET.match(target) if isinstance(target, str) else None
+    need(target == "main" or run_target is not None, "delivery_target: main или run/<run_id>")
+    run_key = pkg.get("run_key")
+    if run_target:
+        key = RUN_KEY.match(run_key) if isinstance(run_key, str) else None
+        need(key is not None and key["run"] == run_target["run"],
+             "run_key: <run_id>#<seq> того же прогона, что delivery_target")
+    else:
+        need(run_key is None, "run_key задаётся только с delivery_target run/<run_id>")
     return {
+        "target": target,
+        "run_key": run_key,
         "repo_dir": repo_dir,
         "governance": governance,
         "allowed": sorted({normalize_path(a, publishable=True) for a in allowed}),
@@ -298,10 +330,13 @@ def session_env(iwe_root: Path, governance: str, session_id: str) -> dict:
 
 def open_session(ctx: dict, pkg: dict, manifest: Manifest) -> Path | None:
     task = f"wp-launch {pkg['wp']} {pkg['phase_id']} attempt {pkg['attempt_id']} by {pkg['launched_by']}"
+    # If the launcher dies inside open, session_maybe_open tells the reader a session may exist.
+    manifest.stage("opening", session_maybe_open=True)
     proc = subprocess.run(
         ["bash", str(ctx["guard"]), "open", "--wp", pkg["wp"], "--agent", SEMAPHORE_AGENT,
          "--task", task, "--slug", ctx["slug"], "--isolate", "--owner-pid", str(os.getpid()),
-         "--close-path", "machine-publish-only"],
+         "--close-path", "machine-publish-only",
+         *(["--base-sha", ctx["base_sha"]] if ctx.get("base_sha") else [])],
         cwd=ctx["repo_dir"], env=ctx["env"], capture_output=True, text=True)
     (ctx["attempt_dir"] / "session-open.log").write_text(
         f"rc={proc.returncode}\n{proc.stdout}\n--- stderr ---\n{proc.stderr}", encoding="utf-8")
@@ -312,12 +347,18 @@ def open_session(ctx: dict, pkg: dict, manifest: Manifest) -> Path | None:
     manifest.stage("opened", session_open=True,
                    retry_close={"operation": "machine-close", "tool": "scripts/session-guard.sh",
                                 "agent": SEMAPHORE_AGENT, "session_id": ctx["session_id"],
-                                "target": "origin/main"})
+                                "publishes_to": "origin/main",
+                                "precondition": ("copy clean at release_base: everything above it would be "
+                                                 "published to origin/main") if ctx["target"] != "main"
+                                else "copy clean; its own commits are what gets published"})
     info = next((json.loads(line) for line in reversed(proc.stdout.splitlines())
                  if line.strip().startswith("{") and line.strip().endswith("}")), {})
     worktree = Path(info["worktree_path"]) if info.get("worktree_path") else None
     if info.get("session_id") != ctx["session_id"] or worktree is None or not worktree.is_dir():
         raise LaunchError("launcher-failed", "launcher", "session-guard open: в ответе нет копии этой сессии")
+    scaffold = SCAFFOLD_LINE.search(proc.stdout)
+    if scaffold and Path(scaffold["path"]).is_file():
+        manifest.stage(orz_scaffold={"path": scaffold["path"], "sha256": sha256_file(Path(scaffold["path"]))})
     manifest.stage(worktree_path=str(worktree))
     return worktree
 
@@ -553,8 +594,8 @@ def stage_changes(worktree: Path, attempt_dir: Path, changes: list[tuple[str, st
         git(worktree, "add", f"--pathspec-from-file={spec}", "--pathspec-file-nul")
 
 
-def discard_attempt(worktree: Path, base: str, attempt_dir: Path) -> None:
-    """Keep the refused work as a patch against base, then return the copy to base.
+def discard_attempt(worktree: Path, base: str, reset_to: str, attempt_dir: Path) -> None:
+    """Keep the refused work as a patch against base, then reset the copy to reset_to.
 
     The copy belongs to this attempt only; resetting it lets machine-close
     release the session without publishing anything.
@@ -567,7 +608,7 @@ def discard_attempt(worktree: Path, base: str, attempt_dir: Path) -> None:
     stage_changes(worktree, attempt_dir, [(c, p) for c, p in changes if not p.endswith("/")])
     patch = git(worktree, "diff", "--binary", "--cached", base, binary=True).stdout
     (attempt_dir / "rejected.patch").write_bytes(patch)
-    git(worktree, "reset", "-q", "--hard", base)
+    git(worktree, "reset", "-q", "--hard", reset_to)
     git(worktree, "clean", "-ffdq")
 
 
@@ -579,7 +620,8 @@ def commit_changes(ctx: dict, worktree: Path, changes: list[tuple[str, str]], pk
     message.write_text(
         f"wp-launch({pkg['wp']}): {pkg['phase_id']} attempt {pkg['attempt_id']}\n\n"
         f"Launch-Attempt: {pkg['attempt_id']}\nLaunch-WP: {pkg['wp']}\nLaunch-Contract: {CONTRACT_VERSION}\n"
-        f"Launched-By: {pkg['launched_by']}\n", encoding="utf-8")
+        f"Launched-By: {pkg['launched_by']}\n"
+        + (f"Run-Event: {pkg['run_key']}\n" if pkg.get("run_key") else ""), encoding="utf-8")
     spec = pathspec_file(ctx["attempt_dir"], "commit-paths.nul", paths)
     proc = subprocess.run(["git", "-C", str(worktree), "commit", "-F", str(message),
                            f"--pathspec-from-file={spec}", "--pathspec-file-nul"],
@@ -668,6 +710,7 @@ def deliver(ctx: dict, commit: str, artifacts: list[dict], manifest: Manifest) -
         rc_close, detail = machine_close(ctx)
         if rc_close == 0:
             manifest.stage("closed", session_open=False)
+            take_scaffold(ctx["attempt_dir"], manifest)
         publication = check_publication(ctx, commit, artifacts)
         manifest.stage("verified", publication=publication)
     state = publication["state"]
@@ -683,6 +726,113 @@ def deliver(ctx: dict, commit: str, artifacts: list[dict], manifest: Manifest) -
     return "delivered"
 
 
+def deliver_to_run_branch(ctx: dict, worktree: Path, base: str, commit: str, artifacts: list[dict],
+                          manifest: Manifest) -> str:
+    """Replay the commit on the fresh run branch and push it there; never touch main.
+
+    The session branch goes back to base afterwards, so the release that
+    follows publishes nothing. The commit is kept as undelivered.patch first.
+    """
+    branch = ctx["target"]
+    session_branch = manifest.data["copy_identity"]["branch"]
+    patch = git(worktree, "format-patch", "-1", "--binary", "--stdout", commit, binary=True).stdout
+    (ctx["attempt_dir"] / "undelivered.patch").write_bytes(patch)
+    manifest.stage("pushing-run-branch")
+    with SIGNALS.deferred(manifest):
+        try:
+            pushed, detail = push_to_run_branch(ctx, worktree, branch, commit)
+        finally:
+            git(worktree, "checkout", "-q", "--force", session_branch)
+            git(worktree, "reset", "-q", "--hard", manifest.data["release_base"])
+        publication = check_run_branch(ctx, branch, pushed, artifacts)
+    manifest.stage("verified", publication=publication)
+    if pushed is None:
+        raise LaunchError("committed-not-published", "delivery", f"ветка {branch}: {detail}")
+    if publication["state"] != "confirmed":
+        raise LaunchError("delivery-unknown", "delivery",
+                          f"отправка в {branch} прошла, проверка не подтвердила: {publication.get('detail')}")
+    (ctx["attempt_dir"] / "undelivered.patch").unlink()
+    return "delivered"
+
+
+def push_to_run_branch(ctx: dict, worktree: Path, branch: str, commit: str) -> tuple[str | None, str]:
+    """(pushed sha, "") or (None, reason). Only a non-fast-forward rejection is retried on the moved branch."""
+    env = {**ctx["env"], "GIT_TERMINAL_PROMPT": "0"}
+    reason = "не начато"
+    for _ in range(RUN_PUSH_TRIES):
+        fetched = git(worktree, "fetch", "-q", "origin", f"refs/heads/{branch}", check=False)
+        if fetched.returncode != 0:
+            return None, f"ветки прогона нет на origin или fetch не прошёл: {fetched.stderr.strip()[-200:]}"
+        tip = git(worktree, "rev-parse", "FETCH_HEAD").stdout.strip()
+        if tip == git(worktree, "rev-parse", f"{commit}^").stdout.strip():
+            replayed = commit  # the branch did not move: the attempt's own commit goes as is
+        else:
+            git(worktree, "checkout", "-q", "--detach", tip)
+            picked = subprocess.run(["git", "-C", str(worktree), "cherry-pick", commit],
+                                    env=env, capture_output=True, text=True)
+            if picked.returncode != 0:
+                git(worktree, "cherry-pick", "--abort", check=False)
+                return None, f"конфликт с веткой прогона: {(picked.stderr or picked.stdout).strip()[-200:]}"
+            replayed = git(worktree, "rev-parse", "HEAD").stdout.strip()
+        pushed = subprocess.run(["git", "-C", str(worktree), "push", "-q", "origin",
+                                 f"{replayed}:refs/heads/{branch}"], env=env, capture_output=True, text=True)
+        with (ctx["attempt_dir"] / "run-push.log").open("a", encoding="utf-8") as log:
+            log.write(f"[{now_iso()}] tip={tip} replayed={replayed} rc={pushed.returncode}\n{pushed.stderr}\n")
+        if pushed.returncode == 0:
+            return replayed, ""
+        reason = f"отправка отклонена: {pushed.stderr.strip()[-200:]}"
+        if not any(mark in pushed.stderr for mark in ("non-fast-forward", "fetch first")):
+            return None, reason
+    return None, f"ветка двигалась все {RUN_PUSH_TRIES} попытки; {reason}"
+
+
+def take_scaffold(attempt_dir: Path, manifest: Manifest) -> None:
+    """Move the untouched report scaffold of a closed session out of the sessions journal."""
+    scaffold = manifest.data.get("orz_scaffold")
+    if not scaffold:
+        return
+    path = Path(scaffold["path"])
+    try:
+        unchanged = path.is_file() and sha256_file(path) == scaffold["sha256"]
+    except OSError:
+        unchanged = False
+    if not unchanged:
+        manifest.stage(orz_scaffold={**scaffold, "moved": False, "reason": "заготовку изменили или убрали"})
+        return
+    target = attempt_dir / "orz-scaffold.md"
+    try:
+        path.replace(target)
+    except OSError as exc:
+        manifest.stage(orz_scaffold={**scaffold, "moved": False, "reason": f"перенос не удался: {exc}"})
+        return
+    manifest.stage(orz_scaffold={**scaffold, "moved": True, "to": str(target)})
+
+
+def fetch_run_tip(repo_dir: Path, branch: str) -> str:
+    """Tip of the run branch on origin; the Manager creates the branch, the launcher never does."""
+    fetched = git(repo_dir, "fetch", "-q", "origin", f"+refs/heads/{branch}:refs/remotes/origin/{branch}",
+                  check=False)
+    if fetched.returncode != 0:
+        raise LaunchError("launcher-failed", "launcher",
+                          f"ветки {branch} нет на origin (её создаёт Менеджер РП): {fetched.stderr.strip()[-200:]}")
+    return git(repo_dir, "rev-parse", f"refs/remotes/origin/{branch}").stdout.strip()
+
+
+def check_run_branch(ctx: dict, branch: str, pushed: str | None, artifacts: list[dict]) -> dict:
+    record = {"remote": "origin", "branch": branch, "method": "push", "checked_at": now_iso()}
+    if pushed is None:
+        return {**record, "state": "absent"}
+    repo = ctx["repo_dir"]
+    if git(repo, "fetch", "-q", "origin", f"refs/heads/{branch}", check=False).returncode != 0:
+        return {**record, "state": "unknown", "detail": "fetch ветки прогона не прошёл", "published_commit": pushed}
+    head = git(repo, "rev-parse", "FETCH_HEAD").stdout.strip()
+    on_branch = git(repo, "merge-base", "--is-ancestor", pushed, head, check=False).returncode == 0
+    mismatch = content_mismatch(repo, pushed, artifacts) if on_branch else "коммита нет в ветке"
+    if mismatch:
+        return {**record, "state": "unknown", "detail": mismatch, "published_commit": pushed, "checked_head": head}
+    return {**record, "state": "confirmed", "published_commit": pushed, "checked_head": head}
+
+
 # --- main flow ---------------------------------------------------------------------
 
 def run(pkg: dict, iwe_root: Path, attempt_dir: Path, manifest: Manifest, seams: Seams) -> str:
@@ -695,8 +845,17 @@ def run(pkg: dict, iwe_root: Path, attempt_dir: Path, manifest: Manifest, seams:
         "slug": f"launch-{pkg['wp'].lower()}-{pkg['attempt_id']}"[:96],
         "env": session_env(iwe_root, checked["governance"], session_id),
     }
+    ctx["target"] = checked["target"]
+    if ctx["target"] != "main":
+        ctx["base_sha"] = fetch_run_tip(checked["repo_dir"], ctx["target"])
+        fork = git(checked["repo_dir"], "merge-base", ctx["base_sha"], "refs/remotes/origin/main", check=False)
+        if fork.returncode != 0:
+            raise LaunchError("launcher-failed", "launcher", f"ветка {ctx['target']} не отходит от origin/main")
+        # Recorded before open: any failure after open must reset the copy here before closing.
+        manifest.stage(release_base=fork.stdout.strip())
     manifest.stage("validated", allowed_paths=checked["allowed"], session_id=session_id,
-                   slug=ctx["slug"], repo=pkg["repo"])
+                   slug=ctx["slug"], repo=pkg["repo"], delivery_target=checked["target"],
+                   run_key=checked["run_key"])
     worktree = None
     try:
         worktree = open_session(ctx, pkg, manifest)
@@ -715,18 +874,25 @@ def release_unpublished(ctx: dict, worktree: Path | None, manifest: Manifest) ->
     """Release a session that must not publish: reset its copy to base, then close.
 
     If the copy cannot be shown to be back at base, the session is left open
-    for reconciliation: closing it would publish whatever is there. Without a
-    recorded base the failure came before the agent ran, so the copy is still
-    as session-guard created it.
+    for reconciliation: closing it would publish whatever is there. A main
+    copy without a recorded base failed before the agent ran and still sits on
+    origin/main as session-guard created it. A run copy sits on the run tip,
+    whose earlier phases are not in main, so it is always reset to
+    release_base first; when the copy itself is unknown it is not closed.
     """
     base = manifest.data.get("isolated_base")
+    release_base = manifest.data.get("release_base") or base
+    if worktree is None and ctx["target"] != "main":
+        manifest.stage(needs_reconcile=True,
+                       reconcile_reason="копия прогона неизвестна: закрытие опубликовало бы ветку прогона в main")
+        return
     try:
-        if worktree is not None and base:
+        if worktree is not None and release_base:
             dirty = git(worktree, "status", "--porcelain", "--untracked-files=all").stdout.strip()
-            if dirty or git(worktree, "rev-parse", "HEAD").stdout.strip() != base:
-                discard_attempt(worktree, base, ctx["attempt_dir"])
+            if dirty or git(worktree, "rev-parse", "HEAD").stdout.strip() != release_base:
+                discard_attempt(worktree, base or release_base, release_base, ctx["attempt_dir"])
                 manifest.stage(copy_reset_after_failure=True)
-            if git(worktree, "rev-parse", "HEAD").stdout.strip() != base \
+            if git(worktree, "rev-parse", "HEAD").stdout.strip() != release_base \
                     or git(worktree, "status", "--porcelain", "--untracked-files=all").stdout.strip():
                 raise LaunchError("launcher-failed", "launcher", "копия не вернулась к базе")
     except (LaunchError, OSError, subprocess.CalledProcessError) as exc:
@@ -737,6 +903,7 @@ def release_unpublished(ctx: dict, worktree: Path | None, manifest: Manifest) ->
         rc, detail = machine_close(ctx)
     if rc == 0:
         manifest.stage(session_open=False)
+        take_scaffold(ctx["attempt_dir"], manifest)
     else:
         manifest.stage(session_close_error=f"{rc}: {detail}")
 
@@ -746,13 +913,17 @@ def work(ctx: dict, pkg: dict, checked: dict, worktree: Path, manifest: Manifest
     common = git(worktree, "rev-parse", "--path-format=absolute", "--git-common-dir").stdout.strip()
     toplevel = git(worktree, "rev-parse", "--show-toplevel").stdout.strip()
     if Path(toplevel).resolve() != worktree.resolve() or Path(common).resolve() != Path(repo_common).resolve():
-        raise LaunchError("launcher-failed", "launcher", f"копия {worktree} не принадлежит {ctx['repo_dir']}")
+        raise LaunchError("launcher-failed", "launcher", f"копия {worktree} не принадлежит {ctx['repo_dir']}",
+                          reconcile=True)
     identity = copy_identity(worktree)
     base = git(worktree, "rev-parse", "HEAD").stdout.strip()
     ignored_before = ignored_paths(worktree)
     inputs = [{"path": p, "sha256": sha256_file(worktree / p) if (worktree / p).is_file() else None}
               for p in checked["inputs"]]
-    manifest.stage("prepared", isolated_base=base, copy_identity=identity, inputs=inputs)
+    if ctx["target"] != "main" and base != ctx["base_sha"]:
+        raise LaunchError("launcher-failed", "launcher", f"копия начата не с вершины {ctx['target']}")
+    manifest.stage("prepared", isolated_base=base, release_base=manifest.data.get("release_base") or base,
+                   copy_identity=identity, inputs=inputs)
 
     attempt_dir, allowed = ctx["attempt_dir"], checked["allowed"]
     prompt_file = attempt_dir / "prompt.md"
@@ -803,6 +974,8 @@ def work(ctx: dict, pkg: dict, checked: dict, worktree: Path, manifest: Manifest
         manifest.stage(commit=None, discarded_commit=commit)
         raise LaunchError("launcher-failed", "launcher",
                           "коммит после проверок отличается от проверенного набора: " + "; ".join(problems[:20]))
+    if ctx["target"] != "main":
+        return deliver_to_run_branch(ctx, worktree, base, commit, artifacts, manifest)
     return deliver(ctx, commit, artifacts, manifest)
 
 
