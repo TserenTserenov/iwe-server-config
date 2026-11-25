@@ -9,11 +9,17 @@ Answers four questions on the computer where it runs, in Russian, for the Week C
 
 Read-only: never edits hooks, settings or logs. Exit 1 when there is an alarm, else 0.
 Env/args: --root (IWE root), --home (home with .claude/logs), --today (YYYY-MM-DD).
+
+Kimi keeps two homes on one computer, each with its own config (WP-388 F41, Mac run 25.11):
+~/.kimi (CLI started from a terminal) and ~/.kimi-code (the VS Code extension). The wiring
+is judged per home against that home's own direct sessions, never "wired in any of them".
 """
 
 import argparse
 import datetime as dt
+import hashlib
 import json
+import re
 import socket
 import subprocess
 import sys
@@ -23,6 +29,9 @@ from pathlib import Path
 AGENTS = ("claude-code", "codex", "kimi")
 TRACKED_RULES = ("A14", "A13.1", "A10", "A12_CROSS_TURN_REPEAT")
 METRIC_SCRIPT = Path(__file__).with_name("style-symbol-metric.py")
+KIMI_HOMES = (".kimi", ".kimi-code")
+# The peer adapter runs Kimi in "$TMP_ROOT/kimi-text-only-workdir" (kimi-peer-adapter.sh).
+KIMI_PEER_WORKDIR = "kimi-text-only-workdir"
 
 
 def _commands(hook_groups):
@@ -63,18 +72,89 @@ def _toml_has_stop_hook(text):
     return False
 
 
-def wiring_kimi(home):
-    configs = [home / ".kimi" / "config.toml", home / ".kimi-code" / "config.toml"]
-    seen, found = [], False
-    for cfg in configs:
+def _kimi_workdirs(kimi_home):
+    """md5(work dir path) -> path, from <home>/kimi.json; the CLI names session folders so."""
+    try:
+        entries = json.loads((kimi_home / "kimi.json").read_text(encoding="utf-8")).get("work_dirs") or []
+    except (OSError, ValueError, AttributeError):
+        return {}
+    paths = [str(e["path"]) for e in entries if isinstance(e, dict) and e.get("path")]
+    return {hashlib.md5(path.encode()).hexdigest(): path for path in paths}
+
+
+def _is_peer_origin(origin):
+    """wd_<name>_<hash> folder (~/.kimi-code) or work dir path (~/.kimi) of a peer-adapter run."""
+    if origin.startswith("wd_"):
+        return origin[3:].rsplit("_", 1)[0] == KIMI_PEER_WORKDIR
+    return Path(origin).name == KIMI_PEER_WORKDIR
+
+
+def _subdirs(path):
+    """Child folders; an unreadable or vanished folder yields none (the count stays conservative)."""
+    try:
+        return [p for p in path.iterdir() if p.is_dir()]
+    except OSError as exc:
+        print(f"  (папка {path} не прочитана: {exc.__class__.__name__})", file=sys.stderr)
+        return []
+
+
+def _is_fresh_session(session_dir, cutoff_ts):
+    """A session counts once if any journal under it (main agent or helpers) is fresh."""
+    for p in session_dir.rglob("wire.jsonl"):
         try:
-            ok = _toml_has_stop_hook(cfg.read_text(encoding="utf-8"))
+            if p.stat().st_mtime >= cutoff_ts:
+                return True
         except OSError:
-            seen.append(f"{cfg.name}: нет файла")
             continue
-        found = found or ok
-        seen.append(f"{cfg.parent.name}/{cfg.name}: {'есть' if ok else 'нет'} проверки после ответа")
-    return found, "; ".join(seen)
+    return False
+
+
+def kimi_direct_sessions(kimi_home, cutoff_ts):
+    """Fresh direct sessions in one Kimi home; peer-adapter work dirs are skipped.
+
+    Layouts: ~/.kimi-code/sessions/wd_<name>_<hash>/session_*/agents/*/wire.jsonl and
+    ~/.kimi/sessions/<md5(work dir)>/<session>/wire.jsonl. An unknown work dir counts as
+    direct: an alarm is better than a hidden session.
+    """
+    base = kimi_home / "sessions"
+    if not base.is_dir():
+        return 0
+    workdirs = _kimi_workdirs(kimi_home)
+    count = 0
+    for group in _subdirs(base):
+        origin = group.name if group.name.startswith("wd_") else workdirs.get(group.name, "")
+        if _is_peer_origin(origin):
+            continue
+        count += sum(1 for s in _subdirs(group) if _is_fresh_session(s, cutoff_ts))
+    return count
+
+
+def kimi_homes(home, cutoff_ts):
+    """Per Kimi home: config wiring (None = no config file) and fresh direct sessions."""
+    result = []
+    for name in KIMI_HOMES:
+        try:
+            wired = _toml_has_stop_hook((home / name / "config.toml").read_text(encoding="utf-8"))
+        except OSError:
+            wired = None
+        result.append({"name": name, "wired": wired, "sessions": kimi_direct_sessions(home / name, cutoff_ts)})
+    return result
+
+
+def kimi_verdict(homes, runs):
+    """(text, alarm, detail) for Kimi: every home with direct sessions needs its own hook."""
+    detail = "; ".join(
+        f"~/{h['name']}: прямых сессий {h['sessions']}, "
+        + ("нет файла настроек" if h["wired"] is None else ("проверка после ответа есть" if h["wired"] else "проверки после ответа нет"))
+        for h in homes
+    )
+    bare = [h for h in homes if h["sessions"] and not h["wired"]]
+    if bare:
+        where = ", ".join(f"~/{h['name']} ({h['sessions']})" for h in bare)
+        return f"ТРЕВОГА: прямые сессии без проверки после ответа в {where}", True, detail
+    total = sum(h["sessions"] for h in homes)
+    text, alarm = verdict(True, total, runs)
+    return text, alarm, detail
 
 
 def _recent(paths, cutoff_ts):
@@ -100,13 +180,11 @@ def _codex_is_peer_run(path):
 
 
 def activity(home, cutoff_ts):
-    """Number of session files touched since cutoff, per agent (direct chats only)."""
+    """Session files touched since cutoff for Claude and Codex (direct chats only); Kimi: kimi_homes."""
     claude = _recent((home / ".claude" / "projects").glob("*/*.jsonl"), cutoff_ts)
     codex_files = (p for p in (home / ".codex" / "sessions").rglob("*.jsonl") if not _codex_is_peer_run(p))
     codex = _recent(codex_files, cutoff_ts)
-    kimi_dirs = [d for d in (home / ".kimi-code" / "sessions").glob("wd_*") if "text-only" not in d.name]
-    kimi = _recent((p for d in kimi_dirs for p in d.rglob("wire.jsonl")), cutoff_ts)
-    return {"claude-code": claude, "codex": codex, "kimi": kimi}
+    return {"claude-code": claude, "codex": codex}
 
 
 def _read_lines(path):
@@ -162,11 +240,17 @@ def a14_new_hits(logs, after_day):
     )
 
 
-def symbol_metric(since, until):
+def claude_projects_glob(home, root):
+    """Claude names a project folder after its path, every non-alphanumeric char -> '-'."""
+    return str(home / ".claude" / "projects" / (re.sub(r"[^A-Za-z0-9]", "-", str(root)) + "*"))
+
+
+def symbol_metric(projects_glob, since, until):
     """All-blocks totals from style-symbol-metric.py, or (None, reason)."""
     with tempfile.TemporaryDirectory() as tmp:
         out = Path(tmp) / "m.json"
-        cmd = [sys.executable, str(METRIC_SCRIPT), "--since", since, "--until", until, "--json", str(out)]
+        cmd = [sys.executable, str(METRIC_SCRIPT), "--since", since, "--until", until,
+               "--root", projects_glob, "--json", str(out)]
         try:
             res = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
             if res.returncode != 0:
@@ -174,6 +258,17 @@ def symbol_metric(since, until):
             return json.loads(out.read_text(encoding="utf-8"))["totals"]["all_blocks"], ""
         except (OSError, ValueError, KeyError, subprocess.TimeoutExpired) as exc:
             return None, f"замер недоступен ({exc.__class__.__name__})"
+
+
+NO_REPLIES = "нет данных (0 ответов в беседах этого компьютера)"
+
+
+def metric_line(title, key, now_m, before_m):
+    """A share per reply is undefined with zero replies: say so instead of printing 0.0."""
+    if not now_m.get("replies"):
+        return f"  {title}: {NO_REPLIES}"
+    before = before_m[key] if before_m.get("replies") else "нет данных"
+    return f"  {title}: {fmt_pair(now_m[key], before)}"
 
 
 def verdict(wired, sessions, runs):
@@ -187,8 +282,8 @@ def verdict(wired, sessions, runs):
     return f"в порядке: сессий {sessions}, запусков проверки {runs}", False
 
 
-def fmt_pair(now, before, unit=""):
-    return f"{now}{unit} (неделей раньше {before}{unit})"
+def fmt_pair(now, before):
+    return f"{now} (неделей раньше {before})"
 
 
 def main(argv=None):
@@ -212,13 +307,16 @@ def main(argv=None):
     until = today.isoformat()
 
     print(f"## Проверка стражей стиля ({until}, компьютер {socket.gethostname()})")
-    wiring = {"claude-code": wiring_claude(root), "codex": wiring_codex(root), "kimi": wiring_kimi(home)}
+    wiring = {"claude-code": wiring_claude(root), "codex": wiring_codex(root)}
     sessions = activity(home, cutoff_ts)
     runs = check_runs(logs, since, until)
     alarms = 0
     for agent in AGENTS:
-        wired, detail = wiring[agent]
-        text, alarm = verdict(wired, sessions[agent], runs[agent])
+        if agent == "kimi":
+            text, alarm, detail = kimi_verdict(kimi_homes(home, cutoff_ts), runs[agent])
+        else:
+            wired, detail = wiring[agent]
+            text, alarm = verdict(wired, sessions[agent], runs[agent])
         alarms += alarm
         print(f"  {agent}: {text}")
         print(f"      настройки: {detail}")
@@ -237,15 +335,16 @@ def main(argv=None):
     calls = concept_kind_calls(logs, since, until)
     print("  обращений к реестру родов по агентам: " + (", ".join(f"{a} {n}" for a, n in sorted(calls.items())) or "нет"))
     if not args.skip_metric:
-        now_m, why = symbol_metric(since, until)
-        before_m, _ = symbol_metric(prev_since, prev_until)
+        projects = claude_projects_glob(home, root)
+        now_m, why = symbol_metric(projects, since, until)
+        before_m, _ = symbol_metric(projects, prev_since, prev_until)
         if now_m and before_m:
-            for key, title, unit in (
-                ("symbol_item_share", "доля пунктов с непояснённым именем из кода", ""),
-                ("links_per_reply", "ссылок на документы на ответ", ""),
-                ("backticks_per_reply", "имён в обратных кавычках на ответ", ""),
+            for key, title in (
+                ("symbol_item_share", "доля пунктов с непояснённым именем из кода"),
+                ("links_per_reply", "ссылок на документы на ответ"),
+                ("backticks_per_reply", "имён в обратных кавычках на ответ"),
             ):
-                print(f"  {title}: {fmt_pair(now_m[key], before_m[key], unit)}")
+                print(metric_line(title, key, now_m, before_m))
         else:
             print(f"  замер имён из кода пропущен: {why or 'нет данных за прошлую неделю'}")
 
