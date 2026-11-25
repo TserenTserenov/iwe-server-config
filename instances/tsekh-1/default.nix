@@ -139,6 +139,11 @@ in
     enable = true;
     b2Bucket = values.backup.b2Bucket;
     backupHeartbeatUrlFile = "/etc/monitoring/backup-heartbeat-url";
+    # WP-627 F3: pinned to UTC. Local 03:00-03:59 does not exist on the spring DST
+    # night (28.03.2027) and systemd skips that day's run entirely; UTC has no gap.
+    # Winter: same local time as before (03:00 / 03:30); summer: one hour later.
+    onCalendarNeon  = "*-*-* 01:00:00 UTC";
+    onCalendarLocal = "*-*-* 01:30:00 UTC";
   };
 
   tsekh.monitoring = {

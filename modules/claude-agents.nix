@@ -112,7 +112,9 @@ in
       description = "IWE — ежедневное обновление Claude CLI";
       wantedBy    = [ "timers.target" ];
       timerConfig = {
-        OnCalendar = "*-*-* 03:30:00 Europe/Nicosia";
+        # WP-627 F3: UTC, not Nicosia: 03:30 Nicosia does not exist on the spring
+        # DST night and systemd skips the run. Winter 03:30 local, summer 04:30.
+        OnCalendar = "*-*-* 01:30:00 UTC";
         Persistent = true;
       };
     };
