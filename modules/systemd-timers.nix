@@ -131,6 +131,11 @@ let
     AUDIT_TIMESTAMPS_REPO_DIR = "${iwe}/DS-IT-systems/audit-timestamps";
   };
 
+  # LMS database over the wg-lms tunnel (WP-542 F11): this file holds only
+  # the LMS database address (pointing at 10.0.0.147 via the tunnel); listed
+  # after /etc/iwe/env so it wins over the old, unreachable address there.
+  lmsTunnelEnvFile = "/home/tseren/.secrets/lms-wg.env";
+
   commonServiceConfig = {
     User            = "tseren";
     Type            = "oneshot";
@@ -1980,6 +1985,7 @@ in
       restartIfChanged = false;
       unitConfig  = paymentRegistryUnitConfig;
       serviceConfig = commonServiceConfig // {
+        EnvironmentFile = [ "/etc/iwe/env" lmsTunnelEnvFile ];
         ExecStartPre = verifiedSyncPre "payment-registry" "main" "payment-registry";
         ExecStart  = "${pkgs.bash}/bin/bash ${iwe}/payment-registry/scripts/incremental-sync.sh";
         TimeoutSec = 420;
@@ -2003,6 +2009,7 @@ in
       restartIfChanged = false;
       unitConfig  = paymentRegistryUnitConfig;
       serviceConfig = commonServiceConfig // {
+        EnvironmentFile = [ "/etc/iwe/env" lmsTunnelEnvFile ];
         ExecStartPre = verifiedSyncPre "payment-registry" "main" "payment-registry";
         ExecStart  = "${pkgs.bash}/bin/bash ${iwe}/payment-registry/scripts/sync-subscriptions.sh";
         TimeoutSec = 420;
@@ -2026,6 +2033,7 @@ in
       restartIfChanged = false;
       unitConfig  = paymentRegistryUnitConfig;
       serviceConfig = commonServiceConfig // {
+        EnvironmentFile = [ "/etc/iwe/env" lmsTunnelEnvFile ];
         ExecStartPre = verifiedSyncPre "payment-registry" "main" "payment-registry";
         ExecStart  = "${contractSyncWrapper}";
         TimeoutSec = 600;
