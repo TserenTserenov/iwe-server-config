@@ -39,7 +39,7 @@ MAILBOX="$GOV/inbox/WP-101/INBOX.md"
 [ -f "$CARD" ] || { echo "FAIL: нет карточки $CARD"; cat "$TMP/create.log"; exit 1; }
 
 for field in 'budget_spent: 0h' 'audience: \[\]' 'artifact_kind: ""' 'artifact_home: ""' 'inbox: INBOX.md'; do
-  check "в шапке есть «$field»" "1" "$(grep -c -E "^${field}\$" "$CARD")"
+  check "в шапке есть «${field}»" "1" "$(grep -c -E "^${field}\$" "$CARD")"
 done
 check "раздел «Суть в трёх строках» идёт сразу за заголовком" "## Суть в трёх строках" \
   "$(awk '/^# WP-101:/{f=1;next} f&&NF{print;exit}' "$CARD")"

@@ -57,6 +57,12 @@ if [[ -z "${IWE_GOVERNANCE_REPO:-}" ]] && [[ ! -d "$IWE/$GOV_REPO" ]]; then
 fi
 
 STRATEGY="$IWE/$GOV_REPO"
+# The registry path cell names the repository, not the checkout: from an isolated copy
+# (IWE_GOVERNANCE_REPO=.iwe-runtime/isolated-worktrees/<id>) it is the main checkout folder (WP-503 I-12).
+GOV_REPO_NAME="$GOV_REPO"
+if [[ "$GOV_REPO" == */* ]] && GOV_COMMON_DIR=$(git -C "$STRATEGY" rev-parse --path-format=absolute --git-common-dir 2>/dev/null); then
+  GOV_REPO_NAME=$(basename "$(dirname "$GOV_COMMON_DIR")")
+fi
 REGISTRY="$STRATEGY/docs/WP-REGISTRY.md"
 INBOX="$STRATEGY/inbox"
 STATE_DIR="$IWE/.claude/state"
@@ -251,7 +257,8 @@ registry_waiver_reason: \"$(yaml_dq_escape "$REGISTRY_WAIVER")\""
   else
     echo "🚫 Registry Gate: название РП не прошло сверку с Реестром понятий и родов." >&2
     echo "   ${REG_OUT#REGISTRY_BLOCK }" >&2
-    echo "   Слова нет в реестре: ответь на проверочный вопрос рода и передай --name-kind <род> --name-kind-answer \"ответ\"" >&2
+    echo "   Слова нет в реестре: ответь на проверочный вопрос рода и передай --name-kind <код рода> --name-kind-answer \"ответ\"" >&2
+    echo "   Код рода — английский, как в реестре (например system); допустимые коды перечислены в строке отказа выше." >&2
     echo "   (при сомнении добавь --name-kind-unsure — решит пилот). Род слова противоречит типу результата:" >&2
     echo "   переназови результат или, только по слову пилота, --registry-waiver \"причина\"." >&2
     exit 1
@@ -609,6 +616,17 @@ fi
 echo ""
 echo "1/5 context file..."
 
+# Card template (WP-503 Ф111, change code Ц38-20; docs/INBOX-CONVENTION.md, «Шаблон карточки РП»):
+# audience = need numbers from --links ([] where the install has no links policy); the other
+# template fields start empty so the schema check (check-wp-card-schema.py) shows what is left to fill.
+AUDIENCE_YAML="[]"
+if [[ -n "$LINKS_JSON" ]]; then
+  if ! AUDIENCE_YAML=$(printf '%s' "$LINKS_JSON" | python3 -c 'import json, sys; print(json.dumps(json.load(sys.stdin).get("needs", [])))'); then
+    echo "   ⚠️  audience: не удалось прочитать needs из --links, поле оставлено пустым" >&2
+    AUDIENCE_YAML="[]"
+  fi
+fi
+
 # state_transition goes into frontmatter only when provided (gate off on
 # installs without the axes registry); hypothesis always present, "—" = no bet.
 FM_STAKE=""
@@ -659,12 +677,21 @@ priority: ${PRIORITY}
 budget: ${BUDGET}
 created: ${TODAY}
 last_session: ${TODAY}
+budget_spent: 0h
 related: []
+audience: ${AUDIENCE_YAML}
+artifact_kind: ""
+artifact_home: ""
+inbox: INBOX.md
 ${FM_STAKE}
 activation: on-demand
 ---
 
 # WP-${WP_ID}: ${TITLE}
+
+## Суть в трёх строках
+
+[Что это. Что создаётся (предмет в физическом мире). Для кого.]
 
 ## Проблема
 
@@ -685,6 +712,10 @@ ${RELATED_ROWS}
 ### Ф1 — [Название фазы] (~?h)
 
 - [ ] ...
+
+## Входящие
+
+Почтовый ящик: INBOX.md (непрочитанных записей: 0)
 
 ## Что узнали
 
@@ -741,6 +772,18 @@ else
 fi
 rm -f "$WP_FILE_TMP"
 
+# Mailbox of the WP (WP-503 Ф111, pilot decision 23.11: every WP has one). Same header as
+# wp-inbox.sh writes on the first entry, so that script appends to this file unchanged.
+# A mailbox that already exists is left alone (the card is new, the folder may not be).
+WP_MAILBOX="$WP_DIR/INBOX.md"
+if [[ ! -f "$WP_MAILBOX" ]]; then
+  if ! printf '# Входящие РП-%s\n\n> Только дописывание. Статус записи меняет скрипт wp-inbox.sh (mark), не правка текста.\n' "$WP_NUM" > "$WP_MAILBOX"; then
+    echo "❌ Не удалось создать почтовый ящик: $WP_MAILBOX" >&2
+    rollback_wp_creation
+    exit 1
+  fi
+fi
+
 echo "   ✅ $WP_FILE"
 if [[ "$HYPOTHESIS_RELATION" == "unclassified" ]]; then
   echo "   ⚠️  Связь с гипотезой не определена: до начала РП выберите tests/enables/responds/researches/operational" >&2
@@ -764,7 +807,7 @@ fi
 REGISTRY_TMP="$SNAPSHOT_DIR/registry.tmp"
 cp "$REGISTRY" "$REGISTRY_TMP"
 
-if ! python3 - "$REGISTRY_TMP" "$WP_NUM" "$PRIORITY" "$TITLE" "$REPO" "$BUDGET" "$GOV_REPO" "$STAKE_CELL" "$WP_ID" <<'PYEOF'
+if ! python3 - "$REGISTRY_TMP" "$WP_NUM" "$PRIORITY" "$TITLE" "$REPO" "$BUDGET" "$GOV_REPO_NAME" "$STAKE_CELL" "$WP_ID" <<'PYEOF'
 import sys
 registry_path, wp_num, priority, title, repo, budget, gov_repo, stake, wp_id = sys.argv[1:10]
 
@@ -941,8 +984,17 @@ with open(weekplan_path, "r", encoding="utf-8") as f:
 # column order/extra columns don't silently corrupt the row.
 header_line = None
 insert_at = None
+# Whole-cell match: «#» immediately followed by «РП», and a «Статус» cell. The scenario table
+# above it has «РП» and «Статус на утверждение» but no «#» (WP-503 I-12).
+def is_week_table_header(line):
+    cells = [c.strip() for c in line.strip().strip("|").split("|")]
+    if "#" not in cells or "Статус" not in cells:
+        return False
+    hash_at = cells.index("#")
+    return hash_at + 1 < len(cells) and cells[hash_at + 1] == "РП"
+
 for i, line in enumerate(lines):
-    if line.strip().startswith("|---") and i > 0 and "РП" in lines[i - 1] and "Статус" in lines[i - 1]:
+    if line.strip().startswith("|---") and i > 0 and is_week_table_header(lines[i - 1]):
         header_line = lines[i - 1]
         insert_at = i + 1
         break
