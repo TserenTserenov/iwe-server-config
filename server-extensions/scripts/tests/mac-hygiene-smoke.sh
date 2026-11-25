@@ -48,18 +48,25 @@ kill "${SLEEP_PID}" 2>/dev/null
 bash "${SCRIPT}" check >/dev/null
 check "no alert below thresholds" test ! -s "${LOG}"
 
-# swap above limit -> one alert, second run suppressed by cooldown
+# swap above limit -> one digest line (not the chat source), second run suppressed by cooldown
 IWE_HYGIENE_SWAP_MB=5000 bash "${SCRIPT}" check >/dev/null
-check "swap alert sent once" test "$(grep -c 'подкачка' "${LOG}")" -eq 1
+check "swap line sent once" test "$(grep -c 'подкачка' "${LOG}")" -eq 1
+check "swap goes to the digest source" grep -q -- '--source mac-hygiene Мак: подкачка' "${LOG}"
 IWE_HYGIENE_SWAP_MB=5000 bash "${SCRIPT}" check >/dev/null
 check "cooldown suppresses repeat" test "$(grep -c 'подкачка' "${LOG}")" -eq 1
+rm -f "${STATE}"/last-notify-*; : > "${LOG}"
+IWE_HYGIENE_SWAP_MB=5000 IWE_HYGIENE_FORCE_HOUR=3 bash "${SCRIPT}" check >/dev/null
+check "digest line is not held by quiet hours" grep -q 'подкачка' "${LOG}"
 
-# disk below limit -> alert; quiet hour -> none
+# disk 10-20 GB free -> digest; below 10 GB -> chat source; chat held in quiet hours
+rm -f "${STATE}"/last-notify-*; : > "${LOG}"
+IWE_HYGIENE_DISK_FREE_GB=15 bash "${SCRIPT}" check >/dev/null
+check "low disk goes to the digest source" grep -q -- '--source mac-hygiene Мак: на диске свободно 15 ГБ' "${LOG}"
 IWE_HYGIENE_DISK_FREE_GB=5 bash "${SCRIPT}" check >/dev/null
-check "disk alert sent" grep -q 'свободно 5 ГБ' "${LOG}"
+check "critical disk goes to the chat source" grep -q -- '--source mac-hygiene-critical Мак: на диске свободно всего 5 ГБ' "${LOG}"
 rm -f "${STATE}"/last-notify-*; : > "${LOG}"
 IWE_HYGIENE_DISK_FREE_GB=5 IWE_HYGIENE_FORCE_HOUR=3 bash "${SCRIPT}" check >/dev/null
-check "no alert in quiet hours" test ! -s "${LOG}"
+check "no chat alert in quiet hours" test ! -s "${LOG}"
 
 rm -rf "${WORK}" 2>/dev/null
 if [ "${FAILS}" -eq 0 ]; then echo "mac-hygiene smoke: all passed"; else echo "mac-hygiene smoke: ${FAILS} failed"; exit 1; fi

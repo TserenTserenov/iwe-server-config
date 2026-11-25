@@ -26,13 +26,18 @@ STATE_DIR="${IWE_HYGIENE_STATE_DIR:-${IWE_WORKSPACE}/.iwe-runtime/state/mac-hygi
 NOTIFY="${IWE_HYGIENE_NOTIFY:-${IWE_WORKSPACE}/scripts/iwe-notify}"
 GUARDED_RM="${IWE_WORKSPACE}/.claude/bin/guarded-rm"
 
-SWAP_LIMIT_MB=4096        # notify when swap in use is above this
-DISK_FREE_LIMIT_GB=20     # notify when free disk is below this
-SESSIONS_LIMIT=12         # notify when this many claude processes run at once
+# Two channels (pilot decision 25.11.2026, WP-568 F14: swap and process alerts were 4-6 chat messages a
+# day with nothing new in them). Source "mac-hygiene" goes to the morning digest (telegram-transport-
+# allowlist.conf), "mac-hygiene-critical" to the chat: only a disk close to full, which stops the Mac.
+SWAP_LIMIT_MB=4096          # digest line when swap in use is above this
+DISK_FREE_LIMIT_GB=20       # digest line when free disk is below this
+DISK_CRITICAL_FREE_GB=10    # chat message when free disk is below this
+SESSIONS_LIMIT=12           # digest line when this many claude processes run at once
 SWEEP_MIN_AGE_DAYS=2
 SWEEP_PERIOD_SEC=86400
-NOTIFY_COOLDOWN_SEC=21600 # same kind of alert at most once per 6 h
-QUIET_FROM=23             # no pings from 23:00 to 07:59 local time
+DIGEST_COOLDOWN_SEC=86400   # same kind of digest line at most once per 24 h
+CRITICAL_COOLDOWN_SEC=21600 # same kind of chat message at most once per 6 h
+QUIET_FROM=23               # no chat pings from 23:00 to 07:59 local time
 QUIET_TO=8
 
 DRY_RUN=0
@@ -62,22 +67,27 @@ in_quiet_hours() {
   [ "${h}" -ge "${QUIET_FROM}" ] || [ "${h}" -lt "${QUIET_TO}" ]
 }
 
-# send_alert <kind> <text>: respects quiet hours and a per-kind cooldown
+# send_alert <digest|critical> <kind> <text>: per-kind cooldown; quiet hours hold only chat messages
 send_alert() {
-  local kind="$1" text="$2" stamp last
+  local channel="$1" kind="$2" text="$3" stamp last source cooldown
+  if [ "${channel}" = critical ]; then
+    source=mac-hygiene-critical; cooldown="${CRITICAL_COOLDOWN_SEC}"
+  else
+    source=mac-hygiene; cooldown="${DIGEST_COOLDOWN_SEC}"
+  fi
   stamp="${STATE_DIR}/last-notify-${kind}"
   last=0
   [ -f "${stamp}" ] && last="$(cat "${stamp}" 2>/dev/null || echo 0)"
-  if [ $(( $(now_epoch) - last )) -lt "${NOTIFY_COOLDOWN_SEC}" ]; then
+  if [ $(( $(now_epoch) - last )) -lt "${cooldown}" ]; then
     log "alert ${kind} suppressed (cooldown)"; return 0
   fi
-  if in_quiet_hours; then
+  if [ "${channel}" = critical ] && in_quiet_hours; then
     log "alert ${kind} suppressed (quiet hours)"; return 0
   fi
   if [ "${DRY_RUN}" -eq 1 ]; then
-    log "DRY-RUN alert ${kind}: ${text}"; return 0
+    log "DRY-RUN alert ${kind} (${source}): ${text}"; return 0
   fi
-  if "${NOTIFY}" --source mac-hygiene "${text}"; then
+  if "${NOTIFY}" --source "${source}" "${text}"; then
     now_epoch > "${stamp}"
     log "alert ${kind} sent"
   else
@@ -90,13 +100,15 @@ do_check() {
   swap="$(swap_used_mb)"; free="$(disk_free_gb)"; sessions="$(sessions_count)"
   log "swap=${swap}MB disk_free=${free}GB claude_sessions=${sessions}"
   if [ -n "${swap}" ] && [ "${swap}" -gt "${SWAP_LIMIT_MB}" ]; then
-    send_alert swap "Мак: подкачка заполнена на ${swap} МБ (порог ${SWAP_LIMIT_MB}) — памяти не хватает. Закройте лишние окна VS Code с сессиями (сейчас их ${sessions}) и вкладки Chrome."
+    send_alert digest swap "Мак: подкачка заполнена на ${swap} МБ (порог ${SWAP_LIMIT_MB}) — памяти не хватает. Закройте лишние окна VS Code с сессиями (сейчас их ${sessions}) и вкладки Chrome."
   fi
-  if [ -n "${free}" ] && [ "${free}" -lt "${DISK_FREE_LIMIT_GB}" ]; then
-    send_alert disk "Мак: на диске свободно ${free} ГБ (порог ${DISK_FREE_LIMIT_GB}). Нужна чистка: корзина, Загрузки, Docker."
+  if [ -n "${free}" ] && [ "${free}" -lt "${DISK_CRITICAL_FREE_GB}" ]; then
+    send_alert critical disk-critical "Мак: на диске свободно всего ${free} ГБ (порог ${DISK_CRITICAL_FREE_GB}) — скоро перестанут работать сессии и публикации. Что делать: очистить корзину, Загрузки, Docker."
+  elif [ -n "${free}" ] && [ "${free}" -lt "${DISK_FREE_LIMIT_GB}" ]; then
+    send_alert digest disk "Мак: на диске свободно ${free} ГБ (порог ${DISK_FREE_LIMIT_GB}). Нужна чистка: корзина, Загрузки, Docker."
   fi
   if [ "${sessions}" -gt "${SESSIONS_LIMIT}" ]; then
-    send_alert sessions "Мак: одновременно работает ${sessions} процессов claude (порог ${SESSIONS_LIMIT}). Закройте завершённые сессии."
+    send_alert digest sessions "Мак: одновременно работает ${sessions} процессов claude (порог ${SESSIONS_LIMIT}). Закройте завершённые сессии."
   fi
 }
 

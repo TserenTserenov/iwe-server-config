@@ -22,7 +22,7 @@
       "repo_id": "DS-my-strategy",
       "thresholds": {
         "behind_max_commits": null,
-        "behind_observed_for_min": 90,
+        "behind_observed_for_min": 360,
         "block_resolution_max_age_min": null,
         "fetch_max_age_min": 120
       },
@@ -55,7 +55,7 @@
       "repo_id": "MC-sessions",
       "thresholds": {
         "behind_max_commits": null,
-        "behind_observed_for_min": 30,
+        "behind_observed_for_min": 360,
         "block_resolution_max_age_min": null,
         "fetch_max_age_min": null
       },
@@ -87,7 +87,7 @@
       "repo_id": "iwe-root",
       "thresholds": {
         "behind_max_commits": null,
-        "behind_observed_for_min": 30,
+        "behind_observed_for_min": 360,
         "block_resolution_max_age_min": null,
         "fetch_max_age_min": null
       },
@@ -481,7 +481,7 @@
       "repo_id": "activity-hub",
       "thresholds": {
         "behind_max_commits": null,
-        "behind_observed_for_min": 30,
+        "behind_observed_for_min": 360,
         "block_resolution_max_age_min": null,
         "fetch_max_age_min": null
       },
@@ -536,7 +536,7 @@
       "repo_id": "knowledge-mcp",
       "thresholds": {
         "behind_max_commits": null,
-        "behind_observed_for_min": 30,
+        "behind_observed_for_min": 360,
         "block_resolution_max_age_min": null,
         "fetch_max_age_min": null
       },

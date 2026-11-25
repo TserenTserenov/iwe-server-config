@@ -12,9 +12,12 @@ Contract:
     broker confirmed a fetch within FETCH_STALE_MIN; a stale or never-confirmed fetch is an episode of
     its own. A pure `ahead` (own commits on their way through the publication gateway) gets
     AHEAD_GRACE_MIN; behind/diverged get the registry threshold.
-  * WHEN: one message per episode once it lasts >= its threshold, and one "снова совпадает" when an
-    alarmed copy is back. Both stay in the state until actually sent: quiet hours (default 23-08
-    local; equal hours = none) and a failed send defer them to the next run.
+  * WHEN: one message per episode once it lasts >= its threshold; it stays in the state until
+    actually sent: quiet hours (default 23-08 local; equal hours = none) and a failed send defer it
+    to the next run. A copy that is back sends nothing (pilot decision 25.11.2026, WP-568 F14: five
+    "снова совпадает" of 24.11 were half of that day's chat noise); the episode is dropped, one log
+    line records it, and the morning convergence report shows the current state. Thresholds of 6 h
+    (registry, LOCAL_BACKUPS) sit above the normal lag of the copies, which heals within 1-3 h.
   * WHY: the last line the reader mover wrote about that copy, when there is one.
     The strategy copy is not moved by the reader mover but by the hourly Mac sync service; for it the
     WHY is that service's last refusal written during the episode, plus one line of what to do
@@ -58,7 +61,7 @@ FETCH_STALE_MIN = 120  # the broker runs every few minutes; two hours without a 
 AHEAD_GRACE_MIN = 120  # a session commit normally reaches GitHub within minutes
 REPEAT_MIN = 360  # an alarmed episode that lasts is repeated this often (6 h), only after a message was really sent
 # (path relative to the root, threshold in minutes) of copies whose upstream is a local bare repository.
-LOCAL_BACKUPS = (("memory", 60),)
+LOCAL_BACKUPS = (("memory", 360),)
 LOCAL_FETCH_TIMEOUT = 60
 
 
@@ -310,32 +313,27 @@ def alarm_text(path, label, minutes, threshold, kind_since, repeat):
     return f"⚠️ {path}: {body}" + (" — повторное сообщение, эпизод не закрыт" if repeat else "")
 
 
-RECOVERED_GITHUB = "снова совпадает с GitHub"
-RECOVERED_BACKUP = "резервная копия снова принимает отправку"
-
-
-def step(state, path, label, threshold, now, recovered=RECOVERED_GITHUB):
+def step(state, path, label, threshold, now):
     """Advance one copy's episode; return the message to send for it, or None.
 
-    A recovery of an alarmed episode stays in the state (recovered=True) until main() has sent it.
-    An alarmed episode that lasts is repeated every REPEAT_MIN minutes after the last message that was
-    actually sent: one message per episode left a second day of the same breakage silent (16.11, WP-539)."""
+    A copy that is back ends its episode silently; an alarmed one leaves a log line (no chat message,
+    see WHEN above). An alarmed episode that lasts is repeated every REPEAT_MIN minutes after the last
+    message that was actually sent: one message per episode left a second day of the same breakage
+    silent (16.11, WP-539)."""
     episode = state.get(path)
     if label == "equal":
-        if not episode:
-            return None
-        if not episode.get("alerted"):
+        if episode:
+            if episode.get("alerted"):
+                print(f"convergence-alarm: {now:%Y-%m-%dT%H:%M%z} recovered, not sent: {path}")
             del state[path]
-            return None
-        episode["recovered"] = True
-        return f"✅ {path}: {recovered}"
+        return None
     if not episode:
         state[path] = {"since": now.isoformat(), "relation": label, "alerted": False}
         return None
     if relation_kind(episode["relation"]) != relation_kind(label):
         episode["kind_since"] = now.isoformat()
     episode["relation"] = label
-    episode.pop("recovered", None)
+    episode.pop("recovered", None)  # states written before 25.11 may still carry it
     minutes = int((now - dt.datetime.fromisoformat(episode["since"])).total_seconds() // 60)
     kind_since = episode.get("kind_since")
     kind_since = dt.datetime.fromisoformat(kind_since).astimezone() if kind_since else None
@@ -475,7 +473,7 @@ def main():
         label = local_backup_label(repo)
         if label is None:
             continue
-        text = step(state, path, label, threshold, now, recovered=RECOVERED_BACKUP)
+        text = step(state, path, label, threshold, now)
         if text:
             pending.append((path, text))
 
@@ -489,9 +487,7 @@ def main():
         status = 0
     elif send_telegram(args.notify, args.secrets, "🔄 Сходимость git, Мак\n\n" + "\n\n".join(t for _, t in pending)):
         for path, _ in pending:
-            if state.get(path, {}).get("recovered"):
-                del state[path]
-            elif path in state:
+            if path in state:
                 state[path]["alerted"] = True
                 state[path]["last_alert"] = now.isoformat()
         log_messages(now, "sent", pending)

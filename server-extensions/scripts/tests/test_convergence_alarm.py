@@ -79,15 +79,18 @@ class StepTest(unittest.TestCase):
                 stream.write(new)
             self.assertIn("unsupported changed ledger path", alarm.last_sync_refusal(log, bookmark))
 
-    def test_lag_alarms_once_after_threshold_then_recovers(self):
+    def test_lag_alarms_once_after_threshold_then_recovers_silently(self):
         state = {}
         self.assertIsNone(alarm.step(state, "x", "behind -3", 30, minutes(0)))
         self.assertIsNone(alarm.step(state, "x", "behind -5", 30, minutes(29)))
         self.assertEqual(alarm.step(state, "x", "behind -5", 30, minutes(31)), "⚠️ x: позади на 5 коммитов уже 31 мин (порог 30)")
         state["x"]["alerted"] = True  # main() marks it after a successful send
         self.assertIsNone(alarm.step(state, "x", "behind -6", 30, minutes(60)))
-        self.assertEqual(alarm.step(state, "x", "equal", 30, minutes(61)), "✅ x: снова совпадает с GitHub")
-        self.assertTrue(state["x"]["recovered"])  # removed by main() only after the send succeeded
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            self.assertIsNone(alarm.step(state, "x", "equal", 30, minutes(61)))  # no chat message (25.11)
+        self.assertEqual(state, {})
+        self.assertIn("recovered, not sent: x", out.getvalue())
 
     def test_short_lag_that_heals_is_silent(self):
         state = {}
@@ -103,7 +106,7 @@ class StepTest(unittest.TestCase):
         self.assertTrue(first.startswith("⚠️ x: расходится:"))
         self.assertTrue(again.startswith("⚠️ x: расходится: впереди на 1 коммит, позади на 2 коммита уже 55 мин"))
 
-    def test_relapse_before_recovery_was_sent_continues_the_episode(self):
+    def test_old_state_with_recovered_flag_continues_the_episode(self):
         state = {"x": {"since": T0.isoformat(), "relation": "behind -1", "alerted": True, "recovered": True}}
         self.assertIsNone(alarm.step(state, "x", "behind -2", 30, minutes(90)))
         self.assertNotIn("recovered", state["x"])
@@ -187,8 +190,9 @@ class WatchedTest(unittest.TestCase):
         registry, errors = repo_registry.load(SCRIPTS / "repo-convergence.registry.yaml")
         self.assertEqual(errors, [])
         limits = dict(alarm.watched(registry, "mac"))
-        expected = {".": 30, "MC-sessions": 30, "DS-MCP/knowledge-mcp": 30,
-                    "DS-IT-systems/activity-hub": 30, "DS-my-strategy": 90}
+        # 6 h for every copy: pilot decision 25.11.2026 (WP-568 F14), above the normal 1-3 h lag
+        expected = {".": 360, "MC-sessions": 360, "DS-MCP/knowledge-mcp": 360,
+                    "DS-IT-systems/activity-hub": 360, "DS-my-strategy": 360}
         self.assertEqual({p: limits.get(p) for p in expected}, expected)
 
 
@@ -314,33 +318,14 @@ class MainTest(unittest.TestCase):
         stamp = dt.datetime.now(dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
         broker.write_text(f"{stamp} OK a <- origin +refs/heads/main:refs/remotes/origin/main\n")
 
-    def test_recovery_waits_out_quiet_hours_then_is_sent_once(self):
+    def test_recovery_sends_nothing_and_ends_the_episode(self):
         self.main()
         self.main()  # alarm sent
+        sent_before = self.sent.read_text()
         self.catch_up()
-        hour = dt.datetime.now().hour
-        self.quiet = (hour, (hour + 1) % 24)  # now is quiet
         self.assertEqual(self.main(), 0)
-        self.assertNotIn("✅", self.sent.read_text())
-        self.assertTrue(json.loads(self.state.read_text())["a"]["recovered"])
-        self.quiet = (0, 0)
-        self.assertEqual(self.main(), 0)
-        self.assertEqual(self.sent.read_text().count("✅ a: снова совпадает"), 1)
+        self.assertEqual(self.sent.read_text(), sent_before)  # no "снова совпадает" in the chat (25.11)
         self.assertEqual(json.loads(self.state.read_text()), {})
-        self.main()
-        self.assertEqual(self.sent.read_text().count("✅"), 1)
-
-    def test_failed_recovery_send_is_retried(self):
-        self.main()
-        self.main()
-        self.catch_up()
-        good = self.notify.read_text()
-        self.fake_notify('echo "iwe-notify: outcome=direct-failed"; exit 1')
-        self.assertEqual(self.main(), 1)
-        self.assertTrue(json.loads(self.state.read_text())["a"]["recovered"])
-        self.fake_notify(good.split("\n", 1)[1])
-        self.assertEqual(self.main(), 0)
-        self.assertIn("✅ a: снова совпадает", self.sent.read_text())
 
     def test_log_names_copy_and_kind_of_each_message(self):
         self.main()
@@ -349,12 +334,10 @@ class MainTest(unittest.TestCase):
             self.main()  # alarm sent
         self.assertRegex(out.getvalue(), r"convergence-alarm: \S+ sent: ⚠️ a: позади на 1 коммит уже \d+ мин")
         self.catch_up()
-        hour = dt.datetime.now().hour
-        self.quiet = (hour, (hour + 1) % 24)
         out = io.StringIO()
         with contextlib.redirect_stdout(out):
             self.main()
-        self.assertIn("deferred (quiet hours): ✅ a: снова совпадает с GitHub", out.getvalue())
+        self.assertIn("recovered, not sent: a", out.getvalue())
 
     def test_failed_send_keeps_episode_unalerted(self):
         self.fake_notify('echo "iwe-notify: outcome=direct-failed"; exit 1')
@@ -493,7 +476,7 @@ class LocalBackupTest(unittest.TestCase):
             self.assertIn("⚠️ memory: расходится: впереди на 1 коммит, позади на 1 коммит", sent.read_text())
             run(self.copy, "-c", "user.name=t", "-c", "user.email=t@t", "merge", "-q", "-s", "ours", "--no-edit", "origin/main")
             self.assertEqual(alarm.main(), 0)
-        self.assertIn("✅ memory: резервная копия снова принимает отправку", sent.read_text())
+        self.assertNotIn("✅", sent.read_text())  # recovery is not a chat message (25.11)
         self.assertEqual(json.loads(state.read_text()), {})
 
 
