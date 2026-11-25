@@ -21,6 +21,7 @@ in
     ../../modules/monitoring.nix
     ../../modules/caddy.nix
     ../../modules/tailscale.nix
+    ../../modules/wg-lms.nix  # WP-542 Ф11 — туннель к базе LMS
     # ../../modules/postgres-preprod.nix  # Ф3
     ../../modules/systemd-timers.nix
     ../../modules/claude-agents.nix
@@ -173,6 +174,17 @@ in
   # см. комментарий в modules/tailscale.nix.
   tsekh.tailscale = {
     enable = true;
+  };
+
+  # Туннель к базе LMS (WP-542 Ф11): конец LMS 146.185.208.231:51820, наш адрес
+  # в туннеле 10.201.0.2, база 10.0.0.147:5432 (БД systemschool, пользователь tseren-wg).
+  tsekh.wgLms = {
+    enable         = true;
+    privateKeyFile = "/home/tseren/.config/wg-lms/private.key";
+    address        = "10.201.0.2/30";
+    peerPublicKey  = "url+NMas9zk2G40On4toLIaa1Mj7X9qxrfezHi8IiW0=";
+    endpoint       = "146.185.208.231:51820";
+    allowedIPs     = [ "10.201.0.1/32" "10.0.0.147/32" ];
   };
 
   tsekh.calendarSecrets = {
