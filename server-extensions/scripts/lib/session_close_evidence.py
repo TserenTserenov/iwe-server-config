@@ -1,4 +1,4 @@
-"""Read-only AR.005 proof for one exact open session, including published worktrees.
+"""Read-only AR.005 proof for an exact session or an explicit no-owner close run.
 
 Never accept a caller's success flag or a model verdict. Reconstruct publication
 receipts against freshly fetched origin/main and inspect every attributed path.
@@ -180,7 +180,118 @@ def report_filled(path: Path) -> None:
     require(match is not None and bool(match.group(1).strip()), "session report is missing its insight")
 
 
-def verify_session(workspace: Path, agent: str, session_id: str, harness: str) -> dict:
+def no_owner_run(workspace: Path, agent: str, harness: str,
+                 run_id: str) -> tuple[Path, bytes, list[Path]]:
+    """Require an explicit active run before considering an absent owner."""
+    import yaml
+
+    class UniqueLoader(yaml.SafeLoader):
+        pass
+
+    def unique_mapping(loader, node):
+        pairs = loader.construct_pairs(node, deep=True)
+        require(all(isinstance(key, str) for key, _ in pairs), "non-string run card key")
+        return scope.unique_object(pairs)
+
+    UniqueLoader.add_constructor(
+        yaml.resolver.BaseResolver.DEFAULT_MAPPING_TAG,
+        unique_mapping,
+    )
+    require(SAFE_ID.fullmatch(run_id) is not None and run_id.startswith("quick-close-"),
+            "no-owner close requires an exact quick-close run id")
+    governance = os.environ.get("IWE_GOVERNANCE_REPO", "DS-my-strategy")
+    require(SAFE_ID.fullmatch(governance) is not None and governance not in {".", ".."},
+            "invalid governance repository")
+    card = workspace / governance / "inbox/agent/tasks" / f"RUN-{run_id}.md"
+    raw = proof.snapshot(card)
+    require(raw.startswith(b"---\n"), "run card has no frontmatter")
+    parts = raw.decode().split("\n---\n", 1)
+    require(len(parts) == 2, "run card frontmatter is incomplete")
+    try:
+        data = yaml.load(parts[0][4:], Loader=UniqueLoader)
+    except yaml.YAMLError as error:
+        raise ValueError("invalid run card frontmatter") from error
+    require(isinstance(data, dict) and data.get("process_id") == "quick-close"
+            and data.get("run_id") == run_id and data.get("owner_session_id") == harness
+            and data.get("status") == "waiting" and data.get("current_step") == "verify-r23",
+            "run is not this owner's active quick-close verification")
+    results = data.get("results")
+    require(isinstance(results, dict), "run results are missing")
+    facts = results.get("gather-session-facts")
+    required = {"agent", "wp", "session_file", "session_file_exists", "has_diff", "commit_needed",
+                "repos", "repos_resolved"}
+    require(isinstance(facts, dict) and required <= facts.keys()
+            and facts["agent"] == agent and facts["wp"] in (None, "")
+            and facts["session_file"] in (None, "")
+            and facts["session_file_exists"] is False and facts["has_diff"] is False
+            and facts["commit_needed"] is False and facts["repos_resolved"] is True,
+            "no-owner close has a WP, report, changes, or incomplete gathered facts")
+    declared = facts["repos"]
+    require(isinstance(declared, list) and bool(declared)
+            and all(isinstance(repo, str) for repo in declared), "no-owner repository scope is missing")
+    repositories = [canonical_path(repo) for repo in declared]
+    require(workspace in repositories and len(set(repositories)) == len(repositories),
+            "no-owner repository scope must include the workspace exactly once")
+    mapping = workspace / ".iwe-runtime/quick-close-harness-session" / f"{run_id}.session_id"
+    require(proof.regular_file_snapshot(mapping).decode().strip() == harness,
+            "run harness mapping mismatch")
+    return card, raw, repositories
+
+
+def require_clean_repository(repo: Path) -> None:
+    require(not proof.git(repo, "status", "--porcelain=v1", "-z", "--untracked-files=normal"),
+            "no-owner repository has uncommitted changes: " + str(repo))
+
+
+def published_repositories(repositories: list[Path]) -> dict[Path, tuple[str, str]]:
+    snapshots = {}
+    for repo in repositories:
+        remote = proof.fetch_target(repo, proof.MAIN_REF)
+        head = proof.oid(repo, "HEAD^{commit}")
+        require(proof.ancestor(repo, head, remote),
+                "no-owner repository has unpublished commits: " + str(repo))
+        require_clean_repository(repo)
+        snapshots[repo] = (head, remote)
+    return snapshots
+
+
+def verify_no_owner(workspace: Path, agent: str, harness: str, run_id: str) -> dict:
+    """Use the same locked absence proof as the runner's no-op release."""
+    require(SAFE_ID.fullmatch(agent) is not None and SAFE_ID.fullmatch(harness) is not None
+            and harness not in {".", "..", "default"}, "missing exact no-owner identity")
+    workspace = workspace.resolve(strict=True)
+    card, raw, repositories = no_owner_run(workspace, agent, harness, run_id)
+    snapshots = published_repositories(repositories)
+    result = subprocess.run(
+        ["bash", str(workspace / "scripts/session-guard.sh"), "owner-status",
+         "--owner-session-id", harness, "--owner-agent", agent],
+        check=True, capture_output=True, text=True, timeout=30,
+        env={**os.environ, "IWE_ROOT": str(workspace), "IWE_WORKSPACE": str(workspace)},
+    )
+    owner = json.loads(result.stdout, object_pairs_hook=scope.unique_object)
+    require(isinstance(owner, dict) and owner.get("schema_version") == 1
+            and owner.get("owner_session_id") == harness and owner.get("state") == "absent"
+            and owner.get("proof") == "admission-locked-snapshot/v1"
+            and owner.get("blockers") == [], "owner absence is not proved")
+    current_card, current_raw, current_repositories = no_owner_run(workspace, agent, harness, run_id)
+    require(current_card == card and current_raw == raw and current_repositories == repositories,
+            "run changed during absence proof")
+    for repo, (head, remote) in snapshots.items():
+        require(proof.oid(repo, "HEAD^{commit}") == head
+                and proof.oid(repo, proof.tracking_ref(repo, proof.MAIN_REF) + "^{commit}") == remote,
+                "repository changed during absence proof")
+        require_clean_repository(repo)
+    return {"check": "session_close", "result": "ok", "run_id": run_id,
+            "owner_session_id": harness, "reason": "no_owner_semaphore",
+            "scope": "declared_repositories",
+            "proof": owner["proof"], "files_checked": 0, "commits_checked": 0,
+            "repos_checked": [str(repo) for repo in repositories]}
+
+
+def verify_session(workspace: Path, agent: str, session_id: str, harness: str,
+                   *, run_id: str = "") -> dict:
+    if not session_id and run_id:
+        return verify_no_owner(workspace, agent, harness, run_id)
     require(SAFE_ID.fullmatch(agent) is not None and SAFE_ID.fullmatch(session_id) is not None
             and session_id not in {".", "..", "default"} and bool(harness), "missing exact session identity")
     workspace = workspace.resolve(strict=True)
@@ -232,10 +343,12 @@ def main() -> int:
     parser.add_argument("--agent", required=True)
     parser.add_argument("--session-id", required=True)
     parser.add_argument("--harness-session-id", required=True)
+    parser.add_argument("--run-id", default="", help="exact active quick-close run for a no-owner close")
     args = parser.parse_args()
     try:
-        result = verify_session(args.workspace, args.agent, args.session_id, args.harness_session_id)
-    except (OSError, ValueError, proof.ProofError, subprocess.SubprocessError) as error:
+        result = verify_session(args.workspace, args.agent, args.session_id, args.harness_session_id,
+                                run_id=args.run_id)
+    except (OSError, ValueError, ImportError, proof.ProofError, subprocess.SubprocessError) as error:
         print(json.dumps({"check": "session_close", "result": "block", "detail": str(error)}, ensure_ascii=False))
         return 1
     print(json.dumps(result, ensure_ascii=False))

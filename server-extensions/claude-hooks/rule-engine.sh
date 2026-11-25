@@ -1871,9 +1871,17 @@ PYEOF
             elif [ "$_calendar_scope" -eq 0 ]; then
                 _proof_root=$(cd "$HOOK_DIR/../.." && pwd -P)
                 _native="${CODEX_THREAD_ID:-${CLAUDE_CODE_SESSION_ID:-${KIMI_SESSION_ID:-}}}"
+                _agent="${IWE_AGENT:-}"
+                if [ -z "$_agent" ]; then
+                    if [ -n "${CODEX_THREAD_ID:-}" ]; then _agent=codex
+                    elif [ -n "${CLAUDE_CODE_SESSION_ID:-}" ]; then _agent=claude-code
+                    elif [ -n "${KIMI_SESSION_ID:-}" ]; then _agent=kimi
+                    fi
+                fi
                 if AR005_EVIDENCE=$(python3 "$_proof_root/scripts/lib/session_close_evidence.py" \
-                    --workspace "$_workspace" --agent "${IWE_AGENT:-}" \
-                    --session-id "${IWE_SESSION_ID:-}" --harness-session-id "$_native"); then
+                    --workspace "$_workspace" --agent "$_agent" \
+                    --session-id "${IWE_SESSION_ID:-}" --harness-session-id "$_native" \
+                    --run-id "${IWE_CLOSE_RUN_ID:-}"); then
                     AR005_OK=1
                 fi
             else

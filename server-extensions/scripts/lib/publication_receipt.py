@@ -85,7 +85,7 @@ def ancestor(repo: Path, before: str, after: str) -> bool:
                           stderr=subprocess.DEVNULL, timeout=15).returncode == 0
 
 
-def snapshot(path: Path) -> bytes:
+def regular_file_snapshot(path: Path) -> bytes:
     fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
     try:
         info = os.fstat(fd)
@@ -96,12 +96,18 @@ def snapshot(path: Path) -> bytes:
             raw = stream.read(MAX_BYTES + 1)
         current = os.lstat(path)
         if ((current.st_dev, current.st_ino, current.st_size) !=
-                (info.st_dev, info.st_ino, len(raw)) or not raw.endswith(b"\n")
-                or b"\0" in raw):
+                (info.st_dev, info.st_ino, len(raw)) or b"\0" in raw):
             raise ProofError("session changed or malformed")
         return raw
     finally:
         os.close(fd)
+
+
+def snapshot(path: Path) -> bytes:
+    raw = regular_file_snapshot(path)
+    if not raw.endswith(b"\n"):
+        raise ProofError("session changed or malformed")
+    return raw
 
 
 def field(raw: bytes, key: str) -> str:

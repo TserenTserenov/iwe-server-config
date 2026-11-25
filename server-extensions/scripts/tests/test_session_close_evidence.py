@@ -362,5 +362,204 @@ class SessionCloseEvidenceTest(unittest.TestCase):
         self.assertEqual(json.loads(result.stdout)["verdict"], "ok")
 
 
+class NoOwnerCloseEvidenceTest(unittest.TestCase):
+    def setUp(self) -> None:
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        base = Path(self.temp.name).resolve()
+        remote = base / "remote.git"
+        self.root = base / "workspace"
+        subprocess.run(["git", "init", "--bare", "--initial-branch=main", str(remote)],
+                       check=True, capture_output=True)
+        subprocess.run(["git", "clone", str(remote), str(self.root)], check=True, capture_output=True)
+        git(self.root, "config", "user.name", "Test")
+        git(self.root, "config", "user.email", "test@example.invalid")
+        git(self.root, "config", "core.hooksPath", "/dev/null")
+        (self.root / "README.md").write_text("baseline\n")
+        git(self.root, "add", "README.md")
+        git(self.root, "commit", "-m", "baseline")
+        git(self.root, "push", "origin", "HEAD:main")
+        (self.root / ".git/info").mkdir(exist_ok=True)
+        (self.root / ".git/info/exclude").write_text(
+            "DS-my-strategy/\n.iwe-runtime/\nscripts/\nowner-status.json\nprotocol.md\nstate/\njournal/\n")
+        self.run_id = "quick-close-external-task-1"
+        self.harness = "native-thread"
+        self.facts = {"agent": "codex", "wp": "", "session_file": "",
+                      "session_file_exists": False, "has_diff": False, "commit_needed": False,
+                      "repos": [str(self.root)], "repos_resolved": True}
+        self.data = {"process_id": "quick-close", "run_id": self.run_id,
+                     "owner_session_id": self.harness, "status": "waiting",
+                     "current_step": "verify-r23", "results": {"gather-session-facts": self.facts}}
+        self.card = self.root / "DS-my-strategy/inbox/agent/tasks" / f"RUN-{self.run_id}.md"
+        self.card.parent.mkdir(parents=True)
+        self.write_card()
+        self.mapping = self.root / ".iwe-runtime/quick-close-harness-session" / f"{self.run_id}.session_id"
+        self.mapping.parent.mkdir(parents=True)
+        self.mapping.write_text(self.harness)
+        self.owner = {"schema_version": 1, "owner_session_id": self.harness,
+                      "state": "absent", "blockers": [], "proof": "admission-locked-snapshot/v1"}
+        self.owner_file = self.root / "owner-status.json"
+        self.write_owner()
+        self.guard = self.root / "scripts/session-guard.sh"
+        self.guard.parent.mkdir()
+        self.guard.write_text('#!/bin/bash\ncat "$IWE_ROOT/owner-status.json"\n')
+
+    def write_card(self) -> None:
+        self.card.write_text("---\n" + json.dumps(self.data) + "\n---\n\n# Run\n")
+
+    def write_owner(self) -> None:
+        self.owner_file.write_text(json.dumps(self.owner))
+
+    def verify(self) -> dict:
+        return close.verify_session(self.root, "codex", "", self.harness, run_id=self.run_id)
+
+    def test_exact_no_owner_run_passes_without_claiming_published_files(self) -> None:
+        result = self.verify()
+        self.assertEqual(result["result"], "ok")
+        self.assertEqual(result["reason"], "no_owner_semaphore")
+        self.assertEqual(result["scope"], "declared_repositories")
+        self.assertEqual(result["repos_checked"], [str(self.root)])
+        self.assertEqual(result["run_id"], self.run_id)
+        self.assertEqual(result["files_checked"], 0)
+        self.assertEqual(result["commits_checked"], 0)
+
+    def test_no_run_id_does_not_turn_absence_into_success(self) -> None:
+        with self.assertRaises(proof.ProofError):
+            close.verify_session(self.root, "codex", "", self.harness)
+
+    def test_mapping_accepts_runner_format_but_session_snapshot_still_requires_lf(self) -> None:
+        self.assertEqual(proof.regular_file_snapshot(self.mapping), self.harness.encode())
+        with self.assertRaises(proof.ProofError):
+            proof.snapshot(self.mapping)
+
+    def test_explicit_missing_session_never_falls_back_to_no_owner(self) -> None:
+        with self.assertRaises(OSError):
+            close.verify_session(self.root, "codex", "missing", self.harness, run_id=self.run_id)
+
+    def test_wp_report_changes_and_missing_facts_block(self) -> None:
+        original = self.facts.copy()
+        for key, value in [("wp", "WP-484"), ("session_file", "report.md"),
+                           ("session_file_exists", True), ("has_diff", True),
+                           ("commit_needed", True), ("agent", "kimi"), ("has_diff", None),
+                           ("repos_resolved", False)]:
+            with self.subTest(key=key, value=value):
+                self.facts.clear()
+                self.facts.update(original)
+                self.facts[key] = value
+                self.write_card()
+                with self.assertRaises(proof.ProofError):
+                    self.verify()
+        self.facts.clear()
+        self.facts.update(original)
+        del self.facts["wp"]
+        self.write_card()
+        with self.assertRaises(proof.ProofError):
+            self.verify()
+
+    def test_foreign_terminal_or_wrong_step_run_blocks(self) -> None:
+        for key, value in [("owner_session_id", "foreign"), ("run_id", "quick-close-foreign"),
+                           ("process_id", "day-close"), ("status", "failed"),
+                           ("current_step", "gather-session-facts")]:
+            with self.subTest(key=key):
+                old = self.data[key]
+                self.data[key] = value
+                self.write_card()
+                with self.assertRaises(proof.ProofError):
+                    self.verify()
+                self.data[key] = old
+
+    def test_ambiguous_yaml_owner_blocks(self) -> None:
+        self.card.write_text("---\nowner_session_id: foreign\n" +
+                             "\n".join(f"{k}: {json.dumps(v)}" for k, v in self.data.items()) +
+                             "\n---\n")
+        with self.assertRaises(proof.ProofError):
+            self.verify()
+
+    def test_mapping_must_match_and_be_a_regular_file(self) -> None:
+        self.mapping.write_text("foreign\n")
+        with self.assertRaises(proof.ProofError):
+            self.verify()
+        self.mapping.unlink()
+        self.mapping.symlink_to(self.owner_file)
+        with self.assertRaises((proof.ProofError, OSError)):
+            self.verify()
+
+    def test_non_string_yaml_key_blocks(self) -> None:
+        self.card.write_text("---\n? [ambiguous, key]\n: value\n---\n")
+        with self.assertRaises(proof.ProofError):
+            self.verify()
+
+    def test_existing_unknown_or_unlocked_owner_blocks(self) -> None:
+        original = self.owner.copy()
+        for key, value in [("state", "present"), ("state", "unknown"),
+                           ("owner_session_id", "foreign"), ("proof", "unlocked"),
+                           ("blockers", ["live-session"])]:
+            with self.subTest(key=key, value=value):
+                self.owner = {**original, key: value}
+                self.write_owner()
+                with self.assertRaises(proof.ProofError):
+                    self.verify()
+
+    def test_owner_probe_error_blocks(self) -> None:
+        self.guard.write_text("#!/bin/bash\nexit 7\n")
+        with self.assertRaises(subprocess.CalledProcessError):
+            self.verify()
+
+    def test_run_change_during_probe_blocks(self) -> None:
+        relative = self.card.relative_to(self.root)
+        self.guard.write_text('#!/bin/bash\ncat "$IWE_ROOT/owner-status.json"\n' +
+                              f'printf "\\nchanged\\n" >> "$IWE_ROOT/{relative}"\n')
+        with self.assertRaises(proof.ProofError):
+            self.verify()
+
+    def test_empty_or_missing_repository_scope_blocks(self) -> None:
+        self.facts["repos"] = []
+        self.write_card()
+        with self.assertRaises(proof.ProofError):
+            self.verify()
+        del self.facts["repos"]
+        self.write_card()
+        with self.assertRaises(proof.ProofError):
+            self.verify()
+
+    def test_new_file_after_gather_blocks(self) -> None:
+        (self.root / "new.txt").write_text("unpublished\n")
+        with self.assertRaisesRegex(proof.ProofError, "uncommitted changes"):
+            self.verify()
+
+    def test_clean_unpublished_commit_blocks(self) -> None:
+        (self.root / "README.md").write_text("unpublished\n")
+        git(self.root, "add", "README.md")
+        git(self.root, "commit", "-m", "not published")
+        self.assertEqual(git(self.root, "status", "--porcelain"), "")
+        with self.assertRaisesRegex(proof.ProofError, "unpublished commits"):
+            self.verify()
+
+    def test_repository_change_during_probe_blocks(self) -> None:
+        self.guard.write_text('#!/bin/bash\ncat "$IWE_ROOT/owner-status.json"\n' +
+                              'printf "changed\\n" >> "$IWE_ROOT/README.md"\n')
+        with self.assertRaisesRegex(proof.ProofError, "uncommitted changes"):
+            self.verify()
+
+    def test_trace_uses_exact_run_and_native_agent(self) -> None:
+        protocol = self.root / "protocol.md"
+        protocol.write_text("## Quick Close\n\n1. Publish [[gate:AR.005]]\n")
+        env = dict(os.environ, IWE_ROOT=str(self.root), IWE_AGENT="", IWE_SESSION_ID="",
+                   IWE_GOVERNANCE_REPO="DS-my-strategy", IWE_CLOSE_RUN_ID=self.run_id,
+                   CODEX_THREAD_ID=self.harness, RULE_SESSION_STATE_DIR=str(self.root / "state"),
+                   RULE_JOURNAL_DIR=str(self.root / "journal"))
+        command = ["bash", str(LIB.parents[1] / ".claude/hooks/rule-engine.sh"),
+                   "check-trace-satisfaction", "--protocol", str(protocol), "--section", "Quick Close"]
+        result = subprocess.run(command, env=env, text=True, capture_output=True)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        evidence = json.loads(result.stdout)
+        self.assertEqual(evidence["verdict"], "ok")
+        self.assertEqual(evidence["publication_evidence"]["reason"], "no_owner_semaphore")
+        env["IWE_CLOSE_RUN_ID"] = ""
+        refused = subprocess.run(command, env=env, text=True, capture_output=True)
+        self.assertNotEqual(refused.returncode, 0)
+        self.assertEqual(json.loads(refused.stdout)["verdict"], "block")
+
+
 if __name__ == "__main__":
     unittest.main()
