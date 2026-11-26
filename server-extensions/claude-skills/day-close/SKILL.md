@@ -559,16 +559,19 @@ bash ${GOV_REPO_ROOT:?}/scripts/day-close-prepare.sh --verify-week-summary --for
 
 `bash ~/IWE/scripts/day-close-step-log.sh end 9b`
 
-### 14в. Extensions (after): заготовка Визионера и прочие расширения [[narrative]]
+### 14в. Extensions (after) и проверка заготовки Визионера [[narrative]]
 
-(РП-622 П8, 26.11: до этого шага закрытие дня расширения «после» не загружало вовсе, поэтому заготовка Визионера на завтра не появлялась сама — утром 26.11 Камердинер не получил выдачи.)
+(РП-622 П8, 26.11: при прямом входе `/day-close` расширения «после» не загружались вовсе, поэтому заготовка Визионера на завтра не появлялась сама — утром 26.11 Камердинер не получил выдачи. Через `/run-protocol` их грузит его шаг 1b.)
 
-Загрузить: `bash .claude/scripts/load-extensions.sh day-close after`. Exit 0 → `Read` каждый файл из вывода (alphabetic) → выполнить. Exit 1 → пропустить. Поддерживает `extensions/day-close.after.md` И `extensions/day-close.after.<suffix>.md`. Расширение Визионера (`day-close.after.visionary.md`) пишет журнал проб (`journal/visionary-trials.jsonl`) в копии дня; этот файл идёт в `DC_FILES` шага 15, если он изменён.
+- **Вход через `/run-protocol day-close`:** расширения «после» уже взяты шагом 1b раннера. Второй раз не загружать и не выполнять (иначе Визионер соберёт вторую выдачу `PREP-…-2` и сделает второй запрос рекомендации), только проверка ниже.
+- **Прямой вход `/day-close`:** загрузить `bash .claude/scripts/load-extensions.sh day-close after`. Exit 0 → `Read` каждый файл из вывода (alphabetic) → выполнить; exit 1 → пропустить. У каждого раздела соблюдать его собственное «когда выполнять»: разделы «после commit+push» — после шага 15, не здесь; здесь — только то, что не требует коммита (заготовка Визионера).
+- Журнал проб (`journal/visionary-trials.jsonl`) расширение Визионера пишет в копию дня (`GOV_REPO_ROOT`); отдельно его не коммитить, он идёт в `DC_FILES` шага 15.
 
 **Проверка заготовки (если расширение Визионера есть, не пропускать):**
 ```bash
+DC_CONTEXT=$(bash "$HOME/IWE/.iwe-runtime/day-close-interactive.sh" --context '<токен из шага 0.5>') || exit 1; eval "$DC_CONTEXT"
 G="${GOV_REPO_ROOT:?}"
-TOMORROW=$(date -v+1d +%F 2>/dev/null || date -d tomorrow +%F)
+TOMORROW=$(python3 -c 'import datetime, sys; print((datetime.date.fromisoformat(sys.argv[1]) + datetime.timedelta(days=1)).isoformat())' "$IWE_CLOSE_DATE") || exit 1
 python3 "$G/scripts/visionary-journal.py" --repo "$G" issue --date "$TOMORROW"
 ```
 В ответе должен быть номер выдачи (`PREP-…`) и строки либо причина нуля, без признака `unavailable`. Иначе — в отчёт закрытия одна строка «Заготовка Визионера на завтра не собрана: <причина>» (утро пройдёт без предложений Визионера, Камердинер это покажет честно).

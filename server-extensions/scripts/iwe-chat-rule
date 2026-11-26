@@ -1,0 +1,264 @@
+#!/usr/bin/env python3
+"""iwe-chat-rule: the one rule that decides whether a message may reach the pilot's chat (WP-625 F14 step 2, stage 3).
+
+Pilot principle (26.11.2026): the chat gets a message only when the pilot must act; the rest goes to the digest;
+at most the host's daily share of unplanned messages (Mac 1, server 1; total up to 3), only an urgent one breaks the
+share. The rule lives in one file next to iwe-notify, so a lagging copy of the strategy repository cannot decide
+for the Mac, and the gateway and the direct path ask the same program.
+
+  iwe-chat-rule decide --source ID --channel CH [--kind K] --action present|missing|empty
+  iwe-chat-rule confirm --token T      the message reached the chat: the reservation becomes a sent message
+  iwe-chat-rule release --token T      the send failed: the reservation is given back
+
+`decide` prints one JSON line {"verdict": "send"|"digest", "mode": "observe"|"enforce"|"error", "reason": ..., "token": ...}
+and always exits 0 (a broken rule must never silence a message: fail-open, the failure goes to chat-rule-failures.log).
+In observe mode (default) the verdict is always "send"; the row of the decision, with what enforcement would have done,
+goes to chat-rule-observe.tsv. Enforcement is switched on by IWE_CHAT_RULE_ENFORCE=1 or the file chat-rule-enforce in
+the admission folder (stage 6 of the DRR in inbox/WP-625).
+
+The action state comes from the gateway (telegram_action_text), not recomputed here: one reading of the markers.
+  present  a real action line         missing  no action marker at all         empty  an explicit "nothing to do"
+Rules, in order: planned sender or kind -> send, not counted; explicit empty action -> digest, even urgent;
+missing action -> urgent sender: send with the gateway's standard line (defect row), others: digest;
+then the daily share of the host: over the share and not urgent -> digest; urgent always passes and is counted.
+"""
+
+import argparse
+import datetime as dt
+import fcntl
+import json
+import os
+import signal
+import socket
+import sys
+import uuid
+from pathlib import Path
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+
+DEFAULT_ZONE = "Asia/Nicosia"            # pilot 26.11: the day boundary is Cyprus time (same default as the meter)
+DEFAULT_SHARE = 1                        # a host that is not in the shares file gets one unplanned message a day
+RESERVATION_TTL_SECONDS = 600            # a reservation never confirmed or released expires
+RULE_DEADLINE_SECONDS = 5                # the whole call is killed after this long (fail-open for the caller)
+PLANNED = "planned"
+NOT_URGENT = "-"
+URGENT_PREFIX = "срочное:"
+PLANNED_KINDS = ("plan", "question")     # same reading as the norm meter (telegram-live-budget-check.py KIND_VERDICT)
+
+
+def workspace():
+    return Path(os.environ.get("IWE_WORKSPACE") or Path.home() / "IWE")
+
+
+def admission_dir():
+    return Path(os.environ.get("DS_PUBLISH_ADMISSION_DIR") or workspace() / ".claude" / "state" / "notify-admission")
+
+
+def budget_path():
+    return Path(os.environ.get("IWE_CHAT_RULE_BUDGET")
+                or workspace() / "DS-my-strategy" / "scripts" / "telegram-live-budget.conf")
+
+
+def shares_path():
+    return Path(os.environ.get("IWE_CHAT_RULE_SHARES") or budget_path().with_name("telegram-live-host-shares.conf"))
+
+
+def host_name():
+    return os.environ.get("IWE_CHAT_RULE_HOST") or socket.gethostname().split(".")[0]
+
+
+def read_budget(path):
+    """{source: (per_day, urgent)} from the budget file; an unreadable file is an error for the caller to log."""
+    rows = {}
+    for line in path.read_text(encoding="utf-8").splitlines():
+        if line.startswith("#") or not line.strip():
+            continue
+        fields = line.split("\t") + [""] * 5
+        rows[fields[0]] = (fields[1].strip(), fields[4].strip() or NOT_URGENT)
+    return rows
+
+
+def read_shares(path):
+    """{host: share}; a missing file means every host has DEFAULT_SHARE."""
+    shares = {}
+    if not path.is_file():
+        return shares
+    for line in path.read_text(encoding="utf-8").splitlines():
+        if line.startswith("#") or not line.strip():
+            continue
+        fields = line.split("\t")
+        if len(fields) >= 2 and fields[1].strip().isdigit():
+            shares[fields[0].strip()] = int(fields[1])
+    return shares
+
+
+def zone():
+    try:
+        return ZoneInfo(os.environ.get("NOTIFY_DIGEST_TZ") or DEFAULT_ZONE)
+    except (ZoneInfoNotFoundError, ValueError):
+        return dt.timezone.utc
+
+
+def enforcing():
+    return os.environ.get("IWE_CHAT_RULE_ENFORCE") == "1" or (admission_dir() / "chat-rule-enforce").is_file()
+
+
+def append_row(name, fields):
+    """One TSV row; the rule must not fail because a log is unwritable, but it says so on stderr."""
+    try:
+        admission_dir().mkdir(parents=True, exist_ok=True)
+        with open(admission_dir() / name, "a", encoding="utf-8") as handle:
+            handle.write("\t".join(str(field).replace("\t", " ").replace("\n", " ") for field in fields) + "\n")
+    except OSError as exc:
+        print(f"iwe-chat-rule: cannot write {name}: {exc}", file=sys.stderr)
+
+
+def now_utc():
+    return dt.datetime.now(dt.timezone.utc)
+
+
+class Counter:
+    """The host's unplanned messages of the current Cyprus day, under an exclusive file lock.
+
+    State: {"day": "YYYY-MM-DD", "entries": [{"token", "source", "ts", "state": "reserved"|"sent"}]}. A reservation is
+    taken BEFORE the send, so two senders on one host cannot both read "0 used" and both pass.
+    """
+
+    def __init__(self, day):
+        self.day = day
+        self.path = admission_dir() / "chat-day-counter.json"
+
+    def __enter__(self):
+        admission_dir().mkdir(parents=True, exist_ok=True)
+        self.lock = open(admission_dir() / "chat-day-counter.lock", "w")
+        fcntl.flock(self.lock, fcntl.LOCK_EX)
+        self.state = self._load()
+        return self
+
+    def __exit__(self, *_exc):
+        tmp = self.path.with_name(f"{self.path.name}.tmp.{os.getpid()}")
+        tmp.write_text(json.dumps(self.state, ensure_ascii=False), encoding="utf-8")
+        os.replace(tmp, self.path)
+        self.lock.close()
+
+    def _load(self):
+        try:
+            state = json.loads(self.path.read_text(encoding="utf-8"))
+        except FileNotFoundError:
+            state = {}
+        except json.JSONDecodeError as exc:
+            append_row("chat-rule-failures.log", [now_utc().isoformat(timespec="seconds"), "counter-corrupt", exc])
+            state = {}
+        if state.get("day") != self.day:
+            state = {"day": self.day, "entries": []}
+        cutoff = now_utc().timestamp() - RESERVATION_TTL_SECONDS
+        state["entries"] = [e for e in state.get("entries", [])
+                            if e.get("state") == "sent" or e.get("ts", 0) >= cutoff]
+        return state
+
+    def used(self):
+        return len(self.state["entries"])
+
+    def reserve(self, source):
+        token = uuid.uuid4().hex[:12]
+        self.state["entries"].append({"token": token, "source": source, "ts": now_utc().timestamp(), "state": "reserved"})
+        return token
+
+    def confirm(self, token):
+        for entry in self.state["entries"]:
+            if entry["token"] == token:
+                entry["state"] = "sent"
+
+    def release(self, token):
+        self.state["entries"] = [e for e in self.state["entries"] if e["token"] != token]
+
+
+def classify(args, budget):
+    """('planned'|'unplanned', urgent: bool) for this send."""
+    per_day, urgent = budget.get(args.source, ("", NOT_URGENT))
+    if per_day == PLANNED or args.channel == "sink" or (args.channel == "kind" and args.kind in PLANNED_KINDS):
+        return "planned", False
+    return "unplanned", urgent.startswith(URGENT_PREFIX)
+
+
+def decide(args):
+    budget = read_budget(budget_path())
+    kind_of_send, urgent = classify(args, budget)
+    if kind_of_send == "planned":
+        return {"verdict": "send", "reason": "planned", "token": ""}
+    if args.action == "empty":
+        return {"verdict": "digest", "reason": "action-empty", "token": ""}
+    if args.action == "missing" and not urgent:
+        return {"verdict": "digest", "reason": "action-missing", "token": ""}
+    day = now_utc().astimezone(zone()).date().isoformat()
+    share = read_shares(shares_path()).get(host_name(), DEFAULT_SHARE)
+    with Counter(day) as counter:
+        if counter.used() >= share and not urgent:
+            return {"verdict": "digest", "reason": f"over-share({counter.used()}/{share})", "token": ""}
+        over = counter.used() >= share
+        token = counter.reserve(args.source)
+    reasons = ["urgent-over-share" if over else "within-share"]
+    if args.action == "missing":
+        reasons.append("urgent-action-missing")  # only an urgent sender gets here: it is sent, the gateway adds its line
+    return {"verdict": "send", "reason": "+".join(reasons), "token": token}
+
+
+def run_decide(args):
+    stamp = now_utc().isoformat(timespec="seconds").replace("+00:00", "Z")
+    try:
+        result = decide(args)
+        mode = "enforce" if enforcing() else "observe"
+        would = result["verdict"]
+        if mode == "observe":
+            # Observation never changes a send: the real verdict is "send". The counter counts what enforcement
+            # would have let through, and a reservation is confirmed at once because the message really goes out.
+            result = {**result, "verdict": "send"}
+            if result["token"]:
+                confirm_token(result["token"])
+        append_row("chat-rule-observe.tsv", [stamp, host_name(), args.source, would, result["reason"], mode])
+        result["mode"] = mode
+        result["would"] = would
+    except Exception as exc:  # noqa: BLE001 - fail-open: a broken rule must never silence a message; logged below
+        append_row("chat-rule-failures.log", [stamp, host_name(), args.source, type(exc).__name__, exc])
+        result = {"verdict": "send", "mode": "error", "reason": f"{type(exc).__name__}", "token": ""}
+    print(json.dumps(result, ensure_ascii=False))
+    return 0
+
+
+def confirm_token(token):
+    day = now_utc().astimezone(zone()).date().isoformat()
+    with Counter(day) as counter:
+        counter.confirm(token)
+
+
+def run_token(args, action):
+    day = now_utc().astimezone(zone()).date().isoformat()
+    try:
+        with Counter(day) as counter:
+            getattr(counter, action)(args.token)
+    except Exception as exc:  # noqa: BLE001 - the send already happened or failed; only the log can say more
+        append_row("chat-rule-failures.log", [now_utc().isoformat(timespec="seconds"), host_name(), action,
+                                              type(exc).__name__, exc])
+    return 0
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    sub = parser.add_subparsers(dest="command", required=True)
+    one = sub.add_parser("decide")
+    one.add_argument("--source", required=True)
+    one.add_argument("--channel", required=True)
+    one.add_argument("--kind", default="")
+    one.add_argument("--action", choices=("present", "missing", "empty"), required=True)
+    for name in ("confirm", "release"):
+        sub.add_parser(name).add_argument("--token", required=True)
+    args = parser.parse_args()
+    # A rule that hangs (a stuck lock, a slow disk) must not hold a message: the process ends after five seconds
+    # and the gateway, which ignores the answer in observe mode and treats silence as "send" in enforce mode, goes on.
+    signal.alarm(RULE_DEADLINE_SECONDS)
+    if args.command == "decide":
+        return run_decide(args)
+    return run_token(args, args.command)
+
+
+if __name__ == "__main__":
+    sys.exit(main())

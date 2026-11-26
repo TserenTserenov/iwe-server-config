@@ -60,6 +60,54 @@ BEFORE=$(lines)
 jq -cn --arg sid "$SID" '{session_id:$sid,prompt:null}' | IWE_ROOT="$SANDBOX" bash "$HOOK"
 [[ "$?" -eq 0 && "$(lines)" == "$BEFORE" ]] && ok "prompt: null — ничего не записано, ввод не блокируется" || fail "prompt: null" "строк: $(lines)"
 
+echo "== WP-484 И-47: будильник ScheduleWakeup =="
+TR="$SANDBOX/transcript.jsonl"
+now_iso() { date -u -v"${1:-+0S}" +%Y-%m-%dT%H:%M:%S.000Z 2>/dev/null || date -u -d "${1:-0 sec}" +%Y-%m-%dT%H:%M:%S.000Z; }
+schedule_call() { # <prompt>: an assistant ScheduleWakeup call, JSON with spaces after colons
+  jq -n --arg p "$1" '{"type": "assistant", "message": {"role": "assistant", "content": [{"type": "tool_use", "name": "ScheduleWakeup", "input": {"delaySeconds": 3600, "prompt": $p}}]}}'
+}
+user_entry() { # <text> <timestamp> [wakeup]
+  jq -cn --arg t "$1" --arg ts "$2" --arg w "${3:-}" '{type: "user", timestamp: $ts, message: {role: "user", content: $t}}
+    + (if $w == "" then {} else {wakeupSource: "loop_wakeup", turnOrigin: "scheduled", isMeta: true} end)'
+}
+send_tr() { # <prompt> [extra-json]: payload with transcript_path
+  jq -cn --arg sid "$SID" --arg prompt "$1" --arg tr "$TR" --argjson extra "${2:-{\}}" \
+    '{session_id: $sid, prompt: $prompt, transcript_path: $tr} + $extra' | IWE_ROOT="$SANDBOX" bash "$HOOK"
+}
+WAKE="РП-529, выпуск 0.42.2. Проверь время (date -u)."
+
+: > "$TR"
+BEFORE=$(lines)
+send_tr "$WAKE" '{"wakeupSource": "loop_wakeup"}'
+[[ "$(lines)" == "$BEFORE" ]] && ok "признак wakeupSource во входе: не записано" || fail "признак wakeupSource во входе" "строк: $(lines)"
+send_tr "$WAKE" '{"turnOrigin": "scheduled"}'
+[[ "$(lines)" == "$BEFORE" ]] && ok "признак turnOrigin=scheduled во входе: не записано" || fail "признак turnOrigin во входе" "строк: $(lines)"
+
+{ schedule_call "$WAKE" | jq -c .; user_entry "$WAKE" "$(now_iso)" wakeup; } > "$TR"
+send_tr "$WAKE"
+[[ "$(lines)" == "$BEFORE" ]] && ok "свежая запись будильника в записи беседы: не записано" || fail "свежая запись будильника" "строк: $(lines)"
+
+{ schedule_call "часы: 3" | jq -c .; user_entry "часы: 3" "$(now_iso -1H)" wakeup; } > "$TR"
+send_tr "часы: 3"
+[[ "$(lines)" == "$((BEFORE + 1))" && "$(last_text)" == "часы: 3" ]] \
+  && ok "старый будильник «часы: 3», текущей записи нет: ответ пилота записан" || fail "старый будильник с тем же текстом" "строк: $(lines)"
+[[ "$(tail -n 1 "$FILE" | jq -r '.suspected_wakeup')" == "true" ]] \
+  && ok "совпадение с текстом будильника помечено suspected_wakeup" || fail "пометка suspected_wakeup" "$(tail -n 1 "$FILE")"
+
+{ user_entry "часы: 3" "$(now_iso)"; } > "$TR"
+send_tr "часы: 3"
+[[ "$(lines)" == "$((BEFORE + 2))" && "$(tail -n 1 "$FILE" | jq -r '.suspected_wakeup')" == "null" ]] \
+  && ok "свежая реплика пилота без признака будильника записана без пометки" || fail "реплика пилота без признака" "$(tail -n 1 "$FILE")"
+[[ "$(tail -n 1 "$FILE" | jq -c '.input_keys')" == '["prompt","session_id","transcript_path"]' ]] \
+  && ok "в записи — имена полей входа хука, без значений" || fail "input_keys" "$(tail -n 1 "$FILE")"
+
+rm -f "$TR"
+send_tr "ответ без записи беседы"
+[[ "$(lines)" == "$((BEFORE + 3))" ]] && ok "запись беседы недоступна: ответ записан как раньше" || fail "запись беседы недоступна" "строк: $(lines)"
+
+[[ ! -e "$SANDBOX/.iwe-runtime/pilot-witness-recorder.diag.log" ]] \
+  && ok "журнал диагностики больше не пишется" || fail "журнал диагностики" "файл есть"
+
 echo
 echo "Итог: $PASS прошло, $FAIL не прошло"
 [[ "$FAIL" -eq 0 ]]
