@@ -17,8 +17,9 @@ Usage:
   wp-run-journal.py create  --run-dir D --wp N --description-ref REF
                             [--preset lead|ask] [--rights-json FILE] [--budget-json JSON]
                             (refuses unless scripts/check-wp-readiness.py of the repository
-                            that holds the run folder is the origin/main version and ends with
-                            "готово", the --wp number matches the folder, and no other run of
+                            that holds the run folder is the origin/main version and, called with
+                            --for-launch (admission and the pilot's launch word required), ends
+                            with "готово", the --wp number matches the folder, and no other run of
                             the WP is open; the check cannot be replaced by a flag or a variable)
   wp-run-journal.py lease   --run-dir D [--ttl-min 120]
   wp-run-journal.py append  --run-dir D --epoch E --type T --payload JSON [--actor A] [--caused-by N]
@@ -746,7 +747,8 @@ def check_launch_allowed(run_dir: Path, args) -> None:
     repo = run_dir.parents[3]  # <repo>/inbox/WP-N/runs/<id>
     script = pinned_readiness_script(repo)
     try:
-        res = subprocess.run([sys.executable, str(script), "--repo", str(repo), "--wp", wp],
+        # --for-launch: the admission and the pilot's word for the launch are mandatory (WP-503).
+        res = subprocess.run([sys.executable, str(script), "--repo", str(repo), "--wp", wp, "--for-launch"],
                              capture_output=True, text=True, timeout=120)
     except (OSError, subprocess.SubprocessError) as error:
         raise Invalid(f"readiness check failed to run: {error}") from error

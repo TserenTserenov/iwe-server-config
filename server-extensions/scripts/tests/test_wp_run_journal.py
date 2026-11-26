@@ -30,7 +30,10 @@ def readiness_stub(root: Path, last_line="readiness: WP-999: готово", code
     """A stand-in for check-wp-readiness.py, published as origin/main of the throwaway repository."""
     stub = root / "scripts" / "check-wp-readiness.py"
     stub.parent.mkdir(exist_ok=True)
-    stub.write_text("import sys\nprint(%r)\nsys.exit(%d)\n" % (last_line, code))
+    # Like the real check, the stub is ready only when asked for a launch (--for-launch).
+    stub.write_text("import sys\nif '--for-launch' not in sys.argv:\n"
+                    "    print('readiness: WP-999: пробелов 1 (called without --for-launch)')\n    sys.exit(1)\n"
+                    "print(%r)\nsys.exit(%d)\n" % (last_line, code))
     if not (root / ".git").exists():
         git(root, "init", "-q")
     git(root, "add", "--", "scripts/check-wp-readiness.py")
