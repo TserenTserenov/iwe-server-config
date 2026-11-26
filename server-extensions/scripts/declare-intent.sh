@@ -112,6 +112,55 @@ mv -f "$TMP_FILE" "$INTENT_DIR/$SESSION_ID.json"
 echo "Намерение записано: $INTENT (сессия $SESSION_ID, агент $AGENT)"
 [ -z "$RITUAL" ] || echo "Согласованный Ритуал записан в запись беседы: проверка Ритуала не потребует его заново после сжатия."
 
+# WP-561 Ф88: the pilot's word "почта" is the WP's inbound mailbox (inbox/WP-N/INBOX.md).
+# Print its state at declaration time, so an agent sees pending entries instead of
+# having to remember the mailbox rule (three agents answered "no such step" on 26.11).
+# Never blocks and never prints a bare "0" for a read failure: a failed read says
+# "не проверен". Behaviour change vs the handoff reader, which never fetches: this
+# fetches origin (fetch leaves the working tree alone) so the count is by the server.
+# The governance repo must be named explicitly (IWE_GOVERNANCE_REPO_PATH or
+# IWE_GOVERNANCE_REPO): a default would silently read another repository.
+show_wp_mailbox() {
+  local wp="$1" num="${1#WP-}"
+  local inbox_script="${IWE_SCRIPTS:-$HOME/IWE/scripts}/wp-inbox.sh"
+  local repo basis="по серверу" rev_flag="--rev origin/main" out heads count lib
+  if [ -n "${IWE_GOVERNANCE_REPO_PATH:-}" ]; then
+    repo="$IWE_GOVERNANCE_REPO_PATH"
+  elif [ -n "${IWE_GOVERNANCE_REPO:-}" ]; then
+    repo="${IWE_WORKSPACE:-$HOME/IWE}/$IWE_GOVERNANCE_REPO"
+  else
+    echo "Ящик входящих $wp: не проверен (репозиторий планов не задан); проверить: wp-inbox.sh list --wp $num --rev origin/main"
+    return 0
+  fi
+  if [ ! -r "$inbox_script" ] || [ ! -d "$repo" ]; then
+    echo "Ящик входящих $wp: не проверен (нет скрипта ящика или репозитория планов $repo)"
+    return 0
+  fi
+  lib="$(dirname "$inbox_script")/lib/run-limited.sh"
+  # shellcheck source=lib/run-limited.sh
+  [ -r "$lib" ] && . "$lib"
+  if ! declare -F run_limited >/dev/null 2>&1; then
+    run_limited() { shift; "$@"; }
+  fi
+  if ! run_limited 12 git -C "$repo" fetch -q origin </dev/null >/dev/null 2>&1; then
+    rev_flag=""
+    basis="по локальной копии, сервер не опрошен"
+  fi
+  # shellcheck disable=SC2086  # rev_flag is intentionally two words or empty
+  if ! out=$(run_limited 15 bash "$inbox_script" list --wp "$num" --repo "$repo" $rev_flag </dev/null 2>&1); then
+    echo "Ящик входящих $wp: не проверен ($(printf '%s' "$out" | head -n 1))"
+    return 0
+  fi
+  heads=$(printf '%s\n' "$out" | LC_ALL=C grep -E '^## И-[0-9]+ · ' || true)
+  if [ -z "$heads" ]; then
+    echo "Ящик входящих $wp: новых записей нет ($basis)"
+    return 0
+  fi
+  count=$(printf '%s\n' "$heads" | grep -c . || true)
+  echo "Ящик входящих $wp: новых записей $count ($basis). Разобрать до работы, шаг 3 протокола открытия сессии:"
+  printf '%s\n' "$heads" | sed 's/^## /  /'
+}
+
 # WP-484 F257 M3: show where the previous session stopped, straight after the
 # intent is recorded.  Optional: a slow or failing reader never blocks the
 # declaration (`|| true`), and `outside-wp` has no card to read.
@@ -130,5 +179,6 @@ case "$INTENT" in
         bash "$SHOW_SCRIPT" "$INTENT" </dev/null || true
       fi
     fi
+    show_wp_mailbox "$INTENT" || true
     ;;
 esac
