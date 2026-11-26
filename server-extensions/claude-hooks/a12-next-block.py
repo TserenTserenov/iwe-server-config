@@ -121,7 +121,7 @@ LEADING_THIS_CHAT_RE = re.compile(
     # A step number ("1) вы, здесь: ...") or a later step after ";" opens the formula too
     # (live case 26.11: the numbered line "1) вы, здесь: сказать «заливай ветку хуков»"
     # was written after the session was closed, and the old anchor missed it).
-    r"(?:^|;\s*)(?:\d+[.)]\s*)?(?:вы|я)\s*[,\-—]?\s*(?:в\s+этом\s+(?:чате|диалоге|окне)|в\s+этой\s+(?:беседе|сессии)|здесь)\s*[:,]",
+    r"(?:^|[;.]\s+)(?:\d+[.)]\s*)?(?:вы|я)\s*[,\-—]?\s*(?:в\s+этом\s+(?:чате|диалоге|окне)|в\s+этой\s+(?:беседе|сессии)|здесь)\s*[:,]",
     re.IGNORECASE,
 )
 
@@ -288,15 +288,27 @@ CONDITIONAL_RE = re.compile(
     r"(?:если|когда|как\s+только)\s+(?:вы\s+)?(?:скажете|напишете|согласны|одобрите|разрешите|дадите|подтвердите)"
     r"|(?:по|при|после)\s+ваш\w+\s+(?:слов[оаеу]\b|команд\w*|одобрени\w*|подтверждени\w*|ответ\w*|согласи\w*)"
     r"|ваш\w*\s+слов[оаеу]\b"
-    r"|следующ\w+\s+(?:сесси\w+|бесед\w+)|в\s+нов\w+\s+(?:сесси\w+|бесед\w+)",
+    r"|следующ\w+\s+(?:сесси\w+|бесед\w+)|в\s+нов\w+\s+(?:сесси\w+|бесед\w+)"
+    # Waits found by the review of 26.11 (Fable): the pilot's decision / signal / "да", "как скажете",
+    # "если не против / хотите", "жду", and a third party's answer.
+    r"|(?<!без )ваш\w*\s+[«\"“]?(?:решени\w+|сигнал\w*|да\b|нет\b|ответ\w*|согласи\w+|выбор\w*)"
+    r"|как\s+(?:скажете|захотите)|если\s+(?:вы\s+)?(?:не\s+против|хотите|захотите)"
+    r"|когда\s+(?:вы\s+)?ответите|\bжду\b|ожида\w+"
+    r"|ответ\w*\s+(?:Гермес\w*|Ким[иа]\w*|Kimi|Кодекс\w*|Codex|Андре\w+|Ильшат\w*)",
     re.IGNORECASE,
 )
+# A "вы" step before the "я" step in one line ("1) вы: сказать «да»; 2) я: залью"): the "я" step
+# waits for it by construction, so it is a mislabelled "вы" line, not an empty promise.
+YOU_STEP_BEFORE_RE = re.compile(r"(?:^|[;.]\s*)(?:\d+[.)]\s*)?\**вы\**\s*[,:\-—]", re.IGNORECASE)
 
 
 def no_wake_kind(no_wake_line):
     """"COND" for a step that waits for the pilot or a later session, "FREE" otherwise, "" for none."""
     if not no_wake_line:
         return ""
+    first_i = I_LINE_RE.search(no_wake_line)
+    if first_i and YOU_STEP_BEFORE_RE.search(no_wake_line[: first_i.start()]):
+        return "COND"
     return "COND" if CONDITIONAL_RE.search(no_wake_line) else "FREE"
 
 

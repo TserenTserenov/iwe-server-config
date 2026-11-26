@@ -232,5 +232,35 @@ INTERIM_UP="<status>completed</status><note>THE RESULT BELOW MAY BE INTERIM; thi
 got=$(make_transcript "$TMP/iu.jsonl" "[U(\"Проверь.\"), *CALL(\"Agent\", \"agentId: aaa1111222233\", \"async_launched\"), NOTE(\"aaa1111222233\", \"$INTERIM_UP\"), A(EVENT)]"; env STYLE_CONTEXT=direct python3 "$DETECTOR" "$TMP/iu.jsonl" 2>/dev/null | sed -n '5p')
 check "interim marker in other letter case -> quiet" "$(is_empty "$got")" "[$got]"
 
+# Review of the merged change by Fable (26.11): common waits of the pilot are COND, a "вы" step before
+# the "я" step makes the line COND, the live empty promises stay FREE.
+i=0
+for t in 'я: залью после вашего решения.' 'я: жду вашего решения.' 'я: продолжу после вашего «да».' \
+         'я: сделаю по вашему сигналу.' 'я: продолжу, как скажете.' 'я: сделаю, если вы не против.' \
+         'я: сделаю, если хотите.' 'я: продолжу, когда ответите.' 'я: жду ответа Гермеса.' \
+         '1) вы: сказать «да»; 2) я: залью.'; do
+  i=$((i + 1))
+  check "wait form $i -> COND" \
+    "$([ "$(kind "wf$i" "[U(\"Проверь.\"), A(\"Итог.\n\nДальше: $t\")]")" = COND ] && echo yes || echo no)" "$t"
+done
+FREE1='я: подготовлю заготовку малого РП для Ф8 и правки команды. Они касаются кода у РП-626, поэтому слить запрос сможете только вы.'
+FREE2='я прошу отдельного проверяющего сверить правки, это шаг без вашего решения.'
+FREE3='я: вернусь завтра утром.'
+j=0
+for t in "$FREE1" "$FREE2" "$FREE3"; do
+  j=$((j + 1))
+  check "live empty promise $j stays FREE" \
+    "$([ "$(kind "fr$j" "[U(\"Проверь.\"), A(\"Итог.\n\nДальше: $t\")]")" = FREE ] && echo yes || echo no)" "$t"
+done
+check "\"вы, здесь:\" after a full stop is found" \
+  "$(make_transcript "$TMP/ps.jsonl" '[U("Закрывай."), A("Итог.\n\nДальше: выполнено. 2) вы, здесь: сказать «заливай».")]'; [ -n "$(env STYLE_CONTEXT=direct python3 "$DETECTOR" "$TMP/ps.jsonl" 2>/dev/null | sed -n '4p')" ] && echo yes || echo no)" "after a dot"
+
+# The return is sent at the end of the hook: the other checks still run (counter, journal) and the place
+# remark of the same line is stored too.
+out=$(run_hook hlate '[U("Проверь."), A("Тест PASS, exit 0.\n\nДальше: я, в этой сессии: закрыть журнал сессии.")]' STYLE_ENFORCE_BLOCK=1)
+check "late return: block text asks to do the step" "$([[ "$out" == *"Выполни обещанный шаг"* ]] && echo yes || echo no)" "$out"
+check "late return: the style findings are in the journal" "$([ "$(logline hlate 'A10')" -ge 1 ] && echo yes || echo no)" "no A10 line"
+check "late return: the place remark is stored too" "$([[ "$(remarks hlate)" == *"из неё ничего не публикуется"* ]] && echo yes || echo no)" "$(remarks hlate)"
+
 echo "a12-next-i-no-wake: pass=$PASS fail=$FAIL"
 [ "$FAIL" -eq 0 ]

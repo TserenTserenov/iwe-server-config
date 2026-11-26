@@ -607,6 +607,15 @@ A12_NEXT_NO_WAKE_KIND=$(printf '%s\n' "$A12_NEXT_RESULT" | sed -n '6p')
 # a journal nobody reads, so the empty "я" promise of 26.11 09:15 repeated. Claude Code only;
 # peer adapters have no such channel (WP-592 F6). The stop_hook_active guard at the top of
 # this file makes a return happen at most once per turn.
+# The return is only marked here and sent at the end of the hook (РП-605 Ф9, review 26.11: an
+# early exit skipped the A7.1 / A13 / A13.1 checks, the violation counter and the place remark).
+A12_RETURN_PENDING=0
+a12_emit_return_if_pending() {
+  [ "$A12_RETURN_PENDING" = 1 ] || return 0
+  jq -n --arg r "Строка «Дальше:» начинается с «я», но ничего не запущено и будильника нет: пилот прочтёт её как «работа идёт». Выполни обещанный шаг сейчас, в этом ответе. Если без решения пилота шаг невозможен, напиши ровно одну строку «Дальше: вы: …» и больше ничего. Прошлый ответ не повторяй, пилоту об этом замечании не пиши." \
+    '{"decision":"block","reason":$r}'
+  exit 0
+}
 if [ "$AGENT" = "claude-code" ] && [ "${STYLE_CONTEXT:-}" != "peer" ]; then
   [ -z "$A12_NEXT_FAILED" ] || echo "$TIMESTAMP | $AGENT | A12_NEXT_DETECTOR_FAILED | a12-next-block-crashed | -" >> "$LOG_FILE" 2>/dev/null || true
   # The return of the turn is switched by A12_NO_WAKE_BLOCK only; IWE_STYLE_DEFER_REMARK=0
@@ -624,9 +633,7 @@ if [ "$AGENT" = "claude-code" ] && [ "${STYLE_CONTEXT:-}" != "peer" ]; then
     # A step with no condition: the second answer is the work itself. One line per return
     # in the journal, so the share of returns that led to a tool call can be counted.
     echo "$TIMESTAMP | $AGENT | A12_NO_WAKE_RETURN | turn-returned-once | $(redact "$A12_NEXT_NO_WAKE_LINE")" >> "$LOG_FILE" 2>/dev/null || true
-    jq -n --arg r "Строка «Дальше:» начинается с «я», но ничего не запущено и будильника нет: пилот прочтёт её как «работа идёт». Выполни обещанный шаг сейчас, в этом ответе. Если без решения пилота шаг невозможен, напиши ровно одну строку «Дальше: вы: …» и больше ничего. Прошлый ответ не повторяй, пилоту об этом замечании не пиши." \
-      '{"decision":"block","reason":$r}'
-    exit 0
+    A12_RETURN_PENDING=1
   fi
   if [ "$A12_REMARKS_ON" = 1 ] && [ -n "$A12_NEXT_NO_WAKE_LINE" ] && [ "$A12_NEXT_NO_WAKE_KIND" = "COND" ]; then
     # A step that waits for the pilot's word or a later session is a "вы" line mislabelled "я":
@@ -809,7 +816,7 @@ fi
 # (BASE5 слишком частое; «авто-фикс» уже показанного текста невозможен).
 # В шаблоне флаг по умолчанию выключен — у нового пользователя ещё нет лога
 # для калибровки точности (гейт промоции ≥90% precision).
-if [ -z "$VIOLATIONS" ]; then exit 0; fi
+if [ -z "$VIOLATIONS" ]; then a12_emit_return_if_pending; exit 0; fi
 
 # Счётчик нарушений за сессию
 # Оба write здесь защищены `|| true` (code review, РП-388 Ф15, 20.10, Critical):
@@ -866,6 +873,7 @@ if [ "${STYLE_ENFORCE_BLOCK:-0}" = "1" ] && [ -n "$BLOCKABLE" ] && [ "$STYLE_CON
   if . "$(dirname "${BASH_SOURCE[0]}")/lib/next-turn-remark.sh" 2>/dev/null \
     && next_turn_remark_add "$COUNT_DIR" "$SESSION_ID" "Прошлый ответ нарушил стиль (правила:${BLOCKABLE} ), замечание уже в журнале. Пилоту о нём не пиши и прошлый ответ не повторяй; в этом ответе соблюдай: A1 голое имя файла не подлежащее; A10 без голых маркеров (exit/PASS); A7.1 журнал процесса в чат не идёт, якоря (коммит, ссылка) идут; A14 «входит в / состоит из» только о системах.${ESC_NOTE}"; then
     echo "$TIMESTAMP | $AGENT | STYLE_REMARK_DEFERRED | next-turn |${BLOCKABLE}" >> "$LOG_FILE" 2>/dev/null || true
+    a12_emit_return_if_pending
     echo '{}'
     exit 0
   fi
@@ -881,5 +889,6 @@ fi
 # В чат пилоту plain-text НЕ выводим — Stop-хук обязан печатать валидный JSON,
 # иначе Claude Code показывает строку как «спецсимволы в конце сообщения»
 # (lessons_hook_json_safety.md, 6 мая). Тихий выход '{}'.
+a12_emit_return_if_pending
 echo '{}'
 exit 0
