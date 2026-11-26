@@ -16,6 +16,10 @@ Design sources (DS-my-strategy, inbox/WP-626/):
 Usage:
   wp-run-journal.py create  --run-dir D --wp N --description-ref REF
                             [--preset lead|ask] [--rights-json FILE] [--budget-json JSON]
+                            (refuses unless scripts/check-wp-readiness.py of the repository
+                            that holds the run folder is the origin/main version and ends with
+                            "готово", the --wp number matches the folder, and no other run of
+                            the WP is open; the check cannot be replaced by a flag or a variable)
   wp-run-journal.py lease   --run-dir D [--ttl-min 120]
   wp-run-journal.py append  --run-dir D --epoch E --type T --payload JSON [--actor A] [--caused-by N]
   wp-run-journal.py ingest-answers --run-dir D --epoch E
@@ -50,12 +54,15 @@ import json
 import os
 import re
 import socket
+import subprocess
 import sys
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 EVENTS = "events.jsonl"
+TERMINAL_EVENTS = ("run-stopped", "run-completed")
+READY_RE = re.compile(r"^readiness: WP-(\d+): готово$")
 LEASE = "lease.json"
 LOCK = ".lock"
 ANSWER_BOX = "protected/pilot-answers.jsonl"
@@ -691,8 +698,68 @@ def release_session_marks(run_dir: Path) -> None:
 
 # ---------------------------------------------------------------- commands
 
+READINESS_SCRIPT = "scripts/check-wp-readiness.py"
+
+
+def pinned_readiness_script(repo: Path) -> Path:
+    """The readiness check of the repository that holds the run folder, and only while its
+    file is byte-identical to origin/main: a locally edited or swapped check starts nothing."""
+    script = repo / READINESS_SCRIPT
+    if not script.is_file():
+        raise Invalid(f"readiness check not found: {script}; the Manager does not start without it")
+
+    def git(*cmd: str) -> str:
+        try:
+            res = subprocess.run(["git", "-C", str(repo), *cmd], capture_output=True, text=True, timeout=30)
+        except (OSError, subprocess.SubprocessError) as error:
+            raise Invalid(f"cannot verify the readiness check with git: {error}") from error
+        if res.returncode != 0:
+            raise Invalid(f"cannot verify the readiness check (git {' '.join(cmd)}): {res.stderr.strip()}")
+        return res.stdout.strip()
+
+    published = git("rev-parse", "--verify", f"origin/main:{READINESS_SCRIPT}")
+    if git("hash-object", "--", READINESS_SCRIPT) != published:
+        raise Invalid(f"readiness check {script} differs from origin/main; "
+                      "the Manager starts only with the published check")
+    return script
+
+
+def check_launch_allowed(run_dir: Path, args) -> None:
+    """F8 safeguard: nothing is created unless the WP is ready, the number matches the
+    folder and no sibling run is open. Closed on doubt: a missing or failing checker refuses."""
+    run_dir = run_dir.resolve()
+    match = re.search(r"/inbox/WP-(\d+)/runs/[^/]+$", str(run_dir))
+    if not match or str(args.wp) != match.group(1):
+        raise Invalid(f"--wp {args.wp} does not match the run folder {run_dir}")
+    wp = match.group(1)
+    for sibling in sorted(run_dir.parent.iterdir()) if run_dir.parent.is_dir() else []:
+        if sibling == run_dir or not sibling.is_dir() or not read_lines(sibling):
+            continue
+        types = set()
+        for line in read_lines(sibling):
+            try:
+                types.add(json.loads(line).get("type"))
+            except (json.JSONDecodeError, AttributeError):
+                pass  # unreadable journal counts as not closed
+        if not types & set(TERMINAL_EVENTS):
+            raise Invalid(f"WP-{wp} already has an unclosed run: {sibling}")
+    repo = run_dir.parents[3]  # <repo>/inbox/WP-N/runs/<id>
+    script = pinned_readiness_script(repo)
+    try:
+        res = subprocess.run([sys.executable, str(script), "--repo", str(repo), "--wp", wp],
+                             capture_output=True, text=True, timeout=120)
+    except (OSError, subprocess.SubprocessError) as error:
+        raise Invalid(f"readiness check failed to run: {error}") from error
+    lines = [ln for ln in res.stdout.splitlines() if ln.strip()]
+    last = READY_RE.match(lines[-1].strip()) if lines else None
+    if res.returncode != 0 or not last or last.group(1) != wp:
+        shown = "\n".join(lines + res.stderr.splitlines()) or "(no output)"
+        raise Invalid(f"WP-{wp} is not ready for the Manager (exit {res.returncode}):\n{shown}")
+
+
 def cmd_create(args) -> int:
     run_dir = Path(args.run_dir)
+    check_launch_allowed(run_dir, args)
     with run_lock(run_dir):
         if read_lines(run_dir):
             raise Invalid("run already exists")

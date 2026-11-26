@@ -262,6 +262,11 @@ write_card "Ф1 — новое значение, ещё не опубликов�
 OUT="$(run --sem "$IWE/.iwe-runtime/sessions/claude-code-s1.open")"
 has "$OUT" "отличается от опубликованной" "правка не на origin: предупреждение"
 has "$(tail -1 "$LOG")" '"not_on_origin": true' "правка не на origin: пометка в журнале"
+# F285 (26.11): an unpublished card plus a failing verdict is a pre-publication reading.
+printf '%s\n' "Ф9 — совсем другой следующий шаг" >"$NEXT_FILE"
+OUT="$(run --sem "$IWE/.iwe-runtime/sessions/claude-code-s1.open")"
+has "$OUT" "Сначала опубликуй карточку" "не опубликовано и провал: просьба сначала опубликовать"
+has "$(tail -1 "$LOG")" '"awaiting_publication": true' "не опубликовано и провал: пометка в журнале"
 # The verdict is on the published card: the false mismatch of 09.11 (a working copy behind
 # origin, the writer's next step equal to the published field) passes.
 printf '%s\n' "Ф1 — опубликованное значение" >"$NEXT_FILE"

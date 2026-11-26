@@ -21,6 +21,24 @@ CONTRACT = {"inputs": [{"path": "inbox/WP-999/in.md", "sha256": "ab12"}],
             "contract_version": "v1", "ceiling": 60}
 
 
+def git(root: Path, *cmd: str) -> None:
+    subprocess.run(["git", "-C", str(root), "-c", "user.name=t", "-c", "user.email=t@example.invalid",
+                    "-c", "commit.gpgsign=false", *cmd], check=True, capture_output=True)
+
+
+def readiness_stub(root: Path, last_line="readiness: WP-999: готово", code=0) -> Path:
+    """A stand-in for check-wp-readiness.py, published as origin/main of the throwaway repository."""
+    stub = root / "scripts" / "check-wp-readiness.py"
+    stub.parent.mkdir(exist_ok=True)
+    stub.write_text("import sys\nprint(%r)\nsys.exit(%d)\n" % (last_line, code))
+    if not (root / ".git").exists():
+        git(root, "init", "-q")
+    git(root, "add", "--", "scripts/check-wp-readiness.py")
+    git(root, "commit", "-q", "--allow-empty", "--no-verify", "-m", "readiness stub")
+    git(root, "update-ref", "refs/remotes/origin/main", "HEAD")
+    return stub
+
+
 class Run:
     """A run folder plus helpers that call the CLI the way the Manager would."""
 
@@ -31,6 +49,7 @@ class Run:
         self.holder = "mgr-1"
         self.host = "tsekh-1"
         self.epoch = None
+        self.readiness = readiness_stub(root)
 
     def cli(self, *args):
         env = {**os.environ, "WP_RUN_JOURNAL_NOW": self.clock, "IWE_WP_MANAGER_STATE": str(self.state_dir),
@@ -46,8 +65,11 @@ class Run:
     def types(self):
         return [e["type"] for e in self.events()]
 
+    def create_cmd(self, *extra, wp="999"):
+        return self.cli("create", "--wp", wp, "--description-ref", "abc:inbox/WP-999/WP-999.md", *extra)
+
     def create(self, *extra):
-        code, out, err = self.cli("create", "--wp", "999", "--description-ref", "abc:inbox/WP-999/WP-999.md", *extra)
+        code, out, err = self.create_cmd(*extra)
         assert code == 0, err
         self.epoch = json.loads(out)["epoch"]
 
@@ -515,7 +537,7 @@ class JournalTest(unittest.TestCase):
         tmp = tempfile.TemporaryDirectory()
         run = Run(Path(tmp.name))
         run.holder = "../../escape"
-        code, _, err = run.cli("create", "--wp", "1", "--description-ref", "r")
+        code, _, err = run.cli("create", "--wp", "999", "--description-ref", "r")
         self.assertEqual(code, 2)
         self.assertFalse((Path(tmp.name) / "escape.json").exists())
         code, _, err = self.run.cli("lease", "--holder", "someone-else")
@@ -616,6 +638,94 @@ class JournalTest(unittest.TestCase):
         with open(self.run.dir / "events.jsonl", "a") as fh:
             fh.write('{"seq": 3, "torn')
         self.assertEqual(self.run.cli("verify")[0], 4)
+
+    def test_launch_refused_with_gaps_and_nothing_is_written(self):
+        tmp = tempfile.TemporaryDirectory()
+        run = Run(Path(tmp.name))
+        readiness_stub(Path(tmp.name), "readiness: WP-999: пробелов 3")
+        code, _, err = run.create_cmd()
+        self.assertEqual(code, 2)
+        self.assertIn("пробелов 3", err)
+        self.assertFalse(run.dir.exists())
+        tmp.cleanup()
+
+    def test_launch_refused_for_wp_not_going_to_the_manager(self):
+        tmp = tempfile.TemporaryDirectory()
+        run = Run(Path(tmp.name))
+        readiness_stub(Path(tmp.name), "readiness: WP-999: не идёт к Менеджеру РП (нет `manager: candidate`) — раздел не требуется")
+        self.assertEqual(run.create_cmd()[0], 2)
+        self.assertFalse(run.dir.exists())
+        tmp.cleanup()
+
+    def test_launch_refused_when_readiness_check_is_missing_or_fails(self):
+        tmp = tempfile.TemporaryDirectory()
+        run = Run(Path(tmp.name))
+        run.readiness.unlink()
+        code, _, err = run.create_cmd()
+        self.assertEqual(code, 2)
+        self.assertIn("not found", err)
+        readiness_stub(Path(tmp.name), "readiness: WP-999: готово", code=1)
+        self.assertEqual(run.create_cmd()[0], 2)
+        self.assertFalse(run.dir.exists())
+        tmp.cleanup()
+
+    def test_edited_check_is_refused(self):
+        tmp = tempfile.TemporaryDirectory()
+        run = Run(Path(tmp.name))
+        readiness_stub(Path(tmp.name), "readiness: WP-999: пробелов 1")
+        run.readiness.write_text("print('readiness: WP-999: готово')\n")  # local edit, not published
+        code, _, err = run.create_cmd()
+        self.assertEqual(code, 2)
+        self.assertIn("differs from origin/main", err)
+        self.assertFalse(run.dir.exists())
+        tmp.cleanup()
+
+    def test_launch_needs_origin_main(self):
+        tmp = tempfile.TemporaryDirectory()
+        run = Run(Path(tmp.name))
+        git(Path(tmp.name), "update-ref", "-d", "refs/remotes/origin/main")
+        code, _, err = run.create_cmd()
+        self.assertEqual(code, 2)
+        self.assertIn("cannot verify the readiness check", err)
+        self.assertFalse(run.dir.exists())
+        tmp.cleanup()
+
+    def test_no_flag_replaces_check(self):
+        tmp = tempfile.TemporaryDirectory()
+        run = Run(Path(tmp.name))
+        readiness_stub(Path(tmp.name), "readiness: WP-999: пробелов 1")
+        fake = Path(tmp.name) / "fake.py"
+        fake.write_text("print('readiness: WP-999: готово')\n")
+        self.assertEqual(run.create_cmd("--readiness-script", str(fake))[0], 2)
+        self.assertFalse(run.dir.exists())
+        tmp.cleanup()
+
+    def test_launch_refused_when_wp_number_differs_from_folder(self):
+        tmp = tempfile.TemporaryDirectory()
+        run = Run(Path(tmp.name))
+        code, _, err = run.create_cmd(wp="998")
+        self.assertEqual(code, 2)
+        self.assertIn("does not match", err)
+        self.assertFalse(run.dir.exists())
+        tmp.cleanup()
+
+    def test_second_unclosed_run_of_the_wp_is_refused(self):
+        other = Run(Path(self.tmp.name))
+        other.dir = self.run.dir.parent / "wp999-2026-12-01-2"
+        code, _, err = other.create_cmd()
+        self.assertEqual(code, 2)
+        self.assertIn("wp999-2026-12-01-1", err)
+        self.assertFalse(other.dir.exists())
+
+    def test_new_run_is_allowed_after_the_previous_one_is_closed(self):
+        self.run.approved_plan(TWO)
+        self.assertEqual(self.run.append("run-stopped", {"reason": "test"})[0], 0)
+        (self.run.dir.parent / "empty-folder").mkdir()
+        other = Run(Path(self.tmp.name))
+        other.holder = "mgr-2"
+        other.dir = self.run.dir.parent / "wp999-2026-12-01-2"
+        other.create()
+        self.assertEqual(other.types(), ["lease-taken", "run-created"])
 
     def test_sample_hides_seed_until_run_closes(self):
         self.run.approved_plan(TWO)

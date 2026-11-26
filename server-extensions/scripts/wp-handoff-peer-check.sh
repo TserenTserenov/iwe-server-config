@@ -290,6 +290,11 @@ if [ "$BLOCK" = 1 ] && [ "$CODE" = "HANDOFF_UNKNOWN_PHASE" ]; then
 fi
 [ "$BLOCK" = 1 ] && add_evidence '"blocked": true'
 [ "$NOT_ON_ORIGIN" = 1 ] && add_evidence '"not_on_origin": true'
+# F285 (26.11): a failing verdict on a card that is not published yet is a pre-publication
+# reading, not a verdict on the field: 13 of 56 closes since 18.11 ended on such a row and
+# 9 of them published the field 0.4-5.6 minutes after the check.  The marker lets the
+# measurement tell the two apart.
+[ "$NOT_ON_ORIGIN" = 1 ] && [ "$STATE" = fail ] && add_evidence '"awaiting_publication": true'
 [ "$BASELINE_SOURCE" = "local-unfetched" ] && add_evidence '"baseline_source": "local-unfetched"'
 if [ "$STALE_CHECKER" = 1 ]; then
   add_evidence '"stale_checker": true'
@@ -301,6 +306,9 @@ if [ "$BASELINE_SOURCE" = "local-unfetched" ]; then
 fi
 if [ "$NOT_ON_ORIGIN" = 1 ]; then
   echo "Session CLOSE: рабочая копия карточки $WP отличается от опубликованной — проверено опубликованное; если правка не опубликована, следующая сессия её не увидит." >&2
+  if [ "$STATE" = fail ]; then
+    echo "  Сначала опубликуй карточку (коммит и отправка на сервер), потом повтори проверку: вердикт выше считан по старой карточке на сервере." >&2
+  fi
 fi
 case "$ORIGIN_STATE" in
   origin_unreachable) echo "Session CLOSE: origin недоступен — проверена рабочая копия, вердикт ориентировочный и не блокирует." >&2 ;;
