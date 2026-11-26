@@ -237,11 +237,15 @@ git -C "$VALID_GOV" add -A
 git -C "$VALID_GOV" commit -qm init
 echo "<!-- touch -->" >> "$VALID_GOV/current/WeekPlan W99.md"
 git -C "$VALID_GOV" add current/WeekPlan\ W99.md
+# Since WP-484 F342 only a staged plan is validated: stage the DayPlan too, so the
+# legacy "Бюджет дня:" label with the mid-day phrase is really checked.
+echo "<!-- touch -->" >> "$VALID_GOV/current/DayPlan 2026-08-27.md"
+git -C "$VALID_GOV" add "current/DayPlan 2026-08-27.md"
 out=$(python3 -c 'import json,sys; print(json.dumps({"tool_name":"Bash","tool_input":{"command":"git commit -m x"},"cwd":sys.argv[1]}))' "$VALID_GOV" \
   | IWE_GOVERNANCE_REPO="valid-gov-repo" IWE_WORKSPACE="$WORKDIR" bash "$HOOK" 2>/dev/null)
-if echo "$out" | grep -q '"decision"[[:space:]]*:[[:space:]]*"block"'; then
+if echo "$out" | grep -q '"decision"[[:space:]]*:[[:space:]]*"block"' || ! echo "$out" | grep -q 'DayPlan прошёл валидацию'; then
   FAIL=$((FAIL+1))
-  echo "FAIL: mid-day multiplier placeholder should not block a fully valid DayPlan: $out"
+  echo "FAIL: mid-day multiplier placeholder should not block a fully valid DayPlan (and it must be validated): $out"
 else
   PASS=$((PASS+1))
 fi

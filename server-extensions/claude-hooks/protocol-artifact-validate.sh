@@ -211,21 +211,55 @@ if [ -f "$PATHSPEC_HELPER" ]; then
 fi
 
 # WP-484 Ф342 (bug-2026-09-14-artifact-validate-hook-blocks-unrelated-commits-on-stale-dayplan):
-# each plan is validated only when that plan itself is in the commit, and the
-# staged plan is validated, not whichever plan lies on disk. A staged path that
-# no longer exists (archived or deleted) has nothing to validate.
-staged_plan() { # <grep pattern> -> absolute path of the newest staged existing plan, or ""
-  local rel
-  rel=$(printf '%s\n' "$STAGED_PLANS" | grep -E "$1" | sort | tail -1)
-  if [ -n "$rel" ] && [ -f "$GOV_PATH/$rel" ]; then printf '%s\n' "$GOV_PATH/$rel"; fi
+# each plan is validated only when that plan itself is in the commit, and its
+# STAGED content (the index version that will be committed) is validated, not the
+# file on disk. A path removed from the index (archived, deleted) has nothing to
+# validate; the newest plan still present in the index is taken.
+PLAN_SNAPSHOT_DIR=$(mktemp -d 2>/dev/null) || PLAN_SNAPSHOT_DIR=""
+trap '[ -n "$PLAN_SNAPSHOT_DIR" ] && rm -rf "$PLAN_SNAPSHOT_DIR"' EXIT
+staged_plan_rel() { # <grep pattern> -> repo-relative path of the newest plan present in the index, or ""
+  local rel newest=""
+  while IFS= read -r rel; do
+    [ -n "$rel" ] || continue
+    git -C "$GOV_PATH" cat-file -e ":$rel" 2>/dev/null && newest="$rel"
+  done < <(printf '%s\n' "$STAGED_PLANS" | grep -E "$1" | sort)
+  printf '%s' "$newest"
+}
+# Which version will be committed depends on the command (`commit -a` or a pathspec
+# takes the disk copy, a plain commit the index), so both are validated when they
+# differ. Prints the staged version first; when no snapshot could be made it prints
+# only the disk copy (the caller notes that).
+plan_versions() { # <rel>
+  local staged disk="$GOV_PATH/$1"
+  staged=$(staged_plan_file "$1")
+  printf '%s\n' "$staged"
+  [ "$staged" = "$disk" ] && return 0
+  if [ -f "$disk" ] && ! cmp -s "$staged" "$disk"; then printf '%s\n' "$disk"; fi
+}
+NOTES=()
+note_versions() { # <rel> <first printed file> <count of printed files>
+  if [ "$2" = "$GOV_PATH/$1" ]; then
+    NOTES+=("версию $(basename "$1") из коммита прочитать не удалось — проверена копия на диске")
+  elif [ "$3" -gt 1 ]; then
+    NOTES+=("$(basename "$1"): версия в коммите и копия на диске различаются — проверены обе")
+  fi
+}
+staged_plan_file() { # <rel> -> a file with the staged content of rel (the disk copy if no snapshot)
+  local out
+  if [ -n "$PLAN_SNAPSHOT_DIR" ]; then
+    out="$PLAN_SNAPSHOT_DIR/$(basename "$1")"
+    if git -C "$GOV_PATH" show ":$1" > "$out" 2>/dev/null; then printf '%s' "$out"; return; fi
+  fi
+  printf '%s' "$GOV_PATH/$1"
 }
 
 # --- DayPlan Validation (only when a DayPlan is in this commit) ---
-DAYPLAN=$(staged_plan '^current/DayPlan.*\.md$')
+DAYPLAN_REL=$(staged_plan_rel '^current/DayPlan.*\.md$')
 MISSING=()
 ERRORS=()
 
-if [ -n "$DAYPLAN" ]; then
+validate_dayplan() { # <file>: appends findings to MISSING / ERRORS
+local DAYPLAN="$1"
 
 # Required sections, by stable id; each id accepts the heading in any shipped
 # language (recognition.dayplan.section.<id> in .claude/lib/locale/*.json,
@@ -293,18 +327,45 @@ fi
 
 # --- Ф3 Check 5: Carry-over цитата (если есть предыдущий DayPlan) ---
 PREV_DAYPLAN=$(ls "$GOV_PATH"/current/DayPlan\ *.md 2>/dev/null | sort | tail -2 | head -1)
-if [ -n "$PREV_DAYPLAN" ] && [ "$PREV_DAYPLAN" != "$DAYPLAN" ]; then
+if [ -n "$PREV_DAYPLAN" ] && [ "$PREV_DAYPLAN" != "$GOV_PATH/$DAYPLAN_REL" ]; then
   # Предыдущий DayPlan существует — текущий должен содержать Carry-over
   if ! grep -qiE 'carry.over|carry_over' "$DAYPLAN"; then
     ERRORS+=("Carry-over цитата из предыдущего Day Close отсутствует (предыдущий DayPlan: $(basename "$PREV_DAYPLAN"))")
   fi
 fi
 
-fi  # endif [ -n "$DAYPLAN" ]
+}  # validate_dayplan
+
+if [ -n "$DAYPLAN_REL" ]; then
+  plan_count=0
+  plan_first=""
+  while IFS= read -r plan_file; do
+    plan_count=$((plan_count + 1))
+    [ -n "$plan_first" ] || plan_first="$plan_file"
+    missing_before=${#MISSING[@]}
+    errors_before=${#ERRORS[@]}
+    validate_dayplan "$plan_file"
+    # The second version is the disk copy: keep only its own findings, labelled.
+    if [ "$plan_count" -gt 1 ]; then
+      kept=("${MISSING[@]:0:missing_before}")
+      for ((i = missing_before; i < ${#MISSING[@]}; i++)); do
+        printf '%s\n' "${MISSING[@]:0:missing_before}" | grep -Fxq -- "${MISSING[i]}" || kept+=("[копия на диске] ${MISSING[i]}")
+      done
+      MISSING=("${kept[@]}")
+      kept=("${ERRORS[@]:0:errors_before}")
+      for ((i = errors_before; i < ${#ERRORS[@]}; i++)); do
+        printf '%s\n' "${ERRORS[@]:0:errors_before}" | grep -Fxq -- "${ERRORS[i]}" || kept+=("[копия на диске] ${ERRORS[i]}")
+      done
+      ERRORS=("${kept[@]}")
+    fi
+  done < <(plan_versions "$DAYPLAN_REL")
+  note_versions "$DAYPLAN_REL" "$plan_first" "$plan_count"
+fi
 
 # --- WeekPlan Validation (Ф6.1 WP-265; only when a WeekPlan is in this commit, Ф342) ---
-WEEKPLAN=$(staged_plan '^current/WeekPlan.*\.md$')
-if [ -n "$WEEKPLAN" ]; then
+WEEKPLAN_REL=$(staged_plan_rel '^current/WeekPlan.*\.md$')
+validate_weekplan() { # <file> [label]: blocks and exits on the first failing version
+  local WEEKPLAN="$1" WP_LABEL="${2:-}"
   WP_LINES=$(wc -l < "$WEEKPLAN" | tr -d ' ')
   WP_ERRORS=()
   WP_MISSING_LIST=()
@@ -347,13 +408,37 @@ if [ -n "$WEEKPLAN" ]; then
   if [ ${#WP_MISSING_LIST[@]} -gt 0 ] || [ ${#WP_ERRORS[@]} -gt 0 ]; then
     WP_MISSING_STR=$(IFS=', '; echo "${WP_MISSING_LIST[*]:-}")
     WP_ERRORS_STR=$(IFS=', '; echo "${WP_ERRORS[*]:-}")
-    WP_MSG="⛔ WEEKPLAN VALIDATION FAILED."
+    WP_MSG="⛔ WEEKPLAN VALIDATION FAILED${WP_LABEL}."
     [ ${#WP_MISSING_LIST[@]} -gt 0 ] && WP_MSG="$WP_MSG Пропущены секции (${#WP_MISSING_LIST[@]}): $WP_MISSING_STR."
     [ ${#WP_ERRORS[@]} -gt 0 ] && WP_MSG="$WP_MSG Ошибки структуры: $WP_ERRORS_STR."
     WP_MSG="$WP_MSG Исправь WeekPlan перед коммитом."
+    [ ${#NOTES[@]} -gt 0 ] && WP_MSG="$WP_MSG ($(IFS=';'; echo "${NOTES[*]}"))"
     jq -n --arg reason "$WP_MSG" '{"decision": "block", "reason": $reason}'
     exit 0
   fi
+}  # validate_weekplan
+
+if [ -n "$WEEKPLAN_REL" ]; then
+  plan_count=0
+  plan_first=""
+  plan_files=()
+  while IFS= read -r plan_file; do
+    plan_count=$((plan_count + 1))
+    [ -n "$plan_first" ] || plan_first="$plan_file"
+    plan_files+=("$plan_file")
+  done < <(plan_versions "$WEEKPLAN_REL")
+  note_versions "$WEEKPLAN_REL" "$plan_first" "$plan_count"
+  validate_weekplan "${plan_files[0]}"
+  [ ${#plan_files[@]} -gt 1 ] && validate_weekplan "${plan_files[1]}" " (копия на диске)"
+fi
+
+# Two validated versions of one DayPlan may report the same finding twice.
+dedupe_lines() { printf '%s\n' "$@" | awk 'NF && !seen[$0]++'; }
+if [ ${#MISSING[@]} -gt 0 ]; then
+  unique=(); while IFS= read -r line; do unique+=("$line"); done < <(dedupe_lines "${MISSING[@]}"); MISSING=("${unique[@]}")
+fi
+if [ ${#ERRORS[@]} -gt 0 ]; then
+  unique=(); while IFS= read -r line; do unique+=("$line"); done < <(dedupe_lines "${ERRORS[@]}"); ERRORS=("${unique[@]}")
 fi
 
 # Report results
@@ -367,12 +452,15 @@ if [ ${#MISSING[@]} -gt 0 ] || [ ${#ERRORS[@]} -gt 0 ]; then
   [ ${#MISSING[@]} -gt 0 ] && MSG="$MSG Пропущены секции (${#MISSING[@]}): $MISSING_STR."
   [ ${#ERRORS[@]} -gt 0 ] && MSG="$MSG Ошибки формата/структуры: $ERRORS_STR."
   MSG="$MSG Исправь DayPlan перед коммитом."
+  [ ${#NOTES[@]} -gt 0 ] && MSG="$MSG ($(IFS=';'; echo "${NOTES[*]}"))"
 
   jq -n --arg reason "$MSG" '{"decision": "block", "reason": $reason}'
-elif [ -n "$DAYPLAN" ]; then
-  cat <<'EOF'
-{"additionalContext": "✅ DayPlan прошёл валидацию: секции, collapsible, непустые блоки, мультипликатор, carry-over."}
-EOF
+elif [ -n "$DAYPLAN_REL" ]; then
+  CTX="✅ DayPlan прошёл валидацию: секции, collapsible, непустые блоки, мультипликатор, carry-over."
+  [ ${#NOTES[@]} -gt 0 ] && CTX="$CTX ($(IFS=';'; echo "${NOTES[*]}"))"
+  jq -n --arg ctx "$CTX" '{"additionalContext": $ctx}'
+elif [ ${#NOTES[@]} -gt 0 ]; then
+  jq -n --arg ctx "⚠️ protocol-artifact-validate: $(IFS=';'; echo "${NOTES[*]}")" '{"additionalContext": $ctx}'
 else
   # Ф342: no DayPlan in this commit -> nothing was validated, say nothing.
   echo '{}'
