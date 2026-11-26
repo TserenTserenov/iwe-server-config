@@ -118,12 +118,14 @@ expect() { # $1 = описание, $2 = block|warn|pass, $3 = cwd, $4 = command
 # Stage a fresh WeekPlan change in gov so the DayPlan/WeekPlan check is live
 # for every scenario below (same as the reported incident: something is
 # staged in the governance repo regardless of what's actually being
-# committed).
-echo "<!-- touch -->" >> "$GOV/current/WeekPlan W99.md"
+# committed). Since WP-484 F342 only the staged plan is validated, so the
+# staged WeekPlan itself carries a defect (an unbalanced <details>): a block
+# below comes from the plan that is in the commit, not from the DayPlan on disk.
+echo "<details><!-- touch: unbalanced on purpose -->" >> "$GOV/current/WeekPlan W99.md"
 git -C "$GOV" add current/WeekPlan\ W99.md
 
 # 1. cwd = governance repo, staged WeekPlan there → validate for real
-#    (multiplier missing in DayPlan → block).
+#    (unbalanced <details> in the staged WeekPlan → block).
 expect "governance repo, cwd-based" block "$GOV" "git commit -m x"
 
 # 2. Same case, -C form instead of relying on cwd.
@@ -141,7 +143,7 @@ expect "unrelated repo via -C, gov cwd has staged WeekPlan" pass "$GOV" "git -C 
 #    no need to re-copy them.
 WORKTREE="$WORKDIR/gov-worktree"
 git -C "$GOV" worktree add -q -b test-worktree-branch "$WORKTREE" >/dev/null 2>&1
-echo "<!-- touch -->" >> "$WORKTREE/current/WeekPlan W99.md"
+echo "<details><!-- touch: unbalanced on purpose -->" >> "$WORKTREE/current/WeekPlan W99.md"
 git -C "$WORKTREE" add current/
 expect "isolated worktree of governance repo" block "$WORKTREE" "git commit -m x"
 

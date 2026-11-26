@@ -210,8 +210,18 @@ if [ -f "$PATHSPEC_HELPER" ]; then
   fi
 fi
 
-# --- DayPlan Validation (выполняется только если DayPlan-файл существует) ---
-DAYPLAN=$(ls "$GOV_PATH"/current/DayPlan\ *.md 2>/dev/null | head -1)
+# WP-484 Ф342 (bug-2026-09-14-artifact-validate-hook-blocks-unrelated-commits-on-stale-dayplan):
+# each plan is validated only when that plan itself is in the commit, and the
+# staged plan is validated, not whichever plan lies on disk. A staged path that
+# no longer exists (archived or deleted) has nothing to validate.
+staged_plan() { # <grep pattern> -> absolute path of the newest staged existing plan, or ""
+  local rel
+  rel=$(printf '%s\n' "$STAGED_PLANS" | grep -E "$1" | sort | tail -1)
+  if [ -n "$rel" ] && [ -f "$GOV_PATH/$rel" ]; then printf '%s\n' "$GOV_PATH/$rel"; fi
+}
+
+# --- DayPlan Validation (only when a DayPlan is in this commit) ---
+DAYPLAN=$(staged_plan '^current/DayPlan.*\.md$')
 MISSING=()
 ERRORS=()
 
@@ -292,8 +302,8 @@ fi
 
 fi  # endif [ -n "$DAYPLAN" ]
 
-# --- WeekPlan Validation (Ф6.1 WP-265) ---
-WEEKPLAN=$(ls "$GOV_PATH"/current/WeekPlan\ *.md 2>/dev/null | sort | tail -1)
+# --- WeekPlan Validation (Ф6.1 WP-265; only when a WeekPlan is in this commit, Ф342) ---
+WEEKPLAN=$(staged_plan '^current/WeekPlan.*\.md$')
 if [ -n "$WEEKPLAN" ]; then
   WP_LINES=$(wc -l < "$WEEKPLAN" | tr -d ' ')
   WP_ERRORS=()
@@ -359,10 +369,13 @@ if [ ${#MISSING[@]} -gt 0 ] || [ ${#ERRORS[@]} -gt 0 ]; then
   MSG="$MSG Исправь DayPlan перед коммитом."
 
   jq -n --arg reason "$MSG" '{"decision": "block", "reason": $reason}'
-else
+elif [ -n "$DAYPLAN" ]; then
   cat <<'EOF'
 {"additionalContext": "✅ DayPlan прошёл валидацию: секции, collapsible, непустые блоки, мультипликатор, carry-over."}
 EOF
+else
+  # Ф342: no DayPlan in this commit -> nothing was validated, say nothing.
+  echo '{}'
 fi
 
 exit 0
