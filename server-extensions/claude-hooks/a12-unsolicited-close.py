@@ -92,12 +92,28 @@ PASTE_PREFIX_LIMIT = 600  # same threshold as close-gate-reminder.sh
 #               boundary: start, punctuation or a connective ("и потом ПСЗ",
 #               "доделай. СЗ"). A verb right before it ("ты не понял ПСЗ") is a
 #               mention, not a command.
+# What may follow the shorthand (WP-484 F337, Fable review 26.11: a free tail let
+# "ПСЗ отменяется", "ПСЗ выполнен", "ПСЗ это что такое" count as the command; a false
+# hit skips the reflection question without the pilot's word, so the tail is a WHITE
+# list): nothing, a polite word, «субагентом ...» / «с субагентом ...» with an optional
+# name, «, остальное ...».
+SHORTHAND_TAIL = (
+    r"(?:\W*(?:пожалуйста|спасибо)"
+    r"|[ \t,]+(?:с[ \t]+)?субагент\w*(?:[ \t]+(?:fable|фабл\w*|kimi|кими|codex|кодекс\w*))?"
+    r"|[ \t]*,[ \t]*остальное[ \t]+(?:в|на)[ \t]+(?:нов\w+|следующ\w+)[ \t]+(?:сесси\w+|беседе|чате))?"
+)
 SHORTHAND_WHOLE_RE = re.compile(r"^\W*(п?сз)\W*$", re.IGNORECASE)
+# After punctuation or a line break (a pasted log line) only a bare shorthand or a polite
+# word counts; the «субагентом ...» tail needs a connective word before the shorthand.
 SHORTHAND_TRAILING_RE = re.compile(
-    r"(?:^|[.,;:!—–\n-]|(?<!\w)(?:и|а|потом|затем|далее|после\s+этого|в\s+конце))"
-    r"\s*(п?сз)(?!\w)\W*(?:(?:пожалуйста|спасибо)\W*)?$",
+    r"(?:(?:^|[.,;:!—–\n-])\s*(п?сз)(?!\w)(?:\W*(?:пожалуйста|спасибо))?"
+    r"|(?<!\w)(?:и|а|то|потом|затем|далее|после\s+этого|в\s+конце)\s*(п?сз)(?!\w)" + SHORTHAND_TAIL + r")\W*$",
     re.IGNORECASE,
 )
+# «ПСЗ» as the FIRST word with an allowed tail ("ПСЗ субагентом Fable", "ПСЗ, остальное
+# в новой сессии"); live cases 22.11 and 25.11.
+SHORTHAND_LEADING_RE = re.compile(r"^\W*(п?сз)(?!\w)" + SHORTHAND_TAIL + r"\W*$", re.IGNORECASE)
+IF_WORD_RE = re.compile(r"(?<!\w)если(?!\w)", re.IGNORECASE)
 # A negation or a question word in the clause right before the shorthand makes it
 # a complaint or a refusal, also across a comma: "ты опять не понял, ПСЗ",
 # "сделай без ПСЗ", "не — ПСЗ", "вместо ПСЗ". Checked on the text before the
@@ -228,15 +244,23 @@ def pilot_shorthand(text, paste_limit=PASTE_PREFIX_LIMIT):
     stripped = mask_quoted_spans(text)
     if "?" in stripped:
         return "", ""
+    leading = SHORTHAND_LEADING_RE.match(stripped)
+    if leading:
+        return ("psz" if leading.group(1).lower() == "псз" else "sz"), "trailing"
     trailing = SHORTHAND_TRAILING_RE.search(stripped)
     if not trailing:
         return "", ""
-    if paste_limit is not None and trailing.start(1) > paste_limit:
+    grp = 1 if trailing.group(1) else 2  # the shorthand sits in group 1 (after punctuation) or 2 (after a connective)
+    if paste_limit is not None and trailing.start(grp) > paste_limit:
         return "", ""
-    clause = stripped[:trailing.start(1)].rstrip(" \t\n.,;:!—–-")
+    # The connective «то» counts only inside an "если ..., то ПСЗ" sentence.
+    before = stripped[: trailing.start(grp)]
+    if re.search(r"(?<!\w)то\W*$", before, re.IGNORECASE) and not IF_WORD_RE.search(before):
+        return "", ""
+    clause = stripped[:trailing.start(grp)].rstrip(" \t\n.,;:!—–-")
     if SHORTHAND_CLAUSE_NEGATION_RE.search(clause) or SHORTHAND_NAMED_IN_CLAUSE_RE.search(clause):
         return "", ""
-    return ("psz" if trailing.group(1).lower() == "псз" else "sz"), "trailing"
+    return ("psz" if trailing.group(grp).lower() == "псз" else "sz"), "trailing"
 
 
 def detect(path):

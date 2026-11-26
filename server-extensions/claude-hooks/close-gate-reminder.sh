@@ -441,7 +441,11 @@ _record_close_intent() {
     fi
   fi
 
-  python3 "$OBLIGATION_CLI" record-intent --session-id "$SESSION_ID" --raw-text "$raw_text" --skip-reflection "$skip_reflection" >/dev/null 2>&1 || \
+  # WP-484 F337: a repeated close word keeps an earlier recorded skip unless this very
+  # message talks about reflection (then the pilot may be asking for it back).
+  local keep_skip="true"
+  echo "$PROMPT" | grep -qE 'рефлекс|ретро' && keep_skip="false"
+  python3 "$OBLIGATION_CLI" record-intent --session-id "$SESSION_ID" --raw-text "$raw_text" --skip-reflection "$skip_reflection" --keep-skip "$keep_skip" >/dev/null 2>&1 || \
     echo "[close-gate-reminder] session=$SESSION_ID record-intent failed (non-fatal — render falls back to interactive path)" >&2
 }
 
