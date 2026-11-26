@@ -14,15 +14,22 @@ Design sources (DS-my-strategy, inbox/WP-626/):
   F2/role-and-rights-draft.md      rights table P1-P19
 
 Usage:
-  wp-run-journal.py create  --run-dir D --wp N --description-ref REF --host H --holder ID
+  wp-run-journal.py create  --run-dir D --wp N --description-ref REF
                             [--preset lead|ask] [--rights-json FILE] [--budget-json JSON]
-  wp-run-journal.py lease   --run-dir D --holder ID [--ttl-min 120]
+  wp-run-journal.py lease   --run-dir D [--ttl-min 120]
   wp-run-journal.py append  --run-dir D --epoch E --type T --payload JSON [--actor A] [--caused-by N]
   wp-run-journal.py ingest-answers --run-dir D --epoch E
   wp-run-journal.py state   --run-dir D
   wp-run-journal.py verify  --run-dir D
   wp-run-journal.py affected --run-dir D --decision ID
   wp-run-journal.py views   --run-dir D
+  wp-run-journal.py sample  --run-dir D      decisions picked for the pilot's spot check
+
+Run folder: must be <repo>/inbox/WP-<N>/runs/<run_id> (F4 section 1).
+Holder: the Claude Code session id from CLAUDE_CODE_SESSION_ID (a --holder flag
+is accepted only when that variable is absent, e.g. in tests, and must match it
+when present). Host: the run is bound to the host that created it
+(IWE_WP_MANAGER_HOST overrides the host name).
 
 Exit codes: 0 ok; 2 usage, schema or lease error (nothing written);
 3 refused by the rights rules (a right-refused event is written);
@@ -30,7 +37,8 @@ Exit codes: 0 ok; 2 usage, schema or lease error (nothing written);
 
 Test clock: WP_RUN_JOURNAL_NOW (ISO-8601 UTC) overrides the current time.
 Session marks: taking a lease writes $IWE_WP_MANAGER_STATE/sessions/<holder>.json
-(default ~/.iwe-runtime/wp-manager); run-completed and run-stopped remove it.
+(default ~/.iwe-runtime/wp-manager); only run-completed removes it (a stopped run keeps
+the session under the Manager rules).
 The hooks wp-manager-answer-box.py and wp-manager-guard.py read these marks.
 """
 from __future__ import annotations
@@ -40,6 +48,8 @@ import fcntl
 import hashlib
 import json
 import os
+import re
+import socket
 import sys
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
@@ -51,6 +61,12 @@ LOCK = ".lock"
 ANSWER_BOX = "protected/pilot-answers.jsonl"
 PILOT_MESSAGES = "protected/pilot-messages.jsonl"
 CARDS = "cards"
+
+
+RUN_DIR_RE = re.compile(r"/inbox/WP-\d+/runs/[A-Za-z0-9][A-Za-z0-9._-]*$")
+HOLDER_RE = re.compile(r"^[A-Za-z0-9_-]{1,128}$")
+# What an approval request must pin down, per approved event type (Fable review round 2).
+ACTION_KEYS = {"phase-transitioned": ("phase", "to"), "phase-assigned": ("phase",), "plan-revised": ("version",)}
 
 
 def session_marker_dir() -> Path:
@@ -80,7 +96,7 @@ REQUIRED = {
     "decision-recorded": ["decision_id", "kind", "rule", "status", "question", "choice", "basis"],
     "assumption-changed": ["assumption_id", "from", "to", "evidence"],
     "phase-transitioned": ["phase", "to", "reason"],
-    "pilot-requested": ["request_id", "subject", "right"],
+    "pilot-requested": ["request_id", "subject", "right", "action"],
     "pilot-answered": ["request_id", "answer", "text"],
     "cost-recorded": ["scope", "minutes", "source"],
     "run-stopped": ["reason"],
@@ -97,14 +113,16 @@ MANAGER_TYPES = set(REQUIRED) - {"run-created", "lease-taken", "pilot-answered",
                                   "pilot-intervention"}
 
 # Allowed phase transitions (F4 section 4 + revision 2 section 3).
+# ready -> assigned and assigned/unknown -> submitted happen only through the
+# phase-assigned and artifact-submitted events, never as manual transitions:
+# otherwise attempt counting (P6) and budget ceilings (P13) are bypassed.
 TRANSITIONS = {
-    ("waiting", "ready"), ("ready", "assigned"), ("assigned", "submitted"),
-    ("assigned", "unknown"), ("unknown", "submitted"), ("unknown", "ready"),
+    ("waiting", "ready"), ("assigned", "unknown"), ("unknown", "ready"),
     ("submitted", "checking"), ("checking", "accepted"), ("checking", "rejected"),
-    ("checking", "accepted-unconfirmed"), ("rejected", "ready"),
+    ("checking", "accepted-unconfirmed"), ("accepted", "accepted-unconfirmed"), ("rejected", "ready"),
     ("ready", "blocked"), ("assigned", "blocked"), ("checking", "blocked"),
     ("blocked", "ready"), ("accepted", "ready"), ("assigned", "ready"),
-    ("submitted", "ready"), ("checking", "ready"), ("ready", "awaiting-decision"),
+    ("submitted", "ready"), ("checking", "ready"),
     ("checking", "awaiting-decision"), ("awaiting-decision", "accepted"),
     ("accepted-unconfirmed", "accepted"), ("accepted-unconfirmed", "ready"),
 }
@@ -176,7 +194,10 @@ def load_events(run_dir: Path) -> list[dict]:
     """Read and verify the chain; raise Broken on any gap or edit."""
     events, prev = [], ""
     for number, line in enumerate(read_lines(run_dir), start=1):
-        event = json.loads(line)
+        try:
+            event = json.loads(line)
+        except json.JSONDecodeError as error:
+            raise Broken(f"line {number} is not JSON ({error})") from error
         if event.get("seq") != number:
             raise Broken(f"seq {event.get('seq')} at line {number}")
         if event.get("prev_hash") != prev:
@@ -221,6 +242,7 @@ class State:
         self.status: dict[str, str] = {}
         self.attempts: dict[str, int] = {}
         self.verdicts: dict[tuple[str, int], str] = {}
+        self.executors: dict[tuple[str, int], str] = {}
         self.requests: dict[str, dict] = {}
         self.answers: dict[str, dict] = {}
         self.decisions: dict[str, dict] = {}
@@ -245,18 +267,33 @@ class State:
             raise Invalid(f"unknown rule {rule}")
         return self.rights[rule]
 
-    def approved(self, request_id: str | None, reuse_key: str | None = None) -> bool:
-        answer = self.answers.get(request_id or "")
-        if not answer or not str(answer["answer"]).lower().startswith(("yes", "choice:")):
-            return False
+    def unused(self, request_id: str, reuse_key: str | None) -> bool:
         used_by = self.consumed.get(request_id)
         return used_by is None or (reuse_key is not None and used_by == reuse_key)
 
+    def decision_answered(self, request_id: str) -> bool:
+        """A decision request is settled by "yes" or a chosen option."""
+        answer = self.answers.get(request_id)
+        return bool(answer) and str(answer["answer"]).lower().startswith(("yes", "choice:")) \
+            and self.unused(request_id, None)
+
+    def action_approved(self, request_id: str, etype: str, payload: dict, reuse_key: str | None) -> bool:
+        """An action request is settled only by a plain "yes" to that very action."""
+        answer = self.answers.get(request_id)
+        action = self.requests.get(request_id, {}).get("action") or {}
+        if not answer or str(answer["answer"]).lower() != "yes" or action.get("type") != etype:
+            return False
+        for key in ("phase", "version", "rollback_of", "to"):
+            if key in action and action[key] != payload.get(key):
+                return False
+        return self.unused(request_id, reuse_key)
+
     def apply(self, event: dict) -> None:
         etype, p = event["type"], event["payload"]
+        settles = not (etype == "decision-recorded" and p.get("status") == "proposed")
         for field in ("approval_request_id", "request_id"):
             rid = p.get(field)
-            if rid and etype not in ("pilot-requested", "pilot-answered", "right-refused"):
+            if rid and settles and etype not in ("pilot-requested", "pilot-answered", "right-refused"):
                 self.consumed.setdefault(rid, p.get("rollback_of") or f"seq{event['seq']}")
         if etype == "run-created":
             for rule, right in (p.get("raises") or {}).items():
@@ -270,10 +307,11 @@ class State:
                 self.status[phase] = "cancelled"
         elif etype == "phase-assigned":
             self.attempts[p["phase"]] = p["attempt"]
+            self.executors[(p["phase"], p["attempt"])] = str(p["executor"])
             self.status[p["phase"]] = "assigned"
         elif etype == "artifact-submitted":
             self.status[p["phase"]] = "submitted"
-        elif etype == "verification-recorded":
+        elif etype == "verification-recorded" and p.get("scope") != "run":
             self.verdicts[(p["phase"], p["attempt"])] = p["verdict"]
         elif etype == "phase-transitioned":
             self.status[p["phase"]] = p["to"]
@@ -286,7 +324,7 @@ class State:
             if p.get("rollback_of"):
                 self.rollbacks.setdefault(p["rollback_of"], set()).add(p["phase"])
         elif etype == "pilot-requested":
-            self.requests[p["request_id"]] = p
+            self.requests[p["request_id"]] = {**p, "asked_at": event["ts"]}
         elif etype == "pilot-answered":
             self.answers[p["request_id"]] = p
         elif etype == "decision-recorded":
@@ -331,35 +369,54 @@ class State:
 
 # ---------------------------------------------------------------- rules
 
+# Fields that name things (and become dict keys or hashed text) must be non-empty strings.
+ID_FIELDS = ("decision_id", "request_id", "approval_request_id", "phase", "assumption_id", "chain", "rule",
+             "from_wp", "to_wp", "rollback_of", "unconfirmed", "scope", "kind", "status", "to")
+
+
 def require_fields(etype: str, payload: dict) -> None:
     missing = [name for name in REQUIRED[etype] if name not in payload]
     if missing:
         raise Invalid(f"{etype}: missing {', '.join(missing)}")
+    bad = [name for name in ID_FIELDS if name in payload and not (isinstance(payload[name], str) and payload[name])]
+    if bad:
+        raise Invalid(f"{etype}: {', '.join(bad)} must be non-empty strings")
 
 
-def need_approval(state: State, payload: dict, what: str, reuse_key: str | None = None) -> None:
-    if not state.approved(payload.get("approval_request_id"), reuse_key):
-        raise Refused(f"{what} needs an unused approved pilot request (approval_request_id)")
+def need_approval(state: State, etype: str, payload: dict, what: str, reuse_key: str | None = None) -> None:
+    rid = payload.get("approval_request_id") or ""
+    if not state.action_approved(rid, etype, payload, reuse_key):
+        raise Refused(f"{what} needs an unused pilot 'yes' to a request about this very {etype} "
+                      "(approval_request_id; the request's action names type and phase/version)")
 
 
 def check_plan(state: State, p: dict) -> None:
-    phases = p["graph"].get("phases")
+    graph = p["graph"]
+    phases = graph.get("phases") if isinstance(graph, dict) else None
     if not isinstance(phases, dict) or not phases:
         raise Invalid("plan-revised: graph.phases must be a non-empty object")
     for name, spec in phases.items():
+        if not isinstance(spec, dict) or not isinstance(spec.get("deps", []), list):
+            raise Invalid(f"plan-revised: phase {name} must be an object with a deps list")
         unknown = set(spec.get("deps", [])) - set(phases)
         if unknown:
             raise Invalid(f"plan-revised: {name} depends on unknown {sorted(unknown)}")
     if not state.plans:
-        need_approval(state, p, "plan v1 (M1)")
+        need_approval(state, "plan-revised", p, "plan v1 (M1)")
         return
-    base = state.plans[0]["graph"]["phases"]
-    if set(phases) != set(state.plan["phases"]):
-        need_approval(state, p, "change of phase composition (P11)")
+    base, previous = state.plans[0]["graph"]["phases"], state.plan["phases"]
+    if set(phases) != set(previous):
+        need_approval(state, "plan-revised", p, "change of phase composition (P11)")
+        return
+    if any(sorted(spec.get("deps", [])) != sorted(previous[name].get("deps", []))
+           or spec.get("class") != previous[name].get("class") for name, spec in phases.items()):
+        need_approval(state, "plan-revised", p, "change of phase dependencies or class (P11)")
+        return
     for name, spec in phases.items():
         limit = base.get(name, {}).get("budget_min")
         if limit and spec.get("budget_min", 0) > limit:
-            need_approval(state, p, f"budget of {name} above plan v1 (P13)")
+            need_approval(state, "plan-revised", p, f"budget of {name} above plan v1 (P13)")
+            return
 
 
 def check_assignment(state: State, p: dict) -> None:
@@ -370,10 +427,11 @@ def check_assignment(state: State, p: dict) -> None:
     if p.setdefault("attempt", attempt) != attempt:
         raise Invalid(f"phase-assigned: attempt must be {attempt}")
     if attempt >= 3:
-        need_approval(state, p, f"attempt {attempt} of {phase} (P6)")
+        need_approval(state, "phase-assigned", p, f"attempt {attempt} of {phase} (P6)")
+        return
     limit = state.plans[0]["graph"]["phases"].get(phase, {}).get("budget_min")
     if limit and state.cost.get(phase, 0) >= 1.5 * limit:
-        need_approval(state, p, f"{phase} spent 1.5x its budget (P13)")
+        need_approval(state, "phase-assigned", p, f"{phase} spent 1.5x its budget (P13)")
 
 
 def check_transition(state: State, p: dict) -> None:
@@ -382,7 +440,7 @@ def check_transition(state: State, p: dict) -> None:
     if current is None:
         raise Invalid(f"phase-transitioned: unknown phase {phase}")
     if target == "cancelled":
-        need_approval(state, p, "cancelling a phase (P11)")
+        need_approval(state, "phase-transitioned", p, "cancelling a phase (P11)")
         return
     if (current, target) not in TRANSITIONS:
         raise Invalid(f"phase-transitioned: {current} -> {target} not allowed")
@@ -393,19 +451,26 @@ def check_transition(state: State, p: dict) -> None:
         pending = [dep for dep in state.deps(phase) if state.status.get(dep) != "accepted"]
         if pending:
             raise Refused(f"{phase} not ready: dependencies {pending} are not accepted")
+    if target in ("accepted", "accepted-unconfirmed") and current == "checking" \
+            and state.plan["phases"].get(phase, {}).get("class") == "Ц":
+        raise Refused(f"{phase} is a class Ц phase: it is accepted only through awaiting-decision")
     if target in ("accepted", "accepted-unconfirmed") and current == "checking":
         verdict = state.verdicts.get((phase, state.attempts.get(phase, 0)))
         if verdict == "pass-with-remarks":
-            need_approval(state, p, "accepting with remarks (P5)")
+            need_approval(state, "phase-transitioned", p, "accepting with remarks (P5)")
         elif verdict != "pass":
             raise Refused(f"{phase} has no passing verdict for its current attempt (P4)")
     if target == "accepted-unconfirmed" and not p.get("unconfirmed"):
         raise Invalid("accepted-unconfirmed needs the unconfirmed decision id")
+    if target == "awaiting-decision":
+        verdict = state.verdicts.get((phase, state.attempts.get(phase, 0)))
+        if state.plan["phases"].get(phase, {}).get("class") != "Ц" or verdict not in ("pass", "pass-with-remarks"):
+            raise Refused("only a class Ц phase whose decision card passed checking may await a decision")
     if current == "awaiting-decision" and target == "accepted":
-        settled = [d for d in state.decisions.values() if d.get("phase") == phase
-                   and (d["status"] == "confirmed" or (d["status"] == "decided" and d["right"] == "auto"))]
+        settled = [d for d in state.decisions.values()
+                   if d.get("phase") == phase and d["kind"] == "goal-risk" and d["status"] == "confirmed"]
         if not settled:
-            raise Refused(f"{phase} waits for a decision; record it (confirmed by the pilot) first")
+            raise Refused(f"{phase} waits for a goal/risk decision confirmed by the pilot")
     if current == "accepted-unconfirmed" and target == "accepted":
         decision = state.decisions.get(state.unconfirmed.get(phase, ""), {})
         if decision.get("status") != "confirmed":
@@ -413,7 +478,7 @@ def check_transition(state: State, p: dict) -> None:
     if p.get("rollback_of"):
         size = len(state.rollbacks.get(p["rollback_of"], set()) | {phase})
         if size > 1:
-            need_approval(state, p, f"rollback of {size} phases for one decision (P10)",
+            need_approval(state, "phase-transitioned", p, f"rollback of {size} phases for one decision (P10)",
                           reuse_key=p["rollback_of"])
 
 
@@ -435,12 +500,22 @@ def check_decision(state: State, p: dict) -> None:
     if rid and asked.get("decision_id") != p["decision_id"]:
         raise Refused(f"request {rid} was not asked about decision {p['decision_id']}")
     answer = state.answers.get(rid)
-    if status in ("decided", "confirmed") and not state.approved(rid):
+    if status in ("decided", "confirmed") and not (rid and state.decision_answered(rid)):
         raise Refused(f"{p['rule']} is {right}: deciding needs the pilot's approval")
     if status == "rejected" and not answer:
         raise Refused("a rejection must reference the pilot's answer")
     if status not in ("decided", "confirmed", "rejected"):
         raise Invalid("decision-recorded: status must be proposed, decided, confirmed or rejected")
+
+
+def check_verification(state: State, p: dict) -> None:
+    if p.get("scope") == "run":
+        return
+    phase, attempt = p["phase"], p["attempt"]
+    if state.status.get(phase) != "checking" or attempt != state.attempts.get(phase):
+        raise Invalid(f"verification-recorded: {phase} attempt {attempt} is not the one being checked")
+    if str(p["verifier"]) == state.executors.get((phase, attempt)):
+        raise Refused(f"the executor of {phase} attempt {attempt} cannot verify it")
 
 
 def check_letter(state: State, p: dict) -> None:
@@ -449,7 +524,18 @@ def check_letter(state: State, p: dict) -> None:
         raise Refused(f"letter chain {p['chain']} returns to {p['to_wp']}: cycle, ask the pilot (P14)")
 
 
-def check_request(run_dir: Path, p: dict) -> None:
+def check_request(run_dir: Path, state: State, p: dict) -> None:
+    if p["request_id"] in state.requests:
+        raise Invalid(f"pilot-requested: request {p['request_id']} already exists")
+    action = p["action"]
+    if not isinstance(action, dict) or "type" not in action:
+        raise Invalid("pilot-requested: action must name the event type it approves (and phase/version)")
+    must = ACTION_KEYS.get(action["type"], ())
+    if action["type"] == "phase-transitioned" and "rollback_of" in action:
+        must = ("to",)  # one approval covers every phase of the rollback of one decision
+    missing = [key for key in must if key not in action]
+    if missing:
+        raise Invalid(f"pilot-requested: an approval of {action['type']} must name {', '.join(missing)}")
     card = run_dir / CARDS / f"{p['request_id']}.md"
     if not card.exists():
         raise Invalid(f"pilot-requested: card {card.name} not found")
@@ -475,7 +561,12 @@ def validate(run_dir: Path, state: State, etype: str, p: dict) -> None:
     elif etype == "letter-sent":
         check_letter(state, p)
     elif etype == "pilot-requested":
-        check_request(run_dir, p)
+        check_request(run_dir, state, p)
+    elif etype == "cost-recorded":
+        if float(p["minutes"]) < 0:
+            raise Invalid("cost-recorded: minutes cannot be negative")
+    elif etype == "verification-recorded":
+        check_verification(state, p)
     elif etype == "run-completed":
         open_phases = sorted(name for name, status in state.status.items()
                              if status not in ("accepted", "cancelled"))
@@ -498,7 +589,29 @@ def check_epoch(run_dir: Path, epoch: int) -> None:
         raise Invalid("lease expired: take it again with `lease`")
 
 
+def current_host() -> str:
+    return os.environ.get("IWE_WP_MANAGER_HOST") or socket.gethostname()
+
+
+def session_holder(flag: str | None) -> str:
+    """The lease holder is the Claude Code session, so the hooks can recognise it."""
+    env = os.environ.get("CLAUDE_CODE_SESSION_ID")
+    if flag and env and flag != env:
+        raise Invalid("--holder must equal this session's CLAUDE_CODE_SESSION_ID")
+    holder = env or flag or ""
+    if not HOLDER_RE.match(holder):
+        raise Invalid("holder must be a session id of letters, digits, '-' or '_'")
+    return holder
+
+
+def check_host(events: list[dict]) -> None:
+    created = next((e for e in events if e["type"] == "run-created"), None)
+    if created and created["payload"]["host"] != current_host():
+        raise Invalid(f"run is bound to host {created['payload']['host']}, this is {current_host()}")
+
+
 def take_lease(run_dir: Path, events: list[dict], holder: str, ttl_min: int) -> int:
+    check_host(events)
     lease = read_lease(run_dir)
     expired = bool(lease) and datetime.fromisoformat(
         lease["expires_at"].replace("Z", "+00:00")) < now()
@@ -538,9 +651,9 @@ def cmd_create(args) -> int:
         seed = os.urandom(16).hex()
         atomic_write(run_dir / "protected" / "seed", seed)
         events: list[dict] = []
-        epoch = take_lease(run_dir, events, args.holder, args.ttl_min)
+        epoch = take_lease(run_dir, events, session_holder(args.holder), args.ttl_min)
         write_event(run_dir, events, "run-created", {
-            "wp": args.wp, "description_ref": args.description_ref, "host": args.host,
+            "wp": args.wp, "description_ref": args.description_ref, "host": current_host(),
             "preset": args.preset, "raises": raises,
             "budget": json.loads(args.budget_json or "{}"),
             "seed_sha": sha256_text(seed),
@@ -553,9 +666,21 @@ def cmd_lease(args) -> int:
     run_dir = Path(args.run_dir)
     with run_lock(run_dir):
         events = load_events(run_dir)
-        epoch = take_lease(run_dir, events, args.holder, args.ttl_min)
+        epoch = take_lease(run_dir, events, session_holder(args.holder), args.ttl_min)
     print(json.dumps({"epoch": epoch}))
     return 0
+
+
+def dry_apply(events: list[dict], etype: str, payload: dict) -> None:
+    """Apply the candidate to a copy of the state first: an event that breaks the
+    projection (e.g. a list where an id is expected) would make the run unreadable forever."""
+    candidate = {"seq": len(events) + 1, "ts": iso(now()), "type": etype, "payload": payload}
+    try:
+        state = State(events + [candidate])
+        json.dumps(state.summary())
+        sample_ids(state, "dry-run-seed")
+    except (TypeError, ValueError, KeyError, AttributeError) as error:
+        raise Invalid(f"{etype}: payload would make the run unreadable ({error})") from error
 
 
 def append_checked(run_dir: Path, epoch: int, etype: str, payload: dict,
@@ -573,8 +698,9 @@ def append_checked(run_dir: Path, epoch: int, etype: str, payload: dict,
                         {"attempted_type": etype, "attempted": payload, "why": str(refusal)},
                         "program", epoch, caused_by)
             raise
+        dry_apply(events, etype, payload)
         event = write_event(run_dir, events, etype, payload, actor, epoch, caused_by)
-        if etype in ("run-completed", "run-stopped"):
+        if etype == "run-completed":  # a stopped run keeps its session restricted until the pilot decides
             release_session_marks(run_dir)
         return event
 
@@ -616,9 +742,13 @@ def cmd_ingest_answers(args) -> int:
         check_epoch(run_dir, args.epoch)
         interventions = ingest_interventions(run_dir, events, args.epoch)
         state = State(events)
+        unmatched = []
         for answer in read_jsonl(run_dir / ANSWER_BOX):
             rid = answer.get("request_id")
-            if rid in state.answers or rid not in state.requests:
+            if rid in state.answers:
+                continue
+            if rid not in state.requests or str(answer.get("ts", "")) < state.requests[rid]["asked_at"]:
+                unmatched.append(rid)  # no such question, or answered before it was asked
                 continue
             card = run_dir / CARDS / f"{rid}.md"
             current = sha256_text(card.read_text(encoding="utf-8")) if card.exists() else ""
@@ -633,7 +763,8 @@ def cmd_ingest_answers(args) -> int:
             write_event(run_dir, events, "pilot-answered", payload, "pilot", args.epoch, None)
             state.apply(events[-1])
             ingested.append(rid)
-    print(json.dumps({"ingested": ingested, "refused": refused, "interventions": interventions}))
+    print(json.dumps({"ingested": ingested, "refused": refused, "unmatched": sorted(set(unmatched)),
+                      "interventions": interventions}))
     return 0
 
 
@@ -660,6 +791,24 @@ def cmd_affected(args) -> int:
     later = sorted(d for d, rec in state.decisions.items()
                    if rec.get("phase") in phases and d != args.decision)
     print(json.dumps({"phases": touched, "decisions": later}, ensure_ascii=False))
+    return 0
+
+
+def sample_ids(state: State, seed: str) -> list[str]:
+    return sorted(d for d, rec in state.decisions.items() if rec["right"] == "auto" and (
+        rec["risk"] == "high" or int(sha256_text(seed + d)[:8], 16) % 5 == 0))
+
+
+def cmd_sample(args) -> int:
+    """Pick auto decisions for the pilot's spot check: every high-risk one plus a seeded fifth.
+
+    The seed sits in protected/ (the guard keeps the agent from reading it); its hash is in
+    run-created, and the seed itself is printed only once the run is closed.
+    """
+    run_dir = Path(args.run_dir)
+    state = State(load_events(run_dir))
+    seed = (run_dir / "protected" / "seed").read_text(encoding="utf-8").strip()
+    print(json.dumps({"review": sample_ids(state, seed), "seed": seed if state.closed else None}))
     return 0
 
 
@@ -690,14 +839,15 @@ def parser() -> argparse.ArgumentParser:
         return cmd
 
     create = command("create", cmd_create)
-    for flag in ("--wp", "--description-ref", "--host", "--holder"):
+    for flag in ("--wp", "--description-ref"):
         create.add_argument(flag, required=True)
+    create.add_argument("--holder")
     create.add_argument("--preset", choices=("lead", "ask"), default="lead")
     create.add_argument("--rights-json")
     create.add_argument("--budget-json")
     create.add_argument("--ttl-min", type=int, default=120)
     lease = command("lease", cmd_lease)
-    lease.add_argument("--holder", required=True)
+    lease.add_argument("--holder")
     lease.add_argument("--ttl-min", type=int, default=120)
     append = command("append", cmd_append)
     append.add_argument("--epoch", type=int, required=True)
@@ -712,12 +862,15 @@ def parser() -> argparse.ArgumentParser:
     affected = command("affected", cmd_affected)
     affected.add_argument("--decision", required=True)
     command("views", cmd_views)
+    command("sample", cmd_sample)
     return root
 
 
 def main(argv: list[str] | None = None) -> int:
     args = parser().parse_args(argv)
     try:
+        if not RUN_DIR_RE.search(str(Path(args.run_dir).resolve())):
+            raise Invalid("--run-dir must be <repo>/inbox/WP-<N>/runs/<run_id>")
         return args.func(args)
     except Refused as refusal:
         print(f"refused: {refusal}", file=sys.stderr)
@@ -725,7 +878,7 @@ def main(argv: list[str] | None = None) -> int:
     except Broken as broken:
         print(f"journal integrity broken: {broken}", file=sys.stderr)
         return 4
-    except (Invalid, KeyError, ValueError, json.JSONDecodeError) as error:
+    except (Invalid, KeyError, ValueError, TypeError, AttributeError, json.JSONDecodeError) as error:
         print(f"error: {error}", file=sys.stderr)
         return 2
 

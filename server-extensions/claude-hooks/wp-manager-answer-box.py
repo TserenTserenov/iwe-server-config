@@ -23,10 +23,13 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
+# A whole line "<request>: <answer>" and nothing else after the answer, so that
+# "R-12: да, но только после проверки" is not taken for a plain yes.
 ANSWER_LINE = re.compile(
-    r"^\s*([RР]-[\w-]+)\s*[:—–-]\s*(да|нет|yes|no|вариант\s*\d+|choice:\s*\S+)\b",
+    r"^\s*([RrРр]-[\w-]+)\s*[:—–-]\s*(да|нет|yes|no|вариант\s*\d+)\s*[.!]?\s*$",
     re.IGNORECASE | re.MULTILINE,
 )
+REQUEST_LIKE = re.compile(r"^\s*([RrРр]-[\w-]+)\s*[:—–-]", re.MULTILINE)
 WORDS = {"да": "yes", "yes": "yes", "нет": "no", "no": "no"}
 
 
@@ -68,20 +71,38 @@ def main() -> int:
     prompt = str(event.get("prompt") or "")
     ref = f"{session}:{hashlib.sha256(prompt.encode('utf-8')).hexdigest()[:16]}"
     now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-    answers = []
+    found: dict[str, set] = {}
+    lines: dict[str, str] = {}
     for match in ANSWER_LINE.finditer(prompt):  # only the answer line is kept, not the whole message
-        rid, answer = match.group(1).replace("Р", "R", 1), normalize(match.group(2))
-        answers.append((rid, answer))
+        rid = request_id(match.group(1))
+        found.setdefault(rid, set()).add(normalize(match.group(2)))
+        lines[rid] = match.group(0).strip()
+    unclear = sorted({request_id(m.group(1)) for m in REQUEST_LIKE.finditer(prompt)} - set(found))
+    conflicting = sorted(rid for rid, answers in found.items() if len(answers) > 1)
+    recorded = {rid: answers.pop() for rid, answers in found.items() if len(answers) == 1}
+    for rid, answer in recorded.items():
         append(run_dir / "protected" / "pilot-answers.jsonl",
-               {"request_id": rid, "answer": answer, "text": match.group(0).strip(),
-                "transcript_ref": ref, "ts": now})
-    if answers:
-        context("Ответы пилота записаны в ящик ответов прогона: "
-                + ", ".join(f"{rid} → {answer}" for rid, answer in answers)
-                + ". Забери их командой wp-run-journal.py ingest-answers.")
-    else:
+               {"request_id": rid, "answer": answer, "text": lines[rid], "transcript_ref": ref, "ts": now})
+    if not recorded:
         append(run_dir / "protected" / "pilot-messages.jsonl", {"text_ref": ref, "ts": now})
+    notes = []
+    if recorded:
+        notes.append("Ответы пилота записаны в ящик ответов прогона: "
+                     + ", ".join(f"{rid} → {answer}" for rid, answer in recorded.items())
+                     + ". Забери их командой wp-run-journal.py ingest-answers.")
+    if conflicting:
+        notes.append(f"Противоречивые ответы на {', '.join(conflicting)} не записаны: переспроси пилота.")
+    if unclear:
+        notes.append(f"Ответ на {', '.join(unclear)} не распознан как «да», «нет» или «вариант N» "
+                     "без оговорок и не записан: переспроси пилота.")
+    if notes:
+        context(" ".join(notes))
     return 0
+
+
+def request_id(raw: str) -> str:
+    """Request ids are written "R-..." on cards; accept r-, Р-, р- from the pilot."""
+    return "R" + raw[1:]
 
 
 if __name__ == "__main__":
