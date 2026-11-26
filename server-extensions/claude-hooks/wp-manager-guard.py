@@ -68,6 +68,11 @@ DELETION = re.compile(
 GH_MERGE = re.compile(r"\bgh\s+pr\s+merge\b|\bgh\s+api\b.*\bmerges?\b|\bgh\s+repo\s+delete\b")
 MAIN_GATEWAYS = re.compile(r"isolate-push\.sh|ds-publish\.sh|publish-commit|atomic-publish\.py|hot_publish_cas\.py")
 PUSH_BAD_OPTS = {"-f", "-d", "--delete", "--mirror", "--all", "--tags", "--prune"}
+FORBIDDEN_MANAGER_TOOL = re.compile(r"^(?:Schedule.*|Cron.*|SendMessage|RemoteTrigger)$")
+FORBIDDEN_MANAGER_MCP = re.compile(
+    r"^mcp__.*(?:send_telegram_message|notifications_release_send|send_message|reply|forward|create_draft"
+    r"|(?:create|update|delete)(?:_|-)events?|respond(?:_|-)to(?:_|-)event)$"
+)
 
 
 def deny(reason: str) -> None:
@@ -177,13 +182,17 @@ def check_manager_shell(command: str) -> str | None:
 
 def main() -> int:
     event = json.load(sys.stdin)
-    tool = event.get("tool_name")
+    tool = str(event.get("tool_name") or "")
     tool_input = event.get("tool_input") if isinstance(event.get("tool_input"), dict) else {}
-    if tool == "Bash":
+    session = str(event.get("session_id") or "")
+    manager = is_manager_session(session)
+    if manager and (FORBIDDEN_MANAGER_TOOL.fullmatch(tool) or FORBIDDEN_MANAGER_MCP.fullmatch(tool)):
+        reason = ("В сессии Менеджера РП инструменты планирования и сообщений запрещены: "
+                  "их текст нельзя принять за ответ пилота.")
+    elif tool == "Bash":
         command = str(tool_input.get("command") or "")
         reason = check_shell_files(command)
-        session = str(event.get("session_id") or "")
-        if not reason and is_manager_session(session):
+        if not reason and manager:
             reason = check_run_dir_access(command, marked_run_dir(session)) or check_manager_shell(command)
     else:
         reason = check_file_tool(tool_input)
