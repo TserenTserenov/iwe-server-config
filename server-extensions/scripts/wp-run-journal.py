@@ -90,8 +90,8 @@ REQUIRED = {
     "run-created": ["wp", "description_ref", "host"],
     "lease-taken": ["holder", "epoch"],
     "plan-revised": ["version", "graph", "reason"],
-    "phase-assigned": ["phase", "executor", "inputs"],
-    "artifact-submitted": ["phase", "attempt", "submission_ref", "submission_sha"],
+    "phase-assigned": ["phase", "executor", "inputs", "contract_version", "ceiling"],
+    "artifact-submitted": ["phase", "attempt", "submission_ref", "submission_sha", "contract_version"],
     "verification-recorded": ["phase", "attempt", "verifier", "verdict"],
     "decision-recorded": ["decision_id", "kind", "rule", "status", "question", "choice", "basis"],
     "assumption-changed": ["assumption_id", "from", "to", "evidence"],
@@ -243,6 +243,9 @@ class State:
         self.attempts: dict[str, int] = {}
         self.verdicts: dict[tuple[str, int], str] = {}
         self.executors: dict[tuple[str, int], str] = {}
+        # (phase, attempt) -> contract version named at assignment; absent in journals
+        # written before the field became mandatory.
+        self.contract_versions: dict[tuple[str, int], str] = {}
         self.requests: dict[str, dict] = {}
         self.answers: dict[str, dict] = {}
         self.decisions: dict[str, dict] = {}
@@ -308,6 +311,8 @@ class State:
         elif etype == "phase-assigned":
             self.attempts[p["phase"]] = p["attempt"]
             self.executors[(p["phase"], p["attempt"])] = str(p["executor"])
+            if "contract_version" in p:
+                self.contract_versions[(p["phase"], p["attempt"])] = str(p["contract_version"])
             self.status[p["phase"]] = "assigned"
         elif etype == "artifact-submitted":
             self.status[p["phase"]] = "submitted"
@@ -419,8 +424,38 @@ def check_plan(state: State, p: dict) -> None:
             return
 
 
+# A ceiling as written in phase contracts: "5h", "90min", "3" (hours) or a number.
+CEILING_TEXT = re.compile(r"(\d+(?:\.\d+)?)\s*(h|min)?")
+
+
+def positive_ceiling(ceiling) -> bool:
+    if isinstance(ceiling, bool):
+        return False
+    if isinstance(ceiling, (int, float)):
+        return 0 < ceiling < float("inf")  # NaN fails both comparisons
+    match = CEILING_TEXT.fullmatch(ceiling.strip()) if isinstance(ceiling, str) else None
+    return bool(match) and float(match.group(1)) > 0
+
+
+def assignment_gaps(p: dict) -> list[str]:
+    """Present-but-empty fields of phase-assigned: an executor must not guess them."""
+    gaps = []
+    version = p["contract_version"]
+    if not (isinstance(version, str) and version and version == version.strip()):
+        gaps.append("contract_version (non-empty string without surrounding spaces)")
+    if not positive_ceiling(p["ceiling"]):
+        gaps.append("ceiling (positive number, or text like 5h / 90min)")
+    inputs = p["inputs"]
+    if not (isinstance(inputs, list) and inputs and all(inputs)):
+        gaps.append("inputs (non-empty list of non-empty entries)")
+    return gaps
+
+
 def check_assignment(state: State, p: dict) -> None:
     phase = p["phase"]
+    gaps = assignment_gaps(p)
+    if gaps:
+        raise Invalid(f"phase-assigned: needs clarification, empty: {'; '.join(gaps)}")
     if state.status.get(phase) != "ready":
         raise Invalid(f"phase-assigned: {phase} is {state.status.get(phase)}, not ready")
     attempt = state.attempts.get(phase, 0) + 1
@@ -432,6 +467,22 @@ def check_assignment(state: State, p: dict) -> None:
     limit = state.plans[0]["graph"]["phases"].get(phase, {}).get("budget_min")
     if limit and state.cost.get(phase, 0) >= 1.5 * limit:
         need_approval(state, "phase-assigned", p, f"{phase} spent 1.5x its budget (P13)")
+
+
+def check_submission_contract(state: State, p: dict) -> None:
+    """The executor must have worked on the current attempt's assigned contract version."""
+    phase, attempt = p["phase"], p["attempt"]
+    current = state.attempts.get(phase)
+    if type(attempt) is not int or attempt != current:
+        raise Invalid(f"artifact-submitted: attempt must be the current attempt {current} of {phase}, "
+                      f"got {attempt!r}")
+    assigned = state.contract_versions.get((phase, attempt))
+    if assigned is None:
+        raise Invalid(f"artifact-submitted: attempt {attempt} of {phase} was assigned without a "
+                      "contract_version (journal written before F8); assign a new attempt")
+    if p["contract_version"] != assigned:
+        raise Invalid(f"artifact-submitted: contract_version {p['contract_version']!r} differs from "
+                      f"assigned {assigned!r} for attempt {p['attempt']} of {p['phase']}")
 
 
 def check_transition(state: State, p: dict) -> None:
@@ -554,6 +605,7 @@ def validate(run_dir: Path, state: State, etype: str, p: dict) -> None:
     elif etype == "artifact-submitted":
         if state.status.get(p["phase"]) not in ("assigned", "unknown"):
             raise Invalid(f"artifact-submitted: {p['phase']} is not assigned")
+        check_submission_contract(state, p)
     elif etype == "phase-transitioned":
         check_transition(state, p)
     elif etype == "decision-recorded":

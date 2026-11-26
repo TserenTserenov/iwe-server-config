@@ -118,14 +118,17 @@ OTHER_PLACE_RE = re.compile(
 # Bare "здесь" counts only in this opening position ("вы, здесь:"): elsewhere it often
 # means "in the document" ("проверить, что здесь изменилось"), which is not a place of the step.
 LEADING_THIS_CHAT_RE = re.compile(
-    r"^(?:вы|я)\s*[,\-—]?\s*(?:в\s+этом\s+(?:чате|диалоге|окне)|в\s+этой\s+(?:беседе|сессии)|здесь)\s*[:,]",
+    # A step number ("1) вы, здесь: ...") or a later step after ";" opens the formula too
+    # (live case 26.11: the numbered line "1) вы, здесь: сказать «заливай ветку хуков»"
+    # was written after the session was closed, and the old anchor missed it).
+    r"(?:^|;\s*)(?:\d+[.)]\s*)?(?:вы|я)\s*[,\-—]?\s*(?:в\s+этом\s+(?:чате|диалоге|окне)|в\s+этой\s+(?:беседе|сессии)|здесь)\s*[:,]",
     re.IGNORECASE,
 )
 
 
 def this_chat_place_line(next_line):
     """The "Дальше:" text if it names this chat as the place of a step."""
-    if LEADING_THIS_CHAT_RE.match(next_line):
+    if LEADING_THIS_CHAT_RE.search(next_line):
         return next_line
     if THIS_CHAT_RE.search(next_line) and not OTHER_PLACE_RE.search(next_line):
         return next_line
@@ -187,6 +190,12 @@ NOTIFICATION_RE = re.compile(r"<task-notification>(.*?)</task-notification>", re
 TASK_ID_RE = re.compile(r"<task-id>([^<\s]+)</task-id>")
 FINAL_STATUS_RE = re.compile(r"<status>(?:completed|failed|killed|stopped|cancelled)</status>")
 MONITOR_EXPIRED_RE = re.compile(r"Monitor expired")
+# A helper that stopped with background work of its own still running sends a "completed"
+# notification marked as interim; the same id notifies again later (live case 25.11 22:04,
+# the first false hit of A12_NEXT_I_NO_WAKE). Such a notification is not an end.
+INTERIM_RE = re.compile(
+    r"background work of its own still running|result below may be interim", re.IGNORECASE
+)
 STOPPED_RE = re.compile(r"Successfully stopped task:\s*(\w+)")
 WAKEUP_TOOL = "ScheduleWakeup"
 CRON_TOOL = "CronCreate"
@@ -203,6 +212,8 @@ def _done_ids(text):
     done = _ids(STOPPED_RE, text)
     for m in NOTIFICATION_RE.finditer(text):
         body = m.group(1)
+        if INTERIM_RE.search(body):
+            continue
         if FINAL_STATUS_RE.search(body) or MONITOR_EXPIRED_RE.search(body):
             done |= {i[:7] for i in TASK_ID_RE.findall(body)}
     return done
@@ -267,6 +278,28 @@ def i_without_wake_line(next_line, rows):
     return None
 
 
+# Two kinds of an empty "я" (РП-605 Ф9, 26.11.2026, review by Fable): a step that waits
+# for the pilot's word or for a later session ("я ... если вы скажете", "я в следующей
+# сессии") is a mislabelled "вы" line, and sending the turn back would only produce a
+# rewritten line, the second block the pilot complained about on 25.11. A step with no
+# such condition could simply be done now, and the second answer is the work itself.
+# Explicit list (P13), extend it from real misses.
+CONDITIONAL_RE = re.compile(
+    r"(?:если|когда|как\s+только)\s+(?:вы\s+)?(?:скажете|напишете|согласны|одобрите|разрешите|дадите|подтвердите)"
+    r"|(?:по|при|после)\s+ваш\w+\s+(?:слов[оаеу]\b|команд\w*|одобрени\w*|подтверждени\w*|ответ\w*|согласи\w*)"
+    r"|ваш\w*\s+слов[оаеу]\b"
+    r"|следующ\w+\s+(?:сесси\w+|бесед\w+)|в\s+нов\w+\s+(?:сесси\w+|бесед\w+)",
+    re.IGNORECASE,
+)
+
+
+def no_wake_kind(no_wake_line):
+    """"COND" for a step that waits for the pilot or a later session, "FREE" otherwise, "" for none."""
+    if not no_wake_line:
+        return ""
+    return "COND" if CONDITIONAL_RE.search(no_wake_line) else "FREE"
+
+
 def detect(path):
     """Returns (missing, empty_content_line, unnamed_launcher_line, this_chat_line, i_no_wake_line)."""
     # Rule 6 covers replies to the pilot only. A peer's turn in a peer
@@ -299,3 +332,4 @@ if __name__ == "__main__":
     print(unnamed_line or "")
     print(this_chat_line or "")
     print(no_wake_line or "")
+    print(no_wake_kind(no_wake_line))  # sixth line: "COND" / "FREE" / empty

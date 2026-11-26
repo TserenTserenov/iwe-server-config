@@ -47,6 +47,9 @@ def TEXTROW(text):
     return {"type": "user", "message": {"content": text}}
 def WAKE(tool="ScheduleWakeup", inp=None):
     return CALL(tool, "ok", inp=inp or {"delaySeconds": 600})
+INTERIM = ("<status>completed</status><note>This agent stopped with background work of its own still running. "
+           "It may resume on its own when that work completes or reports, and the same task-id notifies again "
+           "if it does; the result below may be interim.</note>")
 NUM2 = "Итог.\n\nДальше: 1) вы: посмотреть итог; 2) я: сверю журнал после ответа."
 BOLD = "Итог.\n\nДальше: **я**: запущу проверку и покажу итог."
 NUM = "Итог.\n\nДальше: 1) я: запускаю проверку; 2) вы: посмотреть итог."
@@ -127,14 +130,107 @@ check "second numbered step \"2) я:\" -> signal" "$(is_set "$got")" "[$got]"
 got=$(signal numbered '[U("Проверь."), A(NUM)]')
 check "numbered line \"1) я:\" -> signal" "$(is_set "$got")" "[$got]"
 
-# The hook logs the signal and does not block, even in blocking mode.
-mkdir -p "$TMP/h/home" "$TMP/h/proj"
-make_transcript "$TMP/h/t.jsonl" '[U("Проверь."), A(EMPTY)]'
-out=$(printf '{"transcript_path":"%s","session_id":"h"}' "$TMP/h/t.jsonl" \
-  | env HOME="$TMP/h/home" CLAUDE_PROJECT_DIR="$TMP/h/proj" STYLE_ENFORCE_BLOCK=1 bash "$HOOK" 2>/dev/null)
-check "hook does not block" "$([[ "$out" != *block* ]] && echo yes || echo no)" "$out"
-check "hook logs A12_NEXT_I_NO_WAKE" \
-  "$(grep -q 'A12_NEXT_I_NO_WAKE' "$TMP/h/home/.claude/logs/style-violations.log" 2>/dev/null && echo yes || echo no)" "no log line"
+# РП-605 Ф9 (26.11.2026): the live false hit of 25.11 22:04 -- a helper reported "completed"
+# but marked the result interim (it waits for its own background work) and then reported again.
+got=$(signal interim '[U("Проверь."), *CALL("Agent", "agentId: aaa1111222233", "async_launched"), NOTE("aaa1111222233", INTERIM), A(EVENT)]')
+check "interim completed notification stays pending -> quiet" "$(is_empty "$got")" "[$got]"
+
+got=$(signal interim_end '[U("Проверь."), *CALL("Agent", "agentId: aaa1111222233", "async_launched"), NOTE("aaa1111222233", INTERIM), NOTE("aaa1111222233"), A(EMPTY)]')
+check "interim, then the final notification -> signal" "$(is_set "$got")" "[$got]"
+
+kind() { # $1 id, $2 rows expression; prints the 6th detector line
+  make_transcript "$TMP/$1.jsonl" "$2" || return 0
+  env STYLE_CONTEXT=direct python3 "$DETECTOR" "$TMP/$1.jsonl" 2>/dev/null | sed -n '6p'
+}
+check "free empty promise -> FREE" "$([ "$(kind k1 '[U("Проверь."), A(EMPTY)]')" = FREE ] && echo yes || echo no)" "kind"
+COND1='Итог.\n\nДальше: я: сделать П11, если вы скажете «делай П11».'
+COND2='Итог.\n\nДальше: я, в следующей сессии по РП-625: увожу сбои в сводку.'
+COND3='Итог.\n\nДальше: я: начну по вашему слову.'
+for n in 1 2 3; do
+  eval "c=\$COND$n"
+  check "conditional or next-session promise $n -> COND" \
+    "$([ "$(kind "c$n" "[U(\"Проверь.\"), A(\"$c\")]")" = COND ] && echo yes || echo no)" "kind"
+done
+check "no signal -> empty kind" "$([ -z "$(kind k0 '[U("Проверь."), A(YOU)]')" ] && echo yes || echo no)" "kind"
+
+# РП-605 Ф9: the numbered formula "1) вы, здесь:" names this chat (live case 26.11, session already closed).
+PLACE='Сессия закрыта.\n\nДальше: 1) вы, здесь: сказать «заливай ветку хуков», тогда я запушу её; 2) вы, в новой беседе на РП-484: сказать первой фразой «поправь поле».'
+got=$(make_transcript "$TMP/pl.jsonl" "[U(\"Закрывай.\"), A(\"$PLACE\")]"; env STYLE_CONTEXT=direct python3 "$DETECTOR" "$TMP/pl.jsonl" 2>/dev/null | sed -n '4p')
+check "numbered \"1) вы, здесь:\" -> this-chat signal" "$(is_set "$got")" "[$got]"
+PLACE_OK='Готово.\n\nДальше: 1) вы, в новой беседе на РП-484: сказать первой фразой «поправь поле».'
+got=$(make_transcript "$TMP/pl2.jsonl" "[U(\"Закрывай.\"), A(\"$PLACE_OK\")]"; env STYLE_CONTEXT=direct python3 "$DETECTOR" "$TMP/pl2.jsonl" 2>/dev/null | sed -n '4p')
+check "numbered line naming another place -> quiet" "$(is_empty "$got")" "[$got]"
+
+run_hook() { # $1 id, $2 rows expression, rest: env; prints the hook's stdout, sets HOME under $TMP/$1
+  local id="$1" expr="$2"; shift 2
+  mkdir -p "$TMP/$id/home" "$TMP/$id/proj"
+  make_transcript "$TMP/$id/t.jsonl" "$expr"
+  printf '{"transcript_path":"%s","session_id":"%s"}' "$TMP/$id/t.jsonl" "$id" \
+    | env HOME="$TMP/$id/home" CLAUDE_PROJECT_DIR="$TMP/$id/proj" "$@" bash "$HOOK" 2>/dev/null
+}
+logline() { grep -c "$2" "$TMP/$1/home/.claude/logs/style-violations.log" 2>/dev/null || true; }
+remarks() { cat "$TMP/$1/proj/.claude/state/next-turn-remarks-$1" 2>/dev/null || true; }
+
+# A free empty "я": the turn is returned once, and the journal gets one line per return.
+out=$(run_hook hf '[U("Проверь."), A(EMPTY)]')
+check "free empty promise -> block" "$([[ "$out" == *'"decision": "block"'* ]] && echo yes || echo no)" "$out"
+check "block text asks to do the step" "$([[ "$out" == *"Выполни обещанный шаг"* ]] && echo yes || echo no)" "$out"
+check "hook logs A12_NEXT_I_NO_WAKE" "$([ "$(logline hf A12_NEXT_I_NO_WAKE)" -ge 1 ] && echo yes || echo no)" "no log line"
+check "hook logs A12_NO_WAKE_RETURN" "$([ "$(logline hf A12_NO_WAKE_RETURN)" -ge 1 ] && echo yes || echo no)" "no log line"
+
+# The return happens at most once per turn: the second stop of the same turn passes.
+out=$(printf '{"transcript_path":"%s","session_id":"hf","stop_hook_active":true}' "$TMP/hf/t.jsonl" \
+  | env HOME="$TMP/hf/home" CLAUDE_PROJECT_DIR="$TMP/hf/proj" bash "$HOOK" 2>/dev/null)
+check "stop_hook_active -> no second return" "$([[ "$out" != *block* ]] && echo yes || echo no)" "$out"
+
+# A conditional promise: no block, a remark for the next turn instead.
+out=$(run_hook hc '[U("Проверь."), A("Итог.\n\nДальше: я: сделать П11, если вы скажете «делай П11».")]')
+check "conditional promise -> no block" "$([[ "$out" != *block* ]] && echo yes || echo no)" "$out"
+check "conditional promise -> remark stored" "$([[ "$(remarks hc)" == *"шаг ждёт слова пилота"* ]] && echo yes || echo no)" "$(remarks hc)"
+
+# The numbered "здесь" line: a remark about the place, no block.
+out=$(run_hook hp "[U(\"Закрывай.\"), A(\"$PLACE\")]")
+check "this-chat place -> no block" "$([[ "$out" != *block* ]] && echo yes || echo no)" "$out"
+check "this-chat place -> remark stored" "$([[ "$(remarks hp)" == *"из неё ничего не публикуется"* ]] && echo yes || echo no)" "$(remarks hp)"
+
+# Off switches: the flag turns the return off, the signal is still logged; peer never returns.
+out=$(run_hook hoff '[U("Проверь."), A(EMPTY)]' A12_NO_WAKE_BLOCK=0)
+check "flag A12_NO_WAKE_BLOCK=0 -> no block" "$([[ "$out" != *block* ]] && echo yes || echo no)" "$out"
+check "flag off still logs the signal" "$([ "$(logline hoff A12_NEXT_I_NO_WAKE)" -ge 1 ] && echo yes || echo no)" "no log line"
+out=$(run_hook hpeer '[U("Проверь."), A(EMPTY)]' STYLE_CONTEXT=peer)
+check "peer context -> no block" "$([[ "$out" != *block* ]] && echo yes || echo no)" "$out"
+out=$(run_hook hother '[U("Проверь."), A(EMPTY)]' STYLE_AGENT=kimi)
+check "other agent -> no block" "$([[ "$out" != *block* ]] && echo yes || echo no)" "$out"
+
+# An honest "я" (pending helper) is never returned.
+out=$(run_hook hok '[U("Проверь."), *CALL("Agent", "agentId: aaa1111222233", "async_launched"), A(EVENT)]')
+check "honest \"я\" -> no block" "$([[ "$out" != *block* ]] && echo yes || echo no)" "$out"
+
+# Peer review 26.11 (Kimi, Codex): the return of the turn does not depend on the remarks switch;
+# the conditional-word list is narrower ("словарь" is not the pilot's word) and wider (more real waits).
+out=$(run_hook hdefer '[U("Проверь."), A(EMPTY)]' IWE_STYLE_DEFER_REMARK=0)
+check "remarks off, return still on -> block" "$([[ "$out" == *'"decision": "block"'* ]] && echo yes || echo no)" "$out"
+out=$(run_hook hdefer2 '[U("Проверь."), A("Итог.\n\nДальше: я: сделать П11, если вы скажете «делай П11».")]' IWE_STYLE_DEFER_REMARK=0)
+check "remarks off, conditional -> no block, no remark" "$([[ "$out" != *block* && -z "$(remarks hdefer2)" ]] && echo yes || echo no)" "$out"
+
+CW1='Итог.\n\nДальше: я: обновлю ваш словарь терминов.'
+check "«ваш словарь» is not the pilot's word -> FREE" "$([ "$(kind w1 "[U(\"Проверь.\"), A(\"$CW1\")]")" = FREE ] && echo yes || echo no)" "kind"
+for n in 1 2 3 4 5; do
+  case $n in
+    1) t='Дальше: я: запущу сверку, когда вы скажете «готово».' ;;
+    2) t='Дальше: я: опубликую по вашей команде.' ;;
+    3) t='Дальше: я: начну при вашем одобрении.' ;;
+    4) t='Дальше: я: сделаю, если дадите добро.' ;;
+    5) t='Дальше: я: продолжу в новой сессии по РП-605.' ;;
+  esac
+  # "если дадите добро" has no "вы": the list needs the plain verb form too
+  check "real wait form $n -> COND" \
+    "$([ "$(kind "cw$n" "[U(\"Проверь.\"), A(\"Итог.\n\n$t\")]")" = COND ] && echo yes || echo no)" "kind"
+done
+
+INTERIM_UP="<status>completed</status><note>THE RESULT BELOW MAY BE INTERIM; this agent stopped with Background Work Of Its Own Still Running.</note>"
+got=$(make_transcript "$TMP/iu.jsonl" "[U(\"Проверь.\"), *CALL(\"Agent\", \"agentId: aaa1111222233\", \"async_launched\"), NOTE(\"aaa1111222233\", \"$INTERIM_UP\"), A(EVENT)]"; env STYLE_CONTEXT=direct python3 "$DETECTOR" "$TMP/iu.jsonl" 2>/dev/null | sed -n '5p')
+check "interim marker in other letter case -> quiet" "$(is_empty "$got")" "[$got]"
 
 echo "a12-next-i-no-wake: pass=$PASS fail=$FAIL"
 [ "$FAIL" -eq 0 ]

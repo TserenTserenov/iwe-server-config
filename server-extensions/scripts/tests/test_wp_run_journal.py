@@ -16,6 +16,9 @@ from pathlib import Path
 TOOL = os.environ.get("WP_RUN_JOURNAL") or os.path.realpath(
     os.path.join(os.path.dirname(__file__), "..", "wp-run-journal.py"))
 T0 = "2026-12-01T10:00:00Z"
+# What every phase-assigned must carry besides phase and executor (F4 contract, F8).
+CONTRACT = {"inputs": [{"path": "inbox/WP-999/in.md", "sha256": "ab12"}],
+            "contract_version": "v1", "ceiling": 60}
 
 
 class Run:
@@ -89,11 +92,11 @@ class Run:
 
     def run_to_checking(self, phase, verdict="pass"):
         assert self.move(phase, "ready")[0] == 0
-        assert self.append("phase-assigned", {"phase": phase, "executor": "sonnet", "inputs": []})[0] == 0
+        assert self.append("phase-assigned", {"phase": phase, "executor": "sonnet", **CONTRACT})[0] == 0
         attempt = max(e["payload"]["attempt"] for e in self.events()
                       if e["type"] == "phase-assigned" and e["payload"]["phase"] == phase)
         assert self.append("artifact-submitted", {"phase": phase, "attempt": attempt,
-                                                  "submission_ref": "s", "submission_sha": "x"})[0] == 0
+                                                  "submission_ref": "s", "submission_sha": "x", "contract_version": "v1"})[0] == 0
         assert self.move(phase, "checking")[0] == 0
         assert self.append("verification-recorded", {"phase": phase, "attempt": attempt,
                                                      "verifier": "codex", "verdict": verdict})[0] == 0
@@ -158,10 +161,10 @@ class JournalTest(unittest.TestCase):
         self.run.ask("R-6", action={"type": "phase-assigned", "phase": "A"})
         self.run.pilot_says("R-6")
         self.assertEqual(self.run.move("A", "ready", reason="new-attempt")[0], 0)
-        assign = {"phase": "A", "executor": "opus", "inputs": [], "approval_request_id": "R-6"}
+        assign = {"phase": "A", "executor": "opus", **CONTRACT, "approval_request_id": "R-6"}
         self.assertEqual(self.run.append("phase-assigned", assign)[0], 0)
         self.run.append("artifact-submitted", {"phase": "A", "attempt": 3, "submission_ref": "s",
-                                               "submission_sha": "x"})
+                                               "submission_sha": "x", "contract_version": "v1"})
         self.run.move("A", "checking")
         self.run.append("verification-recorded", {"phase": "A", "attempt": 3, "verifier": "codex", "verdict": "fail"})
         self.assertEqual(self.run.move("A", "rejected")[0], 0)
@@ -197,7 +200,7 @@ class JournalTest(unittest.TestCase):
             self.run.run_to_checking("A", verdict="fail")
             self.assertEqual(self.run.move("A", "rejected")[0], 0)
         self.assertEqual(self.run.move("A", "ready", reason="new-attempt")[0], 0)
-        code, _, err = self.run.append("phase-assigned", {"phase": "A", "executor": "opus", "inputs": []})
+        code, _, err = self.run.append("phase-assigned", {"phase": "A", "executor": "opus", **CONTRACT})
         self.assertEqual(code, 3, err)
         self.assertIn("attempt 3", err)
 
@@ -532,14 +535,77 @@ class JournalTest(unittest.TestCase):
         self.assertEqual(self.run.append("cost-recorded", {"scope": "phase", "phase": "A", "minutes": -100,
                                                            "source": "reported"})[0], 2)
         self.assertEqual(self.run.move("A", "ready")[0], 0)
-        self.assertEqual(self.run.append("phase-assigned", {"phase": "A", "executor": "sonnet", "inputs": []})[0], 0)
+        self.assertEqual(self.run.append("phase-assigned", {"phase": "A", "executor": "sonnet", **CONTRACT})[0], 0)
         self.assertEqual(self.run.append("verification-recorded", {"phase": "A", "attempt": 1, "verifier": "codex",
                                                                    "verdict": "pass"})[0], 2)
         self.run.append("artifact-submitted", {"phase": "A", "attempt": 1, "submission_ref": "s",
-                                               "submission_sha": "x"})
+                                               "submission_sha": "x", "contract_version": "v1"})
         self.run.move("A", "checking")
         self.assertEqual(self.run.append("verification-recorded", {"phase": "A", "attempt": 1, "verifier": "sonnet",
                                                                    "verdict": "pass"})[0], 3)
+
+    def test_assignment_without_contract_keys_is_refused(self):
+        self.run.approved_plan(TWO)
+        self.assertEqual(self.run.move("A", "ready")[0], 0)
+        code, _, err = self.run.append("phase-assigned", {"phase": "A", "executor": "sonnet", "inputs": []})
+        self.assertEqual(code, 2, err)
+        self.assertIn("missing contract_version, ceiling", err)
+        self.assertNotIn("phase-assigned", self.run.types())
+
+    def test_assignment_with_empty_contract_fields_lists_every_gap(self):
+        self.run.approved_plan(TWO)
+        self.assertEqual(self.run.move("A", "ready")[0], 0)
+        code, _, err = self.run.append("phase-assigned", {"phase": "A", "executor": "sonnet", "inputs": [],
+                                                          "contract_version": " ", "ceiling": 0})
+        self.assertEqual(code, 2, err)
+        self.assertIn("needs clarification", err)
+        for field in ("contract_version", "ceiling", "inputs"):
+            self.assertIn(field, err)
+        self.assertNotIn("phase-assigned", self.run.types())
+
+    def test_submission_must_name_the_assigned_contract_version(self):
+        self.run.approved_plan(TWO)
+        self.assertEqual(self.run.move("A", "ready")[0], 0)
+        self.assertEqual(self.run.append("phase-assigned", {"phase": "A", "executor": "sonnet", **CONTRACT})[0], 0)
+        submit = {"phase": "A", "attempt": 1, "submission_ref": "s", "submission_sha": "x"}
+        code, _, err = self.run.append("artifact-submitted", {**submit, "contract_version": "v2"})
+        self.assertEqual(code, 2, err)
+        self.assertIn("differs from assigned 'v1'", err)
+        self.assertNotIn("artifact-submitted", self.run.types())
+        for attempt in (2, "1"):
+            code, _, err = self.run.append("artifact-submitted", {**submit, "attempt": attempt,
+                                                                  "contract_version": "v1"})
+            self.assertEqual(code, 2, err)
+            self.assertIn("current attempt 1", err)
+        self.assertEqual(self.run.append("artifact-submitted", {**submit, "contract_version": "v1"})[0], 0)
+        self.assertEqual(self.run.types()[-1], "artifact-submitted")
+
+    def test_submission_under_an_old_attempt_with_its_old_contract_is_refused(self):
+        self.run.approved_plan(TWO)
+        self.run.run_to_checking("A", verdict="fail")
+        self.assertEqual(self.run.move("A", "rejected")[0], 0)
+        self.assertEqual(self.run.move("A", "ready", reason="new-attempt")[0], 0)
+        assign = {"phase": "A", "executor": "opus", **CONTRACT, "contract_version": "v2"}
+        self.assertEqual(self.run.append("phase-assigned", assign)[0], 0)
+        old = {"phase": "A", "attempt": 1, "submission_ref": "s", "submission_sha": "x", "contract_version": "v1"}
+        code, _, err = self.run.append("artifact-submitted", old)
+        self.assertEqual(code, 2, err)
+        self.assertIn("current attempt 2", err)
+        self.assertEqual(self.run.types()[-1], "phase-assigned")
+
+    def test_assignment_field_values_are_checked_by_meaning(self):
+        self.run.approved_plan(TWO)
+        self.assertEqual(self.run.move("A", "ready")[0], 0)
+        refused = [("ceiling", "0"), ("ceiling", "-5"), ("ceiling", "soon"), ("ceiling", float("inf")),
+                   ("ceiling", True), ("contract_version", " v1"), ("inputs", [{}]), ("inputs", [""])]
+        for field, value in refused:
+            payload = {"phase": "A", "executor": "sonnet", **CONTRACT, field: value}
+            code, _, err = self.run.append("phase-assigned", payload)
+            self.assertEqual(code, 2, f"{field}={value!r}: {err}")
+            self.assertIn(field, err)
+        self.assertNotIn("phase-assigned", self.run.types())
+        payload = {"phase": "A", "executor": "sonnet", **CONTRACT, "ceiling": "5h"}
+        self.assertEqual(self.run.append("phase-assigned", payload)[0], 0)
 
     def test_run_folder_place_host_and_torn_line(self):
         code, _, err = self.run.cli("state", "--run-dir", "/tmp/anywhere")  # argparse: last --run-dir wins

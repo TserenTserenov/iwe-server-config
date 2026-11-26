@@ -586,20 +586,57 @@ fi
 # block text below (РП-605 Ф6, review 05.11): remember the crash separately.
 A12_NEXT_FAILED=
 A12_NEXT_RESULT=$(python3 "$(dirname "${BASH_SOURCE[0]}")/a12-next-block.py" "$TRANSCRIPT_PATH" 2>/dev/null) \
-  || { A12_NEXT_FAILED=1; A12_NEXT_RESULT=$(printf '\n\n\n\n\n'); }
+  || { A12_NEXT_FAILED=1; A12_NEXT_RESULT=$(printf '\n\n\n\n\n\n'); }
 A12_NEXT_MISSING_LINE=$(printf '%s\n' "$A12_NEXT_RESULT" | sed -n '1p')
 A12_NEXT_EMPTY_LINE=$(printf '%s\n' "$A12_NEXT_RESULT" | sed -n '2p')
 A12_NEXT_UNNAMED_LINE=$(printf '%s\n' "$A12_NEXT_RESULT" | sed -n '3p')
 A12_NEXT_THIS_CHAT_LINE=$(printf '%s\n' "$A12_NEXT_RESULT" | sed -n '4p')
 A12_NEXT_NO_WAKE_LINE=$(printf '%s\n' "$A12_NEXT_RESULT" | sed -n '5p')
+A12_NEXT_NO_WAKE_KIND=$(printf '%s\n' "$A12_NEXT_RESULT" | sed -n '6p')
 # Fifth signal (РП-605 Ф7, 24.11.2026, pilot permission): "Дальше: я ..." with no unfinished
-# background task and no alarm in the transcript. Journal mode: logged, never blocks (not in
-# BLOCKABLE) until the log shows no false hits on 30+ live "я" lines.
+# background task and no alarm in the transcript. Always logged; not in BLOCKABLE. Since
+# РП-605 Ф9 (26.11.2026, pilot "делайте все") it also reaches the agent, see the block below.
 [ -n "$A12_NEXT_NO_WAKE_LINE" ] && echo "$TIMESTAMP | $AGENT | A12_NEXT_I_NO_WAKE | i-promise-without-task-or-alarm | $(redact "$A12_NEXT_NO_WAKE_LINE")" >> "$LOG_FILE" 2>/dev/null || true
 [ -n "$A12_NEXT_UNNAMED_LINE" ] && echo "$TIMESTAMP | $AGENT | A12_NEXT_UNNAMED_LAUNCHER | next-session-without-named-launcher | $(redact "$A12_NEXT_UNNAMED_LINE")" >> "$LOG_FILE" 2>/dev/null || true
 [ -n "$A12_NEXT_THIS_CHAT_LINE" ] && echo "$TIMESTAMP | $AGENT | A12_NEXT_PLACE_THIS_CHAT | place-named-for-this-chat | $(redact "$A12_NEXT_THIS_CHAT_LINE")" >> "$LOG_FILE" 2>/dev/null || true
 [ -n "$A12_NEXT_MISSING_LINE" ] && echo "$TIMESTAMP | $AGENT | A12_NEXT_MISSING | no-next-line-in-last-3-lines | -" >> "$LOG_FILE" 2>/dev/null || true
 [ -n "$A12_NEXT_EMPTY_LINE" ] && echo "$TIMESTAMP | $AGENT | A12_NEXT_EMPTY_CONTENT | next-line-emoji-or-punctuation-only | $(redact "$A12_NEXT_EMPTY_LINE")" >> "$LOG_FILE" 2>/dev/null || true
+
+# --- РП-605 Ф9 (26.11.2026): the "Дальше:" signals reach the agent, not only the journal ---
+# Why: the 24.11 version only wrote A12_NEXT_I_NO_WAKE (and 107 A12_NEXT_PLACE_THIS_CHAT) to
+# a journal nobody reads, so the empty "я" promise of 26.11 09:15 repeated. Claude Code only;
+# peer adapters have no such channel (WP-592 F6). The stop_hook_active guard at the top of
+# this file makes a return happen at most once per turn.
+if [ "$AGENT" = "claude-code" ] && [ "${STYLE_CONTEXT:-}" != "peer" ]; then
+  [ -z "$A12_NEXT_FAILED" ] || echo "$TIMESTAMP | $AGENT | A12_NEXT_DETECTOR_FAILED | a12-next-block-crashed | -" >> "$LOG_FILE" 2>/dev/null || true
+  # The return of the turn is switched by A12_NO_WAKE_BLOCK only; IWE_STYLE_DEFER_REMARK=0
+  # switches off the remarks for the next turn (peer review 26.11: the two were tied by mistake).
+  A12_REMARKS_ON=0
+  if [ "${IWE_STYLE_DEFER_REMARK:-1}" != "0" ]; then
+    # shellcheck source=lib/next-turn-remark.sh
+    if . "$(dirname "${BASH_SOURCE[0]}")/lib/next-turn-remark.sh" 2>/dev/null; then
+      A12_REMARKS_ON=1
+    else
+      echo "$TIMESTAMP | $AGENT | A12_REMARK_LIB_MISSING | next-turn-remark.sh-not-loaded | -" >> "$LOG_FILE" 2>/dev/null || true
+    fi
+  fi
+  if [ -n "$A12_NEXT_NO_WAKE_LINE" ] && [ "$A12_NEXT_NO_WAKE_KIND" = "FREE" ] && [ "${A12_NO_WAKE_BLOCK:-1}" != "0" ]; then
+    # A step with no condition: the second answer is the work itself. One line per return
+    # in the journal, so the share of returns that led to a tool call can be counted.
+    echo "$TIMESTAMP | $AGENT | A12_NO_WAKE_RETURN | turn-returned-once | $(redact "$A12_NEXT_NO_WAKE_LINE")" >> "$LOG_FILE" 2>/dev/null || true
+    jq -n --arg r "Строка «Дальше:» начинается с «я», но ничего не запущено и будильника нет: пилот прочтёт её как «работа идёт». Выполни обещанный шаг сейчас, в этом ответе. Если без решения пилота шаг невозможен, напиши ровно одну строку «Дальше: вы: …» и больше ничего. Прошлый ответ не повторяй, пилоту об этом замечании не пиши." \
+      '{"decision":"block","reason":$r}'
+    exit 0
+  fi
+  if [ "$A12_REMARKS_ON" = 1 ] && [ -n "$A12_NEXT_NO_WAKE_LINE" ] && [ "$A12_NEXT_NO_WAKE_KIND" = "COND" ]; then
+    # A step that waits for the pilot's word or a later session is a "вы" line mislabelled "я":
+    # no second block, only a hint for the next turn.
+    next_turn_remark_add "$COUNT_DIR" "$SESSION_ID" "Прошлая строка «Дальше:» начиналась с «я», но шаг ждёт слова пилота или следующей сессии, а ничего не запущено. Так пиши: «вы: сказать X, после этого я Y» или «следующая сессия по РП-N начнётся с …, запустит её …». «Я» только при запущенной задаче или будильнике. Пилоту об этом не пиши." || true
+  fi
+  if [ "$A12_REMARKS_ON" = 1 ] && [ -n "$A12_NEXT_THIS_CHAT_LINE" ]; then
+    next_turn_remark_add "$COUNT_DIR" "$SESSION_ID" "Прошлая строка «Дальше:» назвала шаг «здесь» или «в этом чате». Пиши место, только если это не этот чат. Если сессия уже закрыта, из неё ничего не публикуется: доступное сделай до закрытия, а то, что осталось, называй как «вы, в новой беседе по РП-N: сказать …». Пилоту об этом не пиши." || true
+  fi
+fi
 
 # --- A7.1 (стиль): технический журнал в чат под видом <details> ---
 # A7.1 запрещает журнал (SHA, коммиты, итоги peer, пути отчёта) в чате — он идёт
