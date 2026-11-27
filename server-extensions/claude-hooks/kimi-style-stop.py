@@ -15,9 +15,8 @@ blocks of the last assistant message. Two homes, one hook (WP-592 F6, 25.11):
 style-check-text.sh -- this file is the Kimi-side thin entry, not a third
 reimplementation (same shape as .codex/hooks/style_check_stop.py).
 
-Wire contract (verified against kimi 1.43.0): a hook blocks by exit code 2 and
-its stderr goes back to the model as the reason. Fail-open: any error here must
-not block the pilot's turn.
+The checks are log-only: this hook always exits 0 and never sends the finished
+reply back for regeneration. Fail-open: any error here must not block the turn.
 """
 
 from __future__ import annotations
@@ -107,15 +106,9 @@ def main() -> int:
     if not text:
         return 0
 
-    # РП-388 Ф26 (расширение 05.11, запрос пилота «исправить системно»):
-    # орфография — журнал + напоминание агенту ДО показа ответа пилоту.
-    # Пилот видит только итоговый ответ; напоминание — через механику Ф21
-    # (exit 2 + stderr), guard stop_hook_active не даст попросить дважды за ход.
-    # До стилевой проверки: даже ответ, который стиль заблокирует, должен
-    # попасть в орфо-журнал. В пир-режиме ortho-check.py сам молчит
-    # (проверку там делает адаптер, Ф24). Fail-open внутри, timeout 8с, чтобы
-    # вместе со стилем (10с) уложиться в лимит хука (20с).
-    ortho_flags: list[str] = []
+    # Проверки только журналируют находки. Готовый ответ никогда не возвращается
+    # модели на переписывание: повторная генерация дублировала текст и вносила
+    # новые опечатки (решение пилота 27.11.2026).
     if os.path.isfile(ORTHO):
         ortho_tmp = None
         try:
@@ -124,17 +117,14 @@ def main() -> int:
             ) as of:
                 of.write(text)
                 ortho_tmp = of.name
-            ortho_done = subprocess.run(
+            subprocess.run(
                 ["python3", ORTHO, "kimi", ortho_tmp],
-                stdout=subprocess.PIPE,
+                stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
                 text=True,
                 timeout=8,
                 check=False,
             )
-            ortho_flags = [
-                line.strip() for line in (ortho_done.stdout or "").splitlines() if line.strip()
-            ][:10]
         except Exception:
             pass
         finally:
@@ -151,16 +141,15 @@ def main() -> int:
         ) as fh:
             fh.write(text)
             tmp_path = fh.name
-        done = subprocess.run(
+        subprocess.run(
             ["bash", WRAPPER, "kimi", tmp_path],
-            stdout=subprocess.PIPE,
+            stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
             text=True,
             timeout=10,
             check=False,
-            env={**os.environ, "STYLE_WRAPPER_EMIT": "1"},
+            env={**os.environ, "STYLE_WRAPPER_EMIT": "0"},
         )
-        decision = json.loads(done.stdout or "{}")
     except Exception:
         return 0
     finally:
@@ -170,17 +159,6 @@ def main() -> int:
             except OSError:
                 pass
 
-    if isinstance(decision, dict) and decision.get("decision") == "block":
-        print(decision.get("reason", ""), file=sys.stderr)
-        return 2
-    if ortho_flags:
-        words = ", ".join(ortho_flags)
-        print(
-            f"ОРФО: в предыдущем ответе подозрительные слова — {words}. "
-            "Проверь и исправь; если слово корректное, заверши ход повторно.",
-            file=sys.stderr,
-        )
-        return 2
     return 0
 
 

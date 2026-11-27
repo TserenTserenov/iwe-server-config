@@ -1,8 +1,8 @@
 #!/bin/bash
 # test-style-entries.sh — thin end-of-reply entries of Kimi and Codex (РП-388 Ф21).
-# Both route a finished reply through the shared core behind style-check-text.sh
-# and hand the block decision back to the agent. Run in an isolated HOME that
-# links ~/IWE to this checkout, so the live hooks are not touched.
+# Both route a finished reply through the shared core behind style-check-text.sh.
+# Kimi is log-only; Codex still returns the block decision. Run in an isolated
+# HOME that links ~/IWE to this checkout, so the live hooks are not touched.
 #
 # Run: bash .claude/hooks/tests/test-style-entries.sh
 
@@ -69,8 +69,8 @@ print(json.dumps({"last_assistant_message": os.environ["REPLY_TEXT"],
 
 kimi_journal "$BAD"
 kimi_hook false; rc=$?
-check "kimi: bad reply exits 2" test "$rc" -eq 2
-check "kimi: stderr carries the reason" grep -q "Стиль нарушен" "$TMP/stderr"
+check "kimi: bad reply is logged without a rewrite" test "$rc" -eq 0
+check "kimi: no rewrite reason is returned" test ! -s "$TMP/stderr"
 kimi_hook true; rc=$?
 check "kimi: loop guard (stop_hook_active) exits 0" test "$rc" -eq 0
 kimi_journal "$GOOD"
@@ -82,8 +82,8 @@ check "kimi: unknown session fails open" test "$rc" -eq 0
 
 kimi_code_journal "$BAD"
 kimi_code_hook false; rc=$?
-check "kimi code: bad reply exits 2" test "$rc" -eq 2
-check "kimi code: stderr carries the reason" grep -q "Стиль нарушен" "$TMP/stderr"
+check "kimi code: bad reply is logged without a rewrite" test "$rc" -eq 0
+check "kimi code: no rewrite reason is returned" test ! -s "$TMP/stderr"
 kimi_code_hook true; rc=$?
 check "kimi code: loop guard (stop_hook_active) exits 0" test "$rc" -eq 0
 kimi_code_journal "$GOOD"
