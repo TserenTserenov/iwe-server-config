@@ -3897,13 +3897,13 @@ _session_age_hours() {  # <age seconds>
   return 0
 }
 
-notify_zombie_escalation() {  # <semaphore> <age seconds> <pass key> <reason> <opened epoch>
-  local semaphore="$1" age_seconds="$2" pass_key="$3" reason="$4" opened_epoch="$5"
+notify_zombie_escalation() {  # <semaphore> <age seconds> <pass key> <reason> <opened epoch> [owner death proven: 0|1]
+  local semaphore="$1" age_seconds="$2" pass_key="$3" reason="$4" opened_epoch="$5" proven="${6:-0}"
   # Human text (WP-538 addressee policy, peer-session 2026-09-03-05): what
   # happened, who owns the next step, when it resolves on its own -- this is
   # a fully automatic transition (see the comment above ZOMBIE_REGISTRY), so
   # the pilot owns nothing here beyond "read if curious".
-  local age_h wp task agent host work changed=0 unpublished=0 who age_txt msg
+  local age_h wp task agent host work changed=0 unpublished=0 who age_txt msg sid cure
   age_h=$(_session_age_hours "$age_seconds")
   # The pilot acts on "which work, is anything lost", not on a semaphore file
   # name (WP-568/538, peer-session 2026-10-27-12): same facts and the same
@@ -3919,9 +3919,28 @@ notify_zombie_escalation() {  # <semaphore> <age seconds> <pass key> <reason> <o
   else
     age_txt="менее часа"
   fi
-  work=$(unsaved_work_in_worktree "$(_semaphore_last_field "$semaphore" isolated_worktree)")
+  work=$(unsaved_work_in_worktree "$(_semaphore_session_worktree "$semaphore")")
   case "$work" in gone|unknown) ;; *) read -r changed unpublished <<< "$work" ;; esac
-  if [ "$work" = unknown ]; then
+  # WP-484 Ф343 (peer-session 2026-11-27-10, pilot word 27.11): when the
+  # caller already holds the four-condition death proof that `heal` uses, the
+  # pilot needs no decision -- but the sweep itself never removes the mark, so
+  # "nothing to do" left WP-622's mark hanging for 20h. Name the exact cure.
+  sid=$(_semaphore_last_field "$semaphore" session_id)
+  if [ "$proven" = 1 ] && [ -n "$sid" ]; then
+    cure="Владелец точно завершился (процесса нет, аренда истекла), но сама отметка не снимется и мешает учёту сессий. Снять её можно без вашего решения: скажите агенту «сними мёртвую сессию ${sid}» (команда: session-guard.sh heal ${sid} --apply --reason …; рабочая копия сохранится)."
+    if [ "$work" = unknown ]; then
+      msg="⚠️ Не подаёт признаков жизни ${age_txt}: ${who}. Проверить, есть ли несохранённая работа, не смог. ${cure}"
+      _sweep_count_quiet_notice 1
+    elif [ "$work" = gone ] || { [ "$changed" = 0 ] && [ "$unpublished" = 0 ]; }; then
+      msg="Не подаёт признаков жизни ${age_txt}: ${who}. Несохранённой работы в ней нет. ${cure}"
+      _sweep_count_quiet_notice 0
+    else
+      # heal asks the pilot's code whenever unsaved work is left, so the
+      # no-decision cure holds only after that work is picked up.
+      msg="⚠️ Не подаёт признаков жизни ${age_txt}: ${who}. Владелец точно завершился (процесса нет, аренда истекла), но в её копии осталось: изменённых файлов ${changed}, неотправленных коммитов ${unpublished}. Скажите агенту «подбери работу мёртвой сессии ${sid}»; когда работа опубликована, отметку можно снять без вашего решения (session-guard.sh heal ${sid} --apply --reason …), а без этого снятие попросит ваш код подтверждения."
+      _sweep_count_quiet_notice 1
+    fi
+  elif [ "$work" = unknown ]; then
     msg="⚠️ Не подаёт признаков жизни ${age_txt}: ${who}. Закончилась ли она, доказать не могу, поэтому блокировку не снимал. Проверить, есть ли несохранённая работа, не смог. Делать сейчас ничего не нужно: агент сверит её при следующей работе по ${wp:-этому РП}; если сессия у вас ещё открыта - закройте её, если нет и работа срочная - скажите агенту «проверь осиротевшую сессию по ${wp:-РП}»."
     _sweep_count_quiet_notice 1
   elif [ "$work" = gone ] || { [ "$changed" = 0 ] && [ "$unpublished" = 0 ]; }; then
@@ -4082,6 +4101,20 @@ _quarantine_dead_interactive() {  # <semaphore> <observed dead pid> [out-var for
 # Commits are compared by patch-id with origin/main (`git cherry`), because
 # isolate-push delivers by cherry-pick and a published commit lives there
 # under another SHA.
+# The copy a session wrote in: isolated_worktree, else governance_worktree
+# unless that is the canonical checkout (shared by every session, so its dirt
+# is not this session's). Shared by heal, the escalation text and `markers`
+# so all three judge the same copy (WP-484 Ф343).
+_semaphore_session_worktree() {  # <semaphore>
+  local wt
+  wt=$(_semaphore_last_field "$1" isolated_worktree)
+  if [ -z "$wt" ]; then
+    wt=$(_semaphore_last_field "$1" governance_worktree)
+    [ "$(realpath "$wt" 2>/dev/null || echo "$wt")" != "$(realpath "$IWE_ROOT/$GOV_REPO" 2>/dev/null || echo x)" ] || wt=""
+  fi
+  printf '%s' "$wt"
+}
+
 unsaved_work_in_worktree() {
   local wt="$1" status cherry changed unpublished
   [ -n "$wt" ] || { echo unknown; return 0; }
@@ -4130,6 +4163,108 @@ _sweep_count_quiet_notice() {
   return 0
 }
 
+# WP-561 F90 (pilot permission 27.11.2026): a non-terminal run card
+# (waiting/running) is git-ignored and never committed, so removing the
+# isolated copy deleted the only record of where that close stopped (8 of 44
+# unfinished Mac runs, 20-26.11). Copy every untracked RUN-*.md out before a
+# removal, into a folder named after the worktree (one session; a reused slug
+# in another session cannot overwrite it). A sidecar `<card>.archived` says
+# when and why the copy was taken: a card copied by close at the release step
+# shows the run's state at that moment, not that the run stopped there.
+# Best-effort: a failed copy is reported, never blocks cleanup.
+#
+# WP-561 F90 (27.11.2026, second repair): a superseded attempt of the closing
+# session parked in its isolated copy (status waiting, untracked) made close
+# refuse -- RUN cards survive the ignored-debris clean, and any card but the
+# terminal proof makes the copy "not clean". The session then ended on another
+# path and the copy left with the parked card, whose journal stayed
+# non-terminal for good (most of the 42 non-terminal quick-close journals on
+# the Mac on 27.11). The post-close cancel-session cannot help: it scans only
+# the canonical cards dir. So, before the clean check, cancel those runs in the
+# copy and move each cancelled card into the run-card archive.
+# - Runner: the canonical one, as for every other sweep; cwd = the copy makes
+#   the copy its root.
+# - No autocommit: close holds the session transition lock here, and the
+#   commit's scope note (note-file) needs that same lock.
+# - Excluded: the terminal-proof run (completed, or the accepted card of a
+#   forced close, whose bytes PREPARED has already hashed) and the run that
+#   invoked this close (its runner holds the card lock); caller last, since an
+#   old runner keeps only the last --exclude.
+# Cancelled cards are found on disk, not in the runner's report: the runner
+# writes each card as it goes, so a timeout or error after the first write
+# reports nothing, and a retry no longer sees that card as parked. Only this
+# sweep writes cancel_reason session_closed inside a copy (the post-close sweep
+# runs on the canonical dir). The archive is checked before anything is
+# cancelled. A card it cannot cancel or archive stays in the copy and close
+# refuses, as before. Superseded attempts stay cancelled even if this close
+# fails later.
+_cancel_closing_copy_runs() {  # <worktree> <owner session id> [--exclude RUN_ID]...
+  local worktree="$1" owner="$2" runner archive tasks card name
+  shift 2
+  runner="$IWE_ROOT/$GOV_REPO/scripts/process-runner.py"
+  tasks="$worktree/inbox/agent/tasks"
+  case "${POST_CLOSE_CANCEL_MODE:-}" in happy|forced) ;; *) return 0 ;; esac
+  [ -n "$owner" ] && [ -f "$runner" ] && [ -d "$tasks" ] || return 0
+  if ! grep -Eq '^[^#]*environ[^#]*IWE_CARD_AUTOCOMMIT' "$runner" 2>/dev/null; then
+    echo "WARNING: runner without IWE_CARD_AUTOCOMMIT; parked runs in $worktree not cancelled" >&2
+    return 0
+  fi
+  archive=$(_run_card_archive_dir "$worktree") || return 0
+  echo "Session CLOSE: cancelling parked runs of this session in $worktree (up to 30 s)" >&2
+  (cd -- "$worktree" && IWE_CARD_AUTOCOMMIT=0 timeout 30 python3 "$runner" \
+      cancel-session quick-close "$owner" "$@" >/dev/null) \
+    || echo "WARNING: cancelling parked runs of $owner in $worktree did not finish" >&2
+  for card in "$tasks"/RUN-*.md; do
+    [ -f "$card" ] && [ ! -L "$card" ] || continue
+    [ -n "${TERMINAL_PROOF_REFERENCE:-}" ] && [ "$card" -ef "$TERMINAL_PROOF_REFERENCE" ] && continue
+    grep -q '^status: cancelled$' "$card" && grep -q '^cancel_reason: session_closed$' "$card" || continue
+    name=${card##*/}
+    git -C "$worktree" ls-files --error-unmatch -- "inbox/agent/tasks/$name" >/dev/null 2>&1 && continue
+    _archive_run_card "$worktree" "$archive" "$name" cancelled-at-close && rm -f -- "$card"
+  done
+  return 0
+}
+
+_run_card_archive_dir() {  # <worktree>; prints the archive folder of that worktree
+  local archive="$IWE_ROOT/.iwe-runtime/archived-run-cards/${1##*/}"
+  if [ -L "$IWE_ROOT/.iwe-runtime/archived-run-cards" ] || [ -L "$archive" ] || ! mkdir -p "$archive"; then
+    echo "WARNING: run-card archive $archive unavailable; untracked run cards of $1 not kept" >&2
+    return 1
+  fi
+  printf '%s\n' "$archive"
+}
+
+_archive_run_card() {  # <worktree> <archive dir> <card name> <reason>
+  local worktree="$1" archive="$2" name="$3" reason="$4" card tmp
+  card="$worktree/inbox/agent/tasks/$name"
+  # Temp file + rename: atomic, and mv replaces a symlink instead of following it.
+  if tmp=$(mktemp "$archive/.${name}.XXXXXX") && cp -p -- "$card" "$tmp" && mv -f -- "$tmp" "$archive/$name"; then
+    printf 'archived_at: %s\nreason: %s\nworktree: %s\n' \
+      "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$reason" "$worktree" > "$archive/$name.archived" \
+      || echo "WARNING: run card $name archived without its sidecar" >&2
+    return 0
+  fi
+  rm -f -- "${tmp:-}"
+  echo "WARNING: run card $name not archived from $worktree" >&2
+  return 1
+}
+
+_archive_untracked_run_cards() {  # <worktree> <reason: close|orphan-reap>
+  local worktree="$1" reason="$2" tasks archive card name
+  tasks="$worktree/inbox/agent/tasks"
+  [ -d "$tasks" ] || return 0
+  git -C "$worktree" rev-parse --git-dir >/dev/null 2>&1 \
+    || { echo "WARNING: $worktree is not a readable git worktree; its run cards are not archived" >&2; return 0; }
+  archive=$(_run_card_archive_dir "$worktree") || return 0
+  for card in "$tasks"/RUN-*.md; do
+    [ -f "$card" ] && [ ! -L "$card" ] || continue
+    name=${card##*/}
+    git -C "$worktree" ls-files --error-unmatch -- "inbox/agent/tasks/$name" >/dev/null 2>&1 && continue
+    _archive_run_card "$worktree" "$archive" "$name" "$reason" || true
+  done
+  return 0
+}
+
 # WP-484 (session-close-hygiene peer-session, 2026-08-20, consensus Claude+
 # Codex+Kimi): a semaphore's own quarantine (below) already proves its owner
 # is gone -- but the `isolated_worktree:` path it recorded at open time was
@@ -4158,6 +4293,7 @@ _reap_orphaned_worktree() {
     return 0
   fi
   if "$isolate_push_script" "$worktree_path" main; then
+    _archive_untracked_run_cards "$worktree_path" orphan-reap
     if git -C "$worktree_path" worktree remove "$worktree_path" 2>/dev/null; then
       echo "WARNING: orphaned worktree $worktree_path pushed and removed (owner semaphore quarantined)" >&2
     else
@@ -4738,7 +4874,7 @@ _classify_pid_identity_mismatch() {  # <semaphore> <pid> <observed comm>
 }
 
 _classify_dead_semaphore() {  # <semaphore> <observed pid>
-  local semaphore="$1" observed_pid="$2" pid target epoch age
+  local semaphore="$1" observed_pid="$2" pid target epoch age proven
   local dead_quarantine_path
   [ -f "$semaphore" ] && [ ! -L "$semaphore" ] || return 0
   pid=$(grep '^pid: ' "$semaphore" 2>/dev/null | head -1 | cut -d' ' -f2- || true)
@@ -4795,27 +4931,44 @@ _classify_dead_semaphore() {  # <semaphore> <observed pid>
   epoch=$(semaphore_epoch "$semaphore" || echo 0)
   age=$(( $(date +%s) - epoch ))
   [ "$age" -lt 0 ] && age=0
-  if ! zombie_registry_has_action "$semaphore" "escalated"; then
-    notify_zombie_escalation "$semaphore" "$age" "${_SWEEP_PASS_KEY:-}" \
-      "dead_owner_without_terminal_or_drain_proof" "$epoch"
-    append_zombie_event "dead_owner_without_terminal_or_drain_proof" \
-      "$semaphore" "$epoch" "$age" "escalated" "${_SWEEP_PASS_KEY:-}"
-    _SWEEP_ZOMBIES_ESCALATED=$((_SWEEP_ZOMBIES_ESCALATED + 1))
-    # Cold-review Critical (2026-09-15): cancelling this session's quick-close
-    # runs here (bare dead-PID, no terminal/scheduled-drain proof) would be a
-    # NEW behavior change on an already-tuned false-positive-prone path, not
-    # a refactor -- deliberately NOT wired up, unlike the pid-identity-
-    # mismatch sibling below (_classify_pid_identity_mismatch), whose
-    # evidence for death is strictly stronger (a live, unrelated process
-    # holding the pid, not just kill -0 failing). This branch stays exactly
-    # as conservative as before this patch: notify only, human decides.
+  if zombie_registry_has_action "$semaphore" "escalated"; then
+    # WP-484 Ф343: already reported once; repeating the same line every 30
+    # minutes grew the sweep's stderr to 6.5 MB. The pass summary still counts it.
+    _SWEEP_AMBIGUOUS=$((_SWEEP_AMBIGUOUS + 1))
+    return 0
   fi
+  # WP-484 Ф343: the escalation is sent once, so it must wait until the
+  # death proof can be decided. Right after the pid dies the commit lease is
+  # still running, the proof refuses, and the one notice would forever say
+  # "not proven, nothing to do" (WP-622, 26-27.11). A fresh heartbeat clears
+  # with time the same way; the other refusals (wrong host, no opened_at) do not.
+  proven=0
+  if _dead_interactive_proof "$semaphore" "$pid"; then
+    proven=1
+  elif [[ "$_DI_REFUSAL" == "lease still valid"* || "$_DI_REFUSAL" == heartbeat*" is fresh" ]]; then
+    echo "INFO: pid $pid is dead, $_DI_REFUSAL; escalation waits until the death proof can be decided; $(basename "$semaphore") remains .open" >&2
+    _SWEEP_AMBIGUOUS=$((_SWEEP_AMBIGUOUS + 1))
+    return 0
+  fi
+  notify_zombie_escalation "$semaphore" "$age" "${_SWEEP_PASS_KEY:-}" \
+    "dead_owner_without_terminal_or_drain_proof" "$epoch" "$proven"
+  append_zombie_event "dead_owner_without_terminal_or_drain_proof" \
+    "$semaphore" "$epoch" "$age" "escalated" "${_SWEEP_PASS_KEY:-}"
+  _SWEEP_ZOMBIES_ESCALATED=$((_SWEEP_ZOMBIES_ESCALATED + 1))
+  # Cold-review Critical (2026-09-15): cancelling this session's quick-close
+  # runs here (bare dead-PID, no terminal/scheduled-drain proof) would be a
+  # NEW behavior change on an already-tuned false-positive-prone path, not
+  # a refactor -- deliberately NOT wired up, unlike the pid-identity-
+  # mismatch sibling below (_classify_pid_identity_mismatch), whose
+  # evidence for death is strictly stronger (a live, unrelated process
+  # holding the pid, not just kill -0 failing). This branch stays exactly
+  # as conservative as before this patch: notify only, human decides.
   echo "WARNING: pid $pid is dead, but terminal/scheduled-drain proof is absent or changed; $(basename "$semaphore") remains .open" >&2
   _SWEEP_AMBIGUOUS=$((_SWEEP_AMBIGUOUS + 1))
 }
 
 _sweep_orphaned_semaphores_body() {
-  local semaphore pid epoch age agent comm
+  local semaphore pid epoch age agent comm reported_before
   _SWEEP_AMBIGUOUS=0
   _SWEEP_TERMINAL_REAPED=0
   _SWEEP_SCHEDULED_FROZEN=0
@@ -4914,8 +5067,9 @@ _sweep_orphaned_semaphores_body() {
     }
     age=$(( $(date +%s) - epoch ))
 
-    if [ "$age" -ge "$IWE_ZOMBIE_ESCALATE_SEC" ] \
-       && ! zombie_registry_has_action "$semaphore" "escalated"; then
+    reported_before=0
+    zombie_registry_has_action "$semaphore" "escalated" && reported_before=1
+    if [ "$age" -ge "$IWE_ZOMBIE_ESCALATE_SEC" ] && [ "$reported_before" = 0 ]; then
       notify_zombie_escalation "$semaphore" "$age" "${_SWEEP_PASS_KEY:-}" \
         "missing_or_invalid_owner_pid" "$epoch"
       append_zombie_event "missing_or_invalid_owner_pid" "$semaphore" \
@@ -4923,7 +5077,11 @@ _sweep_orphaned_semaphores_body() {
       _SWEEP_ZOMBIES_ESCALATED=$((_SWEEP_ZOMBIES_ESCALATED + 1))
     fi
 
-    if [ "$age" -gt 1800 ]; then
+    # WP-484 Ф343: an already-reported semaphore is only counted, not
+    # re-printed every 30 minutes (the sweep's stderr reached 6.5 MB).
+    if [ "$age" -gt 1800 ] && [ "$reported_before" = 1 ]; then
+      _SWEEP_AMBIGUOUS=$((_SWEEP_AMBIGUOUS + 1))
+    elif [ "$age" -gt 1800 ]; then
       echo "WARNING: semaphore $(basename "$semaphore") is ${age}s old without owner PID; age cannot fence a writer, kept .open for manual review" >&2
       _SWEEP_AMBIGUOUS=$((_SWEEP_AMBIGUOUS + 1))
     fi
@@ -13034,6 +13192,7 @@ _close_delivery_and_transition() {
         # Keep source-relative publication helpers in their original cwd until
         # proof is complete, then leave the directory before removing it.
         cd -- "$IWE_ROOT" || fail "close: постоянный каталог IWE недоступен; рабочая копия сохранена" 7
+        _archive_untracked_run_cards "$CLOSING_WORKTREE" close
         # WP-530 Ф90: git's own reason (dirty tree, locked worktree, timeout)
         # used to vanish into /dev/null, so every refusal here read the same
         # and the operator could not tell which precondition to fix.
@@ -13193,6 +13352,12 @@ _close_delivery_and_transition() {
     # this same close. A negative pathspec preserves RUN cards under -X; -e
     # would mark them ignored and still delete them. A foreign card remains a
     # dirty-scope refusal instead of being silently deleted.
+    local -a closing_copy_excludes=()
+    [ -z "${POST_CLOSE_EXCLUDE_RUN_ID:-}" ] || closing_copy_excludes+=(--exclude "$POST_CLOSE_EXCLUDE_RUN_ID")
+    [ -z "${POST_CLOSE_FORCED_RUN_ID:-}" ] || closing_copy_excludes+=(--exclude "$POST_CLOSE_FORCED_RUN_ID")
+    [ -z "${CALLER_RUN_ID_ARG:-}" ] || closing_copy_excludes+=(--exclude "$CALLER_RUN_ID_ARG")
+    _cancel_closing_copy_runs "$CLOSING_WORKTREE" "$SESSION_ID" \
+      "${closing_copy_excludes[@]+"${closing_copy_excludes[@]}"}"
     git -C "$CLOSING_WORKTREE" clean -fdX --quiet -- . \
       ':(exclude)inbox/agent/tasks/RUN-*.md' 2>/dev/null || true
     # Proved clean BEFORE the rebuild below (WP-561 Ч3): a dirty copy is refused
@@ -18681,6 +18846,89 @@ _heal_obligation_mode() {  # <session id>; prints the obligation mode or nothing
   python3 "$cli" mode --session-id "$1" 2>/dev/null | tr -d '[:space:]' || true
 }
 
+# WP-484 Ф343 (peer-session 2026-11-27-10, pilot word 27.11): read-only answer
+# to "which open marks are stuck". Counting every mark without a terminal
+# suffix as suspicious called 13 live Claude windows stuck on 27.11; this
+# report checks the owner process and the session's copy instead, and names
+# the one allowed action. It never modifies a mark, a card or a copy.
+_MARKER_STATE=""  # a global, not stdout: the row itself goes to stdout
+_marker_report_row() {  # <semaphore>; sets _MARKER_STATE to alive|dead|unknown
+  local sem="$1" sid agent wp host age_h pid work changed unpublished
+  local work_txt owner action why rc epoch
+  sid=$(_semaphore_last_field "$sem" session_id)
+  agent=$(_semaphore_last_field "$sem" agent)
+  wp=$(_semaphore_last_field "$sem" wp)
+  host=$(_semaphore_last_field "$sem" host)
+  pid=$(_semaphore_last_field "$sem" pid)
+  epoch=$(semaphore_epoch "$sem" || echo 0)
+  age_h=$(_session_age_hours "$(( $(date +%s) - epoch ))")
+  work=$(unsaved_work_in_worktree "$(_semaphore_session_worktree "$sem")")
+  case "$work" in
+    gone) work_txt="копии нет" ;;
+    unknown) work_txt="не проверить" ;;
+    *)
+      read -r changed unpublished <<< "$work"
+      if [ "$changed" = 0 ] && [ "$unpublished" = 0 ]; then
+        work_txt="всё опубликовано"
+      else
+        work_txt="изменённых файлов ${changed}, неопубликованных коммитов ${unpublished}"
+      fi ;;
+  esac
+  local heal_cmd="session-guard.sh heal ${sid:-<session_id>}"
+  if [ -n "$host" ] && [ "$host" != "$(uname -n)" ]; then
+    _MARKER_STATE=unknown
+    owner="на другом компьютере (${host})"
+    action="проверить там: ${heal_cmd} (сухой прогон)"
+  elif ! [[ "$pid" =~ ^[1-9][0-9]*$ ]]; then
+    _MARKER_STATE=unknown
+    owner="не проверить (номер процесса не записан)"
+    action="спросить владельца (${agent:-агент}); без ответа - ${heal_cmd}, снятие по коду подтверждения пилота"
+  elif kill -0 "$pid" 2>/dev/null; then
+    why=$(_prove_recorded_owner_dead "$sem") && rc=0 || rc=$?
+    if [ "$rc" = 1 ]; then
+      _MARKER_STATE=alive; owner="жив (процесс $pid совпал с записанным)"; action="не трогать"
+    elif [ "$rc" = 0 ]; then
+      _MARKER_STATE=unknown; owner="номер $pid занят другим процессом"
+      action="${heal_cmd} (сухой прогон), снятие по коду подтверждения пилота"
+    else
+      _MARKER_STATE=alive; owner="процесс $pid жив (${why})"; action="не трогать"
+    fi
+  elif _dead_interactive_proof "$sem" "$pid"; then
+    _MARKER_STATE=dead; owner="мёртв, доказано (процесса нет, аренда истекла)"
+    # Same rule as heal: unsaved work left -> the pilot's code is needed.
+    if [ "${changed:-0}" = 0 ] && [ "${unpublished:-0}" = 0 ]; then
+      action="снять без решения пилота: ${heal_cmd} --apply --reason <что случилось>"
+    else
+      action="сначала подобрать и опубликовать работу из копии, затем снять без решения пилота: ${heal_cmd} --apply --reason <что случилось> (до публикации снятие просит код подтверждения пилота)"
+    fi
+  else
+    _MARKER_STATE=unknown; owner="процесса $pid нет, смерть не доказана (${_DI_REFUSAL})"
+    case "$_DI_REFUSAL" in
+      "lease still valid"*|heartbeat*" is fresh") action="подождать (аренда или признак жизни ещё свежие), затем снова этот отчёт" ;;
+      *) action="${heal_cmd} (сухой прогон), снятие по коду подтверждения пилота" ;;
+    esac
+  fi
+  printf -- '- %s · %s · %s · %s\n  владелец: %s\n  работа: %s\n  действие: %s\n' \
+    "$(basename -- "$sem")" "${agent:-?}" "${wp:-РП не указан}" "${age_h:-?}ч" \
+    "$owner" "$work_txt" "$action"
+}
+
+if [ "$CMD" = "markers" ]; then
+  [ "${#POSITIONAL[@]}" -eq 0 ] || fail "markers: аргументы не нужны (отчёт по всем открытым отметкам в $SESSION_DIR)" 1
+  MK_ALIVE=0; MK_DEAD=0; MK_UNKNOWN=0
+  for MK_SEM in "$SESSION_DIR"/*.open; do
+    [ -f "$MK_SEM" ] || continue
+    _marker_report_row "$MK_SEM"
+    case "$_MARKER_STATE" in
+      alive) MK_ALIVE=$((MK_ALIVE + 1)) ;;
+      dead) MK_DEAD=$((MK_DEAD + 1)) ;;
+      *) MK_UNKNOWN=$((MK_UNKNOWN + 1)) ;;
+    esac
+  done
+  echo "Итого открытых отметок на $(uname -n): $((MK_ALIVE + MK_DEAD + MK_UNKNOWN)) (владелец жив ${MK_ALIVE}, мёртв доказанно ${MK_DEAD}, не проверить ${MK_UNKNOWN}). Только чтение, ничего не изменено."
+  exit 0
+fi
+
 if [ "$CMD" = "heal" ]; then
   HEAL_SLUG="${POSITIONAL[0]:-}"
   [ -n "$HEAL_SLUG" ] || fail "heal: нужен slug зависшей сессии (поле slug: в её семафоре). Список активных: ls $SESSION_DIR/*.open" 1
@@ -18771,12 +19019,7 @@ $HEAL_QUARANTINES" 1
   else
     HEAL_DEAD_WHY="в семафоре нет числового pid"
   fi
-  HEAL_WT=$(_semaphore_last_field "$HEAL_SEM" isolated_worktree)
-  if [ -z "$HEAL_WT" ]; then
-    HEAL_WT=$(_semaphore_last_field "$HEAL_SEM" governance_worktree)
-    # The canonical checkout is shared by every session: its dirt is not this session's.
-    [ "$(realpath "$HEAL_WT" 2>/dev/null || echo "$HEAL_WT")" != "$(realpath "$IWE_ROOT/$GOV_REPO" 2>/dev/null || echo x)" ] || HEAL_WT=""
-  fi
+  HEAL_WT=$(_semaphore_session_worktree "$HEAL_SEM")
   HEAL_CHANGED=0; HEAL_UNPUBLISHED=0; HEAL_WORK="не проверялась (семафор уже в карантине)"
   if [ "$HEAL_ACTIVE" -eq 1 ]; then
     HEAL_WORK_RAW=$(unsaved_work_in_worktree "$HEAL_WT")
@@ -20115,4 +20358,4 @@ if [ "$CMD" = "post-merge-check" ]; then
   exit 0
 fi
 
-fail "Unknown command: $CMD (use: open, close, audit, renew, note-file, note-commit, recover-orphaned, retire-semaphore-artifact, release-duplicate, heal, owner-status, pre-commit-check, post-merge-check)"
+fail "Unknown command: $CMD (use: open, close, audit, renew, note-file, note-commit, recover-orphaned, retire-semaphore-artifact, release-duplicate, heal, markers, owner-status, pre-commit-check, post-merge-check)"
