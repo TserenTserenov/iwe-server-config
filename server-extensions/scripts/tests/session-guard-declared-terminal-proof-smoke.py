@@ -31,6 +31,29 @@ GUARD = Path(os.environ.get(
     str(Path(__file__).resolve().parents[1] / "session-guard.sh"),
 ))
 SOURCE = GUARD.read_text()
+# The publish-proof helpers bound their whole git walk by a fixed wall-clock budget
+# (deadline 12 s / 40 s, process killed at 15 s / 45 s). On a loaded host the fixture's git
+# calls outlast it and the proof refuses ("timed out after 0.13 seconds"): on 27.11.2026 this
+# held session-guard.sh back from delivery to Tsekh for a tick while the same file passed on
+# an idle Mac. No case here tests the budget itself, so only the copy under test gets
+# PROOF_BUDGET_STRETCH times more time; the guard's own budgets stay unchanged. The anchors
+# must keep matching in pairs, otherwise the stretch would silently stop applying.
+PROOF_BUDGET_STRETCH = 5
+PROOF_DEADLINE = re.compile(r"(deadline = time\.monotonic\(\) \+ )(12|40)()$", re.M)
+PROOF_KILL = re.compile(r"(timeout )(15|45)( python3 - )")
+
+
+def _stretch(match):
+    return match.group(1) + str(int(match.group(2)) * PROOF_BUDGET_STRETCH) + match.group(3)
+
+
+SOURCE, _deadlines = PROOF_DEADLINE.subn(_stretch, SOURCE)
+SOURCE, _kills = PROOF_KILL.subn(_stretch, SOURCE)
+if not _deadlines or _deadlines != _kills:
+    raise SystemExit(
+        f"fixture setup: proof budget anchors moved in {GUARD} "
+        f"({_deadlines} deadlines, {_kills} kill timeouts); update PROOF_DEADLINE/PROOF_KILL"
+    )
 # Functions cut out of the guard (the claim readers) import the shared claim parser from this directory.
 os.environ.setdefault("GUARD_LIB_DIR", str(GUARD.parent / "lib"))
 
