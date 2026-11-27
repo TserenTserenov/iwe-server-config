@@ -164,6 +164,8 @@ else
   echo "FAIL: close did not find the terminal card sitting in the isolated worktree (WP-484, 06.09 regression)" >&2
   exit 1
 fi
+[ -z "$(find "$TEST_ROOT/.iwe-runtime/archived-run-cards" -name RUN-quick-close-isolated-close-smoke.md 2>/dev/null)" ] \
+  || { echo "FAIL: close archived a committed card that git already keeps" >&2; exit 1; }
 
 [ ! -e "$SEM" ] || { echo "FAIL: successful close left .open authoritative" >&2; exit 1; }
 [ -f "$SEM.closed" ] || { echo "FAIL: successful close did not create exact .closed receipt" >&2; exit 1; }
@@ -289,6 +291,57 @@ git -C "$RELEASE_WORKTREE" commit -qm "persist runtime journal before isolated c
 /bin/bash "$GUARD" close --wp WP-484 --slug release-step-proof --agent fixture >/dev/null
 [ ! -e "$RELEASE_SEM" ] && [ -f "$RELEASE_SEM.closed" ] && [ ! -e "$RELEASE_WORKTREE" ] \
   || { echo "FAIL: nested verify-r23 release-step proof did not close exact isolated session" >&2; exit 1; }
+
+# WP-561 F90: the runner calls close from its own release step while its card
+# is still non-terminal and, being git-ignored, untracked in the isolated copy.
+# Close allows exactly that card and removes the copy with it; afterwards the
+# run's last record pointed at a deleted file (8 of 44 unfinished Mac runs,
+# 20-26.11). Close must leave a copy in the run-card archive.
+prepare_isolated_session archive-active-card archive-active-card-session
+ARCHIVE_SEM="$CASE_SEM"
+ARCHIVE_WORKTREE="$CASE_WORKTREE"
+ARCHIVE_CARD_NAME="RUN-quick-close-archive-active-card.md"
+git -C "$ARCHIVE_WORKTREE" rm -q --cached "inbox/agent/tasks/$ARCHIVE_CARD_NAME"
+git -C "$ARCHIVE_WORKTREE" commit -qm "active card is not committed in production"
+cat > "$ARCHIVE_WORKTREE/inbox/agent/tasks/$ARCHIVE_CARD_NAME" <<'EOF'
+---
+process_id: quick-close
+run_id: quick-close-archive-active-card
+requested_slug: archive-active-card
+status: running
+current_step: session-guard-release
+owner_session_id: archive-active-card-session
+results:
+  gather-session-facts:
+    wp: WP-484
+  verify-r23:
+    verdict: pass
+---
+EOF
+[ -z "$(git -C "$ARCHIVE_WORKTREE" status --porcelain)" ] \
+  || { echo "FAIL: fixture setup — the active card is not git-ignored as in production" >&2; exit 1; }
+/bin/bash "$GUARD" close --wp WP-484 --slug archive-active-card --agent fixture >/dev/null \
+  || { echo "FAIL: close refused an isolated session whose active card is untracked" >&2; exit 1; }
+[ ! -e "$ARCHIVE_SEM" ] && [ ! -e "$ARCHIVE_WORKTREE" ] \
+  || { echo "FAIL: archive case did not close and remove the isolated worktree" >&2; exit 1; }
+ARCHIVED_CARD="$TEST_ROOT/.iwe-runtime/archived-run-cards/${ARCHIVE_WORKTREE##*/}/$ARCHIVE_CARD_NAME"
+grep -q '^current_step: session-guard-release$' "$ARCHIVED_CARD" 2>/dev/null \
+  || { echo "FAIL: close removed the isolated worktree without archiving the active run card" >&2; exit 1; }
+grep -q '^reason: close$' "$ARCHIVED_CARD.archived" 2>/dev/null \
+  || { echo "FAIL: archived run card lacks the sidecar that says it was copied at close" >&2; exit 1; }
+echo "PASS: close archives the untracked active run card before removing the isolated worktree"
+
+# The archive is best-effort: when its folder cannot be created, close still
+# succeeds and removes the isolated worktree.
+prepare_isolated_session archive-unavailable archive-unavailable-session
+UNAVAILABLE_SEM="$CASE_SEM"
+UNAVAILABLE_WORKTREE="$CASE_WORKTREE"
+printf '%s\n' blocker > "$TEST_ROOT/.iwe-runtime/archived-run-cards/${UNAVAILABLE_WORKTREE##*/}"
+/bin/bash "$GUARD" close --wp WP-484 --slug archive-unavailable --agent fixture >/dev/null 2>&1 \
+  || { echo "FAIL: an unavailable run-card archive made close fail" >&2; exit 1; }
+[ ! -e "$UNAVAILABLE_SEM" ] && [ -f "$UNAVAILABLE_SEM.closed" ] && [ ! -e "$UNAVAILABLE_WORKTREE" ] \
+  || { echo "FAIL: an unavailable run-card archive changed the close outcome" >&2; exit 1; }
+echo "PASS: an unavailable run-card archive never blocks close"
 
 # isolate-push failure is non-terminal and preserves every live projection.
 prepare_isolated_session push-failure push-failure-session
