@@ -2125,6 +2125,8 @@ class WorktreeCleanupCwdTests(unittest.TestCase):
             "_cleanup_session_commit_intents", "_promote_commit_intent",
             "_finish_session_commit_intents",
             "_close_delivery_and_transition", "_reap_orphaned_worktree", "_local_release_mutation_allowed",
+            "_cancel_closing_copy_runs", "_run_card_archive_dir", "_archive_run_card",
+            "_archive_untracked_run_cards",
         )
         cls.functions = "\n".join(extract_function(SOURCE, name) for name in names)
         cls.functions += '\nfail() { printf "%s\\n" "$1" >&2; exit "${2:-1}"; }\n'

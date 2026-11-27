@@ -42,6 +42,8 @@ FUNCTIONS = (
     # died on "command not found" and the Mac sync gate held session-guard.sh back.
     "_cleanup_session_commit_intents", "_promote_commit_intent", "_finish_session_commit_intents",
     "_close_delivery_and_transition", "_reap_orphaned_worktree", "_local_release_mutation_allowed",
+            "_cancel_closing_copy_runs", "_run_card_archive_dir", "_archive_run_card",
+            "_archive_untracked_run_cards",
 )
 SENTINEL = "declared-peer-session:drift-fixture"
 FILE = "notes/card.md"
