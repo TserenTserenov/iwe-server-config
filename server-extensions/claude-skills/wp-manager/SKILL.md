@@ -73,6 +73,23 @@ gates_rationale: "прогон РП — работа внутри РП; WP Gate 
 6. `phase-transitioned` → `checking`.
 7. Запуск проверяющего (другой запуск; для кода и фаз Ц — другой вендор) — `verification-recorded`.
 8. Переход в `accepted` / `rejected` / `accepted-unconfirmed`. Фаза класса Ц: карточка решения проходит проверку → `awaiting-decision` → `pilot-requested` по решению → `decision-recorded` со статусом `confirmed` → `accepted`.
+
+   Пара записей для фазы Ц обязана совпадать по фазе и решению:
+
+   ```json
+   {"request_id":"R-f153-choice","decision_id":"D-f153-ceiling","phase":"Ф15.3",
+    "subject":"Выбор потолка Ц16-12","right":"confirm","action":{"type":"decision-recorded"}}
+   ```
+
+   После ответа пилота «R-f153-choice: вариант 1»:
+
+   ```json
+   {"decision_id":"D-f153-ceiling","phase":"Ф15.3","kind":"goal-risk","rule":"P8",
+    "status":"confirmed","request_id":"R-f153-choice","question":"Какой потолок выбрать?",
+    "choice":"1","basis":"cards/R-f153-choice.md"}
+   ```
+
+   Программа отклоняет вопрос без `decision_id` или `phase`, решение без `phase` или `request_id`, несовпадение фазы/решения и выбор, отличающийся от ответа пилота.
 9. Выборочная проверка решений `auto` — список даёт команда `sample` (Менеджер его не составляет).
 
 **М3 Пересмотр.** После фазы Ф, отказа, блокировки или изменённого допущения сверить допущения. Если план меняется — `plan-revised`; изменение состава фаз или бюджета требует ответа пилота.

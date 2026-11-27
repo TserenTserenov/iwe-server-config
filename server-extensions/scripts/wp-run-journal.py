@@ -541,6 +541,21 @@ def check_transition(state: State, p: dict) -> None:
                           reuse_key=p["rollback_of"])
 
 
+def check_decision_link(state: State, p: dict) -> None:
+    rid = p.get("request_id") or ""
+    if not rid:
+        return
+    asked = state.requests.get(rid, {})
+    action = asked.get("action") or {}
+    if action.get("type") != "decision-recorded" \
+            or asked.get("decision_id") != p["decision_id"] or asked.get("phase") != p.get("phase"):
+        raise Refused(f"request {rid} was not asked about decision {p['decision_id']} on phase {p.get('phase')}")
+    answer = state.answers.get(rid)
+    if answer and str(answer["answer"]).lower().startswith("choice:") \
+            and str(p["choice"]) != str(answer["answer"]).split(":", 1)[1]:
+        raise Refused(f"decision {p['decision_id']} names a different choice than the pilot's answer")
+
+
 def check_decision(state: State, p: dict) -> None:
     if p["kind"] not in ("rule", "fact", "goal-risk"):
         raise Invalid("decision-recorded: kind must be rule, fact or goal-risk")
@@ -550,21 +565,23 @@ def check_decision(state: State, p: dict) -> None:
     p["right"] = right
     p["risk"] = "high" if p["rule"] in HIGH_RISK_RULES else "normal"
     status = p["status"]
+    if status not in ("proposed", "decided", "confirmed", "rejected"):
+        raise Invalid("decision-recorded: status must be proposed, decided, confirmed or rejected")
+    if p["kind"] == "goal-risk" and status != "proposed" and not str(p.get("phase") or "").strip():
+        raise Invalid("decision-recorded: a phase decision needs phase")
+    check_decision_link(state, p)
     if status == "proposed":
         return
     if status == "decided" and right == "auto":
         return
     rid = p.get("request_id") or ""
-    asked = state.requests.get(rid, {})
-    if rid and asked.get("decision_id") != p["decision_id"]:
-        raise Refused(f"request {rid} was not asked about decision {p['decision_id']}")
+    if p["kind"] == "goal-risk" and right != "auto" and not rid:
+        raise Refused(f"{p['rule']} is {right}: a phase decision needs request_id")
     answer = state.answers.get(rid)
     if status in ("decided", "confirmed") and not (rid and state.decision_answered(rid)):
         raise Refused(f"{p['rule']} is {right}: deciding needs the pilot's approval")
     if status == "rejected" and not answer:
         raise Refused("a rejection must reference the pilot's answer")
-    if status not in ("decided", "confirmed", "rejected"):
-        raise Invalid("decision-recorded: status must be proposed, decided, confirmed or rejected")
 
 
 def check_verification(state: State, p: dict) -> None:
@@ -595,6 +612,10 @@ def check_request(run_dir: Path, state: State, p: dict) -> None:
     missing = [key for key in must if key not in action]
     if missing:
         raise Invalid(f"pilot-requested: an approval of {action['type']} must name {', '.join(missing)}")
+    if action["type"] == "decision-recorded":
+        missing = [key for key in ("decision_id", "phase") if not str(p.get(key) or "").strip()]
+        if missing:
+            raise Invalid("pilot-requested: a decision approval must name decision_id and phase")
     card = run_dir / CARDS / f"{p['request_id']}.md"
     if not card.exists():
         raise Invalid(f"pilot-requested: card {card.name} not found")

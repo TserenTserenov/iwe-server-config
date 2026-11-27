@@ -80,13 +80,15 @@ class Run:
         return self.cli("append", "--epoch", str(epoch or self.epoch), "--type", etype,
                         "--payload", json.dumps(payload, ensure_ascii=False))
 
-    def ask(self, rid, decision_id=None, action=None):
+    def ask(self, rid, decision_id=None, phase=None, action=None):
         (self.dir / "cards").mkdir(parents=True, exist_ok=True)
         (self.dir / "cards" / f"{rid}.md").write_text(f"card {rid}\n")
         payload = {"request_id": rid, "subject": "s", "right": "confirm",
-                   "action": action or {"type": "decision-recorded"}}
+                   "action": action or ({"type": "decision-recorded"} if decision_id else {"type": "pilot-chat"})}
         if decision_id:
             payload["decision_id"] = decision_id
+        if phase:
+            payload["phase"] = phase
         code, _, err = self.append("pilot-requested", payload)
         assert code == 0, err
 
@@ -234,12 +236,12 @@ class JournalTest(unittest.TestCase):
         decision = {"decision_id": "D-1", "phase": "A", "kind": "goal-risk", "rule": "P8",
                     "status": "decided", "question": "q", "choice": "x", "basis": "Strategy.md#p"}
         self.assertEqual(self.run.append("decision-recorded", decision)[0], 3)
-        self.run.ask("R-other", decision_id="D-2")
+        self.run.ask("R-other", decision_id="D-2", phase="A")
         self.run.pilot_says("R-other")
         code, _, err = self.run.append("decision-recorded", {**decision, "request_id": "R-other"})
         self.assertEqual(code, 3)
         self.assertIn("not asked about", err)
-        self.run.ask("R-8", decision_id="D-1")
+        self.run.ask("R-8", decision_id="D-1", phase="A")
         self.run.pilot_says("R-8")
         self.assertEqual(self.run.append("decision-recorded", {**decision, "request_id": "R-8"})[0], 0)
         recorded = self.run.events()[-1]["payload"]
@@ -376,9 +378,9 @@ class JournalTest(unittest.TestCase):
 
     def test_proposed_decision_does_not_spend_its_request(self):
         self.run.approved_plan(TWO)
-        base = {"decision_id": "D-15", "kind": "goal-risk", "rule": "P15", "question": "q", "choice": "c",
+        base = {"decision_id": "D-15", "phase": "A", "kind": "goal-risk", "rule": "P15", "question": "q", "choice": "c",
                 "basis": "WP card", "request_id": "R-15"}
-        self.run.ask("R-15", decision_id="D-15")
+        self.run.ask("R-15", decision_id="D-15", phase="A")
         self.assertEqual(self.run.append("decision-recorded", {**base, "status": "proposed"})[0], 0)
         self.run.pilot_says("R-15")
         self.assertEqual(self.run.append("decision-recorded", {**base, "status": "confirmed"})[0], 0)
@@ -504,11 +506,51 @@ class JournalTest(unittest.TestCase):
         self.run.run_to_checking("C")
         self.assertEqual(self.run.move("C", "awaiting-decision", reason="card")[0], 0)
         self.assertEqual(self.run.move("C", "accepted", reason="decided")[0], 3)
-        self.run.ask("R-c", decision_id="D-c")
+        self.run.ask("R-c", decision_id="D-c", phase="C")
         self.run.pilot_says("R-c", "choice:2")
         self.assertEqual(self.run.append("decision-recorded", {
             "decision_id": "D-c", "phase": "C", "kind": "goal-risk", "rule": "P8", "status": "confirmed",
             "request_id": "R-c", "question": "q", "choice": "2", "basis": "Strategy.md"})[0], 0)
+        self.assertEqual(self.run.move("C", "accepted", reason="decided")[0], 0)
+
+    def test_decision_request_and_record_reproduce_f9_link_failures(self):
+        self.run.approved_plan({"C": {"deps": [], "class": "Ц"}})
+        self.run.run_to_checking("C")
+        self.assertEqual(self.run.move("C", "awaiting-decision", reason="card")[0], 0)
+
+        code, _, err = self.run.append("pilot-requested", {
+            "request_id": "R-no-link", "subject": "s", "right": "confirm",
+            "action": {"type": "decision-recorded"}})
+        self.assertEqual(code, 2)
+        self.assertIn("decision_id and phase", err)
+
+        code, _, err = self.run.append("pilot-requested", {
+            "request_id": "R-no-phase", "subject": "s", "right": "confirm",
+            "decision_id": "D-c", "action": {"type": "decision-recorded"}})
+        self.assertEqual(code, 2)
+        self.assertIn("decision_id and phase", err)
+
+        self.run.ask("R-other-phase", decision_id="D-other", phase="C")
+        self.run.pilot_says("R-other-phase", "choice:2")
+        code, _, err = self.run.append("decision-recorded", {
+            "decision_id": "D-c", "phase": "C", "kind": "goal-risk", "rule": "P8",
+            "status": "confirmed", "request_id": "R-other-phase", "question": "q",
+            "choice": "2", "basis": "Strategy.md"})
+        self.assertEqual(code, 3)
+        self.assertIn("not asked", err)
+
+        code, _, err = self.run.append("decision-recorded", {
+            "decision_id": "D-c", "kind": "goal-risk", "rule": "P8", "status": "confirmed",
+            "request_id": "R-c", "question": "q", "choice": "2", "basis": "Strategy.md"})
+        self.assertEqual(code, 2)
+        self.assertIn("needs phase", err)
+
+        self.run.ask("R-c2", decision_id="D-c", phase="C")
+        self.run.pilot_says("R-c2", "choice:2")
+        self.assertEqual(self.run.append("decision-recorded", {
+            "decision_id": "D-c", "phase": "C", "kind": "goal-risk", "rule": "P8",
+            "status": "confirmed", "request_id": "R-c2", "question": "q",
+            "choice": "2", "basis": "Strategy.md"})[0], 0)
         self.assertEqual(self.run.move("C", "accepted", reason="decided")[0], 0)
 
     def test_run_completes_only_with_all_phases_accepted(self):

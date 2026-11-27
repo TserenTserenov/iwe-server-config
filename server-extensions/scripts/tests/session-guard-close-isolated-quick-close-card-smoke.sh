@@ -43,6 +43,33 @@ git -C "$REPO" config user.name "Test"
 git -C "$REPO" remote add origin "$ORIGIN"
 cat > "$REPO/scripts/process-runner.py" <<'EOF'
 #!/usr/bin/env python3
+# Fixture runner: only cancel-session does real work -- like the real one it
+# cancels parked quick-close cards of one owner in the cwd's cards dir and
+# reports them as {"cancelled": [...]}; it logs its cwd, autocommit setting and
+# arguments for the case that asserts the call.
+import json, os, pathlib, sys
+autocommit = os.environ.get("IWE_CARD_AUTOCOMMIT", "1")
+args = sys.argv[1:]
+if args[:1] == ["cancel-session"] and len(args) >= 3:
+    owner = args[2]
+    excluded = {args[i + 1] for i, arg in enumerate(args) if arg == "--exclude" and i + 1 < len(args)}
+    log = os.environ.get("IWE_TEST_RUNNER_LOG")
+    if log:
+        with open(log, "a", encoding="utf-8") as fh:
+            fh.write(f"{os.getcwd()}\tautocommit={autocommit}\t{' '.join(args)}\n")
+    cancelled = []
+    for card in pathlib.Path("inbox/agent/tasks").glob("RUN-*.md"):
+        text = card.read_text(encoding="utf-8")
+        run_id = next((l.split(": ", 1)[1] for l in text.splitlines() if l.startswith("run_id: ")), "")
+        if (f"owner_session_id: {owner}\n" in text and run_id not in excluded
+                and "status: waiting\n" in text):
+            card.write_text(text.replace("status: waiting\n", "status: cancelled\ncancel_reason: session_closed\n"),
+                            encoding="utf-8")
+            cancelled.append(run_id)
+            if os.environ.get("IWE_TEST_RUNNER_DIE_AFTER_CANCEL") == "1":
+                sys.exit(124)  # like a timeout: card written, nothing reported
+    print(json.dumps({"cancelled": cancelled, "count": len(cancelled)}))
+    sys.exit(0)
 print("{}")
 EOF
 cat > "$REPO/scripts/isolate-push.sh" <<'EOF'
@@ -330,6 +357,60 @@ grep -q '^current_step: session-guard-release$' "$ARCHIVED_CARD" 2>/dev/null \
 grep -q '^reason: close$' "$ARCHIVED_CARD.archived" 2>/dev/null \
   || { echo "FAIL: archived run card lacks the sidecar that says it was copied at close" >&2; exit 1; }
 echo "PASS: close archives the untracked active run card before removing the isolated worktree"
+
+# A superseded attempt of the closing session parked in the isolated copy
+# (status waiting, untracked) made close refuse the copy as not clean; the
+# session then ended on another path and the parked card left with the copy.
+# Close must cancel it in the copy (no autocommit, the completed run excluded)
+# and move the cancelled card into the run-card archive.
+prepare_isolated_session cancel-parked cancel-parked-session
+PARKED_WORKTREE="$CASE_WORKTREE"
+PARKED_CARD="RUN-quick-close-cancel-parked-1.md"
+cat > "$PARKED_WORKTREE/inbox/agent/tasks/$PARKED_CARD" <<'EOF'
+---
+process_id: quick-close
+run_id: quick-close-cancel-parked-1
+requested_slug: cancel-parked
+status: waiting
+current_step: verify-r23
+owner_session_id: cancel-parked-session
+---
+EOF
+RUNNER_LOG="$TEST_ROOT/runner-calls.log"
+: > "$RUNNER_LOG"
+IWE_TEST_RUNNER_LOG="$RUNNER_LOG" /bin/bash "$GUARD" close --wp WP-484 --slug cancel-parked --agent fixture >/dev/null \
+  || { echo "FAIL: close refused a session whose superseded attempt is parked in the copy" >&2; exit 1; }
+[ ! -e "$PARKED_WORKTREE" ] || { echo "FAIL: cancel-parked case did not remove the isolated worktree" >&2; exit 1; }
+PARKED_ARCHIVE="$TEST_ROOT/.iwe-runtime/archived-run-cards/${PARKED_WORKTREE##*/}"
+grep -q '^status: cancelled$' "$PARKED_ARCHIVE/$PARKED_CARD" 2>/dev/null \
+  && grep -q '^reason: cancelled-at-close$' "$PARKED_ARCHIVE/$PARKED_CARD.archived" 2>/dev/null \
+  || { echo "FAIL: the parked run was not cancelled and archived before the copy was removed" >&2; exit 1; }
+grep -q "^${PARKED_WORKTREE}	autocommit=0	cancel-session quick-close cancel-parked-session --exclude quick-close-cancel-parked$" "$RUNNER_LOG" \
+  || { echo "FAIL: copy sweep ran outside the copy, with autocommit, or without excluding the completed run" >&2; cat "$RUNNER_LOG" >&2; exit 1; }
+echo "PASS: close cancels the session's parked run in the copy and archives it"
+
+# The runner writes each cancelled card as it goes: if it dies (timeout, error)
+# after a write, it reports nothing, and a retry no longer sees the card as
+# parked. Close must still find the card it cancelled on disk and archive it.
+prepare_isolated_session cancel-died cancel-died-session
+DIED_WORKTREE="$CASE_WORKTREE"
+DIED_CARD="RUN-quick-close-cancel-died-1.md"
+cat > "$DIED_WORKTREE/inbox/agent/tasks/$DIED_CARD" <<'EOF'
+---
+process_id: quick-close
+run_id: quick-close-cancel-died-1
+requested_slug: cancel-died
+status: waiting
+current_step: verify-r23
+owner_session_id: cancel-died-session
+---
+EOF
+IWE_TEST_RUNNER_DIE_AFTER_CANCEL=1 /bin/bash "$GUARD" close --wp WP-484 --slug cancel-died --agent fixture >/dev/null 2>&1 \
+  || { echo "FAIL: a runner that died after cancelling left close refusing the copy" >&2; exit 1; }
+DIED_ARCHIVE="$TEST_ROOT/.iwe-runtime/archived-run-cards/${DIED_WORKTREE##*/}"
+[ ! -e "$DIED_WORKTREE" ] && grep -q '^status: cancelled$' "$DIED_ARCHIVE/$DIED_CARD" 2>/dev/null \
+  || { echo "FAIL: the card cancelled by a runner that died was not archived" >&2; exit 1; }
+echo "PASS: close archives a card cancelled by a runner that died before reporting"
 
 # The archive is best-effort: when its folder cannot be created, close still
 # succeeds and removes the isolated worktree.
