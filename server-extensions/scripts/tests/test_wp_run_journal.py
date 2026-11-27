@@ -198,7 +198,7 @@ class JournalTest(unittest.TestCase):
         self.assertEqual(self.run.move("A", "ready", reason="new-attempt")[0], 0)
         code, _, err = self.run.append("phase-assigned", assign)
         self.assertEqual(code, 3)
-        self.assertIn("unused", err)
+        self.assertIn("ask again", err)  # spent, and asked on an older attempt
 
     def test_dependency_must_be_accepted_before_ready(self):
         self.run.approved_plan(TWO)
@@ -220,6 +220,85 @@ class JournalTest(unittest.TestCase):
         self.run.ask("R-5", action={"type": "phase-transitioned", "phase": "A", "to": "accepted"})
         self.run.pilot_says("R-5")
         self.assertEqual(self.run.move("A", "accepted", approval_request_id="R-5")[0], 0)
+
+    def test_yes_given_on_an_old_attempt_does_not_approve_the_new_one(self):
+        """F8 finding: a question about a phase dies when the phase moves to a new attempt."""
+        self.run.approved_plan(TWO)
+        self.run.run_to_checking("A", verdict="pass-with-remarks")
+        self.run.ask("R-5", action={"type": "phase-transitioned", "phase": "A", "to": "accepted"})
+        self.run.pilot_says("R-5")
+        self.assertEqual(self.run.move("A", "rejected")[0], 0)
+        self.run.run_to_checking("A", verdict="pass-with-remarks")
+        code, _, err = self.run.move("A", "accepted", approval_request_id="R-5")
+        self.assertEqual(code, 3)
+        self.assertIn("asked on attempt 1 of A, the phase is on attempt 2", err)
+        state = json.loads(self.run.cli("state")[1])
+        self.assertEqual(state["stale_requests"], ["R-5"])
+        self.assertNotIn("R-5", state["open_requests"])
+        self.run.ask("R-5b", action={"type": "phase-transitioned", "phase": "A", "to": "accepted"})
+        self.run.pilot_says("R-5b")
+        self.assertEqual(self.run.move("A", "accepted", approval_request_id="R-5b")[0], 0)
+
+    def test_decision_phase_with_remarks_needs_p5_besides_the_decision(self):
+        """F8 finding (event 74): the confirmed decision does not cover the checker's remarks."""
+        self.run.approved_plan({"C": {"deps": [], "class": "Ц"}})
+        self.run.run_to_checking("C", verdict="pass-with-remarks")
+        self.assertEqual(self.run.move("C", "awaiting-decision", reason="card")[0], 0)
+        self.run.ask("R-c", decision_id="D-c", phase="C")
+        self.run.pilot_says("R-c", "choice:1")
+        self.assertEqual(self.run.append("decision-recorded", {
+            "decision_id": "D-c", "phase": "C", "kind": "goal-risk", "rule": "P8", "status": "confirmed",
+            "request_id": "R-c", "question": "q", "choice": "1", "basis": "card"})[0], 0)
+        code, _, err = self.run.move("C", "accepted", reason="recovery: decided before lease loss")
+        self.assertEqual(code, 3)
+        self.assertIn("P5", err)
+        self.run.ask("R-p5", action={"type": "phase-transitioned", "phase": "C", "to": "accepted"})
+        self.run.pilot_says("R-p5")
+        self.assertEqual(self.run.move("C", "accepted", reason="decided", approval_request_id="R-p5")[0], 0)
+
+    def test_decision_of_an_old_attempt_does_not_settle_the_new_card(self):
+        """Review of the F8 fix: a new attempt of a Ц phase is a new card and needs its own decision."""
+        self.run.approved_plan({"C": {"deps": [], "class": "Ц"}})
+        self.run.run_to_checking("C")
+        self.assertEqual(self.run.move("C", "awaiting-decision", reason="card")[0], 0)
+        self.run.ask("R-c", decision_id="D-c", phase="C")
+        self.run.pilot_says("R-c", "choice:1")
+        self.assertEqual(self.run.append("decision-recorded", {
+            "decision_id": "D-c", "phase": "C", "kind": "goal-risk", "rule": "P8", "status": "confirmed",
+            "request_id": "R-c", "question": "q", "choice": "1", "basis": "card"})[0], 0)
+        self.assertEqual(self.run.move("C", "accepted", reason="decided")[0], 0)
+        self.assertEqual(self.run.move("C", "ready", reason="rollback")[0], 0)
+        self.assertEqual(self.run.append("phase-assigned", {"phase": "C", "executor": "sonnet", **CONTRACT})[0], 0)
+        self.assertEqual(self.run.append("artifact-submitted", {
+            "phase": "C", "attempt": 2, "submission_ref": "s", "submission_sha": "x", "contract_version": "v1"})[0], 0)
+        self.assertEqual(self.run.move("C", "checking")[0], 0)
+        self.assertEqual(self.run.append("verification-recorded", {
+            "phase": "C", "attempt": 2, "verifier": "codex", "verdict": "pass"})[0], 0)
+        self.assertEqual(self.run.move("C", "awaiting-decision", reason="card v2")[0], 0)
+        code, _, err = self.run.move("C", "accepted", reason="decided")
+        self.assertEqual(code, 3)
+        self.assertIn("waits for a goal/risk decision", err)
+        self.run.ask("R-c2", decision_id="D-c2", phase="C")
+        self.run.pilot_says("R-c2", "choice:2")
+        self.assertEqual(self.run.append("decision-recorded", {
+            "decision_id": "D-c2", "phase": "C", "kind": "goal-risk", "rule": "P8", "status": "confirmed",
+            "request_id": "R-c2", "question": "q", "choice": "2", "basis": "card v2"})[0], 0)
+        self.assertEqual(self.run.move("C", "accepted", reason="decided")[0], 0)
+
+    def test_v0_assigns_one_attempt_at_a_time(self):
+        """F8 finding: two attempts in flight at once were accepted."""
+        self.run.approved_plan({"X": {"deps": []}, "Y": {"deps": []}})
+        self.assertEqual(self.run.move("X", "ready")[0], 0)
+        self.assertEqual(self.run.move("Y", "ready")[0], 0)
+        self.assertEqual(self.run.append("phase-assigned", {"phase": "X", "executor": "sonnet", **CONTRACT})[0], 0)
+        code, _, err = self.run.append("phase-assigned", {"phase": "Y", "executor": "sonnet", **CONTRACT})
+        self.assertEqual(code, 2)
+        self.assertIn("one attempt at a time; X still in flight", err)
+        self.assertEqual(self.run.move("X", "unknown", reason="lease lost")[0], 0)
+        self.assertEqual(self.run.append("phase-assigned", {"phase": "Y", "executor": "sonnet", **CONTRACT})[0], 2)
+        self.assertEqual(self.run.append("artifact-submitted", {
+            "phase": "X", "attempt": 1, "submission_ref": "s", "submission_sha": "x", "contract_version": "v1"})[0], 0)
+        self.assertEqual(self.run.append("phase-assigned", {"phase": "Y", "executor": "sonnet", **CONTRACT})[0], 0)
 
     def test_third_attempt_needs_pilot(self):
         self.run.approved_plan(TWO)

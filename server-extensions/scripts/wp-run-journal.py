@@ -135,6 +135,8 @@ TRANSITIONS = {
     ("accepted-unconfirmed", "accepted"), ("accepted-unconfirmed", "ready"),
 }
 BACKWARD_REASONS = {"rollback", "ceiling", "stuck", "new-attempt", "recovery"}
+# An executor may still be working on a phase in these statuses (v0: one at a time).
+IN_FLIGHT = {"assigned", "unknown"}
 STOP_REJECTS_IN_A_ROW = 3
 
 
@@ -282,17 +284,27 @@ class State:
         used_by = self.consumed.get(request_id)
         return used_by is None or (reuse_key is not None and used_by == reuse_key)
 
+    def stale(self, request_id: str) -> str | None:
+        """Why a question about a phase no longer applies: the phase moved to a new attempt since it was asked."""
+        asked = self.requests.get(request_id, {})
+        phase, attempt = asked.get("asked_phase"), asked.get("asked_attempt")
+        if phase is None or self.attempts.get(phase, 0) == attempt:
+            return None
+        return (f"request {request_id} was asked on attempt {attempt} of {phase}, "
+                f"the phase is on attempt {self.attempts.get(phase, 0)} now: ask again")
+
     def decision_answered(self, request_id: str) -> bool:
         """A decision request is settled by "yes" or a chosen option."""
         answer = self.answers.get(request_id)
         return bool(answer) and str(answer["answer"]).lower().startswith(("yes", "choice:")) \
-            and self.unused(request_id, None)
+            and self.unused(request_id, None) and not self.stale(request_id)
 
     def action_approved(self, request_id: str, etype: str, payload: dict, reuse_key: str | None) -> bool:
-        """An action request is settled only by a plain "yes" to that very action."""
+        """An action request is settled only by a plain "yes" to that very action, on the same attempt."""
         answer = self.answers.get(request_id)
         action = self.requests.get(request_id, {}).get("action") or {}
-        if not answer or str(answer["answer"]).lower() != "yes" or action.get("type") != etype:
+        if not answer or str(answer["answer"]).lower() != "yes" or action.get("type") != etype \
+                or self.stale(request_id):
             return False
         for key in ("phase", "version", "rollback_of", "to"):
             if key in action and action[key] != payload.get(key):
@@ -337,11 +349,18 @@ class State:
             if p.get("rollback_of"):
                 self.rollbacks.setdefault(p["rollback_of"], set()).add(p["phase"])
         elif etype == "pilot-requested":
-            self.requests[p["request_id"]] = {**p, "asked_at": event["ts"]}
+            # A question about a phase is bound to the attempt it was asked on (F8 finding).
+            action = p.get("action") if isinstance(p.get("action"), dict) else {}
+            phase = action.get("phase") or p.get("phase")
+            phase = phase if isinstance(phase, str) else None  # journals before this check held any value
+            self.requests[p["request_id"]] = {**p, "asked_at": event["ts"], "asked_phase": phase,
+                                              "asked_attempt": self.attempts.get(phase, 0) if phase else None}
         elif etype == "pilot-answered":
             self.answers[p["request_id"]] = p
         elif etype == "decision-recorded":
-            self.decisions[p["decision_id"]] = {**p, "seq": event["seq"]}
+            phase = p.get("phase")
+            self.decisions[p["decision_id"]] = {**p, "seq": event["seq"],
+                                                "attempt": self.attempts.get(phase, 0) if isinstance(phase, str) else None}
         elif etype == "cost-recorded":
             key = p.get("phase") or p["scope"]
             self.cost[key] = self.cost.get(key, 0) + float(p["minutes"])
@@ -369,7 +388,8 @@ class State:
             "plan_version": self.plans[-1]["version"] if self.plans else None,
             "phases": self.status,
             "attempts": self.attempts,
-            "open_requests": sorted(set(self.requests) - set(self.answers)),
+            "open_requests": sorted(rid for rid in set(self.requests) - set(self.answers) if not self.stale(rid)),
+            "stale_requests": sorted(rid for rid in self.requests if self.stale(rid)),
             "cost_minutes": self.cost,
             "rejects_in_a_row": self.rejects_in_a_row,
             "stop_due": self.rejects_in_a_row >= STOP_REJECTS_IN_A_ROW,
@@ -398,6 +418,9 @@ def require_fields(etype: str, payload: dict) -> None:
 
 def need_approval(state: State, etype: str, payload: dict, what: str, reuse_key: str | None = None) -> None:
     rid = payload.get("approval_request_id") or ""
+    stale = state.stale(rid) if rid else None
+    if stale:
+        raise Refused(f"{what}: {stale}")
     if not state.action_approved(rid, etype, payload, reuse_key):
         raise Refused(f"{what} needs an unused pilot 'yes' to a request about this very {etype} "
                       "(approval_request_id; the request's action names type and phase/version)")
@@ -466,6 +489,10 @@ def check_assignment(state: State, p: dict) -> None:
         raise Invalid(f"phase-assigned: needs clarification, empty: {'; '.join(gaps)}")
     if state.status.get(phase) != "ready":
         raise Invalid(f"phase-assigned: {phase} is {state.status.get(phase)}, not ready")
+    busy = sorted(name for name, status in state.status.items() if status in IN_FLIGHT)
+    if busy:
+        raise Invalid(f"phase-assigned: v0 runs one attempt at a time; {', '.join(busy)} still in flight "
+                      "(wait for the submission; after a crash reconcile with the executor, then move it on from unknown)")
     attempt = state.attempts.get(phase, 0) + 1
     if p.setdefault("attempt", attempt) != attempt:
         raise Invalid(f"phase-assigned: attempt must be {attempt}")
@@ -526,10 +553,15 @@ def check_transition(state: State, p: dict) -> None:
         if state.plan["phases"].get(phase, {}).get("class") != "Ц" or verdict not in ("pass", "pass-with-remarks"):
             raise Refused("only a class Ц phase whose decision card passed checking may await a decision")
     if current == "awaiting-decision" and target == "accepted":
+        # Only a decision made on the current attempt settles its card (a new attempt is a new card).
         settled = [d for d in state.decisions.values()
-                   if d.get("phase") == phase and d["kind"] == "goal-risk" and d["status"] == "confirmed"]
+                   if d.get("phase") == phase and d["kind"] == "goal-risk" and d["status"] == "confirmed"
+                   and d.get("attempt") == state.attempts.get(phase, 0)]
         if not settled:
             raise Refused(f"{phase} waits for a goal/risk decision confirmed by the pilot")
+        # The decision answers the question on the card, not the checker's remarks (F8: recovery skipped P5).
+        if state.verdicts.get((phase, state.attempts.get(phase, 0))) == "pass-with-remarks":
+            need_approval(state, "phase-transitioned", p, "accepting with remarks (P5)")
     if current == "accepted-unconfirmed" and target == "accepted":
         decision = state.decisions.get(state.unconfirmed.get(phase, ""), {})
         if decision.get("status") != "confirmed":
