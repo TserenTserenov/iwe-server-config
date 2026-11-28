@@ -1,32 +1,32 @@
 #!/usr/bin/env bash
 # routing: helper  called-by=protocol-close(step 5c)  deterministic=true
-# wp-archive-trigger-check.sh -- механическая проверка условия РП-541 Ф5 §5c
-# (протокол закрытия, "Триггер архива долгоживущей карточки"): created старше
-# 14 дней И карточка >400 строк -> предложить пилоту перенос закрытых фаз в
-# WP-N-archive.md. Раньше это решение агент принимал "на глаз", перечитывая
-# frontmatter каждый раз заново -- WP-561 2026-09-03-19 (Codex,
-# placement-reviewer): "size-check лучше оформить отдельным детерминированным
-# reflex-шагом", здесь тем же результатом без изменения графа quick-close.yaml
-# (см. согласованную границу с check-wp-transfer-completeness.sh -- та про
-# архивацию ЦЕЛОГО завершённого РП, эта -- про накопление внутри активного).
+# wp-archive-trigger-check.sh -- mechanical licence check for protocol-close step
+# 5c (auto-archival of the closed phases of a WP card into WP-N-archive.md,
+# RP-541 Ф5 -> WP-561 Ф24). It replaced the closing agent's by-eye decision made
+# by re-reading the frontmatter every time -- WP-561 2026-09-03-19 (Codex,
+# placement-reviewer): make the size check "a separate deterministic reflex
+# step", done without changing the quick-close.yaml graph (agreed boundary with
+# check-wp-transfer-completeness.sh: that one archives a WHOLE finished WP, this
+# one handles what accumulates inside an active card).
 #
-# Пороги НЕ новые -- те же 14 дней / 400 строк, что уже задокументированы в
-# memory/protocol-close.md §5c; этот скрипт не меняет политику, только
-# избавляет от ручного подсчёта.
+# The licence no longer depends on card age or size: since WP-561 Ф94 part 3
+# (pilot decision 28.11.2026) every card is licensed unless the pilot declined
+# archival less than 14 days ago; the archiver's own vetoes decide per phase.
 #
-# Использование:
+# Usage:
 #   wp-archive-trigger-check.sh <WP_NUM> [IWE_ROOT]
-# Stdout (всегда, exit 0 -- это отчёт, не gate):
+# Stdout (always, exit 0 -- a report, not a gate):
 #   age_days=<N|unknown>
 #   line_count=<N>
-#   archive_declined_recent=<true|false>
-#   over_threshold=<true|false>
-#   auto_archive=<licensed|declined|n/a>   (WP-561 Ф24: licensed = protocol
-#                §5c auto-archival applies; declined = fresh archive_declined
-#                wins; n/a = under threshold)
-# exit 1 только при ошибке использования/файл не найден.
+#   archive_declined_recent=<true|false>   archive_declined less than 14 days old
+#   over_threshold=<true|false>   informational, does not gate: created more than
+#                14 days ago AND more than 400 lines AND no fresh decline
+#   auto_archive=<licensed|declined>   (WP-561 Ф24: licensed = protocol §5c
+#                auto-archival applies; declined = a fresh archive_declined wins;
+#                n/a, "under threshold", is no longer emitted since Ф94 part 3)
+# exit 1 only on a usage error or a missing card.
 #
-# Совместимость: bash 3.2+ (macOS), bash 4+ (Linux)
+# Compatibility: bash 3.2+ (macOS), bash 4+ (Linux)
 
 set -uo pipefail
 
@@ -43,8 +43,11 @@ if [[ -z "$GOV_REPO" ]]; then
 fi
 INBOX="$IWE/$GOV_REPO/inbox"
 
+# The two thresholds feed only the informational over_threshold; the licence
+# depends on the decline cooldown alone.
 AGE_THRESHOLD_DAYS=14
 LINE_THRESHOLD=400
+DECLINE_COOLDOWN_DAYS=14
 
 if [[ -z "$WP_NUM" ]]; then
   echo "Использование: $0 <WP_NUM> [IWE_ROOT]" >&2
@@ -81,7 +84,7 @@ fi
 
 line_count=$(wc -l < "$WP_FILE" | tr -d ' ')
 
-# Уважает cooldown 14 дней от archive_declined (та же формула, что age выше).
+# A decline stays fresh for DECLINE_COOLDOWN_DAYS (same date formula as age_days).
 archive_declined_recent="false"
 if [[ "$archive_declined" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]]; then
   today_epoch=$(date -u +%s)
@@ -89,7 +92,7 @@ if [[ "$archive_declined" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]]; then
     || date -u -d "$archive_declined" +%s 2>/dev/null || echo "")
   if [[ -n "$declined_epoch" ]]; then
     declined_age_days=$(( (today_epoch - declined_epoch) / 86400 ))
-    [[ "$declined_age_days" -lt "$AGE_THRESHOLD_DAYS" ]] && archive_declined_recent="true"
+    [[ "$declined_age_days" -lt "$DECLINE_COOLDOWN_DAYS" ]] && archive_declined_recent="true"
   fi
 fi
 
@@ -107,12 +110,14 @@ fi
 # 27.09.2026) plus the ABSENCE of a fresh archive_declined -- a fresh decline
 # always wins. The per-card `auto_archive_policy:` field is an audit trail of
 # an already executed decision, never the licence itself (otherwise the first
-# run could never happen). Consumer: scripts/wp-archive-closed-phases.py.
-auto_archive="n/a"
+# run could never happen). Readers: protocol-close.md step 5c and the quick-close
+# handler wp-phase-archive.sh (DS-my-strategy), which runs
+# scripts/wp-archive-closed-phases.py --apply only on `licensed`.
+# WP-561 Ф94 part 3, pilot decision 28.11.2026: over_threshold no longer gates the
+# licence -- on 21-28.11 the threshold skipped archival on 25 closes across 16 WPs.
+auto_archive="licensed"
 if [[ "$archive_declined_recent" == "true" ]]; then
   auto_archive="declined"
-elif [[ "$over_threshold" == "true" ]]; then
-  auto_archive="licensed"
 fi
 
 echo "age_days=${age_days}"
