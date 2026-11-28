@@ -1,7 +1,7 @@
 """Read-only AR.005 proof for an exact session or an explicit no-owner close run.
 
 Never accept a caller's success flag or a model verdict. Reconstruct publication
-receipts against freshly fetched origin/main and inspect every attributed path.
+receipts against a freshly fetched authorized branch and inspect every attributed path.
 """
 from __future__ import annotations
 
@@ -22,6 +22,10 @@ require = scope.require
 SAFE_ID = re.compile(r"[A-Za-z0-9_.-]+")
 
 
+class MissingPublication(proof.ProofError):
+    """The selected branch does not prove delivery of a claimed commit."""
+
+
 def require_claim_syntax(raw: bytes) -> None:
     for line in raw.decode().splitlines():
         match = re.match(r"^\s*(file(?:_v2)?|commit)\s*:", line)
@@ -31,6 +35,26 @@ def require_claim_syntax(raw: bytes) -> None:
 
 def common_dir(repo: Path) -> Path:
     return proof.repository_identity(repo)[0]
+
+
+def session_repo(workspace: Path, name: str, files: dict[Path, set[str]]) -> Path:
+    if name == "iwe-root":
+        return workspace
+    # The repository-qualified claims disambiguate a top-level clone from a
+    # canonical product clone under one of the workspace's product directories.
+    parents = {workspace, workspace / "DS-MCP", workspace / "DS-IT-systems"}
+    candidates = [
+        common.parent for common in files
+        if common.parent.name == name and common.parent.parent in parents
+    ]
+    top_level = workspace / name
+    common_dirs = {common_dir(candidate): candidate for candidate in candidates}
+    if (top_level / ".git").exists():
+        common = common_dir(top_level)
+        if common in files:
+            common_dirs[common] = top_level.resolve(strict=True)
+    require(len(common_dirs) == 1, "missing or ambiguous owned repository: " + name)
+    return next(iter(common_dirs.values()))
 
 
 def canonical_path(value: str) -> Path:
@@ -107,7 +131,7 @@ def repository_checkouts(repo: Path, claims: list[claim_line.Claim],
 
 def published_entries(repo: Path, semaphore: Path, raw: bytes, name: str,
                       claims: list[claim_line.Claim], remote: str,
-                      paths: set[str]) -> dict[str, list[tuple[str, dict | None]]]:
+                      paths: set[str], target_ref: str) -> dict[str, list[tuple[str, dict | None]]]:
     published: dict[str, list[tuple[str, dict | None]]] = defaultdict(list)
     for claim in claims:
         changed = set(proof.changed_paths(repo, claim.sha))
@@ -116,15 +140,56 @@ def published_entries(repo: Path, semaphore: Path, raw: bytes, name: str,
             anchor = claim.sha
             rows = proof.entries(repo, claim.sha, sorted(changed))
         else:
-            require(proof.verify(repo, semaphore, name, claim.sha, remote),
-                    "owned commit lacks verified publication")
-            receipt = scope.receipt_for(raw, name, claim.sha)
+            if not proof.verify(repo, semaphore, name, claim.sha, remote, target_ref):
+                raise MissingPublication(
+                    f"owned commit lacks verified publication: {name} {claim.sha[:12]} on {target_ref}"
+                )
+            receipt = scope.receipt_for(raw, name, claim.sha, target_ref)
             anchor, rows = receipt["anchor_commit"], receipt["published_paths"]
         for row in rows:
             candidate = (anchor, row["entry"])
             if candidate not in published[row["path"]]:
                 published[row["path"]].append(candidate)
     return dict(published)
+
+
+def published_repository(workspace: Path, repo: Path, semaphore: Path, raw: bytes,
+                         name: str, claims: list[claim_line.Claim], paths: set[str]
+                         ) -> tuple[str, str, dict[str, list[tuple[str, dict | None]]]]:
+    main = proof.fetch_target(repo, proof.MAIN_REF)
+    try:
+        return (proof.MAIN_REF, main,
+                published_entries(repo, semaphore, raw, name, claims, main, paths, proof.MAIN_REF))
+    except MissingPublication as main_error:
+        _, origin = proof.repository_identity(repo)
+        allowed = proof.registered_product_refs(origin)
+        if name == proof.BOT_REPO and origin == "github.com/aisystant/aist_bot":
+            allowed |= proof.PEER_PRODUCT_REFS
+        sources = {claim.sha for claim in claims}
+        targets = set()
+        for line in raw.decode().splitlines():
+            if line.startswith(proof.PREFIX):
+                receipt = json.loads(line[len(proof.PREFIX):])
+                if (isinstance(receipt, dict) and receipt.get("repo") == name
+                        and isinstance(receipt.get("source_commit"), str)
+                        and receipt.get("source_commit") in sources
+                        and isinstance(receipt.get("target_ref"), str)
+                        and receipt.get("target_ref") in allowed
+                        and receipt["target_ref"] != proof.MAIN_REF):
+                    targets.add(receipt["target_ref"])
+        verified = []
+        for target in sorted(targets):
+            proof.product_target(repo, raw, name, workspace, target)
+            remote = proof.fetch_target(repo, target)
+            try:
+                entries = published_entries(repo, semaphore, raw, name, claims, remote, paths, target)
+            except MissingPublication:
+                continue
+            verified.append((target, remote, entries))
+        if not verified:
+            raise main_error
+        require(len(verified) == 1, "ambiguous verified publication branches: " + name)
+        return verified[0]
 
 
 def require_clean_path(checkout: Path, path: str, actual: dict | None,
@@ -142,20 +207,21 @@ def require_clean_path(checkout: Path, path: str, actual: dict | None,
             "uncommitted owned path: " + path)
 
 
-def lag_note(checkout: Path, remote: str) -> str:
+def lag_note(checkout: Path, remote: str, target_ref: str) -> str:
     """Name the checkout and how far it trails the published tip, so a stalled copy is not
     mistaken for a broken session or a broken sync service (WP-484 F327, 22.11: a session
     read this refusal as "the sync service is dead" while the copy was held by two dirty files)."""
     raw = proof.git(checkout, "rev-list", "--count", f"HEAD..{remote}", allowed=(0, 128)).decode().strip()
     behind = int(raw) if raw.isdigit() else None
     if behind:
-        return (f" (checkout {checkout} is {behind} commits behind published main: "
+        branch = target_ref.removeprefix("refs/heads/")
+        return (f" (checkout {checkout} is {behind} commits behind published {branch}: "
                 "advance that copy, then close again)")
     return f" (checkout {checkout})"
 
 
 def verify_paths(repo: Path, checkouts: set[Path], paths: set[str], remote: str,
-                 published: dict[str, list[tuple[str, dict | None]]]) -> dict:
+                 published: dict[str, list[tuple[str, dict | None]]], target_ref: str) -> dict:
     algorithm = proof.git(repo, "rev-parse", "--show-object-format").decode().strip()
     require(algorithm in {"sha1", "sha256"}, "unsupported Git object format")
     snapshots = {}
@@ -169,7 +235,7 @@ def verify_paths(repo: Path, checkouts: set[Path], paths: set[str], remote: str,
                 # The diagnostic git call runs only on the failure path: a slow or failing
                 # rev-list must never turn a valid close into a refusal.
                 require(False, "owned path differs from published content: " + path
-                        + lag_note(checkout, remote))
+                        + lag_note(checkout, remote, target_ref))
             snapshots[(checkout, path)] = (actual, remote_entries[path])
     return snapshots
 
@@ -312,15 +378,16 @@ def verify_session(workspace: Path, agent: str, session_id: str, harness: str,
     all_snapshots = []
     tips = []
     for name, claims in commits.items():
-        repo = workspace if name == "iwe-root" else (workspace / name).resolve(strict=True)
+        repo = session_repo(workspace, name, files)
         common = common_dir(repo)
         require(common in files and common not in checked_common, "ambiguous repository attribution")
         checked_common.add(common)
         checkouts = repository_checkouts(repo, claims, governance, reports)
-        remote = proof.fetch_target(repo, proof.MAIN_REF)
-        tips.append((repo, remote))
-        published = published_entries(repo, semaphore, raw, name, claims, remote, files[common])
-        snapshots = verify_paths(repo, checkouts, files[common], remote, published)
+        target_ref, remote, published = published_repository(
+            workspace, repo, semaphore, raw, name, claims, files[common]
+        )
+        tips.append((repo, target_ref, remote))
+        snapshots = verify_paths(repo, checkouts, files[common], remote, published, target_ref)
         algorithm = proof.git(repo, "rev-parse", "--show-object-format").decode().strip()
         all_snapshots.append((algorithm, snapshots))
     require(checked_common == set(files), "file repository has no verified publication claims")
@@ -330,7 +397,8 @@ def verify_session(workspace: Path, agent: str, session_id: str, harness: str,
             actual = scope.local_entry(checkout, path, algorithm)
             require(actual == entry, "owned path changed during proof")
             require_clean_path(checkout, path, actual, remote_entry)
-    require(all(proof.oid(repo, "refs/remotes/origin/main^{commit}") == remote for repo, remote in tips)
+    require(all(proof.oid(repo, proof.tracking_ref(repo, target_ref) + "^{commit}") == remote
+                for repo, target_ref, remote in tips)
             and proof.snapshot(semaphore) == raw, "session or publication changed during proof")
     return {"check": "session_close", "result": "ok", "session_id": session_id,
             "files_checked": sum(map(len, files.values())),

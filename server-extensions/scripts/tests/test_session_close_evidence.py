@@ -10,6 +10,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 LIB = Path(__file__).resolve().parents[1] / "lib"
 sys.path.insert(0, str(LIB))
@@ -85,6 +86,40 @@ class SessionCloseEvidenceTest(unittest.TestCase):
         self.assertEqual(result["files_checked"], 2)
         self.assertEqual(result["commits_checked"], 2)
         self.assertEqual(result["report"], str(self.reports / self.report))
+
+    def product_checkout(self, *, branch: str = "pilot") -> tuple[Path, str, str]:
+        product = self.clone("product")
+        self.publish(product, "README.md", "Product base\n")
+        (self.root / "DS-MCP").mkdir()
+        nested = self.root / "DS-MCP" / product.name
+        product.rename(nested)
+        git(nested, "switch", "-c", branch)
+        (nested / "delivery.py").write_text("def delivered():\n    return True\n")
+        git(nested, "add", "--", "delivery.py")
+        git(nested, "commit", "-m", "Pilot delivery")
+        git(nested, "push", "origin", f"HEAD:{branch}")
+        source = git(nested, "rev-parse", "HEAD")
+        self.sem.write_text(
+            self.sem.read_text().replace("close_path: quick-close", "close_path: peer-session")
+            + self.file_claim(nested, "delivery.py")
+            + f"commit: {nested.name} {source}\n"
+        )
+        return nested, source, f"refs/heads/{branch}"
+
+    def test_owned_nested_product_published_to_registered_pilot_branch(self) -> None:
+        product, source, target = self.product_checkout()
+        with mock.patch.object(proof, "registered_product_refs", return_value=frozenset({target})):
+            self.refused()  # Reachability alone cannot select another branch.
+            self.assertEqual(proof.record(product, self.sem, product.name, source, target), 1)
+            self.assertEqual(self.verify()["commits_checked"], 3)
+            (product / "delivery.py").write_text("Unpublished owned edit.\n")
+            self.refused()
+
+    def test_product_receipt_cannot_select_an_unregistered_branch(self) -> None:
+        product, source, target = self.product_checkout(branch="unapproved")
+        with mock.patch.object(proof, "registered_product_refs", return_value=frozenset({target})):
+            self.assertEqual(proof.record(product, self.sem, product.name, source, target), 1)
+        self.refused()
 
     def test_foreign_dirty_and_unpublished_files_do_not_block(self) -> None:
         (self.gov / "foreign").write_text("foreign work\n")

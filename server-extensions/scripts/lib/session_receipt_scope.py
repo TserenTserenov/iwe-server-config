@@ -97,13 +97,15 @@ def parse_scope(raw: bytes, common: Path, orz: str) -> set[str]:
     return own
 
 
-def receipt_for(raw: bytes, name: str, source: str) -> dict:
+def receipt_for(raw: bytes, name: str, source: str, target_ref: str | None = None) -> dict:
     rows = []
     for line in raw.decode("utf-8").splitlines():
         if not line.startswith(proof.PREFIX):
             continue
         value = json.loads(line[len(proof.PREFIX):])
-        if isinstance(value, dict) and value.get("repo") == name and value.get("source_commit") == source:
+        if (isinstance(value, dict) and value.get("repo") == name
+                and value.get("source_commit") == source
+                and (target_ref is None or value.get("target_ref") == target_ref)):
             rows.append(value)
     require(len(rows) == 1, "missing or duplicate publication receipt")
     return rows[0]
