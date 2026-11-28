@@ -5761,6 +5761,17 @@ fi
 if [ "$CLOSE_EXPLAIN" -eq 1 ] && [ "$CMD" != "close" ]; then
   fail "--explain применим только к close" 1
 fi
+# WP-561 F93 (28.11): only note-commit and note-publication read --repo. Any
+# other command dropped it silently; `note-file <future path> --repo X` then
+# claimed the path for the repository of the working directory, and the close
+# later refused the commit as touching an unclaimed path. WP-7 Ф83 contract:
+# no flag is ever silently ignored.
+if [ -n "$REPO_ARG" ] && [ "$CMD" != "note-commit" ] && [ "$CMD" != "note-publication" ]; then
+  if [ "$CMD" = "note-file" ]; then
+    fail "note-file не принимает --repo: репозиторий заявки берётся из пути или из текущего каталога, ключ ничего не менял. Будущий файл: запусти из каталога репозитория '${REPO_ARG}' и передай путь относительно него: (cd <каталог репозитория> && session-guard.sh note-file <путь> ...); существующий файл можно передать абсолютным путём; пакет путей: --paths-from0 <файл> --repo-root <корень репозитория>" 1
+  fi
+  fail "--repo применим только к note-commit и note-publication" 1
+fi
 if { [ "$HEAL_APPLY" -eq 1 ] || [ "$HEAL_DISCARD_UNPUBLISHED" -eq 1 ]; } && [ "$CMD" != "heal" ]; then
   fail "--apply и --discard-unpublished применимы только к heal" 1
 fi
